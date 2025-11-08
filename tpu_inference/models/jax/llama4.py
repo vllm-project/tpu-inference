@@ -20,8 +20,8 @@ from tpu_inference.layers.jax.transformer_block import \
     SharedExpertsTransformerBlock
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
-    get_param, model_weights_generator, print_param_info, reshape_params,
-    transpose_params)
+    convert_torch_to_jax_with_view, get_param, model_weights_generator,
+    print_param_info, reshape_params, transpose_params)
 
 logger = init_logger(__name__)
 
