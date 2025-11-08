@@ -80,7 +80,11 @@ def get_uuid(pid: int) -> int:
 
 def get_mesh() -> Mesh:
     sharding_size = jax.device_count()
-    return jax.make_mesh((sharding_size, ), ("model", ))
+    return jax.make_mesh(
+        (sharding_size, ),
+        ("model", ),
+        axis_types=(jax.sharding.AxisType.Auto, ) * len(("model", )),
+    )
 
 
 def get_kv_shape(mesh: Mesh, per_shard: bool = False) -> tuple[int, ...]:
