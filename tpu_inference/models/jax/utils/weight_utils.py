@@ -10,10 +10,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-import torch
-
 import jax
 import jax.numpy as jnp
+import torch
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
@@ -89,7 +88,9 @@ def model_weights_generator(
                 st_file, framework, filter_regex):
             yield name, weight_tensor
 
-def convert_torch_to_jax_with_view(loaded_weight: torch.Tensor, cast_type: jnp.dtype) -> jax.Array:
+
+def convert_torch_to_jax_with_view(loaded_weight: torch.Tensor,
+                                   cast_type: jnp.dtype) -> jax.Array:
     """
     Converts a PyTorch tensor to a JAX array by reinterpreting its
     bit representation using a dtype view map.

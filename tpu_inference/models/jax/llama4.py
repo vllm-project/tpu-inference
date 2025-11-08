@@ -3,7 +3,6 @@ from typing import List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
-import torch
 from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
@@ -20,10 +19,11 @@ from tpu_inference.layers.jax.transformer_block import \
     SharedExpertsTransformerBlock
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
-    get_param, model_weights_generator, print_param_info, reshape_params,
-    transpose_params, convert_torch_to_jax_with_view)
+    convert_torch_to_jax_with_view, get_param, model_weights_generator,
+    print_param_info, reshape_params, transpose_params)
 
 logger = init_logger(__name__)
+
 
 class Llama4ForCausalLM(nnx.Module):
 
@@ -121,30 +121,31 @@ class Llama4ForCausalLM(nnx.Module):
                             ed_sharding=(None, 'expert'),
                             random_init=force_random_weights)
 
-            moe_ffw = MoE(dtype=dtype,
-                          num_local_experts=self.num_local_experts,
-                          apply_expert_weight_before_computation=True,
-                          hidden_size=self.hidden_size,
-                          intermediate_size_moe=self.intermediate_size_moe,
-                          hidden_act=self.hidden_act,
-                          router=router,
-                          rngs=self.rng,
-                          activation_ffw_td=('data', None),
-                          activation_ffw_ted=('data', 'expert', None),
-                          edf_sharding=('expert', None, 'model'),
-                          efd_sharding=('expert', 'model', None),
-                          random_init=force_random_weights) if is_moe_layer else None
+            moe_ffw = MoE(
+                dtype=dtype,
+                num_local_experts=self.num_local_experts,
+                apply_expert_weight_before_computation=True,
+                hidden_size=self.hidden_size,
+                intermediate_size_moe=self.intermediate_size_moe,
+                hidden_act=self.hidden_act,
+                router=router,
+                rngs=self.rng,
+                activation_ffw_td=('data', None),
+                activation_ffw_ted=('data', 'expert', None),
+                edf_sharding=('expert', None, 'model'),
+                efd_sharding=('expert', 'model', None),
+                random_init=force_random_weights) if is_moe_layer else None
 
-
-            dense_ffw = DenseFFW(dtype=dtype,
-                                 hidden_act=self.hidden_act,
-                                 hidden_size=self.hidden_size,
-                                 intermediate_size=self.intermediate_size_mlp,
-                                 random_init=force_random_weights,
-                                 rngs=self.rng,
-                                 df_sharding=(None, 'model'),
-                                 fd_sharding=('model', None),
-                                 activation_ffw_td=('data', None)) if not is_moe_layer else None
+            dense_ffw = DenseFFW(
+                dtype=dtype,
+                hidden_act=self.hidden_act,
+                hidden_size=self.hidden_size,
+                intermediate_size=self.intermediate_size_mlp,
+                random_init=force_random_weights,
+                rngs=self.rng,
+                df_sharding=(None, 'model'),
+                fd_sharding=('model', None),
+                activation_ffw_td=('data', None)) if not is_moe_layer else None
 
             attn = Llama4Attention(
                 hidden_size=self.hidden_size,
@@ -524,8 +525,9 @@ class Llama4WeightLoader:
 
                     loaded_weight = convert_torch_to_jax_with_view(
                         loaded_weight, cast_type)
-                    loaded_weight = transpose_params(
-                        loaded_name, loaded_weight, self._transpose_map)
+                    loaded_weight = transpose_params(loaded_name,
+                                                     loaded_weight,
+                                                     self._transpose_map)
 
                     buffer_key = f"{mapped_name}_{'scale' if is_scale else 'qvalue'}"
                     if buffer_key not in self.expert_weights_buffer:
