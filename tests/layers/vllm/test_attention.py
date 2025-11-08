@@ -301,6 +301,7 @@ class TestPallasAttentionBackendImpl:
                                           kv_cache_dtype="auto",
                                           attn_type=AttentionType.DECODER,
                                           sinks=sinks)
+        impl.process_weights_after_loading(torch.bfloat16)
 
         layer = MagicMock()
         layer.layer_name = "0"
@@ -312,5 +313,37 @@ class TestPallasAttentionBackendImpl:
                 kv_caches=[kv_cache],
                 mesh=mesh,
                 layer_name_to_kvcache_index={'0': 0}):
+            assert impl.sinks is not None
+            impl.forward(layer, query, key, value, torch.tensor([]), metadata)
+
+    def test_forward_with_attention_sink_head_dim_128_raises_error(self, mesh):
+        head_dim = 128
+        sinks = torch.rand([NUM_HEADS], dtype=torch.float32)
+
+        impl = PallasAttentionBackendImpl(num_heads=NUM_HEADS,
+                                          head_size=head_dim,
+                                          scale=0.088,
+                                          num_kv_heads=NUM_KV_HEADS,
+                                          alibi_slopes=None,
+                                          sliding_window=None,
+                                          kv_cache_dtype="auto",
+                                          attn_type=AttentionType.DECODER,
+                                          sinks=sinks)
+        impl.process_weights_after_loading(torch.bfloat16)
+
+        layer = MagicMock()
+        layer.layer_name = "0"
+
+        query, key, value, kv_cache, metadata = create_inputs(
+            mesh, head_dim=head_dim)
+
+        with torchax.default_env(), set_vllm_model_wrapper_context(
+                kv_caches=[kv_cache],
+                mesh=mesh,
+                layer_name_to_kvcache_index={'0': 0}
+        ), pytest.raises(
+                NotImplementedError,
+                match=
+                "Attention sink support is only available when head_dim==64"):
             assert impl.sinks is not None
             impl.forward(layer, query, key, value, torch.tensor([]), metadata)
