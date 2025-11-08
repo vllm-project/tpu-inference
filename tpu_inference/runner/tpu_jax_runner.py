@@ -1,3 +1,7 @@
+import json
+import time
+import threading
+import queue
 import functools
 import os
 import random
@@ -8,6 +12,7 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
+import time
 import torch
 import vllm.envs as envs
 from flax import nnx
@@ -138,6 +143,38 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         else:
             self.kv_cache_dtype = TPU_STR_DTYPE_TO_TORCH_DTYPE[
                 cache_config.cache_dtype]
+
+        if "timing_json" in self.vllm_config.additional_config:
+          self._init_timing_worker()
+
+    def _init_timing_worker(self):
+        self.timing_queue = queue.Queue()
+        # daemon=True ensures this thread automatically dies when the main program exits
+        threading.Thread(target=self._timing_loop, daemon=True, name="TimingWorker").start()
+
+    def _timing_loop(self):
+        timing_json = self.vllm_config.additional_config["timing_jsonl"]
+        json_handle = open(timing_json, mode="a")
+        while True:
+            start_time, jax_future, scheduling_mode, request_distribution  = self.timing_queue.get()
+            try:
+                # This blocks ONLY this background thread, not the main execution loop
+                jax_future.block_until_ready()
+                duration = time.perf_counter() - start_time
+                json_str = json.dumps({
+                    "scheduling_mode": scheduling_mode,
+                    "request_distribution": request_distribution.tolist(),
+                    "duration": duration
+                    }
+                )
+                json_handle.write(json_str + "\n")
+            except Exception as e:
+                logger.error(f"Timing worker error: {e}")
+            finally:
+                # close the file handle after main program exits.
+
+                self.timing_queue.task_done()
+
 
     def _init_random(self):
         if self.model_config.seed is None:
@@ -350,6 +387,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self,
         scheduler_output: "VllmSchedulerOutput",
     ) -> tuple[AttentionMetadata, ModelRunnerOutput]:
+        def _scheduler_mode(attn_metadata: AttentionMetadata) -> str:
+            request_dist = attn_metadata.request_distribution
+            num_reqs = request_dist[-1]
+            if request_dist[0] == num_reqs:
+                return "decode-only"
+            elif request_dist[0] == 0 and (request_dist[1] == num_reqs or request_dist[2] == num_reqs):
+                return "prefill-only"
+            else:
+                return "mixed"
         self.persistent_batch_manager.update_states(
             scheduler_output, self.get_mrope_input_positions_fn)
         if not scheduler_output.total_num_scheduled_tokens:
@@ -393,6 +439,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # TODO: make _get_input_ids_embeds within this context
         # NOTE: right now, mm model will use embeddings as the input,
         # but text-only model will use input_ids
+        
         with self.maybe_forbid_compile:
 
             with set_forward_context(
@@ -402,7 +449,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     scheduler_output) as kv_connector_output:
                 # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
                 # but one of them would be `None`
-
+                start_time = time.perf_counter()
                 (self.kv_caches, hidden_states,
                  aux_hidden_states) = self.model_fn(
                      self.state,
@@ -413,7 +460,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      tuple(self.layer_name_to_kvcache_index.items()),
                      lora_metadata,
                  )
-
+                scheduling_mode = _scheduler_mode(attn_metadata)
+                if "timing_json" in self.vllm_config.additional_config:
+                  self.timing_queue.put((start_time, hidden_states, scheduling_mode, attn_metadata.request_distribution))
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
             logits = self.compute_logits_fn(
