@@ -266,8 +266,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             axis_names = ("data", "attn_dp", "expert", "model")
             num_slices = int(os.environ.get('NUM_SLICES', 1))
 
-            print("devices", len(self.devices))
-            print("num_slices", num_slices)
+            print("devices", len(self.devices)) #debug only
+            print("num_slices", num_slices) #debug only
             if num_slices == 1:
                 mesh_shape = (sharding_strategy.model_dp_size,
                     sharding_strategy.attn_dp_size,
@@ -279,32 +279,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     self.devices,
                     allow_split_physical_axes=True
                 )
-            else:
-                if sharding_strategy.model_dp_size < num_slices:
-                    raise ValueError(
-                        f"Cannot use {num_slices} slices with model_dp_size={sharding_strategy.model_dp_size}. "
-                        f"Number of slices cannot exceed model data parallelism size.")
-                
-                if sharding_strategy.model_dp_size % num_slices != 0:
-                    raise ValueError(
-                        f"model_dp_size ({sharding_strategy.model_dp_size}) must be evenly divisible by "
-                        f"num_slices ({num_slices}). Current remainder: {sharding_strategy.model_dp_size % num_slices}")
-                
+            else:                
                 dp_outer = num_slices
                 dp_inner = sharding_strategy.model_dp_size // num_slices
-                attn_dp_outer = 1  # Keep attention DP within slices for now
-                attn_dp_inner = sharding_strategy.attn_dp_size
+                attn_dp_outer = 1
                 
-                assert dp_inner * dp_outer == sharding_strategy.model_dp_size, \
-                    f"dp_inner ({dp_inner}) * dp_outer ({dp_outer}) must equal model_dp_size ({sharding_strategy.model_dp_size})"
-                assert attn_dp_inner * attn_dp_outer == sharding_strategy.attn_dp_size, \
-                    f"attn_dp_inner ({attn_dp_inner}) * attn_dp_outer ({attn_dp_outer}) must equal attn_dp_size ({sharding_strategy.attn_dp_size})"
-                
-                intra_node_shape = (dp_inner, attn_dp_inner, sharding_strategy.expert_size, sharding_strategy.tp_size)
-                outer_node_shape = (dp_outer, attn_dp_outer, 1, 1)
+                intra_node_shape = (dp_inner, sharding_strategy.attn_dp_size, sharding_strategy.expert_size, sharding_strategy.tp_size)
+                outer_node_shape = (dp_outer, 1, 1, 1)
                 devices_array = mesh_utils.create_hybrid_device_mesh(
-                    mesh_shape=intra_node_shape,      # Inner (Fast/ICI/NVLink)
-                    dcn_mesh_shape=outer_node_shape,  # Outer (Slow/DCN/Ethernet)
+                    mesh_shape=intra_node_shape, 
+                    dcn_mesh_shape=outer_node_shape,
                     devices=self.devices,
                     allow_split_physical_axes=True
                 )
