@@ -281,7 +281,8 @@ def _load_and_shard_weight(vllm_config,
                            hf_key: str,
                            hf_weight: jax.Array,
                            keep_original_dtype_keys_regex: list[str]
-                           | None = None):
+                           | None = None,
+                           pp_missing_layers: list[str] | None = None):
     name_map = metadata_map.name_map
     reshape_keys = metadata_map.reshape_map
     bias_reshape_keys = metadata_map.bias_reshape_map
@@ -336,7 +337,10 @@ def _load_and_shard_weight(vllm_config,
                 f"Skip loading {hf_key} as it's not used in eagle-3 for now")
             return
         model_key = name_map.get(hf_key, hf_key)
-
+    
+    if pp_missing_layers and _is_pp_missing_layer(hf_key,pp_missing_layers):
+        logger.warning(f"Skip loading {hf_key} as it doesn't belong to this PP stage.")
+        return 
     model_weight, model_sharding = get_param_and_sharding(
         params, shardings, model_key)
 
@@ -399,6 +403,12 @@ def _load_and_shard_weight(vllm_config,
         model_weight.sharding, NamedSharding) else model_weight.sharding
     model_weight.value = shard(hf_weight, spec)
 
+def _is_pp_missing_layer(hf_key: str, pp_missing_layers: list[str]) -> bool:
+    has_digit = any(char.isdigit() for char in hf_key)
+    # add the suffix after digits to avoid it matches "layers.10" with "layers.1"
+    suffix = "." if has_digit else ""
+    return any(f'{pp_missing_layer}{suffix}' in hf_key
+                for pp_missing_layer in pp_missing_layers)
 
 def _load_hf_weights_on_thread(
     vllm_config: VllmConfig,
@@ -408,6 +418,7 @@ def _load_hf_weights_on_thread(
     weights_file: str,
     filter_regex: Optional[str] = None,
     keep_original_dtype_keys_regex: Optional[list[str]] = None,
+    pp_missing_layers: list[str] | None = None,
 ):
     """Loads weights from a single weights file."""
     try:
@@ -426,6 +437,7 @@ def _load_hf_weights_on_thread(
             hf_key,
             hf_weight,
             keep_original_dtype_keys_regex,
+            pp_missing_layers,
         )
 
 
@@ -437,6 +449,7 @@ def load_hf_weights(
     filter_regex: Optional[str] = None,
     is_draft_model: bool = False,
     keep_original_dtype_keys_regex: Optional[list[str]] = None,
+    pp_missing_layers: list[str] | None = None,
 ):
     """Load weights into a JAX model from either an iterator or files."""
     params = nnx.state(model)
@@ -467,6 +480,7 @@ def load_hf_weights(
                 hf_key,
                 hf_weight_jax,
                 keep_original_dtype_keys_regex,
+                pp_missing_layers=pp_missing_layers,
             )
     else:
         # File-based path (multi-threaded)
@@ -494,6 +508,7 @@ def load_hf_weights(
                     filter_regex=filter_regex,
                     keep_original_dtype_keys_regex=
                     keep_original_dtype_keys_regex,
+                    pp_missing_layers=pp_missing_layers,
                 ) for weights_file in weights_files
             ]
             for future in futures:
