@@ -125,6 +125,8 @@ REQUIRED_KV_CACHE_LAYOUT = "NHD"
 # default swap op type
 DEFAULT_HOST_HBM_SWAP_OP_TYPE = "jax"
 
+BLOCK_SIZE_BUCKETS = [1, 2, 4, 8, 16]
+
 # we keep our operations at vllm's block granularity,
 # and provide the following three preferences when handling
 # the last partial block during save:
@@ -896,6 +898,12 @@ class TPUConnectorWorker:
         logger.info(
             f"(cpu offloading) swap operation type is {self.swap_op_type}")
 
+        self.use_bucketed_swap_ops = os.getenv(
+            "TPU_OFFLOAD_SKIP_JAX_PRECOMPILE", "0") == "0"
+        logger.info(
+            f"(cpu offloading) use_bucketed_swap_ops={self.use_bucketed_swap_ops}"
+        )
+
         self.swap_in_fn: KVCacheSwapFn = None
         self.swap_out_fn: KVCacheSwapFn = None
 
@@ -967,6 +975,248 @@ class TPUConnectorWorker:
             raise ValueError(
                 "TPUConnectorWorker registered with no KV caches.")
 
+        # Pre-compile the JIT functions for KV cache swapping.
+        self._precompile_kv_swap_operations()
+
+    def _decompose_into_buckets(self, num_blocks: int) -> list[int]:
+        """
+        Decomposes a number into a sum of numbers from the BLOCK_SIZE_BUCKETS
+        list using a greedy approach.
+        """
+        sorted_buckets = sorted(BLOCK_SIZE_BUCKETS, reverse=True)
+        chunks = []
+        remaining = num_blocks
+        while remaining > 0:
+            for bucket_size in sorted_buckets:
+                if remaining >= bucket_size:
+                    chunks.append(bucket_size)
+                    remaining -= bucket_size
+                    break
+            else:
+                # This should not happen if 1 is in the buckets
+                raise ValueError(
+                    "Could not decompose number with the given buckets.")
+        return chunks
+
+    def _precompile_kv_swap_operations(self):
+        """
+        Pre-compiles the JIT-compiled functions used for KV cache swapping
+        with a variety of common block sizes to avoid runtime recompilation.
+        """
+        if os.getenv("TPU_OFFLOAD_SKIP_JAX_PRECOMPILE", "0") == "1":
+            logger.info(
+                "Skipping KV swap pre-compilation due to environment variable."
+            )
+            return
+
+        logger.info("Starting pre-compilation of KV cache swap operations")
+        start_time = time.time()
+        paged_kv_for_compilation = self.runner.kv_caches
+        for num_blocks in BLOCK_SIZE_BUCKETS:
+            try:
+                logger.info(f"  - Compiling for {num_blocks} blocks...")
+                dummy_block_ids = jnp.arange(num_blocks)
+
+                # 1. Pre-compile gather (used in save)
+                flat_dummy_kv_caches_tpu = KVCacheManager._jitted_gather_kv_cache(
+                    paged_kv_for_compilation, dummy_block_ids)
+                jax.block_until_ready(flat_dummy_kv_caches_tpu)
+
+                # 2. Pre-compile TPU -> CPU transfer (used in save)
+                dummy_kv_cpu = self.swap_out_fn(flat_dummy_kv_caches_tpu)
+                jax.block_until_ready(dummy_kv_cpu)
+
+                # 3. Pre-compile CPU -> TPU transfer (used in load)
+                split_size_list = [self.block_size] * num_blocks
+                chunked_dummy_kv_cpu = [
+                    jax.lax.split(flat_layer_cache, split_size_list, axis=0)
+                    for flat_layer_cache in dummy_kv_cpu
+                ]
+                chunked_dummy_kv_tpu = self.swap_in_fn(chunked_dummy_kv_cpu)
+                jax.block_until_ready(chunked_dummy_kv_tpu)
+
+                # 4. Pre-compile insert (used in load).
+                # The result is passed to the next iteration's gather to avoid
+                # using a "deleted" array.
+                logger.info(
+                    f"    - Calling jitted_insert_kv_cache_slices with paged_kv_for_compilation len: {len(paged_kv_for_compilation)}, first_element_shape: {paged_kv_for_compilation[0].shape}, "
+                    f"chunked_dummy_kv_tpu len: {len(chunked_dummy_kv_tpu)}")
+                paged_kv_for_compilation = jitted_insert_kv_cache_slices(
+                    self.block_size, paged_kv_for_compilation,
+                    chunked_dummy_kv_tpu, dummy_block_ids)
+                jax.block_until_ready(paged_kv_for_compilation)
+            except Exception as e:
+                logger.warning(
+                    f"    - Failed to pre-compile for {num_blocks} blocks: {e}",
+                    exc_info=True)
+
+        self.runner.kv_caches = paged_kv_for_compilation
+        duration = time.time() - start_time
+        logger.info("KV cache swap pre-compilation finished in %.2f [secs].",
+                    duration)
+
+    def _bucketed_gather_kv_cache(
+        self,
+        kv_caches: list[jax.Array],
+        block_ids: jax.Array,
+    ) -> list[jax.Array]:
+        """
+        Gathers KV cache data for the given block_ids by breaking the operation
+        into bucket-aligned chunks to leverage JIT compilation cache.
+        """
+        num_blocks = len(block_ids)
+        if num_blocks == 0:
+            return []
+        if num_blocks in BLOCK_SIZE_BUCKETS:
+            return KVCacheManager._jitted_gather_kv_cache(kv_caches, block_ids)
+
+        decomposed_block_sizes = self._decompose_into_buckets(num_blocks)
+        logger.info(
+            f"Decomposing gather for {num_blocks} blocks into bucket sizes {decomposed_block_sizes}"
+        )
+        gathered_chunks = []
+        block_offset = 0
+        for decomposed_block_size in decomposed_block_sizes:
+            block_slice = jax.lax.dynamic_slice_in_dim(block_ids,
+                                                       block_offset,
+                                                       decomposed_block_size,
+                                                       axis=0)
+            gathered_chunk = KVCacheManager._jitted_gather_kv_cache(
+                kv_caches, block_slice)
+            gathered_chunks.append(gathered_chunk)
+            block_offset += decomposed_block_size
+
+        # Reassemble the results from all chunks
+        return jax.tree.map(lambda *x: jnp.concatenate(x, axis=0),
+                            *gathered_chunks)
+
+    def _bucketed_swap_out_fn(
+            self,
+            flat_kv_caches_tpu: list[jax.Array]) -> list[list[jax.Array]]:
+        """
+        Swaps out KV cache data from TPU to CPU in bucket-aligned chunks,
+        returning a list of block-sized chunks per layer.
+        """
+        num_tokens = flat_kv_caches_tpu[0].shape[0]
+        num_blocks = num_tokens // self.block_size
+        if num_blocks == 0:
+            return [[] for _ in range(self.num_layers)]
+
+        # Fast path: handle bucket-sized transfers
+        if num_blocks in BLOCK_SIZE_BUCKETS:
+            flat_kv_caches_cpu = self.swap_out_fn(flat_kv_caches_tpu)
+            split_size_list = [self.block_size] * num_blocks
+            return [
+                jax.lax.split(flat_layer_cache, split_size_list, axis=0)
+                for flat_layer_cache in flat_kv_caches_cpu
+            ]
+
+        # Bucket decomposition path
+        decomposed_block_sizes = self._decompose_into_buckets(num_blocks)
+        logger.info(
+            f"Decomposing swap-out for {num_blocks} blocks into bucket sizes {decomposed_block_sizes}"
+        )
+        # This will be a list of lists, where each inner list holds the chunks
+        # for a layer.
+        final_chunks_per_layer = [[] for _ in range(self.num_layers)]
+        token_offset = 0
+        for decomposed_block_size in decomposed_block_sizes:
+            chunk_size_in_tokens = decomposed_block_size * self.block_size
+
+            # Slice the TPU tensor for the current bucket
+            tpu_chunk = [
+                jax.lax.dynamic_slice_in_dim(layer_cache,
+                                             token_offset,
+                                             chunk_size_in_tokens,
+                                             axis=0)
+                for layer_cache in flat_kv_caches_tpu
+            ]
+
+            # Swap the bucket to CPU, result is a flat tensor for this bucket. We are doing the chunking inside this function to avoid returning any jnp.concatenate
+            # of kv cache for the the bucketed blocks
+            cpu_chunk_flat_per_layer = self.swap_out_fn(tpu_chunk)
+            # Split the flat bucket tensor into block-sized chunks and append
+            split_size_list = [self.block_size] * decomposed_block_size
+            for i, layer_cache in enumerate(cpu_chunk_flat_per_layer):
+                chunks = jax.lax.split(layer_cache, split_size_list, axis=0)
+                final_chunks_per_layer[i].extend(chunks)
+
+            token_offset += chunk_size_in_tokens
+
+        return final_chunks_per_layer
+
+    def _bucketed_swap_in_fn(
+        self,
+        assembled_kv_on_cpu: list[list[jax.Array]],
+    ) -> list[list[jax.Array]]:
+        """
+        Swaps in KV cache data from CPU to TPU in bucket-aligned chunks,
+        assembling a complete staging buffer on the TPU.
+        """
+        num_blocks = len(assembled_kv_on_cpu[0])
+        if num_blocks == 0:
+            return [[] for _ in range(self.num_layers)]
+        if num_blocks in BLOCK_SIZE_BUCKETS:
+            return self.swap_in_fn(assembled_kv_on_cpu)
+
+        decomposed_block_sizes = self._decompose_into_buckets(num_blocks)
+        logger.info(
+            f"Decomposing swap-in for {num_blocks} blocks into bucket sizes {decomposed_block_sizes}"
+        )
+
+        tpu_chunks_per_layer = [[] for _ in range(self.num_layers)]
+        block_offset = 0
+        for decomposed_block_size in decomposed_block_sizes:
+            cpu_chunks_for_bucket = [
+                layer_chunks[block_offset:block_offset + decomposed_block_size]
+                for layer_chunks in assembled_kv_on_cpu
+            ]
+            tpu_chunks_for_bucket = self.swap_in_fn(cpu_chunks_for_bucket)
+            for i in range(self.num_layers):
+                tpu_chunks_per_layer[i].extend(tpu_chunks_for_bucket[i])
+            block_offset += decomposed_block_size
+
+        return tpu_chunks_per_layer
+
+    def _bucketed_jitted_insert_kv_cache_slices(
+        self,
+        kv_caches: list[jax.Array],
+        kv_cache_slices: list[list[jax.Array]],
+        dst_blocks: jax.Array,
+    ) -> list[jax.Array]:
+        """
+        Inserts KV cache slices into the main cache in bucket-aligned chunks.
+        """
+        num_blocks = len(dst_blocks)
+        if num_blocks == 0:
+            return kv_caches
+        if num_blocks in BLOCK_SIZE_BUCKETS:
+            return jitted_insert_kv_cache_slices(self.block_size, kv_caches,
+                                                 kv_cache_slices, dst_blocks)
+
+        decomposed_block_sizes = self._decompose_into_buckets(num_blocks)
+        logger.info(
+            f"Decomposing insert for {num_blocks} blocks into bucket sizes {decomposed_block_sizes}"
+        )
+
+        updated_kv_caches = kv_caches
+        block_offset = 0
+        for decomposed_block_size in decomposed_block_sizes:
+            slices_for_bucket = [
+                layer_slices[block_offset:block_offset + decomposed_block_size]
+                for layer_slices in kv_cache_slices
+            ]
+            dst_blocks_for_bucket = jax.lax.dynamic_slice_in_dim(
+                dst_blocks, block_offset, decomposed_block_size, axis=0)
+
+            updated_kv_caches = jitted_insert_kv_cache_slices(
+                self.block_size, updated_kv_caches, slices_for_bucket,
+                dst_blocks_for_bucket)
+
+            block_offset += decomposed_block_size
+
+        return updated_kv_caches
+
     def _save_blocks_to_cpu(self, req_id: ReqId, full_block_ids: list[int],
                             full_token_ids: list[int],
                             save_spec: SaveSpec) -> ReqId:
@@ -1033,55 +1283,55 @@ class TPUConnectorWorker:
         try:
             start_time = time.time()
             blocks_to_save = jnp.array(blocks_to_save)
-            # gather and reshape blocks on TPU first: output_shape: [blocks_to_save * block_size, num_heads, 2, head_dim]
-            flat_kv_caches_tpu = KVCacheManager._jitted_gather_kv_cache(
-                self.runner.kv_caches, blocks_to_save)
+            if self.use_bucketed_swap_ops:
+                flat_kv_caches_tpu = self._bucketed_gather_kv_cache(
+                    self.runner.kv_caches, blocks_to_save)
+            else:
+                flat_kv_caches_tpu = KVCacheManager._jitted_gather_kv_cache(
+                    self.runner.kv_caches, blocks_to_save)
 
             jax.block_until_ready(flat_kv_caches_tpu)
             logger.info(
                 f"extracted_blocks_tpu: {flat_kv_caches_tpu[0].shape}, {flat_kv_caches_tpu[0].sharding}"
             )
 
-            flat_kv_caches_cpu = self.swap_out_fn(flat_kv_caches_tpu)
-            # Block until the transfer is complete
-            if flat_kv_caches_cpu:
-                jax.block_until_ready(flat_kv_caches_cpu)
+            if self.use_bucketed_swap_ops:
+                chunks_on_cpu = self._bucketed_swap_out_fn(flat_kv_caches_tpu)
+            else:
+                flat_kv_caches_cpu = self.swap_out_fn(flat_kv_caches_tpu)
+                if flat_kv_caches_cpu:
+                    jax.block_until_ready(flat_kv_caches_cpu)
+                    # NOTE(jcgu): we keep cpu_chunk_size == block_size
+                    split_size_list = [self.cpu_chunk_size
+                                       ] * num_blocks_to_save
+                    chunks_on_cpu = [
+                        jax.lax.split(flat_layer_cache,
+                                      split_size_list,
+                                      axis=0)
+                        for flat_layer_cache in flat_kv_caches_cpu
+                    ]
+
+            if chunks_on_cpu and chunks_on_cpu[0]:
+                jax.block_until_ready(chunks_on_cpu)
 
             duration = time.time() - start_time
             logger.info(f"Successfully saved {len(blocks_to_save)} blocks for "
                         f"request {req_id} to CPU in {duration:.4f} seconds.")
 
-            if flat_kv_caches_cpu:
-                logger.info(
-                    f"Shape of a single layer on CPU before reshape (num_blocks, block_size, ...): {flat_kv_caches_cpu[0].shape}"
-                )
-
-                total_size_bytes = sum(layer.nbytes
-                                       for layer in flat_kv_caches_cpu)
-                logger.info(
-                    f"Total size of flat_kv_caches_cpu: {total_size_bytes / 1024**2:.2f} MB"
-                )
-                logger.info(
-                    f"Shape of a single layer after reshape (total_tokens, ...): {flat_kv_caches_cpu[0].shape}"
-                )
+            total_size_bytes = sum(
+                sum(chunk.nbytes for chunk in layer_chunks)
+                for layer_chunks in chunks_on_cpu)
+            logger.info(
+                f"Total size of chunks_on_cpu: {total_size_bytes / 1024**2:.2f} MB"
+            )
 
             post_transfer_start_time = time.time()
-
             # Generate keys for the entire token sequence to get absolute positions. This to ensure that the delta
             # tokens that is about to be captured in the cache are correctly mapped. These keys will be recreated
             # during get_finished() to unpin the correct keys.
             all_keys_generator = self.token_processor.process_tokens(
                 process_token_ids)
             all_keys = list(all_keys_generator)
-
-            # NOTE(jcgu): we keep cpu_chunk_size == block_size
-            split_size_list = [self.cpu_chunk_size] * num_blocks_to_save
-            chunks_on_cpu = [
-                jax.lax.split(flat_layer_cache, split_size_list, axis=0)
-                for flat_layer_cache in flat_kv_caches_cpu
-            ]
-            jax.block_until_ready(chunks_on_cpu)
-
             # Filter for keys that correspond to the new data we are saving.
             relevant_keys = []
             for abs_start_token_idx, abs_end_token_idx, key in all_keys:
@@ -1104,8 +1354,7 @@ class TPUConnectorWorker:
                         f"Request {req_id}: Saving to CPU chunk: "
                         f"abs_start_token_idx={abs_start_token_idx}, abs_end_token_idx={abs_end_token_idx}, "
                         f"chunk_hash={key.chunk_hash}, "
-                        f" local_chunk_idx={i}, chunk_size={split_size_list[i]}"
-                    )
+                        f" local_chunk_idx={i}")
 
                 logger.info(
                     f"Request {req_id}: Added {len(relevant_keys)} keys to CPU backend."
@@ -1317,15 +1566,27 @@ class TPUConnectorWorker:
 
             # swap-in
             # output: [[cpu_chunk_size * num_chunks] * num_layer]
-            raw_chunked_kv_on_tpu = self.swap_in_fn(assembled_kv_on_cpu)
+            if self.use_bucketed_swap_ops:
+                # Use the bucketed wrappers for a uniform two-step process
+                raw_chunked_kv_on_tpu = self._bucketed_swap_in_fn(
+                    assembled_kv_on_cpu)
+            else:
+                raw_chunked_kv_on_tpu = self.swap_in_fn(assembled_kv_on_cpu)
             jax.block_until_ready(raw_chunked_kv_on_tpu)
 
-            self.runner.kv_caches = jitted_insert_kv_cache_slices(
-                self.block_size,
-                self.runner.kv_caches,
-                raw_chunked_kv_on_tpu,
-                jnp.array(dst_blocks),
-            )
+            if self.use_bucketed_swap_ops:
+                self.runner.kv_caches = self._bucketed_jitted_insert_kv_cache_slices(
+                    self.runner.kv_caches,
+                    raw_chunked_kv_on_tpu,
+                    jnp.array(dst_blocks),
+                )
+            else:
+                self.runner.kv_caches = jitted_insert_kv_cache_slices(
+                    self.block_size,
+                    self.runner.kv_caches,
+                    raw_chunked_kv_on_tpu,
+                    jnp.array(dst_blocks),
+                )
             jax.block_until_ready(self.runner.kv_caches)
             logger.info(
                 f"Request {meta.req_id}: Loaded {num_tokens_to_load_delta} tokens into "

@@ -200,6 +200,15 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
     @parameterized.named_parameters(
         dict(
             testcase_name="_prefill_no_skip_save_2_drop_jax",
+            use_precompiled_swap_ops=False,
+            num_skip_leading_tokens=0,
+            num_tokens_to_save=_DEFAULT_BLOCK_SIZE * 2,
+            num_total_tokens=_DEFAULT_BLOCK_SIZE * 2 + 10,
+            num_blocks_to_save=2,
+        ),
+        dict(
+            testcase_name="_prefill_no_skip_save_2_drop_jax_precompiled",
+            use_precompiled_swap_ops=True,
             num_skip_leading_tokens=0,
             num_tokens_to_save=_DEFAULT_BLOCK_SIZE * 2,
             num_total_tokens=_DEFAULT_BLOCK_SIZE * 2 + 10,
@@ -207,6 +216,16 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
         ),
         dict(
             testcase_name="_prefill_no_skip_save_2_drop_pallas",
+            use_precompiled_swap_ops=False,
+            num_skip_leading_tokens=0,
+            num_tokens_to_save=_DEFAULT_BLOCK_SIZE * 2,
+            num_total_tokens=_DEFAULT_BLOCK_SIZE * 2 + 10,
+            num_blocks_to_save=2,
+            swap_op_type="pallas",
+        ),
+        dict(
+            testcase_name="_prefill_no_skip_save_2_drop_pallas_precompiled",
+            use_precompiled_swap_ops=True,
             num_skip_leading_tokens=0,
             num_tokens_to_save=_DEFAULT_BLOCK_SIZE * 2,
             num_total_tokens=_DEFAULT_BLOCK_SIZE * 2 + 10,
@@ -219,6 +238,15 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
         # block and assign 3 blocks to save.
         dict(
             testcase_name="_prefill_no_skip_save_2_pad_jax",
+            use_precompiled_swap_ops=False,
+            num_skip_leading_tokens=0,
+            num_tokens_to_save=_DEFAULT_BLOCK_SIZE * 2 + 10,
+            num_total_tokens=_DEFAULT_BLOCK_SIZE * 2 + 10,
+            num_blocks_to_save=3,
+        ),
+        dict(
+            testcase_name="_prefill_no_skip_save_2_pad_jax_precompiled",
+            use_precompiled_swap_ops=True,
             num_skip_leading_tokens=0,
             num_tokens_to_save=_DEFAULT_BLOCK_SIZE * 2 + 10,
             num_total_tokens=_DEFAULT_BLOCK_SIZE * 2 + 10,
@@ -226,6 +254,16 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
         ),
         dict(
             testcase_name="_prefill_no_skip_save_2_pad_pallas",
+            use_precompiled_swap_ops=False,
+            num_skip_leading_tokens=0,
+            num_tokens_to_save=_DEFAULT_BLOCK_SIZE * 2 + 10,
+            num_total_tokens=_DEFAULT_BLOCK_SIZE * 2 + 10,
+            num_blocks_to_save=3,
+            swap_op_type="pallas",
+        ),
+        dict(
+            testcase_name="_prefill_no_skip_save_2_pad_pallas_precompiled",
+            use_precompiled_swap_ops=True,
             num_skip_leading_tokens=0,
             num_tokens_to_save=_DEFAULT_BLOCK_SIZE * 2 + 10,
             num_total_tokens=_DEFAULT_BLOCK_SIZE * 2 + 10,
@@ -234,6 +272,15 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
         ),
         dict(
             testcase_name="_prefill_skip_2_save_2_drop",
+            use_precompiled_swap_ops=False,
+            num_skip_leading_tokens=_DEFAULT_BLOCK_SIZE * 2,
+            num_tokens_to_save=_DEFAULT_BLOCK_SIZE * 2,
+            num_total_tokens=_DEFAULT_BLOCK_SIZE * 4 + 10,
+            num_blocks_to_save=2,
+        ),
+        dict(
+            testcase_name="_prefill_skip_2_save_2_drop_precompiled",
+            use_precompiled_swap_ops=True,
             num_skip_leading_tokens=_DEFAULT_BLOCK_SIZE * 2,
             num_tokens_to_save=_DEFAULT_BLOCK_SIZE * 2,
             num_total_tokens=_DEFAULT_BLOCK_SIZE * 4 + 10,
@@ -241,6 +288,15 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
         ),
         dict(
             testcase_name="_prefill_skip_2_save_2_pad",
+            use_precompiled_swap_ops=False,
+            num_skip_leading_tokens=_DEFAULT_BLOCK_SIZE * 2,
+            num_tokens_to_save=_DEFAULT_BLOCK_SIZE * 2 + 10,
+            num_total_tokens=_DEFAULT_BLOCK_SIZE * 4 + 10,
+            num_blocks_to_save=3,
+        ),
+        dict(
+            testcase_name="_prefill_skip_2_save_2_pad_precompiled",
+            use_precompiled_swap_ops=True,
             num_skip_leading_tokens=_DEFAULT_BLOCK_SIZE * 2,
             num_tokens_to_save=_DEFAULT_BLOCK_SIZE * 2 + 10,
             num_total_tokens=_DEFAULT_BLOCK_SIZE * 4 + 10,
@@ -248,6 +304,15 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
         ),
         dict(
             testcase_name="_decode_skip_3_save_1",
+            use_precompiled_swap_ops=False,
+            num_skip_leading_tokens=_DEFAULT_BLOCK_SIZE * 3,
+            num_tokens_to_save=_DEFAULT_BLOCK_SIZE,
+            num_total_tokens=_DEFAULT_BLOCK_SIZE * 4,
+            num_blocks_to_save=1,
+        ),
+        dict(
+            testcase_name="_decode_skip_3_save_1_precompiled",
+            use_precompiled_swap_ops=True,
             num_skip_leading_tokens=_DEFAULT_BLOCK_SIZE * 3,
             num_tokens_to_save=_DEFAULT_BLOCK_SIZE,
             num_total_tokens=_DEFAULT_BLOCK_SIZE * 4,
@@ -255,6 +320,17 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
         ),
         dict(
             testcase_name="_no_save",
+            use_precompiled_swap_ops=False,
+            num_skip_leading_tokens=_DEFAULT_BLOCK_SIZE * 2,
+            num_tokens_to_save=0,
+            num_total_tokens=_DEFAULT_BLOCK_SIZE * 2,
+            num_blocks_to_save=0,
+            is_final_save=False,
+            skip_save=False,
+        ),
+        dict(
+            testcase_name="_no_save_precompiled",
+            use_precompiled_swap_ops=True,
             num_skip_leading_tokens=_DEFAULT_BLOCK_SIZE * 2,
             num_tokens_to_save=0,
             num_total_tokens=_DEFAULT_BLOCK_SIZE * 2,
@@ -264,6 +340,17 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
         ),
         dict(
             testcase_name="_final_save_save_1_drop",
+            use_precompiled_swap_ops=False,
+            num_skip_leading_tokens=_DEFAULT_BLOCK_SIZE * 2,
+            num_tokens_to_save=_DEFAULT_BLOCK_SIZE,
+            num_total_tokens=_DEFAULT_BLOCK_SIZE * 3 + 10,
+            num_blocks_to_save=1,
+            is_final_save=True,
+            skip_save=False,
+        ),
+        dict(
+            testcase_name="_final_save_save_1_drop_precompiled",
+            use_precompiled_swap_ops=True,
             num_skip_leading_tokens=_DEFAULT_BLOCK_SIZE * 2,
             num_tokens_to_save=_DEFAULT_BLOCK_SIZE,
             num_total_tokens=_DEFAULT_BLOCK_SIZE * 3 + 10,
@@ -273,6 +360,17 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
         ),
         dict(
             testcase_name="_final_save_save_1_pad",
+            use_precompiled_swap_ops=False,
+            num_skip_leading_tokens=_DEFAULT_BLOCK_SIZE * 2,
+            num_tokens_to_save=10,
+            num_total_tokens=_DEFAULT_BLOCK_SIZE * 2 + 10,
+            num_blocks_to_save=1,
+            is_final_save=True,
+            skip_save=False,
+        ),
+        dict(
+            testcase_name="_final_save_save_1_pad_precompiled",
+            use_precompiled_swap_ops=True,
             num_skip_leading_tokens=_DEFAULT_BLOCK_SIZE * 2,
             num_tokens_to_save=10,
             num_total_tokens=_DEFAULT_BLOCK_SIZE * 2 + 10,
@@ -282,6 +380,17 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
         ),
         dict(
             testcase_name="_final_save_without_data",
+            use_precompiled_swap_ops=False,
+            num_skip_leading_tokens=_DEFAULT_BLOCK_SIZE * 2,
+            num_tokens_to_save=0,
+            num_total_tokens=_DEFAULT_BLOCK_SIZE * 2,
+            num_blocks_to_save=0,
+            is_final_save=True,
+            skip_save=True,
+        ),
+        dict(
+            testcase_name="_final_save_without_data_precompiled",
+            use_precompiled_swap_ops=True,
             num_skip_leading_tokens=_DEFAULT_BLOCK_SIZE * 2,
             num_tokens_to_save=0,
             num_total_tokens=_DEFAULT_BLOCK_SIZE * 2,
@@ -292,6 +401,7 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
     )
     def test_tpu_connector_save(
         self,
+        use_precompiled_swap_ops: bool,
         num_skip_leading_tokens: int,
         num_tokens_to_save: int,
         num_total_tokens: int,
@@ -300,6 +410,8 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
         skip_save: bool = False,
         swap_op_type: str = "jax",
     ):
+        os.environ[
+            "TPU_OFFLOAD_SKIP_JAX_PRECOMPILE"] = "0" if use_precompiled_swap_ops else "1"
 
         # Prepare and Execute Save
         total_token_ids = list(range(num_total_tokens))
@@ -422,18 +534,33 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
 
     @parameterized.named_parameters(
         dict(
-            testcase_name="_2_steps",
+            testcase_name="_2_steps_nobucket",
+            use_precompiled_swap_ops=False,
+            num_blocks_step1=2,
+            num_blocks_step2=1,
+        ),
+        dict(
+            testcase_name="_2_steps_bucketed_precompiled",
+            use_precompiled_swap_ops=True,
             num_blocks_step1=2,
             num_blocks_step2=1,
         ),
         dict(
             testcase_name="_zero_token_step2",
+            use_precompiled_swap_ops=False,
+            num_blocks_step1=2,
+            num_blocks_step2=0,
+        ),
+        dict(
+            testcase_name="_zero_token_step2_bucketed_precompiled",
+            use_precompiled_swap_ops=True,
             num_blocks_step1=2,
             num_blocks_step2=0,
         ),
     )
     def test_tpu_connector_multi_step_save(
         self,
+        use_precompiled_swap_ops: bool,
         num_blocks_step1: int,
         num_blocks_step2: int,
     ):
@@ -441,6 +568,8 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
         Tests that the TPUConnectorWorker correctly saves the KV cache in multiple
         steps, respecting the save watermark (skip_leading_tokens).
         """
+        os.environ[
+            "TPU_OFFLOAD_SKIP_JAX_PRECOMPILE"] = "0" if use_precompiled_swap_ops else "1"
         num_tokens_step1 = num_blocks_step1 * self.block_size
         num_tokens_step2 = num_blocks_step2 * self.block_size
         logger.info(
@@ -589,24 +718,56 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
     @parameterized.named_parameters(
         dict(
             testcase_name="_full_load_jax",
+            use_precompiled_swap_ops=False,
+            swap_op_type="jax",
+            num_matched_blocks=4,
+            num_computed_blocks=0,
+        ),
+        dict(
+            testcase_name="_full_load_jax_precompiled",
+            use_precompiled_swap_ops=True,
             swap_op_type="jax",
             num_matched_blocks=4,
             num_computed_blocks=0,
         ),
         dict(
             testcase_name="_delta_load_jax",
+            use_precompiled_swap_ops=False,
+            swap_op_type="jax",
+            num_matched_blocks=4,
+            num_computed_blocks=1,
+        ),
+        dict(
+            testcase_name="_delta_load_jax_precompiled",
+            use_precompiled_swap_ops=True,
             swap_op_type="jax",
             num_matched_blocks=4,
             num_computed_blocks=1,
         ),
         dict(
             testcase_name="_delta_load_pallas",
+            use_precompiled_swap_ops=False,
+            swap_op_type="pallas",
+            num_matched_blocks=4,
+            num_computed_blocks=1,
+        ),
+        dict(
+            testcase_name="_delta_load_pallas_precompiled",
+            use_precompiled_swap_ops=True,
             swap_op_type="pallas",
             num_matched_blocks=4,
             num_computed_blocks=1,
         ),
         dict(
             testcase_name="_no_load_jax",
+            use_precompiled_swap_ops=False,
+            swap_op_type="jax",
+            num_matched_blocks=1,
+            num_computed_blocks=1,
+        ),
+        dict(
+            testcase_name="_no_load_jax_precompiled",
+            use_precompiled_swap_ops=True,
             swap_op_type="jax",
             num_matched_blocks=1,
             num_computed_blocks=1,
@@ -614,6 +775,7 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
     )
     def test_tpu_connector_load(
         self,
+        use_precompiled_swap_ops: bool,
         swap_op_type: str,
         num_matched_blocks: int,
         num_computed_blocks: int = 0,
@@ -654,6 +816,8 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
             - Assert that the parts of the destination cache that should not have
             been touched remain zero.
         """
+        os.environ[
+            "TPU_OFFLOAD_SKIP_JAX_PRECOMPILE"] = "0" if use_precompiled_swap_ops else "1"
         num_matched_tokens = num_matched_blocks * self.block_size
         num_computed_tokens = num_computed_blocks * self.block_size
         if num_matched_blocks > self.num_blocks:
