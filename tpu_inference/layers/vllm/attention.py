@@ -209,7 +209,7 @@ def _jax_attn_func(
         k_scale=k_scale,
         v_scale=v_scale,
         sinks=sinks,
-        attention_chunk_size=sliding_window,
+        # attention_chunk_size=sliding_window,
     )
 
     # Convert the shape back to vLLM's convention
