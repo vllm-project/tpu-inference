@@ -66,8 +66,8 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             vocab_size=vocab_size,
             hidden_size=self.hidden_size,
             dtype=dtype,
-            prelogit_td=NamedSharding(self.mesh, P()),
-            vd_sharding=NamedSharding(self.mesh, P((), None)),
+            prelogit_td=P(),
+            vd_sharding= P((), None),
             #mesh=self.mesh,
             rngs=nnx.Rngs(rng),
             random_init=force_random_weights,
@@ -87,9 +87,9 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                 intermediate_size=intermediate_size,
                 random_init=force_random_weights,
                 rngs=nnx.Rngs(rng),
-                df_sharding=NamedSharding(self.mesh, P(None, 'model')),
-                fd_sharding=NamedSharding(self.mesh, P('model', None)),
-                activation_ffw_td=NamedSharding(self.mesh, P('data', None)))
+                df_sharding=P(None, 'model'),
+                fd_sharding=P('model', None),
+                activation_ffw_td=P('data', None))
 
             attn = Llama4Attention(
                 hidden_size=self.hidden_size,
@@ -116,25 +116,15 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                 mesh=self.mesh,
                 random_init=force_random_weights,
 
-                # Added ".spec" to the ends of these
-                activation_attention_td=NamedSharding(self.mesh,
-                                                      P('data', 'model')).spec,
-                activation_q_td=NamedSharding(self.mesh, P('data',
-                                                           'model')).spec,
-                query_tnh=NamedSharding(self.mesh, P('data', 'model',
-                                                     None)).spec,
-                keyvalue_skh=NamedSharding(self.mesh, P('data', 'model',
-                                                        None)).spec,
-                activation_attention_out_td=NamedSharding(
-                    self.mesh, P('data', 'model')).spec,
-                attn_o_tnh=NamedSharding(self.mesh, P('data', 'model',
-                                                      None)).spec,
-                dnh_sharding=NamedSharding(self.mesh, P(None, 'model',
-                                                        None)).spec,
-                dkh_sharding=NamedSharding(self.mesh, P(None, 'model',
-                                                        None)).spec,
-                nhd_sharding=NamedSharding(self.mesh, P('model', None,
-                                                        None)).spec,
+                activation_attention_td=P('data', 'model'),
+                activation_q_td=P('data', 'model'),
+                query_tnh=P('data', 'model', None),
+                keyvalue_skh=P('data', 'model', None),
+                activation_attention_out_td=P('data', 'model'),
+                attn_o_tnh=P('data', 'model', None),
+                dnh_sharding=P(None, 'model', None),
+                dkh_sharding=P(None, 'model', None),
+                nhd_sharding=P('model', None, None),
             )
 
             pre_attention_norm = RMSNorm(
@@ -143,7 +133,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                 random_init=force_random_weights,
                 epsilon=rms_norm_eps,
                 rngs=nnx.Rngs(rng),
-                activation_ffw_td=NamedSharding(self.mesh, P()),
+                activation_ffw_td= P(),
                 with_scale=True,
                 dtype=dtype,
             )
@@ -151,7 +141,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             pre_mlp_norm = RMSNorm(
                 dims=self.hidden_size,
                 #mesh=self.mesh,
-                activation_ffw_td=NamedSharding(self.mesh, P()),
+                activation_ffw_td=P(),
                 epsilon=rms_norm_eps,
                 rngs=nnx.Rngs(rng),
                 with_scale=True,
@@ -169,7 +159,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         self.final_norm = RMSNorm(
             dims=self.hidden_size,
             #mesh=self.mesh,
-            activation_ffw_td=NamedSharding(self.mesh, P()),
+            activation_ffw_td=P(),
             epsilon=rms_norm_eps,
             rngs=nnx.Rngs(rng),
             with_scale=True,
@@ -182,9 +172,9 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             hidden_size=self.hidden_size,
             dtype=dtype,
             rngs=nnx.Rngs(rng),
-            prelogit_td=NamedSharding(self.mesh, P()),
-            vd_sharding=NamedSharding(self.mesh, P()),
-            dv_sharding=NamedSharding(self.mesh, P()),
+            prelogit_td=P(),
+            vd_sharding=P(),
+            dv_sharding=P(),
             #mesh=self.mesh,
             random_init=force_random_weights)
         if self.is_verbose:
