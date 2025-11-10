@@ -1,0 +1,187 @@
+INFO 11-04 21:56:10 [__init__.py:22] TPU info: node_name=wenxindong-v6e-2 | tpu_type=v6e-8 | worker_id=0 | num_chips=8 | num_cores_per_chip=1
+INFO 11-04 21:56:10 [importing.py:44] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+INFO 11-04 21:56:10 [importing.py:68] Triton not installed or not compatible; certain GPU-related functions will not be available.
+WARNING 11-04 21:56:10 [interface.py:171] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 11-04 21:56:11 [argparse_utils.py:79] argument '--disable-log-requests' is deprecated and replaced with '--enable-log-requests'. This will be removed in v0.12.0.
+[1;36m(APIServer pid=738213)[0;0m INFO 11-04 21:56:11 [api_server.py:1967] vLLM API server version 0.11.1rc2.dev272+gf417746ad
+[1;36m(APIServer pid=738213)[0;0m INFO 11-04 21:56:11 [utils.py:253] non-default args: {'model_tag': 'meta-llama/Llama-3.1-8B-Instruct', 'model': 'meta-llama/Llama-3.1-8B-Instruct', 'max_model_len': 2048, 'data_parallel_size': 2, 'gpu_memory_utilization': 0.95, 'enable_prefix_caching': False, 'max_num_batched_tokens': 1024, 'max_num_seqs': 256, 'async_scheduling': True}
+[1;36m(APIServer pid=738213)[0;0m INFO 11-04 21:56:12 [model.py:630] Resolved architecture: LlamaForCausalLM
+[1;36m(APIServer pid=738213)[0;0m INFO 11-04 21:56:12 [model.py:1728] Using max model len 2048
+[1;36m(APIServer pid=738213)[0;0m INFO 11-04 21:56:12 [scheduler.py:226] Chunked prefill is enabled with max_num_batched_tokens=1024.
+[1;36m(APIServer pid=738213)[0;0m INFO 11-04 21:56:12 [tpu_jax.py:118] Initialized sharding configuration: ShardingConfigManager(total_devices=2, sharding_strategy=ShardingStrategy(tensor_parallelism=1, expert_parallelism=1, sequence_parallelism=1, data_parallelism=2, attention_data_parallelism=1), device_indexes=None)
+[1;36m(APIServer pid=738213)[0;0m WARNING 11-04 21:56:12 [tpu_jax.py:156] The model dtype is not properly set for JAX backend. Overwriting it to jnp.bfloat16
+[1;36m(APIServer pid=738213)[0;0m INFO 11-04 21:56:12 [tpu_jax.py:192] Force using UniProcExecutor for JAX on single host.
+[1;36m(APIServer pid=738213)[0;0m INFO 11-04 21:56:12 [dp_scheduler.py:523] DP size (2) >= 2, using DPScheduler
+INFO 11-04 21:56:17 [__init__.py:22] TPU info: node_name=wenxindong-v6e-2 | tpu_type=v6e-8 | worker_id=0 | num_chips=8 | num_cores_per_chip=1
+INFO 11-04 21:56:17 [importing.py:44] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+INFO 11-04 21:56:17 [importing.py:68] Triton not installed or not compatible; certain GPU-related functions will not be available.
+WARNING 11-04 21:56:17 [interface.py:171] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+[1;36m(EngineCore_DP0 pid=738413)[0;0m INFO 11-04 21:56:18 [core.py:93] Initializing a V1 LLM engine (v0.11.1rc2.dev272+gf417746ad) with config: model='meta-llama/Llama-3.1-8B-Instruct', speculative_config=None, tokenizer='meta-llama/Llama-3.1-8B-Instruct', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=<class 'jax.numpy.bfloat16'>, max_seq_len=2048, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, disable_custom_all_reduce=True, quantization=None, enforce_eager=False, kv_cache_dtype=auto, device_config=None, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None), seed=0, served_model_name=meta-llama/Llama-3.1-8B-Instruct, enable_prefix_caching=False, chunked_prefill_enabled=True, pooler_config=None, compilation_config={'level': None, 'mode': 2, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'openxla', 'custom_ops': ['all'], 'splitting_ops': None, 'use_inductor': None, 'compile_sizes': None, 'inductor_compile_config': {'enable_auto_functionalized_v2': False}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'use_cudagraph': True, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': None, 'cudagraph_copy_inputs': False, 'full_cuda_graph': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {}, 'max_cudagraph_capture_size': None, 'local_cache_dir': None}
+[1;36m(EngineCore_DP0 pid=738413)[0;0m WARNING 11-04 21:56:18 [tpu_jax.py:228] Pin memory is not supported on TPU.
+[1;36m(EngineCore_DP0 pid=738413)[0;0m WARNING 11-04 21:56:18 [tpu_worker_jax.py:58] The model dtype is not properly set for JAX backend. Overwriting it to jnp.bfloat16
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843] EngineCore failed to start.
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843] Traceback (most recent call last):
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]   File "/home/wenxindong_google_com/miniconda3/envs/wenxin_test/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 812, in backends
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]     backend = _init_backend(platform)
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]               ^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]   File "/home/wenxindong_google_com/miniconda3/envs/wenxin_test/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 896, in _init_backend
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]     backend = registration.factory()
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]               ^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]   File "/home/wenxindong_google_com/miniconda3/envs/wenxin_test/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 217, in tpu_client_timer_callback
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]     client = make_tpu_client(
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]              ^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]   File "/home/wenxindong_google_com/miniconda3/envs/wenxin_test/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 196, in make_tpu_client
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]     return _jax.get_c_api_client(
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]            ^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843] jaxlib._jax.XlaRuntimeError: UNKNOWN: TPU initialization failed: open(/dev/vfio/2): Device or resource busy: Device or resource busy; Couldn't open iommu group /dev/vfio/2
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843] During handling of the above exception, another exception occurred:
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843] Traceback (most recent call last):
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core.py", line 834, in run_engine_core
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]     engine_core = EngineCoreProc(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core.py", line 602, in __init__
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]     super().__init__(
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core.py", line 102, in __init__
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]     self.model_executor = executor_class(vllm_config)
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]   File "/home/wenxindong_google_com/vllm/vllm/v1/executor/abstract.py", line 101, in __init__
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]     self._init_executor()
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]   File "/home/wenxindong_google_com/vllm/vllm/v1/executor/uniproc_executor.py", line 47, in _init_executor
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]     self.driver_worker.init_device()
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]   File "/home/wenxindong_google_com/vllm/vllm/v1/worker/worker_base.py", line 324, in init_device
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]     self.worker.init_device()  # type: ignore
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]     ^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/worker/tpu_worker_jax.py", line 133, in init_device
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]     self.devices = jax.devices()[:sharding_config.total_devices]
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]                    ^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]   File "/home/wenxindong_google_com/miniconda3/envs/wenxin_test/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 1010, in devices
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]     return get_backend(backend).devices()
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]            ^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]   File "/home/wenxindong_google_com/miniconda3/envs/wenxin_test/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 944, in get_backend
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]     return _get_backend_uncached(platform)
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]   File "/home/wenxindong_google_com/miniconda3/envs/wenxin_test/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 923, in _get_backend_uncached
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]     bs = backends()
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]          ^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]   File "/home/wenxindong_google_com/miniconda3/envs/wenxin_test/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 828, in backends
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843]     raise RuntimeError(err_msg)
+[1;36m(EngineCore_DP0 pid=738413)[0;0m ERROR 11-04 21:56:19 [core.py:843] RuntimeError: Unable to initialize backend 'tpu': UNKNOWN: TPU initialization failed: open(/dev/vfio/2): Device or resource busy: Device or resource busy; Couldn't open iommu group /dev/vfio/2 (set JAX_PLATFORMS='' to automatically choose an available backend)
+[1;36m(EngineCore_DP0 pid=738413)[0;0m Process EngineCore_DP0:
+[1;36m(EngineCore_DP0 pid=738413)[0;0m Traceback (most recent call last):
+[1;36m(EngineCore_DP0 pid=738413)[0;0m   File "/home/wenxindong_google_com/miniconda3/envs/wenxin_test/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 812, in backends
+[1;36m(EngineCore_DP0 pid=738413)[0;0m     backend = _init_backend(platform)
+[1;36m(EngineCore_DP0 pid=738413)[0;0m               ^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=738413)[0;0m   File "/home/wenxindong_google_com/miniconda3/envs/wenxin_test/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 896, in _init_backend
+[1;36m(EngineCore_DP0 pid=738413)[0;0m     backend = registration.factory()
+[1;36m(EngineCore_DP0 pid=738413)[0;0m               ^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=738413)[0;0m   File "/home/wenxindong_google_com/miniconda3/envs/wenxin_test/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 217, in tpu_client_timer_callback
+[1;36m(EngineCore_DP0 pid=738413)[0;0m     client = make_tpu_client(
+[1;36m(EngineCore_DP0 pid=738413)[0;0m              ^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=738413)[0;0m   File "/home/wenxindong_google_com/miniconda3/envs/wenxin_test/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 196, in make_tpu_client
+[1;36m(EngineCore_DP0 pid=738413)[0;0m     return _jax.get_c_api_client(
+[1;36m(EngineCore_DP0 pid=738413)[0;0m            ^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=738413)[0;0m jaxlib._jax.XlaRuntimeError: UNKNOWN: TPU initialization failed: open(/dev/vfio/2): Device or resource busy: Device or resource busy; Couldn't open iommu group /dev/vfio/2
+[1;36m(EngineCore_DP0 pid=738413)[0;0m
+[1;36m(EngineCore_DP0 pid=738413)[0;0m During handling of the above exception, another exception occurred:
+[1;36m(EngineCore_DP0 pid=738413)[0;0m
+[1;36m(EngineCore_DP0 pid=738413)[0;0m Traceback (most recent call last):
+[1;36m(EngineCore_DP0 pid=738413)[0;0m   File "/home/wenxindong_google_com/miniconda3/envs/wenxin_test/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+[1;36m(EngineCore_DP0 pid=738413)[0;0m     self.run()
+[1;36m(EngineCore_DP0 pid=738413)[0;0m   File "/home/wenxindong_google_com/miniconda3/envs/wenxin_test/lib/python3.12/multiprocessing/process.py", line 108, in run
+[1;36m(EngineCore_DP0 pid=738413)[0;0m     self._target(*self._args, **self._kwargs)
+[1;36m(EngineCore_DP0 pid=738413)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core.py", line 847, in run_engine_core
+[1;36m(EngineCore_DP0 pid=738413)[0;0m     raise e
+[1;36m(EngineCore_DP0 pid=738413)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core.py", line 834, in run_engine_core
+[1;36m(EngineCore_DP0 pid=738413)[0;0m     engine_core = EngineCoreProc(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=738413)[0;0m                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=738413)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core.py", line 602, in __init__
+[1;36m(EngineCore_DP0 pid=738413)[0;0m     super().__init__(
+[1;36m(EngineCore_DP0 pid=738413)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core.py", line 102, in __init__
+[1;36m(EngineCore_DP0 pid=738413)[0;0m     self.model_executor = executor_class(vllm_config)
+[1;36m(EngineCore_DP0 pid=738413)[0;0m                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=738413)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/executor/abstract.py", line 101, in __init__
+[1;36m(EngineCore_DP0 pid=738413)[0;0m     self._init_executor()
+[1;36m(EngineCore_DP0 pid=738413)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/executor/uniproc_executor.py", line 47, in _init_executor
+[1;36m(EngineCore_DP0 pid=738413)[0;0m     self.driver_worker.init_device()
+[1;36m(EngineCore_DP0 pid=738413)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/worker/worker_base.py", line 324, in init_device
+[1;36m(EngineCore_DP0 pid=738413)[0;0m     self.worker.init_device()  # type: ignore
+[1;36m(EngineCore_DP0 pid=738413)[0;0m     ^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=738413)[0;0m   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/worker/tpu_worker_jax.py", line 133, in init_device
+[1;36m(EngineCore_DP0 pid=738413)[0;0m     self.devices = jax.devices()[:sharding_config.total_devices]
+[1;36m(EngineCore_DP0 pid=738413)[0;0m                    ^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=738413)[0;0m   File "/home/wenxindong_google_com/miniconda3/envs/wenxin_test/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 1010, in devices
+[1;36m(EngineCore_DP0 pid=738413)[0;0m     return get_backend(backend).devices()
+[1;36m(EngineCore_DP0 pid=738413)[0;0m            ^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=738413)[0;0m   File "/home/wenxindong_google_com/miniconda3/envs/wenxin_test/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 944, in get_backend
+[1;36m(EngineCore_DP0 pid=738413)[0;0m     return _get_backend_uncached(platform)
+[1;36m(EngineCore_DP0 pid=738413)[0;0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=738413)[0;0m   File "/home/wenxindong_google_com/miniconda3/envs/wenxin_test/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 923, in _get_backend_uncached
+[1;36m(EngineCore_DP0 pid=738413)[0;0m     bs = backends()
+[1;36m(EngineCore_DP0 pid=738413)[0;0m          ^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=738413)[0;0m   File "/home/wenxindong_google_com/miniconda3/envs/wenxin_test/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 828, in backends
+[1;36m(EngineCore_DP0 pid=738413)[0;0m     raise RuntimeError(err_msg)
+[1;36m(EngineCore_DP0 pid=738413)[0;0m RuntimeError: Unable to initialize backend 'tpu': UNKNOWN: TPU initialization failed: open(/dev/vfio/2): Device or resource busy: Device or resource busy; Couldn't open iommu group /dev/vfio/2 (set JAX_PLATFORMS='' to automatically choose an available backend)
+[1;36m(APIServer pid=738213)[0;0m Traceback (most recent call last):
+[1;36m(APIServer pid=738213)[0;0m   File "/home/wenxindong_google_com/miniconda3/envs/wenxin_test/bin/vllm", line 7, in <module>
+[1;36m(APIServer pid=738213)[0;0m     sys.exit(main())
+[1;36m(APIServer pid=738213)[0;0m              ^^^^^^
+[1;36m(APIServer pid=738213)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/entrypoints/cli/main.py", line 73, in main
+[1;36m(APIServer pid=738213)[0;0m     args.dispatch_function(args)
+[1;36m(APIServer pid=738213)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/entrypoints/cli/serve.py", line 59, in cmd
+[1;36m(APIServer pid=738213)[0;0m     uvloop.run(run_server(args))
+[1;36m(APIServer pid=738213)[0;0m   File "/home/wenxindong_google_com/miniconda3/envs/wenxin_test/lib/python3.12/site-packages/uvloop/__init__.py", line 109, in run
+[1;36m(APIServer pid=738213)[0;0m     return __asyncio.run(
+[1;36m(APIServer pid=738213)[0;0m            ^^^^^^^^^^^^^^
+[1;36m(APIServer pid=738213)[0;0m   File "/home/wenxindong_google_com/miniconda3/envs/wenxin_test/lib/python3.12/asyncio/runners.py", line 195, in run
+[1;36m(APIServer pid=738213)[0;0m     return runner.run(main)
+[1;36m(APIServer pid=738213)[0;0m            ^^^^^^^^^^^^^^^^
+[1;36m(APIServer pid=738213)[0;0m   File "/home/wenxindong_google_com/miniconda3/envs/wenxin_test/lib/python3.12/asyncio/runners.py", line 118, in run
+[1;36m(APIServer pid=738213)[0;0m     return self._loop.run_until_complete(task)
+[1;36m(APIServer pid=738213)[0;0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(APIServer pid=738213)[0;0m   File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+[1;36m(APIServer pid=738213)[0;0m   File "/home/wenxindong_google_com/miniconda3/envs/wenxin_test/lib/python3.12/site-packages/uvloop/__init__.py", line 61, in wrapper
+[1;36m(APIServer pid=738213)[0;0m     return await main
+[1;36m(APIServer pid=738213)[0;0m            ^^^^^^^^^^
+[1;36m(APIServer pid=738213)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/entrypoints/openai/api_server.py", line 2011, in run_server
+[1;36m(APIServer pid=738213)[0;0m     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
+[1;36m(APIServer pid=738213)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/entrypoints/openai/api_server.py", line 2027, in run_server_worker
+[1;36m(APIServer pid=738213)[0;0m     async with build_async_engine_client(
+[1;36m(APIServer pid=738213)[0;0m                ^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(APIServer pid=738213)[0;0m   File "/home/wenxindong_google_com/miniconda3/envs/wenxin_test/lib/python3.12/contextlib.py", line 210, in __aenter__
+[1;36m(APIServer pid=738213)[0;0m     return await anext(self.gen)
+[1;36m(APIServer pid=738213)[0;0m            ^^^^^^^^^^^^^^^^^^^^^
+[1;36m(APIServer pid=738213)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/entrypoints/openai/api_server.py", line 195, in build_async_engine_client
+[1;36m(APIServer pid=738213)[0;0m     async with build_async_engine_client_from_engine_args(
+[1;36m(APIServer pid=738213)[0;0m                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(APIServer pid=738213)[0;0m   File "/home/wenxindong_google_com/miniconda3/envs/wenxin_test/lib/python3.12/contextlib.py", line 210, in __aenter__
+[1;36m(APIServer pid=738213)[0;0m     return await anext(self.gen)
+[1;36m(APIServer pid=738213)[0;0m            ^^^^^^^^^^^^^^^^^^^^^
+[1;36m(APIServer pid=738213)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/entrypoints/openai/api_server.py", line 242, in build_async_engine_client_from_engine_args
+[1;36m(APIServer pid=738213)[0;0m     async_llm = AsyncLLM.from_vllm_config(
+[1;36m(APIServer pid=738213)[0;0m                 ^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(APIServer pid=738213)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/utils/func_utils.py", line 116, in inner
+[1;36m(APIServer pid=738213)[0;0m     return fn(*args, **kwargs)
+[1;36m(APIServer pid=738213)[0;0m            ^^^^^^^^^^^^^^^^^^^
+[1;36m(APIServer pid=738213)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/async_llm.py", line 202, in from_vllm_config
+[1;36m(APIServer pid=738213)[0;0m     return cls(
+[1;36m(APIServer pid=738213)[0;0m            ^^^^
+[1;36m(APIServer pid=738213)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/async_llm.py", line 132, in __init__
+[1;36m(APIServer pid=738213)[0;0m     self.engine_core = EngineCoreClient.make_async_mp_client(
+[1;36m(APIServer pid=738213)[0;0m                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(APIServer pid=738213)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core_client.py", line 121, in make_async_mp_client
+[1;36m(APIServer pid=738213)[0;0m     return AsyncMPClient(*client_args)
+[1;36m(APIServer pid=738213)[0;0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(APIServer pid=738213)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core_client.py", line 808, in __init__
+[1;36m(APIServer pid=738213)[0;0m     super().__init__(
+[1;36m(APIServer pid=738213)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core_client.py", line 469, in __init__
+[1;36m(APIServer pid=738213)[0;0m     with launch_core_engines(vllm_config, executor_class, log_stats) as (
+[1;36m(APIServer pid=738213)[0;0m          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(APIServer pid=738213)[0;0m   File "/home/wenxindong_google_com/miniconda3/envs/wenxin_test/lib/python3.12/contextlib.py", line 144, in __exit__
+[1;36m(APIServer pid=738213)[0;0m     next(self.gen)
+[1;36m(APIServer pid=738213)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/utils.py", line 898, in launch_core_engines
+[1;36m(APIServer pid=738213)[0;0m     wait_for_engine_startup(
+[1;36m(APIServer pid=738213)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/utils.py", line 955, in wait_for_engine_startup
+[1;36m(APIServer pid=738213)[0;0m     raise RuntimeError(
+[1;36m(APIServer pid=738213)[0;0m RuntimeError: Engine core initialization failed. See root cause above. Failed core proc(s): {}
