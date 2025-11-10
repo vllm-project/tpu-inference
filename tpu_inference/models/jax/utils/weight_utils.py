@@ -144,6 +144,7 @@ def model_weights_single_file_generator(
     # Because otherwise the tensor will be loaded on TPU:0 by default,
     # although the tensor would eventually be sharded across multiple TPUs,
     # it would lead to OOM on TPU:0 for large models.
+    print("cpu devices: ", jax.devices("cpu"))
     with jax.default_device(jax.devices("cpu")[0]):
         with safe_open(weights_file, framework=framework) as f:
             for name in f.keys():
@@ -151,6 +152,7 @@ def model_weights_single_file_generator(
                         filter_regex, name):
                     continue
                 weight_tensor = f.get_tensor(name)
+                print("Loaded weight tensor:", name, weight_tensor.shape)
                 yield name, weight_tensor
 
 
@@ -299,7 +301,7 @@ def _load_hf_weights_on_thread(vllm_config,
         shardings = nnx.get_named_sharding(params, mesh)
     except TypeError:
         shardings = params
-
+    print("line 302")
     for hf_key, hf_weight in model_weights_single_file_generator(
             weights_file, framework="flax", filter_regex=filter_regex):
 
