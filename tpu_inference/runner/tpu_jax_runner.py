@@ -42,7 +42,7 @@ from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
                                                       gather_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
-from tpu_inference.layers.jax.sharding import (ShardingAxisName)
+from tpu_inference.layers.jax.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import get_model
 from tpu_inference.models.jax.utils.weight_utils import (
@@ -259,31 +259,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.rng_key = jax.random.key(self.model_config.seed)
 
     def _init_mesh(self) -> None:
-        """Initialize the JAX mesh for distributed computation.
-
-        Creates either a 4D mesh (data, attn_dp, expert, model) for new model design
-        or a 2D mesh (data, model) for legacy models. Supports both single-slice and
-        multi-slice configurations.
-        """
-        use_new_model_design = os.getenv("NEW_MODEL_DESIGN", False)
-
-        if use_new_model_design:
+        if os.getenv("NEW_MODEL_DESIGN", False):
             self.mesh = self._create_new_model_mesh()
         else:
+            # NOTE(wenxindongwork): The new MoE kernel expects a 2D mesh, so we default
+            # to a 2D mesh for now, and we may change this in the future.
             self.mesh = self._create_2d_mesh()
 
         logger.info(f"Init mesh | mesh={self.mesh}")
 
     def _create_new_model_mesh(self) -> jax.sharding.Mesh:
-        """Create a 4D mesh for new model design (data, attn_dp, expert, model).
-
-        The new MoE kernel expects a 4D mesh structure. This method supports both
-        single-slice and multi-slice configurations via the NUM_SLICES environment
-        variable.
-
-        Returns:
-            A JAX mesh configured for the new model design with 4D axis structure.
-        """
         axis_names = ("data", "attn_dp", "expert", "model")
         num_slices = int(os.environ.get('NUM_SLICES', 1))
 
@@ -298,14 +283,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         return jax.sharding.Mesh(devices_array, axis_names)
 
     def _create_single_slice_mesh(self) -> jax.Array:
-        """Create device mesh for single-slice configuration.
-
-        Arranges devices in a 4D mesh shape according to the sharding strategy:
-        (model_dp_size, attn_dp_size, expert_size, tp_size).
-
-        Returns:
-            Device array arranged according to the 4D mesh shape.
-        """
         sharding_strategy = self.vllm_config.sharding_config
         mesh_shape = (
             sharding_strategy.model_dp_size,
@@ -321,21 +298,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         )
 
     def _create_multi_slice_mesh(self, num_slices: int) -> jax.Array:
-        """Create hybrid device mesh for multi-slice configuration.
-
-        Splits data parallelism across multiple slices (e.g., TPU pods). The outer
-        dimension represents slice-level parallelism, while inner dimensions handle
-        intra-slice parallelism.
-
-        Args:
-            num_slices: Number of slices for outer data parallelism.
-
-        Returns:
-            Hybrid device array with intra-node and inter-node mesh shapes.
-        """
         sharding_strategy = self.vllm_config.sharding_config
         dp_inner = sharding_strategy.model_dp_size // num_slices
 
+        # Splits data parallelism across multiple slices.
         intra_node_shape = (
             dp_inner,
             sharding_strategy.attn_dp_size,
@@ -352,16 +318,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         )
 
     def _create_2d_mesh(self) -> jax.sharding.Mesh:
-        """Create a 2D mesh for legacy model design (data, model).
-
-        Creates a traditional 2D mesh with data and model parallelism axes.
-        Supports both optimized mesh creation and enforced device ordering.
-
-        Returns:
-            A JAX mesh configured for the legacy model design with 2D axis structure.
-        """
-        sharding_strategy = self.vllm_config.sharding_config
         axis_names = ("data", "model")
+        sharding_strategy = self.vllm_config.sharding_config
         mesh_shape = (
             sharding_strategy.model_dp_size,
             sharding_strategy.tp_size,
