@@ -13,6 +13,9 @@ from tpu_inference import utils
 if TYPE_CHECKING:
     from vllm.v1.configs.vllm_config import VllmConfig
 
+MESH_AXIS_NAMES = ("data", "attn_dp", "expert", "model")
+MESH_AXIS_NAMES_2D = ('data', 'model')
+
 
 class ShardingAxisNameBase:
     """Base class for sharding axis names."""
