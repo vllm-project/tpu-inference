@@ -15,9 +15,9 @@ from tpu_inference.kernels.quantized_matmul.kernel import \
 
 def sharded_quantized_matmul(x: jax.Array, w_q: jax.Array, w_s: jax.Array,
                              mesh: Mesh, weight_sharding: P):
-    out_axis, in_axis = weight_sharding
+    in_axis, out_axis = weight_sharding
     x_sharding = P(None, in_axis)
-    scale_sharding = P(out_axis, )
+    scale_sharding = P(None, out_axis)
     out_sharding = P(None, out_axis)
 
     x = jax.lax.with_sharding_constraint(x, NamedSharding(mesh, x_sharding))
