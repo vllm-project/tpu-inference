@@ -10,6 +10,15 @@ from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe, ref_moe
 jax.config.parse_flags_with_absl()
 
 
+def cdiv(a, b):
+    assert b != 0
+    return (a + b - 1) // b
+
+
+def align_to(x, a):
+    return cdiv(x, a) * a
+
+
 def gen_moe_inputs(
     dtype,
     top_k,
@@ -19,11 +28,14 @@ def gen_moe_inputs(
     num_tokens,
     *,
     seed=1234,
+    has_bias=False,
 ):
     key = jax.random.key(seed)
-    k0, k1, k2, k4, k5 = jax.random.split(key, 5)
+    k0, k1, k2, k3, k4, k5, k6 = jax.random.split(key, 7)
+
     a = jax.random.normal(k0, (num_tokens, hidden_size),
                           dtype=jnp.float32).astype(dtype) / 10
+
     w1 = (jax.random.normal(
         k1,
         (num_experts, 2, hidden_size, intermediate_size),
@@ -31,21 +43,34 @@ def gen_moe_inputs(
     ) / 10).astype(dtype)
     w2 = (jax.random.normal(k2, (num_experts, intermediate_size, hidden_size),
                             dtype=jnp.float32) / 10).astype(dtype)
+
+    if has_bias:
+        b1 = (jax.random.normal(k3, (num_experts, 2, intermediate_size),
+                                dtype=jnp.float32) / 10).astype(dtype)
+        b2 = (jax.random.normal(k4, (num_experts, hidden_size),
+                                dtype=jnp.float32) / 10).astype(dtype)
+    else:
+        b1 = b2 = None
+
     gating_output = (
-        jax.random.normal(k4, (num_tokens, num_experts), dtype=jnp.float32) +
+        jax.random.normal(k5, (num_tokens, num_experts), dtype=jnp.float32) +
         jnp.arange(num_tokens * num_experts, dtype=jnp.float32).reshape(
             num_tokens, num_experts) / 100)
+
     # To generate unique top-k!
-    top_k_indices = jax.random.randint(k5, (num_tokens, top_k),
+    top_k_indices = jax.random.randint(k6, (num_tokens, top_k),
                                        minval=0,
                                        maxval=num_experts - 1,
                                        dtype=jnp.int32)
+
     one_hot = (jnp.sum(
         jax.nn.one_hot(top_k_indices, num_experts, dtype=jnp.float32),
         axis=1,
     ) * 30)
+
     gating_output = (gating_output + one_hot).astype(dtype)
-    return a, w1, w2, gating_output
+
+    return a, w1, w2, b1, b2, gating_output
 
 
 def sub_channel_quantize(x, quant_dtype, wsz=256):
@@ -104,11 +129,11 @@ class MoEKernelTest(jtu.JaxTestCase):
         act_fn="silu",
         w_dtype=None,
         subc_quant_wsz=None,
-        use_benchmark_baseline=False,
+        has_bias=False,
         atol=2e-1,
         rtol=2e-1,
     ):
-        a, w1, w2, gating_output = gen_moe_inputs(
+        a, w1, w2, b1, b2, gating_output = gen_moe_inputs(
             dtype,
             top_k,
             num_experts,
@@ -116,6 +141,7 @@ class MoEKernelTest(jtu.JaxTestCase):
             intermediate_size,
             num_tokens,
             seed=seed,
+            has_bias=has_bias,
         )
         w1_scale = None
         w2_scale = None
@@ -137,6 +163,8 @@ class MoEKernelTest(jtu.JaxTestCase):
             subc_quant_wsz=subc_quant_wsz,
             w1_scale=w1_scale,
             w2_scale=w2_scale,
+            b1=b1,
+            b2=b2,
             bt=bt,
             bf=bf,
             bd1=bd1,
@@ -152,6 +180,8 @@ class MoEKernelTest(jtu.JaxTestCase):
             w2,
             gating_output,
             top_k,
+            b1=b1,
+            b2=b2,
             renormalize_topk_logits=renormalize_topk_logits,
             activation=act_fn,
             subc_quant_wsz=subc_quant_wsz,
@@ -306,6 +336,33 @@ class MoEKernelTest(jtu.JaxTestCase):
             bf=1024,
             bd1=1024,
             bd2=1024,
+            btc=32,
+            bfc=256,
+            bd1c=256,
+            bd2c=256,
+        )
+
+    def test_bias(self):
+        dtype = jnp.bfloat16
+        top_k = 8
+        num_experts = 128
+        hidden_size = 1024
+        intermediate_size = 1024
+        num_tokens = 8 * 32
+        self._test_moe(
+            dtype=dtype,
+            top_k=top_k,
+            num_experts=num_experts,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            num_tokens=num_tokens,
+            seed=1234,
+            renormalize_topk_logits=False,
+            has_bias=True,
+            bt=32,
+            bf=512,
+            bd1=512,
+            bd2=512,
             btc=32,
             bfc=256,
             bd1c=256,
