@@ -139,6 +139,8 @@ def matmul_kernel(
     save_acc: bool,
     save_x_q: bool,
 ):
+    print("Printing kernel args:", x_ref.shape, w_q_ref.shape,
+          w_scale_ref.shape, x_abs_max_ref.shape, out_ref.shape)
     out_idx, in_idx = pl.program_id(1), pl.program_id(2)
     n_in = pl.num_programs(2)
     x_ref_dtype = x_ref.dtype
@@ -329,6 +331,7 @@ def quantized_matmul_kernel(
         upper_limit_bytes=get_device_vmem_limit(),
     )
 
+    #print("Printing kernel shape", x.shape, w_q.shape, w_scale.shape)
     kernel = pl.pallas_call(
         functools.partial(
             matmul_kernel,

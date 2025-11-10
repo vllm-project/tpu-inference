@@ -1,3 +1,4 @@
+import functools
 from typing import Optional, Union
 
 import jax
@@ -15,15 +16,45 @@ from tpu_inference.kernels.quantized_matmul.kernel import \
 
 def sharded_quantized_matmul(x: jax.Array, w_q: jax.Array, w_s: jax.Array,
                              mesh: Mesh, weight_sharding: P):
-    in_axis, out_axis = weight_sharding
-    x_sharding = P(None, in_axis)
-    scale_sharding = P(None, out_axis)
-    out_sharding = P(None, out_axis)
+    print("Printing before quantized kernel:", x.shape, w_q.shape, w_s.shape,
+          weight_sharding)
+    if len(weight_sharding) == 2:
+        in_axis, out_axis = weight_sharding
+        scale_sharding = P(None, out_axis)
+        out_sharding = P(None, out_axis)
+    elif len(weight_sharding) == 3:
+        in_axis, out_axis, _ = weight_sharding
+        scale_sharding = P(in_axis, out_axis,
+                           None) if out_axis == "model" else P(
+                               None, None, None)
+        out_sharding = P(in_axis, out_axis,
+                         None) if out_axis == "model" else P(None, None)
+    x_sharding = P(None, in_axis) if len(x.shape) == 2 else P(
+        None, in_axis, None)
 
     x = jax.lax.with_sharding_constraint(x, NamedSharding(mesh, x_sharding))
 
     def wrapper(x, w_q, w_s):
-        output = quantized_matmul_kernel(x, w_q, w_s, x_q_dtype=w_q.dtype)
+        if len(weight_sharding) == 2:
+            output = quantized_matmul_kernel(x, w_q, w_s, x_q_dtype=w_q.dtype)
+        else:
+            # jax.vmap causes float8_e4m3fn TypeError, so we have to declare function partial.
+            quantized_matmul_kernel_partial = functools.partial(
+                quantized_matmul_kernel, x_q_dtype=w_q.dtype)
+            if out_axis == "model":
+                func = jax.vmap(quantized_matmul_kernel_partial,
+                                in_axes=(None, 1, 1),
+                                out_axes=1)
+                output = func(x, w_q, w_s)
+            else:
+                # The scale shape is (1,1,5120), but we need (1,5120). It could not be done in loading because the kernel sharding requires 3 dimensional tensors.
+                w_s = jnp.squeeze(w_s, axis=1)
+                func = jax.vmap(quantized_matmul_kernel_partial,
+                                in_axes=(1, 0, None),
+                                out_axes=0)
+                output = func(x, w_q, w_s)  # test
+                output = jnp.sum(output, axis=0)
+                #print("Printing output quantization:", output.shape)
         if in_axis:
             output = jax.lax.psum(output, axis_name=in_axis)
         return output

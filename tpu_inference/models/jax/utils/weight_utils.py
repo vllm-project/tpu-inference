@@ -458,6 +458,19 @@ def _load_hf_weights_on_thread(vllm_config,
             if len(hf_weight.shape) == 2:
                 hf_weight = jnp.reshape(
                     hf_weight, (hf_weight.shape[1], hf_weight.shape[0]))
+            if "self_attn.q_proj" in hf_key:
+                hf_weight = jnp.reshape(hf_weight, [1] + list(
+                    model.model.layers[0].self_attn.q_proj.kernel_shape[1:]))
+            elif "self_attn.k_proj" in hf_key:
+                hf_weight = jnp.reshape(hf_weight, [1] + list(
+                    model.model.layers[0].self_attn.k_proj.kernel_shape[1:]))
+            elif "self_attn.v_proj" in hf_key:
+                hf_weight = jnp.reshape(hf_weight, [1] + list(
+                    model.model.layers[0].self_attn.v_proj.kernel_shape[1:]))
+            elif "self_attn.o_proj" in hf_key:
+                hf_weight = jnp.reshape(hf_weight, [1, 1] + list(
+                    model.model.layers[0].self_attn.o_proj.kernel_shape[2:]))
+
             if quant_scales is not None:
                 quant_scales[hf_key] = hf_weight
                 continue
@@ -551,29 +564,6 @@ def _load_hf_weights_on_thread(vllm_config,
         # Update the model weight
         spec = model_weight.sharding.spec if isinstance(
             model_weight.sharding, NamedSharding) else model_weight.sharding
-        # Transpose the MLP weight shape as the quantized matmul will take it as (n_output_feature, n_input_feature).
-        #if "mlp" in hf_key:
-        #hf_weight = jnp.transpose(hf_weight)
-        if "self_attn.q_proj" in hf_key:
-            rhs_parsed_info = prepare_rhs_transform(
-                model.model.layers[0].self_attn.q_proj.einsum_str,
-                hf_weight.shape)
-            hf_weight = transform_rhs_for_matmul(hf_weight, rhs_parsed_info)
-        elif "self_attn.v_proj" in hf_key:
-            rhs_parsed_info = prepare_rhs_transform(
-                model.model.layers[0].self_attn.v_proj.einsum_str,
-                hf_weight.shape)
-            hf_weight = transform_rhs_for_matmul(hf_weight, rhs_parsed_info)
-        elif "self_attn.o_proj" in hf_key:
-            rhs_parsed_info = prepare_rhs_transform(
-                model.model.layers[0].self_attn.o_proj.einsum_str,
-                hf_weight.shape)
-            hf_weight = transform_rhs_for_matmul(hf_weight, rhs_parsed_info)
-        elif "self_attn.k_proj" in hf_key:
-            rhs_parsed_info = prepare_rhs_transform(
-                model.model.layers[0].self_attn.k_proj.einsum_str,
-                hf_weight.shape)
-            hf_weight = transform_rhs_for_matmul(hf_weight, rhs_parsed_info)
         model_weight.value = shard(hf_weight, spec)
 
 
