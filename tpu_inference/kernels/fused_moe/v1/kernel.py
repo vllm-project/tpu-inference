@@ -7,7 +7,6 @@ import jax.numpy as jnp
 from jax import lax
 from jax._src import dtypes
 from jax.experimental import pallas as pl
-from jax.experimental import shard_map
 from jax.experimental.pallas import tpu as pltpu
 
 P = jax.sharding.PartitionSpec
@@ -35,12 +34,38 @@ def broadcast_minor(src, shape):
                            axis=-1)[..., :shape[-1]]
 
 
+def swigluoai(gate: jax.Array,
+              up: jax.Array,
+              *,
+              alpha: float = 1.702,
+              limit: float = 7.0) -> jax.Array:
+    """Activation used in GPT-OSS MoE Layer."""
+    gate = jnp.clip(gate, a_max=limit)
+    up = jnp.clip(up, a_min=-limit, a_max=limit)
+    glu = gate * jax.nn.sigmoid(alpha * gate)
+    return (up + 1.0) * glu
+
+
+def activation_fn(acc1, acc3, act_fn):
+    if act_fn == "silu":
+        return jax.nn.silu(acc1) * acc3
+    elif act_fn == "gelu":
+        return jax.nn.gelu(acc1) * acc3
+    elif act_fn == "swigluoai":
+        return swigluoai(acc1, acc3)
+    else:
+        raise RuntimeError(f"Unsupported activation function: {act_fn}")
+
+
 def ref_moe(
     tokens: jax.Array,  # (num_tokens, hidden_size)
     w1: jax.Array,  # (num_experts, 2, hidden_size, intermediate_size)
     w2: jax.Array,  # (num_experts, intermediate_size, hidden_size)
     gating_output: jax.Array,  # (num_tokens, num_experts)
     top_k: int,
+    b1: jax.Array | None = None,  # (num_experts, 2, intermediate_size)
+    b2: jax.Array | None = None,  # (num_experts, hidden_size)
+    renormalize_topk_logits: bool = False,
     activation="silu",
 ):
     n_tokens = tokens.shape[0]  # num_tokens
@@ -52,6 +77,10 @@ def ref_moe(
     # Select top-k experts per token
     top_k_logits, top_k_indices = lax.top_k(
         gating_logits, top_k)  # [num_tokens, top_k], [num_tokens, top_k]
+
+    if renormalize_topk_logits:
+        top_k_logits = top_k_logits / jnp.sum(
+            top_k_logits, axis=-1, keepdims=True)
 
     t_outputs = []
 
@@ -77,21 +106,18 @@ def ref_moe(
             gmm1_w1_proj, gmm1_w3_proj = jnp.split(
                 gmm_1_out, 2,
                 axis=-1)  # [1, intermediate_size], [1, intermediate_size]
+            if b1 is not None:
+                gmm1_w1_proj += b1[expert_id, 0].reshape(1, -1)
+                gmm1_w3_proj += b1[expert_id, 1].reshape(1, -1)
 
             # Apply gated activation: activation(gate) * up
-            if activation == "silu":
-                act = jax.nn.silu(
-                    gmm1_w1_proj) * gmm1_w3_proj  # [1, intermediate_size]
-            elif activation == "gelu":
-                act = jax.nn.gelu(
-                    gmm1_w1_proj) * gmm1_w3_proj  # [1, intermediate_size]
-            else:
-                raise ValueError(
-                    f"Unsupported activation: {activation}. Use 'silu' or 'gelu'."
-                )
+            act = activation_fn(gmm1_w1_proj, gmm1_w3_proj, activation)
 
             # Second linear layer (down projection)
             gmm_2_out = act @ expert_weight_2  # [1, d_model]
+            if b2 is not None:
+                expert_bias_2 = b2[expert_id]  # [d_model]
+                gmm_2_out += expert_bias_2.reshape(1, -1)
             tok_expert_act.append(gmm_2_out)
 
         # Combine outputs from all selected experts
@@ -117,6 +143,8 @@ def _fused_ep_moe_kernel(
         w2_hbm,  # (local_num_experts, intermediate_size, hidden_size)
         gating_hbm,  # (local_num_tokens, padded_num_experts)
         a2a_g_hbm,  # (num_experts, bt, t_packing, hidden_size // t_packing)
+        b1_hbm,  # (local_num_experts, 2, intermediate_size)
+        b2_hbm,  # (local_num_experts, btc, hidden_size)
         # Output
     output_hbm,  # (local_num_tokens, hidden_size)
         # Scratch
@@ -137,15 +165,21 @@ def _fused_ep_moe_kernel(
         b_w3_x2_vmem,  # <bw_sem_id> (2, t_packing, bd1 // t_packing, bf)
         b_w2_x2_vmem,  # <bw_sem_id> (2, t_packing, bf, bd2 // t_packing)
         b_acc_vmem,  # F32(bt * num_devices, 1, bf * 2)
+        b_b2_x2_vmem,  # <bw_sem_id> (2, t_packing, btc, bd2 // t_packing)
+        b_b1_x2_vmem,  # <bw_sem_id> (2, btc, bf)
+        b_b3_x2_vmem,  # <bw_sem_id> (2, btc, bf)
         ### Semaphores:
-    local_sems,  # (2, 5): 2 x [b_gating_sem, b_w1_sem, b_w2_sem, b_w3_sem, b_output_sem]
+    local_sems,  # (2, 8): 2 x [b_gating_sem, b_w1_sem, b_w2_sem, b_w3_sem, b_output_sem, b2_sem, bb1_sem, bb3_sem]
         send_sems,  # <e_sem_id> (2,)
         recv_sems,  # <e_sem_id> (2,)
         a2a_gather_sem,
         a2a_acc_sem,
         *,
         top_k: int,
+        has_bias: bool,
+        renormalize_topk_logits: bool,
         ep_axis_name: str,
+        act_fn: str,
         # Kernel tuning params.
         bt: int,  # Block size of local_num_tokens.
         bf: int,  # Block size of intermediate_size.
@@ -160,8 +194,6 @@ def _fused_ep_moe_kernel(
     num_devices = lax.axis_size(ep_axis_name)
     local_num_tokens = tokens_hbm.shape[0]
     local_num_experts, intermediate_size, hidden_size = w2_hbm.shape
-    # num_experts = local_num_experts * num_devices
-    # padded_num_experts = expert_starts_x2_smem.shape[-1]
     right_id = (my_id + 1) % num_devices
 
     t_dtype = tokens_hbm.dtype
@@ -183,11 +215,15 @@ def _fused_ep_moe_kernel(
     num_bd1 = cdiv(hidden_size, bd1)
     num_bd2 = cdiv(hidden_size, bd2)
 
+    def get_mesh_device_id(ep_rank):
+        dp_rank = jax.lax.axis_index("data")
+        return (dp_rank, ep_rank)
+
     def sync_barrier():
         barrier_sem = pltpu.get_barrier_semaphore()
         pltpu.semaphore_signal(
             barrier_sem,
-            device_id=(0, right_id),
+            device_id=get_mesh_device_id(right_id),
             device_id_type=pltpu.DeviceIdType.MESH,
         )
         pltpu.semaphore_wait(barrier_sem, 1)
@@ -212,7 +248,7 @@ def _fused_ep_moe_kernel(
             sem=b_gating_sem,
         ).wait()
 
-    def get_top_k(input, top_k):
+    def get_top_k(input, top_k, renormalize_topk_logits):
         assert len(input.shape) == 2, input.shape
         input = input.astype(jnp.float32)
         top_k_logits_lst = []
@@ -220,11 +256,16 @@ def _fused_ep_moe_kernel(
         t2e = jnp.zeros(input.shape, dtype=jnp.int32)
         t2e_routing = jnp.zeros(input.shape, dtype=jnp.int32)
         iota = jax.lax.broadcasted_iota(jnp.int32, input.shape, 1)
+        if renormalize_topk_logits:
+            top_k_logits_sum = jnp.zeros((input.shape[0], 128), jnp.float32)
+
         for k_id in range(top_k):
             # TODO(jevinjiang): return both top_k values and indices in op in Mosaic
             top_k_logits = jnp.broadcast_to(
                 jnp.max(input, axis=1, keepdims=True),
                 (input.shape[0], 128)).astype(input.dtype)
+            if renormalize_topk_logits:
+                top_k_logits_sum = top_k_logits_sum + top_k_logits
             top_k_logits_lst.append(top_k_logits)
             # TODO(jevinjiang): support bf16 argmax in Mosaic
             top_k_indices = jnp.broadcast_to(
@@ -235,6 +276,11 @@ def _fused_ep_moe_kernel(
             t2e += mask.astype(jnp.int32)
             if k_id != top_k - 1:
                 input = jnp.where(mask, -jnp.inf, input)
+
+        if renormalize_topk_logits:
+            for k_id in range(top_k):
+                top_k_logits_lst[
+                    k_id] = top_k_logits_lst[k_id] / top_k_logits_sum
 
         expert_sizes = jnp.sum(t2e, axis=0, keepdims=True)
         expert_starts = jnp.zeros_like(expert_sizes)
@@ -277,7 +323,7 @@ def _fused_ep_moe_kernel(
                     dst_ref=d2e_count_vmem.at[row_id],
                     send_sem=send_sem,
                     recv_sem=recv_sem,
-                    device_id=(0, right_id),
+                    device_id=get_mesh_device_id(right_id),
                     device_id_type=pltpu.DeviceIdType.MESH,
                 ).wait()
                 row_id = (row_id + num_devices - 1) % num_devices
@@ -359,10 +405,8 @@ def _fused_ep_moe_kernel(
                                              pl.ds(start, remote_sz)],
                     send_sem=send_sems.at[e_sem_id],
                     recv_sem=recv_sems.at[e_sem_id],
-                    device_id=(
-                        0,
-                        recv_id,
-                    ),
+                    device_id=get_mesh_device_id(recv_id),
+                    device_id_type=pltpu.DeviceIdType.MESH,
                 ).start()
         a2a_s_sends_x2_smem[e_sem_id] = send_sz
 
@@ -406,7 +450,8 @@ def _fused_ep_moe_kernel(
                 dst_ref=a2a_g_hbm.at[my_e_id, pl.ds(0, remote_sz)],
                 send_sem=send_sems.at[e_sem_id],
                 recv_sem=a2a_gather_sem,
-                device_id=(0, recv_id),
+                device_id=get_mesh_device_id(recv_id),
+                device_id_type=pltpu.DeviceIdType.MESH,
             ).start()
             start += sz
 
@@ -431,6 +476,44 @@ def _fused_ep_moe_kernel(
             src_ref=a2a_g_hbm.at[0, pl.ds(0, sz)],
             dst_ref=a2a_g_hbm.at[0, pl.ds(0, sz)],
             sem=a2a_gather_sem,
+        ).wait()
+
+    def start_fetch_bb1(local_e_id, sem_idx, bf_id):
+        is_valid = jnp.logical_and(0 <= bf_id, bf_id < num_bf)
+        sz = pl.multiple_of(lax.select(is_valid, bf, 0), bf)
+        sem_b1 = local_sems.at[sem_idx, 6]
+        pltpu.make_async_copy(
+            src_ref=b1_hbm.at[local_e_id, 0, :,
+                              pl.ds(bf_id * bf, sz)],
+            dst_ref=b_b1_x2_vmem.at[sem_idx, :, pl.ds(0, sz)],
+            sem=sem_b1,
+        ).start()
+
+    def start_fetch_bb3(local_e_id, sem_idx, bf_id):
+        is_valid = jnp.logical_and(0 <= bf_id, bf_id < num_bf)
+        sz = pl.multiple_of(lax.select(is_valid, bf, 0), bf)
+        sem_b3 = local_sems.at[sem_idx, 7]
+        pltpu.make_async_copy(
+            src_ref=b1_hbm.at[local_e_id, 1, :,
+                              pl.ds(bf_id * bf, sz)],
+            dst_ref=b_b3_x2_vmem.at[sem_idx, :, pl.ds(0, sz)],
+            sem=sem_b3,
+        ).start()
+
+    def wait_fetch_bb1(local_e_id, sem_idx, bf_id):
+        del local_e_id, bf_id
+        pltpu.make_async_copy(
+            dst_ref=b_b1_x2_vmem.at[sem_idx],
+            src_ref=b_b1_x2_vmem.at[sem_idx],
+            sem=local_sems.at[sem_idx, 6],
+        ).wait()
+
+    def wait_fetch_bb3(local_e_id, sem_idx, bf_id):
+        del local_e_id, bf_id
+        pltpu.make_async_copy(
+            dst_ref=b_b3_x2_vmem.at[sem_idx],
+            src_ref=b_b3_x2_vmem.at[sem_idx],
+            sem=local_sems.at[sem_idx, 7],
         ).wait()
 
     def start_fetch_bw1(local_e_id, bw1_sem_id, bf_id, bd1_id):
@@ -458,6 +541,19 @@ def _fused_ep_moe_kernel(
                 ],
                 dst_ref=b_w2_x2_vmem.at[bw2_sem_id, p],
                 sem=local_sems.at[bw2_sem_id, 2],
+            ).start()
+
+    def start_fetch_bb2(local_e_id, bb2_sem_id, bd2_id):
+        for p in range(t_packing):
+            offset = p * h_per_packing + bd2_id * bd2_per_packing
+            pltpu.make_async_copy(
+                src_ref=b2_hbm.at[
+                    local_e_id,
+                    :,
+                    pl.ds(offset, bd2_per_packing),
+                ],
+                dst_ref=b_b2_x2_vmem.at[bb2_sem_id, p],
+                sem=local_sems.at[bb2_sem_id, 5],
             ).start()
 
     def start_fetch_bw3(local_e_id, bw3_sem_id, bf_id, bd3_id):
@@ -488,6 +584,14 @@ def _fused_ep_moe_kernel(
             src_ref=b_w2_x2_vmem.at[bw2_sem_id],
             dst_ref=b_w2_x2_vmem.at[bw2_sem_id],
             sem=local_sems.at[bw2_sem_id, 2],
+        ).wait()
+
+    def wait_fetch_bb2(local_e_id, bb2_sem_id, bd2_id):
+        del local_e_id, bd2_id
+        pltpu.make_async_copy(
+            src_ref=b_b2_x2_vmem.at[bb2_sem_id],
+            dst_ref=b_b2_x2_vmem.at[bb2_sem_id],
+            sem=local_sems.at[bb2_sem_id, 5],
         ).wait()
 
     def wait_fetch_bw3(local_e_id, bw3_sem_id, bf_id, bd3_id):
@@ -525,6 +629,9 @@ def _fused_ep_moe_kernel(
         acc3_vmem,
         dyn_sz,
         should_init,
+        apply_b13,
+        b1_vmem=None,
+        b3_vmem=None,
     ):
         assert t_b32_vmem.shape == (bt * num_devices, bd1 // t_packing)
         assert w1_vmem.shape == w3_vmem.shape == (t_packing, bd1_per_packing,
@@ -536,8 +643,11 @@ def _fused_ep_moe_kernel(
         num_loops = cdiv(dyn_sz, btc)
         repack_ty = jnp.dtype(f"int{t_bitwidth}")
 
+        num_bd1c = cdiv(bd1, bd1c)
+        num_bfc = cdiv(bf, bfc)
+
         def body(btc_id, _):
-            for bd1c_id in range(cdiv(bd1, bd1c)):
+            for bd1c_id in range(num_bd1c):
                 t_b32 = t_b32_vmem[
                     pl.ds(btc_id * btc, btc),
                     pl.ds(bd1c_id * bd1c_per_packing, bd1c_per_packing),
@@ -545,7 +655,7 @@ def _fused_ep_moe_kernel(
                 for p_id in range(t_packing):
                     t = pltpu.bitcast(t_b32.astype(repack_ty), t_dtype)
                     t_b32 = t_b32 >> t_bitwidth
-                    for bfc_id in range(cdiv(bf, bfc)):
+                    for bfc_id in range(num_bfc):
                         w_slices = (
                             p_id,
                             pl.ds(bd1c_id * bd1c_per_packing,
@@ -560,6 +670,11 @@ def _fused_ep_moe_kernel(
                         acc3 = jnp.dot(t,
                                        w3,
                                        preferred_element_type=jnp.float32)
+                        if apply_b13 and p_id == t_packing - 1 and bd1c_id == num_bd1c - 1:
+                            b1 = b1_vmem[:, pl.ds(bfc_id * bfc, bfc)]
+                            b3 = b3_vmem[:, pl.ds(bfc_id * bfc, bfc)]
+                            acc1 += b1
+                            acc3 += b3
                         acc_slices = (pl.ds(btc_id * btc,
                                             btc), pl.ds(bfc_id * bfc, bfc))
                         if should_init and p_id == bd1c_id == 0:
@@ -578,6 +693,8 @@ def _fused_ep_moe_kernel(
         res_b32_vmem,
         dyn_sz,
         should_init,
+        apply_b2,
+        b2_vmem=None,
     ):
         assert res_b32_vmem.shape == (bt * num_devices, bd2_per_packing)
         assert w2_vmem.shape == (t_packing, bf, bd2_per_packing), (
@@ -604,7 +721,7 @@ def _fused_ep_moe_kernel(
                                             btc), pl.ds(bfc_id * bfc, bfc))
                         acc1 = acc1_vmem[*acc_slices]
                         acc3 = acc3_vmem[*acc_slices]
-                        act = jax.nn.silu(acc1) * acc3
+                        act = activation_fn(acc1, acc3, act_fn)
                         w2 = w2_vmem[
                             p_id,
                             pl.ds(bfc_id * bfc, bfc),
@@ -614,6 +731,16 @@ def _fused_ep_moe_kernel(
                         res += jnp.dot(act,
                                        w2,
                                        preferred_element_type=jnp.float32)
+
+                    # Use real b2
+                    if apply_b2:
+                        b2 = b2_vmem[
+                            p_id,
+                            :,
+                            pl.ds(bd2c_id *
+                                  bd2c_per_packing, bd2c_per_packing),
+                        ].astype(jnp.float32)
+                        res += b2
                     res = pltpu.bitcast(res, jnp.uint32)
                     if t_packing == 2:
                         res = res >> 16 << (16 * p_id)
@@ -664,6 +791,13 @@ def _fused_ep_moe_kernel(
                 wait_fetch_bw1(local_e_id, bw_sem_id, bf_id, bd1_id)
                 wait_fetch_bw3(local_e_id, bw_sem_id, bf_id, bd1_id)
 
+                apply_b13 = has_bias and (bd1_id == num_bd1 - 1)
+                if apply_b13:
+                    start_fetch_bb1(local_e_id, bw_sem_id, bf_id)
+                    start_fetch_bb3(local_e_id, bw_sem_id, bf_id)
+                    wait_fetch_bb1(local_e_id, bw_sem_id, bf_id)
+                    wait_fetch_bb3(local_e_id, bw_sem_id, bf_id)
+
                 dynamic_ffn1(
                     t_b32_vmem=a2a_s_b32_vmem.at[
                         ...,
@@ -674,6 +808,9 @@ def _fused_ep_moe_kernel(
                     acc3_vmem=b_acc3_vmem,
                     dyn_sz=dyn_sz,
                     should_init=(bd1_id == 0),
+                    apply_b13=apply_b13,
+                    b1_vmem=b_b1_x2_vmem.at[bw_sem_id],
+                    b3_vmem=b_b3_x2_vmem.at[bw_sem_id],
                 )
                 bw_sem_id = (bw_sem_id + 1) % 2
 
@@ -681,9 +818,21 @@ def _fused_ep_moe_kernel(
                 start_fetch_next_bw(local_e_id, bw_sem_id, bf_id, num_bd1,
                                     bd2_id)
                 wait_fetch_bw2(local_e_id, bw_sem_id, bf_id, bd2_id)
+
+                # start_fetch_next_bb2(local_e_id, bw_sem_id, bd2_id)
+                # wait_fetch_bb2(local_e_id, bw_sem_id, bd2_id)
                 if bf_id == bd2_id == 0:
                     wait_a2a_gather_send(bt_id, e_sem_id, local_e_id - 2)
 
+                if has_bias and bf_id == num_bf - 1:
+                    start_fetch_bb2(local_e_id,
+                                    bb2_sem_id=bw_sem_id,
+                                    bd2_id=bd2_id)
+                    wait_fetch_bb2(local_e_id,
+                                   bb2_sem_id=bw_sem_id,
+                                   bd2_id=bd2_id)
+
+                apply_b2 = has_bias and (bf_id == num_bf - 1)
                 dynamic_ffn2(
                     acc1_vmem=b_acc1_vmem,
                     acc3_vmem=b_acc3_vmem,
@@ -693,6 +842,8 @@ def _fused_ep_moe_kernel(
                         pl.ds(bd2_id * bd2_per_packing, bd2_per_packing)],
                     dyn_sz=dyn_sz,
                     should_init=(bf_id == 0),
+                    apply_b2=apply_b2,
+                    b2_vmem=b_b2_x2_vmem.at[bw_sem_id],
                 )
                 bw_sem_id = (bw_sem_id + 1) % 2
 
@@ -757,7 +908,7 @@ def _fused_ep_moe_kernel(
         b_gating = b_gating_x2_vmem[bt_sem_id]
         b_gating_score = jax.nn.softmax(b_gating, axis=-1)
         top_k_logits_lst, t2e_routing, expert_sizes, expert_starts = get_top_k(
-            b_gating_score, top_k)
+            b_gating_score, top_k, renormalize_topk_logits)
 
         all_reduce_metadata(bt_sem_id, t2e_routing, expert_starts,
                             expert_sizes)
@@ -776,6 +927,9 @@ def _fused_ep_moe_kernel(
             # Prefetch weights for active expert.
             start_fetch_bw1(local_e_id, bw1_sem_id=0, bf_id=0, bd1_id=0)
             start_fetch_bw3(local_e_id, bw3_sem_id=0, bf_id=0, bd3_id=0)
+
+            start_fetch_bb2(local_e_id, bb2_sem_id=0, bd2_id=0)
+            wait_fetch_bb2(local_e_id, bb2_sem_id=0, bd2_id=0)
 
             # Wait for a2a scatter and perform FFN for active expert.
             wait_a2a_scatter_recv(bt_id, e_sem_id, local_e_id)
@@ -827,6 +981,8 @@ def _fused_ep_moe_kernel(
     static_argnames=[
         "mesh",
         "top_k",
+        "renormalize_topk_logits",
+        "act_fn",
         "bt",
         "bf",
         "bd1",
@@ -845,6 +1001,10 @@ def fused_ep_moe(
     w2: jax.Array,  # (num_experts, intermediate_size, hidden_size)
     gating_output: jax.Array,  # (num_tokens, num_experts)
     top_k: int,
+    b1: jax.Array | None = None,
+    b2: jax.Array | None = None,
+    renormalize_topk_logits: bool = False,
+    act_fn: str = "silu",
     *,
     # Kernel tuning parameters.
     bt: int,
@@ -855,12 +1015,12 @@ def fused_ep_moe(
     bfc: int,
     bd1c: int,
     bd2c: int,
-    ep_axis_name: str = 'model',
+    ep_axis_name: str = "model",
 ):
     # Assert all other axes have length of 1
     assert len(mesh.shape) == 2, "Expect 2D mesh in tpu-inference"
-    assert 'data' in mesh.shape and mesh.shape['data'] == 1, \
-        "Expect data axis size of 1 in tpu-inference"
+    assert ("data" in mesh.shape and mesh.shape["data"]
+            == 1), "Expect data axis size of 1 in tpu-inference"
 
     ep_size = mesh.shape[ep_axis_name]
     num_devices = ep_size
@@ -908,13 +1068,33 @@ def fused_ep_moe(
             constant_values=-jnp.inf,
         )
 
-    scope_name = f"fused_moe_k-{top_k}_bt-{bt}-{btc}_bf-{bf}-{bfc}_bd1-{bd1}-{bd1c}_bd2-{bd2}-{bd2c}"
+    has_bias = b1 is not None
+    if b1 is None:
+        b1 = jnp.zeros((num_experts, 2, intermediate_size), dtype=w1.dtype)
+    b1 = b1.reshape(num_experts, 2, 1, intermediate_size)
+    b1 = jnp.broadcast_to(b1, (num_experts, 2, btc, intermediate_size))
+
+    if b2 is None:
+        b2 = jnp.zeros((num_experts, hidden_size), dtype=w2.dtype)
+    elif b2.shape[-1] != hidden_size:
+        b2 = jnp.pad(
+            b2,
+            ((0, 0), (0, hidden_size - b2.shape[-1])),
+            constant_values=0,
+        )
+    b2 = b2.reshape(num_experts, 1, hidden_size)
+    b2 = jnp.broadcast_to(b2, (num_experts, btc, hidden_size))
+
+    scope_name = f"fused_moe_k-{top_k}_renorm-{renormalize_topk_logits}_bt-{bt}-{btc}_bf-{bf}-{bfc}_bd1-{bd1}-{bd1c}_bd2-{bd2}-{bd2c}"
     fused_moe = jax.named_scope(scope_name)(
         pl.pallas_call(
             functools.partial(
                 _fused_ep_moe_kernel,
                 top_k=top_k,
+                has_bias=has_bias,
+                renormalize_topk_logits=renormalize_topk_logits,
                 ep_axis_name=ep_axis_name,
+                act_fn=act_fn,
                 bt=bt,
                 bf=bf,
                 bd1=bd1,
@@ -929,6 +1109,8 @@ def fused_ep_moe(
             grid_spec=pltpu.PrefetchScalarGridSpec(
                 num_scalar_prefetch=0,
                 in_specs=[
+                    pl.BlockSpec(memory_space=pltpu.MemorySpace.HBM),
+                    pl.BlockSpec(memory_space=pltpu.MemorySpace.HBM),
                     pl.BlockSpec(memory_space=pltpu.MemorySpace.HBM),
                     pl.BlockSpec(memory_space=pltpu.MemorySpace.HBM),
                     pl.BlockSpec(memory_space=pltpu.MemorySpace.HBM),
@@ -986,8 +1168,15 @@ def fused_ep_moe(
                     pltpu.VMEM((2, t_packing, bf, bd2 // t_packing), w2.dtype),
                     # b_acc_vmem
                     pltpu.VMEM((bt * num_devices, 1, bf * 2), jnp.float32),
+                    # b2_vmem_buf
+                    pltpu.VMEM((2, t_packing, btc, bd2 // t_packing),
+                               b2.dtype),
+                    # b1_vmem_buf
+                    pltpu.VMEM((2, btc, bf), b1.dtype),
+                    # b3_vmem_buf
+                    pltpu.VMEM((2, btc, bf), b1.dtype),
                     # local_sems
-                    pltpu.SemaphoreType.DMA((2, 5)),
+                    pltpu.SemaphoreType.DMA((2, 8)),
                     # send_sems
                     pltpu.SemaphoreType.DMA((2, )),
                     # recv_sems
@@ -1006,21 +1195,29 @@ def fused_ep_moe(
         ))
 
     @jax.jit
-    @functools.partial(
-        shard_map.shard_map,
+    @jax.shard_map(
         mesh=mesh,
-        in_specs=(P(ep_axis_name), P(ep_axis_name), P(ep_axis_name),
-                  P(ep_axis_name), P()),
+        in_specs=(
+            P(ep_axis_name),
+            P(ep_axis_name),
+            P(ep_axis_name),
+            P(ep_axis_name),
+            P(),
+            P(ep_axis_name),
+            P(ep_axis_name),
+        ),
         out_specs=P(ep_axis_name),
-        check_rep=False,
+        check_vma=False,
     )
-    def kernel(tokens, w1, w2, gating_output, a2a_g_hbm_scratch):
+    def kernel(tokens, w1, w2, gating_output, a2a_g_hbm_scratch, b1, b2):
         return fused_moe(
             pltpu.with_memory_space_constraint(tokens, pltpu.HBM),
             pltpu.with_memory_space_constraint(w1, pltpu.HBM),
             pltpu.with_memory_space_constraint(w2, pltpu.HBM),
             pltpu.with_memory_space_constraint(gating_output, pltpu.HBM),
             pltpu.with_memory_space_constraint(a2a_g_hbm_scratch, pltpu.HBM),
+            pltpu.with_memory_space_constraint(b1, pltpu.HBM),
+            pltpu.with_memory_space_constraint(b2, pltpu.HBM),
         )
 
     a2a_g_hbm_scratch = pl.empty(
@@ -1031,5 +1228,7 @@ def fused_ep_moe(
         w2,
         gating_output,
         a2a_g_hbm_scratch,
+        b1,
+        b2,
     )
     return results[:, :actual_hidden_size]
