@@ -328,7 +328,7 @@ class Qwen3QuantizedMLP(nnx.Module):
             intermediate_size,
             use_bias=False,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
             model=model,
         )
@@ -337,7 +337,7 @@ class Qwen3QuantizedMLP(nnx.Module):
             intermediate_size,
             use_bias=False,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
             model=model,
         )
@@ -346,7 +346,7 @@ class Qwen3QuantizedMLP(nnx.Module):
             hidden_size,
             use_bias=False,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
             model=model,
         )
@@ -487,7 +487,7 @@ class Qwen3Attention(nnx.Module):
             model=model,
             param_dtype=dtype,
             # P(None, "model", None) -> P("model", None, None) due to weigh transpose.
-            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
         )
         self.q_norm = nnx.RMSNorm(
@@ -503,7 +503,7 @@ class Qwen3Attention(nnx.Module):
             model=model,
             param_dtype=dtype,
             # P(None, "model", None) -> P("model", None, None) due to weigh transpose.
-            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
         )
         self.k_norm = nnx.RMSNorm(
@@ -519,7 +519,7 @@ class Qwen3Attention(nnx.Module):
             model=model,
             param_dtype=dtype,
             # P(None, "model", None) -> P("model", None, None) due to weigh transpose.
-            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
         )
         self.o_proj = JaxEinsumLayer(
@@ -528,7 +528,7 @@ class Qwen3Attention(nnx.Module):
             model=model,
             param_dtype=dtype,
             # P("model", None, None) -> P(None, "model", None) due to weigh transpose.
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
         )
 

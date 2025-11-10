@@ -106,20 +106,20 @@ def validate_inputs(
             )
 
     # Verify input shapes.
-    if x.shape[1] != w_q.shape[1]:
-        raise ValueError(f'{x.shape[1]=} must be equal to {w_q.shape[1]=}')
-    if w_q.shape[0] != w_scale.shape[1]:
+    if x.shape[1] != w_q.shape[0]:
+        raise ValueError(f'{x.shape[1]=} must be equal to {w_q.shape[0]=}')
+    if w_q.shape[1] != w_scale.shape[1]:
         raise ValueError(
-            f'{w_q.shape[0]=} must be equal to {w_scale.shape[1]=}')
+            f'{w_q.shape[1]=} must be equal to {w_scale.shape[1]=}')
     if x_abs_max.shape != (1, x.shape[0]):
         raise ValueError(
             f'{x_abs_max.shape=} must be equal to (1, {x.shape[0]=})')
     if x.shape[0] % batch_block_size != 0:
         raise ValueError(
             f'{x.shape[0]=} must be a multiple of {batch_block_size=}')
-    if w_q.shape[0] % out_block_size != 0:
+    if w_q.shape[1] % out_block_size != 0:
         raise ValueError(
-            f'{w_q.shape[0]=} must be a multiple of {out_block_size=}')
+            f'{w_q.shape[1]=} must be a multiple of {out_block_size=}')
     if x.shape[1] % in_block_size != 0:
         raise ValueError(
             f'{x.shape[1]=} must be a multiple of {in_block_size=}')
@@ -127,7 +127,7 @@ def validate_inputs(
 
 def matmul_kernel(
     x_ref: jax.Array,  # (batch_block_size, in_block_size)
-    w_q_ref: jax.Array,  # (out_block_size, in_block_size)
+    w_q_ref: jax.Array,  # (in_block_size, out_block_size)
     w_scale_ref: jax.Array,  # (1, out_block_size)
     x_abs_max_ref: jax.Array,  # (1, batch_block_size)
     out_ref: jax.Array,  # (batch_block_size, out_block_size)
@@ -189,17 +189,15 @@ def matmul_kernel(
                 if is_last_step:
                     x_scale_tmp = x_scale_scratch[...]
 
-            acc = jax.lax.dot_general(
+            acc = jnp.matmul(
                 x_q_tmp,
                 w_q_ref[...],
-                (((1, ), (1, )), ((), ())),
                 preferred_element_type=acc_dtype,
             )
         else:
-            acc = jax.lax.dot_general(
+            acc = jnp.matmul(
                 x_ref[...],
                 w_q_ref[...],
-                (((1, ), (1, )), ((), ())),
                 preferred_element_type=acc_dtype,
             )
 
@@ -228,10 +226,9 @@ def matmul_kernel(
 )
 def quantized_matmul_kernel(
     x: jax.Array,  # [bs, n_in]
-    w_q: jax.Array,  # [n_out, n_in]
-    w_scale: jax.Array,  # [n_out]
+    w_q: jax.Array,  # [n_in, n_out]
+    w_scale: jax.Array,  # [n_blocks, n_out]
     w_zp: jax.Array | None = None,  # [n_out]
-    block_size: int | None = None,
     x_q_dtype: jnp.dtype | None = None,
     *,
     tuned_value: TunedValue | None = None,
@@ -240,10 +237,9 @@ def quantized_matmul_kernel(
 
   Args:
     x: Input unquantized array.
-    w_q: Weight quantized array. [n_output_features, n_input_features]
-    w_scale: Weight quantization scale. [n_output_features]
+    w_q: Weight quantized array. [n_input_features, n_output_features]
+    w_scale: Weight quantization scale. [n_blocks, n_output_features]
     w_zp: Weight zero point for asymmetric quantization.
-    block_size: Block size for subchannel quantization.
     x_q_dtype: Quantization type of the input. If None or if the value is the
       same as x.dtype, then no quantization is applied.
     tuned_value: Kernel tuned values for optimal performance.
@@ -254,8 +250,6 @@ def quantized_matmul_kernel(
 
     if w_zp is not None:
         raise NotImplementedError('zero_point is not supported.')
-    if block_size is not None:
-        raise NotImplementedError('block_size is not supported.')
 
     if x_q_dtype is None:
         x_q_dtype = x.dtype
@@ -271,7 +265,7 @@ def quantized_matmul_kernel(
     assert x_abs_max.shape == (1, x.shape[0])
 
     orig_n_batch, orig_n_in = x.shape
-    orig_n_out, _ = w_q.shape
+    _, orig_n_out = w_q.shape
 
     if tuned_value is None:
         tuned_value = get_tuned_block_sizes(
@@ -293,16 +287,15 @@ def quantized_matmul_kernel(
                             ((0, 0), (0, padded_n_batch - orig_n_batch)))
     padded_n_out = next_multiple(orig_n_out, out_block_size)
     if orig_n_out < padded_n_out:
-        w_q = jnp.pad(w_q, ((0, padded_n_out - orig_n_out), (0, 0)))
-        w_scale = jnp.pad(w_scale, (0, padded_n_out - orig_n_out))
+        w_q = jnp.pad(w_q, ((0, 0), (0, padded_n_out - orig_n_out)))
+        w_scale = jnp.pad(w_scale, ((0, 0), (0, padded_n_out - orig_n_out)))
     padded_n_in = next_multiple(orig_n_in, in_block_size)
     if orig_n_in < padded_n_in:
         x = jnp.pad(x, ((0, 0), (0, padded_n_in - orig_n_in)))
-        w_q = jnp.pad(w_q, ((0, 0), (0, padded_n_in - orig_n_in)))
+        w_q = jnp.pad(w_q, ((0, padded_n_in - orig_n_in), (0, 0)))
 
     if w_scale.dtype != jnp.float32:
         w_scale = w_scale.astype(jnp.float32)
-    w_scale = jnp.expand_dims(w_scale, axis=0)  # [1, n_output_features]
 
     n_batch = padded_n_batch // batch_block_size
     n_out = padded_n_out // out_block_size
@@ -348,8 +341,8 @@ def quantized_matmul_kernel(
             in_specs=[
                 pl.BlockSpec((batch_block_size, in_block_size), lambda b, o, i:
                              (b, i)),  # x
-                pl.BlockSpec((out_block_size, in_block_size), lambda b, o, i:
-                             (o, i)),  # w_q
+                pl.BlockSpec((in_block_size, out_block_size), lambda b, o, i:
+                             (i, o)),  # w_q
                 pl.BlockSpec((1, out_block_size), lambda b, o, i:
                              (0, o)),  # w_scale
                 pl.BlockSpec((1, batch_block_size), lambda b, o, i:

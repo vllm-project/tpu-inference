@@ -31,7 +31,7 @@ def unfold_args(
         fn(*fn_conditions)
 
 
-def quantize_tensor(x: jax.Array, dtype: jnp.dtype, dim: int = -1):
+def quantize_tensor(x: jax.Array, dtype: jnp.dtype, dim: int):
     if jnp.issubdtype(dtype, jnp.integer):
         dtype_info = jnp.iinfo(dtype)
         max_val = int(dtype_info.max)
