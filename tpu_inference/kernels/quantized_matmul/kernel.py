@@ -1,5 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
-"""Quantized matmul kernel."""
+# SPDX-License-Identifier: Apache-2.0"""Quantized matmul kernel."""
 
 import functools
 
