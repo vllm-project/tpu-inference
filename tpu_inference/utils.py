@@ -131,13 +131,28 @@ def pathways_hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
     live_arrays = jax.live_arrays()
     hbm_used = defaultdict(int)
     hbm_limit = get_device_hbm_limit()
+    # for array in live_arrays:
+    #     assert hasattr(array, 'sharding') and hasattr(
+    #         array.sharding, 'device_set'
+    #     ), "This function must not be called within jax tracer (e.g. jit, vmap, grad)"
+    #     logger.info("Array on device %s: dtype=%s, size=%d", array.sharding.device_set, array.dtype, array.size)
+    #     for device in array.sharding.device_set:
+    #         hbm_used[device] += array.dtype.itemsize * array.size 
+            #// len(array.sharding.device_set)
+    
     for array in live_arrays:
-        assert hasattr(array, 'sharding') and hasattr(
-            array.sharding, 'device_set'
-        ), "This function must not be called within jax tracer (e.g. jit, vmap, grad)"
-        for device in array.sharding.device_set:
-            hbm_used[device] += array.dtype.itemsize * array.size // len(
-                array.sharding.device_set)
+        try:
+            # Iterate ONLY over shards that physically exist on this host's devices
+            for shard in array.addressable_shards:
+                # shard.data is the local chunk of the array on that specific device.
+                # .nbytes gives the exact memory footprint of that chunk in bytes.
+                hbm_used[shard.device] += shard.data.nbytes
+        except Exception as e:
+            logger.warning(
+                "Failed to get shards for array %s: %s. ", array, e)
+            for device in array.sharding.device_set:
+                hbm_used[device] += array.dtype.itemsize * array.size 
+
     return [(hbm_used[device], hbm_limit) for device in devices]
 
 
