@@ -42,7 +42,9 @@ from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
                                                       gather_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
-from tpu_inference.layers.jax.sharding import (ShardingAxisName,
+from tpu_inference.layers.jax.sharding import (MESH_AXIS_NAMES,
+                                               MESH_AXIS_NAMES_2D,
+                                               ShardingAxisName,
                                                ShardingConfigManager)
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import get_model
@@ -270,7 +272,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         logger.info(f"Init mesh | mesh={self.mesh}")
 
     def _create_new_model_mesh(self) -> jax.sharding.Mesh:
-        axis_names = ("data", "attn_dp", "expert", "model")
         num_slices = int(os.environ.get('NUM_SLICES', 1))
 
         logger.info(f"Creating new model mesh | devices={len(self.devices)}, "
@@ -281,7 +282,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         else:
             devices_array = self._create_multi_slice_mesh(num_slices)
 
-        return jax.sharding.Mesh(devices_array, axis_names)
+        return jax.sharding.Mesh(devices_array, MESH_AXIS_NAMES)
 
     def _create_single_slice_mesh(self) -> jax.Array:
         sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config
@@ -319,7 +320,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         )
 
     def _create_2d_mesh(self) -> jax.sharding.Mesh:
-        axis_names = ("data", "model")
+
         sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config
         mesh_shape = (
             sharding_strategy.model_dp_size,
@@ -331,10 +332,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             and len(self.vllm_config.sharding_config.device_indexes) > 0)
 
         if enforce_device_order:
-            return jax.make_mesh(mesh_shape, axis_names, devices=self.devices)
+            return jax.make_mesh(mesh_shape,
+                                 MESH_AXIS_NAMES_2D,
+                                 devices=self.devices)
         else:
             return make_optimized_mesh(mesh_shape,
-                                       axis_names,
+                                       MESH_AXIS_NAMES_2D,
                                        devices=self.devices)
 
     def _init_phased_profiling(self) -> None:
