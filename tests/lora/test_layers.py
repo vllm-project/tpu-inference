@@ -216,7 +216,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, stage) -> None:
         max_loras=max_loras,
         max_lora_rank=max_lora_rank,
         fully_sharded_loras=False,
-        lora_dtype=torch.float16,
+        lora_dtype=torch.bfloat16,
     )
     vllm_config = dist_init
     vllm_config.lora_config = lora_config
@@ -256,7 +256,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, stage) -> None:
         num_inputs=32,
         input_size=(1, 64),
         input_range=(0, 1),
-        input_type=torch.float16,
+        input_type=torch.bfloat16,
         device='cpu')
 
     _update_punica_wrapper_metadata(punica_wrapper, index_mapping,
@@ -303,7 +303,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, stage) -> None:
         num_inputs=32,
         input_size=(1, 64),
         input_range=(0, 1),
-        input_type=torch.float16,
+        input_type=torch.bfloat16,
         device='cpu')
 
     _update_punica_wrapper_metadata(punica_wrapper, index_mapping,
@@ -337,7 +337,7 @@ def test_linear_parallel(dist_init, num_loras, orientation, stage) -> None:
         max_loras=max_loras,
         max_lora_rank=max_lora_rank,
         fully_sharded_loras=False,
-        lora_dtype=torch.float16,
+        lora_dtype=torch.bfloat16,
     )
     vllm_config = dist_init
     vllm_config.lora_config = lora_config
@@ -371,7 +371,7 @@ def test_linear_parallel(dist_init, num_loras, orientation, stage) -> None:
         num_inputs=32,
         input_size=(1, 64),
         input_range=(0, 1),
-        input_type=torch.float16,
+        input_type=torch.bfloat16,
         device='cpu')
 
     _update_punica_wrapper_metadata(punica_wrapper, index_mapping,
@@ -409,7 +409,7 @@ def test_linear_parallel(dist_init, num_loras, orientation, stage) -> None:
         num_inputs=32,
         input_size=(1, 64),
         input_range=(0, 1),
-        input_type=torch.float16,
+        input_type=torch.bfloat16,
         device='cpu')
     _update_punica_wrapper_metadata(punica_wrapper, index_mapping,
                                     prompt_mapping, stage, index_to_id,
@@ -438,7 +438,7 @@ def _create_random_linear_parallel_layer(orientation, vllm_config, mesh):
                 64,  # input_size
                 64,  # output_size
                 bias=False,
-                params_dtype=torch.float16)
+                params_dtype=torch.bfloat16)
 
         linear = _create_row_linear()
         linear.weight.data = torch.rand_like(linear.weight.data)
@@ -455,7 +455,7 @@ def _create_random_linear_parallel_layer(orientation, vllm_config, mesh):
             return ColumnParallelLinear(64,
                                         64,
                                         bias=False,
-                                        params_dtype=torch.float16)
+                                        params_dtype=torch.bfloat16)
 
         linear = _create_column_linear()
         linear.weight.data = torch.rand_like(linear.weight.data)
@@ -531,7 +531,7 @@ def _create_column_parallel_packed_layer(repeats, vllm_config, mesh):
                 64,  # input_size
                 [64] * repeats,  # output_size
                 bias=False,
-                params_dtype=torch.float16)
+                params_dtype=torch.bfloat16)
 
         linear = _create_merged_column_linear()
         linear.weight.data = torch.rand_like(linear.weight.data)
@@ -547,7 +547,7 @@ def _create_column_parallel_packed_layer(repeats, vllm_config, mesh):
                                      64,
                                      32,
                                      bias=False,
-                                     params_dtype=torch.float16)
+                                     params_dtype=torch.bfloat16)
 
         linear = _create_qkv_linear()
         linear.weight.data = torch.rand_like(linear.weight.data)
@@ -563,7 +563,7 @@ def _create_column_parallel_packed_layer(repeats, vllm_config, mesh):
                                      64,
                                      32,
                                      bias=False,
-                                     params_dtype=torch.float16)
+                                     params_dtype=torch.bfloat16)
 
         linear = _create_qkv_linear()
         linear.weight.data = torch.rand_like(linear.weight.data)
