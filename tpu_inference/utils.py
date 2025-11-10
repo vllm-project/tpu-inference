@@ -131,9 +131,16 @@ def pathways_hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
     live_arrays = jax.live_arrays()
     hbm_used = defaultdict(int)
     hbm_limit = get_device_hbm_limit()
+    once = True 
     for array in live_arrays:
-        for shard in array.addressable_shards:
+        if once: 
+            logger.info(f"Pathways Calculating HBM usage from live arrays: {array.addressable_shards} | {array.size}")
+
+        for i, shard in enumerate(array.addressable_shards):
             hbm_used[shard.device] += shard.data.nbytes
+            if once: 
+                logger.info(f"Pathways Shard {i}: {shard.data.nbytes}")
+        once = False
 
     return [(hbm_used[device], hbm_limit) for device in devices]
 
