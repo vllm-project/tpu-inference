@@ -265,8 +265,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if os.getenv("NEW_MODEL_DESIGN", False):
             self.mesh = self._create_new_model_mesh()
         else:
-            # NOTE(wenxindongwork): The new MoE kernel expects a 2D mesh, so we default
-            # to a 2D mesh for now, and we may change this in the future.
+            # NOTE(wenxindongwork): The new MoE kernel expects a 2D mesh, so we need
+            # to create a 2D mesh for now. We should make the new_model_mesh as the default
+            # in the future.
             self.mesh = self._create_2d_mesh()
 
         logger.info(f"Init mesh | mesh={self.mesh}")
