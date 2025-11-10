@@ -101,6 +101,7 @@ steps:
            exit 0
          fi
 
+
    - label: "JAX unit tests"
      key: test_7
      soft_fail: true
@@ -219,8 +220,20 @@ steps:
            exit 0
          fi
 
-   - label: "lora unit tests on single chip"
+   - label: "E2E data parallelism test"
      key: test_14
+     soft_fail: true
+     env:
+       NEW_MODEL_DESIGN: "True"
+     agents:
+       queue: tpu_v6e_8_queue
+     commands:
+       - |
+         .buildkite/scripts/run_in_docker.sh \
+           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_data_parallel.py'
+
+   - label: "lora unit tests on single chip"
+     key: test_15
      soft_fail: true
      agents:
        queue: tpu_v6e_queue
@@ -231,7 +244,7 @@ steps:
            python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_layers.py'
 
    - label: "lora unit tests on multi chips"
-     key: test_15
+     key: test_16
      soft_fail: true
      env:
        USE_V6E8_QUEUE: "True"
@@ -242,9 +255,6 @@ steps:
        - |
          .buildkite/scripts/run_in_docker.sh \
            bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_layers.py'
-
-
-
   # -----------------------------------------------------------------
   # NOTIFICATION STEP
   # -----------------------------------------------------------------
@@ -266,9 +276,10 @@ steps:
        - test_13
        - test_14
        - test_15
+       - test_16
      agents:
        queue: cpu
      commands:
        - |
          .buildkite/scripts/check_results.sh \
-           "TPU JAX Tests Failed" test_0 test_1 test_2 test_3 test_4 test_5 test_6 test_7 test_8 test_9 test_10 test_11 test_12 test_13 test_14 test_15
+           "TPU JAX Tests Failed" test_0 test_1 test_2 test_3 test_4 test_5 test_6 test_7 test_8 test_9 test_10 test_11 test_12 test_13 test_14 test_15 test_16

@@ -22,10 +22,6 @@ MAX_NUM_SEQS = 4
 NUM_HEADS = 8
 # Number of attention heads (Key/Value) - for Grouped-Query Attention
 NUM_KV_HEADS = 4
-# Dimension of each attention head
-HEAD_DIM = 64
-# Padded head dimension
-PADDED_HEAD_DIM = 64
 # Total number of blocks in the KV cache
 NUM_BLOCKS = 32
 # Number of tokens per block
@@ -39,17 +35,17 @@ def mesh():
     """Provides a mock 1D JAX mesh for testing."""
     # Create a mesh with available devices, useful for running on CPU/GPU/TPU
     # For this test, it will likely be a single CPU device.
-    devices = np.array(jax.local_devices())
+    devices = np.array(jax.local_devices()[:1])
     if not devices.any():
         # Add a mock device if no devices are present (e.g., in a CI environment)
         devices = np.array([jax.devices("cpu")[0]])
-    return Mesh(devices.reshape((-1, 1)), ("data", "model"))
+    return Mesh(devices.reshape((-1, 1, 1)), ("data", "attn_dp", "model"))
 
 
 # ---- Test for `attention` ----
 
 
-def test_attention(monkeypatch, mesh):
+def _test_attention(monkeypatch, mesh, head_dim, use_sinks=False):
     """
     Tests the main `attention` function.
 
@@ -62,23 +58,35 @@ def test_attention(monkeypatch, mesh):
     # Create input tensors
     q_dtype = jnp.float32
     kv_dtype = jnp.float32
-    q = jnp.ones((TOTAL_TOKENS, NUM_HEADS, PADDED_HEAD_DIM), dtype=q_dtype)
-    k = jnp.ones((TOTAL_TOKENS, NUM_KV_HEADS, PADDED_HEAD_DIM), dtype=kv_dtype)
-    v = jnp.ones((TOTAL_TOKENS, NUM_KV_HEADS, PADDED_HEAD_DIM), dtype=kv_dtype)
+    q = jnp.ones((TOTAL_TOKENS, NUM_HEADS, head_dim), dtype=q_dtype)
+    k = jnp.ones((TOTAL_TOKENS, NUM_KV_HEADS, head_dim), dtype=kv_dtype)
+    v = jnp.ones((TOTAL_TOKENS, NUM_KV_HEADS, head_dim), dtype=kv_dtype)
+    sinks = jnp.ones((NUM_HEADS, ), dtype=jnp.float32) if use_sinks else None
 
-    kv_cache_shape = get_kv_cache_shape_with_mesh(mesh, NUM_BLOCKS, BLOCK_SIZE,
-                                                  NUM_KV_HEADS, HEAD_DIM,
-                                                  kv_dtype)
+    kv_cache_shape = get_kv_cache_shape_with_mesh(
+        mesh,
+        NUM_BLOCKS,
+        BLOCK_SIZE,
+        NUM_KV_HEADS,
+        head_dim,
+        kv_dtype,
+    )
     kv_cache = jnp.zeros(kv_cache_shape, dtype=kv_dtype)
 
     # Mock ragged_paged_attention to return a tensor of the correct shape
-    mock_paged_attn_kernel = MagicMock(
-        return_value=(jnp.ones((TOTAL_TOKENS, NUM_HEADS, PADDED_HEAD_DIM)),
-                      kv_cache))
-    monkeypatch.setattr(
-        "tpu_inference.layers.jax.attention_interface.ragged_paged_attention",
-        mock_paged_attn_kernel,
-    )
+    mock_paged_attn_kernel = MagicMock(return_value=(jnp.ones(
+        (TOTAL_TOKENS, NUM_HEADS, head_dim)), kv_cache), )
+
+    if head_dim == 64:
+        monkeypatch.setattr(
+            "tpu_inference.layers.jax.attention_interface.ragged_paged_attention_hd64",
+            mock_paged_attn_kernel,
+        )
+    else:
+        monkeypatch.setattr(
+            "tpu_inference.layers.jax.attention_interface.ragged_paged_attention",
+            mock_paged_attn_kernel,
+        )
 
     # Create AttentionMetadata
     attention_metadata = AttentionMetadata(
@@ -98,7 +106,8 @@ def test_attention(monkeypatch, mesh):
         v=v,
         attention_metadata=attention_metadata,
         mesh=mesh,
-        head_dim_original=HEAD_DIM,
+        head_dim_original=head_dim,
+        sinks=sinks,
     )
 
     # 3. Assert
@@ -111,3 +120,23 @@ def test_attention(monkeypatch, mesh):
 
     # Check that the output is the one from our mock
     assert jnp.all(output == 1.0)
+
+
+def test_attention(monkeypatch, mesh):
+    _test_attention(monkeypatch, mesh, 128)
+
+
+def test_attention_hd64(monkeypatch, mesh):
+    _test_attention(monkeypatch, mesh, 64)
+
+
+def test_attention_sink(monkeypatch, mesh):
+    _test_attention(monkeypatch, mesh, 64, True)
+
+
+def test_attention_sink_no_64_raises_error(monkeypatch, mesh):
+    with pytest.raises(
+            NotImplementedError,
+            match="Attention sink support is only available when head_dim==64"
+    ):
+        _test_attention(monkeypatch, mesh, 128, True)
