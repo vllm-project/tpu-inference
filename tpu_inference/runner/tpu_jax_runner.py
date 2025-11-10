@@ -1437,7 +1437,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             spec_decode_metadata = self.speculative_decoding_manager.get_spec_decode_metadata(
                 num_draft_tokens, self.query_start_loc_cpu[1:num_reqs + 1],
                 padded_num_reqs)
-            logits_indices = spec_decode_metadata.final_logits_indices
 
         # Put to device
         sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
@@ -1450,10 +1449,27 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         query_start_loc_cpu = query_start_loc
         seq_lens_cpu = seq_lens
-        (input_ids, positions, block_tables, query_start_loc, seq_lens,
-         logits_indices, request_distribution) = device_array(
-             self.mesh, (input_ids, positions, block_tables, query_start_loc,
-                         seq_lens, logits_indices, request_distribution))
+        if not spec_decode_metadata:
+            (input_ids, positions, block_tables, query_start_loc, seq_lens,
+             logits_indices, request_distribution) = device_array(
+                 self.mesh,
+                 (input_ids, positions, block_tables, query_start_loc,
+                  seq_lens, logits_indices, request_distribution))
+        else:
+            (input_ids, positions, block_tables, query_start_loc, seq_lens,
+             request_distribution, spec_decode_metadata.draft_token_ids,
+             spec_decode_metadata.draft_lengths,
+             spec_decode_metadata.target_logits_indices,
+             spec_decode_metadata.bonus_logits_indices,
+             spec_decode_metadata.final_logits_indices) = device_array(
+                 self.mesh, (input_ids, positions, block_tables,
+                             query_start_loc, seq_lens, request_distribution,
+                             spec_decode_metadata.draft_token_ids,
+                             spec_decode_metadata.draft_lengths,
+                             spec_decode_metadata.target_logits_indices,
+                             spec_decode_metadata.bonus_logits_indices,
+                             spec_decode_metadata.final_logits_indices))
+            logits_indices = spec_decode_metadata.final_logits_indices
 
         if self.scheduler_config.async_scheduling and len(
                 token_in_tpu_cur_input_indices) > 0:

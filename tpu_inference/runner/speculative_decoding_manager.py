@@ -11,7 +11,6 @@ from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
-from tpu_inference.utils import device_array
 
 if TYPE_CHECKING:
     from tpu_inference.layers.common.attention_metadata import \
@@ -109,8 +108,7 @@ class SpeculativeDecodingManager:
         assert pad_len >= 0
         next_token_ids += [0] * pad_len
 
-        next_token_ids = device_array(
-            self.runner.mesh, np.array(next_token_ids, dtype=jnp.int32))
+        next_token_ids = np.array(next_token_ids, dtype=jnp.int32)
 
         if spec_decode_metadata is None:
             num_rejected_tokens = None
@@ -123,9 +121,8 @@ class SpeculativeDecodingManager:
 
             pad_len = self.runner.max_num_reqs - len(num_rejected_tokens)
             num_rejected_tokens += [0] * pad_len
-            num_rejected_tokens = device_array(
-                self.runner.mesh, np.array(num_rejected_tokens,
-                                           dtype=jnp.int32))
+            num_rejected_tokens = np.array(num_rejected_tokens,
+                                           dtype=jnp.int32)
 
         target_hidden_states, input_ids, last_token_indices, attn_metadata = self.runner.drafter.prepare_inputs(
             attn_metadata,
@@ -228,14 +225,6 @@ class SpeculativeDecodingManager:
         ])
 
         padded_num_draft_tokens_cpu = padded_num_draft_tokens
-        # CPU -> TPU copy.
-        (padded_num_draft_tokens, padded_draft_token_ids,
-         padded_logits_indices, padded_target_logits_indices,
-         padded_bonus_logits_indices) = device_array(
-             self.runner.mesh,
-             (padded_num_draft_tokens, padded_draft_token_ids,
-              padded_logits_indices, padded_target_logits_indices,
-              padded_bonus_logits_indices))
 
         metadata = SpecDecodeMetadata(
             draft_token_ids=padded_draft_token_ids,
