@@ -4,7 +4,6 @@ import jax
 import jax.numpy as jnp
 import torch
 import torch.nn.functional as F
-from compressed_tensors.quantization import QuantizationStrategy
 from jax.experimental.layout import Format, Layout
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
@@ -31,46 +30,12 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
     def __init__(self, quant_config: "CompressedTensorsConfig",
                  moe: FusedMoEConfig, mesh: Mesh):
         super().__init__(quant_config, moe)
-
-        self.use_marlin = False
-        self.use_cutlass = False
-        self.is_fp8_w8a8_sm100 = False
-
         self.mesh = mesh
         self.quant_config = quant_config
-        # import sys
-        # sys.stdin = open(0)
-        # breakpoint()
-        self.weight_quant = self.quant_config.target_scheme_map["Linear"].get(
-            "weights")
-        self.input_quant = self.quant_config.target_scheme_map["Linear"].get(
-            "input_activations")
-        per_tensor = (self.weight_quant.strategy == QuantizationStrategy.TENSOR
-                      and self.input_quant.strategy
-                      == QuantizationStrategy.TENSOR)
-        per_channel = (
-            self.weight_quant.strategy == QuantizationStrategy.CHANNEL
-            and self.input_quant.strategy == QuantizationStrategy.TOKEN)
-        if not (per_tensor or per_channel):
-            assert self.weight_quant.strategy == QuantizationStrategy.BLOCK
-            self.weight_block_size = self.weight_quant.block_structure
-            assert self.weight_quant.dynamic is not None
-        else:
-            self.weight_block_size = None
-        self.block_quant = self.weight_block_size is not None
 
-        self.static_input_scales = not self.input_quant.dynamic
-        if self.static_input_scales and per_channel:
-            raise ValueError(
-                "For FP8 Fused MoE layer, we require either per tensor or "
-                "channelwise, dynamic per token quantization.")
-
-        # For GPUs that lack FP8 hardware support, we can leverage the Marlin
-        # kernel for fast weight-only FP8 quantization
+        # disable GPU paths
         self.use_marlin = False
         self.rocm_aiter_moe_enabled = False  # is_rocm_aiter_moe_enabled()
-
-        # cutlass path
         self.is_fp8_w8a8_sm100 = False
         self.use_cutlass = False
         self.disable_expert_map = False
