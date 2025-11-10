@@ -42,7 +42,8 @@ from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
                                                       gather_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
-from tpu_inference.layers.jax.sharding import ShardingAxisName
+from tpu_inference.layers.jax.sharding import (ShardingAxisName,
+                                               ShardingConfigManager)
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import get_model
 from tpu_inference.models.jax.utils.weight_utils import (
@@ -283,7 +284,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         return jax.sharding.Mesh(devices_array, axis_names)
 
     def _create_single_slice_mesh(self) -> jax.Array:
-        sharding_strategy = self.vllm_config.sharding_config
+        sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config
         mesh_shape = (
             sharding_strategy.model_dp_size,
             sharding_strategy.attn_dp_size,
@@ -298,28 +299,28 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         )
 
     def _create_multi_slice_mesh(self, num_slices: int) -> jax.Array:
-        sharding_strategy = self.vllm_config.sharding_config
+        sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config
         dp_inner = sharding_strategy.model_dp_size // num_slices
 
         # Splits data parallelism across multiple slices.
-        intra_node_shape = (
+        ici_mesh_shape = (
             dp_inner,
             sharding_strategy.attn_dp_size,
             sharding_strategy.expert_size,
             sharding_strategy.tp_size,
         )
-        outer_node_shape = (num_slices, 1, 1, 1)
+        dcn_mesh_shape = (num_slices, 1, 1, 1)
 
         return mesh_utils.create_hybrid_device_mesh(
-            mesh_shape=intra_node_shape,
-            dcn_mesh_shape=outer_node_shape,
+            mesh_shape=ici_mesh_shape,
+            dcn_mesh_shape=dcn_mesh_shape,
             devices=self.devices,
             allow_split_physical_axes=True,
         )
 
     def _create_2d_mesh(self) -> jax.sharding.Mesh:
         axis_names = ("data", "model")
-        sharding_strategy = self.vllm_config.sharding_config
+        sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config
         mesh_shape = (
             sharding_strategy.model_dp_size,
             sharding_strategy.tp_size,
