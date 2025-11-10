@@ -38,6 +38,9 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
 
         self.mesh = mesh
         self.quant_config = quant_config
+        # import sys
+        # sys.stdin = open(0)
+        # breakpoint()
         self.weight_quant = self.quant_config.target_scheme_map["Linear"].get(
             "weights")
         self.input_quant = self.quant_config.target_scheme_map["Linear"].get(
@@ -176,6 +179,10 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         if scoring_func != "softmax":
             raise NotImplementedError(
                 "Only softmax is supported for scoring_func")
+
+        # import sys
+        # sys.stdin = open(0)
+        # breakpoint()
 
         # TODO: Use MoE kernel when it supports fp8
 
