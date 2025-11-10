@@ -17,7 +17,6 @@ from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from safetensors import safe_open
-from vllm import envs
 
 from tpu_inference import utils
 from tpu_inference.logger import init_logger
@@ -144,7 +143,6 @@ def model_weights_single_file_generator(
     # Because otherwise the tensor will be loaded on TPU:0 by default,
     # although the tensor would eventually be sharded across multiple TPUs,
     # it would lead to OOM on TPU:0 for large models.
-    print("cpu devices: ", jax.devices("cpu"))
     with jax.default_device(jax.devices("cpu")[0]):
         with safe_open(weights_file, framework=framework) as f:
             for name in f.keys():
@@ -152,7 +150,6 @@ def model_weights_single_file_generator(
                         filter_regex, name):
                     continue
                 weight_tensor = f.get_tensor(name)
-                print("Loaded weight tensor:", name, weight_tensor.shape)
                 yield name, weight_tensor
 
 
@@ -277,10 +274,6 @@ def _load_hf_weights_on_thread(vllm_config,
                                filter_regex: str | None = None,
                                keep_original_dtype_keys_regex: list[str]
                                | None = None):
-    # Only load on host 1
-    print("jax.process_index(): ", jax.process_index())
-    if jax.process_index() != 0:
-        return
     name_map = metadata_map.name_map
     reshape_keys = metadata_map.reshape_map
     bias_reshape_keys = metadata_map.bias_reshape_map
@@ -301,7 +294,7 @@ def _load_hf_weights_on_thread(vllm_config,
         shardings = nnx.get_named_sharding(params, mesh)
     except TypeError:
         shardings = params
-    print("line 302")
+
     for hf_key, hf_weight in model_weights_single_file_generator(
             weights_file, framework="flax", filter_regex=filter_regex):
 
@@ -428,9 +421,7 @@ def load_hf_weights(vllm_config,
     # NOTE(xiang): Disable multi-threading mode if running on multi-host.
     # Because multi-threading would cause different JAX processes to load
     # different weights at the same time.
-    using_pathways_multihost = len(
-        mesh.devices.flatten()) > 8 and envs.VLLM_TPU_USING_PATHWAYS
-    if os.environ.get("TPU_MULTIHOST_BACKEND", "").lower() == "ray" or using_pathways_multihost:
+    if os.environ.get("TPU_MULTIHOST_BACKEND", "").lower() == "ray":
         max_workers = 1
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
