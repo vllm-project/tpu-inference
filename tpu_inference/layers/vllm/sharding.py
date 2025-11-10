@@ -5,8 +5,7 @@ import torchax
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn import Parameter
 from torch.utils import _pytree as pytree
-from torchax.interop import jax_view, torch_view
-from torchax.ops.mappings import t2j
+from torchax.interop import torch_view
 from vllm.lora.layers import (MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLoRA,
                               RowParallelLinearWithLoRA)
