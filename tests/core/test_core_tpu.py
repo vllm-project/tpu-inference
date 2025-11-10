@@ -393,7 +393,7 @@ class TestDisaggOrchestrator(unittest.TestCase):
         mock_model_output = MagicMock()
         mock_model_output.req_id_to_index = {"test_req": 0}
         mock_model_output.sampled_token_ids = [[1]]
-        self.mock_prefill_engine.execute_model_with_error_logging.return_value = mock_model_output
+        self.mock_prefill_engine.model_executor.execute_model.return_value = mock_model_output
 
         # Mock request
         mock_request = MagicMock()
@@ -408,7 +408,7 @@ class TestDisaggOrchestrator(unittest.TestCase):
 
         orchestrator._prefill(0)
 
-        self.mock_prefill_engine.execute_model_with_error_logging.assert_called_once(
+        self.mock_prefill_engine.model_executor.execute_model.assert_called_once(
         )
         self.assertTrue(orchestrator._transfer_backlogs[0].qsize() > 0)
 
@@ -477,7 +477,7 @@ class TestDisaggOrchestrator(unittest.TestCase):
 
         # Mock model output
         mock_model_output = MagicMock()
-        self.mock_decode_engine.execute_model_with_error_logging.return_value = mock_model_output
+        self.mock_decode_engine.model_executor.execute_model.return_value = mock_model_output
 
         # Mock the side effect of update_from_output to stop the loop
         def stop_loop(*args, **kwargs):
@@ -488,7 +488,7 @@ class TestDisaggOrchestrator(unittest.TestCase):
 
         orchestrator._decode(0)
 
-        self.mock_decode_engine.execute_model_with_error_logging.assert_called_once(
+        self.mock_decode_engine.model_executor.execute_model.assert_called_once(
         )
         self.mock_output_queue.put_nowait.assert_called_once()
 

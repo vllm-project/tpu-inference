@@ -1,5 +1,9 @@
 import os
 
+# The environment variables override should be imported before any other
+# modules to ensure that the environment variables are set before any
+# other modules are imported.
+import tpu_inference.env_override  # noqa: F401
 from tpu_inference import tpu_info as ti
 from tpu_inference.logger import init_logger
 

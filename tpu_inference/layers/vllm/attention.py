@@ -71,13 +71,18 @@ class PallasAttentionBackendImpl(AttentionImpl):
                                       "are not implemented for "
                                       "PallasAttentionBackendImpl")
 
-        #TODO (kyuyeunk): Shard the sinks along head axis.
         self.sinks = sinks
         if self.sinks is not None:
-            self.sinks = t2j(self.sinks, use_dlpack=False).astype(jnp.float32)
             assert self.sinks.shape[0] == num_heads, (
                 "Sinks must have the same number of heads as the number of "
                 "heads in the layer")
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        #TODO (kyuyeunk): Shard the sinks along num_heads dim
+        if self.sinks is not None:
+            sinks = t2j(self.sinks, use_dlpack=False)
+            sinks = torch_view(sinks.astype(jnp.float32))
+            self.sinks = torch.nn.Parameter(sinks, requires_grad=False)
 
     def forward(
         self,
@@ -121,14 +126,25 @@ class PallasAttentionBackendImpl(AttentionImpl):
             k_scale = layer._k_scale_float
             v_scale = layer._v_scale_float
 
-        sinks = None if self.sinks is None else jax_view(self.sinks)
+        sinks = jax_view(self.sinks)
 
-        new_kv_cache, outputs = _jax_attn_func(kv_cache, query, key, value,
-                                               sinks, attn_metadata, mesh,
-                                               self.scale, self.head_size,
-                                               self.num_heads,
-                                               self.num_kv_heads, q_scale,
-                                               k_scale, v_scale)
+        new_kv_cache, outputs = _jax_attn_func(
+            kv_cache,
+            query,
+            key,
+            value,
+            sinks,
+            attn_metadata,
+            mesh,
+            self.scale,
+            self.head_size,
+            self.num_heads,
+            self.num_kv_heads,
+            q_scale,
+            k_scale,
+            v_scale,
+            self.sliding_window,
+        )
         vllm_model_wrapper_context.kv_caches[kv_cache_index] = new_kv_cache
 
         return torch_view(outputs)
@@ -136,10 +152,18 @@ class PallasAttentionBackendImpl(AttentionImpl):
 
 @functools.partial(
     jax.jit,
-    static_argnums=(
-        6, 7, 8, 9, 10, 11, 12, 13
-    ),  # mesh, scale, head_size, num_heads, num_kv_heads, q_scale, k_scale, v_scale
-    donate_argnums=(0, ),  # donate kv_cache
+    static_argnames=(
+        "mesh",
+        "scale",
+        "head_size",
+        "num_heads",
+        "num_kv_heads",
+        "q_scale",
+        "k_scale",
+        "v_scale",
+        "sliding_window",
+    ),
+    donate_argnames=("kv_cache"),
 )
 def _jax_attn_func(
     kv_cache: jax.Array,
@@ -153,9 +177,10 @@ def _jax_attn_func(
     head_size: int,
     num_heads: int,
     num_kv_heads: int,
-    q_scale: Optional[float] = None,
-    k_scale: Optional[float] = None,
-    v_scale: Optional[float] = None,
+    q_scale: float | None = None,
+    k_scale: float | None = None,
+    v_scale: float | None = None,
+    sliding_window: int | None = None,
 ) -> Tuple[jax.Array, jax.Array]:
     del scale  # Unused for now, as the attention function applies a default scale.
 
@@ -184,6 +209,7 @@ def _jax_attn_func(
         k_scale=k_scale,
         v_scale=v_scale,
         sinks=sinks,
+        attention_chunk_size=sliding_window,
     )
 
     # Convert the shape back to vLLM's convention
