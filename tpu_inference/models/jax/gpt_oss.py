@@ -92,6 +92,7 @@ class GptOss(nnx.Module):
                 num_key_value_heads=num_key_value_heads,
                 head_dim=head_dim,
                 dtype=dtype,
+                kv_cache_dtype=vllm_config.cache_config.cache_dtype,
                 rope_theta=rope_theta,
                 initial_context_length=initial_context_length,
                 rope_scaling_factor=rope_scaling_factor,
