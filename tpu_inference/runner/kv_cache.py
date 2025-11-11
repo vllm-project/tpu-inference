@@ -1,4 +1,4 @@
-from typing import Any, List
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -57,7 +57,7 @@ def create_kv_caches(
     num_kv_heads: int,
     head_size: int,
     mesh: Mesh,
-    layer_names: List[str],
+    layer_names: list[str],
     cache_dtype: jnp.dtype = DEFAULT_KV_CACHE_DTYPE,
     use_mla: bool = False,
 ) -> List[jax.Array]:
