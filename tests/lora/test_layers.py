@@ -15,6 +15,7 @@ from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
                               LoRAMapping, MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLoRA,
                               QKVParallelLinearWithLoRA,
+                              ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA)
 # yapf: enable
 from vllm.lora.models import LoRALayerWeights, PackedLoRALayerWeights
@@ -22,6 +23,7 @@ from vllm.lora.punica_wrapper import get_punica_wrapper
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
+                                               ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.utils import set_random_seed
 from vllm.platforms import current_platform
@@ -326,9 +328,9 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, stage) -> None:
 
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 4, 9])
-@pytest.mark.parametrize("orientation", ["row", "column"])
+@pytest.mark.parametrize("layer_type", ["row", "column", "replicated"])
 @pytest.mark.parametrize("stage", [True, False])
-def test_linear_parallel(dist_init, num_loras, orientation, stage) -> None:
+def test_linear_parallel(dist_init, num_loras, layer_type, stage) -> None:
     set_random_seed(6)
 
     max_loras = 9
@@ -344,7 +346,7 @@ def test_linear_parallel(dist_init, num_loras, orientation, stage) -> None:
 
     mesh = _create_mesh()
     linear, lora_linear = _create_random_linear_parallel_layer(
-        orientation, vllm_config, mesh)
+        layer_type, vllm_config, mesh)
     _verify_lora_linear_layer(linear, lora_linear)
 
     max_num_batched_tokens = 8192
@@ -429,9 +431,9 @@ def test_linear_parallel(dist_init, num_loras, orientation, stage) -> None:
                                    atol=atol)
 
 
-def _create_random_linear_parallel_layer(orientation, vllm_config, mesh):
+def _create_random_linear_parallel_layer(layer_type, vllm_config, mesh):
     # We first create a base linear layer, then a lora layer to wrap it.
-    if orientation == "row":
+    if layer_type == "row":
 
         def _create_row_linear():
             return RowParallelLinear(
@@ -449,7 +451,7 @@ def _create_random_linear_parallel_layer(orientation, vllm_config, mesh):
                                            RowParallelLinearWithLoRA,
                                            vllm_config=vllm_config,
                                            mesh=mesh)
-    else:
+    elif layer_type == "column":
 
         def _create_column_linear():
             return ColumnParallelLinear(64,
@@ -466,6 +468,27 @@ def _create_random_linear_parallel_layer(orientation, vllm_config, mesh):
                                            ColumnParallelLinearWithLoRA,
                                            vllm_config=vllm_config,
                                            mesh=mesh)
+
+    elif layer_type == "replicated":
+
+        def _create_replicated_linear():
+            return ReplicatedLinear(64,
+                                    64,
+                                    bias=False,
+                                    params_dtype=torch.bfloat16)
+
+        linear = _create_replicated_linear()
+        linear.weight.data = torch.rand_like(linear.weight.data)
+
+        base_linear = _create_replicated_linear()
+        lora_linear = _create_lora_wrapper(linear,
+                                           base_linear,
+                                           ReplicatedLinearWithLoRA,
+                                           vllm_config=vllm_config,
+                                           mesh=mesh)
+
+    else:
+        raise NotImplementedError("Unknown layer type: {}".format(layer_type))
 
     return linear, lora_linear
 

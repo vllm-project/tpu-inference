@@ -13,6 +13,7 @@ from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLoRA,
                               QKVParallelLinearWithLoRA,
+                              ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA)
 from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -194,6 +195,7 @@ MODULE_TYPE_TO_SHARDING_FUNC = [
      _shard_merged_column_parallel_linear_lora),
     (MergedQKVParallelLinearWithLoRA, _shard_merged_qkv_parallel_linear_lora),
     (RowParallelLinearWithLoRA, _shard_row_parallel_linear_lora),
+    (ReplicatedLinearWithLoRA, _shard_base_linear_lora_replicated),
 ]
 
 
