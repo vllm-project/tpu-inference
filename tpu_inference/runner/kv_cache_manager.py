@@ -18,13 +18,13 @@ from tpu_inference import utils
 from tpu_inference import utils as common_utils
 from tpu_inference.logger import init_logger
 from tpu_inference.runner import utils as runner_utils
-from tpu_inference.runner.input_batch_jax import CachedRequestState, InputBatch
+from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
 from tpu_inference.runner.kv_cache import create_kv_caches
 
 if TYPE_CHECKING:
     from vllm.v1.request import Request
 
-    from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
+    from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 logger = init_logger(__name__)
 

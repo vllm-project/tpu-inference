@@ -185,7 +185,7 @@ class TpuPlatform(Platform):
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         parallel_config.worker_cls = \
-                        "tpu_inference.worker.tpu_worker_jax.TPUWorker"
+                        "tpu_inference.worker.tpu_worker.TPUWorker"
 
         multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "").lower()
         if not multihost_backend:  # Single host

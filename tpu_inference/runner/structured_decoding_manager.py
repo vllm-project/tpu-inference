@@ -9,7 +9,7 @@ from tpu_inference.utils import device_array
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput
 
-    from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
+    from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
 class StructuredDecodingManager:

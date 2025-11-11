@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
+from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
 class TestTPUJaxRunnerDPInputsLightweight:
@@ -76,11 +76,11 @@ class TestTPUJaxRunnerDPInputsLightweight:
         mock_output.grammar_bitmask = None
         return mock_output
 
-    @patch('tpu_inference.runner.tpu_jax_runner.NamedSharding')
-    @patch('tpu_inference.runner.tpu_jax_runner.runner_utils')
-    @patch('tpu_inference.runner.tpu_jax_runner.device_array',
+    @patch('tpu_inference.runner.tpu_runner.NamedSharding')
+    @patch('tpu_inference.runner.tpu_runner.runner_utils')
+    @patch('tpu_inference.runner.tpu_runner.device_array',
            side_effect=lambda mesh, tensors, **kwargs: tensors)
-    @patch('tpu_inference.runner.tpu_jax_runner.TPUSupportedSamplingMetadata')
+    @patch('tpu_inference.runner.tpu_runner.TPUSupportedSamplingMetadata')
     def test_prepare_inputs_dp_basic_functionality(self,
                                                    mock_sampling_metadata,
                                                    mock_device_array,
@@ -136,7 +136,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
         scheduler_output = self._create_mock_scheduler_output(
             num_scheduled_tokens, assigned_dp_ranks)
 
-        with patch('tpu_inference.runner.tpu_jax_runner.runner_utils'
+        with patch('tpu_inference.runner.tpu_runner.runner_utils'
                    ) as mock_runner_utils:
             mock_runner_utils.get_padded_token_len.side_effect = lambda paddings_list, val: 16 if val <= 15 else 32  # Padded tokens per DP rank
 
@@ -210,7 +210,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
         scheduler_output = self._create_mock_scheduler_output(
             num_scheduled_tokens, assigned_dp_ranks)
 
-        with patch('tpu_inference.runner.tpu_jax_runner.runner_utils'
+        with patch('tpu_inference.runner.tpu_runner.runner_utils'
                    ) as mock_runner_utils:
             mock_runner_utils.get_padded_token_len.side_effect = lambda paddings_list, val: 16 if val <= 15 else 32
 
@@ -287,7 +287,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
         scheduler_output = self._create_mock_scheduler_output(
             num_scheduled_tokens, assigned_dp_ranks)
 
-        with patch('tpu_inference.runner.tpu_jax_runner.runner_utils'
+        with patch('tpu_inference.runner.tpu_runner.runner_utils'
                    ) as mock_runner_utils:
             mock_runner_utils.get_padded_token_len.side_effect = lambda paddings_list, val: 8 if val <= 6 else 16
 
@@ -316,11 +316,11 @@ class TestTPUJaxRunnerDPInputsLightweight:
             np.testing.assert_array_equal(logits_indices_selector,
                                           expected_positions)
 
-    @patch('tpu_inference.runner.tpu_jax_runner.NamedSharding')
-    @patch('tpu_inference.runner.tpu_jax_runner.runner_utils')
-    @patch('tpu_inference.runner.tpu_jax_runner.device_array',
+    @patch('tpu_inference.runner.tpu_runner.NamedSharding')
+    @patch('tpu_inference.runner.tpu_runner.runner_utils')
+    @patch('tpu_inference.runner.tpu_runner.device_array',
            side_effect=lambda mesh, tensors, **kwargs: tensors)
-    @patch('tpu_inference.runner.tpu_jax_runner.TPUSupportedSamplingMetadata')
+    @patch('tpu_inference.runner.tpu_runner.TPUSupportedSamplingMetadata')
     def test_prepare_inputs_dp_verify_content_balanced(self,
                                                        mock_sampling_metadata,
                                                        mock_device_array,
@@ -433,11 +433,11 @@ class TestTPUJaxRunnerDPInputsLightweight:
         assert len(logits_indices_selector) == 2
         assert np.array_equal(logits_indices_selector, np.array([0, 4]))
 
-    @patch('tpu_inference.runner.tpu_jax_runner.NamedSharding')
-    @patch('tpu_inference.runner.tpu_jax_runner.runner_utils')
-    @patch('tpu_inference.runner.tpu_jax_runner.device_array',
+    @patch('tpu_inference.runner.tpu_runner.NamedSharding')
+    @patch('tpu_inference.runner.tpu_runner.runner_utils')
+    @patch('tpu_inference.runner.tpu_runner.device_array',
            side_effect=lambda mesh, tensors, **kwargs: tensors)
-    @patch('tpu_inference.runner.tpu_jax_runner.TPUSupportedSamplingMetadata')
+    @patch('tpu_inference.runner.tpu_runner.TPUSupportedSamplingMetadata')
     def test_prepare_inputs_dp_verify_content_empty_rank(
             self, mock_sampling_metadata, mock_device_array, mock_runner_utils,
             mock_named_sharding):
@@ -558,11 +558,11 @@ class TestTPUJaxRunnerDPInputsLightweight:
         np.testing.assert_array_equal(logits_indices_selector,
                                       expected_selector)
 
-    @patch('tpu_inference.runner.tpu_jax_runner.NamedSharding')
-    @patch('tpu_inference.runner.tpu_jax_runner.runner_utils')
-    @patch('tpu_inference.runner.tpu_jax_runner.device_array',
+    @patch('tpu_inference.runner.tpu_runner.NamedSharding')
+    @patch('tpu_inference.runner.tpu_runner.runner_utils')
+    @patch('tpu_inference.runner.tpu_runner.device_array',
            side_effect=lambda mesh, tensors, **kwargs: tensors)
-    @patch('tpu_inference.runner.tpu_jax_runner.TPUSupportedSamplingMetadata')
+    @patch('tpu_inference.runner.tpu_runner.TPUSupportedSamplingMetadata')
     def test_prepare_async_token_substitution_indices_dp(
             self, mock_sampling_metadata, mock_device_array, mock_runner_utils,
             mock_named_sharding):
@@ -598,11 +598,11 @@ class TestTPUJaxRunnerDPInputsLightweight:
         assert token_in_tpu_cur_input_indices_dp[1] == [11]
         assert token_in_tpu_pre_next_tokens_indices_dp[1] == [2]
 
-    @patch('tpu_inference.runner.tpu_jax_runner.NamedSharding')
-    @patch('tpu_inference.runner.tpu_jax_runner.runner_utils')
-    @patch('tpu_inference.runner.tpu_jax_runner.device_array',
+    @patch('tpu_inference.runner.tpu_runner.NamedSharding')
+    @patch('tpu_inference.runner.tpu_runner.runner_utils')
+    @patch('tpu_inference.runner.tpu_runner.device_array',
            side_effect=lambda mesh, tensors, **kwargs: tensors)
-    @patch('tpu_inference.runner.tpu_jax_runner.TPUSupportedSamplingMetadata')
+    @patch('tpu_inference.runner.tpu_runner.TPUSupportedSamplingMetadata')
     def test_prepare_async_token_substitution_indices_dp_no_placeholders(
             self, mock_sampling_metadata, mock_device_array, mock_runner_utils,
             mock_named_sharding):
@@ -652,7 +652,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
         # Should return input_ids unchanged
         np.testing.assert_array_equal(result, input_ids)
 
-    @patch('tpu_inference.runner.tpu_jax_runner.device_array',
+    @patch('tpu_inference.runner.tpu_runner.device_array',
            side_effect=lambda mesh, tensors, **kwargs: tensors)
     def test_apply_async_token_substitution_with_padding(
             self, mock_device_array):
@@ -733,11 +733,11 @@ class TestTPUJaxRunnerDPInputsLightweight:
         self.runner._prepare_inputs_non_dp.assert_called_once_with(
             scheduler_output)
 
-    @patch('tpu_inference.runner.tpu_jax_runner.NamedSharding')
-    @patch('tpu_inference.runner.tpu_jax_runner.runner_utils')
-    @patch('tpu_inference.runner.tpu_jax_runner.device_array',
+    @patch('tpu_inference.runner.tpu_runner.NamedSharding')
+    @patch('tpu_inference.runner.tpu_runner.runner_utils')
+    @patch('tpu_inference.runner.tpu_runner.device_array',
            side_effect=lambda mesh, tensors, **kwargs: tensors)
-    @patch('tpu_inference.runner.tpu_jax_runner.TPUSupportedSamplingMetadata')
+    @patch('tpu_inference.runner.tpu_runner.TPUSupportedSamplingMetadata')
     def test_prepare_inputs_dp_with_async_scheduling(self,
                                                      mock_sampling_metadata,
                                                      mock_device_array,
@@ -806,11 +806,11 @@ class TestTPUJaxRunnerDPInputsLightweight:
         # Verify async token substitution was called
         mock_prepare_async.assert_called_once()
 
-    @patch('tpu_inference.runner.tpu_jax_runner.NamedSharding')
-    @patch('tpu_inference.runner.tpu_jax_runner.runner_utils')
-    @patch('tpu_inference.runner.tpu_jax_runner.device_array',
+    @patch('tpu_inference.runner.tpu_runner.NamedSharding')
+    @patch('tpu_inference.runner.tpu_runner.runner_utils')
+    @patch('tpu_inference.runner.tpu_runner.device_array',
            side_effect=lambda mesh, tensors, **kwargs: tensors)
-    @patch('tpu_inference.runner.tpu_jax_runner.TPUSupportedSamplingMetadata')
+    @patch('tpu_inference.runner.tpu_runner.TPUSupportedSamplingMetadata')
     def test_prepare_inputs_dp_async_token_substitution_application(
             self, mock_sampling_metadata, mock_device_array, mock_runner_utils,
             mock_named_sharding):
