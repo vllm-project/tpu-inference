@@ -207,7 +207,6 @@ class CompilationManager:
             ) if self.runner.vllm_config.sharding_config.total_dp_size > 1 else None
 
             for num_reqs in self.runner.num_reqs_paddings:
-                # Create fresh arrays for each compilation to avoid "Array has been deleted" errors
                 padded_token_in_tpu_cur_input_indices = np.zeros((num_tokens, ),
                                                                  dtype=np.int32)
                 padded_token_in_tpu_pre_next_tokens_indices = np.zeros(

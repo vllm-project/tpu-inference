@@ -190,9 +190,7 @@ class KVCacheManager:
             num_blocks = kv_cache_tensor.size // page_size_bytes
             dp_size = self.runner.vllm_config.sharding_config.total_dp_size
             # num_blocks must be a multiple of dp_size
-            logger.info("Adjusting num_blocks before: ", num_blocks)
-            num_blocks = (num_blocks // dp_size) * dp_size
-            logger.info("Adjusting num_blocks after: ", num_blocks)
+            num_blocks = math.ceil(num_blocks / dp_size) * dp_size
             # NOTE: we'll multiply the num_kv_heads by 2 in the function
             kv_cache = create_kv_caches(
                 num_blocks=num_blocks,
