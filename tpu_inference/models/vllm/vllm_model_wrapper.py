@@ -1,6 +1,5 @@
 import copy
 import functools
-import os
 from collections.abc import Sequence
 from contextlib import nullcontext
 from typing import Any, List, Optional, Tuple
@@ -91,12 +90,8 @@ class VllmModelWrapper:
         # may casue errors. Therefore, we disable it during weight loading.
         vllm_config_for_load.parallel_config.enable_expert_parallel = False
 
-        if os.getenv("JAX_RANDOM_WEIGHTS", False):
-            vllm_config_for_load.load_config.load_format = "dummy"
-            use_random_weights = True
-        else:
-            use_random_weights = (
-                vllm_config_for_load.load_config.load_format == "dummy")
+        use_random_weights = (
+            vllm_config_for_load.load_config.load_format == "dummy")
         if use_random_weights:
             logger.info(
                 "Initializing vLLM model with random weights, weight loading skipped."
