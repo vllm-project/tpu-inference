@@ -176,11 +176,16 @@ class _DisaggOrchestrator:
                 continue
 
             scheduler_output = prefill_engine.scheduler.schedule()
-            with LatencyTracker(
-                    f"prefill-{idx}"), prefill_engine.log_error_detail(
-                        scheduler_output):
-                model_output = prefill_engine.model_executor.execute_model(
+            with LatencyTracker(f"prefill-{idx}"):
+                future = prefill_engine.model_executor.execute_model(
+                    scheduler_output, non_block=True)
+                grammar_output = prefill_engine.scheduler.get_grammar_bitmask(
                     scheduler_output)
+                with prefill_engine.log_error_detail(scheduler_output):
+                    model_output = future.result()
+                    if model_output is None:
+                        model_output = prefill_engine.model_executor.sample_tokens(
+                            grammar_output)
 
             if scheduler_output.total_num_scheduled_tokens > 0:
                 logger.debug(f"Prefill result: {model_output}")
@@ -351,11 +356,17 @@ class _DisaggOrchestrator:
                 new block ids - {scheduler_output.scheduled_cached_reqs.new_block_ids}'''
                          )
 
-            with LatencyTracker(
-                    f"decode-{idx}"), decode_engine.log_error_detail(
-                        scheduler_output):
-                model_output = decode_engine.model_executor.execute_model(
+            with LatencyTracker(f"decode-{idx}"):
+                future = decode_engine.model_executor.execute_model(
+                    scheduler_output, non_block=True)
+                grammar_output = decode_engine.scheduler.get_grammar_bitmask(
                     scheduler_output)
+                with decode_engine.log_error_detail(scheduler_output):
+                    model_output = future.result()
+                    if model_output is None:
+                        model_output = decode_engine.model_executor.sample_tokens(
+                            grammar_output)
+
             if scheduler_output.total_num_scheduled_tokens > 0:
                 logger.debug(f"Decode result: {model_output}")
 

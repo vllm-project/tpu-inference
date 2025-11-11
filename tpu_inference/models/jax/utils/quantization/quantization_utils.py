@@ -54,6 +54,23 @@ DEFAULT_DEEPSEEK_FP8_CONFIG = {
     }
 }
 
+DEFAULT_LLAMA4_FP8_CONFIG = {
+    "qwix": {
+        "use_abstract_model":
+        True,
+        "scale_dtype":
+        "bfloat16",
+        "rules": [
+            {
+                "module_path": "layers.*.moe_ffw",
+                "op_names": "einsum",
+                "weight_qtype": "float8_e4m3fn",
+                "act_qtype": "float8_e4m3fn",
+            },
+        ],
+    }
+}
+
 
 def parse_qwix_config_to_rules(
         qwix_config: List[dict]) -> List[qwix.QuantizationRule]:
@@ -304,11 +321,28 @@ def apply_qwix_quantization(
 
         return model_or_model_fn
 
+    hf_config = vllm_config.model_config.hf_config
+    if hasattr(hf_config, "text_config") and hasattr(hf_config.text_config,
+                                                     "num_hidden_layers"):
+        num_hidden_layers = hf_config.text_config.num_hidden_layers
+        logger.info(
+            f"Using num_hidden_layers from hf_config.text_config: {num_hidden_layers}"
+        )
+    elif hasattr(hf_config, "num_hidden_layers"):
+        num_hidden_layers = hf_config.num_hidden_layers
+        logger.info(
+            f"Using num_hidden_layers directly from hf_config: {num_hidden_layers}"
+        )
+    else:
+        raise AttributeError(
+            "Could not find 'num_hidden_layers' in hf_config or hf_config.text_config."
+        )
+
     qwix_quantize_fn_for_eval = functools.partial(
         qwix_quantize_nnx_model,
         qwix_config=qwix_config,
         mesh=mesh,
-        num_hidden_layers=vllm_config.model_config.hf_config.num_hidden_layers,
+        num_hidden_layers=num_hidden_layers,
         kv_cache_block_size=block_size,
         kv_cache_num_kv_heads=num_kv_heads,
         kv_cache_head_size=head_size,
@@ -364,6 +398,8 @@ def get_default_qwix_quantization_config(
     # TODO (jacobplatin): remove this so that we can support various quantization types
     if model_type == "deepseek_v3" and quant_method == "fp8":
         return DEFAULT_DEEPSEEK_FP8_CONFIG
+    elif model_type == "llama4" and quant_method == "compressed-tensors":
+        return DEFAULT_LLAMA4_FP8_CONFIG
 
 
 def update_vllm_config_for_qwix_quantization(vllm_config: "VllmConfig"):

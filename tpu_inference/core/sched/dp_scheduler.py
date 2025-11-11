@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import (CachedRequestData, GrammarOutput,
                                        SchedulerOutput)
@@ -76,8 +76,7 @@ class DPScheduler(SchedulerInterface):
         self._create_per_rank_configs(kv_cache_config)
 
         # The original scheduler class could be Scheduler or AsyncScheduler
-        original_scheduler_cls = resolve_obj_by_qualname(
-            vllm_config.scheduler_config._original_scheduler_cls)
+        original_scheduler_cls = vllm_config.scheduler_config._original_scheduler_cls
         self.schedulers: List[Scheduler] = []
         for rank in range(self.dp_size):
             scheduler = original_scheduler_cls(
@@ -92,7 +91,8 @@ class DPScheduler(SchedulerInterface):
             self.schedulers.append(scheduler)
 
         logger.info(
-            f"DPScheduler per-rank limits: max_seqs={self.vllm_config.scheduler_config.max_num_seqs}, "
+            f"DPScheduler (Async = {self.vllm_config.scheduler_config.async_scheduling}) "
+            f"per-rank limits: max_seqs={self.vllm_config.scheduler_config.max_num_seqs}, "
             f"max_tokens={self.vllm_config.scheduler_config.max_num_batched_tokens}"
         )
 
@@ -515,5 +515,9 @@ def update_vllm_config_for_dp_scheduler(vllm_config: Any) -> None:
     dp_size = vllm_config.sharding_config.total_dp_size
 
     if dp_size > 1:
-        vllm_config.scheduler_config._original_scheduler_cls = vllm_config.scheduler_config.scheduler_cls
+        if vllm_config.scheduler_config.async_scheduling:
+            vllm_config.scheduler_config._original_scheduler_cls = AsyncScheduler
+        else:
+            vllm_config.scheduler_config._original_scheduler_cls = Scheduler
+
         vllm_config.scheduler_config.scheduler_cls = DPScheduler
