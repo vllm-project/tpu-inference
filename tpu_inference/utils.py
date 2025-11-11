@@ -132,12 +132,8 @@ def pathways_hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
     hbm_used = defaultdict(int)
     hbm_limit = get_device_hbm_limit()
     for array in live_arrays:
-        assert hasattr(array, 'sharding') and hasattr(
-            array.sharding, 'device_set'
-        ), "This function must not be called within jax tracer (e.g. jit, vmap, grad)"
-        for device in array.sharding.device_set:
-            hbm_used[device] += array.dtype.itemsize * array.size // len(
-                array.sharding.device_set)
+        for buffer in array.device_buffers:
+            hbm_used[buffer.device] += buffer.nbytes
     return [(hbm_used[device], hbm_limit) for device in devices]
 
 
