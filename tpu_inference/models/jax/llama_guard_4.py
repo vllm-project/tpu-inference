@@ -34,14 +34,11 @@ class LlamaGuard4ForCausalLM(nnx.Module):
 
         self.vllm_config = vllm_config
 
-        #Did this to get past dtype error in vllm/vllm/multimodal/processing.py
         import torch
         self.vllm_config.model_config.dtype = torch.bfloat16
 
         model_config = vllm_config.model_config
 
-
-        # self.rng = nnx.Rngs(rng)
         self.mesh = mesh
         self.is_verbose = getattr(self.vllm_config.additional_config,
                                   "is_verbose", False)
@@ -68,7 +65,6 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             dtype=dtype,
             prelogit_td=P(),
             vd_sharding= P((), None),
-            #mesh=self.mesh,
             rngs=nnx.Rngs(rng),
             random_init=force_random_weights,
         )
@@ -76,11 +72,9 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         self.layers = []
 
         for i in range(num_layers):
-            use_attention_rope = True  #(i + 1) % self.no_rope_layer_interval != 0
+            use_attention_rope = True 
 
-            # Llama Guard 4 is a dense model, so we use a standard MLP.
             custom_module = DenseFFW(
-                #mesh=self.mesh,
                 dtype=dtype,
                 hidden_act=hidden_act,
                 hidden_size=self.hidden_size,
@@ -129,7 +123,6 @@ class LlamaGuard4ForCausalLM(nnx.Module):
 
             pre_attention_norm = RMSNorm(
                 dims=self.hidden_size,
-                #mesh=self.mesh,
                 random_init=force_random_weights,
                 epsilon=rms_norm_eps,
                 rngs=nnx.Rngs(rng),
@@ -140,7 +133,6 @@ class LlamaGuard4ForCausalLM(nnx.Module):
 
             pre_mlp_norm = RMSNorm(
                 dims=self.hidden_size,
-                #mesh=self.mesh,
                 activation_ffw_td=P(),
                 epsilon=rms_norm_eps,
                 rngs=nnx.Rngs(rng),
@@ -158,7 +150,6 @@ class LlamaGuard4ForCausalLM(nnx.Module):
 
         self.final_norm = RMSNorm(
             dims=self.hidden_size,
-            #mesh=self.mesh,
             activation_ffw_td=P(),
             epsilon=rms_norm_eps,
             rngs=nnx.Rngs(rng),
@@ -175,7 +166,6 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             prelogit_td=P(),
             vd_sharding=P(),
             dv_sharding=P(),
-            #mesh=self.mesh,
             random_init=force_random_weights)
         if self.is_verbose:
             self._print_model_architecture()
@@ -210,20 +200,11 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             attention_metadata: AttentionMetadata,
             inputs_embeds: Optional[jax.Array] = None,
             layer_metadata_tuple: Optional[Tuple] = None,
-            lora_metadata: Optional[Any] = None,  # The 7th argument
-            *args,  # Catch any remaining args
+            lora_metadata: Optional[Any] = None,  
+            *args, 
     ) -> Tuple[List[KVCacheType], jax.Array]:
         is_prefill = False
 
-        print(
-            "this is the value of input_embeds when first passed into LlamaGuard4ForCausalLM.__call__: ",
-            inputs_embeds)
-        print(
-            "this is the value of input_ids when first passed into LlamaGuard4ForCausalLM.__call__: ",
-            input_ids)
-
-        # --- 1. DETERMINE INPUT TENSOR (FUSED/EMBEDDED) ---
-        # NOTE: The runner passes either input_ids (text-only) OR inputs_embeds (fused MM embeds).
         if inputs_embeds is not None:
             # PATH A: Multimodal fused embeddings provided by the runner.
             x_TD = inputs_embeds
@@ -235,12 +216,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             raise ValueError(
                 "Cannot run forward pass: Both input_ids and inputs_embeds are None."
             )
-
-        print(
-            "this is the value of x_TD after if-elif statement in LlamaGuard4ForCausalLM.__call__: ",
-            x_TD)
-
-
+        
         for (i, block) in enumerate(self.layers):
             kv_cache = kv_caches[i]
             new_kv_cache, x_TD = block(x_TD, is_prefill, kv_cache,
@@ -248,44 +224,15 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             jax.block_until_ready(x_TD)
             kv_caches[i] = new_kv_cache
 
-        # jax.debug.print("Final layer before norm: {}", x_TD)
         final_activation_TD = self.final_norm(x_TD)
-
-        # jax.debug.print("\nJAX Final Hidden States:\n{}", final_activation_TD)
 
         aux_hidden_states = None
 
         return kv_caches, final_activation_TD, aux_hidden_states
 
-
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         logits_TV = jnp.dot(hidden_states,
                             self.lm_head.input_embedding_table_DV.value)
-
-        # Check the max and min values of the logits to see if they're reasonable
-        jax.debug.print("Logits min/max: {}/{}", jnp.min(logits_TV),
-                        jnp.max(logits_TV))
-
-        # Also check the logits for the `safe` and `unsafe` tokens
-        # You'll need to find the token IDs for these from your tokenizer
-        safe_token_id = 60411  # From your debug output
-        unsafe_token_id = 72110  # From your debug output
-        jax.debug.print("Logits for 'safe' token: {}",
-                        logits_TV[0, safe_token_id])
-        jax.debug.print("Logits for 'unsafe' token: {}",
-                        logits_TV[0, unsafe_token_id])
-
-        # Find the token ID with the highest logit value
-        predicted_token_id = jnp.argmax(logits_TV, axis=-1)
-        jax.debug.print("Predicted token ID from argmax: {}",
-                        predicted_token_id[0])
-
-        # Use jax.debug.print to view of the logits_TV array
-        jax.debug.print("This is logits_TV: {}", logits_TV)
-
-        # It's also a good practice to block until the device is ready to ensure the print statement is flushed
-        jax.block_until_ready(logits_TV)
-
         return logits_TV
 
     def get_input_embeddings(
@@ -373,10 +320,6 @@ class LlamaGuard4WeightLoader:
         model_params = nnx.state(model_for_loading)
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in self.names_and_weights_generator:
-                # jax.debug.print(
-                #     f"Loaded: {loaded_name} - Shape: {loaded_weight.shape} - Values:\n{loaded_weight}"
-                # )
-
                 if loaded_name.endswith(".bias"):
                     continue
                 if "vision_model" in loaded_name or "multi_modal_projector" in loaded_name:
@@ -392,53 +335,17 @@ class LlamaGuard4WeightLoader:
                     loaded_weight = transpose_params(loaded_name,
                                                      loaded_weight,
                                                      self._transpose_map)
-
-                # --- Print key model weights here ---
-                # if "embed_tokens" in loaded_name:
-                #     jax.debug.print("JAX Embedding Table:\n{}", loaded_weight)
-
-                # if "layers.0.self_attn.q_proj" in loaded_name:
-                #     jax.debug.print("JAX layers.0 q_proj.weight:\n{}",
-                #                     loaded_weight)
-
-                # if "layers.0.self_attn.k_proj" in loaded_name:
-                #     jax.debug.print("JAX layers.0 k_proj.weight:\n{}",
-                #                     loaded_weight)
-
-                # if "layers.0.self_attn.v_proj" in loaded_name:
-                #     jax.debug.print("JAX layers.0 v_proj.weight:\n{}",
-                #                     loaded_weight)
-
-                # if "layers.0.feed_forward.gate_proj" in loaded_name:
-                #     jax.debug.print("JAX layers.0 gate_proj.weight:\n{}",
-                #                     loaded_weight)
-
-                # if "layers.0.feed_forward.down_proj" in loaded_name:
-                #     jax.debug.print("JAX layers.0 down_proj.weight:\n{}",
-                #                     loaded_weight)
-
-                # if "layers.0.feed_forward.up_proj" in loaded_name:
-                #     jax.debug.print("JAX layers.0 up_proj.weight:\n{}",
-                #                     loaded_weight)
-
                 if model_weight.value.shape != loaded_weight.shape:
                     raise ValueError(
                         f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
                         f"does not match model shape for {mapped_name}: {model_weight.value.shape}!"
                     )
-                # logger.info(
-                #     f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
-                # )
-
-                # some of the model_weight.sharding entries were tuples and not NamedSharding objects
-                sharding_spec = model_weight.sharding
-                if isinstance(sharding_spec, NamedSharding):
-                    sharding_spec = sharding_spec.spec
-                elif sharding_spec == ():
-                    sharding_spec = P()
+                logger.debug(
+                    f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
+                )
 
                 model_weight.value = shard_put(loaded_weight,
-                                               sharding_spec,
+                                               model_weight.sharding,
                                                mesh=model_for_loading.mesh)
                 if self.is_verbose:
                     print_param_info(model_weight, loaded_name)

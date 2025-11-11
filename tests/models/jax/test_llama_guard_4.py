@@ -12,10 +12,8 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from vllm.config import ModelConfig
 
-# NOTE: Updated import paths to reflect the Llama Guard 4 model
 from tpu_inference.models.jax.llama_guard_4 import (
     LlamaGuard4ForCausalLM, LlamaGuard4WeightLoader)
-
 
 class MockParamLlamaGuard4:
     """A mock for a parameter used in the LlamaGuard4 model."""
@@ -50,9 +48,8 @@ class MockVllmConfig:
         self.load_config = MagicMock()
         self.load_config.download_dir = None
 
-        # These values are based on the LlamaGuard4ForCausalLM __init__
         self.model_config.get_vocab_size.return_value = 202048
-        self.model_config.get_hidden_size.return_value = 5120 # Standard Llama Guard 4 hidden size
+        self.model_config.get_hidden_size.return_value = 5120 
         self.model_config.model = model_name
 
         self.additional_config = {
@@ -73,9 +70,7 @@ class MockVllmConfig:
         text_config_mock.head_dim = 128
         
         hf_config_mock = MagicMock()
-        hf_config_mock.text_config = text_config_mock # LlamaGuard4 likely uses a text config structure
-        # NOTE: If LlamaGuard4 doesn't use the 'text_config' property, 
-        # you might need to adjust the line above or mock 'hf_config_mock' directly.
+        hf_config_mock.text_config = text_config_mock 
 
         self.model_config.hf_config = hf_config_mock
 
@@ -89,7 +84,7 @@ def mesh():
         pytest.skip("No JAX devices available for mesh creation.")
 
     devices = np.array(jax.local_devices())
-    # Create a 4D mesh for standard sharding tests
+
     num_devices = len(devices)
     device_mesh = devices.reshape((num_devices, 1, 1, 1))
 
@@ -106,7 +101,6 @@ def rng() -> PRNGKey:
 
 @pytest.fixture
 def mock_vllm_config_llama_guard_4() -> MockVllmConfig:
-    # NOTE: Use the correct model name
     return MockVllmConfig(model_name="meta-llama/Llama-Guard-4-12B")
 
 
@@ -120,9 +114,6 @@ class TestLlamaGuard4ForCausalLM:
         # Check model name is correctly set in the config
         assert "llama-guard-4" in model.vllm_config.model_config.model.lower()
 
-        # NOTE: Since LlamaGuard4ForCausalLM hardcodes hidden_size = 5120 (by convention),
-        # we assert against the mocked value (which might be overridden by the model init if it were real)
-        # Assuming the model's __init__ uses its own hardcoded 5120:
         assert model.hidden_size == 5120 
 
     def test_create_model_with_random_weights(self,
@@ -138,7 +129,6 @@ class TestLlamaGuard4ForCausalLM:
                                            mesh=mesh,
                                            force_random_weights=True)
             
-            # Use the correct attribute names from your LlamaGuard4ForCausalLM class
             embedding_weight = model.embedder.input_embedding_table_VD.value
             attention_q_kernel = model.layers[0].attn.kernel_q_proj_DNH.value
             final_norm_scale = model.final_norm.scale.value
@@ -147,11 +137,9 @@ class TestLlamaGuard4ForCausalLM:
             assert isinstance(attention_q_kernel, jax.Array)
             assert isinstance(final_norm_scale, jax.Array)
 
-            # Check that the weights are initialized non-uniformly (standard deviation > 0)
             assert jnp.std(embedding_weight) > 0
             assert jnp.std(attention_q_kernel) > 0
 
-            # RMSNorm scale is typically initialized to 1.0
             assert jnp.all(final_norm_scale == 1.0)
 
     @patch("tpu_inference.models.jax.llama_guard_4.LlamaGuard4WeightLoader")
@@ -159,20 +147,17 @@ class TestLlamaGuard4ForCausalLM:
         """Tests that the weight loader is called correctly for checkpoint loading."""
         vllm_config = MockVllmConfig(model_name="llama-guard-4-test",
                                      random_weights=False)
-        
-        # NOTE: Model must be initialized before calling load_weights
         model = LlamaGuard4ForCausalLM(vllm_config, rng, mesh)
 
         mock_loader_instance = MagicMock()
         mock_loader_cls.return_value = mock_loader_instance
         model.load_weights(rng)
 
-        # NOTE: Check arguments match LlamaGuard4WeightLoader's __init__
         mock_loader_cls.assert_called_once_with(vllm_config=vllm_config,
-                                                hidden_size=5120, # Hardcoded in LlamaGuard4ForCausalLM
-                                                attn_heads=40,    # Hardcoded in LlamaGuard4ForCausalLM
-                                                num_key_value_heads=8, # Hardcoded
-                                                attn_head_dim=128)     # Hardcoded
+                                                hidden_size=5120,
+                                                attn_heads=40,
+                                                num_key_value_heads=8,
+                                                attn_head_dim=128)
         mock_loader_instance.load_weights.assert_called_once_with(model)
 
 
@@ -181,7 +166,6 @@ class TestLlamaGuard4WeightLoader:
 
     @pytest.fixture
     def weight_loader(self):
-        # NOTE: Initialize with the correct Llama Guard 4 parameters
         return LlamaGuard4WeightLoader(
             vllm_config=MockVllmConfig("test-model"),
             hidden_size=5120,
@@ -189,14 +173,11 @@ class TestLlamaGuard4WeightLoader:
             num_key_value_heads=8,
             attn_head_dim=128)
 
-    # NOTE: LlamaGuard4WeightLoader does not have _get_layer_num, so we skip that test.
-    # It relies on simple regex substitution in map_loaded_to_standardized_name.
-
     @pytest.mark.parametrize("hf_key, expected", [
         ("language_model.model.layers.15.self_attn.q_proj.weight",
          "layers.15.attn.kernel_q_proj_DNH"),
         ("language_model.model.layers.0.feed_forward.gate_proj.weight",
-         "layers.0.custom_module.kernel_gating_DF"), # Check custom_module path
+         "layers.0.custom_module.kernel_gating_DF"),
         ("language_model.model.embed_tokens.weight",
          "embedder.input_embedding_table_VD"),
         ("language_model.model.norm.weight", "final_norm.scale"),
@@ -216,11 +197,9 @@ class TestLlamaGuard4WeightLoader:
 
         model = LlamaGuard4ForCausalLM(vllm_config, rng, mesh)
 
-        # Define shapes based on the model's actual sizes
         hidden_size = 5120
         vocab_size = 202048
         
-        # Original weight shape is (vocab_size, hidden_size) for embedder
         original_weight = jnp.ones((vocab_size, hidden_size))
         dummy_weights = [
             ("language_model.model.embed_tokens.weight", original_weight),
@@ -243,6 +222,3 @@ class TestLlamaGuard4WeightLoader:
 
             # Check if the shape of the array passed to shard_put matches the model's expected shape.
             assert called_with_weight.shape == mock_param.value.shape
-
-    # NOTE: Llama Guard 4 is a dense model (no MoE), so the test 
-    # for gate_up_proj is NOT applicable and is omitted.
