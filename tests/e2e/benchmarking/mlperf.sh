@@ -40,13 +40,12 @@ else
     echo "QUANTIZATION is False. Running without quantization."
 fi
 
-echo extra_serve_args: "${extra_serve_args[@]}"
-
 root_dir=/workspace
 dataset_name=mlperf
 dataset_path=""
 num_prompts=1000
 exit_code=0
+use_dummy_weights=false
 
 helpFunction()
 {
@@ -57,6 +56,7 @@ helpFunction()
    echo -e "\t-p The path to the processed MLPerf dataset (default: None, which will download the dataset)"
    echo -e "\t-m A space-separated list of HuggingFace model ids to use (default: Qwen/Qwen2.5-1.5B-Instruct, Qwen/Qwen2.5-0.5B-Instruct, meta-llama/Llama-3.1-8B-Instruct and meta-llama/Llama-4-Scout-17B-16E-Instruct)"
    echo -e "\t-n Number of prompts to use for the benchmark (default: 10)"
+   echo -e "\t--use-dummy-weights Use dummy random weight (default: false)"
    exit 1
 }
 
@@ -84,6 +84,11 @@ while [[ "$#" -gt 0 ]]; do
             ;;
         -n|--num-prompts)
             num_prompts="$2"
+            shift
+            shift
+            ;;
+        --use-dummy-weights)
+            use_dummy_weights=true
             shift
             shift
             ;;
@@ -120,6 +125,13 @@ if [ -z "$dataset_path" ]; then
         echo "Not downloading the MLPerf dataset because it already exists"
     fi
 fi
+
+if [ "$use_dummy_weights" = true ]; then
+    extra_serve_args+=("--load-format=dummy")
+fi
+
+echo extra_serve_args: "${extra_serve_args[@]}"
+
 
 echo "Using the dataset at $dataset_path"
 

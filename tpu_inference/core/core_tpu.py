@@ -446,13 +446,15 @@ class DisaggEngineCore(vLLMEngineCore):
         executor_fail_callback: Optional[Callable] = None,
     ):
         self.vllm_config = vllm_config
-        self.vllm_config.cache_config.gpu_memory_utilization = (
-            self.vllm_config.cache_config.gpu_memory_utilization - 0.1)
 
         self.output_queue = queue.Queue[Union[tuple[int, EngineCoreOutputs],
                                               bytes]]()
 
         self.devices = jax.devices()
+        device_kind = self.devices[0].device_kind
+        if device_kind != 'TPU7x':
+            self.vllm_config.cache_config.gpu_memory_utilization = (
+                self.vllm_config.cache_config.gpu_memory_utilization - 0.1)
         prefill_slice_sizes, decode_slice_sizes, slice_sizes = _get_slice_sizes(
             self.devices)
 
@@ -597,7 +599,6 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
         # engine core to be executed, instead we create other instance of
         # engine cores and let them do the work.
         self.vllm_config = vllm_config
-        self.vllm_config.cache_config.gpu_memory_utilization = self.vllm_config.cache_config.gpu_memory_utilization - 0.1
 
         # We should be taking the input from the client, the code below is forked from
         # vllm.v1.engine.core.EngineCoreProc.
@@ -610,6 +611,10 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
         self.engines_running = False
 
         self.devices = jax.devices()
+        device_kind = self.devices[0].device_kind
+        if device_kind != 'TPU7x':
+            self.vllm_config.cache_config.gpu_memory_utilization = (
+                self.vllm_config.cache_config.gpu_memory_utilization - 0.1)
         prefill_slice_sizes, decode_slice_sizes, slice_sizes = _get_slice_sizes(
             self.devices)
 

@@ -18,7 +18,7 @@ from tpu_inference.logger import init_logger
 from tpu_inference.utils import device_array
 
 if TYPE_CHECKING:
-    from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
+    from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 logger = init_logger(__name__)
 
