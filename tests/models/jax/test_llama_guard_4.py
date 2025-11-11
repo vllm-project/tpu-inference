@@ -48,8 +48,9 @@ class MockVllmConfig:
         self.load_config = MagicMock()
         self.load_config.download_dir = None
 
-        self.model_config.get_vocab_size.return_value = 202048
-        self.model_config.get_hidden_size.return_value = 5120 
+        # Downsizing the following to avoid OOM
+        self.model_config.get_vocab_size.return_value = 1024
+        self.model_config.get_hidden_size.return_value = 128 
         self.model_config.model = model_name
 
         self.additional_config = {
@@ -64,10 +65,11 @@ class MockVllmConfig:
         self.cache_config = MagicMock(cache_dtype="auto")
 
         # Mock the underlying HF config values for parameter detection
+        # Downsized to avoid OOM
         text_config_mock = MagicMock()
-        text_config_mock.num_attention_heads = 40
-        text_config_mock.num_key_value_heads = 8
-        text_config_mock.head_dim = 128
+        text_config_mock.num_attention_heads = 4
+        text_config_mock.num_key_value_heads = 2
+        text_config_mock.head_dim = 32
         
         hf_config_mock = MagicMock()
         hf_config_mock.text_config = text_config_mock 
@@ -114,7 +116,7 @@ class TestLlamaGuard4ForCausalLM:
         # Check model name is correctly set in the config
         assert "llama-guard-4" in model.vllm_config.model_config.model.lower()
 
-        assert model.hidden_size == 5120 
+        assert model.hidden_size == 128 
 
     def test_create_model_with_random_weights(self,
                                               mock_vllm_config_llama_guard_4,
