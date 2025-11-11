@@ -317,12 +317,12 @@ class DeepSeekV3(nnx.Module):
         self.weight_loader.load_weights(self)
         self.initialize_cache(self.mesh)
 
-    def initialize_cache(self):
+    def initialize_cache(self, mesh):
         # Initialize RoPE caches after weights are loaded and before JIT compilation.
         for layer in self.layers:
             if hasattr(layer, 'attn') and hasattr(layer.attn, 'rope'):
                 if hasattr(layer.attn.rope, 'initialize_cache'):
-                    layer.attn.rope.initialize_cache()
+                    layer.attn.rope.initialize_cache(mesh)
 
     def __call__(
         self,
