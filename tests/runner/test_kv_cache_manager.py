@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 import torch
 from vllm.attention import Attention
 from vllm.attention.backends.abstract import AttentionType
@@ -200,14 +201,15 @@ class TestKVCacheManager:
             np.testing.assert_array_equal(updated_block_content,
                                           expected_padded_slice)
 
-    def test_get_kv_cache_spec_with_compilation_cfg(self):
+    @pytest.mark.parametrize("num_kv_heads", [16, 32])
+    @pytest.mark.parametrize("head_size", [64, 100, 200])
+    def test_get_kv_cache_spec_with_compilation_cfg(self, num_kv_heads,
+                                                    head_size):
         # tests we create kv cache spec from compilation config
         # create a static forward context with
         # 10 full attention layers +
         # 10 sliding window attention layers
         # 1 layer with shared kv cache.
-        num_kv_heads = 16
-        head_size = 128
         attn_type = AttentionType.DECODER
         sliding_window = 10
         static_forward_context = {}

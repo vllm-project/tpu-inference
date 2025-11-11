@@ -150,6 +150,10 @@ def hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
 
 def get_padded_head_dim(head_dim: int) -> int:
     """Pads head_dim up to the nearest multiple of 128 for kernel performance."""
+    # When head_dim == 64, we use kernel specificly optimized for it which does
+    # not require any padding.
+    if head_dim == 64:
+        return 64
     return (head_dim + 127) // 128 * 128
 
 
