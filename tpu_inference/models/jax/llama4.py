@@ -9,6 +9,7 @@ from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
 
+from tpu_inference.layers.jax.moe.deepseek_v3_moe import SparseMoE
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
 from tpu_inference.layers.jax.attention.llama4_attention import Llama4Attention
 from tpu_inference.layers.jax.constants import KVCacheType
@@ -89,6 +90,13 @@ class Llama4ForCausalLM(nnx.Module):
 
         self.use_qk_norm = getattr(text_config, "use_qk_norm", True)
 
+        self.weight_loader = Llama4WeightLoader(
+            vllm_config=vllm_config,
+            hidden_size=self.hidden_size,
+            attn_heads=self.num_attention_heads,
+            num_key_value_heads=self.num_key_value_heads,
+            attn_head_dim=self.num_attention_heads)
+
         self.embedder = Embedder(vocab_size=self.vocab_size,
                                  hidden_size=self.hidden_size,
                                  dtype=dtype,
@@ -118,20 +126,39 @@ class Llama4ForCausalLM(nnx.Module):
                             ed_sharding=(None, None),
                             random_init=force_random_weights)
 
-            moe_ffw = MoE(
-                dtype=dtype,
-                num_local_experts=self.num_local_experts,
-                apply_expert_weight_before_computation=True,
-                hidden_size=self.hidden_size,
-                intermediate_size_moe=self.intermediate_size_moe,
-                hidden_act=self.hidden_act,
-                router=router,
-                rngs=self.rng,
-                activation_ffw_td=('data', None),
-                activation_ffw_ted=('data', 'expert', None),
-                edf_sharding=('model', None, None),
-                efd_sharding=('model', None, None),
-                random_init=force_random_weights) if is_moe_layer else None
+            # moe_ffw = MoE(
+            #     dtype=dtype,
+            #     num_local_experts=self.num_local_experts,
+            #     apply_expert_weight_before_computation=True,
+            #     hidden_size=self.hidden_size,
+            #     intermediate_size_moe=self.intermediate_size_moe,
+            #     hidden_act=self.hidden_act,
+            #     router=router,
+            #     rngs=self.rng,
+            #     activation_ffw_td=('data', None),
+            #     activation_ffw_ted=('data', 'expert', None),
+            #     edf_sharding=('model', None, None),
+            #     efd_sharding=('model', None, None),
+            #     random_init=force_random_weights) if is_moe_layer else None
+            
+            moe_ffw = SparseMoE(
+                    dtype=dtype,
+                    num_local_experts=self.num_local_experts,
+                    apply_expert_weight_before_computation=False,
+                    hidden_size=self.hidden_size,
+                    intermediate_size_moe=self.intermediate_size_moe,
+                    num_experts_per_tok=8,
+                    mesh=self.mesh,
+                    hidden_act=self.hidden_act,
+                    rngs=self.rng,
+                    random_init=force_random_weights,
+                    activation_ffw_td=('data', None),
+                    activation_ffw_ted=('data', None, None),
+                    edf_sharding=('model', None, None),
+                    efd_sharding=('model', None, None),
+                    quantized_dtype=self.weight_loader.quant_dtype
+                    if self.weight_loader.is_model_quantized else None,
+                    router=router)
 
             dense_ffw = DenseFFW(
                 dtype=dtype,
@@ -308,6 +335,9 @@ class Llama4WeightLoader:
 
         self.quantization_config = getattr(vllm_config.model_config.hf_config,
                                            "quantization_config", None)
+        self.quant_dtype = jnp.float8_e4m3fn
+        self.is_model_quantized = True if self.quantization_config else False
+
         self.expert_weights_buffer = {}
         self.expert_prefix = "shared_expert."
 
