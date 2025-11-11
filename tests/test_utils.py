@@ -75,36 +75,28 @@ def test_hbm_usage_bytes_pathways_enabled(mock_devices, mock_live_arrays):
     mock_device2 = MagicMock()
     devices = [mock_device1, mock_device2]
 
-    # Create mock shards for array1 (sharded across 2 devices)
-    mock_shard1_dev1 = MagicMock()
-    mock_shard1_dev1.device = mock_device1
-    mock_shard1_dev1.data.nbytes = 2000  # 4 bytes * 1000 elements / 2 devices
-
-    mock_shard1_dev2 = MagicMock()
-    mock_shard1_dev2.device = mock_device2
-    mock_shard1_dev2.data.nbytes = 2000  # 4 bytes * 1000 elements / 2 devices
-
+    # Create mock arrays with sharding
     mock_array1 = MagicMock()
-    mock_array1.addressable_shards = [mock_shard1_dev1, mock_shard1_dev2]
-
-    # Create mock shards for array2 (only on device1)
-    mock_shard2_dev1 = MagicMock()
-    mock_shard2_dev1.device = mock_device1
-    mock_shard2_dev1.data.nbytes = 1000  # 2 bytes * 500 elements
+    mock_array1.dtype.itemsize = 4  # float32
+    mock_array1.size = 1000  # 1000 elements
+    mock_array1.sharding.device_set = {mock_device1, mock_device2
+                                       }  # Sharded across 2 devices
 
     mock_array2 = MagicMock()
-    mock_array2.addressable_shards = [mock_shard2_dev1]
+    mock_array2.dtype.itemsize = 2  # float16
+    mock_array2.size = 500  # 500 elements
+    mock_array2.sharding.device_set = {mock_device1}  # Only on device1
 
     mock_live_arrays.return_value = [mock_array1, mock_array2]
 
     usage = hbm_usage_bytes(devices)
 
     # Expected calculations:
-    # Array1: 2000 bytes on device1, 2000 bytes on device2
-    # Array2: 1000 bytes on device1 only
+    # Array1: 4 bytes * 1000 elements / 2 devices = 2000 bytes per device
+    # Array2: 2 bytes * 500 elements / 1 device = 1000 bytes on device1 only
     # Device1: 2000 + 1000 = 3000 bytes
     # Device2: 2000 + 0 = 2000 bytes
-    # hbm_limit = 95 * GBYTES for TPU v5p
+    # hbm_limit = 33550237184 (hardcoded in the function)
     expected_usage = [(3000, 95 * GBYTES), (2000, 95 * GBYTES)]
     assert usage == expected_usage
 

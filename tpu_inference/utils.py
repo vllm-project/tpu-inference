@@ -131,23 +131,7 @@ def pathways_hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
     live_arrays = jax.live_arrays()
     hbm_used = defaultdict(int)
     hbm_limit = get_device_hbm_limit()
-    # device_ids ={device.id for device in devices}
-    # once = True  
-    # for array in live_arrays:
-        # if once: 
-        #     logger.info(f"Pathways Calculating HBM usage from live arrays: {array.addressable_shards} | {array.shape}")
-
-        # for i, shard in enumerate(array.addressable_shards):
-        #     # Only count shards that are on devices assigned to this worker
-        #     if shard.device.id in device_ids:
-        #         hbm_used[shard.device] += shard.data.nbytes
-        #         if once: 
-        #             logger.info(f"Pathways Shard {i} on device {shard.device.id}: {shard.data.nbytes}")
-        # once = False
     for array in live_arrays:
-        assert hasattr(array, 'sharding') and hasattr(
-            array.sharding, 'device_set'
-        ), "This function must not be called within jax tracer (e.g. jit, vmap, grad)"
         for buffer in array.device_buffers:
                 hbm_used[buffer.device] += buffer.nbytes
     return [(hbm_used[device], hbm_limit) for device in devices]

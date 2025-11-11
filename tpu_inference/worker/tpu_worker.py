@@ -158,7 +158,6 @@ class TPUWorker:
     def determine_available_memory(self) -> int:
         gpu_memory_utilization = self.cache_config.gpu_memory_utilization
         hbm_usage = utils.hbm_usage_bytes(self.devices)
-        logger.info("Memory statistics | HBM usage per device: %s", hbm_usage)
         total_hbm_limit = total_hbm_used = 0
         for used, limit in hbm_usage:
             total_hbm_used += used
