@@ -13,7 +13,7 @@ from tpu_inference.models.jax.utils.multi_modal_utils import (
     flatten_embeddings, sanity_check_mm_encoder_outputs)
 
 if TYPE_CHECKING:
-    from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
+    from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
 class MultiModalManager:

@@ -8,10 +8,10 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
 from vllm.sampling_params import SamplingType
 from vllm.v1.outputs import DraftTokenIds
 
-from tpu_inference.runner.input_batch_jax import CachedRequestState, InputBatch
+from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
 from tpu_inference.runner.speculative_decoding_manager import \
     SpecDecodeMetadata
-from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
+from tpu_inference.runner.tpu_runner import TPUModelRunner
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
 
 
@@ -28,8 +28,8 @@ class TestSpeculativeDecodingManager:
         with patch('jax.devices', return_value=self.mock_devices), \
              patch('jax.make_mesh', return_value=self.mock_mesh), \
              patch('jax.random.key', return_value=self.mock_rng_key), \
-             patch('tpu_inference.runner.tpu_jax_runner.get_model', return_value=MagicMock()), \
-             patch('tpu_inference.runner.tpu_jax_runner.make_optimized_mesh', return_value=self.mock_mesh):
+             patch('tpu_inference.runner.tpu_runner.get_model', return_value=MagicMock()), \
+             patch('tpu_inference.runner.tpu_runner.make_optimized_mesh', return_value=self.mock_mesh):
 
             model_config = ModelConfig(tokenizer_mode="auto",
                                        trust_remote_code=False,

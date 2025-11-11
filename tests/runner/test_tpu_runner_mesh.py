@@ -4,7 +4,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
+from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
 class TestTPUModelRunnerMeshInit:
@@ -54,8 +54,8 @@ class TestTPUModelRunnerMeshInit:
                                                      mock_vllm_config):
         """Test 2d mesh creation without enforced device order."""
         with patch.dict(os.environ, {'NEW_MODEL_DESIGN': ''}), \
-             patch('tpu_inference.runner.tpu_jax_runner.make_optimized_mesh') as mock_make_mesh, \
-             patch('tpu_inference.runner.tpu_jax_runner.logger'):
+             patch('tpu_inference.runner.tpu_runner.make_optimized_mesh') as mock_make_mesh, \
+             patch('tpu_inference.runner.tpu_runner.logger'):
 
             mock_mesh = Mock()
             mock_make_mesh.return_value = mock_mesh
@@ -81,7 +81,7 @@ class TestTPUModelRunnerMeshInit:
 
         with patch.dict(os.environ, {'NEW_MODEL_DESIGN': ''}), \
              patch('jax.make_mesh') as mock_jax_mesh, \
-             patch('tpu_inference.runner.tpu_jax_runner.logger'):
+             patch('tpu_inference.runner.tpu_runner.logger'):
 
             mock_mesh = Mock()
             mock_jax_mesh.return_value = mock_mesh
@@ -104,9 +104,9 @@ class TestTPUModelRunnerMeshInit:
                                               mock_vllm_config):
         """Test new model mesh creation with single slice."""
         with patch.dict(os.environ, {'NEW_MODEL_DESIGN': '1', 'NUM_SLICES': '1'}), \
-             patch('tpu_inference.runner.tpu_jax_runner.mesh_utils') as mock_mesh_utils, \
+             patch('tpu_inference.runner.tpu_runner.mesh_utils') as mock_mesh_utils, \
              patch('jax.sharding.Mesh') as mock_jax_mesh, \
-             patch('tpu_inference.runner.tpu_jax_runner.logger'):
+             patch('tpu_inference.runner.tpu_runner.logger'):
 
             mock_devices_array = Mock()
             mock_mesh_utils.create_device_mesh.return_value = mock_devices_array
@@ -135,9 +135,9 @@ class TestTPUModelRunnerMeshInit:
         """Test new model mesh creation with multiple slices."""
         num_slices = 2
         with patch.dict(os.environ, {'NEW_MODEL_DESIGN': '1', 'NUM_SLICES': str(num_slices)}), \
-             patch('tpu_inference.runner.tpu_jax_runner.mesh_utils') as mock_mesh_utils, \
+             patch('tpu_inference.runner.tpu_runner.mesh_utils') as mock_mesh_utils, \
              patch('jax.sharding.Mesh') as mock_jax_mesh, \
-             patch('tpu_inference.runner.tpu_jax_runner.logger'):
+             patch('tpu_inference.runner.tpu_runner.logger'):
 
             mock_devices_array = Mock()
             mock_mesh_utils.create_hybrid_device_mesh.return_value = mock_devices_array
@@ -174,7 +174,7 @@ class TestTPUModelRunnerMeshInit:
                                                    num_slices,
                                                    expected_dp_inner):
         """Test dp_inner calculation for various num_slices values."""
-        with patch('tpu_inference.runner.tpu_jax_runner.mesh_utils'
+        with patch('tpu_inference.runner.tpu_runner.mesh_utils'
                    ) as mock_mesh_utils:
             mock_mesh_utils.create_hybrid_device_mesh.return_value = Mock()
 
