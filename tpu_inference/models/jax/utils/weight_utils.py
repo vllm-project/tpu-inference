@@ -167,8 +167,8 @@ def get_param(params: nnx.State, path: str) -> nnx.State:
     return plevel
 
 
-def get_param_and_sharding(params: nnx.State, shardings: Any,
-                           path: str) -> tuple[nnx.State, nnx.State]:
+def get_param_and_sharding(params: nnx.State, shardings: Any, path: str,
+                           rank: int) -> tuple[nnx.State, nnx.State]:
     keys = path.split(".")
     plevel = params
     slevel = shardings
@@ -273,7 +273,9 @@ def _load_hf_weights_on_thread(vllm_config,
                                weights_file: str,
                                filter_regex: str | None = None,
                                keep_original_dtype_keys_regex: list[str]
-                               | None = None):
+                               | None = None,
+                               pp_missing_layers: list[str] | None = None,
+                               rank: int | None = 0):
     name_map = metadata_map.name_map
     reshape_keys = metadata_map.reshape_map
     bias_reshape_keys = metadata_map.bias_reshape_map
@@ -297,7 +299,6 @@ def _load_hf_weights_on_thread(vllm_config,
 
     for hf_key, hf_weight in model_weights_single_file_generator(
             weights_file, framework="flax", filter_regex=filter_regex):
-
         # Check if the key should retain its original dtype
         keep_original_dtype = False
         if keep_original_dtype_keys_regex:
@@ -338,8 +339,22 @@ def _load_hf_weights_on_thread(vllm_config,
                 )
                 continue
             model_key = name_map.get(hf_key, hf_key)
+        # add skip pp missing layers.
+        def is_pp_missing_layer(hf_key):
+            has_digit = any(char.isdigit() for char in hf_key)
+            # add the suffix after digits to avoid it matches "layers.10" with "layers.1"
+            suffix = "." if has_digit else ""
+            return any(f'{pp_missing_layer}{suffix}' in hf_key
+                       for pp_missing_layer in pp_missing_layers)
+
+        if pp_missing_layers and is_pp_missing_layer(hf_key):
+            logger.warning(
+                f'{rank=} Skip loading {hf_key} as it does not belong to the current PP rank'
+            )
+            continue
+
         model_weight, model_sharding = get_param_and_sharding(
-            params, shardings, model_key)
+            params, shardings, model_key, rank)
 
         logger.debug(
             "before transform | "
@@ -408,7 +423,10 @@ def load_hf_weights(vllm_config,
                     mesh: Mesh,
                     filter_regex: str | None = None,
                     is_draft_model: bool = False,
-                    keep_original_dtype_keys_regex: list[str] | None = None):
+                    keep_original_dtype_keys_regex: list[str] | None = None,
+                    pp_missing_layers: list[str] | None = None,
+                    rank: int | None = 0):
+    # TODO: remove rank after debug finishes.
     """Load weights from all model weights files to the model, run in multi threads."""
     if is_draft_model:
         model_path = vllm_config.speculative_config.draft_model_config.model
@@ -416,6 +434,7 @@ def load_hf_weights(vllm_config,
         model_path = vllm_config.model_config.model
     weights_files = get_model_weights_files(
         model_path, vllm_config.load_config.download_dir)
+    # For PP, params are partial.
     params = nnx.state(model)
     max_workers = min(64, len(weights_files))
     # NOTE(xiang): Disable multi-threading mode if running on multi-host.
@@ -433,8 +452,9 @@ def load_hf_weights(vllm_config,
                 mesh,
                 weights_file,
                 filter_regex=filter_regex,
-                keep_original_dtype_keys_regex=keep_original_dtype_keys_regex)
-            for weights_file in weights_files
+                keep_original_dtype_keys_regex=keep_original_dtype_keys_regex,
+                pp_missing_layers=pp_missing_layers,
+                rank=rank) for weights_file in weights_files
         ]
         for future in futures:
             future.result()
