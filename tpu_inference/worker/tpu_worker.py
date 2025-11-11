@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 import jaxlib
 import jaxtyping
-import vllm.envs as envs
+import vllm.envs as vllm_envs
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
                                           has_kv_transfer_group)
@@ -22,7 +22,7 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 
-from tpu_inference import utils
+from tpu_inference import envs, utils
 from tpu_inference.distributed.utils import (get_host_ip, get_kv_transfer_port,
                                              get_node_id)
 from tpu_inference.layers.jax.sharding import ShardingConfigManager
@@ -50,7 +50,7 @@ class TPUWorker:
                  devices=None):
         # If we use vLLM's model implementation in PyTorch, we should set it
         # with torch version of the dtype.
-        impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
+        impl = envs.MODEL_IMPL_TYPE
         if impl != "vllm":  # vllm-pytorch implementation does not need this conversion
 
             # NOTE(wenlong): because sometimes mm needs to use torch for preprocessing
@@ -86,11 +86,11 @@ class TPUWorker:
         # TPU Worker is initialized. The profiler server needs to start after
         # MP runtime is initialized.
         self.profile_dir = None
-        if envs.VLLM_TORCH_PROFILER_DIR and self.rank < 1:
+        if vllm_envs.VLLM_TORCH_PROFILER_DIR and self.rank < 1:
             if not self.devices or 0 in self.device_ranks:
                 # For TPU, we can only have 1 active profiler session for 1 profiler
                 # server. So we only profile on rank0.
-                self.profile_dir = envs.VLLM_TORCH_PROFILER_DIR
+                self.profile_dir = vllm_envs.VLLM_TORCH_PROFILER_DIR
                 logger.info("Profiling enabled. Traces will be saved to: %s",
                             self.profile_dir)
 

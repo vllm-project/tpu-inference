@@ -4,13 +4,14 @@ import os
 from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
 
 import jax.numpy as jnp
-import vllm.envs as envs
+import vllm.envs as vllm_envs
 from torchax.ops.mappings import j2t_dtype
 from tpu_info import device
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.platforms.interface import Platform, PlatformEnum
 from vllm.sampling_params import SamplingParams, SamplingType
 
+from tpu_inference import envs
 from tpu_inference.layers.jax.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
 
@@ -71,7 +72,7 @@ class TpuPlatform(Platform):
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         try:
-            if envs.VLLM_TPU_USING_PATHWAYS:
+            if vllm_envs.VLLM_TPU_USING_PATHWAYS:
                 # Causes mutliprocess accessing IFRT when calling jax.devices()
                 return "TPU v6 lite"
             else:
@@ -87,7 +88,7 @@ class TpuPlatform(Platform):
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        return not envs.VLLM_USE_V1
+        return not vllm_envs.VLLM_USE_V1
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
@@ -118,11 +119,11 @@ class TpuPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        if not envs.VLLM_USE_V1:
+        if not vllm_envs.VLLM_USE_V1:
             raise RuntimeError("VLLM_USE_V1=1 must be set for JAX backend.")
 
-        if envs.VLLM_TPU_USING_PATHWAYS:
-            assert not envs.VLLM_ENABLE_V1_MULTIPROCESSING, (
+        if vllm_envs.VLLM_TPU_USING_PATHWAYS:
+            assert not vllm_envs.VLLM_ENABLE_V1_MULTIPROCESSING, (
                 "VLLM_ENABLE_V1_MULTIPROCESSING must be 0 when using Pathways(JAX_PLATFORMS=proxy)"
             )
         cls._initialize_sharding_config(vllm_config)
@@ -144,7 +145,7 @@ class TpuPlatform(Platform):
             compilation_config.backend = "openxla"
 
         # If we use vLLM's model implementation in PyTorch, we should set it with torch version of the dtype.
-        impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
+        impl = envs.MODEL_IMPL_TYPE
 
         # NOTE(xiang): convert dtype to jnp.dtype
         # NOTE(wenlong): skip this logic for mm model preprocessing
@@ -164,7 +165,7 @@ class TpuPlatform(Platform):
             vllm_config.model_config.dtype = j2t_dtype(
                 vllm_config.model_config.dtype.dtype)
 
-        if envs.VLLM_USE_V1:
+        if vllm_envs.VLLM_USE_V1:
             # TODO(cuiq): remove this dependency.
             from vllm.v1.attention.backends.pallas import \
                 PallasAttentionBackend
@@ -250,7 +251,7 @@ class TpuPlatform(Platform):
         """Raises if this request is unsupported on this platform"""
 
         if isinstance(params, SamplingParams):
-            if params.structured_outputs is not None and not envs.VLLM_USE_V1:
+            if params.structured_outputs is not None and not vllm_envs.VLLM_USE_V1:
                 raise ValueError("Structured output is not supported on "
                                  f"{cls.device_name} V0.")
             if params.sampling_type == SamplingType.RANDOM_SEED:
