@@ -1,18 +1,20 @@
 import os
 import time
-from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-import vllm.envs as envs
 from jax.sharding import NamedSharding, PartitionSpec
 
+import vllm.envs as envs
 from tpu_inference.core.disagg_utils import is_disagg_enabled
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.sample.sampling import sample
-from tpu_inference.layers.jax.sample.sampling_metadata import \
-    TPUSupportedSamplingMetadata
+from tpu_inference.layers.jax.sample.sampling_metadata import (
+    TPUSupportedSamplingMetadata,
+)
 from tpu_inference.layers.jax.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import device_array
@@ -36,9 +38,9 @@ class CompilationManager:
                               envs.VLLM_XLA_CACHE_PATH)
 
     def _create_dummy_tensor(self,
-                             shape: Tuple[int, ...],
+                             shape: tuple[int, ...],
                              dtype: Any,
-                             sharding: Optional[NamedSharding] = None) -> Any:
+                             sharding: NamedSharding | None = None) -> Any:
         """Helper to create dummy tensors for precompilation."""
         tensor = jnp.ones(shape, dtype=dtype)
         if sharding:
@@ -273,11 +275,11 @@ class CompilationManager:
     def _precompile_select_from_array_helper(
         self,
         name: str,
-        source_paddings: List[int],
-        indices_paddings: List[int],
+        source_paddings: list[int],
+        indices_paddings: list[int],
         hidden_dim: int,
-        input_sharding: Optional[NamedSharding] = None,
-        indices_sharding: Optional[NamedSharding] = None,
+        input_sharding: NamedSharding | None = None,
+        indices_sharding: NamedSharding | None = None,
         only_equal_paddings: bool = False,
         check_should_skip_padding: bool = True,
     ) -> None:
@@ -349,16 +351,18 @@ class CompilationManager:
                 source_paddings=self.runner.num_logits_paddings,
                 indices_paddings=self.runner.num_reqs_paddings,
                 hidden_dim=vocab_size,
-                input_sharding=NamedSharding(self.runner.mesh,
-                                             PartitionSpec(None, ('model', 'expert')),
+                input_sharding=NamedSharding(
+                    self.runner.mesh, PartitionSpec(None,
+                                                    ('model', 'expert'))),
             )
             self._precompile_select_from_array_helper(
                 name="select target tokens for spec decoding",
                 source_paddings=self.runner.num_logits_paddings,
                 indices_paddings=self.runner.num_logits_paddings,
                 hidden_dim=vocab_size,
-                input_sharding=NamedSharding(self.runner.mesh,
-                                             PartitionSpec(None, ('model', 'expert')),
+                input_sharding=NamedSharding(
+                    self.runner.mesh, PartitionSpec(None,
+                                                    ('model', 'expert'))),
                 only_equal_paddings=True,
             )
 
@@ -390,7 +394,7 @@ class CompilationManager:
         for num_reqs in self.runner.num_reqs_paddings:
             logits_sharding = NamedSharding(
                 self.runner.mesh,
-                PartitionSpec(ShardingAxisName.ATTN_DATA, ('model', 'expert'))
+                PartitionSpec(ShardingAxisName.ATTN_DATA, ('model', 'expert')))
             dp_size = self.runner.vllm_config.sharding_config.total_dp_size
             sampling_metadata_sharding = NamedSharding(
                 self.runner.mesh, PartitionSpec(
@@ -479,8 +483,8 @@ class CompilationManager:
         vocab_size = self.runner.model_config.get_vocab_size()
         for num_logits in self.runner.num_logits_paddings:
             for num_reqs in self.runner.num_reqs_paddings:
-                sharding = NamedSharding(self.runner.mesh,
-                                         PartitionSpec(None, ('model', 'expert')))
+                sharding = NamedSharding(
+                    self.runner.mesh, PartitionSpec(None, ('model', 'expert')))
                 target_probs = self._create_dummy_tensor(
                     (num_logits, vocab_size), jnp.bfloat16, sharding)
                 draft_token_ids = self._create_dummy_tensor((num_logits, ),
