@@ -1,5 +1,6 @@
 import math
 from dataclasses import dataclass, field
+from typing import Optional, Tuple
 
 import jax
 from flax import nnx
@@ -17,7 +18,7 @@ class RotaryEmbedding(nnx.Module):
     rope_theta: float
     original_max_position_embeddings: int
     dtype: jnp.dtype
-    sin_cos_cache: jax.Array | None = field(init=False, default=None)
+    sin_cos_cache: Optional[jax.Array] = field(init=False, default=None)
 
     def initialize_cache(self):
         """Computes and caches the sin/cos embeddings."""
@@ -197,7 +198,7 @@ class GptOssRotaryEmbedding(nnx.Module):
     rope_ntk_alpha: float = 1.0
     rope_ntk_beta: float = 32.0
 
-    def _compute_concentration_and_inv_freq(self) -> tuple[float, jax.Array]:
+    def _compute_concentration_and_inv_freq(self) -> Tuple[float, jax.Array]:
         """
         Computes the inverse frequencies and concentration factor for YaRN.
         See YaRN paper: https://arxiv.org/abs/2309.00071
@@ -231,7 +232,7 @@ class GptOssRotaryEmbedding(nnx.Module):
         return concentration, inv_freq
 
     def _compute_cos_sin(self,
-                         positions: jax.Array) -> tuple[jax.Array, jax.Array]:
+                         positions: jax.Array) -> Tuple[jax.Array, jax.Array]:
         """Computes cosine and sine embeddings for given positions."""
         concentration, inv_freq_H = self._compute_concentration_and_inv_freq()
 
@@ -246,7 +247,7 @@ class GptOssRotaryEmbedding(nnx.Module):
         return cos, sin
 
     def __call__(self, query_TNH: jax.Array, key_TNH: jax.Array,
-                 positions: jax.Array) -> tuple[jax.Array, jax.Array]:
+                 positions: jax.Array) -> Tuple[jax.Array, jax.Array]:
         """
         Applies rotary embeddings to query and key tensors.
         Args:
