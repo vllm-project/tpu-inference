@@ -9,8 +9,10 @@ from torch.nn import Parameter
 from torch.utils import _pytree as pytree
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
-from vllm.lora.layers import (MergedColumnParallelLinearWithLoRA,
+from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
+                              MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLoRA,
+                              QKVParallelLinearWithLoRA,
                               RowParallelLinearWithLoRA)
 from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -137,9 +139,8 @@ def _shard_base_linear_lora_replicated(layer: BaseLinearLayerWithLoRA,
     layer.lora_b_stacked = sharded_lora_b_tpu
 
 
-# TODO: Add custom sharding logic for following lora layers
-def _shard_merged_column_parallel_linear_lora(
-        layer: MergedColumnParallelLinearWithLoRA, mesh: Mesh) -> None:
+def _shard_column_linear_lora(layer: ColumnParallelLinearWithLoRA,
+                              mesh: Mesh) -> None:
     assert layer.n_slices > 0, "layer.n_slices should be greater than 0"
     # lora_a_stacked[i] has shape [max_loras, 1, max_lora_rank, in_features]
     sharded_lora_a_tpu = torch.nn.ParameterList()
@@ -160,9 +161,19 @@ def _shard_merged_column_parallel_linear_lora(
     layer.lora_b_stacked = sharded_lora_b_tpu
 
 
+def _shard_qkv_linear_lora(layer: ColumnParallelLinearWithLoRA,
+                           mesh: Mesh) -> None:
+    _shard_column_linear_lora(layer, mesh)
+
+
+def _shard_merged_column_parallel_linear_lora(
+        layer: MergedColumnParallelLinearWithLoRA, mesh: Mesh) -> None:
+    _shard_column_linear_lora(layer, mesh)
+
+
 def _shard_merged_qkv_parallel_linear_lora(
         layer: MergedQKVParallelLinearWithLoRA, mesh: Mesh) -> None:
-    _shard_merged_column_parallel_linear_lora(layer, mesh)
+    _shard_column_linear_lora(layer, mesh)
 
 
 def _shard_row_parallel_linear_lora(layer: RowParallelLinearWithLoRA,
@@ -176,6 +187,8 @@ MODULE_TYPE_TO_SHARDING_FUNC = [
     (ParallelLMHead, _shard_lm_head),
     (VocabParallelEmbedding, _shard_vocab_parallel_embedding),
     # Shard LoRA layers
+    (ColumnParallelLinearWithLoRA, _shard_column_linear_lora),
+    (QKVParallelLinearWithLoRA, _shard_qkv_linear_lora),
     (MergedColumnParallelLinearWithLoRA,
      _shard_merged_column_parallel_linear_lora),
     (MergedQKVParallelLinearWithLoRA, _shard_merged_qkv_parallel_linear_lora),
