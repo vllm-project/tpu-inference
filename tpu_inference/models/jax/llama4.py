@@ -600,11 +600,11 @@ class Llama4WeightLoader:
                                 f"[AGGREGATED] Loaded shape for {buffer_key}: {aggregated_weight.shape}"
                                 f"does not match model shape for {loaded_name}: {model_weight.array.scale.value.shape}!"
                             )
-                        
+
                         model_weight.array.scale.value = shard_put(
-                                aggregated_weight,
-                                model_weight.array.scale.sharding,
-                                mesh=model_for_loading.mesh)
+                            aggregated_weight,
+                            model_weight.array.scale.sharding,
+                            mesh=model_for_loading.mesh)
 
                     elif aggregated_weight.itemsize < 2:  # check model weight elem nbits < 16
                         loaded_name = f"{base_mapped_name}.array.qvalue.value"
