@@ -134,7 +134,7 @@ def pathways_hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
     once = True 
     for array in live_arrays:
         if once: 
-            logger.info(f"Pathways Calculating HBM usage from live arrays: {array.addressable_shards} | {array.size}")
+            logger.info(f"Pathways Calculating HBM usage from live arrays: {array.addressable_shards} | {array.shape}")
 
         for i, shard in enumerate(array.addressable_shards):
             hbm_used[shard.device] += shard.data.nbytes
