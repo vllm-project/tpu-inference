@@ -1,8 +1,0 @@
-============================= test session starts ==============================
-platform linux -- Python 3.12.11, pytest-8.4.2, pluggy-1.6.0
-rootdir: /home/wenxindong_google_com/tpu-inference
-configfile: pyproject.toml
-plugins: anyio-4.10.0, mock-3.15.0, jaxtyping-0.3.2
-collected 3 items / 2 deselected / 1 selected
-
-tests/e2e/test_data_parallel.py 
