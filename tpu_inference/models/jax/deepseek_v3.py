@@ -317,7 +317,7 @@ class DeepSeekV3(nnx.Module):
         # we have to pass dynamic arrays here for __call__'s usage.
         self.rng = nnx.Rngs(rng)
         self.weight_loader.load_weights(self)
-        self.initialize_cache()
+        self.initialize_cache(self.mesh)
 
     def initialize_cache(self):
         # Initialize RoPE caches after weights are loaded and before JIT compilation.
