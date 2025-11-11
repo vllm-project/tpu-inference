@@ -148,9 +148,8 @@ def pathways_hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
         assert hasattr(array, 'sharding') and hasattr(
             array.sharding, 'device_set'
         ), "This function must not be called within jax tracer (e.g. jit, vmap, grad)"
-        for device in array.sharding.device_set:
-            hbm_used[device] += array.dtype.itemsize * array.size 
-
+        for buffer in array.device_buffers:
+                hbm_used[buffer.device] += buffer.nbytes
     return [(hbm_used[device], hbm_limit) for device in devices]
 
 
