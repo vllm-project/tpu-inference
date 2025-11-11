@@ -16,7 +16,7 @@ from jax._src.interpreters import pxla
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
 from tpu_inference.logger import init_logger
-from tpu_inference.runner.input_batch_jax import InputBatch
+from tpu_inference.runner.input_batch import InputBatch
 
 MIN_NUM_SEQS = 8
 

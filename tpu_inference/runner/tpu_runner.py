@@ -13,6 +13,7 @@ import numpy as np
 import torch
 import vllm.envs as envs
 from flax import nnx
+from jax.experimental import mesh_utils
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.ops.mappings import j2t_dtype
 from vllm.config import VllmConfig
@@ -41,7 +42,9 @@ from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
                                                       gather_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
-from tpu_inference.layers.jax.sharding import (ShardingAxisName,
+from tpu_inference.layers.jax.sharding import (MESH_AXIS_NAMES,
+                                               MESH_AXIS_NAMES_2D,
+                                               ShardingAxisName,
                                                ShardingConfigManager)
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import get_model
@@ -49,7 +52,7 @@ from tpu_inference.models.jax.utils.weight_utils import (
     shard_put, transfer_state_with_mappings)
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.compilation_manager import CompilationManager
-from tpu_inference.runner.input_batch_jax import CachedRequestState, InputBatch
+from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
 from tpu_inference.runner.kv_cache_manager import KVCacheManager
 from tpu_inference.runner.lora_utils import LoraUtils
 from tpu_inference.runner.multimodal_manager import MultiModalManager
@@ -259,32 +262,84 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.rng_key = jax.random.key(self.model_config.seed)
 
     def _init_mesh(self) -> None:
-        sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config
-        # NOTE(wenxindongwork): The new MoE kernel expects a 2D mesh, so we default
-        # to a 2D mesh for now, and we may change this in the future.
         if os.getenv("NEW_MODEL_DESIGN", False):
-            axis_names = ("data", "attn_dp", "expert", "model")
-            mesh_shape = (sharding_strategy.model_dp_size,
-                          sharding_strategy.attn_dp_size,
-                          sharding_strategy.expert_size,
-                          sharding_strategy.tp_size)
-
+            self.mesh = self._create_new_model_mesh()
         else:
-            axis_names = ("data", "model")
-            mesh_shape = (sharding_strategy.model_dp_size,
-                          sharding_strategy.tp_size)
+            # NOTE(wenxindongwork): The new MoE kernel expects a 2D mesh, so we need
+            # to create a 2D mesh for now. We should make the new_model_mesh as the default
+            # in the future.
+            self.mesh = self._create_2d_mesh()
 
-        enforce_device_order = self.vllm_config.sharding_config.device_indexes is not None and len(
-            self.vllm_config.sharding_config.device_indexes) > 0
-        if enforce_device_order:
-            self.mesh = jax.make_mesh(mesh_shape,
-                                      axis_names,
-                                      devices=self.devices)
-        else:
-            self.mesh = make_optimized_mesh(mesh_shape,
-                                            axis_names,
-                                            devices=self.devices)
         logger.info(f"Init mesh | mesh={self.mesh}")
+
+    def _create_new_model_mesh(self) -> jax.sharding.Mesh:
+        num_slices = int(os.environ.get('NUM_SLICES', 1))
+
+        logger.info(f"Creating new model mesh | devices={len(self.devices)}, "
+                    f"num_slices={num_slices}")
+
+        if num_slices == 1:
+            devices_array = self._create_single_slice_mesh()
+        else:
+            devices_array = self._create_multi_slice_mesh(num_slices)
+
+        return jax.sharding.Mesh(devices_array, MESH_AXIS_NAMES)
+
+    def _create_single_slice_mesh(self) -> jax.Array:
+        sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config
+        mesh_shape = (
+            sharding_strategy.model_dp_size,
+            sharding_strategy.attn_dp_size,
+            sharding_strategy.expert_size,
+            sharding_strategy.tp_size,
+        )
+
+        return mesh_utils.create_device_mesh(
+            mesh_shape,
+            self.devices,
+            allow_split_physical_axes=True,
+        )
+
+    def _create_multi_slice_mesh(self, num_slices: int) -> jax.Array:
+        sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config
+        dp_inner = sharding_strategy.model_dp_size // num_slices
+
+        # Splits data parallelism across multiple slices.
+        ici_mesh_shape = (
+            dp_inner,
+            sharding_strategy.attn_dp_size,
+            sharding_strategy.expert_size,
+            sharding_strategy.tp_size,
+        )
+        dcn_mesh_shape = (num_slices, 1, 1, 1)
+
+        return mesh_utils.create_hybrid_device_mesh(
+            mesh_shape=ici_mesh_shape,
+            dcn_mesh_shape=dcn_mesh_shape,
+            devices=self.devices,
+            allow_split_physical_axes=True,
+        )
+
+    def _create_2d_mesh(self) -> jax.sharding.Mesh:
+
+        sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config
+        mesh_shape = (
+            sharding_strategy.model_dp_size,
+            sharding_strategy.tp_size,
+        )
+
+        enforce_device_order = (
+            self.vllm_config.sharding_config.device_indexes is not None
+            and len(self.vllm_config.sharding_config.device_indexes) > 0)
+
+        if enforce_device_order:
+            return jax.make_mesh(mesh_shape,
+                                 MESH_AXIS_NAMES_2D,
+                                 devices=self.devices)
+        else:
+            return make_optimized_mesh(mesh_shape,
+                                       MESH_AXIS_NAMES_2D,
+                                       devices=self.devices)
 
     def _init_phased_profiling(self) -> None:
         self.phased_profiling_dir = os.getenv("PHASED_PROFILING_DIR", "")

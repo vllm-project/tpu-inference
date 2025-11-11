@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import torch
 from jax.sharding import Mesh
 
-from tpu_inference.runner.input_batch_jax import InputBatch
+from tpu_inference.runner.input_batch import InputBatch
 from tpu_inference.utils import device_array
 
 DEFAULT_SAMPLING_PARAMS = dict(

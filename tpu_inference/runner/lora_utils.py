@@ -10,7 +10,7 @@ from vllm.lora.request import LoRARequest
 from tpu_inference.layers.vllm.sharding import update_lora
 
 if TYPE_CHECKING:
-    from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
+    from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
 class LoraUtils:

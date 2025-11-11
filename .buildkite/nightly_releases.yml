@@ -1,0 +1,32 @@
+steps:
+  - label: "Publish vllm/vllm-tpu nightly image"
+    if: build.env("NIGHTLY") == "1"
+    agents:
+      queue: cpu
+    secrets:
+      - DOCKERHUB_TOKEN
+    commands:
+      - "yes | docker system prune -a"
+      - "docker build --no-cache -f docker/Dockerfile -t vllm/vllm-tpu:nightly -t vllm/vllm-tpu:nightly-$BUILDKITE_COMMIT ."
+      - "docker push vllm/vllm-tpu:nightly"
+      - "docker push vllm/vllm-tpu:nightly-$BUILDKITE_COMMIT"
+    plugins:
+      - docker-login#v3.0.0:
+          username: tpuinference
+          password-env: DOCKERHUB_TOKEN
+
+  - label: "Publish vllm/vllm-tpu nightly image for ironwood"
+    if: build.env("NIGHTLY") == "1"
+    agents:
+      queue: cpu
+    secrets:
+      - DOCKERHUB_TOKEN
+    commands:
+      - "yes | docker system prune -a"
+      - "docker build --no-cache --build-arg IS_FOR_V7X=true -f docker/Dockerfile -t vllm/vllm-tpu:nightly-ironwood -t vllm/vllm-tpu:nightly-ironwood-$BUILDKITE_COMMIT ."
+      - "docker push vllm/vllm-tpu:nightly-ironwood"
+      - "docker push vllm/vllm-tpu:nightly-ironwood-$BUILDKITE_COMMIT"
+    plugins:
+      - docker-login#v3.0.0:
+          username: tpuinference
+          password-env: DOCKERHUB_TOKEN

@@ -1,3 +1,5 @@
+import os
+
 import jax
 import jax.numpy as jnp
 import torch
@@ -5,7 +7,8 @@ import torchax
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn import Parameter
 from torch.utils import _pytree as pytree
-from torchax.interop import torch_view
+from torchax.interop import jax_view, torch_view
+from torchax.ops.mappings import t2j
 from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLoRA,
@@ -83,9 +86,16 @@ def _tensor_is_in_cpu(tensor: torch.tensor) -> bool:
 
 def _convert_to_torchax_and_shard(tensor: torch.Tensor,
                                   sharding: NamedSharding) -> torch.Tensor:
-    np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
-    dtype = TORCH_TO_JAX_DTYPE_MAP.get(tensor.dtype, jnp.float32)
-    return torch_view(jax.device_put(np_tensor, sharding).astype(dtype))
+    if os.getenv("VLLM_TPU_USE_PATHWAYS", False) and tensor is torch.Tensor:
+        np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
+        dtype = TORCH_TO_JAX_DTYPE_MAP.get(tensor.dtype, jnp.float32)
+        return torch_view(jax.device_put(np_tensor, sharding).astype(dtype))
+    else:
+        if isinstance(tensor, torchax.tensor.Tensor):
+            tensor = jax_view(tensor)
+        else:
+            tensor = t2j(tensor)
+        return torch_view(_sharded_device_put(tensor, sharding))
 
 
 def _shard_tensor_to_tpu_replicated(tensor: torch.Tensor,

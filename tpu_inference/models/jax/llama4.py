@@ -48,9 +48,6 @@ class Llama4ForCausalLM(nnx.Module):
         # TODO(fhzhang): figure out whether we need to actually enable this.
         #    strategy_dict = {"tensor_parallelism": 4, "expert_parallelism": 2}
 
-        # TODO(fhzhang): remove these once we confirm that the values we get from config are good.
-        # self.hidden_size: int = 5120
-        # vocab_size = 202048
         self.vocab_size = model_config.get_vocab_size()
         self.hidden_size = model_config.get_hidden_size()
 
@@ -118,7 +115,7 @@ class Llama4ForCausalLM(nnx.Module):
                             router_act="sigmoid",
                             rngs=self.rng,
                             activation_ffw_td=('data', None),
-                            ed_sharding=(None, 'expert'),
+                            ed_sharding=(None, None),
                             random_init=force_random_weights)
 
             moe_ffw = MoE(
@@ -132,8 +129,8 @@ class Llama4ForCausalLM(nnx.Module):
                 rngs=self.rng,
                 activation_ffw_td=('data', None),
                 activation_ffw_ted=('data', 'expert', None),
-                edf_sharding=('expert', None, 'model'),
-                efd_sharding=('expert', 'model', None),
+                edf_sharding=('model', None, None),
+                efd_sharding=('model', None, None),
                 random_init=force_random_weights) if is_moe_layer else None
 
             dense_ffw = DenseFFW(
@@ -196,6 +193,7 @@ class Llama4ForCausalLM(nnx.Module):
                 rngs=self.rng,
                 with_scale=True,
                 dtype=dtype,
+                activation_ffw_td=('data', None),
             )
 
             pre_mlp_norm = RMSNorm(
@@ -205,6 +203,7 @@ class Llama4ForCausalLM(nnx.Module):
                 with_scale=True,
                 dtype=dtype,
                 random_init=force_random_weights,
+                activation_ffw_td=('data', None),
             )
 
             block = SharedExpertsTransformerBlock(
@@ -344,8 +343,7 @@ class Llama4WeightLoader:
             "o_proj": (hidden_size, attn_heads, attn_head_dim),
         }
 
-        # Set the mappings from loaded parameter keys to standardized names.
-
+        # Set the mappings from loaded parameter keys to standardized names.\
         # 1. EXPERT_MAPPINGS_FUSED: Used for non-quantized (e.g., BF16) checkpoints.
         #    - This format typically comes from standard checkpoints where 'gate' and 'up' projection weights might be combined (FUSED) into a single tensor.
         #    - Expert weights are usually stacked, with the expert dimension (E) being the first dimension.
@@ -513,7 +511,6 @@ class Llama4WeightLoader:
                 is_scale = loaded_name.endswith(".weight_scale")
 
                 if is_unfused_expert:
-                    # if layer_num is not None:
                     mapped_name = self.map_loaded_to_standardized_name(
                         loaded_name)
                     model_weight = get_param(model_params, mapped_name)
@@ -604,19 +601,10 @@ class Llama4WeightLoader:
                                 f"does not match model shape for {loaded_name}: {model_weight.array.scale.value.shape}!"
                             )
 
-                        if buffer_key.endswith("kernel_down_proj_EFD_scale"):
-                            # The model's default sharding may incorrectly place the 'model' split on an axis that is not divisible by the mesh size (8),
-                            # so this explicitly enforces ('expert', None, 'model') to ensure correct Tensor and Expert Parallelism.
-                            correct_sharding_names = ('expert', None, 'model')
-                            model_weight.array.scale.value = shard_put(
-                                aggregated_weight,
-                                correct_sharding_names,
-                                mesh=model_for_loading.mesh)
-                        else:
-                            model_weight.array.scale.value = shard_put(
-                                aggregated_weight,
-                                model_weight.array.scale.sharding,
-                                mesh=model_for_loading.mesh)
+                        model_weight.array.scale.value = shard_put(
+                            aggregated_weight,
+                            model_weight.array.scale.sharding,
+                            mesh=model_for_loading.mesh)
 
                     elif aggregated_weight.itemsize < 2:  # check model weight elem nbits < 16
                         loaded_name = f"{base_mapped_name}.array.qvalue.value"

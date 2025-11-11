@@ -48,8 +48,7 @@ class TpuPlatform(Platform):
     ]
 
     additional_env_vars: list[str] = [
-        "JAX_RANDOM_WEIGHTS", "PHASED_PROFILING_DIR",
-        "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS",
+        "PHASED_PROFILING_DIR", "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS",
         "TPU_MULTIHOST_BACKEND", "VLLM_MLA_DISABLE", "TPU_BACKEND_TYPE"
     ]
 
@@ -185,7 +184,7 @@ class TpuPlatform(Platform):
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         parallel_config.worker_cls = \
-                        "tpu_inference.worker.tpu_worker_jax.TPUWorker"
+                        "tpu_inference.worker.tpu_worker.TPUWorker"
 
         multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "").lower()
         if not multihost_backend:  # Single host

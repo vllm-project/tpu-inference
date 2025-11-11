@@ -7,6 +7,6 @@ Feature,CorrectnessTest,PerformanceTest
 "JAX-Path Qxix Quantization",✅,✅
 "Multimodal Inputs",✅,✅
 "async scheduler",✅,✅
-"Speculative Decoding: Ngram",✅,✅
+"Speculative Decoding: Ngram",✅,❌
 "Collective Communication Matmul",✅,N/A
 "Ragged Paged Attention V3",✅,✅

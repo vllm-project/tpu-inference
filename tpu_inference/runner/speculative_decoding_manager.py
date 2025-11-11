@@ -16,7 +16,7 @@ from tpu_inference.utils import device_array
 if TYPE_CHECKING:
     from tpu_inference.layers.common.attention_metadata import \
         AttentionMetadata
-    from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
+    from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
 @dataclass
