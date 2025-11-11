@@ -207,8 +207,8 @@ class CompilationManager:
             ) if self.runner.vllm_config.sharding_config.total_dp_size > 1 else None
 
             for num_reqs in self.runner.num_reqs_paddings:
-                padded_token_in_tpu_cur_input_indices = np.zeros((num_tokens, ),
-                                                                 dtype=np.int32)
+                padded_token_in_tpu_cur_input_indices = np.zeros(
+                    (num_tokens, ), dtype=np.int32)
                 padded_token_in_tpu_pre_next_tokens_indices = np.zeros(
                     (num_tokens, ), dtype=jnp.int32)
                 (padded_token_in_tpu_cur_input_indices,
@@ -216,7 +216,7 @@ class CompilationManager:
                      self.runner.mesh,
                      (padded_token_in_tpu_cur_input_indices,
                       padded_token_in_tpu_pre_next_tokens_indices))
-                
+
                 input_ids = self._create_dummy_tensor((num_tokens, ),
                                                       jnp.int32, dp_sharding)
                 # Need align to the sampling output
