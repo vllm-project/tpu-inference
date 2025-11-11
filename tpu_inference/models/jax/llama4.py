@@ -164,7 +164,7 @@ class Llama4ForCausalLM(nnx.Module):
                 mesh=self.mesh,
                 random_init=force_random_weights,
                 activation_attention_td=('data', 'model'),
-                activation_q_td=('data', 'model'), 
+                activation_q_td=('data', 'model'),
                 query_tnh=P('data', 'model', None),
                 keyvalue_skh=P('data', 'model', None),
                 activation_attention_out_td=('data', 'model'),
