@@ -338,9 +338,6 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         assert isinstance(layer, FusedMoE)
-        if scoring_func != "softmax":
-            raise NotImplementedError(
-                "Only softmax is supported for scoring_func")
 
         if self.use_kernel and layer.use_ep:
             output = fused_ep_moe(
@@ -369,6 +366,7 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 mesh=self.mesh,
                 use_ep=layer.use_ep,
                 activation=activation,
+                scoring=scoring_func,
             )
 
         return torch_view(output)
