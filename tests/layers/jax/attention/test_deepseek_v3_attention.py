@@ -89,7 +89,7 @@ class TestMLA(unittest.TestCase):
                 request_distribution=jnp.array([0, 0, 1], dtype=jnp.int32),
             )
 
-            mla.rope.initialize_cache()
+            mla.rope.initialize_cache(self.mesh)
 
             # Run forward pass
             new_kv_cache, output = mla(x,
