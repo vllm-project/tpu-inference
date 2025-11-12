@@ -1,4 +1,5 @@
 import random
+from copy import deepcopy
 from typing import Optional
 
 import jax
@@ -12,7 +13,8 @@ from vllm.config import LoRAConfig
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
-                              LoRAMapping, MergedColumnParallelLinearWithLoRA,
+                              LogitsProcessorWithLoRA, LoRAMapping,
+                              MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLoRA,
                               QKVParallelLinearWithLoRA,
                               RowParallelLinearWithLoRA)
@@ -23,6 +25,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.utils import set_random_seed
 from vllm.platforms import current_platform
 
@@ -618,3 +622,132 @@ def _create_lora_wrapper(linear,
         lora_linear.lora_b_stacked) == n_slices)
 
     return lora_linear
+
+
+@pytest.mark.parametrize("num_loras", [1, 2, 4])
+@pytest.mark.parametrize("vocab_size", [512, 32000, 64000, 256512])
+@pytest.mark.parametrize("stage", [True, False])
+def test_lm_head_logits_processor(dist_init, num_loras, vocab_size,
+                                  stage) -> None:
+    set_random_seed(6)
+
+    max_loras = 9
+    max_lora_rank = 8
+    lora_config = LoRAConfig(
+        max_loras=max_loras,
+        max_lora_rank=max_lora_rank,
+        fully_sharded_loras=False,
+        lora_dtype=torch.bfloat16,
+    )
+    vllm_config = dist_init
+    vllm_config.lora_config = lora_config
+
+    mesh = _create_mesh()
+
+    max_num_batched_tokens = 8192
+    max_batches = 256
+    with torchax.default_env():
+        punica_wrapper = get_punica_wrapper(max_num_batched_tokens,
+                                            max_batches,
+                                            'jax',
+                                            max_loras=max_loras)
+    assert check_punica_wrapper(punica_wrapper)
+
+    def _pretest():
+        linear = ParallelLMHead(vocab_size + lora_config.lora_extra_vocab_size,
+                                1024,
+                                vocab_size,
+                                params_dtype=torch.bfloat16)
+        linear.weight.data = torch.rand_like(linear.weight.data)
+        linear.weight.data[:, vocab_size:] = 0
+
+        logits_processor = LogitsProcessor(
+            vocab_size + lora_config.lora_extra_vocab_size, vocab_size)
+        torchax_base_linear = deepcopy(linear)
+        _shard_module_to_tpu(torchax_base_linear, mesh)
+        # jax_config = JaxCommonLinearConfig(vllm_config, mesh, base_linear)
+        # linear_method = VllmUnquantizedLinearMethod(jax_config)
+        # base_linear.quant_method = linear_method
+        # linear_method.process_weights_after_loading(
+        #     base_linear)  # here base_linear.weight is moved to TPU and sharded.
+        # assert jax_view(base_linear.weight).platform(
+        # ) == 'tpu', 'base_linear.weight should have been moved to TPU.'
+        # assert not isinstance(
+        # jax_view(base_linear.weight).sharding, jax.sharding.
+        # SingleDeviceSharding), 'base_linear.weight should have been sharded.'
+        lora_logits_processor = LogitsProcessorWithLoRA(
+            logits_processor, 1024, linear.weight.dtype, linear.weight.device,
+            None)
+        with torchax.default_env():
+            lora_logits_processor.create_lora_weights(max_loras, lora_config)
+        _shard_module_to_tpu(lora_logits_processor, mesh)
+        with torchax.default_env():
+            assert jax_view(lora_logits_processor.lora_a_stacked[0]).platform(
+            ) == 'tpu', 'lora_a_stacked should have been moved to TPU.'
+            assert not isinstance(
+                jax_view(lora_logits_processor.lora_a_stacked[0]).sharding,
+                jax.sharding.SingleDeviceSharding
+            ), 'lora_a_stacked should have been sharded.'
+            assert jax_view(lora_logits_processor.lora_b_stacked[0]).platform(
+            ) == 'tpu', 'lora_b_stacked should have been moved to TPU.'
+            assert not isinstance(
+                jax_view(lora_logits_processor.lora_b_stacked[0]).sharding,
+                jax.sharding.SingleDeviceSharding
+            ), 'lora_b_stacked should have been sharded.'
+
+        return linear, torchax_base_linear, logits_processor, lora_logits_processor
+
+    index_to_id = get_random_index_to_id(num_loras, max_loras)
+    linear, torchax_base_linear, logits_processor, lora_logits_processor = _pretest(
+    )
+    lora_logits_processor.set_mapping(punica_wrapper)
+    lora_dict, _ = populate_loras(
+        index_to_id=index_to_id,
+        lora_layer=lora_logits_processor,
+        baselayer_weights=linear.weight,
+        generate_embeddings_tensor=1024,
+    )
+    embeddings_tensor = list(lora_dict.values())[0].embeddings_tensor
+    embeddings_tensor_len = embeddings_tensor.shape[0]
+    inputs, index_mapping, prompt_mapping = create_random_inputs(
+        active_lora_ids=list(lora_dict.keys()),
+        num_inputs=32,
+        input_size=(1, 64),
+        input_range=(0, 1),
+        input_type=torch.bfloat16,
+        device='cpu')
+    _update_punica_wrapper_metadata(punica_wrapper, index_mapping,
+                                    prompt_mapping, stage, index_to_id,
+                                    lora_config)
+
+    input_ = torch.rand(20, 1024)
+    with torchax.default_env():
+        torchax_inputs = _shard_and_move_inputs_to_tpu(inputs, mesh)
+        lora_result = lora_logits_processor._get_logits(
+            hidden_states=torchax_inputs,
+            lm_head=torchax_base_linear,
+            embedding_bias=None)
+
+    # original_lm_head = deepcopy(linear)
+
+    linear.weight[logits_processor.
+                  org_vocab_size:logits_processor.org_vocab_size +
+                  embeddings_tensor_len] = embeddings_tensor
+
+    logits_processor.org_vocab_size = vocab_size + lora_config.lora_extra_vocab_size
+    expected_results: list[torch.Tensor] = []
+    for input_, lora_id in zip(inputs, prompt_mapping):
+        lora = lora_dict[lora_id]
+        result = logits_processor._get_logits(hidden_states=input_,
+                                              lm_head=linear,
+                                              embedding_bias=None)
+        result[:, vocab_size + embeddings_tensor_len:] = float("-inf")
+        result += input_ @ lora.lora_a.T @ lora.lora_b.T * lora.scaling
+        expected_results.append(result)
+    expected_result = torch.cat(expected_results)
+    logits_processor.org_vocab_size = vocab_size
+    rtol, atol = TOLERANCES[lora_result.dtype]
+    torch.testing.assert_close(lora_result,
+                               expected_result,
+                               rtol=rtol,
+                               atol=atol)

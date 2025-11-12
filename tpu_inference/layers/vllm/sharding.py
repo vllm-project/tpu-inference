@@ -10,6 +10,7 @@ from torch.utils import _pytree as pytree
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
 from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
+                              LogitsProcessorWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLoRA,
                               QKVParallelLinearWithLoRA,
@@ -139,6 +140,24 @@ def _shard_base_linear_lora_replicated(layer: BaseLinearLayerWithLoRA,
     layer.lora_b_stacked = sharded_lora_b_tpu
 
 
+def _shard_vocab_lora_replicated(layer, mesh) -> None:
+    # sharded_lora_a_tpu = torch.nn.ParameterList()
+    # sharded_lora_b_tpu = torch.nn.ParameterList()
+
+    # for i in range(layer.n_slices):
+    #     sharded_lora_a_tpu.append(
+    #         _shard_tensor_to_tpu_replicated(layer.lora_a_stacked[i], mesh))
+    #     sharded_lora_b_tpu.append(
+    #         _shard_tensor_to_tpu_replicated(layer.lora_b_stacked[i], mesh))
+
+    # layer.lora_a_stacked = sharded_lora_a_tpu
+    # layer.lora_b_stacked = sharded_lora_b_tpu
+    layer.lora_a_stacked = _shard_tensor_to_tpu_replicated(
+        layer.lora_a_stacked, mesh)
+    layer.lora_b_stacked = _shard_tensor_to_tpu_replicated(
+        layer.lora_b_stacked, mesh)
+
+
 def _shard_column_linear_lora(layer: ColumnParallelLinearWithLoRA,
                               mesh: Mesh) -> None:
     assert layer.n_slices > 0, "layer.n_slices should be greater than 0"
@@ -193,6 +212,7 @@ MODULE_TYPE_TO_SHARDING_FUNC = [
      _shard_merged_column_parallel_linear_lora),
     (MergedQKVParallelLinearWithLoRA, _shard_merged_qkv_parallel_linear_lora),
     (RowParallelLinearWithLoRA, _shard_row_parallel_linear_lora),
+    (LogitsProcessorWithLoRA, _shard_vocab_lora_replicated),
 ]
 
 
