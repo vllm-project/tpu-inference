@@ -228,6 +228,17 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, stage) -> None:
         repeats, vllm_config, mesh)
     _verify_lora_linear_layer(linear, lora_linear)
 
+    # After we create the lora_config, the linear layer and the lora layer,
+    # here are the steps to do next:
+    # - create a punica wrapper.
+    # - associate the punica wrapper with the lora layer.
+    # - populate the lora matrices in the lora layer: use non-zero values for testing lora and zero values for testing the case where the layer doesn't have lora.
+    # - create inputs and lora_mapping.
+    # - update the metadata of the punica wrapper.
+    # - convert the inputs to be torchax tensors.
+    # - then run a forward on the lora layer to get the actual output.
+    # - then run a reference implementation as the expected output.
+
     # Create a punica wrapper and associate it with the lora linear layer.
     max_num_batched_tokens = 8192
     max_batches = 256

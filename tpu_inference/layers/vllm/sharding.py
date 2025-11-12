@@ -162,7 +162,6 @@ def _shard_column_linear_lora(layer: ColumnParallelLinearWithLoRA,
     layer.lora_b_stacked = sharded_lora_b_tpu
 
 
-# TODO: Add custom sharding logic for following lora layers
 def _shard_qkv_linear_lora(layer: ColumnParallelLinearWithLoRA,
                            mesh: Mesh) -> None:
     _shard_column_linear_lora(layer, mesh)
