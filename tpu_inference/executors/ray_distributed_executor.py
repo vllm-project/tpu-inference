@@ -352,7 +352,8 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
             all_kwargs.append(kwargs)
         self.collective_rpc("init_worker", args=(all_kwargs, ))
         self.collective_rpc("init_device")
-        self._run_workers("initialize_pp_transfer_connect")
+        if self.parallel_config.pipeline_parallel_size > 1:
+            self._run_workers("initialize_pp_transfer_connect")
         self.collective_rpc("load_model")
 
         if self.use_ray_spmd_worker:
