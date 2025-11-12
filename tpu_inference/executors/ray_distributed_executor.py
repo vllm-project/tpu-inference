@@ -346,12 +346,13 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         if self.use_ray_spmd_worker:
             for pp_rank in range(self.parallel_config.pipeline_parallel_size):
                 self.pp_tp_workers.append([])
+                parallel_size_per_pipeline = self.vllm_config.sharding_config.tp_size * self.vllm_config.sharding_config.expert_size
                 for tp_rank in range(
-                        int(self.parallel_config.tensor_parallel_size //
+                        int(parallel_size_per_pipeline //
                             num_tpu_per_worker)):
                     # PP=2, TP=4
                     # pp_tp_workers = [[0, 1, 2, 3], [4, 5, 6, 7]]
-                    rank = (pp_rank * self.parallel_config.tensor_parallel_size
+                    rank = (pp_rank * parallel_size_per_pipeline
                             ) + tp_rank
                     assert len(self.pp_tp_workers[pp_rank]) == tp_rank
                     assert pp_rank < len(self.pp_tp_workers)
