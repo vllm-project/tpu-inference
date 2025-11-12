@@ -63,7 +63,7 @@ class TestTPUWorker:
         assert worker.profile_dir is None
         assert worker.devices == ['tpu:0']
 
-    @patch('tpu_inference.worker.tpu_worker.envs')
+    @patch('tpu_inference.worker.tpu_worker.vllm_envs')
     def test_init_with_profiler_on_rank_zero(self, mock_envs,
                                              mock_vllm_config):
         """Tests that the profiler directory is set correctly on rank 0."""
@@ -74,7 +74,7 @@ class TestTPUWorker:
                            distributed_init_method="test_method")
         assert worker.profile_dir == "/tmp/profiles"
 
-    @patch('tpu_inference.worker.tpu_worker.envs')
+    @patch('tpu_inference.worker.tpu_worker.vllm_envs')
     def test_init_with_profiler_on_other_ranks(self, mock_envs,
                                                mock_vllm_config):
         """Tests that the profiler directory is NOT set on non-rank 0 workers."""
