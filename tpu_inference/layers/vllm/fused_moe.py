@@ -123,13 +123,14 @@ def tensor_sharded_gmm_merged_column_parallel(
     gmm_result = shard_map(
         _gmm,
         mesh=mesh,
-        in_specs=(P(ShardingAxisName.MLP_DATA, None), P(None, ShardingAxisName.EXPERT, None), P(ShardingAxisName.MLP_DATA)),
+        in_specs=(P(ShardingAxisName.MLP_DATA, None), P(None, ShardingAxisName.MLP_TENSOR, None), P(ShardingAxisName.MLP_DATA)),
         out_specs=(P(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR)),
         check_rep=False,
     )(lhs, rhs, group_sizes)
 
     if rhs_bias is not None:
         rhs_bis = jnp.repeat(rhs_bias, group_sizes, 0, total_repeat_length=m)
+        # Maybe need to add sharding constraint here
         gmm_result = (gmm_result + rhs_bis).astype(gmm_result.dtype)
 
     n_shards = mesh.shape['model'] * mesh.shape['attn_dp']
@@ -174,8 +175,9 @@ def tensor_sharded_gmm_row_parallel(
     )(lhs, rhs, group_sizes)
 
     if rhs_bias is not None:
-        print("rhs_bias is not None")
+        
         rhs_bias = jnp.repeat(rhs_bias, group_sizes, 0, total_repeat_length=m)
+        # wenxindong: Maybe need to add sharding constraint here
         gmm_result = (gmm_result + rhs_bias).astype(gmm_result.dtype)
 
     return gmm_result
@@ -193,7 +195,7 @@ def expert_sharded_gmm(
     # adapted from https://github.com/pytorch/xla/blob/1d409399474197c484894be90b75d9855393dda5/torch_xla/experimental/custom_kernel.py#L1401
     m, k, g = lhs.shape[0], lhs.shape[1], rhs.shape[0]
     n = rhs.shape[1] if transpose_rhs else rhs.shape[2]
-    tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
+    tm, tk, tn = _get_tiling_size_for_gmm_kernel(m//mesh.shape["data"], k, n, g)
 
     num_experts_per_shard = num_experts // ep_size
     group_offset = jnp.arange(0, num_experts, num_experts_per_shard)
@@ -237,8 +239,8 @@ def expert_sharded_gmm(
     gmm_res = shard_map(
         _gmm,
         mesh=mesh,
-        in_specs=(P(), P(ShardingAxisName.EXPERT, None,
-                         None), P(), P(ShardingAxisName.EXPERT)),
+        in_specs=(P(ShardingAxisName.MLP_DATA, None), P(ShardingAxisName.EXPERT, None,
+                         None), P(ShardingAxisName.MLP_DATA), P(ShardingAxisName.EXPERT)),
         out_specs=(P(ShardingAxisName.EXPERT, None)),
         check_rep=False,
     )(lhs, rhs, group_sizes, group_offset)
@@ -348,7 +350,6 @@ def fused_moe_func(
         raise NotImplementedError(
             "Bias is not supported when using expert parallelism.")
     orig_shape = hidden_states.shape
-    print(f"orig_shape: {orig_shape}")
     hidden_size = hidden_states.shape[-1]
     num_tokens = hidden_states.size // hidden_size
     assert global_num_experts == w1.shape[0]
@@ -359,7 +360,6 @@ def fused_moe_func(
     assert (num_tokens * topk) % 16 == 0, (
         "The kernel requires num_tokens * topk to be a multiple of "
         f"16 but got {num_tokens}*{topk}={num_tokens*topk}")
-
     hidden_states = jax.lax.with_sharding_constraint(
             hidden_states, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
 
@@ -375,8 +375,6 @@ def fused_moe_func(
         topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
     topk_weights = topk_weights.astype(dtype)
 
-    # Use shard_map for all sorting and gathering operations to enable parallel
-    # computation on each shard. Each shard processes its local tokens independently.
     def _process_tokens_locally(hidden_states_local, topk_indices_local):
         num_tokens_local = hidden_states_local.shape[0]
         topk_indices_flat = topk_indices_local.flatten()
@@ -443,7 +441,6 @@ def fused_moe_func(
             mesh=mesh,
         )
 
-    # Use shard_map for reordering and final reduction to process each shard locally
     def _finalize_output(x_local, topk_argsort_revert_indices_local, topk_weights_local):
         x_local = x_local[topk_argsort_revert_indices_local].reshape(-1, topk, hidden_size)
         x_local = x_local * jnp.expand_dims(topk_weights_local, axis=-1)
@@ -496,7 +493,6 @@ def fused_moe_func_padded(
     hidden_size = hidden_states.shape[-1]
     num_tokens = hidden_states.size // hidden_size
     if num_tokens * topk < 16:
-        print("num_tokens * topk < 16")
         assert 16 % (num_tokens *
                      topk) == 0, f"Cannot pad to 16: {num_tokens=}, {topk=}"
         n_repeats = 16 // (num_tokens * topk)
@@ -525,7 +521,6 @@ def fused_moe_func_padded(
         x = expanded_x[:hidden_states.shape[0]]
         return x
     else:
-        print("num_tokens * topk >= 16")
         return fused_moe_func(
             hidden_states,
             w1,
