@@ -61,7 +61,6 @@ class TestTpuRayDistributedExecutor(unittest.TestCase):
         # --- Setup mocks ---
         mock_envs.VLLM_USE_RAY_COMPILED_DAG = True
         mock_envs.VLLM_USE_RAY_SPMD_WORKER = True
-        mock_envs.VLLM_USE_V1 = True
         mock_envs.VLLM_RAY_BUNDLE_INDICES = ""
 
         mock_platform.ray_device_key = "TPU"

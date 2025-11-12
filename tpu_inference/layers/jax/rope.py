@@ -5,6 +5,8 @@ from typing import Optional, Tuple
 import jax
 from flax import nnx
 from jax import numpy as jnp
+from jax.experimental.layout import Layout, with_layout_constraint
+from jax.sharding import NamedSharding, PartitionSpec
 
 
 @dataclass(kw_only=True)
@@ -72,7 +74,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
     mscale_value: float = 1
     mscale_all_dim: float = 0
 
-    def initialize_cache(self):
+    def initialize_cache(self, mesh: jax.sharding.Mesh):
         """Computes and caches the sin/cos embeddings."""
         # The second condition is for the Qwix case, where we need to call `initialize_cache` on
         # the abstract model.  Thus, when we go to call `initialize_cache` on the concrete model,
@@ -81,9 +83,11 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         if self.sin_cos_cache is not None and not isinstance(
                 self.sin_cos_cache, jax.ShapeDtypeStruct):
             return
-        self.mscale = _yarn_get_mscale(
+        mscale_val = _yarn_get_mscale(
             self.scaling_factor, self.mscale_value) / _yarn_get_mscale(
                 self.scaling_factor, self.mscale_all_dim)
+        replicated_sharding = NamedSharding(mesh, PartitionSpec())
+        self.mscale = jax.device_put(mscale_val, replicated_sharding)
         self.sin_cos_cache = self._compute_sin_cos()
 
     def _compute_inv_freq(self):
@@ -103,6 +107,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
             1 - inv_freq_mask) + inv_freq_extrapolation * inv_freq_mask
         return inv_freq
 
+    @jax.jit
     def _compute_sin_cos(self):
         inv_freq_H = self._compute_inv_freq()
         t = jnp.arange(self.original_max_position_embeddings *
@@ -111,12 +116,20 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         freqs = jnp.einsum("...T,k->...Tk", t, inv_freq_H)
         sin, cos = jnp.sin(freqs) * self.mscale, jnp.cos(freqs) * self.mscale
         cache = jnp.concatenate((cos, sin), axis=-1)
-        return cache
+        H = cache.shape[1]
+        target_dim = ((H - 1) // 128 + 1) * 128
+        padding_amount = target_dim - self.rotary_dim
+        pad_width = ((0, 0), (0, padding_amount))
+        cache_padded = jnp.pad(cache, pad_width, mode='constant')
+        desired_layout = Layout(major_to_minor=(1, 0))
+        cache_padded = with_layout_constraint(cache_padded, desired_layout)
+        return cache_padded
 
     def apply_rope(self, positions: jax.Array, x_TNH: jax.Array):
         assert x_TNH.ndim == 3
         assert self.sin_cos_cache is not None, "RoPE cache not initialized."
-        cos_sin_TH = self.sin_cos_cache[positions]
+        cos_sin_padded = self.sin_cos_cache[positions]
+        cos_sin_TH = cos_sin_padded[:, :self.rotary_dim]
         # cos, sin: (T, H/2)
         cos_TH, sin_TH = jnp.split(cos_sin_TH, 2, axis=-1)
         assert sin_TH.ndim == 2 and cos_TH.ndim == 2
