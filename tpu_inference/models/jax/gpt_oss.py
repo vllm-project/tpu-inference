@@ -82,7 +82,7 @@ class GptOss(nnx.Module):
             hidden_size=hidden_size,
             dtype=dtype,
             rngs=self.rng,
-            vd_sharding=(('data', 'model'), None),
+            vd_sharding=P(('data', 'model'), None),
             random_init=self.random_init,
         )
 
@@ -105,9 +105,9 @@ class GptOss(nnx.Module):
                 query_tnh=P(None, 'model', None),
                 keyvalue_skh=P(None, 'model', None),
                 attn_o_tnh=P(None, 'model', None),
-                dnh_sharding=(None, 'model', None),
-                dkh_sharding=(None, 'model', None),
-                nhd_sharding=('model', None, None),
+                dnh_sharding=P(None, 'model', None),
+                dkh_sharding=P(None, 'model', None),
+                nhd_sharding=P('model', None, None),
                 mesh=self.mesh,
             )
 
@@ -120,9 +120,9 @@ class GptOss(nnx.Module):
                 dtype=dtype,
                 router_act='softmax',
                 random_init=self.random_init,
-                activation_ffw_td=('data', None),
-                ed_sharding=('model', None),
-                e_sharding=('model', ),
+                activation_ffw_td=P('data', None),
+                ed_sharding=P('model', None),
+                e_sharding=P('model'),
             )
 
             moe_mlp = GptOssMoE(
@@ -135,10 +135,10 @@ class GptOss(nnx.Module):
                 router=router,
                 swiglu_limit=swiglu_limit,
                 # Sharding configuration
-                activation_ffw_td=('data', None),
-                edf_sharding=('model', None, None),
-                efd_sharding=('model', None, None),
-                ed_sharding=('model', None),
+                activation_ffw_td=P('data', None),
+                edf_sharding=P('model', None, None),
+                efd_sharding=P('model', None, None),
+                ed_sharding=P('model', None),
             )
 
             block = TransformerBlock(
@@ -148,6 +148,7 @@ class GptOss(nnx.Module):
                     epsilon=rms_norm_eps,
                     dtype=dtype,
                     rngs=self.rng,
+                    activation_ffw_td=P('data', None),
                 ),
                 pre_mlp_norm=RMSNorm(
                     dims=hidden_size,
@@ -155,6 +156,7 @@ class GptOss(nnx.Module):
                     epsilon=rms_norm_eps,
                     dtype=dtype,
                     rngs=self.rng,
+                    activation_ffw_td=P('data', None),
                 ),
                 attn=attn,
                 custom_module=moe_mlp,
@@ -167,6 +169,7 @@ class GptOss(nnx.Module):
             random_init=self.random_init,
             epsilon=rms_norm_eps,
             dtype=dtype,
+            activation_ffw_td=P('data', None),
         )
 
         self.lm_head = LMhead(
@@ -174,8 +177,8 @@ class GptOss(nnx.Module):
             hidden_size=hidden_size,
             dtype=dtype,
             rngs=self.rng,
-            vd_sharding=(('data', 'model'), None),
-            dv_sharding=(None, ('data', 'model')),
+            vd_sharding=P(('data', 'model'), None),
+            dv_sharding=P(None, ('data', 'model')),
             random_init=self.random_init,
         )
 
