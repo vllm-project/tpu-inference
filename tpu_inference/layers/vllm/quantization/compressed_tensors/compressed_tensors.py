@@ -30,12 +30,8 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
-@register_quantization_config("jax-compressed-tensors")
+@register_quantization_config("tpu-compressed-tensors")
 class VllmCompressedTensorsConfig(CompressedTensorsConfig, JaxCommonConfig):
-
-    @classmethod
-    def get_name(cls) -> str:
-        return "jax-compressed-tensors"
 
     def get_scheme(self,
                    layer: torch.nn.Module,

@@ -34,12 +34,12 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
-@register_quantization_config("jax-unquantized")
+@register_quantization_config("tpu-unquantized")
 class VllmUnquantizedConfig(QuantizationConfig, JaxCommonConfig):
 
     @classmethod
     def get_name(cls) -> str:
-        return "jax-unquantized"
+        return "unquantized"
 
     @classmethod
     def get_supported_act_dtypes(cls) -> list[torch.dtype]:

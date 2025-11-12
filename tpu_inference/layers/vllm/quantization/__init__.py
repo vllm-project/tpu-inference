@@ -9,6 +9,7 @@ from tpu_inference.layers.vllm.quantization.awq import VllmAWQConfig
 from tpu_inference.layers.vllm.quantization.common import JaxCommonConfig
 from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors import \
     VllmCompressedTensorsConfig  # noqa: E501
+from tpu_inference.layers.vllm.quantization.mxfp4 import VllmMxfp4Config
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedConfig
 
@@ -21,6 +22,7 @@ def get_tpu_quantization_config(vllm_config: VllmConfig,
         None: VllmUnquantizedConfig,
         "compressed-tensors": VllmCompressedTensorsConfig,
         "awq": VllmAWQConfig,
+        "mxfp4": VllmMxfp4Config,
     }
     if model_config.quantization not in method_to_config:
         raise NotImplementedError(
@@ -30,6 +32,7 @@ def get_tpu_quantization_config(vllm_config: VllmConfig,
     assert issubclass(quant_config, JaxCommonConfig)
     quant_config.set_configs(vllm_config, mesh)
 
-    model_config.quantization = quant_config.get_name()
+    # TODO(kyuyeunk): Create more programmatic way to handle this.
+    model_config.quantization = "tpu-" + quant_config.get_name()
     return VllmConfig.get_quantization_config(model_config,
                                               vllm_config.load_config)
