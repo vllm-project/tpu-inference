@@ -164,8 +164,8 @@ class TPUWorker:
             device_indexes = sharding_config.device_indexes
             if device_indexes is not None and len(device_indexes) > 0:
                 # Enforcing the devices sequence to be consistent with the specified device indexes
-                all_devices = jax.local_devices()
-                device_dict = {device.id: device for device in all_devices}
+                all_local_devices = jax.local_devices()
+                device_dict = {device.id: device for device in all_local_devices}
                 self.devices = []
                 for device_index in device_indexes:
                     device = device_dict[device_index]
