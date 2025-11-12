@@ -1,12 +1,12 @@
 Feature,CorrectnessTest,PerformanceTest
-"Prefix Caching",✅,✅
 "Chunked Prefill",✅,✅
-"Structured Decoding",✅,N/A
-"Single Program Multi Data",✅,✅
-"Quantized Matmul Attention and KV Cache",✅,✅
-"JAX-Path Qxix Quantization",✅,✅
-"Multimodal Inputs",✅,✅
-"async scheduler",✅,✅
-"Speculative Decoding: Ngram",✅,❌
 "Collective Communication Matmul",✅,N/A
+"JAX-Path Qxix Quantization",N/A,❌
+"Multimodal Inputs",✅,❌
+"Prefix Caching",✅,✅
+"Quantized Matmul Attention and KV Cache",N/A,❌
 "Ragged Paged Attention V3",✅,✅
+"Single Program Multi Data",✅,✅
+"Speculative Decoding: Ngram",❌,N/A
+"Structured Decoding",❌,N/A
+"async scheduler",❌,N/A
