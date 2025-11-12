@@ -133,7 +133,7 @@ def tensor_sharded_gmm_merged_column_parallel(
         # Maybe need to add sharding constraint here
         gmm_result = (gmm_result + rhs_bis).astype(gmm_result.dtype)
 
-    n_shards = mesh.shape['model'] * mesh.shape['attn_dp']
+    n_shards = mesh.shape['model'] * mesh.shape.get('attn_dp', 1)
     output_sizes = [intermediate_size, intermediate_size]
 
     return slice_sharded_tensor_for_concatenation(gmm_result, output_sizes,
@@ -353,8 +353,7 @@ def fused_moe_func(
     hidden_size = hidden_states.shape[-1]
     num_tokens = hidden_states.size // hidden_size
     assert global_num_experts == w1.shape[0]
-    ep_size = mesh.shape['model'] * mesh.shape[
-        "attn_dp"]  # only used if use_ep is True.
+    ep_size = mesh.shape['model'] * mesh.shape.get("attn_dp", 1)  # only used if use_ep is True.
     intermediate_size = w2.shape[-1]
     dtype = hidden_states.dtype
     assert (num_tokens * topk) % 16 == 0, (
