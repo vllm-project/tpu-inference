@@ -23,6 +23,18 @@ def activation_fn(activation: str, x1, x2):
                 f"FusedMoE does not support {activation} activation")
 
 
+def scoring_fn(scoring: str, x):
+    x = x.astype(jnp.float32)
+    match scoring:
+        case "softmax":
+            return jax.nn.softmax(x, axis=-1)
+        case "sigmoid":
+            return jax.nn.sigmoid(x)
+        case _:
+            raise NotImplementedError(
+                f"FusedMoE does not support {scoring} scoring")
+
+
 def _swigluoai(x1, x2, alpha=1.702, limit=7.0):
     x1 = jnp.clip(x1, a_max=limit)
     x2 = jnp.clip(x2, a_min=-limit, a_max=limit)
@@ -334,6 +346,7 @@ def fused_moe_func(
     mesh: Mesh,
     use_ep: bool,
     activation: str,
+    scoring: str,
 ):
     """
     Args:
@@ -360,7 +373,7 @@ def fused_moe_func(
     hidden_states = hidden_states.reshape(num_tokens, hidden_size)
     gating_output = gating_output.reshape(num_tokens, global_num_experts)
 
-    topk_weights = jax.nn.softmax(gating_output.astype(jnp.float32), axis=-1)
+    topk_weights = scoring_fn(scoring, gating_output)
     topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
@@ -441,6 +454,7 @@ def fused_moe_func(
         "mesh",
         "use_ep",
         "activation",
+        "scoring",
     ),
 )
 def fused_moe_func_padded(
@@ -457,6 +471,7 @@ def fused_moe_func_padded(
     mesh: Mesh,
     use_ep: bool,
     activation: str,
+    scoring: str,
 ):
     # TODO(fanhongmin@google.com): Once the jax runner pads the input, we no longer need this.
     hidden_size = hidden_states.shape[-1]
@@ -486,6 +501,7 @@ def fused_moe_func_padded(
             mesh,
             use_ep,
             activation,
+            scoring,
         )
         x = expanded_x[:hidden_states.shape[0]]
         return x
@@ -504,4 +520,5 @@ def fused_moe_func_padded(
             mesh,
             use_ep,
             activation,
+            scoring,
         )
