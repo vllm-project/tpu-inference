@@ -34,7 +34,14 @@ HAZARD_MAPPING = {
 
 
 def load_ailuminate_dataset(file_path):
-    df = pd.read_csv(file_path)
+    print("Attempting to load data from the following path: ", file_path)
+
+    try:
+        df = pd.read_csv(file_path)
+    except Exception as e:
+        print(f"Error loading dataset from {file_path}: {e}")
+        # Re-raise the error to stop the script if the data can't be loaded
+        raise
 
     test_cases = []
     for _, row in df.iterrows():
@@ -76,10 +83,10 @@ def create_parser():
     parser.set_defaults(max_model_len=4096)
     parser.set_defaults(
         hf_overrides='{"architectures": ["Llama4ForConditionalGeneration"]}')
-    # parser.add_argument("--chat-template",
-    #                     type=str,
-    #                     required=True,
-    #                     help="Path to the chat template for Llama Guard 4.")
+    parser.add_argument("--dataset-path",
+                        type=str,
+                        required=True,
+                        help="Path to the AILuminate CSV file (can be local path or gs:// URI).")
 
     # Add sampling params
     sampling_group = parser.add_argument_group("Sampling parameters")
@@ -97,6 +104,7 @@ def main(args: dict):
     temperature = args.pop("temperature")
     top_p = args.pop("top_p")
     top_k = args.pop("top_k")
+    dataset_path = args.pop("dataset_path")
    
     # Define conversations and their expected outputs to test the guard model.
     # These include both safe and unsafe prompts based on the model card.
@@ -140,8 +148,9 @@ def main(args: dict):
 
 
     # Define conversations and their expected outputs
+    # "/mnt/disks/jiries-disk_data/ailuminate/airr_official_1.0_demo_en_us_prompt_set_release.csv"
     test_cases = load_ailuminate_dataset(
-        "/mnt/disks/jiries-disk_data/ailuminate/airr_official_1.0_demo_en_us_prompt_set_release.csv"
+        dataset_path
     )
 
     # Create an LLM
