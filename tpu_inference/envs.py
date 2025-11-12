@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     JAX_PLATFORMS: str = ""
-    JAX_RANDOM_WEIGHTS: bool = False
     TPU_ACCELERATOR_TYPE: str | None = None
     TPU_NAME: str | None = None
     TPU_WORKER_ID: str | None = None
@@ -28,9 +27,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # JAX platform selection (e.g., "tpu", "cpu", "proxy")
     "JAX_PLATFORMS":
     lambda: os.getenv("JAX_PLATFORMS", ""),
-    # Initialize model weights randomly instead of loading from checkpoint
-    "JAX_RANDOM_WEIGHTS":
-    lambda: bool(int(os.getenv("JAX_RANDOM_WEIGHTS", "0"))),
     # TPU accelerator type (e.g., "v5litepod-16", "v4-8")
     "TPU_ACCELERATOR_TYPE":
     lambda: os.getenv("TPU_ACCELERATOR_TYPE", None),
