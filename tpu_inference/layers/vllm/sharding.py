@@ -84,7 +84,8 @@ def _tensor_is_in_cpu(tensor: torch.tensor) -> bool:
 
 def _convert_to_torchax_and_shard(tensor: torch.Tensor,
                                   sharding: NamedSharding) -> torch.Tensor:
-    if os.getenv("VLLM_TPU_USING_PATHWAYS", False) and tensor is torch.Tensor:
+    if os.getenv("VLLM_TPU_USING_PATHWAYS", False) and isinstance(
+            tensor, torch.Tensor):
         np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
         dtype = TORCH_TO_JAX_DTYPE_MAP.get(tensor.dtype, jnp.float32)
         return torch_view(jax.device_put(np_tensor, sharding).astype(dtype))
