@@ -148,7 +148,7 @@ def _get_nnx_model(
                                                 mesh,
                                                 apply_to_abstract_model=False)
             if hasattr(jit_model, 'initialize_cache'):
-                jit_model.initialize_cache()
+                jit_model.initialize_cache(mesh)
     else:
         # We first create an abstract model without allocating any weights,
         # then fill in its weigths during load_weights from HF.
@@ -199,7 +199,7 @@ def get_flax_model(
             vllm_config.model_config.hf_config)
     jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
     kv_cache_sharding = NamedSharding(
-        mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None, "model"))
+        mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None, ("model", "expert")))
     hidden_states_sharding = NamedSharding(mesh,
                                            PartitionSpec(
                                                ShardingAxisName.ATTN_DATA,
@@ -224,7 +224,7 @@ def get_flax_model(
         return model(*args)
 
     logits_sharding = NamedSharding(
-        mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, "model"))
+        mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ("model", "expert")))
 
     @functools.partial(
         jax.jit,
