@@ -193,7 +193,7 @@ def _fused_ep_moe_kernel(
         pltpu.semaphore_wait(barrier_sem, 1)
 
     def start_fetch_b_gating(bt_id, priority=0):
-        is_valid = jnp.logical_and(0 <= bt_id, bt_id < num_bt)
+        is_valid = jnp.logical_and(bt_id >= 0, bt_id < num_bt)
         sz = pl.multiple_of(lax.select(is_valid, bt, 0), bt)
         bt_sem_id = (bt_id + 2) % 2
         b_gating_sem = local_sems.at[bt_sem_id, 0]
@@ -416,7 +416,7 @@ def _fused_ep_moe_kernel(
         sz = expert_sizes_x2_smem[bt_sem_id, 0, my_e_id]
         local_sz = d2e_count_x2_smem[bt_sem_id, my_id, 0, my_e_id]
         remote_sz = sz - local_sz
-        is_valid = jnp.logical_and(0 <= local_e_id, local_e_id
+        is_valid = jnp.logical_and(local_e_id >= 0, local_e_id
                                    < local_num_experts)
         remote_sz = lax.select(is_valid, remote_sz, 0)
         pltpu.make_async_copy(
@@ -735,7 +735,7 @@ def _fused_ep_moe_kernel(
         ).start(priority=priority)
 
     def wait_send_bo(bt_id):
-        is_valid = jnp.logical_and(0 <= bt_id, bt_id < num_bt)
+        is_valid = jnp.logical_and(bt_id >= 0, bt_id < num_bt)
         sz = pl.multiple_of(lax.select(is_valid, bt, 0), bt)
         bt_sem_id = (bt_id + 2) % 2
         b_output_sem = local_sems.at[bt_sem_id, 4]

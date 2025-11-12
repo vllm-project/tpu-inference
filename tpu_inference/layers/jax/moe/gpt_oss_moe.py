@@ -4,8 +4,10 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from flax.typing import Sharding
+from jax.sharding import Mesh
 from jaxtyping import Float
 
+from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.layers.jax.moe.moe import Router
@@ -46,13 +48,7 @@ class GptOssRouter(Router):
 
         router_logits_TE += self.bias_E.value
 
-        weights_TX, selected_experts_TX = jax.lax.top_k(
-            router_logits_TE, self.num_experts_per_tok)
-
-        normalized_weights_TX = jax.nn.softmax(weights_TX.astype(self.dtype),
-                                               axis=-1)
-
-        return normalized_weights_TX, selected_experts_TX
+        return router_logits_TE
 
 
 def _swiglu(x: Float, alpha: Float, limit: Float) -> Float:
@@ -90,37 +86,44 @@ class GptOssMoE(nnx.Module):
 
     random_init: bool = False
 
+    mesh: Mesh
+
     def __call__(self, x_TD: Float) -> Float:
         """Performs the forward pass for the GPT-OSS MoE layer."""
         x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
 
-        weights_TX, indices_TX = self.router(x_TD)
+        router_logits_TE = self.router(x_TD)
 
-        # First MLP layer (up-projection)
-        with jax.named_scope("MLP #1"):
-            up_proj_TEF2 = jnp.einsum('TD,EDF -> TEF', x_TD,
-                                      self.mlp1_weight_EDF2.value)
-            up_proj_TEF2 += self.mlp1_bias_EF2.value
-
-            fuse_TEF = _swiglu(up_proj_TEF2,
-                               alpha=self.swiglu_alpha,
-                               limit=self.swiglu_limit)
-
-        # Second MLP layer (down-projection)
-        with jax.named_scope("MLP #2"):
-            down_proj_TED = jnp.einsum('TEF,EFD -> TED', fuse_TEF,
-                                       self.mlp2_weight_EFD.value)
-            down_proj_TED += self.mlp2_bias_ED.value
-
-        # Weighted sum of expert outputs
-        with jax.named_scope("sum"):
-            indices_for_gather = indices_TX[..., None]
-            gathered_down_proj_TED = jnp.take_along_axis(down_proj_TED,
-                                                         indices_for_gather,
-                                                         axis=1)
-            output_TD = jnp.einsum('TXD,TX -> TD', gathered_down_proj_TED,
-                                   weights_TX)
+        block_size = {
+            "bt": 32,
+            "bf": 512,
+            "bd1": 512,
+            "bd2": 512,
+            "btc": 32,
+            "bfc": 256,
+            "bd1c": 256,
+            "bd2c": 256,
+        }
+        ep_axis_name = self.efd_sharding[0]
+        # TODO: Currently, we must reshape the tensors to fit the MoE kernel's
+        # required shape. We will eliminate this step and load the tensors in
+        # their desired final shape once the weight loading process(with fp4 
+        # support) is finalized.
+        mlp1_weight_E2DF = jnp.swapaxes(
+            jnp.reshape(self.mlp1_weight_EDF2.value,
+                        (self.num_local_experts, self.hidden_size, 2,
+                         self.intermediate_size_moe)), 1, 2)
+        output_TD = fused_ep_moe(
+            mesh=self.mesh,
+            tokens=x_TD,
+            w1=mlp1_weight_E2DF,
+            w2=self.mlp2_weight_EFD.value,
+            gating_output=router_logits_TE,
+            top_k=self.router.num_experts_per_tok,
+            ep_axis_name=ep_axis_name,
+            **block_size,
+        )
 
         return output_TD.astype(self.dtype)
 
