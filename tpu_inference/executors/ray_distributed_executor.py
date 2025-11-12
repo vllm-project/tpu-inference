@@ -97,7 +97,6 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         self.input_encoder = msgspec.msgpack.Encoder(enc_hook=_encode_hook)
         self.output_decoder = msgspec.msgpack.Decoder(
             Optional[List[SamplerOutput]])
-        self.use_v1 = envs.VLLM_USE_V1
 
         self.pp_locks: Optional[List[asyncio.Lock]] = None
 

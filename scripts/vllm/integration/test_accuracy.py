@@ -70,9 +70,7 @@ def test_lm_eval_accuracy_v1_engine(monkeypatch: pytest.MonkeyPatch,
     elif tp_size < 1 or tp_size > 8:
         raise ValueError
 
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-
+    with monkeypatch.context() as _:
         more_args = None
         if current_platform.is_tpu():
             more_args = "max_model_len=2048,max_num_seqs=64"
@@ -104,9 +102,7 @@ def test_lm_eval_accuracy_v1_engine_fp8_kv_cache(
     elif tp_size < 1 or tp_size > 8:
         raise ValueError
 
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-
+    with monkeypatch.context() as _:
         more_args = None
         if current_platform.is_tpu():
             more_args = "max_model_len=2048,max_num_seqs=128,kv_cache_dtype=fp8"
