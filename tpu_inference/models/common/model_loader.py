@@ -1,5 +1,4 @@
 import functools
-import os
 from typing import Any, Optional
 
 import jax
@@ -11,6 +10,7 @@ from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 from vllm.utils.func_utils import supports_kw
 
+from tpu_inference import envs
 from tpu_inference.layers.jax.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.quantization.quantization_utils import (
@@ -316,7 +316,7 @@ def get_model(
     mesh: Mesh,
     is_draft_model: bool = False,
 ) -> Any:
-    impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
+    impl = envs.MODEL_IMPL_TYPE
     logger.info(f"Loading model with MODEL_IMPL_TYPE={impl}")
 
     if impl == "flax_nnx":

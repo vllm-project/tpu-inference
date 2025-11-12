@@ -324,7 +324,7 @@ class DeepSeekV3(nnx.Module):
         for layer in self.layers:
             if hasattr(layer, 'attn') and hasattr(layer.attn, 'rope'):
                 if hasattr(layer.attn.rope, 'initialize_cache'):
-                    layer.attn.rope.initialize_cache()
+                    layer.attn.rope.initialize_cache(self.mesh)
 
     def __call__(
         self,

@@ -1,4 +1,3 @@
-import os
 from typing import Any, Callable, Optional, Union
 
 import jax
@@ -22,6 +21,7 @@ from vllm.model_executor.layers.quantization import \
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 
+from tpu_inference import envs
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
 from tpu_inference.layers.vllm.fused_moe import fused_moe_func_padded
 from tpu_inference.layers.vllm.linear_common import (
@@ -164,7 +164,7 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                  ep_axis_name: str = 'model'):
         super().__init__(moe)
         self.mesh = mesh
-        self.use_kernel = bool(int(os.getenv("USE_MOE_EP_KERNEL", "0")))
+        self.use_kernel = envs.USE_MOE_EP_KERNEL
         self.ep_axis_name = ep_axis_name
         # TODO: Use autotune table once we have it.
         self.block_size = {
