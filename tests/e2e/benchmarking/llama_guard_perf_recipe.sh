@@ -69,12 +69,12 @@ echo "Using GCS dataset at: $GCS_DATASET_URI"
 # --- 2. SPIN UP VLLM SERVER ---
 echo "Spinning up the vLLM server for $MODEL_NAME (TP=$TP_SIZE)..."
 # Using the standard model load command. I used to have SKIP_JAX_PRECOMPILE=1 in the following command
-(MODEL_IMPL_TYPE=vllm vllm serve "$MODEL_NAME" \
+(vllm serve "$MODEL_NAME" \
     --tensor-parallel-size "$TP_SIZE" \
     --dtype bfloat16 \
     --max-model-len "$MAX_MODEL_LEN" \
     --max-num-batched-tokens 3072 \
-    --hf-overrides '{"architectures": ["Llama4ForConditionalGeneration"]}' \
+    --hf-overrides '{"architectures": ["LlamaForCausalLM"]}' \
     2>&1 | tee -a "$LOG_FILE") &
 
 # Wait loop
