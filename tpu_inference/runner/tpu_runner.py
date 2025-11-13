@@ -1315,10 +1315,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         seq_lens_cpu = seq_lens
 
         (input_ids, positions, block_tables, query_start_loc, seq_lens,
-         logits_indices, request_distribution, logits_indices) = device_array(
+         logits_indices, request_distribution) = device_array(
              self.mesh,
              (input_ids, positions, block_tables, query_start_loc, seq_lens,
-              logits_indices, request_distribution, logits_indices),
+              logits_indices, request_distribution),
              sharding=data_parallel_attn_sharding,
          )
         # Async scheduling: substitute placeholder tokens for DP
