@@ -968,12 +968,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             pooler_output=[],
             kv_connector_output=kv_connector_output,
         )
-        logger.info(f'{req_ids=}')
-        logger.info(f'{model_runner_output.req_id_to_index=}')
-        logger.info(f'{model_runner_output.sampled_token_ids=}')
-        logger.info(f'{model_runner_output.logprobs=}')
-        logger.info(f'{model_runner_output.prompt_logprobs_dict=}')
-        logger.info(f'{model_runner_output.kv_connector_output=}')
         return model_runner_output
 
     @functools.partial(jax.jit, static_argnums=(0, ))
