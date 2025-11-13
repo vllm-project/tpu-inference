@@ -1553,7 +1553,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         seq_lens_cpu = seq_lens
         
         
-        
+        logger.info(f"{self.devices=}")
+        logger.info(f"{jax.local_devices()=}")
         input_tuple_single_device = jax.device_put(
             (input_ids, positions, block_tables, query_start_loc, seq_lens,
              logits_indices, request_distribution),
