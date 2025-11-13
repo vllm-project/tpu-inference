@@ -89,6 +89,10 @@ docker builder prune -f
 
 echo "Cleanup complete."
 
+echo "Installing Python dependencies"
+python3 -m pip install --progress-bar off buildkite-test-collector==0.1.9
+echo "Python dependencies installed"
+
 IMAGE_NAME="vllm-tpu"
 docker build --no-cache -f docker/Dockerfile -t "${IMAGE_NAME}:${BUILDKITE_COMMIT}" .
 
