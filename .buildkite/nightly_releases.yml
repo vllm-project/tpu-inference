@@ -1,3 +1,7 @@
+notify:
+  - email: "ullm-oncall@rotations.google.com"
+    if: build.state == "failed"
+
 steps:
   - label: "Publish vllm/vllm-tpu nightly image"
     if: build.env("NIGHTLY") == "1"
