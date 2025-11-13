@@ -134,6 +134,9 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
         w2_weight = dequantize_block_weight(w2_weight, w2_weight_scale,
                                             MXFP4_BLOCK_SIZE, jnp.bfloat16)
 
+        w13_weight = w13_weight.astype(jnp.float8_e4m3fn)
+        w2_weight = w2_weight.astype(jnp.float8_e4m3fn)
+
         # Because we have dequantized weights, scales are not used anymore.
         delattr(layer, "w13_weight_scale")
         delattr(layer, "w2_weight_scale")
