@@ -1551,10 +1551,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         query_start_loc_cpu = query_start_loc
         seq_lens_cpu = seq_lens
+        
+        
+        
+        input_tuple_single_device = jax.device_put(
+            (input_ids, positions, block_tables, query_start_loc, seq_lens,
+             logits_indices, request_distribution),
+            device=self.devices[0],
+        )
         (input_ids, positions, block_tables, query_start_loc, seq_lens,
          logits_indices, request_distribution) = device_array(
-             self.mesh, (input_ids, positions, block_tables, query_start_loc,
-                         seq_lens, logits_indices, request_distribution))
+             self.mesh, input_tuple_single_device)
 
         if self.scheduler_config.async_scheduling and len(
                 token_in_tpu_cur_input_indices) > 0:
