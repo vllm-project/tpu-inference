@@ -1557,7 +1557,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         input_tuple_single_device = jax.device_put(
             (input_ids, positions, block_tables, query_start_loc, seq_lens,
              logits_indices, request_distribution),
-            device=self.devices[0],
+            device=jax.local_devices()[0],
         )
         (input_ids, positions, block_tables, query_start_loc, seq_lens,
          logits_indices, request_distribution) = device_array(
