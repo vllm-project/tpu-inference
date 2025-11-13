@@ -3,7 +3,7 @@ x-run-condition: &run-on-nightly-or-tag
 
 notify:
   - email: "ullm-oncall@rotations.google.com"
-    if: build.state == "failed" && build.branch == "main"
+    if: build.state == "failed"
 
 steps:
    - label: "Upload Tests for Models & Features"
