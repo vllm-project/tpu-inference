@@ -2,10 +2,10 @@ import functools
 
 import jax
 from jax import numpy as jnp
-from jax.experimental.pallas.ops.tpu.megablox.gmm import gmm
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
+from tpu_inference.kernels.megablox.gmm import gmm
 from tpu_inference.layers.vllm.linear_common import \
     slice_sharded_tensor_for_concatenation
 
