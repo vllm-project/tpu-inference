@@ -1350,11 +1350,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         logits_indices_cpu = logits_indices
         seq_lens_cpu = seq_lens
 
-        (input_ids, positions, block_tables, query_start_loc, seq_lens,
-         logits_indices, request_distribution, logits_indices) = device_array(
+        # First, put arrays on a single device.
+        # JAX will then handle efficient device-to-device transfer.
+        input_tuple_single_device = jax.device_put(
+            (input_ids, positions, block_tables, query_start_loc, seq_lens,
+             logits_indices, request_distribution),
+            device=self.devices[0],
+        )
+
+        # Then, distribute from that single device to all devices in the mesh.
+        (input_ids, positions, block_tables, query_start_loc, seq_lens, logits_indices,
+         request_distribution) = device_array(
              self.mesh,
-             (input_ids, positions, block_tables, query_start_loc, seq_lens,
-              logits_indices, request_distribution, logits_indices),
+             input_tuple_single_device,
              sharding=data_parallel_attn_sharding,
          )
         # Async scheduling: substitute placeholder tokens for DP
