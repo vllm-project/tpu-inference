@@ -266,3 +266,7 @@ class TpuPlatform(Platform):
         Returns if the current platform needs to sync weight loader.
         """
         return True
+
+    @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
+        return True
