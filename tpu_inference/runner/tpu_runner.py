@@ -1544,10 +1544,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         
         
         (input_ids, positions, block_tables, query_start_loc, seq_lens,
-         logits_indices, request_distribution) = device_array(
-             self.mesh, (input_ids, positions, block_tables, query_start_loc, seq_lens,
+         logits_indices, request_distribution) = jax.make_array_from_process_local_data(
+             NamedSharding(self.mesh, PartitionSpec(None)), 
+             (input_ids, positions, block_tables, query_start_loc, seq_lens,
              logits_indices, request_distribution))
-
+        
         if self.scheduler_config.async_scheduling and len(
                 token_in_tpu_cur_input_indices) > 0:
             assert self._pre_async_results is not None
