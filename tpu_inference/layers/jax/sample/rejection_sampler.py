@@ -12,7 +12,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tpu_inference.layers.jax.binary_search import topk_mask, topp_mask
+from tpu_inference.layers.common.binary_search import topk_mask, topp_mask
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 
