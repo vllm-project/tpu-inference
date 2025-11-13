@@ -132,8 +132,8 @@ def pathways_hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
     hbm_used = defaultdict(int)
     hbm_limit = get_device_hbm_limit()
     for array in live_arrays:
-        for buffer in array.device_buffers:
-            hbm_used[buffer.device] += buffer.nbytes
+        for buffer in array.addressable_shards:
+            hbm_used[buffer.data.device] += buffer.data.nbytes
     return [(hbm_used[device], hbm_limit) for device in devices]
 
 
