@@ -121,6 +121,7 @@ class ShardingConfigManager:
         if enable_dp_attention:
             # Replicate attention layer when num_kv_heads < TP
             num_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
+            
             kv_dtype = utils.get_jax_dtype_from_str_dtype(
                 vllm_config.cache_config.cache_dtype) or jnp.bfloat16
             packing = 4 // jnp.dtype(kv_dtype).itemsize
@@ -128,6 +129,11 @@ class ShardingConfigManager:
             # duplicate KV heads across devices, wasting kv cache memory.
             # Use attention DP instead to reduce per-device num_kv_heads and
             # eliminate this waste.
+
+            # if head_dim is 64, multiply packing by 2
+            if vllm_config.model_config.get_head_size() == 64:
+                packing *= 2
+                
             num_kv_heads_per_device_in_kv_cache = (num_kv_heads * 2) / packing
             attn_dp = max(
                 int(tensor_parallelism // num_kv_heads_per_device_in_kv_cache),
