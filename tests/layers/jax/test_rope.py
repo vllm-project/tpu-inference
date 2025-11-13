@@ -1,5 +1,7 @@
+import jax
 from jax import numpy as jnp
 from jax._src import test_util as jtu
+from jax.sharding import Mesh
 
 from tpu_inference.layers.jax.rope import (DeepseekScalingRotaryEmbedding,
                                            RotaryEmbedding)
@@ -42,20 +44,29 @@ class DeepseekScalingRotaryEmbeddingTest(jtu.JaxTestCase):
         rope_theta = 10000
         original_max_position_embeddings = 1
         scaling_factor = 2
+        devices = jax.devices()
+        mesh = Mesh(devices, ('data', ))
+
         rope = DeepseekScalingRotaryEmbedding(
             rotary_dim=head_dim,
             rope_theta=rope_theta,
             original_max_position_embeddings=original_max_position_embeddings,
             scaling_factor=scaling_factor,
             dtype=jnp.float32)
-        rope.initialize_cache()
+        rope.initialize_cache(mesh)
+        expected_padded_dim = 128
         self.assertTrue(
             rope.sin_cos_cache.shape == (scaling_factor *
                                          original_max_position_embeddings,
-                                         head_dim))
+                                         expected_padded_dim))
+
+        valid_cache_slice = rope.sin_cos_cache[:, :head_dim]
+
         expected_sin_cos = jnp.array([[1.0693147, 0], [0.5777532, 0.8997973]],
                                      dtype=jnp.float32)
-        self.assertArraysAllClose(rope.sin_cos_cache, expected_sin_cos)
+
+        self.assertArraysAllClose(valid_cache_slice, expected_sin_cos)
+
         num_tokens = 2
         num_heads = 1
         positions = jnp.arange(num_tokens)
