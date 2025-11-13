@@ -7,8 +7,6 @@ MODEL_NAME="${TEST_MODEL:-meta-llama/Llama-Guard-4-12B}"
 TP_SIZE="${TENSOR_PARALLEL_SIZE:-8}"
 
 # Paths and Files
-# --- CRITICAL CHANGE: Point directly to the final JSONL file in GCS ---
-# This GCS path is now the *dataset-path* argument for vllm bench serve
 GCS_DATASET_URI="gs://jiries/datasets/ailuminate/airr_official_1.0_demo_en_us_prompt_set_release.jsonl" 
 
 LOG_FILE="server.log"
@@ -20,7 +18,7 @@ NUM_PROMPTS=500 # Use a large subset of the dataset for stable metrics
 # Llama Guard generates a short, deterministic output (e.g., "unsafe\nS4")
 OUTPUT_LEN_OVERRIDE=20 
 # Target for checking minimum acceptable performance (You must measure this!)
-TARGET_THROUGHPUT="40.00" #NOTE: Setting low intentionally to see the test pass first.  
+TARGET_THROUGHPUT="450.00" 
 
 backend="vllm"
 
@@ -68,7 +66,7 @@ echo "Using GCS dataset at: $GCS_DATASET_URI"
 
 # --- 2. SPIN UP VLLM SERVER ---
 echo "Spinning up the vLLM server for $MODEL_NAME (TP=$TP_SIZE)..."
-# Using the standard model load command. I used to have SKIP_JAX_PRECOMPILE=1 in the following command
+# Using the standard model load command.
 (vllm serve "$MODEL_NAME" \
     --tensor-parallel-size "$TP_SIZE" \
     --dtype bfloat16 \
@@ -85,7 +83,7 @@ while ! grep -q "$READY_MESSAGE" "$LOG_FILE" ; do
     elapsed_time=$((current_time - start_time))
 
     if [[ "$elapsed_time" -ge "$TIMEOUT_SECONDS" ]]; then
-        echo "TIMEOUT: Server did not start within $TIMEOUT_SECONDS seconds."
+        echo "TIMEOUT: Server did not start within $TIMEOUT_SECONDS seconds."`
         exit 1
     fi
     sleep 5
