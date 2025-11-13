@@ -360,10 +360,10 @@ def fused_moe_func(
         "The kernel requires num_tokens * topk to be a multiple of "
         f"16 but got {num_tokens}*{topk}={num_tokens*topk}")
     hidden_states = jax.lax.with_sharding_constraint(
-            hidden_states, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
+            hidden_states, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
 
     gating_output = jax.lax.with_sharding_constraint(
-            gating_output, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
+            gating_output, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
     
     hidden_states = hidden_states.reshape(num_tokens, hidden_size)
     gating_output = gating_output.reshape(num_tokens, global_num_experts)
@@ -389,8 +389,8 @@ def fused_moe_func(
     x, group_sizes, topk_argsort_revert_indices = shard_map(
         _process_tokens_locally,
         mesh=mesh,
-        in_specs=(P(ShardingAxisName.MLP_DATA, None), P(ShardingAxisName.MLP_DATA, None)),
-        out_specs=(P(ShardingAxisName.MLP_DATA, None), P(), P(ShardingAxisName.MLP_DATA)),
+        in_specs=(P(ShardingAxisName.ATTN_DATA, None), P(ShardingAxisName.ATTN_DATA, None)),
+        out_specs=(P(ShardingAxisName.ATTN_DATA, None), P(), P(ShardingAxisName.ATTN_DATA)),
         check_rep=False,
     )(hidden_states, topk_indices)
 
@@ -449,15 +449,15 @@ def fused_moe_func(
     x = shard_map(
         _finalize_output,
         mesh=mesh,
-        in_specs=(P(ShardingAxisName.MLP_DATA, None), P(ShardingAxisName.MLP_DATA), P(ShardingAxisName.MLP_DATA, None)),
-        out_specs=(P(ShardingAxisName.MLP_DATA, None)),
+        in_specs=(P(ShardingAxisName.ATTN_DATA, None), P(ShardingAxisName.ATTN_DATA), P(ShardingAxisName.ATTN_DATA, None)),
+        out_specs=(P(ShardingAxisName.ATTN_DATA, None)),
         check_rep=False,
     )(x, topk_argsort_revert_indices, topk_weights)
     
     x = x.reshape(orig_shape)
 
     if reduce_results:
-        x = jax.lax.with_sharding_constraint(x, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA)))
+        x = jax.lax.with_sharding_constraint(x, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA)))
     return x
 
 
