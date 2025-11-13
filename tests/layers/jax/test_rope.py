@@ -1,7 +1,7 @@
 import jax
 from jax import numpy as jnp
 from jax._src import test_util as jtu
-from jax.sharding import Mesh, PartitionSpec, NamedSharding
+from jax.sharding import Mesh
 
 from tpu_inference.layers.jax.rope import (DeepseekScalingRotaryEmbedding,
                                            RotaryEmbedding)
