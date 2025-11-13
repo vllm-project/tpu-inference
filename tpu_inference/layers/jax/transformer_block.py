@@ -88,7 +88,6 @@ class SharedExpertsTransformerBlock(TransformerBlock):
 
         if isinstance(self.custom_module, DenseFFW):
             dense_layer = self.custom_module
-            logits_TD = self.custom_module(normed_ffw_input_TD)
         else:
             dense_layer = self.dense_ffw
 
