@@ -1357,6 +1357,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
              logits_indices, request_distribution),
             device=self.devices[0],
         )
+        
+        logger.info(f'{input_tuple_single_device=}')
 
         # Then, distribute from that single device to all devices in the mesh.
         (input_ids, positions, block_tables, query_start_loc, seq_lens, logits_indices,
