@@ -141,6 +141,8 @@ def _get_nnx_model(
 
         with mesh:
             jit_model = create_sharded_model()
+            if hasattr(jit_model, 'prepare_moe_for_inference') and bool(int(os.getenv("USE_MOE_EP_KERNEL", "0"))):
+                jit_model.prepare_moe_for_inference(padded_dim=3072)
             # In this case, we are applying Qwix quantization to the true, concrete model
             jit_model = apply_qwix_quantization(vllm_config,
                                                 jit_model,

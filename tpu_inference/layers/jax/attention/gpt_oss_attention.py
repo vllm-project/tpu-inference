@@ -178,7 +178,7 @@ class GptOssAttention(nnx.Module):
             return ragged_paged_attention_hd64(
                 *args,
                 sm_scale=self.sm_scale,
-                sliding_window=md.sliding_window,
+                sliding_window=None,
                 q_scale=q_scale,
                 k_scale=k_scale,
                 v_scale=v_scale,

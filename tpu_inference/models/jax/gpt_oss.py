@@ -1,3 +1,4 @@
+import os
 import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
@@ -121,6 +122,7 @@ class GptOss(nnx.Module):
                 activation_ffw_td=('data', None),
                 ed_sharding=('model', None),
                 e_sharding=('model', ),
+                use_kernel=bool(int(os.getenv("USE_MOE_EP_KERNEL", "0"))),
             )
 
             moe_mlp = GptOssMoE(
@@ -137,12 +139,15 @@ class GptOss(nnx.Module):
                 edf_sharding=('model', None, None),
                 efd_sharding=('model', None, None),
                 ed_sharding=('model', None),
+                mesh=self.mesh,
+                use_kernel=bool(int(os.getenv("USE_MOE_EP_KERNEL", "0"))),
             )
 
             block = TransformerBlock(
                 pre_attention_norm=RMSNorm(
                     dims=hidden_size,
                     random_init=self.random_init,
+                    activation_ffw_td=P('data', None),
                     epsilon=rms_norm_eps,
                     dtype=dtype,
                     rngs=self.rng,
@@ -150,6 +155,7 @@ class GptOss(nnx.Module):
                 pre_mlp_norm=RMSNorm(
                     dims=hidden_size,
                     random_init=self.random_init,
+                    activation_ffw_td=P('data', None),
                     epsilon=rms_norm_eps,
                     dtype=dtype,
                     rngs=self.rng,
@@ -163,6 +169,7 @@ class GptOss(nnx.Module):
             dims=hidden_size,
             rngs=self.rng,
             random_init=self.random_init,
+            activation_ffw_td=P('data', None),
             epsilon=rms_norm_eps,
             dtype=dtype,
         )
@@ -176,6 +183,25 @@ class GptOss(nnx.Module):
             dv_sharding=(None, ('data', 'model')),
             random_init=self.random_init,
         )
+    def prepare_moe_for_inference(self, padded_dim: int = 3072):
+        """
+        Iterates through all layers and converts MoE weights from 
+        checkpoint shape (e.g., 2880) to kernel-optimized padded shape (3072).
+        """
+        logger.info(f"Starting MoE weight repacking (target dim={padded_dim})...")
+        
+        # Use a scan or simple loop. Since this is one-time setup, a loop is fine.
+        for i, layer in enumerate(self.layers):
+            # layer is a TransformerBlock
+            # layer.custom_module is the GptOssMoE instance
+            if hasattr(layer, 'custom_module') and isinstance(layer.custom_module, GptOssMoE):
+                # Optional: Log progress every few layers
+                if i % 4 == 0:
+                    logger.info(f"Repacking MoE weights for layer {i}...")
+                
+                layer.custom_module.convert_weights_for_inference(padded_dim)
+                
+        logger.info("MoE weight repacking complete.")
 
     # For compatibility with flax.
     def apply(self, variables, *args, **kwargs):
@@ -184,7 +210,10 @@ class GptOss(nnx.Module):
     def load_weights(self, rng: PRNGKey, cache_dir: Optional[str] = None):
         """Loads and transforms all weights from a checkpoint"""
         self.rng = nnx.Rngs(rng)
-
+        if self.random_init:
+            logger.info("Random weights enabled. Skipping checkpoint loading.")
+            self.prepare_moe_for_inference(padded_dim=3072)
+            return
         # Format: 'hf_key': ('jax_model_path', transform_function, target_shape)
         transforms = {
             "transpose_reshape": lambda w, shape: w.T.reshape(shape),
@@ -326,6 +355,9 @@ class GptOss(nnx.Module):
                     print_param_info(model_weight, loaded_name)
 
         nnx.update(self, model_params)
+        print(f"DEBUG: {self.layers[0].pre_attention_norm.scale.value.sharding}")
+        if bool(int(os.getenv("USE_MOE_EP_KERNEL", "0"))):
+            self.prepare_moe_for_inference(padded_dim=3072)
 
     def __call__(
         self,

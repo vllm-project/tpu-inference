@@ -52,7 +52,7 @@ class DeepSeekV3(nnx.Module):
         self.rng = nnx.Rngs(rng)
 
         # NOTE: the default is 61
-        num_layers: int = vllm_config.model_config.hf_config.num_hidden_layers
+        num_layers: int = 20
         num_local_experts: int = 256
 
         vocab_size: int = 129280
@@ -317,14 +317,14 @@ class DeepSeekV3(nnx.Module):
         # we have to pass dynamic arrays here for __call__'s usage.
         self.rng = nnx.Rngs(rng)
         self.weight_loader.load_weights(self)
-        self.initialize_cache(self.mesh)
+        self.initialize_cache()
 
     def initialize_cache(self):
         # Initialize RoPE caches after weights are loaded and before JIT compilation.
         for layer in self.layers:
             if hasattr(layer, 'attn') and hasattr(layer.attn, 'rope'):
                 if hasattr(layer.attn.rope, 'initialize_cache'):
-                    layer.attn.rope.initialize_cache()
+                    layer.attn.rope.initialize_cache(self.mesh)
 
     def __call__(
         self,

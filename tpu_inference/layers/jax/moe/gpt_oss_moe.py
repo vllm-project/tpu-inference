@@ -1,11 +1,16 @@
 from dataclasses import InitVar, dataclass
+from functools import partial
+from typing import Optional, Tuple, Any
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 from flax.typing import Sharding
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 from jaxtyping import Float
 
+from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.layers.jax.moe.moe import Router
@@ -21,6 +26,7 @@ class GptOssRouter(Router):
 
     """
     e_sharding: Sharding = ()
+    use_kernel: bool = False
 
     def __post_init__(self, rngs: nnx.Rngs):
         """
@@ -45,14 +51,17 @@ class GptOssRouter(Router):
                                       self.kernel_DE.value)
 
         router_logits_TE += self.bias_E.value
+        
+        if self.use_kernel: 
+            return router_logits_TE
+        else:
+            weights_TX, selected_experts_TX = jax.lax.top_k(
+                router_logits_TE, self.num_experts_per_tok)
 
-        weights_TX, selected_experts_TX = jax.lax.top_k(
-            router_logits_TE, self.num_experts_per_tok)
+            normalized_weights_TX = jax.nn.softmax(weights_TX.astype(self.dtype),
+                                                axis=-1)
 
-        normalized_weights_TX = jax.nn.softmax(weights_TX.astype(self.dtype),
-                                               axis=-1)
-
-        return normalized_weights_TX, selected_experts_TX
+            return normalized_weights_TX, selected_experts_TX
 
 
 def _swiglu(x: Float, alpha: Float, limit: Float) -> Float:
@@ -89,38 +98,67 @@ class GptOssMoE(nnx.Module):
     ed_sharding: Sharding
 
     random_init: bool = False
+    use_kernel: bool = False
+    mesh: Mesh
 
     def __call__(self, x_TD: Float) -> Float:
         """Performs the forward pass for the GPT-OSS MoE layer."""
         x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
 
-        weights_TX, indices_TX = self.router(x_TD)
+        if self.use_kernel:
+            router_logits_TE = self.router(x_TD)
 
-        # First MLP layer (up-projection)
-        with jax.named_scope("MLP #1"):
-            up_proj_TEF2 = jnp.einsum('TD,EDF -> TEF', x_TD,
-                                      self.mlp1_weight_EDF2.value)
-            up_proj_TEF2 += self.mlp1_bias_EF2.value
+            self.block_size = {
+                "bt": 64,
+                "bf": 1536,
+                "bd1": 1536,
+                "bd2": 1536,
+                "btc": 64,
+                "bfc": 1536,
+                "bd1c": 1536,
+                "bd2c": 1536,
+            }
+            ep_axis_name = self.efd_sharding[0]
 
-            fuse_TEF = _swiglu(up_proj_TEF2,
-                               alpha=self.swiglu_alpha,
-                               limit=self.swiglu_limit)
 
-        # Second MLP layer (down-projection)
-        with jax.named_scope("MLP #2"):
-            down_proj_TED = jnp.einsum('TEF,EFD -> TED', fuse_TEF,
-                                       self.mlp2_weight_EFD.value)
-            down_proj_TED += self.mlp2_bias_ED.value
+            output_TD = fused_ep_moe(
+                mesh=self.mesh,
+                tokens=x_TD,
+                w1=self.mlp1_weight_EDF2.value,
+                w2=self.mlp2_weight_EFD.value,
+                gating_output=router_logits_TE,
+                top_k=self.router.num_experts_per_tok,
+                ep_axis_name=ep_axis_name,
+                **self.block_size,
+            )
+        else:
+            weights_TX, indices_TX = self.router(x_TD)
 
-        # Weighted sum of expert outputs
-        with jax.named_scope("sum"):
-            indices_for_gather = indices_TX[..., None]
-            gathered_down_proj_TED = jnp.take_along_axis(down_proj_TED,
-                                                         indices_for_gather,
-                                                         axis=1)
-            output_TD = jnp.einsum('TXD,TX -> TD', gathered_down_proj_TED,
-                                   weights_TX)
+            # First MLP layer (up-projection)
+            with jax.named_scope("MLP #1"):
+                up_proj_TEF2 = jnp.einsum('TD,EDF -> TEF', x_TD,
+                                        self.mlp1_weight_EDF2.value)
+                up_proj_TEF2 += self.mlp1_bias_EF2.value
+
+                fuse_TEF = _swiglu(up_proj_TEF2,
+                                alpha=self.swiglu_alpha,
+                                limit=self.swiglu_limit)
+
+            # Second MLP layer (down-projection)
+            with jax.named_scope("MLP #2"):
+                down_proj_TED = jnp.einsum('TEF,EFD -> TED', fuse_TEF,
+                                        self.mlp2_weight_EFD.value)
+                down_proj_TED += self.mlp2_bias_ED.value
+
+            # Weighted sum of expert outputs
+            with jax.named_scope("sum"):
+                indices_for_gather = indices_TX[..., None]
+                gathered_down_proj_TED = jnp.take_along_axis(down_proj_TED,
+                                                            indices_for_gather,
+                                                            axis=1)
+                output_TD = jnp.einsum('TXD,TX -> TD', gathered_down_proj_TED,
+                                    weights_TX)
 
         return output_TD.astype(self.dtype)
 
@@ -159,3 +197,40 @@ class GptOssMoE(nnx.Module):
             sharding=self.ed_sharding,
             random_init=self.random_init,
         )
+        
+
+    def convert_weights_for_inference(self, padded_dim=3072):
+        
+        spec_w1 = P(self.edf_sharding[0], None, self.edf_sharding[1], self.edf_sharding[2])
+        sharding_w1 = NamedSharding(self.mesh, spec_w1)
+
+        # (E, D, 2F) -> (E, 2, D, F)
+        w1 = self.mlp1_weight_EDF2.value
+        w1 = jnp.reshape(w1, (self.num_local_experts, self.hidden_size, 2, self.intermediate_size_moe))
+        w1 = jnp.swapaxes(w1, 1, 2)
+
+        # Pad to (E, 2, padded_dim, padded_dim)
+        w1 = jnp.pad(w1, (
+            (0, 0), (0, 0), 
+            (0, padded_dim - self.hidden_size), 
+            (0, padded_dim - self.intermediate_size_moe)
+        ))
+        
+        w1 = jax.lax.with_sharding_constraint(w1, sharding_w1)
+        self.mlp1_weight_EDF2 = nnx.Param(w1, sharding=spec_w1)
+
+            
+        sharding_w2 = NamedSharding(self.mesh, P(*self.efd_sharding))
+        w2 = self.mlp2_weight_EFD.value
+        
+        # Pad to (E, padded_dim, padded_dim)
+        w2 = jnp.pad(w2, (
+            (0, 0), 
+            (0, padded_dim - self.intermediate_size_moe),
+            (0, padded_dim - self.hidden_size)
+        ))
+
+        w2 = jax.lax.with_sharding_constraint(w2, sharding_w2)
+        self.mlp2_weight_EFD = nnx.Param(w2, sharding=P(*self.efd_sharding))
+        
+        jax.block_until_ready(self.mlp1_weight_EDF2.value)
