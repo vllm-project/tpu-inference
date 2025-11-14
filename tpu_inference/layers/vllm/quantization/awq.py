@@ -29,12 +29,8 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
-@register_quantization_config("jax-awq")
+@register_quantization_config("tpu-awq")
 class VllmAWQConfig(AWQConfig, JaxCommonConfig):
-
-    @classmethod
-    def get_name(cls) -> str:
-        return "jax-awq"
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
         # NOTE: AWQ checkpoint was quantized with float16. But on TPUs, using
