@@ -1,4 +1,24 @@
 #!/bin/bash
+# -----------------------------------------------------------------------------
+# Llama Guard 4 Accuracy Integration Test
+# -----------------------------------------------------------------------------
+# DESCRIPTION:
+# This script executes the Llama-Guard-4-12B model in offline inference mode
+# against a subset of AILuminate safety prompts. It validates the 
+# model's final classification accuracy against a predetermined threshold set 
+# in the CI environment variables.
+#
+# USAGE (CI/Docker Environment):
+# This script is executed via the Buildkite CI pipeline, which injects the 
+# following required environment variables: TEST_MODEL, TENSOR_PARALLEL_SIZE, 
+# and MINIMUM_ACCURACY_THRESHOLD.
+#
+# USAGE (Local Testing):
+# export TEST_MODEL="meta-llama/Llama-Guard-4-12B"
+# export TENSOR_PARALLEL_SIZE=8
+# export MINIMUM_ACCURACY_THRESHOLD=0.31
+# bash test_llama_guard_4_accuracy.sh
+# -----------------------------------------------------------------------------
 set -e
 
 # --- Configuration and Variable Extraction ---
@@ -26,7 +46,6 @@ python /workspace/tpu_inference/examples/offline_llama_guard_4_inference.py \
   --tensor-parallel-size="$TENSOR_PARALLEL_SIZE" \
   --max_model_len=2048 \
   --max-num-batched-tokens=4096 \
-  --hf_overrides '{"architectures": ["LLaMAForCausalLM"]}' \
   2>&1 | tee "$ACCURACY_LOG_FILE"
 
 PYTHON_EXIT_CODE=$?

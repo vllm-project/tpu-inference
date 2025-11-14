@@ -60,7 +60,7 @@ helpFunction()
    exit 1
 }
 
-SHARED_UTILS_PATH="/workspace/tpu_inference/scripts/vllm/benchmarking/bench_utils.sh"
+SHARED_UTILS_PATH="/workspace/tests/e2e/benchmarking/bench_utils.sh"
 
 # Source the shared functions (cleanUp, waitForServerReady)
 . "$SHARED_UTILS_PATH"

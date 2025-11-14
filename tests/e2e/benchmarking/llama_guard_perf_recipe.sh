@@ -45,7 +45,7 @@ TIMEOUT_SECONDS=600
 READY_MESSAGE="Application startup complete."
 exit_code=0
 
-SHARED_UTILS_PATH="/workspace/tpu_inference/scripts/vllm/benchmarking/bench_utils.sh"
+SHARED_UTILS_PATH="/workspace/tests/e2e/benchmarking/bench_utils.sh" #THIS PATH IS ERRORING IN THE CI
 
 # Source the shared functions (cleanUp, waitForServerReady)
 . "$SHARED_UTILS_PATH"
@@ -88,7 +88,6 @@ echo "Spinning up the vLLM server for $MODEL_NAME (TP=$TP_SIZE)..."
     --tensor-parallel-size "$TP_SIZE" \
     --max-model-len "$MAX_MODEL_LEN" \
     --max-num-batched-tokens 4096 \
-    --hf-overrides '{"architectures": ["LLaMAForCausalLM"]}' \
     2>&1 | tee -a "$LOG_FILE") &
 
 # --- 3. WAIT FOR SERVER (Shared Function Call) ---

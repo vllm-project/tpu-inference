@@ -1,5 +1,6 @@
 """
 🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨
+This model is a work in progress
 
 The following Llama Guard 4 model implementation only has the text portion implemented thus far. 
 Any multimodal inputs passed to this model will fail
@@ -65,18 +66,9 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         intermediate_size =  getattr(text_config, "intermediate_size", 8192)
 
         self.rope_theta_text = getattr(text_config, "rope_theta", 500000.0)
-        self.rope_scaling = getattr(text_config, 
-                                        "rope_scaling", 
-                                        {
-                                        "rope_scaling":{
-                                            "factor": 16,
-                                            "high_freq_factor": 1,
-                                            "low_freq_factor": 1.0,
-                                            "original_max_position_embeddings": 8192,
-                                            "rope_type": "llama3"
-                                            }
-                                        }
-                                    )
+        self.rope_scaling = getattr(text_config, "rope_scaling")
+
+        self.rng = nnx.Rngs(rng)
 
         self.embedder = Embedder(
             vocab_size=vocab_size,
@@ -84,7 +76,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             dtype=self.dtype,
             prelogit_td=P(),
             vd_sharding= P((), None),
-            rngs=nnx.Rngs(rng),
+            rngs=self.rng,
             random_init=force_random_weights,
         )
 
@@ -99,7 +91,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                 hidden_size=self.hidden_size,
                 intermediate_size=intermediate_size,
                 random_init=force_random_weights,
-                rngs=nnx.Rngs(rng),
+                rngs=self.rng,
                 df_sharding=P(None, 'model'),
                 fd_sharding=P('model', None),
                 activation_ffw_td=P('data', None))
@@ -117,7 +109,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                     "high_freq_factor": self.rope_scaling["high_freq_factor"],
                     "original_max_position_embeddings": self.rope_scaling["original_max_position_embeddings"]
                 },
-                rngs=nnx.Rngs(rng),
+                rngs=self.rng,
                 rope_input_ordering="interleaved",
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
@@ -144,7 +136,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                 dims=self.hidden_size,
                 random_init=force_random_weights,
                 epsilon=rms_norm_eps,
-                rngs=nnx.Rngs(rng),
+                rngs=self.rng,
                 activation_ffw_td= P(),
                 with_scale=True,
                 dtype=self.dtype,
@@ -154,7 +146,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                 dims=self.hidden_size,
                 activation_ffw_td=P(),
                 epsilon=rms_norm_eps,
-                rngs=nnx.Rngs(rng),
+                rngs=self.rng,
                 with_scale=True,
                 dtype=self.dtype,
                 random_init=force_random_weights,
@@ -171,7 +163,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             dims=self.hidden_size,
             activation_ffw_td=P(),
             epsilon=rms_norm_eps,
-            rngs=nnx.Rngs(rng),
+            rngs=self.rng,
             with_scale=True,
             dtype=self.dtype,
             random_init=force_random_weights,
@@ -181,7 +173,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             vocab_size=vocab_size,
             hidden_size=self.hidden_size,
             dtype=self.dtype,
-            rngs=nnx.Rngs(rng),
+            rngs=self.rng,
             prelogit_td=P(),
             vd_sharding=P(),
             dv_sharding=P(),
