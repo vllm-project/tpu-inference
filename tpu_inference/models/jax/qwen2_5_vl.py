@@ -14,9 +14,9 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
 from vllm.config import VllmConfig
 
 from tpu_inference import utils as utils
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.jax.attention_interface import \
+from tpu_inference.layers.common.attention_interface import \
     sharded_flash_attention
+from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.qwen2 import Qwen2ForCausalLM
 # from vllm.model_executor.models.interfaces import MultiModalEmbeddings

@@ -13,9 +13,9 @@ from tpu_inference import utils
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     ragged_paged_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.rope_interface import apply_rope
-from tpu_inference.layers.jax.sharding import ShardingAxisName
 
 KVCache = Tuple[jax.Array, jax.Array]
 

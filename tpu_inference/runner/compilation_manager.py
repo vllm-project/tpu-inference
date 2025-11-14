@@ -10,10 +10,10 @@ from jax.sharding import NamedSharding, PartitionSpec
 
 from tpu_inference.core.disagg_utils import is_disagg_enabled
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling import sample
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
-from tpu_inference.layers.jax.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import device_array
 

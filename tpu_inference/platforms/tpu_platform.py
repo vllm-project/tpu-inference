@@ -12,7 +12,7 @@ from vllm.platforms.interface import Platform, PlatformEnum
 from vllm.sampling_params import SamplingParams, SamplingType
 
 from tpu_inference import envs
-from tpu_inference.layers.jax.sharding import ShardingConfigManager
+from tpu_inference.layers.common.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
 
 if TYPE_CHECKING:

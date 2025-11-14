@@ -6,8 +6,8 @@ import numpy as np
 import pytest
 from jax.sharding import Mesh
 
+from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.jax.attention_interface import attention
 from tpu_inference.runner.kv_cache import get_kv_cache_shape_with_mesh
 
 # ---- Test Configuration & Constants ----
@@ -79,12 +79,12 @@ def _test_attention(monkeypatch, mesh, head_dim, use_sinks=False):
 
     if head_dim == 64:
         monkeypatch.setattr(
-            "tpu_inference.layers.jax.attention_interface.ragged_paged_attention_hd64",
+            "tpu_inference.layers.common.attention_interface.ragged_paged_attention_hd64",
             mock_paged_attn_kernel,
         )
     else:
         monkeypatch.setattr(
-            "tpu_inference.layers.jax.attention_interface.ragged_paged_attention",
+            "tpu_inference.layers.common.attention_interface.ragged_paged_attention",
             mock_paged_attn_kernel,
         )
 

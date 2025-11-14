@@ -6,10 +6,10 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from vllm.v1.outputs import LogprobsTensors
 
-from tpu_inference.layers.jax.binary_search import topk_mask, topp_mask
+from tpu_inference.layers.common.binary_search import topk_mask, topp_mask
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
-from tpu_inference.layers.jax.sharding import ShardingAxisName
 
 _SAMPLING_EPS = 1e-5
 

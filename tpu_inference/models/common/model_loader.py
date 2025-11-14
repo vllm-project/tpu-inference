@@ -11,7 +11,7 @@ from vllm.config import VllmConfig
 from vllm.utils.func_utils import supports_kw
 
 from tpu_inference import envs
-from tpu_inference.layers.jax.sharding import ShardingAxisName
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.quantization.quantization_utils import (
     apply_qwix_on_abstract_model, apply_qwix_quantization,

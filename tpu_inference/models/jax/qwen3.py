@@ -8,8 +8,8 @@ from transformers import Qwen3Config
 from vllm.config import VllmConfig
 
 from tpu_inference import utils
+from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.jax.attention_interface import attention
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.qwen2 import Qwen2DecoderLayer

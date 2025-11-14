@@ -8,9 +8,9 @@ from flax import nnx
 from jax.sharding import Mesh
 from parameterized import parameterized
 
+from tpu_inference.layers.common.attention_interface import get_kv_cache_shape
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.attention.attention import Attention
-from tpu_inference.layers.jax.attention_interface import get_kv_cache_shape
 
 KVCache = Tuple[jax.Array, jax.Array]
 
