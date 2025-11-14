@@ -859,31 +859,33 @@ class TPUConnectorScheduler():
         assert adjusted_num_total_blocks <= len(tracker.block_ids)
 
         has_new_tokens = adjusted_num_total_tokens > tracker.save_watermark
-        # Determine if a save is needed for this step
         should_save = False
-        if is_finished:
-            # If the request finished during the decode phase, respect the decode_save flag for saving data.
-            # Otherwise (e.g., finished after prefill), always save data.
-            if tracker.is_decode_phase and not self.decode_save:
-                should_save = False
-                logger.info(
-                    f"Request {tracker.req_id}: Will skip saving final tokens for decoded request because decode_save is False."
-                )
-            else:
-                should_save = True
-        elif has_new_tokens:
+        # Determine if a save is needed for this step
+        # when there are new token KVs (adjusted by saving behavior):
+        # 1. Prefill: always save
+        # 2. Decode (with save_decode=True)
+        #  2.1 regular decode (not finished): accumulate until getting a full block
+        #  2.2 request finished: save
+        if has_new_tokens:
             if not tracker.is_decode_phase:
-                should_save = True  # Prefill
+                # Prefill: always save the new-computed blocks
+                should_save = True
             elif self.decode_save:
-                # Decode: check for block boundary
-                next_block_boundary = (tracker.save_watermark //
-                                       self.block_size + 1) * self.block_size
-                logger.info(
-                    f"in decode phase, next_block_boundary: {next_block_boundary}, "
-                )
-                # NOTE(jcgu): for decode, we do not drop or pad, just accumulate tokens until the next block boundary
-                if num_total_tokens >= next_block_boundary:
+                if is_finished:
+                    # After decode, if there are new final new tokens to save
                     should_save = True
+                else:
+                    # During decode, we do not drop or pad, just accumulate tokens until the next block boundary
+                    next_block_boundary = (
+                        tracker.save_watermark // self.block_size +
+                        1) * self.block_size
+                    logger.info(
+                        f"in decode phase, next_block_boundary: {next_block_boundary}, "
+                    )
+                    if num_total_tokens == next_block_boundary:
+                        # always save the full block for decode (not affected by saving_behavior)
+                        assert num_total_tokens == adjusted_num_total_tokens, f" decode_save: {num_total_tokens} != (adjusted) {adjusted_num_total_tokens}"
+                        should_save = True
 
         logger.info(f"    - Preparing meta for req (save): {tracker.req_id}, "
                     f"is_finished={is_finished}, "
@@ -961,7 +963,9 @@ class TPUConnectorScheduler():
                         f"      -> Old watermark {tracker.save_watermark}, new save_watermark count: {adjusted_num_total_tokens}"
                     )
                     tracker.save_watermark = adjusted_num_total_tokens
-        elif is_finished:
+
+        if is_finished and save_spec is None:
+            # For finished requests, there must be a no-op save to update the state in the worker side.
             # This is a "completion-only" signal because should_save is False.
             # NOTE(jcgu): num_total_tokens will be used to unpin tokens;
             #  apply the number of saved tokens;
