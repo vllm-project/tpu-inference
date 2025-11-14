@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional, Tuple
 
 import jax
@@ -43,6 +44,26 @@ _DTYPE: dict[str, jnp.dtype] = {
 }
 
 
+@dataclass
+class PPConfig:
+    rank: int
+    ip: str
+    prev_worker_ip: str
+    pp_world_size: int
+
+    # default env vars for
+    # TPU_PROCESS_BOUNDS, TPU_CHIPS_PER_PROCESS_BOUNDS, TPU_VISIBLE_CHIPS
+    # if PP is used in single host.
+    default_tpu_process_bounds: str = field(init=False)
+    default_tpu_chips_per_process_bounds: str = field(init=False)
+    default_tpu_visible_chips: str = field(init=False)
+
+    def __post_init__(self):
+        self.default_tpu_process_bounds = f"1,{self.pp_world_size},1"
+        self.default_tpu_chips_per_process_bounds = "1,1,1"
+        self.default_tpu_visible_chips = f"{self.rank}"
+
+
 class TPUWorker:
 
     def __init__(
@@ -82,9 +103,8 @@ class TPUWorker:
         self.devices = devices if devices is not None else []
         self.device_ranks = set(device.id for device in self.devices
                                 if isinstance(device, jaxlib._jax.Device))
-        self.ip = ip
-        self.prev_worker_ip = prev_worker_ip
-        self.pp_world_size = self.parallel_config.pipeline_parallel_size
+        self.pp_config = PPConfig(rank, ip, prev_worker_ip,
+                                  self.parallel_config.pipeline_parallel_size)
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
@@ -107,8 +127,10 @@ class TPUWorker:
 
         # For PP, we use MPMD so we want to profile every worker.
         if self.pp_world_size > 1 and envs.VLLM_TORCH_PROFILER_DIR:
-            self.profile_dir = os.path.join(envs.VLLM_TORCH_PROFILER_DIR,
-                                            f"rank_{self.rank}")
+            self.profile_dir = os.path.join(
+                envs.VLLM_TORCH_PROFILER_DIR,
+                f"pprank_{self.rank}_ppworldsize_{self.pp_config.pp_world_size}"
+            )
             os.makedirs(self.profile_dir, exist_ok=True)
 
         use_jax_profiler_server = os.getenv("USE_JAX_PROFILER_SERVER", False)
@@ -122,6 +144,7 @@ class TPUWorker:
                 )
                 jax.profiler.start_server(jax_profiler_server_port)
 
+        # step_counter is used to calculate uuid to transfer intermediate tensors.
         self.step_counter = 0
 
     def initialize_cache(self, num_gpu_blocks: int,
@@ -129,17 +152,13 @@ class TPUWorker:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
-    def init_device(self):
+    def init_device(self,
+                    tpu_process_bounds="",
+                    tpu_chips_per_process_bounds="",
+                    tpu_visible_chips=""):
         # set tpu visible devices for Jax runtime in single host PP.
         multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "").lower()
         if multihost_backend != "ray" and self.parallel_config.pipeline_parallel_size > 1:
-            # Note: Below is the setting for v6e8 host (8 chips of v6e)
-            # There are 2 ways of subslicing a v6e:
-            # 1) 2 slices with 4 TPU chips each, we can do PP=2, TP=1/2/3/4
-            # 2) 1 chip for each subslice, with at most 8 subslices,
-            #    we can do TP=1, PP=1/2/3/4/5/6/7/8
-            # Replace with your own topology.
-
             tpu_ports = [
                 jax_parallel_state.BASE_JAX_PORT + i
                 for i in range(self.pp_world_size)
@@ -149,15 +168,27 @@ class TPUWorker:
             os.environ["TPU_PROCESS_PORT"] = f"{tpu_ports[self.rank]}"
             os.environ["CLOUD_TPU_TASK_ID"] = f"{self.rank}"
 
-            # first way of subslicing.
-            # os.environ["TPU_PROCESS_BOUNDS"] = "1,1,1"
-            # os.environ["TPU_CHIPS_PER_PROCESS_BOUNDS"] = f"1,4,1"
-            # os.environ["TPU_VISIBLE_CHIPS"] = "0,1,2,3" if self.rank == 0 else "4,5,6,7"
-
-            # second way of subslicing.
-            os.environ["TPU_PROCESS_BOUNDS"] = f"1,{self.pp_world_size},1"
-            os.environ["TPU_CHIPS_PER_PROCESS_BOUNDS"] = "1,1,1"
-            os.environ["TPU_VISIBLE_CHIPS"] = f"{self.rank}"
+            # Note: Below is the setting for v6e8 host (8 chips of v6e)
+            # Replace with your own topology.
+            # There are 2 ways of subslicing a v6e
+            # 1) 2 slices with 4 TPU chips each, we can do PP=2, TP=1/2/3/4
+            #   TPU_PROCESS_BOUNDS = "1,1,1"
+            #   TPU_CHIPS_PER_PROCESS_BOUNDS = "1,4,1"
+            #   TPU_VISIBLE_CHIPS = "0,1,2,3" or "4,5,6,7"
+            # 2) 1 chip for each subslice, with at most 8 subslices,
+            #    we can do TP=1, PP=1/2/3/4/5/6/7/8
+            os.environ[
+                "TPU_PROCESS_BOUNDS"] = tpu_process_bounds \
+                    if tpu_process_bounds \
+                        else self.pp_config.default_tpu_process_bounds
+            os.environ[
+                "TPU_CHIPS_PER_PROCESS_BOUNDS"] = tpu_chips_per_process_bounds \
+                    if tpu_chips_per_process_bounds \
+                        else self.pp_config.default_tpu_chips_per_process_bounds
+            os.environ[
+                "TPU_VISIBLE_CHIPS"] = tpu_visible_chips \
+                    if tpu_visible_chips \
+                        else self.pp_config.default_tpu_visible_chips
 
         if not self.devices:
             sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
@@ -165,7 +196,10 @@ class TPUWorker:
             if device_indexes is not None and len(device_indexes) > 0:
                 # Enforcing the devices sequence to be consistent with the specified device indexes
                 all_local_devices = jax.local_devices()
-                device_dict = {device.id: device for device in all_local_devices}
+                device_dict = {
+                    device.id: device
+                    for device in all_local_devices
+                }
                 self.devices = []
                 for device_index in device_indexes:
                     device = device_dict[device_index]
@@ -178,7 +212,8 @@ class TPUWorker:
                 assert len(self.devices) >= sharding_config.total_devices
                 self.devices = self.devices[:sharding_config.total_devices]
             else:
-                assert jax.local_device_count() >= sharding_config.total_devices
+                assert jax.local_device_count(
+                ) >= sharding_config.total_devices
                 self.devices = jax.local_devices()[:sharding_config.
                                                    total_devices]
         # Initialize the vLLM distribution layer as a single chip environment,
@@ -198,7 +233,7 @@ class TPUWorker:
             )
 
         jax_parallel_state.init_pp_distributed_environment(
-            self.ip,
+            self.pp_config.ip,
             self.rank,
             self.parallel_config.pipeline_parallel_size,
             self.devices[0],
@@ -218,7 +253,8 @@ class TPUWorker:
     def initialize_pp_transfer_connect(self):
         if self.rank == 0:
             return
-        jax_parallel_state.connect(self.prev_worker_ip, self.rank - 1)
+        jax_parallel_state.connect(self.pp_config.prev_worker_ip,
+                                   self.rank - 1)
 
     def determine_available_memory(self) -> int:
         gpu_memory_utilization = self.cache_config.gpu_memory_utilization
