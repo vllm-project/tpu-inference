@@ -3,6 +3,6 @@ Model,UnitTest,IntegrationTest,Benchmark
 "Qwen/Qwen3-4B",✅,✅,✅
 "Qwen/Qwen2.5-VL-7B-Instruct",✅,❌,N/A
 "google/gemma-3-27b-it",❌,N/A,N/A
-"Qwen/Qwen3-32B",✅,❌,N/A
+"Qwen/Qwen3-32B",✅,✅,✅
 "meta-llama/Llama-3.1-8B-Instruct",❌,N/A,N/A
-"Qwen/Qwen3-30B-A3B",✅,✅,❌
+"Qwen/Qwen3-30B-A3B",✅,❌,N/A
