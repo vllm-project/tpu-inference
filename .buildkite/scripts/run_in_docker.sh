@@ -89,6 +89,10 @@ docker builder prune -f
 
 echo "Cleanup complete."
 
+echo "Installing Python dependencies"
+python3 -m pip install --progress-bar off buildkite-test-collector==0.1.9
+echo "Python dependencies installed"
+
 IMAGE_NAME="vllm-tpu"
 docker build --no-cache -f docker/Dockerfile -t "${IMAGE_NAME}:${BUILDKITE_COMMIT}" .
 
@@ -103,12 +107,10 @@ exec docker run \
   -e MODEL_IMPL_TYPE="$MODEL_IMPL_TYPE" \
   -e HF_TOKEN="$HF_TOKEN" \
   -e VLLM_XLA_CACHE_PATH="$DOCKER_HF_HOME/.cache/jax_cache" \
-  -e VLLM_USE_V1=1 \
   -e VLLM_XLA_CHECK_RECOMPILATION=1 \
   ${QUANTIZATION:+-e QUANTIZATION="$QUANTIZATION"} \
   ${NEW_MODEL_DESIGN:+-e NEW_MODEL_DESIGN="$NEW_MODEL_DESIGN"} \
   ${USE_V6E8_QUEUE:+-e USE_V6E8_QUEUE="$USE_V6E8_QUEUE"} \
-  ${JAX_RANDOM_WEIGHTS:+-e JAX_RANDOM_WEIGHTS="$JAX_RANDOM_WEIGHTS"} \
   ${SKIP_ACCURACY_TESTS:+-e SKIP_ACCURACY_TESTS="$SKIP_ACCURACY_TESTS"} \
   ${VLLM_MLA_DISABLE:+-e VLLM_MLA_DISABLE="$VLLM_MLA_DISABLE"} \
   "${IMAGE_NAME}:${BUILDKITE_COMMIT}" \

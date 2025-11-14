@@ -14,10 +14,11 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsConfig, CompressedTensorsKVCacheMethod,
     CompressedTensorsLinearMethod, CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    find_matched_target, is_activation_quantization_format,
-    should_ignore_layer)
+    find_matched_target, should_ignore_layer)
 
 from tpu_inference.layers.vllm.quantization.common import JaxCommonConfig
+from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors_moe import \
+    VllmCompressedTensorsW8A8Fp8MoEMethod
 from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import \
     VllmCompressedTensorsW8A8Fp8
 from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_int8 import \
@@ -60,12 +61,12 @@ class VllmCompressedTensorsConfig(CompressedTensorsConfig, JaxCommonConfig):
                 layer_name=layer_name,
                 module=layer,
                 targets=self.target_scheme_map.keys(),
-                fused_mapping=self.packed_modules_mapping)
+                fused_mapping=self.packed_modules_mapping,
+            )
 
             scheme_dict = self.target_scheme_map[matched_target]
             weight_quant = scheme_dict.get("weights")
             input_quant = scheme_dict.get("input_activations")
-            format = scheme_dict.get("format")
 
         if weight_quant is None:
             logger.warning_once("Acceleration for non-quantized schemes is "
@@ -74,10 +75,6 @@ class VllmCompressedTensorsConfig(CompressedTensorsConfig, JaxCommonConfig):
             return None
 
         # TODO(kyuyeunk): Add support for different act_quant_format
-        act_quant_format = is_activation_quantization_format(  # noqa: F841
-            format
-        ) if format is not None else is_activation_quantization_format(
-            self.quant_format)
 
         linear_config = self.get_linear_config(layer)
         if self._is_fp8_w8a8(weight_quant, input_quant):
@@ -114,8 +111,8 @@ class VllmCompressedTensorsConfig(CompressedTensorsConfig, JaxCommonConfig):
             layer.scheme = scheme
             return CompressedTensorsLinearMethod(self)
         if isinstance(layer, FusedMoE):
-            raise NotImplementedError(
-                "FusedMoE quantization is currently not supported.")
+            return VllmCompressedTensorsW8A8Fp8MoEMethod(
+                self, layer.quant_config, self.mesh)
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
         return None

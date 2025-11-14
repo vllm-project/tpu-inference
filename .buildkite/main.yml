@@ -1,12 +1,15 @@
 x-run-condition: &run-on-nightly-or-tag
   if: build.env("NIGHTLY") == "1" || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/
 
+notify:
+  - email: "ullm-oncall@rotations.google.com"
+    if: build.state == "failed" && build.branch == "main"
+
 steps:
    - label: "Upload Tests for Models & Features"
      <<: *run-on-nightly-or-tag
      agents:
-       # TODO : can be done on non-TPU queues once they're set up b/449203039
-       queue: tpu_v6e_queue
+       queue: cpu
      commands:
        - bash .buildkite/scripts/upload_models_and_features.sh
 
@@ -17,7 +20,7 @@ steps:
      <<: *run-on-nightly-or-tag
      key: generate_support_matrices
      agents:
-       queue: tpu_v6e_queue
+       queue: cpu
      soft_fail: true
      commands:
        - bash .buildkite/scripts/generate_support_matrices.sh
@@ -27,7 +30,7 @@ steps:
 #     key: notify_test_results
 #     depends_on: generate_support_matrices
 #     agents:
-#       queue: tpu_v6e_queue
+#       queue: cpu
 #     commands:
 #       - bash .buildkite/scripts/notify_test_results.sh
 
@@ -36,7 +39,7 @@ steps:
 #     depends_on: notify_test_results
 #     branches: "main"
 #     agents:
-#       queue: tpu_v6e_queue
+#       queue: cpu
 #     commands:
 #       # TODO : record verified vllm-tpu_inference commit hash pair if test successful (to be handled in separate PR)
 #       - echo "committing verified commit hashes"
@@ -46,7 +49,7 @@ steps:
      key: commit_nightly_support_matrices
      depends_on: generate_support_matrices
      agents:
-       queue: tpu_v6e_queue
+       queue: cpu
      secrets:
       - GITHUB_PAT
      command:

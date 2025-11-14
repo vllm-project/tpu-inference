@@ -1,4 +1,7 @@
+import os
+
 import jax
+import jax.numpy as jnp
 import torch
 import torchax
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
@@ -6,8 +9,11 @@ from torch.nn import Parameter
 from torch.utils import _pytree as pytree
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
-from vllm.lora.layers import (MergedColumnParallelLinearWithLoRA,
+from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
+                              MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLoRA,
+                              QKVParallelLinearWithLoRA,
+                              ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA)
 from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -18,6 +24,12 @@ from tpu_inference.logger import init_logger
 P = PartitionSpec
 
 logger = init_logger(__name__)
+
+TORCH_TO_JAX_DTYPE_MAP = {
+    torch.float32: jnp.float32,
+    torch.float16: jnp.float16,
+    torch.bfloat16: jnp.bfloat16,
+}
 
 
 def shard_model_to_tpu(model: torch.nn.Module,
@@ -75,11 +87,17 @@ def _tensor_is_in_cpu(tensor: torch.tensor) -> bool:
 
 def _convert_to_torchax_and_shard(tensor: torch.Tensor,
                                   sharding: NamedSharding) -> torch.Tensor:
-    if isinstance(tensor, torchax.tensor.Tensor):
-        tensor = jax_view(tensor)
+    if os.getenv("VLLM_TPU_USING_PATHWAYS", False) and isinstance(
+            tensor, torch.Tensor):
+        np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
+        dtype = TORCH_TO_JAX_DTYPE_MAP.get(tensor.dtype, jnp.float32)
+        return torch_view(jax.device_put(np_tensor, sharding).astype(dtype))
     else:
-        tensor = t2j(tensor)
-    return torch_view(jax.device_put(tensor, sharding))
+        if isinstance(tensor, torchax.tensor.Tensor):
+            tensor = jax_view(tensor)
+        else:
+            tensor = t2j(tensor)
+        return torch_view(_sharded_device_put(tensor, sharding))
 
 
 def _shard_tensor_to_tpu_replicated(tensor: torch.Tensor,
@@ -123,9 +141,8 @@ def _shard_base_linear_lora_replicated(layer: BaseLinearLayerWithLoRA,
     layer.lora_b_stacked = sharded_lora_b_tpu
 
 
-# TODO: Add custom sharding logic for following lora layers
-def _shard_merged_column_parallel_linear_lora(
-        layer: MergedColumnParallelLinearWithLoRA, mesh: Mesh) -> None:
+def _shard_column_linear_lora(layer: ColumnParallelLinearWithLoRA,
+                              mesh: Mesh) -> None:
     assert layer.n_slices > 0, "layer.n_slices should be greater than 0"
     # lora_a_stacked[i] has shape [max_loras, 1, max_lora_rank, in_features]
     sharded_lora_a_tpu = torch.nn.ParameterList()
@@ -146,9 +163,19 @@ def _shard_merged_column_parallel_linear_lora(
     layer.lora_b_stacked = sharded_lora_b_tpu
 
 
+def _shard_qkv_linear_lora(layer: ColumnParallelLinearWithLoRA,
+                           mesh: Mesh) -> None:
+    _shard_column_linear_lora(layer, mesh)
+
+
+def _shard_merged_column_parallel_linear_lora(
+        layer: MergedColumnParallelLinearWithLoRA, mesh: Mesh) -> None:
+    _shard_column_linear_lora(layer, mesh)
+
+
 def _shard_merged_qkv_parallel_linear_lora(
         layer: MergedQKVParallelLinearWithLoRA, mesh: Mesh) -> None:
-    _shard_merged_column_parallel_linear_lora(layer, mesh)
+    _shard_column_linear_lora(layer, mesh)
 
 
 def _shard_row_parallel_linear_lora(layer: RowParallelLinearWithLoRA,
@@ -162,10 +189,13 @@ MODULE_TYPE_TO_SHARDING_FUNC = [
     (ParallelLMHead, _shard_lm_head),
     (VocabParallelEmbedding, _shard_vocab_parallel_embedding),
     # Shard LoRA layers
+    (ColumnParallelLinearWithLoRA, _shard_column_linear_lora),
+    (QKVParallelLinearWithLoRA, _shard_qkv_linear_lora),
     (MergedColumnParallelLinearWithLoRA,
      _shard_merged_column_parallel_linear_lora),
     (MergedQKVParallelLinearWithLoRA, _shard_merged_qkv_parallel_linear_lora),
     (RowParallelLinearWithLoRA, _shard_row_parallel_linear_lora),
+    (ReplicatedLinearWithLoRA, _shard_base_linear_lora_replicated),
 ]
 
 
@@ -176,3 +206,25 @@ def _shard_module_to_tpu(model: torch.nn.Module, mesh: Mesh) -> None:
                 logger.debug("shard %s with %s", path, sharding_func)
                 sharding_func(module, mesh)
                 break
+
+
+def _sharded_device_put(tensor: jax.Array, sharding) -> jax.Array:
+    if isinstance(tensor, tuple):
+        return tuple(_sharded_device_put(t, sharding) for t in tensor)
+    import os
+    multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "").lower()
+    if multihost_backend != "ray":
+        return jax.device_put(tensor, sharding)
+
+    # NOTE: at here, num_global_devices != num_local_devices
+    # meaning we are in multi-host setup. Each host will run the same process
+    # and each process only need to handle the devices accessible to this host.
+    shape = tensor.shape
+    x_split = [
+        jax.device_put(tensor[i], device) for device, i in
+        sharding.addressable_devices_indices_map(shape).items()
+    ]
+    return jax.make_array_from_single_device_arrays(shape,
+                                                    sharding,
+                                                    x_split,
+                                                    dtype=tensor.dtype)

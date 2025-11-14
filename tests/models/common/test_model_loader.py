@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 import torch
 from jax.sharding import Mesh
@@ -39,9 +40,10 @@ class MockModelB:
 @pytest.fixture(scope="module")
 def mesh() -> Mesh:
     """Provides a JAX device mesh for sharding."""
-    devices = jax.devices()
+    devices = np.array(jax.devices()[:1])
+    devices = devices.reshape((1, 1, 1, -1))
     # Pass the 1D list of devices directly. Its ndim will match len(axis_names).
-    return Mesh(devices, axis_names=("model", ))
+    return Mesh(devices, axis_names=("data", "attn_dp", "expert", "model"))
 
 
 @pytest.fixture
@@ -252,17 +254,13 @@ def test_get_vllm_model(mesh):
     assert callable(compute_logits_fn)
 
 
-@pytest.mark.parametrize("set_in_config", [True, False])
-def test_get_vllm_model_random_weights(mesh, set_in_config):
+def test_get_vllm_model_random_weights(mesh):
     rng = jax.random.PRNGKey(42)
 
     engine_args = EngineArgs(model="Qwen/Qwen3-0.6B")
     vllm_config = engine_args.create_engine_config()
     vllm_config.model_config.dtype = torch.bfloat16
-    if set_in_config:
-        vllm_config.load_config.load_format = "dummy"
-    else:
-        os.environ["JAX_RANDOM_WEIGHTS"] = "True"
+    vllm_config.load_config.load_format = "dummy"
 
     with set_current_vllm_config(vllm_config):
         temp_file = tempfile.mkstemp()[1]

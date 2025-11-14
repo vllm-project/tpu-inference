@@ -91,7 +91,7 @@ from tpu_inference.distributed.utils import (get_host_ip, get_kv_ips,
                                              get_kv_transfer_port, get_node_id,
                                              get_side_channel_port)
 from tpu_inference.logger import init_logger
-from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
+from tpu_inference.runner.tpu_runner import TPUModelRunner
 from tpu_inference.utils import device_array
 
 ReqId = str
@@ -190,6 +190,10 @@ class TPUConnector(KVConnectorBase_V1):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
+    def get_finished_count(self) -> int:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.get_finished_count()
+
     ############################################################
     # Worker Side Methods
     ############################################################
@@ -280,7 +284,7 @@ class TPUConnectorScheduler():
                   because TPU pulls KV cache in a blocking way.
 
         """
-        if self.is_producer:
+        if self.is_producer or not request.kv_transfer_params:
             return 0, False
 
         assert num_computed_tokens % self.block_size == 0
@@ -345,7 +349,9 @@ class TPUConnectorScheduler():
                 remote_host=params["remote_host"],
                 remote_port=params["remote_port"],
             )
-        logger.info(f"Scheduler -->  reqs_to_load={self.reqs_to_load}")
+        logger.info(
+            f"TPUConnector Scheduler update_state_after_alloc -->  reqs_to_load={self.reqs_to_load}"
+        )
 
     def build_connector_meta(self) -> TPUConnectorMetadata:
         """
@@ -364,6 +370,12 @@ class TPUConnectorScheduler():
             self.reqs_to_load = {}
 
         return meta
+
+    def get_finished_count(self) -> int:
+        """
+        Return how many workers need pull the kv cache and report back.
+        """
+        return len(self.kv_ip) if isinstance(self.kv_ip, list) else 1
 
     def request_finished(
         self,

@@ -4,16 +4,16 @@ import os
 from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
 
 import jax.numpy as jnp
-import vllm.envs as envs
+import vllm.envs as vllm_envs
 from torchax.ops.mappings import j2t_dtype
 from tpu_info import device
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.platforms.interface import Platform, PlatformEnum
 from vllm.sampling_params import SamplingParams, SamplingType
 
+from tpu_inference import envs
+from tpu_inference.layers.jax.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.utils.quantization.quantization_utils import \
-    update_vllm_config_for_qwix_quantization
 
 if TYPE_CHECKING:
     from vllm.attention.backends.registry import _Backend
@@ -49,8 +49,7 @@ class TpuPlatform(Platform):
     ]
 
     additional_env_vars: list[str] = [
-        "JAX_RANDOM_WEIGHTS", "PHASED_PROFILING_DIR",
-        "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS",
+        "PHASED_PROFILING_DIR", "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS",
         "TPU_MULTIHOST_BACKEND", "VLLM_MLA_DISABLE", "TPU_BACKEND_TYPE"
     ]
 
@@ -73,7 +72,7 @@ class TpuPlatform(Platform):
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         try:
-            if envs.VLLM_TPU_USING_PATHWAYS:
+            if vllm_envs.VLLM_TPU_USING_PATHWAYS:
                 # Causes mutliprocess accessing IFRT when calling jax.devices()
                 return "TPU v6 lite"
             else:
@@ -89,7 +88,7 @@ class TpuPlatform(Platform):
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        return not envs.VLLM_USE_V1
+        return False
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
@@ -112,14 +111,20 @@ class TpuPlatform(Platform):
         return True
 
     @classmethod
-    def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        if not envs.VLLM_USE_V1:
-            raise RuntimeError("VLLM_USE_V1=1 must be set for JAX backend.")
+    def _initialize_sharding_config(cls, vllm_config: VllmConfig) -> None:
 
-        if envs.VLLM_TPU_USING_PATHWAYS:
-            assert not envs.VLLM_ENABLE_V1_MULTIPROCESSING, (
+        sharding_config = ShardingConfigManager.from_vllm_config(vllm_config)
+        vllm_config.sharding_config = sharding_config
+        logger.info(f"Initialized sharding configuration: {sharding_config}")
+
+    @classmethod
+    def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+
+        if vllm_envs.VLLM_TPU_USING_PATHWAYS:
+            assert not vllm_envs.VLLM_ENABLE_V1_MULTIPROCESSING, (
                 "VLLM_ENABLE_V1_MULTIPROCESSING must be 0 when using Pathways(JAX_PLATFORMS=proxy)"
             )
+        cls._initialize_sharding_config(vllm_config)
 
         from vllm.config import CompilationMode
 
@@ -138,7 +143,7 @@ class TpuPlatform(Platform):
             compilation_config.backend = "openxla"
 
         # If we use vLLM's model implementation in PyTorch, we should set it with torch version of the dtype.
-        impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
+        impl = envs.MODEL_IMPL_TYPE
 
         # NOTE(xiang): convert dtype to jnp.dtype
         # NOTE(wenlong): skip this logic for mm model preprocessing
@@ -158,27 +163,24 @@ class TpuPlatform(Platform):
             vllm_config.model_config.dtype = j2t_dtype(
                 vllm_config.model_config.dtype.dtype)
 
-        if envs.VLLM_USE_V1:
-            # TODO(cuiq): remove this dependency.
-            from vllm.v1.attention.backends.pallas import \
-                PallasAttentionBackend
-            cache_config.block_size = PallasAttentionBackend.get_page_size(
-                vllm_config)  # type: ignore[assignment]
-            min_page_size = PallasAttentionBackend.get_min_page_size(
-                vllm_config)
-            if min_page_size > cache_config.block_size:
-                logger.warning(
-                    "Increase the page size from %s to %s to make sure there's"
-                    "no SMEM OOM",
-                    cache_config.block_size,
-                    min_page_size,
-                )
-                cache_config.block_size = min_page_size  # type: ignore[assignment]
+        # TODO(cuiq): remove this dependency.
+        from vllm.v1.attention.backends.pallas import PallasAttentionBackend
+        cache_config.block_size = PallasAttentionBackend.get_page_size(
+            vllm_config)  # type: ignore[assignment]
+        min_page_size = PallasAttentionBackend.get_min_page_size(vllm_config)
+        if min_page_size > cache_config.block_size:
+            logger.warning(
+                "Increase the page size from %s to %s to make sure there's"
+                "no SMEM OOM",
+                cache_config.block_size,
+                min_page_size,
+            )
+            cache_config.block_size = min_page_size  # type: ignore[assignment]
 
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         parallel_config.worker_cls = \
-                        "tpu_inference.worker.tpu_worker_jax.TPUWorker"
+                        "tpu_inference.worker.tpu_worker.TPUWorker"
 
         multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "").lower()
         if not multihost_backend:  # Single host
@@ -206,8 +208,15 @@ class TpuPlatform(Platform):
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is not None:
             assert kv_transfer_config.kv_connector == "TPUConnector"
+        # Late initialization to avoid circular import
+        from tpu_inference.models.jax.utils.quantization.quantization_utils import \
+            update_vllm_config_for_qwix_quantization
 
         update_vllm_config_for_qwix_quantization(vllm_config)
+
+        from tpu_inference.core.sched.dp_scheduler import \
+            update_vllm_config_for_dp_scheduler
+        update_vllm_config_for_dp_scheduler(vllm_config)
 
     @classmethod
     def is_pin_memory_available(cls):
@@ -237,9 +246,6 @@ class TpuPlatform(Platform):
         """Raises if this request is unsupported on this platform"""
 
         if isinstance(params, SamplingParams):
-            if params.structured_outputs is not None and not envs.VLLM_USE_V1:
-                raise ValueError("Structured output is not supported on "
-                                 f"{cls.device_name} V0.")
             if params.sampling_type == SamplingType.RANDOM_SEED:
                 raise ValueError("JAX does not support per-request seed.")
 

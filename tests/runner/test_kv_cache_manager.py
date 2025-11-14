@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 import torch
 from vllm.attention import Attention
 from vllm.attention.backends.abstract import AttentionType
@@ -15,8 +16,8 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.request import Request
 
 from tpu_inference import utils as common_utils
-from tpu_inference.runner.input_batch_jax import CachedRequestState
-from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
+from tpu_inference.runner.input_batch import CachedRequestState
+from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
 class TestKVCacheManager:
@@ -28,15 +29,15 @@ class TestKVCacheManager:
 
         # create 1x1 mesh
         devices = np.asarray(jax.devices()[:1])
-        axis_names = ('data', 'model')
-        mesh_shape = (1, 1)
+        axis_names = ('data', 'attn_dp', 'model')
+        mesh_shape = (1, 1, 1)
         self.mock_mesh = jax.sharding.Mesh(devices.reshape(mesh_shape),
                                            axis_names)
 
         with patch('jax.devices', return_value=self.mock_devices), \
              patch('jax.make_mesh', return_value=self.mock_mesh), \
              patch('jax.random.key', return_value=self.mock_rng_key), \
-             patch('tpu_inference.runner.tpu_jax_runner.get_model', return_value=MagicMock()):
+             patch('tpu_inference.runner.tpu_runner.get_model', return_value=MagicMock()):
 
             model_config = ModelConfig(tokenizer_mode="auto",
                                        trust_remote_code=False,
@@ -200,14 +201,15 @@ class TestKVCacheManager:
             np.testing.assert_array_equal(updated_block_content,
                                           expected_padded_slice)
 
-    def test_get_kv_cache_spec_with_compilation_cfg(self):
+    @pytest.mark.parametrize("num_kv_heads", [16, 32])
+    @pytest.mark.parametrize("head_size", [64, 100, 200])
+    def test_get_kv_cache_spec_with_compilation_cfg(self, num_kv_heads,
+                                                    head_size):
         # tests we create kv cache spec from compilation config
         # create a static forward context with
         # 10 full attention layers +
         # 10 sliding window attention layers
         # 1 layer with shared kv cache.
-        num_kv_heads = 16
-        head_size = 128
         attn_type = AttentionType.DECODER
         sliding_window = 10
         static_forward_context = {}

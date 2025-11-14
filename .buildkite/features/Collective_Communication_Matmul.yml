@@ -14,7 +14,7 @@ steps:
       CI_TARGET: "Collective Communication Matmul"
       CI_STAGE: "CorrectnessTest"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh Collective_Communication_Matmul_CorrectnessTest

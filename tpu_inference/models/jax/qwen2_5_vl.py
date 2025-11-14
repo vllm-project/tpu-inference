@@ -1077,12 +1077,15 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             image_shapes = warmup_config.get("image_shapes")
 
         vc = self.vllm_config.model_config.hf_config.vision_config
+        factor = vc.patch_size * vc.spatial_merge_size
         for input_hw in image_shapes:
             if not isinstance(input_hw, list) or len(input_hw) != 2:
                 logger.warning(f"Skipping invalid shape {input_hw}.")
                 continue
             h_input, w_input = input_hw
-            t, h, w = 1, h_input // vc.patch_size, w_input // vc.patch_size
+            h_processed = round(h_input / factor) * factor
+            w_processed = round(w_input / factor) * factor
+            t, h, w = 1, h_processed // vc.patch_size, w_processed // vc.patch_size
             grid_thw = (t, h, w)
             num_patches = t * h * w
             patch_input_dim = vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size

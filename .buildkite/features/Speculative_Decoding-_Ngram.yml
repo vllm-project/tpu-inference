@@ -6,7 +6,11 @@ steps:
     agents:
       queue: tpu_v6e_queue
     commands:
-      - echo "covered by performance test"
+      - |
+        .buildkite/scripts/run_in_docker.sh \
+          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_ngram_correctness_greedy \
+          /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_ngram_correctness_random \
+          /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_eagle3_correctness
   - label: "Record correctness test result for Speculative Decoding: Ngram"
     key: "record_Speculative_Decoding-_Ngram_CorrectnessTest"
     depends_on: "Speculative_Decoding-_Ngram_CorrectnessTest"
@@ -14,7 +18,7 @@ steps:
       CI_TARGET: "Speculative Decoding: Ngram"
       CI_STAGE: "CorrectnessTest"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh Speculative_Decoding-_Ngram_CorrectnessTest
@@ -26,7 +30,12 @@ steps:
     agents:
       queue: tpu_v6e_queue
     commands:
-      - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py
+      - |
+        .buildkite/scripts/run_in_docker.sh \
+          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_ngram_performance_greedy \
+          /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_ngram_performance_random \
+          /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_eagle3_performance
+
   - label: "Record performance test result for Speculative Decoding: Ngram"
     key: "record_Speculative_Decoding-_Ngram_PerformanceTest"
     depends_on: "Speculative_Decoding-_Ngram_PerformanceTest"
@@ -34,7 +43,7 @@ steps:
       CI_TARGET: "Speculative Decoding: Ngram"
       CI_STAGE: "PerformanceTest"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh Speculative_Decoding-_Ngram_PerformanceTest

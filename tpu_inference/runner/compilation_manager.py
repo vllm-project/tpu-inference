@@ -13,11 +13,12 @@ from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.sample.sampling import sample
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
+from tpu_inference.layers.jax.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import device_array
 
 if TYPE_CHECKING:
-    from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
+    from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -128,20 +129,28 @@ class CompilationManager:
             num_tokens = inputs_embeds.shape[0]
         assert num_tokens is not None
 
+        dp_size = self.runner.vllm_config.sharding_config.total_dp_size
+        dp_sharding = NamedSharding(
+            self.runner.mesh, PartitionSpec(
+                ShardingAxisName.ATTN_DATA, )) if dp_size > 1 else None
+
         # Keep existing pattern for complex array operations
         block_tables = self.runner.block_table_cpu[:self.runner.max_num_reqs]
         block_tables = block_tables.reshape(-1)
-        block_tables = device_array(self.runner.mesh, block_tables)
+        block_tables = device_array(self.runner.mesh,
+                                    block_tables,
+                                    sharding=dp_sharding)
 
         seq_lens = self._create_dummy_tensor((self.runner.max_num_reqs, ),
-                                             jnp.int32)
+                                             jnp.int32, dp_sharding)
         query_start_loc = self._create_dummy_tensor(
-            (self.runner.max_num_reqs + 1, ), jnp.int32)
+            (self.runner.max_num_reqs + dp_size, ), jnp.int32, dp_sharding)
 
         # Keep existing pattern for specific value arrays
-        request_distribution = np.array([0, 0, 0], dtype=np.int32)
+        request_distribution = np.array([0, 0, 0] * dp_size, dtype=np.int32)
         request_distribution = device_array(self.runner.mesh,
-                                            request_distribution)
+                                            request_distribution,
+                                            sharding=dp_sharding)
 
         attention_metadata = AttentionMetadata(
             input_positions=positions,
@@ -193,18 +202,29 @@ class CompilationManager:
         """
 
         for num_tokens in self.runner.num_tokens_paddings:
-            padded_token_in_tpu_cur_input_indices = np.zeros((num_tokens, ),
-                                                             dtype=np.int32)
-            padded_token_in_tpu_pre_next_tokens_indices = np.zeros(
-                (num_tokens, ), dtype=jnp.int32)
+            dp_sharding = NamedSharding(
+                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, )
+            ) if self.runner.vllm_config.sharding_config.total_dp_size > 1 else None
+
             for num_reqs in self.runner.num_reqs_paddings:
+                padded_token_in_tpu_cur_input_indices = np.zeros(
+                    (num_tokens, ), dtype=np.int32)
+                padded_token_in_tpu_pre_next_tokens_indices = np.zeros(
+                    (num_tokens, ), dtype=jnp.int32)
+                (padded_token_in_tpu_cur_input_indices,
+                 padded_token_in_tpu_pre_next_tokens_indices) = device_array(
+                     self.runner.mesh,
+                     (padded_token_in_tpu_cur_input_indices,
+                      padded_token_in_tpu_pre_next_tokens_indices))
+
                 input_ids = self._create_dummy_tensor((num_tokens, ),
-                                                      jnp.int32)
+                                                      jnp.int32, dp_sharding)
                 # Need align to the sampling output
                 next_tokens = self._create_dummy_tensor(
                     (num_reqs, ),
                     jnp.int32,
-                    sharding=NamedSharding(self.runner.mesh, PartitionSpec()))
+                    sharding=dp_sharding,
+                )
                 placeholder_num = 1
                 self._run_compilation(
                     "_substitute_placeholder_token_fn",
@@ -220,8 +240,14 @@ class CompilationManager:
 
     def _precompile_backbone_text_only(self) -> None:
         for num_tokens in self.runner.num_tokens_paddings:
-            input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32)
-            positions = self._create_dummy_tensor((num_tokens, ), jnp.int32)
+            dp_sharding = NamedSharding(
+                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, )
+            ) if self.runner.vllm_config.sharding_config.total_dp_size > 1 else None
+
+            input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32,
+                                                  dp_sharding)
+            positions = self._create_dummy_tensor((num_tokens, ), jnp.int32,
+                                                  dp_sharding)
             self._precompile_backbone_helper("backbone",
                                              input_ids=input_ids,
                                              positions=positions,
@@ -250,7 +276,8 @@ class CompilationManager:
         source_paddings: List[int],
         indices_paddings: List[int],
         hidden_dim: int,
-        sharding: Optional[NamedSharding] = None,
+        input_sharding: Optional[NamedSharding] = None,
+        indices_sharding: Optional[NamedSharding] = None,
         only_equal_paddings: bool = False,
         check_should_skip_padding: bool = True,
     ) -> None:
@@ -283,9 +310,9 @@ class CompilationManager:
                     continue
 
                 input_tensor = self._create_dummy_tensor(
-                    (array_size, hidden_dim), jnp.bfloat16, sharding)
+                    (array_size, hidden_dim), jnp.bfloat16, input_sharding)
                 indices_to_select = self._create_dummy_tensor(
-                    (indices_count, ), jnp.int32)
+                    (indices_count, ), jnp.int32, indices_sharding)
 
                 self._run_compilation(
                     f"select_from_array [{name}]",
@@ -303,14 +330,16 @@ class CompilationManager:
             index_paddings = self.runner.num_logits_paddings
         else:
             index_paddings = self.runner.num_reqs_paddings
-
+        dp_sharding = NamedSharding(self.runner.mesh,
+                                    PartitionSpec(ShardingAxisName.ATTN_DATA))
+        dp_size = self.runner.vllm_config.sharding_config.total_dp_size
         self._precompile_select_from_array_helper(
             name="select all logits",
             source_paddings=self.runner.num_tokens_paddings,
             indices_paddings=index_paddings,
             hidden_dim=hsize,
-            sharding=NamedSharding(self.runner.mesh, PartitionSpec(None,
-                                                                   None)),
+            input_sharding=dp_sharding,
+            indices_sharding=dp_sharding if dp_size > 1 else None,
         )
 
         if self.runner.speculative_config:
@@ -320,16 +349,16 @@ class CompilationManager:
                 source_paddings=self.runner.num_logits_paddings,
                 indices_paddings=self.runner.num_reqs_paddings,
                 hidden_dim=vocab_size,
-                sharding=NamedSharding(self.runner.mesh,
-                                       PartitionSpec(None, "model")),
+                input_sharding=NamedSharding(self.runner.mesh,
+                                             PartitionSpec(None, "model")),
             )
             self._precompile_select_from_array_helper(
                 name="select target tokens for spec decoding",
                 source_paddings=self.runner.num_logits_paddings,
                 indices_paddings=self.runner.num_logits_paddings,
                 hidden_dim=vocab_size,
-                sharding=NamedSharding(self.runner.mesh,
-                                       PartitionSpec(None, "model")),
+                input_sharding=NamedSharding(self.runner.mesh,
+                                             PartitionSpec(None, "model")),
                 only_equal_paddings=True,
             )
 
@@ -337,9 +366,11 @@ class CompilationManager:
         logger.info("Compiling compute_logits with different input shapes.")
         hsize = self.runner.model_config.get_hidden_size()
         leading_shape = self.runner.num_reqs_paddings if not self.runner.speculative_config else self.runner.num_logits_paddings
+        dp_sharding = NamedSharding(self.runner.mesh,
+                                    PartitionSpec(ShardingAxisName.ATTN_DATA))
         for num_reqs in leading_shape:
-            hidden_states = self._create_dummy_tensor((num_reqs, hsize),
-                                                      jnp.bfloat16)
+            hidden_states = self._create_dummy_tensor(
+                (num_reqs, hsize), jnp.bfloat16, dp_sharding)
             with self.runner.maybe_select_dummy_loras(
                     self.runner.lora_config,
                     np.array([num_reqs], dtype=np.int32)):
@@ -357,10 +388,15 @@ class CompilationManager:
         logger.info("Compiling sampling with different input shapes.")
         hsize = self.runner.model_config.get_vocab_size()
         for num_reqs in self.runner.num_reqs_paddings:
-            sharding = NamedSharding(self.runner.mesh,
-                                     PartitionSpec(None, "model"))
+            logits_sharding = NamedSharding(
+                self.runner.mesh,
+                PartitionSpec(ShardingAxisName.ATTN_DATA, "model"))
+            dp_size = self.runner.vllm_config.sharding_config.total_dp_size
+            sampling_metadata_sharding = NamedSharding(
+                self.runner.mesh, PartitionSpec(
+                    ShardingAxisName.ATTN_DATA)) if dp_size > 1 else None
             logits = self._create_dummy_tensor((num_reqs, hsize), jnp.bfloat16,
-                                               sharding)
+                                               logits_sharding)
             for do_sampling in (True, False):
                 if do_sampling:
                     temperature = np.full((num_reqs, ), 0.7, dtype=np.float32)
@@ -368,7 +404,8 @@ class CompilationManager:
                     top_p = np.full((num_reqs, ), 0.8, dtype=np.float32)
                     (temperature, top_k,
                      top_p) = device_array(self.runner.mesh,
-                                           (temperature, top_k, top_p))
+                                           (temperature, top_k, top_p),
+                                           sharding=sampling_metadata_sharding)
                 else:
                     temperature = None
                     top_k = None
@@ -714,6 +751,11 @@ class CompilationManager:
     def _precompile_structured_decoding(self) -> None:
         logger.info(
             "Compiling structured_decoding with different input shapes.")
+        if self.runner.vllm_config.sharding_config.total_dp_size > 1:
+            logger.warning(
+                "Structured decoding precompilation skipped since structured decoding is not supported with DP."
+            )
+            return
         for num_reqs in self.runner.num_reqs_paddings:
             dummy_logits = self._create_dummy_tensor(
                 (num_reqs, self.runner.vocab_size), jnp.bfloat16)

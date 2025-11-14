@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 import jaxlib
 import jaxtyping
-import vllm.envs as envs
+import vllm.envs as vllm_envs
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
                                           has_kv_transfer_group)
@@ -18,16 +18,17 @@ from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
 from vllm.v1 import utils as vllm_utils
 from vllm.v1.core.kv_cache_utils import get_num_blocks, get_uniform_page_size
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 
-from tpu_inference import utils
+from tpu_inference import envs, utils
 from tpu_inference.distributed.utils import (get_host_ip, get_kv_transfer_port,
                                              get_node_id)
+from tpu_inference.layers.jax.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.kv_cache import get_rpa_page_size_bytes
-from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
+from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -49,7 +50,7 @@ class TPUWorker:
                  devices=None):
         # If we use vLLM's model implementation in PyTorch, we should set it
         # with torch version of the dtype.
-        impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
+        impl = envs.MODEL_IMPL_TYPE
         if impl != "vllm":  # vllm-pytorch implementation does not need this conversion
 
             # NOTE(wenlong): because sometimes mm needs to use torch for preprocessing
@@ -85,11 +86,11 @@ class TPUWorker:
         # TPU Worker is initialized. The profiler server needs to start after
         # MP runtime is initialized.
         self.profile_dir = None
-        if envs.VLLM_TORCH_PROFILER_DIR and self.rank < 1:
+        if vllm_envs.VLLM_TORCH_PROFILER_DIR and self.rank < 1:
             if not self.devices or 0 in self.device_ranks:
                 # For TPU, we can only have 1 active profiler session for 1 profiler
                 # server. So we only profile on rank0.
-                self.profile_dir = envs.VLLM_TORCH_PROFILER_DIR
+                self.profile_dir = vllm_envs.VLLM_TORCH_PROFILER_DIR
                 logger.info("Profiling enabled. Traces will be saved to: %s",
                             self.profile_dir)
 
@@ -111,16 +112,10 @@ class TPUWorker:
 
     def init_device(self):
         if not self.devices:
-            device_indexes = []
-            tp = self.parallel_config.tensor_parallel_size
-            try:
-                device_indexes = self.vllm_config.additional_config[
-                    "sharding"]["sharding_strategy"]["device_indexes"]
-            except KeyError:
-                self.devices = jax.devices()[:tp]
-
-            # Enforcing the devices sequence to be consistent with the specified device indexes
-            if not self.devices:
+            sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
+            device_indexes = sharding_config.device_indexes
+            if device_indexes is not None and len(device_indexes) > 0:
+                # Enforcing the devices sequence to be consistent with the specified device indexes
                 all_devices = jax.devices()
                 device_dict = {device.id: device for device in all_devices}
                 self.devices = []
@@ -132,7 +127,9 @@ class TPUWorker:
                             f"jax.devices() with IDs {list(device_dict.keys())}!"
                         )
                     self.devices.append(device)
-                self.devices = self.devices[:tp]
+                self.devices = self.devices[:sharding_config.total_devices]
+            else:
+                self.devices = jax.devices()[:sharding_config.total_devices]
 
         # Initialize the vLLM distribution layer as a single chip environment,
         # we'll swap the model's parallel modules with TPU SPMD equivalents.
@@ -200,10 +197,15 @@ class TPUWorker:
         output = self.model_runner.execute_model(scheduler_output)
 
         # With a connector, the scheduler expects output from all workers
+        # TODO(mrjunwan): Figure out if this is ok after https://github.com/vllm-project/vllm/pull/26866
         if has_kv_transfer_group():
             return output
 
         return output if self.is_driver_worker else None
+
+    def sample_tokens(self,
+                      grammar_output: GrammarOutput) -> ModelRunnerOutput:
+        return self.model_runner.sample_tokens(grammar_output)
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         return self.model_runner.take_draft_token_ids()
@@ -264,7 +266,8 @@ class TPUWorker:
 
         # TODO(kyuyeunk): Instead of checking page_size_bytes here, introduce
         # feature that allows overriding page_size_bytes of KVCacheSpec.
-        vllm_page_size_bytes = get_uniform_page_size(kv_cache_specs)
+        vllm_page_size_bytes = get_uniform_page_size(
+            list(kv_cache_specs.values()))
         rpa_page_size_bytes = get_rpa_page_size_bytes(self.model_runner.mesh,
                                                       kv_cache_specs)
 

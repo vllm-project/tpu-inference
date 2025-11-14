@@ -1,27 +1,27 @@
 # Quantized Matmul Attention and KV Cache
 steps:
-  - label: "Correctness tests for Quantized Matmul Attention and KV Cache"
-    key: "Quantized_Matmul_Attention_and_KV_Cache_CorrectnessTest"
-    soft_fail: true
-    agents:
-      queue: tpu_v6e_queue
-    commands:
-      - echo "covered by performance test"
-  - label: "Record correctness test result for Quantized Matmul Attention and KV Cache"
-    key: "record_Quantized_Matmul_Attention_and_KV_Cache_CorrectnessTest"
-    depends_on: "Quantized_Matmul_Attention_and_KV_Cache_CorrectnessTest"
-    env:
-      CI_TARGET: "Quantized Matmul Attention and KV Cache"
-      CI_STAGE: "CorrectnessTest"
-    agents:
-      queue: tpu_v6e_queue
-    commands:
-      - |
-        .buildkite/scripts/record_step_result.sh Quantized_Matmul_Attention_and_KV_Cache_CorrectnessTest
+  # - label: "Correctness tests for Quantized Matmul Attention and KV Cache"
+  #   key: "Quantized_Matmul_Attention_and_KV_Cache_CorrectnessTest"
+  #   soft_fail: true
+  #   agents:
+  #     queue: cpu
+  #   commands:
+  #     - echo "covered by performance test"
+  # - label: "Record correctness test result for Quantized Matmul Attention and KV Cache"
+  #   key: "record_Quantized_Matmul_Attention_and_KV_Cache_CorrectnessTest"
+  #   depends_on: "Quantized_Matmul_Attention_and_KV_Cache_CorrectnessTest"
+  #   env:
+  #     CI_TARGET: "Quantized Matmul Attention and KV Cache"
+  #     CI_STAGE: "CorrectnessTest"
+  #   agents:
+  #     queue: cpu
+  #   commands:
+  #     - |
+  #       .buildkite/scripts/record_step_result.sh Quantized_Matmul_Attention_and_KV_Cache_CorrectnessTest
 
   - label: "Performance tests for Quantized Matmul Attention and KV Cache"
     key: "Quantized_Matmul_Attention_and_KV_Cache_PerformanceTest"
-    depends_on: "record_Quantized_Matmul_Attention_and_KV_Cache_CorrectnessTest"
+    # depends_on: "record_Quantized_Matmul_Attention_and_KV_Cache_CorrectnessTest"
     soft_fail: true
     agents:
       queue: tpu_v6e_8_queue
@@ -45,7 +45,7 @@ steps:
       CI_TARGET: "Quantized Matmul Attention and KV Cache"
       CI_STAGE: "PerformanceTest"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh Quantized_Matmul_Attention_and_KV_Cache_PerformanceTest

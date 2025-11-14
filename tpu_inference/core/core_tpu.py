@@ -177,9 +177,15 @@ class _DisaggOrchestrator:
 
             scheduler_output = prefill_engine.scheduler.schedule()
             with LatencyTracker(f"prefill-{idx}"):
-                model_output = prefill_engine.execute_model_with_error_logging(
-                    prefill_engine.model_executor.execute_model,
+                future = prefill_engine.model_executor.execute_model(
+                    scheduler_output, non_block=True)
+                grammar_output = prefill_engine.scheduler.get_grammar_bitmask(
                     scheduler_output)
+                with prefill_engine.log_error_detail(scheduler_output):
+                    model_output = future.result()
+                    if model_output is None:
+                        model_output = prefill_engine.model_executor.sample_tokens(
+                            grammar_output)
 
             if scheduler_output.total_num_scheduled_tokens > 0:
                 logger.debug(f"Prefill result: {model_output}")
@@ -351,9 +357,16 @@ class _DisaggOrchestrator:
                          )
 
             with LatencyTracker(f"decode-{idx}"):
-                model_output = decode_engine.execute_model_with_error_logging(
-                    decode_engine.model_executor.execute_model,
+                future = decode_engine.model_executor.execute_model(
+                    scheduler_output, non_block=True)
+                grammar_output = decode_engine.scheduler.get_grammar_bitmask(
                     scheduler_output)
+                with decode_engine.log_error_detail(scheduler_output):
+                    model_output = future.result()
+                    if model_output is None:
+                        model_output = decode_engine.model_executor.sample_tokens(
+                            grammar_output)
+
             if scheduler_output.total_num_scheduled_tokens > 0:
                 logger.debug(f"Decode result: {model_output}")
 
@@ -433,13 +446,15 @@ class DisaggEngineCore(vLLMEngineCore):
         executor_fail_callback: Optional[Callable] = None,
     ):
         self.vllm_config = vllm_config
-        self.vllm_config.cache_config.gpu_memory_utilization = (
-            self.vllm_config.cache_config.gpu_memory_utilization - 0.1)
 
         self.output_queue = queue.Queue[Union[tuple[int, EngineCoreOutputs],
                                               bytes]]()
 
         self.devices = jax.devices()
+        device_kind = self.devices[0].device_kind
+        if device_kind != 'TPU7x':
+            self.vllm_config.cache_config.gpu_memory_utilization = (
+                self.vllm_config.cache_config.gpu_memory_utilization - 0.1)
         prefill_slice_sizes, decode_slice_sizes, slice_sizes = _get_slice_sizes(
             self.devices)
 
@@ -584,7 +599,6 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
         # engine core to be executed, instead we create other instance of
         # engine cores and let them do the work.
         self.vllm_config = vllm_config
-        self.vllm_config.cache_config.gpu_memory_utilization = self.vllm_config.cache_config.gpu_memory_utilization - 0.1
 
         # We should be taking the input from the client, the code below is forked from
         # vllm.v1.engine.core.EngineCoreProc.
@@ -597,6 +611,10 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
         self.engines_running = False
 
         self.devices = jax.devices()
+        device_kind = self.devices[0].device_kind
+        if device_kind != 'TPU7x':
+            self.vllm_config.cache_config.gpu_memory_utilization = (
+                self.vllm_config.cache_config.gpu_memory_utilization - 0.1)
         prefill_slice_sizes, decode_slice_sizes, slice_sizes = _get_slice_sizes(
             self.devices)
 

@@ -16,7 +16,7 @@ steps:
       CI_STAGE: "UnitTest"
       CI_TARGET: Qwen/Qwen2.5-VL-7B-Instruct
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh Qwen_Qwen2_5-VL-7B-Instruct_UnitTest
@@ -41,7 +41,7 @@ steps:
       CI_TARGET: Qwen/Qwen2.5-VL-7B-Instruct
       CI_STAGE: "IntegrationTest"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh Qwen_Qwen2_5-VL-7B-Instruct_IntegrationTest
@@ -62,7 +62,7 @@ steps:
       CI_TARGET: Qwen/Qwen2.5-VL-7B-Instruct
       CI_STAGE: "Benchmark"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh Qwen_Qwen2_5-VL-7B-Instruct_Benchmark

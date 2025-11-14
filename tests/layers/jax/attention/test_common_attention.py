@@ -21,8 +21,10 @@ class TestAttention(unittest.TestCase):
     def setUp(self):
         """Sets up the testing environment before each test."""
         self.mesh = Mesh(
-            np.array(jax.devices()[:1]).reshape(1, -1),
+            np.array(jax.devices()[:1]).reshape(1, 1, 1, -1),
             axis_names=(
+                "data",
+                "attn_dp",
                 "expert",
                 "model",
             ),

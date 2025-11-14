@@ -1,25 +1,28 @@
 from unittest.mock import MagicMock, patch
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
 
-from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
+from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
 class TestTPUJaxRunner:
 
     def setup_method(self):
         # Mock JAX dependencies
-        self.mock_devices = [MagicMock(coords=i) for i in range(4)]
-        self.mock_mesh = MagicMock()
+        self.mock_devices = [MagicMock(coords=i) for i in range(1)]
         self.mock_rng_key = MagicMock()
-
+        device_array = np.array(jax.devices()[:1]).reshape(1, 1, 1, -1)
+        self.mock_mesh = jax.make_mesh(device_array.shape,
+                                       ('data', 'attn_dp', 'expert', 'model'))
         with patch('jax.devices', return_value=self.mock_devices), \
              patch('jax.make_mesh', return_value=self.mock_mesh), \
              patch('jax.random.key', return_value=self.mock_rng_key), \
-             patch('tpu_inference.runner.tpu_jax_runner.get_model', return_value=MagicMock()):
+             patch('tpu_inference.runner.tpu_runner.get_model', return_value=MagicMock()), \
+             patch('tpu_inference.runner.tpu_runner.make_optimized_mesh', return_value=self.mock_mesh):
 
             model_config = ModelConfig(tokenizer_mode="auto",
                                        trust_remote_code=False,
@@ -103,15 +106,17 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
     def setup_method(self):
         # Mock JAX dependencies
         self.mock_devices = [MagicMock(coords=i) for i in range(4)]
-        self.mock_mesh = MagicMock()
         self.mock_rng_key = MagicMock()
-
+        device_array = np.array(jax.devices()[:1]).reshape(1, 1, 1, -1)
+        self.mock_mesh = jax.make_mesh(device_array.shape,
+                                       ('data', 'attn_dp', 'expert', 'model'))
         # Setup the runner with the model_config.is_multimodal_model set to True but get_model returning None for get_multimodal_embeddings_fn and get_input_embeddings_fn.
         with patch('jax.devices', return_value=self.mock_devices), \
              patch('jax.make_mesh', return_value=self.mock_mesh), \
              patch('jax.random.key', return_value=self.mock_rng_key), \
-             patch('tpu_inference.runner.tpu_jax_runner.nnx.Rngs', return_value=self.mock_rng_key), \
-             patch('tpu_inference.runner.tpu_jax_runner.get_model', return_value=self._model_get_model()):
+             patch('tpu_inference.runner.tpu_runner.nnx.Rngs', return_value=self.mock_rng_key), \
+             patch('tpu_inference.runner.tpu_runner.get_model', return_value=self._model_get_model()), \
+             patch('tpu_inference.runner.tpu_runner.make_optimized_mesh', return_value=self.mock_mesh):
 
             model_config = ModelConfig(tokenizer_mode="auto",
                                        trust_remote_code=False,

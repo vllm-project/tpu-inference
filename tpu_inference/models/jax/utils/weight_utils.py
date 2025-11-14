@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
+import torch
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
@@ -24,6 +25,12 @@ from tpu_inference.models.jax.utils import file_utils
 logger = init_logger(__name__)
 
 HF_WEIGHTS_FORMAT = "*.safetensors"
+
+DTYPE_VIEW_MAP = {
+    jnp.dtype(jnp.float8_e4m3fn): torch.uint8,
+    jnp.dtype(jnp.bfloat16): torch.uint16,
+    jnp.dtype(jnp.float32): torch.uint32,
+}
 
 
 @dataclass
@@ -80,6 +87,18 @@ def model_weights_generator(
         for name, weight_tensor in model_weights_single_file_generator(
                 st_file, framework, filter_regex):
             yield name, weight_tensor
+
+
+def convert_torch_to_jax_with_view(loaded_weight: torch.Tensor,
+                                   cast_type: jnp.dtype) -> jax.Array:
+    """
+    Converts a PyTorch tensor to a JAX array by reinterpreting its
+    bit representation using a dtype view map.
+    """
+    torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+    loaded_weight = jnp.array(
+        loaded_weight.view(torch_view_type).numpy()).view(cast_type)
+    return loaded_weight
 
 
 ############ END Used by llama4, deepseek only for now END ############

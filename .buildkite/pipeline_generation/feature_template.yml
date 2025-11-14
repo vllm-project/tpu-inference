@@ -14,7 +14,7 @@ steps:
       CI_TARGET: "{FEATURE_NAME}"
       CI_STAGE: "CorrectnessTest"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh {SANITIZED_FEATURE_NAME}_CorrectnessTest
@@ -34,7 +34,7 @@ steps:
       CI_TARGET: "{FEATURE_NAME}"
       CI_STAGE: "PerformanceTest"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh {SANITIZED_FEATURE_NAME}_PerformanceTest

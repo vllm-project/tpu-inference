@@ -7,7 +7,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import DraftTokenIds
 
 # The class we are testing
-from tpu_inference.worker.tpu_worker_jax import TPUWorker
+from tpu_inference.worker.tpu_worker import TPUWorker
 
 
 @pytest.fixture
@@ -35,6 +35,9 @@ def mock_vllm_config():
     config.parallel_config = mock_parallel_conf
     config.additional_config = mock_additional_config
 
+    config.sharding_config = MagicMock()
+    config.sharding_config.total_devices = 2
+
     return config
 
 
@@ -60,7 +63,7 @@ class TestTPUWorker:
         assert worker.profile_dir is None
         assert worker.devices == ['tpu:0']
 
-    @patch('tpu_inference.worker.tpu_worker_jax.envs')
+    @patch('tpu_inference.worker.tpu_worker.vllm_envs')
     def test_init_with_profiler_on_rank_zero(self, mock_envs,
                                              mock_vllm_config):
         """Tests that the profiler directory is set correctly on rank 0."""
@@ -71,7 +74,7 @@ class TestTPUWorker:
                            distributed_init_method="test_method")
         assert worker.profile_dir == "/tmp/profiles"
 
-    @patch('tpu_inference.worker.tpu_worker_jax.envs')
+    @patch('tpu_inference.worker.tpu_worker.vllm_envs')
     def test_init_with_profiler_on_other_ranks(self, mock_envs,
                                                mock_vllm_config):
         """Tests that the profiler directory is NOT set on non-rank 0 workers."""
@@ -96,11 +99,10 @@ class TestTPUWorker:
         assert worker.cache_config.num_gpu_blocks == 2048
         assert worker.cache_config.num_cpu_blocks == 1024
 
-    @patch('tpu_inference.worker.tpu_worker_jax.TPUModelRunner')
-    @patch('tpu_inference.worker.tpu_worker_jax.utils')
-    @patch('tpu_inference.worker.tpu_worker_jax.jax')
-    @patch(
-        'tpu_inference.worker.tpu_worker_jax.ensure_kv_transfer_initialized')
+    @patch('tpu_inference.worker.tpu_worker.TPUModelRunner')
+    @patch('tpu_inference.worker.tpu_worker.utils')
+    @patch('tpu_inference.worker.tpu_worker.jax')
+    @patch('tpu_inference.worker.tpu_worker.ensure_kv_transfer_initialized')
     def test_init_device_with_provided_devices(
             self, mock_ensure_kv_transfer_initialized, mock_jax, mock_utils,
             mock_runner_cls, mock_vllm_config):
@@ -118,11 +120,10 @@ class TestTPUWorker:
         mock_runner_cls.assert_called_once_with(mock_vllm_config, mock_devices)
         assert isinstance(worker.model_runner, MagicMock)
 
-    @patch('tpu_inference.worker.tpu_worker_jax.TPUModelRunner')
-    @patch('tpu_inference.worker.tpu_worker_jax.utils')
-    @patch('tpu_inference.worker.tpu_worker_jax.jax')
-    @patch(
-        'tpu_inference.worker.tpu_worker_jax.ensure_kv_transfer_initialized')
+    @patch('tpu_inference.worker.tpu_worker.TPUModelRunner')
+    @patch('tpu_inference.worker.tpu_worker.utils')
+    @patch('tpu_inference.worker.tpu_worker.jax')
+    @patch('tpu_inference.worker.tpu_worker.ensure_kv_transfer_initialized')
     def test_init_device_autodetects_devices(
             self, mock_ensure_kv_transfer_initialized, mock_jax, mock_utils,
             mock_runner_cls, mock_vllm_config):
@@ -144,7 +145,7 @@ class TestTPUWorker:
         mock_runner_cls.assert_called_once_with(mock_vllm_config,
                                                 expected_devices)
 
-    @patch('tpu_inference.worker.tpu_worker_jax.utils')
+    @patch('tpu_inference.worker.tpu_worker.utils')
     def test_determine_available_memory(self, mock_utils, mock_vllm_config):
         """Tests the available HBM memory calculation."""
         # Setup mock return for hbm_usage_bytes: [(used_bytes, limit_bytes), ...]
@@ -172,7 +173,7 @@ class TestTPUWorker:
     # --- Core Logic Tests ---
     #
 
-    @patch('tpu_inference.worker.tpu_worker_jax.TPUModelRunner')
+    @patch('tpu_inference.worker.tpu_worker.TPUModelRunner')
     def test_execute_model(self, mock_runner_cls, mock_vllm_config):
         """Tests that the driver worker executes the model and returns the concrete vLLM output."""
         worker = TPUWorker(vllm_config=mock_vllm_config,
@@ -195,7 +196,7 @@ class TestTPUWorker:
         # Assert the final result is the concrete model output
         assert result == mock_model_output
 
-    @patch('tpu_inference.worker.tpu_worker_jax.TPUModelRunner')
+    @patch('tpu_inference.worker.tpu_worker.TPUModelRunner')
     def test_execute_model_non_driver_returns_none(self, mock_runner_cls,
                                                    mock_vllm_config):
         """Tests that a non-driver worker executes the model but returns None."""
@@ -260,7 +261,7 @@ class TestTPUWorker:
     # --- Profiling and Health Check Tests ---
     #
 
-    @patch('tpu_inference.worker.tpu_worker_jax.jax')
+    @patch('tpu_inference.worker.tpu_worker.jax')
     @patch.dict('os.environ', {"PYTHON_TRACER_LEVEL": "1"}, clear=True)
     def test_profile_start(self, mock_jax, mock_vllm_config):
         """Tests starting the JAX profiler."""
@@ -279,7 +280,7 @@ class TestTPUWorker:
         # Verify options from env var were used
         assert kwargs['profiler_options'].python_tracer_level == '1'
 
-    @patch('tpu_inference.worker.tpu_worker_jax.jax')
+    @patch('tpu_inference.worker.tpu_worker.jax')
     def test_profile_stop(self, mock_jax, mock_vllm_config):
         """Tests stopping the JAX profiler."""
         worker = TPUWorker(vllm_config=mock_vllm_config,

@@ -1,5 +1,4 @@
 import functools
-import os
 from typing import Any, Optional
 
 import jax
@@ -11,6 +10,8 @@ from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 from vllm.utils.func_utils import supports_kw
 
+from tpu_inference import envs
+from tpu_inference.layers.jax.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.quantization.quantization_utils import (
     apply_qwix_on_abstract_model, apply_qwix_quantization,
@@ -102,7 +103,7 @@ def _get_nnx_model(
                                             apply_to_abstract_model=False)
         return model
 
-    if os.getenv("JAX_RANDOM_WEIGHTS", False):
+    if vllm_config.load_config.load_format == "dummy":
         # Create a sharded model with random inited weights.
         # TODO: currently Qwen2ForCausalLM is using legacy model implementation
         # will merge the random init logic when all model are migrated to new model implementation
@@ -197,9 +198,12 @@ def get_flax_model(
         model_class = _get_model_architecture(
             vllm_config.model_config.hf_config)
     jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
-    kv_cache_sharding = NamedSharding(mesh, PartitionSpec(None, None, "model"))
-    hidden_states_sharding = NamedSharding(mesh, PartitionSpec(None,
-                                                               None))  # (T, D)
+    kv_cache_sharding = NamedSharding(
+        mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None, "model"))
+    hidden_states_sharding = NamedSharding(mesh,
+                                           PartitionSpec(
+                                               ShardingAxisName.ATTN_DATA,
+                                               None))  # (T, D)
 
     # For performance consideration, refer to:
     # https://flax.readthedocs.io/en/latest/guides/performance.html
@@ -219,7 +223,8 @@ def get_flax_model(
         model = nnx.merge(graphdef, state)
         return model(*args)
 
-    logits_sharding = NamedSharding(mesh, PartitionSpec(None, "model"))
+    logits_sharding = NamedSharding(
+        mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, "model"))
 
     @functools.partial(
         jax.jit,
@@ -309,7 +314,7 @@ def get_model(
     mesh: Mesh,
     is_draft_model: bool = False,
 ) -> Any:
-    impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
+    impl = envs.MODEL_IMPL_TYPE
     logger.info(f"Loading model with MODEL_IMPL_TYPE={impl}")
 
     if impl == "flax_nnx":

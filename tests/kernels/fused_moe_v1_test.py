@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import numpy as np
 from absl.testing import absltest
 from jax._src import test_util as jtu
 from jax.sharding import Mesh
@@ -59,7 +60,8 @@ class MoEKernelTest(jtu.JaxTestCase):
                 (-1 if x.coords[0] % 2 else 1) * x.coords[1],
             ),
         )
-        self.mesh = Mesh(devices=self.mesh_devices, axis_names=("model", ))
+        self.mesh = Mesh(np.array(self.mesh_devices).reshape(1, -1),
+                         axis_names=("data", "model"))
 
     def test_basic(self):
         dtype = jnp.bfloat16
