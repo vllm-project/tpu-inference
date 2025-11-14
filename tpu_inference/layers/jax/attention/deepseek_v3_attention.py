@@ -12,7 +12,7 @@ from jax.sharding import PartitionSpec as P
 import os
 
 from tpu_inference import utils
-from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
+from tpu_inference.kernels.mla.v1.kernel import \
     mla_ragged_paged_attention
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     ragged_paged_attention
@@ -23,6 +23,9 @@ from tpu_inference.layers.jax.rope import DeepseekScalingRotaryEmbedding
 from tpu_inference.layers.jax.sharding import ShardingAxisName
 
 KVCache = Tuple[jax.Array, jax.Array]
+
+from tpu_inference.logger import init_logger
+logger = init_logger(__name__)
 
 
 # TODO (wenxindongwork): Add MLA KV cache implementation. For now, cache complete KV vectors.
@@ -200,7 +203,7 @@ class MLA(nnx.Module):
             q_nope_TNH = q_TNH[..., :self.qk_nope_head_dim]
             q_rope_TNH = q_TNH[..., self.qk_nope_head_dim:]
             q_rope_TNH = self.rope.apply_rope(md.input_positions, q_rope_TNH)
-            if self.kernel:
+            if self.use_kernel:
                 # Absorbe the K up-projection matrix into q
                 kernel_k_up_proj_ANH = self.kernel_kv_up_proj_ANH[..., :self.qk_nope_head_dim]
                 q_TNA = jnp.einsum("TNH,ANH -> TNA", q_nope_TNH, kernel_k_up_proj_ANH)
@@ -225,6 +228,7 @@ class MLA(nnx.Module):
                 (k_rope_SNH.shape[0], self.N, self.qk_rope_head_dim))
             kv_SA = kv_SA[..., :self.kv_lora_rank]
             kv_SA = self.kv_rms_norm(kv_SA)
+            kv_SA = nnx.with_sharding_constraint(kv_SA, self.keyvalue_skh)
 
             if not self.use_kernel:
                 # KV up projection.
@@ -247,7 +251,7 @@ class MLA(nnx.Module):
             # q, k, v head dimension to be multiple of 128. For now, we will
             # pad the q, k, v dimension to multiple of 128.
             # We should update the MLA kv cache implementation in the future.
-            if not self.kernel: # MLA kernel handles pading
+            if not self.use_kernel: # MLA kernel handles pading
                 multiple_of_128 = ((self.qk_head_dim - 1) // 128 + 1) * 128
                 q_TNH = jnp.pad(q_TNH, ((0, 0), (0, 0),
                                         (0, multiple_of_128 - self.qk_head_dim)))
@@ -293,18 +297,16 @@ class MLA(nnx.Module):
                     k_rope_SNH,
                     attention_metadata,
                     self.mesh,
-                    q_scale,
-                    k_scale,
-                    v_scale,
                 )
                 kernel_v_up_proj_ANH = self.kernel_kv_up_proj_ANH[..., self.qk_nope_head_dim:]
                 outputs_TNH = jnp.einsum("TNA,ANH -> TNH", outputs_TNA, kernel_v_up_proj_ANH)
             
             with jax.named_scope("o_proj"):
-                    o_TD = jnp.einsum("TNH,NHD -> TD", outputs_TNH,
-                                    self.kernel_o_proj_NHD.value)
                     o_TD = nnx.with_sharding_constraint(
                         o_TD, self.activation_attention_out_td)
+                    o_TD = jnp.einsum("TNH,NHD -> TD", outputs_TNH,
+                                    self.kernel_o_proj_NHD.value)
+                    
             return new_kv_cache, o_TD
 
 
@@ -397,9 +399,6 @@ class MLA(nnx.Module):
         k_rope_SNH: jax.Array,
         attention_metadata: AttentionMetadata,
         mesh: Mesh,
-        q_scale: float | None = None,
-        k_scale: float | None = None,
-        v_scale: float | None = None,
     ) -> Tuple[KVCache, jax.Array]:
         """Performs scaled dot-product attention and updates the KV cache.
 
@@ -430,23 +429,24 @@ class MLA(nnx.Module):
         md = attention_metadata
         in_specs = (
             self.query_tnh,  # q
+            self.query_tnh,  # q_rope # TODO: is this correct?
             self.keyvalue_skh,  # k
-            self.keyvalue_skh,  # v
-            P(None, None, "model"),  # kv_cache
+            self.keyvalue_skh,  # k_rope # TODO: is this correct?
+            P(ShardingAxisName.MLP_TENSOR),  # kv_cache
             P(),  # md.seq_lens: Replicated
             P(),  # page_indices_flat: Replicated
             P(),  # query_start_loc: Replicated
             P(),  # distribution: Replicated
         )
+        logger.warning(f"********in_specs = {in_specs}")
         out_specs = (self.attn_o_tnh, P(ShardingAxisName.MLP_TENSOR))
+        logger.warning(f"********out_specs = {in_specs}")
+        logger.warning(f"********input_shapes: q_TNA={q_TNA.shape}, q_rope_TNH={q_rope_TNH.shape}, k_SKA={k_SKA.shape}, k_rope_SNH={k_rope_SNH.shape}, kv_cache={kv_cache.shape} ")
 
         def _mla_ragged_paged_attention(*args):
             return mla_ragged_paged_attention(
                 *args,
                 sm_scale=self.scale,
-                q_scale=q_scale,
-                k_scale=k_scale,
-                v_scale=v_scale,
             )
         
         

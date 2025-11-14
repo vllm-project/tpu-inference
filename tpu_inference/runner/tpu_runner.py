@@ -306,7 +306,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             sharding_strategy.expert_size,
             sharding_strategy.tp_size,
         )
-
+        logger.warning(f"**********mesh_shape = {mesh_shape}")
         return mesh_utils.create_device_mesh(
             mesh_shape,
             self.devices,

@@ -138,7 +138,7 @@ class DeepSeekV3(nnx.Module):
 
 
                 query_tnh_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
-                keyvalue_skh_spec=P(ShardingAxisName.MLP_TENSOR, None), # misnomer should be something like keyvalue_sa
+                keyvalue_skh_spec=P(ShardingAxisName.MLP_TENSOR, None) # misnomer should be something like keyvalue_sa
                 attn_o_tnh_spec=P(ShardingAxisName.MLP_TENSOR, None, None),
                 
             else:
