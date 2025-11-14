@@ -189,6 +189,23 @@ def _substitute_placeholder_token(
     update_values = jnp.where(mask, new_token_values, original_values)
     return input_ids.at[token_in_tpu_cur_input_indices].set(update_values)
 
+def _reorder_logits_indices(logprobs_lists, logits_indices_selector):
+    return LogprobsLists(
+        logprob_token_ids=[
+            logprobs_lists.logprob_token_ids[i]
+            for i in logits_indices_selector
+        ],
+        logprobs=[
+            logprobs_lists.logprobs[i]
+            for i in logits_indices_selector
+        ],
+        sampled_token_ranks=[
+            logprobs_lists.sampled_token_ranks[i]
+            for i in logits_indices_selector
+        ],
+        cu_num_generated_tokens=logprobs_lists.
+        cu_num_generated_tokens,
+    )
 
 class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
@@ -843,22 +860,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 # Map logprobs back to the pre-dp shuffling order
                 logprobs_lists = logprobs.tolists()
                 if logits_indices_selector is not None:
-                    logprobs_lists = LogprobsLists(
-                        logprob_token_ids=[
-                            logprobs_lists.logprob_token_ids[i]
-                            for i in logits_indices_selector
-                        ],
-                        logprobs=[
-                            logprobs_lists.logprobs[i]
-                            for i in logits_indices_selector
-                        ],
-                        sampled_token_ranks=[
-                            logprobs_lists.sampled_token_ranks[i]
-                            for i in logits_indices_selector
-                        ],
-                        cu_num_generated_tokens=logprobs_lists.
-                        cu_num_generated_tokens,
-                    )
+                    logprobs_lists = _reorder_logits_indices(logprobs_lists, logits_indices_selector)
 
             else:
                 logprobs_lists = None
@@ -930,22 +932,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # Map logprobs back to the pre-dp shuffling order
             logprobs_lists = logprobs.tolists()
             if logits_indices_selector is not None:
-                logprobs_lists = LogprobsLists(
-                    logprob_token_ids=[
-                        logprobs_lists.logprob_token_ids[i]
-                        for i in logits_indices_selector
-                    ],
-                    logprobs=[
-                        logprobs_lists.logprobs[i]
-                        for i in logits_indices_selector
-                    ],
-                    sampled_token_ranks=[
-                        logprobs_lists.sampled_token_ranks[i]
-                        for i in logits_indices_selector
-                    ],
-                    cu_num_generated_tokens=logprobs_lists.
-                    cu_num_generated_tokens,
-                )
+                logprobs_lists = _reorder_logits_indices(logprobs_lists, logits_indices_selector)
         else:
             logprobs_lists = None
 
