@@ -184,8 +184,14 @@ class TpuPlatform(Platform):
 
         multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "").lower()
         if not multihost_backend:  # Single host
-            logger.info("Force using UniProcExecutor for JAX on single host.")
-            parallel_config.distributed_executor_backend = "uni"
+            if parallel_config.pipeline_parallel_size == 1:
+                logger.info("Force using UniProcExecutor for JAX on \
+                        single host without pipeline parallelism.")
+                parallel_config.distributed_executor_backend = "uni"
+            else:
+                logger.info("Force using MultiprocExecutor for JAX on \
+                        single host with pipeline parallelism.")
+                parallel_config.distributed_executor_backend = "mp"
         elif multihost_backend == "ray":
             from tpu_inference.executors.ray_distributed_executor import \
                 RayDistributedExecutor
