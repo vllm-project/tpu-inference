@@ -103,7 +103,6 @@ def tensor_sharded_gmm_merged_column_parallel(
     rhs: jax.Array,
     rhs_bias: jax.Array | None,
     group_sizes: jax.Array,
-    group_sizes_global: jax.Array,
     transpose_rhs: bool,
     mesh: Mesh,
     intermediate_size: int,
@@ -129,10 +128,18 @@ def tensor_sharded_gmm_merged_column_parallel(
         check_rep=False,
     )(lhs, rhs, group_sizes)
 
-    
     if rhs_bias is not None:
-        rhs_bis = jnp.repeat(rhs_bias, group_sizes_global, 0, total_repeat_length=m)
-        gmm_result = (gmm_result + rhs_bis).astype(gmm_result.dtype)
+        def _add_bias(gmm_result_local, rhs_bias_local, group_sizes_global):
+            rhs_bis = jnp.repeat(rhs_bias_local, group_sizes_global, 0, total_repeat_length=m//mesh.shape["data"])
+            return (gmm_result_local + rhs_bis).astype(gmm_result_local.dtype)
+        
+        gmm_result = shard_map(
+            _add_bias,
+            mesh=mesh,
+            in_specs=(P(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR), P(None, ShardingAxisName.MLP_TENSOR), P(ShardingAxisName.MLP_DATA)),
+            out_specs=(P(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR)),
+            check_rep=False,
+        )(gmm_result, rhs_bias, group_sizes)
 
     n_shards = mesh.shape['model'] * mesh.shape.get('attn_dp', 1)
     output_sizes = [intermediate_size, intermediate_size]
@@ -146,7 +153,6 @@ def tensor_sharded_gmm_row_parallel(
     rhs: jax.Array,
     rhs_bias: jax.Array | None,
     group_sizes: jax.Array,
-    group_sizes_global: jax.Array,
     transpose_rhs: bool,
     mesh: Mesh,
 ) -> jax.Array:
@@ -177,8 +183,17 @@ def tensor_sharded_gmm_row_parallel(
     )(lhs, rhs, group_sizes)
     # jax.debug.print("gmm_result before bias {} {}", gmm_result.sum(), gmm_result.ravel()[:10])
     if rhs_bias is not None:
-        rhs_bias = jnp.repeat(rhs_bias, group_sizes_global, 0, total_repeat_length=m)
-        gmm_result = (gmm_result + rhs_bias).astype(gmm_result.dtype)
+        def _add_bias(gmm_result_local, rhs_bias_local, group_sizes_global):
+            rhs_bis = jnp.repeat(rhs_bias_local, group_sizes_global, 0, total_repeat_length=m//mesh.shape["data"])
+            return (gmm_result_local + rhs_bis).astype(gmm_result_local.dtype)
+        
+        gmm_result = shard_map(
+            _add_bias,
+            mesh=mesh,
+            in_specs=(P(ShardingAxisName.MLP_DATA), P(), P(ShardingAxisName.MLP_DATA)),
+            out_specs=(P(ShardingAxisName.MLP_DATA)),
+            check_rep=False,
+        )(gmm_result, rhs_bias, group_sizes)
 
     return gmm_result
 
@@ -359,13 +374,6 @@ def fused_moe_func(
     assert (num_tokens * topk) % 16 == 0, (
         "The kernel requires num_tokens * topk to be a multiple of "
         f"16 but got {num_tokens}*{topk}={num_tokens*topk}")
-    hidden_states = jax.lax.with_sharding_constraint(
-            hidden_states, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
-
-    gating_output = jax.lax.with_sharding_constraint(
-            gating_output, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
-    
-    # jax.debug.print("hidden_state before MoE {} {}", hidden_states.sum(), hidden_states.ravel()[:10])
     hidden_states = hidden_states.reshape(num_tokens, hidden_size)
     gating_output = gating_output.reshape(num_tokens, global_num_experts)
 
@@ -383,19 +391,15 @@ def fused_moe_func(
         token_indices = jnp.arange(num_tokens_local, dtype=jnp.int32).repeat(topk)
         token_indices_sorted = token_indices[topk_argsort_indices]
         group_sizes_local = jnp.bincount(topk_indices_flat, length=global_num_experts)
-        
-        # Reduce group_sizes once across data parallel shards to get global counts
-        # This is needed for bias addition and should be done only once for efficiency
-        group_sizes_global = jax.lax.psum(group_sizes_local, axis_name=ShardingAxisName.ATTN_DATA)
-        
+                
         x = hidden_states_local[token_indices_sorted]
-        return x, group_sizes_local, group_sizes_global, topk_argsort_revert_indices
+        return x, group_sizes_local, topk_argsort_revert_indices
     
-    x, group_sizes, group_sizes_global, topk_argsort_revert_indices = shard_map(
+    x, group_sizes, topk_argsort_revert_indices = shard_map(
         _process_tokens_locally,
         mesh=mesh,
         in_specs=(P(ShardingAxisName.ATTN_DATA, None), P(ShardingAxisName.ATTN_DATA, None)),
-        out_specs=(P(ShardingAxisName.ATTN_DATA, None), P(ShardingAxisName.ATTN_DATA), P(), P(ShardingAxisName.ATTN_DATA)),
+        out_specs=(P(ShardingAxisName.ATTN_DATA, None), P(ShardingAxisName.ATTN_DATA), P(ShardingAxisName.ATTN_DATA)),
         check_rep=False,
     )(hidden_states, topk_indices)
     
@@ -418,7 +422,6 @@ def fused_moe_func(
             w1,
             w1_bias,
             group_sizes,
-            group_sizes_global,
             transpose_rhs=True,
             mesh=mesh,
             intermediate_size=intermediate_size,
@@ -446,7 +449,6 @@ def fused_moe_func(
             w2,
             w2_bias,
             group_sizes,
-            group_sizes_global,
             transpose_rhs=True,
             mesh=mesh,
         )
