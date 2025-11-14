@@ -77,7 +77,6 @@ class LlamaAttention(nnx.Module):
 
         self.head_dim_original = getattr(config, "head_dim",
                                          self.hidden_size // self.num_heads)
-        self.head_dim_original = 64
         self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
 
         sharding_size = mesh.shape["model"] * mesh.shape.get("attn_dp", 1)
