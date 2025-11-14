@@ -492,7 +492,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             jax.random.key(self.model_config.seed)).params()
         self.is_multimodal_model = (self.model_config.is_multimodal_model
                                     and self.get_multimodal_embeddings_fn
-                                    is not None)
+                                    is not None 
+                                    and self.model_config.hf_config.architectures[0] != "Llama4ForConditionalGeneration" ) #TODO: Remove Llama Guard 4 specific condition once the LG4 Vision portion is implemented
 
         logger.info(f"Init model | "
                     f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")
