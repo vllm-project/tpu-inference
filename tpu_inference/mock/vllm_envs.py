@@ -191,7 +191,7 @@ def maybe_convert_bool(value: Optional[str]) -> Optional[bool]:
 
 def _get_jax_platforms() -> str:
     """Get JAX_PLATFORMS from tpu_inference.envs module.
-    
+
     Returns:
         The JAX_PLATFORMS value.
     """
