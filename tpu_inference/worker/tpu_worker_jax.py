@@ -26,6 +26,8 @@ from tpu_inference.di.abstracts import (AbstractKVCacheConfig,
                                         AbstractLoRARequest,
                                         AbstractSchedulerOutput)
 from tpu_inference.di.interfaces import HostInterface
+from tpu_inference.distributed.cache_util import \
+    get_default_kv_connector_staging_buffer_tokens
 from tpu_inference.distributed.utils import (get_host_ip, get_kv_transfer_port,
                                              get_node_id)
 from tpu_inference.logger import init_logger
@@ -171,8 +173,11 @@ class TPUWorker(AbstractTpuWorker):
             kv_transfer_config = self.vllm_config.kv_transfer_config
             if kv_transfer_config.kv_connector == "TPUConnector" and kv_transfer_config.kv_connector_module_path == "tpu_inference.distributed.tpu_connector_local":
                 # If kv offloading is enabled, we need to account for the memory used by the KV transfer buffer.
+                _default_staging_buffer_tokens = get_default_kv_connector_staging_buffer_tokens(
+                )
                 staging_buffer_tokens = int(
-                    os.getenv("TPU_OFFLOAD_STAGING_BUFFER_TOKENS", "8192"))
+                    os.getenv("TPU_OFFLOAD_STAGING_BUFFER_TOKENS",
+                              str(_default_staging_buffer_tokens)))
                 # calculate staging buffer size
                 staging_buffer_pages = staging_buffer_tokens // self.vllm_config.cache_config.block_size
 

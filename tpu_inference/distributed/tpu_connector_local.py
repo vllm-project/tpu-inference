@@ -113,8 +113,9 @@ from tpu_inference.runner.kv_cache_manager import KVCacheManager
 from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
 
 from .cache_util import (CPU_OFFLOADING_SWAP_OP_TYPE, KVCacheSwapFn,
-                         TokenProcessor, cdiv, get_kv_cache_swap_fn,
-                         jitted_insert_kv_cache_slices)
+                         TokenProcessor, cdiv,
+                         get_default_kv_connector_staging_buffer_tokens,
+                         get_kv_cache_swap_fn, jitted_insert_kv_cache_slices)
 from .local_cpu_backend import LocalCPUBackend
 
 EngineId = str
@@ -635,8 +636,11 @@ class TPUConnectorScheduler():
         # config staging buffer
         # NOTE(jcgu): Need to find a way to grab page_size_bytes in scheduler
         # otherwise, we can only use # of tokens as input, instead of buffer size in GB
+        _default_staging_buffer_tokens = get_default_kv_connector_staging_buffer_tokens(
+        )
         num_staging_buffer_tokens = int(
-            os.getenv("TPU_OFFLOAD_STAGING_BUFFER_TOKENS", "8192"))
+            os.getenv("TPU_OFFLOAD_STAGING_BUFFER_TOKENS",
+                      str(_default_staging_buffer_tokens)))
         self.num_staging_blocks = num_staging_buffer_tokens // self.block_size
         self.staging_buffer_manager = _StagingBufferManager(
             num_blocks=self.num_staging_blocks)
