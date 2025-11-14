@@ -132,7 +132,6 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
                 f"current platform {current_platform.device_name} does not "
                 "support ray.")
 
-        tp_size = self.parallel_config.tensor_parallel_size
         pp_size = self.parallel_config.pipeline_parallel_size
         placement_group_specs: List[Dict[str, float]] = []
         if pp_size == 1:
@@ -140,8 +139,9 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
                 device_str: node['Resources'][device_str]
             } for node in ray.nodes()]
         else:
+            num_devices_per_pp_rank = self.vllm_config.sharding_config.total_devices
             placement_group_specs = [{
-                device_str: tp_size
+                device_str: num_devices_per_pp_rank
             } for _ in range(pp_size)]
 
         # vLLM engine is also a worker to execute model with an accelerator,
