@@ -27,7 +27,7 @@ from vllm.v1.core.sched.output import GrammarOutput
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
-                             DraftTokenIds, KVConnectorOutput,
+                             DraftTokenIds, KVConnectorOutput, LogprobsLists,
                              ModelRunnerOutput)
 from vllm.v1.request import Request
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
@@ -840,7 +840,26 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     logits_indices_selector)
 
             if logprobs is not None:
+                # Map logprobs back to the pre-dp shuffling order
                 logprobs_lists = logprobs.tolists()
+                if logits_indices_selector is not None:
+                    logprobs_lists = LogprobsLists(
+                        logprob_token_ids=[
+                            logprobs_lists.logprob_token_ids[i]
+                            for i in logits_indices_selector
+                        ],
+                        logprobs=[
+                            logprobs_lists.logprobs[i]
+                            for i in logits_indices_selector
+                        ],
+                        sampled_token_ranks=[
+                            logprobs_lists.sampled_token_ranks[i]
+                            for i in logits_indices_selector
+                        ],
+                        cu_num_generated_tokens=logprobs_lists.
+                        cu_num_generated_tokens,
+                    )
+
             else:
                 logprobs_lists = None
 
@@ -908,7 +927,25 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             req_state.output_token_ids.extend(sampled_ids)
 
         if logprobs is not None:
+            # Map logprobs back to the pre-dp shuffling order
             logprobs_lists = logprobs.tolists()
+            if logits_indices_selector is not None:
+                logprobs_lists = LogprobsLists(
+                    logprob_token_ids=[
+                        logprobs_lists.logprob_token_ids[i]
+                        for i in logits_indices_selector
+                    ],
+                    logprobs=[
+                        logprobs_lists.logprobs[i]
+                        for i in logits_indices_selector
+                    ],
+                    sampled_token_ranks=[
+                        logprobs_lists.sampled_token_ranks[i]
+                        for i in logits_indices_selector
+                    ],
+                    cu_num_generated_tokens=logprobs_lists.
+                    cu_num_generated_tokens,
+                )
         else:
             logprobs_lists = None
 
