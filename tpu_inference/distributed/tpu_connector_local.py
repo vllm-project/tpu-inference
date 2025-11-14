@@ -452,7 +452,9 @@ class TPUConnector(KVConnectorBase_V1):
 
 
 class _StagingBufferManager():
-    """ Bookkeeping the staging buffer.
+    """ Bookkeeping the staging buffer inside the connector scheduler.
+    NOTE(jcgu): the operations (e.g., allocate, free, get) to staging buffer / blocks are NOT thread-safe.
+    But it's okay since there is only one connector scheduler instance.
     """
 
     def __init__(self, num_blocks: int):
@@ -477,7 +479,7 @@ class _StagingBufferManager():
             logger.warning(
                 f"  get {num_blocks} staging blocks to allocate for Req:{req_id}."
             )
-            return
+            return num_blocks
         if num_blocks > self._num_free_blocks:
             # do not have enough capacity, return 0
             return 0
@@ -520,8 +522,7 @@ class _StagingBufferManager():
         # load operations respectively
         if usage == "load":
             if req_id not in self._blocks_for_load:
-                # raise ValueError(f" there is no record of staging buffer (usage: {usage}) for Req:{req_id}")
-                logger.info(
+                logger.warning(
                     f" there is no record of staging buffer (usage: {usage}) for Req:{req_id}"
                 )
                 return 0
@@ -540,8 +541,7 @@ class _StagingBufferManager():
             self._num_blocks_for_load -= num_freed_blocks
         elif usage == "save":
             if req_id not in self._blocks_for_save:
-                # raise ValueError(f" there is no record of staging buffer (usage: {usage}) for Req:{req_id}")
-                logger.info(
+                logger.warning(
                     f" there is no record of staging buffer (usage: {usage}) for Req:{req_id}"
                 )
                 return 0
@@ -694,6 +694,8 @@ class TPUConnectorScheduler():
 
         if num_matched_tokens > num_computed_tokens:
             # planning staging blocks for load
+            # NOTE(jcgu): do not worry about the inconsistency of the staging buffer status;
+            # there is only one connector scheduler who is operating on it.
             num_avail_staging_blocks = self.staging_buffer_manager.get_num_free_staging_blocks(
             )
             num_skip_blocks = num_computed_tokens // self.block_size
@@ -715,10 +717,12 @@ class TPUConnectorScheduler():
                     dst_blocks=dummy_dst_blocks,
                     num_skip_leading_tokens=num_computed_tokens,
                 )
-                self.staging_buffer_manager.allocate(
+                _num_allocated_blocks = self.staging_buffer_manager.allocate(
                     request.request_id,
                     num_blocks=num_blocks_to_load,
                     usage="load")
+                assert _num_allocated_blocks == num_blocks_to_load >= 0, f" failed to allocate {_num_allocated_blocks} (load) staging blocks for request {request.request_id}, expected {num_blocks_to_load}."
+
                 self._external_cache_hits[
                     request.request_id] = num_matched_tokens
 
@@ -943,19 +947,20 @@ class TPUConnectorScheduler():
                     skip_save=False,
                     src_blocks=src_block_ids,
                 )
-                self.staging_buffer_manager.allocate(
+                _num_allocated_blocks = self.staging_buffer_manager.allocate(
                     tracker.req_id,
                     num_blocks=num_blocks_to_save,
                     usage="save")
+                assert _num_allocated_blocks == num_blocks_to_save >= 0, f" failed to allocate {_num_allocated_blocks} (save) staging blocks for request {tracker.req_id}, expected {num_blocks_to_save}."
                 if adjusted_num_total_tokens > tracker.save_watermark:
                     logger.info(
-                        f"      -> Old watermark {tracker.save_watermark}, new save_watermark count: {tracker.save_watermark}"
+                        f"      -> Old watermark {tracker.save_watermark}, new save_watermark count: {adjusted_num_total_tokens}"
                     )
                     tracker.save_watermark = adjusted_num_total_tokens
         elif is_finished:
             # This is a "completion-only" signal because should_save is False.
             # NOTE(jcgu): num_total_tokens will be used to unpin tokens;
-            #  apply the number of saved tokens
+            #  apply the number of saved tokens;
             save_spec = SaveSpec(
                 num_skip_leading_tokens=tracker.save_watermark,
                 num_total_tokens=tracker.save_watermark,
@@ -963,7 +968,6 @@ class TPUConnectorScheduler():
                 is_final_save=True,
                 skip_save=True,
             )
-            # self.staging_buffer_manager.allocate(tracker.req_id, num_blocks=0, usage="save")
 
         # 2. Determine if a work order is needed.
         if not save_spec and not (load_spec and load_spec.can_load):
