@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-import os
 import time
 from collections import defaultdict
 from collections.abc import Sequence
@@ -14,7 +13,8 @@ from jax._src import mesh as mesh_lib
 from jax._src import xla_bridge as xb
 from jax._src.lib import xla_client as xc
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from vllm import envs as vllm_envs, utils
+from vllm import envs as vllm_envs
+from vllm import utils
 
 from tpu_inference import envs
 from tpu_inference.logger import init_logger
