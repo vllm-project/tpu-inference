@@ -157,9 +157,9 @@ class TestLlamaGuard4ForCausalLM:
 
         mock_loader_cls.assert_called_once_with(vllm_config=vllm_config,
                                                 hidden_size=128,
-                                                attn_heads=40,
-                                                num_key_value_heads=8,
-                                                attn_head_dim=128)
+                                                attn_heads=4,
+                                                num_key_value_heads=2,
+                                                attn_head_dim=32)
         mock_loader_instance.load_weights.assert_called_once_with(model)
 
 

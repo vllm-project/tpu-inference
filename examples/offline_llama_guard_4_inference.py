@@ -1,6 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+"""
+Example script for running offline safety classification inference on Llama Guard 4.
+
+applies the Llama Guard 4 chat template to 35 prompts from the ailuminate dataset, 
+and runs inference using the JAX backend. It calculates the final accuracy based on 
+the model's 'safe'/'unsafe' and S-code classification.
+
+Example Command (JAX Backend):
+python examples/offline_llama_guard_4_inference.py \
+    --model meta-llama/Llama-Guard-4-12B \
+    --tensor-parallel-size 8 \
+    --max-model-len 4096 \
+    --max_num_batched_tokens=4096
+
+Example Command (TorchAX Comparison/Base Case):
+MODEL_IMPL_TYPE=vllm python examples/offline_llama_guard_4_inference.py \
+    --model meta-llama/Llama-Guard-4-12B \
+    --tensor-parallel-size 8 \
+    --max-model-len 4096 \
+    --max_num_batched_tokens=4096
+"""
+
 import os
 
 import pandas as pd
@@ -236,7 +258,9 @@ if __name__ == "__main__":
     else:
         from unittest.mock import patch
 
-        from tpu_inference.core.core_tpu import DisaggEngineCoreProc
+        from tpu_inference.core.core_tpu import (DisaggEngineCore,
+                                                 DisaggEngineCoreProc)
 
-        with patch("vllm.v1.engine.core.EngineCoreProc", DisaggEngineCoreProc):
+        with patch("vllm.v1.engine.core.EngineCore", DisaggEngineCore), patch(
+                "vllm.v1.engine.core.EngineCoreProc", DisaggEngineCoreProc):
             main(args)

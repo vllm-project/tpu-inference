@@ -60,10 +60,8 @@ helpFunction()
    exit 1
 }
 
-SHARED_UTILS_PATH="/workspace/tests/e2e/benchmarking/bench_utils.sh"
-
-# Source the shared functions (cleanUp, waitForServerReady)
-. "$SHARED_UTILS_PATH"
+# Access shared benchmarking functionality
+source "$(dirname "$0")/bench_utils.sh"
 
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
@@ -277,13 +275,13 @@ for model_name in $model_list; do
     --num-prompts "$num_prompts" \
     --run-eval 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
 
-    # TODO (jacobplatin): probably want to add an option to skip this in the future
-    if [ "$dataset_name" == "mlperf" ]; then
-        checkThroughputAndRouge
-        if [ "$exit_code" -ne 0 ]; then
-            exit_code=1
+        # TODO (jacobplatin): probably want to add an option to skip this in the future
+        if [ "$dataset_name" == "mlperf" ]; then
+            checkThroughputAndRouge
+            if [ "$exit_code" -ne 0 ]; then
+                exit_code=1
+            fi
         fi
-    fi
 
     cleanUp "$model_name"
 done

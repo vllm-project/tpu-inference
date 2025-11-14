@@ -74,8 +74,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             vocab_size=vocab_size,
             hidden_size=self.hidden_size,
             dtype=self.dtype,
-            prelogit_td=P(),
-            vd_sharding= P((), None),
+            vd_sharding=(('data', 'model'), None),
             rngs=self.rng,
             random_init=force_random_weights,
         )
@@ -121,15 +120,15 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                 mesh=self.mesh,
                 random_init=force_random_weights,
 
-                activation_attention_td=P('data', 'model'),
-                activation_q_td=P('data', 'model'),
+                activation_attention_td=('data', 'model'),
+                activation_q_td=('data', 'model'),
                 query_tnh=P('data', 'model', None),
                 keyvalue_skh=P('data', 'model', None),
-                activation_attention_out_td=P('data', 'model'),
+                activation_attention_out_td=('data', 'model'),
                 attn_o_tnh=P('data', 'model', None),
-                dnh_sharding=P(None, 'model', None),
-                dkh_sharding=P(None, 'model', None),
-                nhd_sharding=P('model', None, None),
+                dnh_sharding=(None, 'model', None),
+                dkh_sharding=(None, 'model', None),
+                nhd_sharding=('model', None, None),
             )
 
             pre_attention_norm = RMSNorm(
@@ -137,14 +136,14 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                 random_init=force_random_weights,
                 epsilon=rms_norm_eps,
                 rngs=self.rng,
-                activation_ffw_td= P(),
+                activation_ffw_td=('data', None),
                 with_scale=True,
                 dtype=self.dtype,
             )
 
             pre_mlp_norm = RMSNorm(
                 dims=self.hidden_size,
-                activation_ffw_td=P(),
+                activation_ffw_td=('data', None),
                 epsilon=rms_norm_eps,
                 rngs=self.rng,
                 with_scale=True,
@@ -174,9 +173,8 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             hidden_size=self.hidden_size,
             dtype=self.dtype,
             rngs=self.rng,
-            prelogit_td=P(),
-            vd_sharding=P(),
-            dv_sharding=P(),
+            vd_sharding=(('data', 'model'), None),
+            dv_sharding=(None, ('data', 'model')),
             random_init=force_random_weights)
         if self.is_verbose:
             self._print_model_architecture()

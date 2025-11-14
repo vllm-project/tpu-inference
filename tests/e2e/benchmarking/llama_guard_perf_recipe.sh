@@ -45,10 +45,8 @@ TIMEOUT_SECONDS=600
 READY_MESSAGE="Application startup complete."
 exit_code=0
 
-SHARED_UTILS_PATH="/workspace/tests/e2e/benchmarking/bench_utils.sh" #THIS PATH IS ERRORING IN THE CI
-
-# Source the shared functions (cleanUp, waitForServerReady)
-. "$SHARED_UTILS_PATH"
+# Access shared benchmarking functionality
+source "$(dirname "$0")/bench_utils.sh"
 
 # ---------------------
 
