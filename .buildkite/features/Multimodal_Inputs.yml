@@ -1,4 +1,5 @@
 # Multimodal Inputs
+# feature support matrix
 steps:
   - label: "Correctness tests for Multimodal Inputs"
     key: "Multimodal_Inputs_CorrectnessTest"
@@ -13,6 +14,7 @@ steps:
     env:
       CI_TARGET: Multimodal Inputs
       CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
     agents:
       queue: cpu
     commands:
@@ -33,6 +35,7 @@ steps:
     env:
       CI_TARGET: Multimodal Inputs
       CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "feature support matrix"
     agents:
       queue: cpu
     commands:
