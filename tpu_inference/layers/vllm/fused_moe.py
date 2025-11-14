@@ -175,7 +175,7 @@ def tensor_sharded_gmm_row_parallel(
     out_specs=(P(ShardingAxisName.MLP_DATA)),
     check_rep=False,
     )(lhs, rhs, group_sizes)
-    jax.debug.print("gmm_result before bias {} {}", gmm_result.sum(), gmm_result.ravel()[:10])
+    # jax.debug.print("gmm_result before bias {} {}", gmm_result.sum(), gmm_result.ravel()[:10])
     if rhs_bias is not None:
         rhs_bias = jnp.repeat(rhs_bias, group_sizes_global, 0, total_repeat_length=m)
         gmm_result = (gmm_result + rhs_bias).astype(gmm_result.dtype)
@@ -365,7 +365,7 @@ def fused_moe_func(
     gating_output = jax.lax.with_sharding_constraint(
             gating_output, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
     
-    jax.debug.print("hidden_state before MoE {} {}", hidden_states.sum(), hidden_states.ravel()[:10])
+    # jax.debug.print("hidden_state before MoE {} {}", hidden_states.sum(), hidden_states.ravel()[:10])
     hidden_states = hidden_states.reshape(num_tokens, hidden_size)
     gating_output = gating_output.reshape(num_tokens, global_num_experts)
 
@@ -386,7 +386,7 @@ def fused_moe_func(
         
         # Reduce group_sizes once across data parallel shards to get global counts
         # This is needed for bias addition and should be done only once for efficiency
-        group_sizes_global = jax.lax.psum(group_sizes_local, axis_name=ShardingAxisName.MLP_DATA)
+        group_sizes_global = jax.lax.psum(group_sizes_local, axis_name=ShardingAxisName.ATTN_DATA)
         
         x = hidden_states_local[token_indices_sorted]
         return x, group_sizes_local, group_sizes_global, topk_argsort_revert_indices
@@ -399,8 +399,8 @@ def fused_moe_func(
         check_rep=False,
     )(hidden_states, topk_indices)
     
-    jax.debug.print("hidden_state before gmm {} {}", x.sum(), x.ravel()[:10])
-    jax.debug.print("group_sizes {} {}", group_sizes.sum(), group_sizes)
+    # jax.debug.print("hidden_state before gmm {} {}", x.sum(), x.ravel()[:10])
+    # jax.debug.print("group_sizes {} {}", group_sizes.sum(), group_sizes)
     if use_ep:
         x = expert_sharded_gmm(
             x,
@@ -423,11 +423,11 @@ def fused_moe_func(
             mesh=mesh,
             intermediate_size=intermediate_size,
         )
-        jax.debug.print("hidden_state after first gmm x1 {} {}", x1.sum(), x1.ravel()[:10])
-        jax.debug.print("hidden_state after first gmm x2 {} {}", x2.sum(), x2.ravel()[:10])
+        # jax.debug.print("hidden_state after first gmm x1 {} {}", x1.sum(), x1.ravel()[:10])
+        # jax.debug.print("hidden_state after first gmm x2 {} {}", x2.sum(), x2.ravel()[:10])
 
     x = activation_fn(activation, x1, x2)
-    jax.debug.print("hidden_state after activation {} {}", x.sum(), x.ravel()[:10])
+    # jax.debug.print("hidden_state after activation {} {}", x.sum(), x.ravel()[:10])
     if use_ep:
         x = expert_sharded_gmm(
             x,
@@ -450,7 +450,7 @@ def fused_moe_func(
             transpose_rhs=True,
             mesh=mesh,
         )
-        jax.debug.print("hidden_state after second gmm {} {}", x.sum(), x.ravel()[:10])
+        # jax.debug.print("hidden_state after second gmm {} {}", x.sum(), x.ravel()[:10])
 
     def _finalize_output(x_local, topk_argsort_revert_indices_local, topk_weights_local):
         x_local = x_local[topk_argsort_revert_indices_local].reshape(-1, topk, hidden_size)
@@ -465,12 +465,12 @@ def fused_moe_func(
         out_specs=(P(ShardingAxisName.ATTN_DATA, None)),
         check_rep=False,
     )(x, topk_argsort_revert_indices, topk_weights)
-    jax.debug.print("hidden_state after finalize output {} {}", x.sum(), x.ravel()[:10])
+    # jax.debug.print("hidden_state after finalize output {} {}", x.sum(), x.ravel()[:10])
     x = x.reshape(orig_shape)
 
     if reduce_results:
         x = jax.lax.with_sharding_constraint(x, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA)))
-        jax.debug.print("hidden_state after reducing result {} {}", x.sum(), x.ravel()[:10])
+        # jax.debug.print("hidden_state after reducing result {} {}", x.sum(), x.ravel()[:10])
     return x
 
 

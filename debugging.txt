@@ -1,0 +1,423 @@
+INFO 11-14 06:43:43 [__init__.py:26] TPU info: node_name=cuiq-infer-v7-2 | tpu_type=tpu7x-8 | worker_id=0 | num_chips=8 | num_cores_per_chip=2
+INFO 11-14 06:43:43 [importing.py:44] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+INFO 11-14 06:43:43 [importing.py:68] Triton not installed or not compatible; certain GPU-related functions will not be available.
+WARNING 11-14 06:43:43 [interface.py:197] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+INFO 11-14 06:43:44 [utils.py:253] non-default args: {'download_dir': '/mnt/disks/persist', 'max_model_len': 1024, 'tensor_parallel_size': 4, 'data_parallel_size': 2, 'num_redundant_experts': None, 'eplb_window_size': None, 'eplb_step_interval': None, 'eplb_log_balancedness': None, 'enable_lora': None, 'reasoning_parser_plugin': '', 'model': 'unsloth/gpt-oss-120b-BF16'}
+INFO 11-14 06:43:45 [model.py:630] Resolved architecture: GptOssForCausalLM
+INFO 11-14 06:43:45 [model.py:1728] Using max model len 1024
+WARNING 11-14 06:43:45 [tpu_jax.py:82] Error getting device name: 'NoneType' object has no attribute 'name'
+INFO 11-14 06:43:45 [scheduler.py:254] Chunked prefill is enabled with max_num_batched_tokens=8192.
+INFO 11-14 06:43:45 [config.py:272] Overriding max cuda graph capture size to 1024 for performance.
+INFO 11-14 06:43:45 [tpu_jax.py:118] Initialized sharding configuration: ShardingConfigManager(total_devices=8, sharding_strategy=ShardingStrategy(tensor_parallelism=4, expert_parallelism=1, sequence_parallelism=1, data_parallelism=2, attention_data_parallelism=1), device_indexes=None)
+WARNING 11-14 06:43:45 [tpu_jax.py:156] The model dtype is not properly set for JAX backend. Overwriting it to jnp.bfloat16
+INFO 11-14 06:43:45 [tpu_jax.py:192] Force using UniProcExecutor for JAX on single host.
+[1;36m(EngineCore_DP0 pid=113991)[0;0m INFO 11-14 06:43:46 [core.py:94] Initializing a V1 LLM engine (v0.11.1rc7.dev48+gdf4d3a44a) with config: model='unsloth/gpt-oss-120b-BF16', speculative_config=None, tokenizer='unsloth/gpt-oss-120b-BF16', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=1024, download_dir='/mnt/disks/persist', load_format=auto, tensor_parallel_size=4, pipeline_parallel_size=1, data_parallel_size=1, disable_custom_all_reduce=True, quantization=None, enforce_eager=False, kv_cache_dtype=auto, device_config=None, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='openai_gptoss', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None), seed=0, served_model_name=unsloth/gpt-oss-120b-BF16, enable_prefix_caching=True, chunked_prefill_enabled=True, pooler_config=None, compilation_config={'level': None, 'mode': 2, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'openxla', 'custom_ops': ['all'], 'splitting_ops': None, 'compile_mm_encoder': True, 'use_inductor': None, 'compile_sizes': None, 'inductor_compile_config': {'enable_auto_functionalized_v2': False}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'use_cudagraph': True, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': None, 'cudagraph_copy_inputs': False, 'full_cuda_graph': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {}, 'max_cudagraph_capture_size': 1024, 'local_cache_dir': None}
+[1;36m(EngineCore_DP0 pid=113991)[0;0m WARNING 11-14 06:43:46 [tpu_jax.py:228] Pin memory is not supported on TPU.
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[1;36m(EngineCore_DP0 pid=113991)[0;0m INFO 11-14 06:43:51 [parallel_state.py:1325] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, TP rank 0, EP rank 0
+[1;36m(EngineCore_DP0 pid=113991)[0;0m INFO 11-14 06:43:51 [tpu_jax_runner.py:274] Init mesh | mesh=Mesh('data': 2, 'model': 4, axis_types=(Auto, Auto))
+[1;36m(EngineCore_DP0 pid=113991)[0;0m INFO 11-14 06:43:51 [utils.py:93] Prepared token paddings: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m INFO 11-14 06:43:52 [utils.py:59] Prepared request paddings: [8, 16, 32, 64, 128, 256, 512]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m INFO 11-14 06:43:52 [compilation_manager.py:34] Enabling JAX compile cache.
+[1;36m(EngineCore_DP0 pid=113991)[0;0m INFO 11-14 06:43:52 [tpu_worker_jax.py:152] Init worker | rank=0 | node_id=0 | is_driver_worker=True | hbm=[(0.0, 94.75), (0.0, 94.75), (0.0, 94.75), (0.0, 94.75), (0.0, 94.75), (0.0, 94.75), (0.0, 94.75), (0.0, 94.75)]GiB
+[1;36m(EngineCore_DP0 pid=113991)[0;0m INFO 11-14 06:43:52 [model_loader.py:318] Loading model with MODEL_IMPL_TYPE=vllm
+[1;36m(EngineCore_DP0 pid=113991)[0;0m WARNING 11-14 06:43:53 [rocm.py:34] Failed to import from amdsmi with ModuleNotFoundError("No module named 'amdsmi'")
+[1;36m(EngineCore_DP0 pid=113991)[0;0m WARNING 11-14 06:43:53 [rocm.py:39] Failed to import from vllm._C with ModuleNotFoundError("No module named 'vllm._C'")
+[1;36m(EngineCore_DP0 pid=113991)[0;0m WARNING 11-14 06:43:53 [rocm.py:45] Failed to import from vllm._rocm_C with ModuleNotFoundError("No module named 'vllm._rocm_C'")
+[1;36m(EngineCore_DP0 pid=113991)[0;0m WARNING 11-14 06:43:53 [registry.py:171] _Backend has been renamed to AttentionBackendEnum. Please update your code to use AttentionBackendEnum instead. _Backend will be removed in a future release.
+[1;36m(EngineCore_DP0 pid=113991)[0;0m INFO 11-14 06:43:53 [tpu_jax.py:63] Cannot use None backend on TPU.
+[1;36m(EngineCore_DP0 pid=113991)[0;0m INFO 11-14 06:43:53 [tpu_jax.py:66] Using Pallas V1 backend.
+[1;36m(EngineCore_DP0 pid=113991)[0;0m INFO 11-14 06:43:53 [layer.py:331] Disabling MoE shared_experts cuda stream
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:   0% Completed | 0/73 [00:00<?, ?it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:   1% Completed | 1/73 [00:00<00:11,  6.09it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:   3% Completed | 2/73 [00:00<00:13,  5.43it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:   4% Completed | 3/73 [00:00<00:18,  3.81it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:   5% Completed | 4/73 [00:01<00:21,  3.22it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:   7% Completed | 5/73 [00:01<00:18,  3.62it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:   8% Completed | 6/73 [00:01<00:16,  4.06it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  10% Completed | 7/73 [00:01<00:15,  4.37it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  11% Completed | 8/73 [00:01<00:14,  4.62it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  12% Completed | 9/73 [00:02<00:13,  4.81it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  14% Completed | 10/73 [00:02<00:16,  3.86it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  15% Completed | 11/73 [00:02<00:15,  4.08it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  16% Completed | 12/73 [00:02<00:13,  4.38it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  18% Completed | 13/73 [00:03<00:12,  4.64it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  19% Completed | 14/73 [00:03<00:15,  3.84it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  21% Completed | 15/73 [00:03<00:16,  3.41it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  22% Completed | 16/73 [00:04<00:17,  3.18it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  23% Completed | 17/73 [00:04<00:16,  3.46it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  25% Completed | 18/73 [00:04<00:16,  3.25it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  26% Completed | 19/73 [00:05<00:17,  3.08it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  27% Completed | 20/73 [00:05<00:17,  2.95it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  29% Completed | 21/73 [00:05<00:18,  2.87it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  30% Completed | 22/73 [00:06<00:17,  2.84it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  32% Completed | 23/73 [00:06<00:17,  2.79it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  33% Completed | 24/73 [00:06<00:15,  3.18it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  34% Completed | 25/73 [00:07<00:15,  3.09it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  36% Completed | 26/73 [00:07<00:13,  3.46it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  37% Completed | 27/73 [00:07<00:12,  3.80it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  38% Completed | 28/73 [00:07<00:12,  3.48it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  40% Completed | 29/73 [00:08<00:13,  3.22it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  41% Completed | 30/73 [00:08<00:12,  3.50it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  42% Completed | 31/73 [00:08<00:12,  3.30it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  44% Completed | 32/73 [00:09<00:13,  3.12it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  45% Completed | 33/73 [00:09<00:13,  2.96it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  47% Completed | 34/73 [00:09<00:11,  3.35it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  48% Completed | 35/73 [00:09<00:10,  3.77it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  49% Completed | 36/73 [00:10<00:10,  3.47it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  51% Completed | 37/73 [00:10<00:11,  3.16it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  52% Completed | 38/73 [00:10<00:09,  3.52it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  53% Completed | 39/73 [00:11<00:10,  3.31it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  55% Completed | 40/73 [00:11<00:10,  3.06it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  56% Completed | 41/73 [00:11<00:09,  3.44it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  58% Completed | 42/73 [00:11<00:08,  3.84it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  59% Completed | 43/73 [00:12<00:08,  3.51it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  60% Completed | 44/73 [00:12<00:07,  3.82it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  62% Completed | 45/73 [00:12<00:06,  4.08it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  63% Completed | 46/73 [00:12<00:06,  4.39it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  64% Completed | 47/73 [00:13<00:06,  3.82it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  66% Completed | 48/73 [00:13<00:06,  4.06it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  67% Completed | 49/73 [00:13<00:05,  4.32it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  68% Completed | 50/73 [00:14<00:06,  3.66it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  70% Completed | 51/73 [00:14<00:05,  3.93it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  71% Completed | 52/73 [00:14<00:05,  3.51it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  73% Completed | 53/73 [00:14<00:05,  3.80it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  74% Completed | 54/73 [00:15<00:04,  4.18it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  75% Completed | 55/73 [00:15<00:04,  4.50it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  77% Completed | 56/73 [00:15<00:03,  4.72it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  78% Completed | 57/73 [00:15<00:04,  3.90it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  79% Completed | 58/73 [00:15<00:03,  4.14it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  81% Completed | 59/73 [00:16<00:03,  3.71it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  82% Completed | 60/73 [00:16<00:03,  3.30it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  84% Completed | 61/73 [00:17<00:03,  3.12it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  85% Completed | 62/73 [00:17<00:03,  3.49it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  86% Completed | 63/73 [00:17<00:03,  3.27it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  88% Completed | 64/73 [00:17<00:02,  3.62it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  89% Completed | 65/73 [00:17<00:01,  4.03it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  90% Completed | 66/73 [00:18<00:01,  4.36it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  92% Completed | 67/73 [00:18<00:01,  4.64it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  93% Completed | 68/73 [00:18<00:01,  3.88it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  96% Completed | 70/73 [00:19<00:00,  4.27it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  97% Completed | 71/73 [00:19<00:00,  3.75it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards:  99% Completed | 72/73 [00:19<00:00,  3.37it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards: 100% Completed | 73/73 [00:20<00:00,  3.16it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Loading safetensors checkpoint shards: 100% Completed | 73/73 [00:20<00:00,  3.61it/s]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m 
+[1;36m(EngineCore_DP0 pid=113991)[0;0m INFO 11-14 06:44:14 [default_loader.py:314] Loading weights took 20.30 seconds
+[1;36m(EngineCore_DP0 pid=113991)[0;0m [2025-11-14 06:44:16] WARNING ops_registry.py:36: Duplicate op registration for aten.__and__
+[1;36m(EngineCore_DP0 pid=113991)[0;0m [2025-11-14 06:44:16] WARNING unquantized.py:94: Bias might return incorrect value.
+[1;36m(EngineCore_DP0 pid=113991)[0;0m INFO 11-14 06:45:25 [tpu_jax_runner.py:498] Init model | hbm=[(56.45, 94.75), (56.45, 94.75), (56.45, 94.75), (56.45, 94.75), (56.45, 94.75), (56.45, 94.75), (56.45, 94.75), (56.45, 94.75)]GiB
+[1;36m(EngineCore_DP0 pid=113991)[0;0m INFO 11-14 06:45:25 [tpu_worker_jax.py:175] Memory statistics | total_hbm_limit_gb=757.97GiB | total_hbm_limit_cap_gb=682.17GiB | total_hbm_used_gb=451.62GiB | total_hbm_avail_gb=230.55GiB
+[1;36m(EngineCore_DP0 pid=113991)[0;0m WARNING 11-14 06:45:25 [kv_cache_utils.py:1095] Hybrid KV cache manager is disabled for this hybrid model, This means we do not enable any optimizations for saving KV cache memory (e.g., dropping the KV cache outside the sliding window). The compute of layers like sliding window is still saved.
+[1;36m(EngineCore_DP0 pid=113991)[0;0m INFO 11-14 06:45:25 [kv_cache_utils.py:1229] GPU KV cache size: 3,357,696 tokens
+[1;36m(EngineCore_DP0 pid=113991)[0;0m INFO 11-14 06:45:25 [kv_cache_utils.py:1234] Maximum concurrency for 1,024 tokens per request: 3279.00x
+[1;36m(EngineCore_DP0 pid=113991)[0;0m INFO 11-14 06:45:28 [kv_cache_manager.py:216] Init kv-cache | num_layers=36 | shape=(num_blocks, (64, 4, 2, 128)) | num_blocks=[52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464, 52464] | sharding=NamedSharding(mesh=Mesh('data': 2, 'model': 4, axis_types=(Auto, Auto)), spec=PartitionSpec('data', None, 'model'), memory_kind=device) | dtype=bfloat16 | hbm=[(85.27, 94.75), (85.27, 94.75), (85.27, 94.75), (85.27, 94.75), (85.27, 94.75), (85.27, 94.75), (85.27, 94.75), (85.27, 94.75)]Gb
+[1;36m(EngineCore_DP0 pid=113991)[0;0m INFO 11-14 06:45:28 [core.py:247] init engine (profile, create kv cache, warmup model) took 3.14 seconds
+[1;36m(EngineCore_DP0 pid=113991)[0;0m WARNING 11-14 06:45:29 [scheduler.py:158] Using custom scheduler class <class 'tpu_inference.core.sched.dp_scheduler.DPScheduler'>. This scheduler interface is not public and compatibility may not be maintained.
+[1;36m(EngineCore_DP0 pid=113991)[0;0m INFO 11-14 06:45:29 [dp_scheduler.py:93] DPScheduler (Async = False) per-rank limits: max_seqs=256, max_tokens=8192
+[1;36m(EngineCore_DP0 pid=113991)[0;0m INFO 11-14 06:45:29 [tpu_jax.py:118] Initialized sharding configuration: ShardingConfigManager(total_devices=4, sharding_strategy=ShardingStrategy(tensor_parallelism=4, expert_parallelism=1, sequence_parallelism=1, data_parallelism=1, attention_data_parallelism=1), device_indexes=None)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m WARNING 11-14 06:45:29 [tpu_jax.py:156] The model dtype is not properly set for JAX backend. Overwriting it to jnp.bfloat16
+[1;36m(EngineCore_DP0 pid=113991)[0;0m INFO 11-14 06:45:29 [tpu_jax.py:192] Force using UniProcExecutor for JAX on single host.
+INFO 11-14 06:45:29 [llm.py:350] Supported tasks: ['generate']
+Adding requests:   0%|          | 0/35 [00:00<?, ?it/s]Adding requests: 100%|██████████| 35/35 [00:00<00:00, 1981.17it/s]
+Processed prompts:   0%|          | 0/35 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s][1;36m(EngineCore_DP0 pid=113991)[0;0m /mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torchax/tensor.py:154: UserWarning: Explicitly requested dtype int64 requested in astype is not available, and will be truncated to dtype int32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   res = jax_function(self._elem, *args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m [2025-11-14 06:45:29] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=113991)[0;0m [2025-11-14 06:45:30] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=113991)[0;0m input_ids: [13225    11   922  1308   382     0     0     0     0     0     0     0
+[1;36m(EngineCore_DP0 pid=113991)[0;0m      0     0     0     0]
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Couldn`t find tuned sizes for the RPA v3 kernel with %s ('TPU v7', 64, 'q_bfloat16_kv_bfloat16', 'q_head-16_kv_head-2_head-64', 1024)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [dump_input.py:72] Dumping input data for V1 LLM engine (v0.11.1rc7.dev48+gdf4d3a44a) with config: model='unsloth/gpt-oss-120b-BF16', speculative_config=None, tokenizer='unsloth/gpt-oss-120b-BF16', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=1024, download_dir='/mnt/disks/persist', load_format=auto, tensor_parallel_size=4, pipeline_parallel_size=1, data_parallel_size=1, disable_custom_all_reduce=True, quantization=None, enforce_eager=False, kv_cache_dtype=auto, device_config=None, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='openai_gptoss', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None), seed=0, served_model_name=unsloth/gpt-oss-120b-BF16, enable_prefix_caching=True, chunked_prefill_enabled=True, pooler_config=None, compilation_config={'level': None, 'mode': 2, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'openxla', 'custom_ops': ['all'], 'splitting_ops': None, 'compile_mm_encoder': True, 'use_inductor': None, 'compile_sizes': None, 'inductor_compile_config': {'enable_auto_functionalized_v2': False}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'use_cudagraph': True, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': None, 'cudagraph_copy_inputs': False, 'full_cuda_graph': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {}, 'max_cudagraph_capture_size': 1024, 'local_cache_dir': None}, 
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [dump_input.py:79] Dumping scheduler output for model execution: DPSchedulerOutput(scheduled_new_reqs=[NewRequestData(req_id=0,prompt_token_ids_len=5,mm_features=[],sampling_params=SamplingParams(n=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=1.0, top_p=1.0, top_k=0, min_p=0.0, seed=None, stop=[], stop_token_ids=[199999], bad_words=[], include_stop_str_in_output=False, ignore_eos=False, max_tokens=16, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, truncate_prompt_tokens=None, structured_outputs=None, extra_args=None),block_ids=([1],),num_computed_tokens=0,lora_request=None,prompt_embeds_shape=None)], scheduled_cached_reqs=CachedRequestData(req_ids=[], resumed_req_ids=[], new_token_ids=[], all_token_ids=[], new_block_ids=[], num_computed_tokens=[], num_output_tokens=[]), num_scheduled_tokens={0: 5}, total_num_scheduled_tokens=5, scheduled_spec_decode_tokens={}, scheduled_encoder_inputs={}, num_common_prefix_blocks=[1], finished_req_ids=[], free_encoder_mm_hashes=[], pending_structured_output_tokens=false, kv_connector_metadata=null, assigned_dp_rank={0: 0})
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [dump_input.py:81] Dumping scheduler stats: SchedulerStats(num_running_reqs=1, num_waiting_reqs=0, step_counter=0, current_wave=0, kv_cache_usage=1.9061415881982402e-05, prefix_cache_stats=PrefixCacheStats(reset=False, requests=3, queries=15, hits=0, preempted_requests=0, preempted_queries=0, preempted_hits=0), connector_prefix_cache_stats=None, spec_decoding_stats=None, kv_connector_stats=None, waiting_lora_adapters={}, running_lora_adapters={})
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857] EngineCore encountered a fatal error.
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857] Traceback (most recent call last):
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core.py", line 848, in run_engine_core
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     engine_core.run_busy_loop()
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core.py", line 875, in run_busy_loop
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     self._process_engine_step()
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core.py", line 904, in _process_engine_step
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     outputs, model_executed = self.step_fn()
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]                               ^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core.py", line 332, in step
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     model_output = future.result()
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]                    ^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/mnt/disks/persist/vllm_conda/lib/python3.12/concurrent/futures/_base.py", line 449, in result
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     return self.__get_result()
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]            ^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/mnt/disks/persist/vllm_conda/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     raise self._exception
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/home/wenxindong_google_com/vllm/vllm/v1/executor/uniproc_executor.py", line 79, in collective_rpc
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     result = run_method(self.driver_worker, method, args, kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/home/wenxindong_google_com/vllm/vllm/v1/serial_utils.py", line 459, in run_method
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     return func(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]            ^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/home/wenxindong_google_com/vllm/vllm/v1/worker/worker_base.py", line 367, in execute_model
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     return self.worker.execute_model(scheduler_output, *args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/worker/tpu_worker_jax.py", line 198, in execute_model
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     output = self.model_runner.execute_model(scheduler_output)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/utils.py", line 313, in wrapper
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     result = func(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]              ^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/runner/tpu_jax_runner.py", line 526, in execute_model
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     _, output = self._execute_model(scheduler_output)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/runner/tpu_jax_runner.py", line 717, in _execute_model
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     aux_hidden_states) = self.model_fn(
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]                          ^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/models/vllm/vllm_model_wrapper.py", line 169, in step_fun
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     hidden_states = torch.func.functional_call(
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torch/_functorch/functional_call.py", line 148, in functional_call
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     return nn.utils.stateless._functional_call(
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torch/nn/utils/stateless.py", line 282, in _functional_call
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     return module(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]            ^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     return self._call_impl(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     return forward_call(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/models/vllm/vllm_model_wrapper.py", line 46, in forward
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     return self.compute_hidden_state(
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/models/vllm/vllm_model_wrapper.py", line 60, in compute_hidden_state
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     hidden_state = self.vllm_model(input_ids, positions,
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     return self._call_impl(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     return forward_call(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/home/wenxindong_google_com/vllm/vllm/model_executor/models/gpt_oss.py", line 716, in forward
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/home/wenxindong_google_com/vllm/vllm/compilation/decorators.py", line 470, in __call__
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     output = self.compiled_callable(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torch/_dynamo/eval_frame.py", line 761, in compile_wrapper
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     _maybe_set_eval_frame(prior)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/home/wenxindong_google_com/vllm/vllm/model_executor/models/gpt_oss.py", line 299, in forward
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     x, residual = layer(x, positions, residual)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     return self._call_impl(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     return forward_call(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/home/wenxindong_google_com/vllm/vllm/model_executor/models/gpt_oss.py", line 236, in forward
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     output = self.mlp(hidden_states)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]              ^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     return self._call_impl(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     return forward_call(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/home/wenxindong_google_com/vllm/vllm/model_executor/models/gpt_oss.py", line 189, in forward
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     x = self.experts(hidden_states=x, router_logits=g)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     return self._call_impl(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     return forward_call(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/home/wenxindong_google_com/vllm/vllm/model_executor/custom_op.py", line 46, in forward
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     return self._forward_method(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/home/wenxindong_google_com/vllm/vllm/model_executor/custom_op.py", line 76, in forward_tpu
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     return self.forward_native(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/home/wenxindong_google_com/vllm/vllm/model_executor/layers/fused_moe/layer.py", line 1487, in forward_native
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     fused_output = self.forward_impl(hidden_states, router_logits)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/home/wenxindong_google_com/vllm/vllm/model_executor/layers/fused_moe/layer.py", line 1745, in forward_impl
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     final_hidden_states = self.quant_method.apply(
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]                           ^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/layers/vllm/quantization/unquantized.py", line 363, in apply
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     output = fused_moe_func_padded(
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]              ^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/layers/vllm/fused_moe.py", line 491, in fused_moe_func_padded
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     return x
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]         ^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/layers/vllm/fused_moe.py", line 388, in fused_moe_func
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     x1, x2 = tensor_sharded_gmm_merged_column_parallel(
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/layers/vllm/fused_moe.py", line 124, in tensor_sharded_gmm_merged_column_parallel
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]     gmm_result = shard_map(
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857]                  ^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857] ValueError: The context mesh AbstractMesh('data': 2, 'model': 4, axis_types=(Manual, Manual), device_kind=TPU7x, num_cores=1) should match the mesh passed to shard_map Mesh('data': 2, 'model': 4, axis_types=(Auto, Auto))
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857] --------------------
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ERROR 11-14 06:45:30 [core.py:857] For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Process EngineCore_DP0:
+Traceback (most recent call last):
+  File "/home/wenxindong_google_com/tpu-inference/examples/offline_inference.py", line 113, in <module>
+    main(args)
+  File "/home/wenxindong_google_com/tpu-inference/examples/offline_inference.py", line 92, in main
+    outputs = llm.generate(prompts, sampling_params)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wenxindong_google_com/vllm/vllm/entrypoints/llm.py", line 446, in generate
+    outputs = self._run_engine(use_tqdm=use_tqdm)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wenxindong_google_com/vllm/vllm/entrypoints/llm.py", line 1736, in _run_engine
+    step_outputs = self.llm_engine.step()
+                   ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wenxindong_google_com/vllm/vllm/v1/engine/llm_engine.py", line 285, in step
+    outputs = self.engine_core.get_output()
+[1;36m(EngineCore_DP0 pid=113991)[0;0m Traceback (most recent call last):
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core_client.py", line 709, in get_output
+    raise self._format_exception(outputs) from None
+vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue. See stack trace (above) for the root cause.
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/mnt/disks/persist/vllm_conda/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     self.run()
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/mnt/disks/persist/vllm_conda/lib/python3.12/multiprocessing/process.py", line 108, in run
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     self._target(*self._args, **self._kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core.py", line 859, in run_engine_core
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     raise e
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core.py", line 848, in run_engine_core
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     engine_core.run_busy_loop()
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core.py", line 875, in run_busy_loop
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     self._process_engine_step()
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core.py", line 904, in _process_engine_step
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     outputs, model_executed = self.step_fn()
+[1;36m(EngineCore_DP0 pid=113991)[0;0m                               ^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core.py", line 332, in step
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     model_output = future.result()
+[1;36m(EngineCore_DP0 pid=113991)[0;0m                    ^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/mnt/disks/persist/vllm_conda/lib/python3.12/concurrent/futures/_base.py", line 449, in result
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     return self.__get_result()
+[1;36m(EngineCore_DP0 pid=113991)[0;0m            ^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/mnt/disks/persist/vllm_conda/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     raise self._exception
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/executor/uniproc_executor.py", line 79, in collective_rpc
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     result = run_method(self.driver_worker, method, args, kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/serial_utils.py", line 459, in run_method
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     return func(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m            ^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/worker/worker_base.py", line 367, in execute_model
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     return self.worker.execute_model(scheduler_output, *args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/worker/tpu_worker_jax.py", line 198, in execute_model
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     output = self.model_runner.execute_model(scheduler_output)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/utils.py", line 313, in wrapper
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     result = func(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m              ^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/runner/tpu_jax_runner.py", line 526, in execute_model
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     _, output = self._execute_model(scheduler_output)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/runner/tpu_jax_runner.py", line 717, in _execute_model
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     aux_hidden_states) = self.model_fn(
+[1;36m(EngineCore_DP0 pid=113991)[0;0m                          ^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/models/vllm/vllm_model_wrapper.py", line 169, in step_fun
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     hidden_states = torch.func.functional_call(
+[1;36m(EngineCore_DP0 pid=113991)[0;0m                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torch/_functorch/functional_call.py", line 148, in functional_call
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     return nn.utils.stateless._functional_call(
+[1;36m(EngineCore_DP0 pid=113991)[0;0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torch/nn/utils/stateless.py", line 282, in _functional_call
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     return module(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m            ^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     return self._call_impl(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     return forward_call(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/models/vllm/vllm_model_wrapper.py", line 46, in forward
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     return self.compute_hidden_state(
+[1;36m(EngineCore_DP0 pid=113991)[0;0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/models/vllm/vllm_model_wrapper.py", line 60, in compute_hidden_state
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     hidden_state = self.vllm_model(input_ids, positions,
+[1;36m(EngineCore_DP0 pid=113991)[0;0m                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     return self._call_impl(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     return forward_call(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/model_executor/models/gpt_oss.py", line 716, in forward
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/compilation/decorators.py", line 470, in __call__
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     output = self.compiled_callable(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torch/_dynamo/eval_frame.py", line 761, in compile_wrapper
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     _maybe_set_eval_frame(prior)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/model_executor/models/gpt_oss.py", line 299, in forward
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     x, residual = layer(x, positions, residual)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     return self._call_impl(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     return forward_call(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/model_executor/models/gpt_oss.py", line 236, in forward
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     output = self.mlp(hidden_states)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m              ^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     return self._call_impl(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     return forward_call(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/model_executor/models/gpt_oss.py", line 189, in forward
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     x = self.experts(hidden_states=x, router_logits=g)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     return self._call_impl(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     return forward_call(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/model_executor/custom_op.py", line 46, in forward
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     return self._forward_method(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/model_executor/custom_op.py", line 76, in forward_tpu
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     return self.forward_native(*args, **kwargs)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/model_executor/layers/fused_moe/layer.py", line 1487, in forward_native
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     fused_output = self.forward_impl(hidden_states, router_logits)
+[1;36m(EngineCore_DP0 pid=113991)[0;0m                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/model_executor/layers/fused_moe/layer.py", line 1745, in forward_impl
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     final_hidden_states = self.quant_method.apply(
+[1;36m(EngineCore_DP0 pid=113991)[0;0m                           ^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/layers/vllm/quantization/unquantized.py", line 363, in apply
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     output = fused_moe_func_padded(
+[1;36m(EngineCore_DP0 pid=113991)[0;0m              ^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/layers/vllm/fused_moe.py", line 491, in fused_moe_func_padded
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     return x
+[1;36m(EngineCore_DP0 pid=113991)[0;0m         ^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/layers/vllm/fused_moe.py", line 388, in fused_moe_func
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     x1, x2 = tensor_sharded_gmm_merged_column_parallel(
+[1;36m(EngineCore_DP0 pid=113991)[0;0m              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/layers/vllm/fused_moe.py", line 124, in tensor_sharded_gmm_merged_column_parallel
+[1;36m(EngineCore_DP0 pid=113991)[0;0m     gmm_result = shard_map(
+[1;36m(EngineCore_DP0 pid=113991)[0;0m                  ^^^^^^^^^^
+[1;36m(EngineCore_DP0 pid=113991)[0;0m ValueError: The context mesh AbstractMesh('data': 2, 'model': 4, axis_types=(Manual, Manual), device_kind=TPU7x, num_cores=1) should match the mesh passed to shard_map Mesh('data': 2, 'model': 4, axis_types=(Auto, Auto))
+[1;36m(EngineCore_DP0 pid=113991)[0;0m --------------------
+[1;36m(EngineCore_DP0 pid=113991)[0;0m For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
+Processed prompts:   0%|          | 0/35 [00:04<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]
