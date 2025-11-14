@@ -15,6 +15,20 @@ DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
 
 DEFAULT_VMEM_LIMIT_BYTES = 100 * 1024 * 1024
 
+def get_kv_cache_shape(
+    total_num_pages,
+    page_size,
+    lkv_dim,
+    kv_dtype,
+):
+    kv_packing = get_dtype_packing(kv_dtype)
+    return (
+        total_num_pages,
+        align_to(page_size, kv_packing) // kv_packing,
+        kv_packing,
+        align_to(lkv_dim, 128), # TODO: Should this be 256?
+    )
+
 
 @functools.partial(
     jax.jit,

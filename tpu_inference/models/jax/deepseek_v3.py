@@ -4,6 +4,7 @@ from typing import List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+import os
 import torch
 from flax import nnx
 from flax.typing import PRNGKey
@@ -15,6 +16,7 @@ from vllm.config import VllmConfig
 from tpu_inference import utils
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
 from tpu_inference.layers.jax.attention.deepseek_v3_attention import MLA
+from tpu_inference.layers.jax.sharding import ShardingAxisName
 from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
 from tpu_inference.layers.jax.moe.deepseek_v3_moe import (DeepSeekV3Router,
@@ -36,6 +38,8 @@ DTYPE_VIEW_MAP = {
     jnp.dtype(jnp.bfloat16): torch.uint16,
     jnp.dtype(jnp.float32): torch.uint32,
 }
+
+USE_MLA_KERNEL = os.getenv("USE_MLA_KERNEL", "0")
 
 
 @dataclass
@@ -60,7 +64,7 @@ class DeepSeekV3(nnx.Module):
         # NOTE: this dtype may be implicitly overriden if using to Qwix to load in the quantized weights
         dtype: jnp.dtype = jnp.bfloat16
         num_attention_heads: int = 128
-        num_key_value_heads: int = 128
+        num_key_value_heads: int = 1 if USE_MLA_KERNEL else 128
         ffw_intermediate_size: int = 18432
         moe_intermediate_size: int = 2048
         num_experts_per_token: int = 8
@@ -127,6 +131,27 @@ class DeepSeekV3(nnx.Module):
         self.layers = []
 
         def _create_mla() -> MLA:
+
+            if USE_MLA_KERNEL:
+                qkv_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
+                kv_cache_spec = P(ShardingAxisName.MLP_TENSOR)
+
+
+                query_tnh_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
+                keyvalue_skh_spec=P(ShardingAxisName.MLP_TENSOR, None), # misnomer should be something like keyvalue_sa
+                attn_o_tnh_spec=P(ShardingAxisName.MLP_TENSOR, None, None),
+                
+            else:
+                # TODO: update to use ShardingAxisName
+                query_tnh_spec = P(None, 'model', None)
+                keyvalue_skh_spec=P(None, 'model', None) 
+                # activation_attention_out_td=(None, None),
+                attn_o_tnh_spec=P(None, 'model', None),
+                # q_da_sharding=(None, 'model'),
+                # anh_spec=(None, 'model', None),
+                # kv_da_spec=(None, 'model'),
+                # nhd_spec=('model', None, None)
+
             return MLA(
                 rope_theta=rope_theta,
                 rope_scaling=rope_scaling,
@@ -148,10 +173,10 @@ class DeepSeekV3(nnx.Module):
                 rngs=self.rng,
                 activation_attention_td=(None, None),
                 activation_q_td=(None, None),
-                query_tnh=P(None, 'model', None),
-                keyvalue_skh=P(None, 'model', None),
+                query_tnh=query_tnh_spec,
+                keyvalue_skh=keyvalue_skh_spec,
                 activation_attention_out_td=(None, None),
-                attn_o_tnh=P(None, 'model', None),
+                attn_o_tnh=attn_o_tnh_spec,
                 q_da_sharding=(None, 'model'),
                 anh_sharding=(None, 'model', None),
                 kv_da_sharding=(None, 'model'),

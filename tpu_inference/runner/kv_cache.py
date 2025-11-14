@@ -3,18 +3,21 @@ from typing import Any, List
 import jax
 import jax.numpy as jnp
 import numpy as np
+import os
 from jax._src import dtypes
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.ops.mappings import t2j_dtype
 
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
-from tpu_inference.layers.common.sharding import ShardingAxisName
+import tpu_inference.kernels.mla.v1.kernel as mla
+from tpu_inference.layers.jax.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
 
 DEFAULT_KV_CACHE_DTYPE = jnp.bfloat16
+USE_MLA_KERNEL = os.getenv("USE_MLA_KERNEL", "0")
 
 
 def get_kv_cache_shape_with_mesh(mesh: Mesh, total_num_pages: int,
@@ -28,15 +31,21 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh, total_num_pages: int,
     # specific model, rather than being determined by the head_dim. If new
     # models are introduced with a head_dim of 64, this will require additional
     # model-specific adjustments.
-    get_kv_cache_shape_fn = (
-        rpa_hd64.get_kv_cache_shape if actual_head_dim == 64 \
-            else rpa.get_kv_cache_shape
-    )
-    shape = list(
-        get_kv_cache_shape_fn(total_num_pages, page_size,
-                              actual_num_kv_heads // model_cnt,
-                              actual_head_dim, kv_dtype))
-    shape[2] *= model_cnt
+    if USE_MLA_KERNEL:
+        get_kv_cache_shape_fn = mla.get_kv_cache_shape
+        shape = list(
+            get_kv_cache_shape_fn(total_num_pages, page_size,
+                                  actual_head_dim, kv_dtype))
+    else:
+        get_kv_cache_shape_fn = (
+            rpa_hd64.get_kv_cache_shape if actual_head_dim == 64 \
+                else rpa.get_kv_cache_shape
+        )
+        shape = list(
+            get_kv_cache_shape_fn(total_num_pages, page_size,
+                                actual_num_kv_heads // model_cnt,
+                                actual_head_dim, kv_dtype))
+        shape[2] *= model_cnt
     return tuple(shape)
 
 
@@ -94,7 +103,7 @@ def create_kv_caches(
     return kv_caches
 
 
-def get_rpa_page_size_bytes(mesh: Mesh, kv_cache_specs: dict[str, Any]) -> int:
+def get_attention_page_size_bytes(mesh: Mesh, kv_cache_specs: dict[str, Any]) -> int:
     """
     Calculate KV cache page size of RPA kernel.
 
