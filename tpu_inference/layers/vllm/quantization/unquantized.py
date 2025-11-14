@@ -23,6 +23,8 @@ from vllm.model_executor.layers.quantization.base_config import (
 
 from tpu_inference import envs
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
+from tpu_inference.layers.common.quant_methods import (UNQUANTIZED,
+                                                       get_tpu_quant_method)
 from tpu_inference.layers.vllm.fused_moe import fused_moe_func_padded
 from tpu_inference.layers.vllm.linear_common import (
     reorder_concatenated_tensor_for_sharding,
@@ -34,12 +36,12 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
-@register_quantization_config("tpu-unquantized")
+@register_quantization_config(get_tpu_quant_method(UNQUANTIZED))
 class VllmUnquantizedConfig(QuantizationConfig, JaxCommonConfig):
 
     @classmethod
     def get_name(cls) -> str:
-        return "unquantized"
+        return UNQUANTIZED
 
     @classmethod
     def get_supported_act_dtypes(cls) -> list[torch.dtype]:

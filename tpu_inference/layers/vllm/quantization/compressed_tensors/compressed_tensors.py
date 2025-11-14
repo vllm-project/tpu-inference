@@ -16,6 +16,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target, should_ignore_layer)
 
+from tpu_inference.layers.common.quant_methods import (COMPRESSED_TENSORS,
+                                                       get_tpu_quant_method)
 from tpu_inference.layers.vllm.quantization.common import JaxCommonConfig
 from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors_moe import \
     VllmCompressedTensorsW8A8Fp8MoEMethod
@@ -30,8 +32,12 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
-@register_quantization_config("tpu-compressed-tensors")
+@register_quantization_config(get_tpu_quant_method(COMPRESSED_TENSORS))
 class VllmCompressedTensorsConfig(CompressedTensorsConfig, JaxCommonConfig):
+
+    @classmethod
+    def get_name(cls) -> str:
+        return COMPRESSED_TENSORS
 
     def get_scheme(self,
                    layer: torch.nn.Module,

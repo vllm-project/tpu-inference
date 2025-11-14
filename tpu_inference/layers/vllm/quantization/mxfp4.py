@@ -24,6 +24,8 @@ from vllm.model_executor.layers.quantization.mxfp4 import (Mxfp4Backend,
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
+from tpu_inference.layers.common.quant_methods import (MXFP4,
+                                                       get_tpu_quant_method)
 from tpu_inference.layers.vllm.fused_moe import fused_moe_func_padded
 from tpu_inference.layers.vllm.linear_common import \
     reorder_concatenated_tensor_for_sharding
@@ -64,8 +66,12 @@ def dequantize_block_weight(weight: jax.Array,
     return weight_dequantized.reshape(orig_shape).astype(out_dtype)
 
 
-@register_quantization_config("tpu-mxfp4")
+@register_quantization_config(get_tpu_quant_method(MXFP4))
 class VllmMxfp4Config(Mxfp4Config, JaxCommonConfig):
+
+    @classmethod
+    def get_name(cls):
+        return MXFP4
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
