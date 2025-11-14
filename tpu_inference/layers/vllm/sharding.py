@@ -211,8 +211,8 @@ def _shard_module_to_tpu(model: torch.nn.Module, mesh: Mesh) -> None:
 def _sharded_device_put(tensor: jax.Array, sharding) -> jax.Array:
     if isinstance(tensor, tuple):
         return tuple(_sharded_device_put(t, sharding) for t in tensor)
-    import os
-    multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "").lower()
+    from tpu_inference import envs
+    multihost_backend = envs.TPU_MULTIHOST_BACKEND
     if multihost_backend != "ray":
         return jax.device_put(tensor, sharding)
 

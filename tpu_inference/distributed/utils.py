@@ -2,6 +2,7 @@ import os
 
 from vllm.utils.network_utils import get_ip
 
+from tpu_inference import envs
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
@@ -17,7 +18,7 @@ def set_node_kv_ip_port(ip_port: tuple[int, str, int]):
 
 
 def get_kv_ips() -> str:
-    if os.getenv("TPU_MULTIHOST_BACKEND", "").lower() == "ray":
+    if envs.TPU_MULTIHOST_BACKEND == "ray":
         num_nodes = len(_NODES_KV_IP_PORT)
         ips = []
         for node_id in range(num_nodes):
@@ -28,7 +29,7 @@ def get_kv_ips() -> str:
 
 
 def get_kv_ports() -> str:
-    if os.getenv("TPU_MULTIHOST_BACKEND", "").lower() == "ray":
+    if envs.TPU_MULTIHOST_BACKEND == "ray":
         num_nodes = len(_NODES_KV_IP_PORT)
         ports = []
         for node_id in range(num_nodes):

@@ -183,7 +183,7 @@ class TpuPlatform(Platform):
         parallel_config.worker_cls = \
                         "tpu_inference.worker.tpu_worker.TPUWorker"
 
-        multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "").lower()
+        multihost_backend = envs.TPU_MULTIHOST_BACKEND
         if not multihost_backend:  # Single host
             if parallel_config.pipeline_parallel_size == 1:
                 logger.info("Force using UniProcExecutor for JAX on \

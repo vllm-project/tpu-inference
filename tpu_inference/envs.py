@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 environment_variables: dict[str, Callable[[], Any]] = {
     # JAX platform selection (e.g., "tpu", "cpu", "proxy")
     "JAX_PLATFORMS":
-    lambda: os.getenv("JAX_PLATFORMS", ""),
+    lambda: os.getenv("JAX_PLATFORMS", "").lower(),
     # TPU accelerator type (e.g., "v5litepod-16", "v4-8")
     "TPU_ACCELERATOR_TYPE":
     lambda: os.getenv("TPU_ACCELERATOR_TYPE", None),
