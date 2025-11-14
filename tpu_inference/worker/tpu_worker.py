@@ -25,7 +25,7 @@ from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from tpu_inference import envs, utils
 from tpu_inference.distributed.utils import (get_host_ip, get_kv_transfer_port,
                                              get_node_id)
-from tpu_inference.layers.jax.sharding import ShardingConfigManager
+from tpu_inference.layers.common.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.kv_cache import get_rpa_page_size_bytes
 from tpu_inference.runner.tpu_runner import TPUModelRunner

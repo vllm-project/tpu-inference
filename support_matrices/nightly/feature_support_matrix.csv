@@ -4,7 +4,7 @@ Feature,CorrectnessTest,PerformanceTest
 "JAX-Path Qxix Quantization",N/A,✅
 "Multimodal Inputs",✅,✅
 "Prefix Caching",✅,✅
-"Quantized Matmul Attention and KV Cache",N/A,✅
+"Quantized Matmul Attention and KV Cache",N/A,❌
 "Ragged Paged Attention V3",✅,✅
 "Single Program Multi Data",✅,✅
 "Speculative Decoding: Ngram",✅,✅

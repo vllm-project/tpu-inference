@@ -1231,6 +1231,13 @@ TUNED_BLOCK_SIZES = {
                 },
             }
         },
+        16: {
+            'q_bfloat16_kv_bfloat16': {
+                'q_head-8_kv_head-1_head-128': {
+                    262144: (128, 256),
+                }
+            }
+        },
     },
     'TPU v5e': {
         128: {

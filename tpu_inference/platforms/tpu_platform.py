@@ -7,12 +7,13 @@ import jax.numpy as jnp
 import vllm.envs as vllm_envs
 from torchax.ops.mappings import j2t_dtype
 from tpu_info import device
+from vllm.attention.backends.abstract import AttentionType
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.platforms.interface import Platform, PlatformEnum
 from vllm.sampling_params import SamplingParams, SamplingType
 
 from tpu_inference import envs
-from tpu_inference.layers.jax.sharding import ShardingConfigManager
+from tpu_inference.layers.common.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
 
 if TYPE_CHECKING:
@@ -57,7 +58,8 @@ class TpuPlatform(Platform):
     def get_attn_backend_cls(cls, selected_backend: "_Backend", head_size: int,
                              dtype: jnp.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
-                             has_sink: bool, use_sparse: bool) -> str:
+                             has_sink: bool, use_sparse: bool,
+                             attn_type: AttentionType) -> str:
         from vllm.attention.backends.registry import _Backend
         if selected_backend != _Backend.PALLAS:
             logger.info("Cannot use %s backend on TPU.", selected_backend)
@@ -184,8 +186,14 @@ class TpuPlatform(Platform):
 
         multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "").lower()
         if not multihost_backend:  # Single host
-            logger.info("Force using UniProcExecutor for JAX on single host.")
-            parallel_config.distributed_executor_backend = "uni"
+            if parallel_config.pipeline_parallel_size == 1:
+                logger.info("Force using UniProcExecutor for JAX on \
+                        single host without pipeline parallelism.")
+                parallel_config.distributed_executor_backend = "uni"
+            else:
+                logger.info("Force using MultiprocExecutor for JAX on \
+                        single host with pipeline parallelism.")
+                parallel_config.distributed_executor_backend = "mp"
         elif multihost_backend == "ray":
             from tpu_inference.executors.ray_distributed_executor import \
                 RayDistributedExecutor

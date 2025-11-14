@@ -37,15 +37,15 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from tpu_inference import utils as common_utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
+                                                  MESH_AXIS_NAMES_2D,
+                                                  ShardingAxisName,
+                                                  ShardingConfigManager)
 from tpu_inference.layers.jax.sample.rejection_sampler import RejectionSampler
 from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
                                                       gather_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
-from tpu_inference.layers.jax.sharding import (MESH_AXIS_NAMES,
-                                               MESH_AXIS_NAMES_2D,
-                                               ShardingAxisName,
-                                               ShardingConfigManager)
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import get_model
 from tpu_inference.models.jax.utils.weight_utils import (
@@ -1316,10 +1316,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         seq_lens_cpu = seq_lens
 
         (input_ids, positions, block_tables, query_start_loc, seq_lens,
-         logits_indices, request_distribution, logits_indices) = device_array(
+         logits_indices, request_distribution) = device_array(
              self.mesh,
              (input_ids, positions, block_tables, query_start_loc, seq_lens,
-              logits_indices, request_distribution, logits_indices),
+              logits_indices, request_distribution),
              sharding=data_parallel_attn_sharding,
          )
         # Async scheduling: substitute placeholder tokens for DP

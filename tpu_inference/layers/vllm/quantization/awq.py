@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped, unpack_quantized_values_into_int32)
 from vllm.scalar_type import scalar_types
 
+from tpu_inference.layers.common.quant_methods import AWQ, get_tpu_quant_method
 from tpu_inference.layers.vllm.linear_common import (
     slice_sharded_tensor_for_concatenation, torch_to_jax_param)
 from tpu_inference.layers.vllm.quantization.common import (
@@ -29,12 +30,12 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
-@register_quantization_config("jax-awq")
+@register_quantization_config(get_tpu_quant_method(AWQ))
 class VllmAWQConfig(AWQConfig, JaxCommonConfig):
 
     @classmethod
-    def get_name(cls) -> str:
-        return "jax-awq"
+    def get_name(cls):
+        return AWQ
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
         # NOTE: AWQ checkpoint was quantized with float16. But on TPUs, using

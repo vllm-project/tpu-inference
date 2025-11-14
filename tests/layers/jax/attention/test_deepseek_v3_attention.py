@@ -7,9 +7,9 @@ from flax import nnx
 from jax.sharding import Mesh
 from parameterized import parameterized
 
+from tpu_inference.layers.common.attention_interface import get_kv_cache_shape
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.attention.deepseek_v3_attention import MLA
-from tpu_inference.layers.jax.attention_interface import get_kv_cache_shape
 
 
 class TestMLA(unittest.TestCase):
@@ -89,7 +89,7 @@ class TestMLA(unittest.TestCase):
                 request_distribution=jnp.array([0, 0, 1], dtype=jnp.int32),
             )
 
-            mla.rope.initialize_cache()
+            mla.rope.initialize_cache(self.mesh)
 
             # Run forward pass
             new_kv_cache, output = mla(x,
