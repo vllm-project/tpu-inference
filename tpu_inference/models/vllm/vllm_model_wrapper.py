@@ -150,9 +150,9 @@ class VllmModelWrapper:
             input_embeds: jax.Array,
             layer_name_to_kvcache_index: Sequence[Tuple[str, int]],
             lora_metadata,
-            intermediate_tensors: JaxIntermediateTensors,
-            is_first_rank: bool,
-            is_last_rank: bool,
+            intermediate_tensors: JaxIntermediateTensors = None,
+            is_first_rank: bool = True,
+            is_last_rank: bool = True,
             *args,
         ) -> Tuple[List[jax.Array], jax.Array]:
             layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
