@@ -168,7 +168,7 @@ def test_hbm_usage_bytes_pathways_no_arrays(mock_devices, mock_live_arrays):
     "head_dim, expected_padded_head_dim",
     [
         (1, 128),
-        (64, 128),
+        (64, 64),
         (127, 128),
         (128, 128),
         (129, 256),
