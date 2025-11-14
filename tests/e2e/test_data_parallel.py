@@ -12,7 +12,7 @@ from vllm import LLM, EngineArgs, SamplingParams
 @pytest.fixture
 def model_name():
     """Small model for faster testing."""
-    return "meta-llama/Llama-3.2-1B-Instruct"
+    return "Qwen/Qwen2.5-1.5B-Instruct"
 
 
 @pytest.fixture(autouse=True)
