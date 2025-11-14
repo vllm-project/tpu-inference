@@ -4,12 +4,12 @@ import os
 # modules to ensure that the environment variables are set before any
 # other modules are imported.
 import tpu_inference.env_override  # noqa: F401
-from tpu_inference import tpu_info as ti
+from tpu_inference import envs, tpu_info as ti
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
 
-if "proxy" in os.environ.get('JAX_PLATFORMS', '').lower():
+if "proxy" in envs.JAX_PLATFORMS:
     logger.info("Running vLLM on TPU via Pathways proxy.")
     # Must run pathwaysutils.initialize() before any JAX operations
     try:

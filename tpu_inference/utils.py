@@ -14,8 +14,9 @@ from jax._src import mesh as mesh_lib
 from jax._src import xla_bridge as xb
 from jax._src.lib import xla_client as xc
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from vllm import envs, utils
+from vllm import envs as vllm_envs, utils
 
+from tpu_inference import envs
 from tpu_inference.logger import init_logger
 
 GBYTES = 1024 * 1024 * 1024
@@ -57,10 +58,10 @@ def get_num_kv_heads_by_tp(num_kv_heads: int, tp_size: int) -> int:
 
 def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
     usage = []
-    if envs.VLLM_TPU_USING_PATHWAYS:
+    if vllm_envs.VLLM_TPU_USING_PATHWAYS:
         return pathways_hbm_usage_gb(devices)
 
-    multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "").lower()
+    multihost_backend = envs.TPU_MULTIHOST_BACKEND
     if multihost_backend == "ray":
         # MemoryStats is only supported for addressable PjRt devices.
         # Assume all the devices have similar memory usage for now.
