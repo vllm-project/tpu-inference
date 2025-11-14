@@ -47,12 +47,13 @@ except ImportError:
     from backend_request_func import get_tokenizer
 
 try:
-    from vllm.utils import FlexibleArgumentParser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
 # yapf: disable
-from benchmark_dataset import MLPerfDataset, MMLUDataset, SampleRequest
+from benchmark_dataset import (MLPerfDataset, MMLUDataset, RandomDataset,
+                               SampleRequest, SonnetDataset)
 # yapf: disable
 from benchmark_utils import (eval_benchmark_dataset_result,
                              sample_warmup_requests)
@@ -354,7 +355,7 @@ async def benchmark(
         )
         req_model_id, req_model_name = model_id, model_name
 
-        request_func_input = RequestFuncInput(
+        request_kwargs = dict(
             model=req_model_id,
             model_name=req_model_name,
             prompt=prompt,
@@ -365,8 +366,18 @@ async def benchmark(
             multi_modal_content=mm_content,
             ignore_eos=ignore_eos,
             extra_body=extra_body,
-            completion=request.completion,
         )
+
+        # For MMLMDataset, MLPerfDataset
+        if request.completion is not None:
+            request_kwargs["completion"] = request.completion
+
+        # For Random (synthetic), Sonnet
+        if request.request_id is not None:
+            request_kwargs["request_id"] = request.request_id
+
+        request_func_input = RequestFuncInput(**request_kwargs)
+
         tasks.append(
             asyncio.create_task(
                 limited_request_func(request_func_input=request_func_input,
@@ -541,32 +552,71 @@ def main(args: argparse.Namespace):
             "Please specify '--dataset-name' and the corresponding "
             "'--dataset-path' if required.")
 
-    # For datasets that follow a similar structure, use a mapping.
-    dataset_mapping = {
-        "mmlu":
-        lambda: MMLUDataset(random_seed=args.seed,
-                            dataset_path=args.dataset_path,
-                            num_shots=args.mmlu_num_shots,
-                            mmlu_method=args.mmlu_method).sample(
-                                tokenizer=tokenizer,
-                                num_requests=args.num_prompts,
-                                input_len=args.mmlu_input_len,
-                                output_len=args.mmlu_output_len,
-                            ),
-        "mlperf":
-        lambda: MLPerfDataset(random_seed=args.seed,
-                                dataset_path=args.dataset_path).sample(
+    if args.dataset_name == "sonnet":
+        dataset = SonnetDataset(dataset_path=args.dataset_path)
+        # For the "sonnet" dataset, formatting depends on the backend.
+        if args.backend == "openai-chat":
+            input_requests = dataset.sample(
+                num_requests=args.num_prompts,
+                input_len=args.sonnet_input_len,
+                output_len=args.sonnet_output_len,
+                prefix_len=args.sonnet_prefix_len,
+                tokenizer=tokenizer,
+                return_prompt_formatted=False,
+                request_id_prefix=args.request_id_prefix,
+            )
+        else:
+            assert tokenizer.chat_template or tokenizer.default_chat_template, (
+                "Tokenizer/model must have chat template for sonnet dataset."
+            )
+            input_requests = dataset.sample(
+                num_requests=args.num_prompts,
+                input_len=args.sonnet_input_len,
+                output_len=args.sonnet_output_len,
+                prefix_len=args.sonnet_prefix_len,
+                tokenizer=tokenizer,
+                return_prompt_formatted=True,
+                request_id_prefix=args.request_id_prefix,
+            )
+    else:
+        # For datasets that follow a similar structure, use a mapping.
+        dataset_mapping = {
+            "mmlu":
+            lambda: MMLUDataset(random_seed=args.seed,
+                                dataset_path=args.dataset_path,
+                                num_shots=args.mmlu_num_shots,
+                                mmlu_method=args.mmlu_method,
+                                use_chat_template=args.mmlu_use_chat_template).sample(
                                     tokenizer=tokenizer,
                                     num_requests=args.num_prompts,
-                                    input_len=args.mlperf_input_len,
-                                    output_len=args.mlperf_output_len,
-                                ),
-    }
+                                    input_len=args.mmlu_input_len,
+                                    output_len=args.mmlu_output_len,
+                                    ),
+            "mlperf":
+            lambda: MLPerfDataset(random_seed=args.seed,
+                                  dataset_path=args.dataset_path).sample(
+                                      tokenizer=tokenizer,
+                                      num_requests=args.num_prompts,
+                                      input_len=args.mlperf_input_len,
+                                      output_len=args.mlperf_output_len,
+                                      ),
+            "random":
+            lambda: RandomDataset(random_seed=args.seed,
+                                  dataset_path=args.dataset_path).sample(
+                                      tokenizer=tokenizer,
+                                      num_requests=args.num_prompts,
+                                      prefix_len=args.random_prefix_len,
+                                      input_len=args.random_input_len,
+                                      output_len=args.random_output_len,
+                                      range_ratio=args.random_range_ratio,
+                                      request_id_prefix=args.request_id_prefix,
+                                      ),
+        }
 
-    try:
-        input_requests = dataset_mapping[args.dataset_name]()
-    except KeyError as err:
-        raise ValueError(f"Unknown dataset: {args.dataset_name}") from err
+        try:
+            input_requests = dataset_mapping[args.dataset_name]()
+        except KeyError as err:
+            raise ValueError(f"Unknown dataset: {args.dataset_name}") from err
     goodput_config_dict = check_goodput_args(args)
 
     # Collect the sampling parameters.
@@ -783,7 +833,15 @@ if __name__ == "__main__":
         "goodput, refer to DistServe paper: https://arxiv.org/pdf/2401.09670 "
         "and the blog: https://hao-ai-lab.github.io/blogs/distserve",
     )
+    parser.add_argument(
+        "--request-id-prefix",
+        type=str,
+        required=False,
+        default="benchmark-serving",
+        help="Specify the prefix of request id.",
+    )
 
+    # group for dataset specific arguments
     mmlu_group = parser.add_argument_group("mmlu dataset options")
     mmlu_group.add_argument(
         "--mmlu-input-len",
@@ -811,6 +869,11 @@ if __name__ == "__main__":
         choices=["HELM", "Harness", ""],
         help="mmlu method/format to generate shots",
     )
+    mmlu_group.add_argument(
+        "--mmlu-use-chat-template",
+        action="store_true",
+        help="Whether to format MMLU prompts using the tokenizer's chat template.",
+    )
 
     mlperf_group = parser.add_argument_group("mlperf dataset options")
     mlperf_group.add_argument(
@@ -825,6 +888,62 @@ if __name__ == "__main__":
         default=None,
         help="Output length for each request. Overrides the output length "
         "from the MLPerf dataset.",
+    )
+
+    sonnet_group = parser.add_argument_group("sonnet dataset options")
+    sonnet_group.add_argument(
+        "--sonnet-input-len",
+        type=int,
+        default=550,
+        help="Number of input tokens per request, used only for sonnet dataset.",
+    )
+    sonnet_group.add_argument(
+        "--sonnet-output-len",
+        type=int,
+        default=150,
+        help="Number of output tokens per request, used only for sonnet dataset.",
+    )
+    sonnet_group.add_argument(
+        "--sonnet-prefix-len",
+        type=int,
+        default=200,
+        help="Number of prefix tokens per request, used only for sonnet dataset.",
+    )
+
+    random_group = parser.add_argument_group("random dataset options")
+    random_group.add_argument(
+        "--random-input-len",
+        type=int,
+        default=1024,
+        help="Number of input tokens per request, used only for random sampling.",
+    )
+    random_group.add_argument(
+        "--random-output-len",
+        type=int,
+        default=128,
+        help="Number of output tokens per request, used only for random sampling.",
+    )
+    random_group.add_argument(
+        "--random-range-ratio",
+        type=float,
+        default=0.0,
+        help="Range ratio for sampling input/output length, "
+        "used only for random sampling. Must be in the range [0, 1) to define "
+        "a symmetric sampling range"
+        "[length * (1 - range_ratio), length * (1 + range_ratio)].",
+    )
+    random_group.add_argument(
+        "--random-prefix-len",
+        type=int,
+        default=0,
+        help=(
+            "Number of fixed prefix tokens before the random context "
+            "in a request. "
+            "The total input length is the sum of `random-prefix-len` and "
+            "a random "
+            "context length sampled from [input_len * (1 - range_ratio), "
+            "input_len * (1 + range_ratio)]."
+        ),
     )
 
     sampling_group = parser.add_argument_group("sampling parameters")

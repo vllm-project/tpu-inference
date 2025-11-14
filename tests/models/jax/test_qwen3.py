@@ -9,9 +9,9 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from vllm.config import ModelConfig
 
-from tpu_commons.models.jax.attention_metadata import AttentionMetadata
-from tpu_commons.models.jax.qwen3 import Qwen3ForCausalLM
-from tpu_commons.runner.kv_cache import create_kv_caches
+from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.models.jax.qwen3 import Qwen3ForCausalLM
+from tpu_inference.runner.kv_cache import create_kv_caches
 
 
 class MockVllmConfig:
@@ -35,9 +35,10 @@ def mesh():
     devices = np.array(jax.local_devices()[:1])
     num_devices = len(devices)
     assert num_devices == 1
-    device_mesh = devices.reshape((num_devices, 1))
+    device_mesh = devices.reshape((num_devices, 1, 1, 1))
 
-    with Mesh(device_mesh, axis_names=('data', 'model')) as m:
+    with Mesh(device_mesh,
+              axis_names=('data', 'attn_dp', 'expert', 'model')) as m:
         yield m
 
 
@@ -87,7 +88,12 @@ class TestQwen3ForCausalLM:
         model_config = mock_vllm_config.model_config
         hf_config = model_config.hf_config
 
-        assert model.mesh.shape == {"data": 1, "model": 1}
+        assert model.mesh.shape == {
+            "data": 1,
+            "attn_dp": 1,
+            "expert": 1,
+            "model": 1
+        }
 
         layers = model.model.layers
         assert len(layers) == hf_config.num_hidden_layers

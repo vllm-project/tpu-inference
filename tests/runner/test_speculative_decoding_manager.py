@@ -1,30 +1,35 @@
 from unittest.mock import MagicMock, patch
 
+import jax
 import numpy as np
 import pytest
-
-from tpu_commons.runner.input_batch_jax import CachedRequestState, InputBatch
-from tpu_commons.runner.speculative_decoding_manager import SpecDecodeMetadata
-from tpu_commons.runner.tpu_jax_runner import TPUModelRunner
-from tpu_commons.spec_decode.jax.eagle3 import Eagle3Proposer
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
 from vllm.sampling_params import SamplingType
 from vllm.v1.outputs import DraftTokenIds
+
+from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
+from tpu_inference.runner.speculative_decoding_manager import \
+    SpecDecodeMetadata
+from tpu_inference.runner.tpu_runner import TPUModelRunner
+from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
 
 
 class TestSpeculativeDecodingManager:
 
     def setup_method(self):
         # Mock JAX dependencies
-        self.mock_devices = [MagicMock(coords=i) for i in range(4)]
-        self.mock_mesh = MagicMock()
+        self.mock_devices = [MagicMock(coords=i) for i in range(1)]
+        device_array = np.array(jax.devices()[:1]).reshape(1, 1, 1, 1)
+        self.mock_mesh = jax.make_mesh(device_array.shape,
+                                       ('data', 'attn_dp', 'expert', 'model'))
         self.mock_rng_key = MagicMock()
 
         with patch('jax.devices', return_value=self.mock_devices), \
              patch('jax.make_mesh', return_value=self.mock_mesh), \
              patch('jax.random.key', return_value=self.mock_rng_key), \
-             patch('tpu_commons.runner.tpu_jax_runner.get_model', return_value=MagicMock()):
+             patch('tpu_inference.runner.tpu_runner.get_model', return_value=MagicMock()), \
+             patch('tpu_inference.runner.tpu_runner.make_optimized_mesh', return_value=self.mock_mesh):
 
             model_config = ModelConfig(tokenizer_mode="auto",
                                        trust_remote_code=False,
@@ -53,7 +58,7 @@ class TestSpeculativeDecodingManager:
                 scheduler_config=scheduler_config,
                 parallel_config=parallel_config,
                 speculative_config=speculative_config,
-                observability_config=None,
+                observability_config={},
                 additional_config={},
             )
 
@@ -235,7 +240,7 @@ class TestSpeculativeDecodingManager:
 
         # Act
         with patch(
-                "tpu_commons.runner.speculative_decoding_manager.device_array",
+                "tpu_inference.runner.speculative_decoding_manager.device_array",
                 side_effect=self.mock_device_array):
             metadata = self.runner.speculative_decoding_manager.get_spec_decode_metadata(
                 num_draft_tokens_np,
@@ -301,14 +306,15 @@ class TestSpeculativeDecodingManager:
         # Mock drafter methods
         mock_attn_metadata = MagicMock()
         mock_target_token_ids = MagicMock()
+        mock_last_token_indices = MagicMock()
         mock_target_hidden_states = MagicMock()
         self.runner.drafter.prepare_inputs.return_value = (
-            mock_attn_metadata,
-            mock_target_token_ids,
             mock_target_hidden_states,
+            mock_target_token_ids,
+            mock_last_token_indices,
+            mock_attn_metadata,
         )
-        mock_draft_token_ids = MagicMock()
-        mock_draft_token_ids.tolist.return_value = [[10, 11], [20, 21]]
+        mock_draft_token_ids = [[10, 11], [20, 21]]
         self.runner.drafter.propose.return_value = (
             self.runner.kv_caches,
             mock_draft_token_ids,
@@ -329,7 +335,7 @@ class TestSpeculativeDecodingManager:
 
         # 2. ===== Act =====
         with patch(
-                "tpu_commons.runner.speculative_decoding_manager.device_array",
+                "tpu_inference.runner.speculative_decoding_manager.device_array",
                 side_effect=lambda mesh, x: x):
             result = self.runner.speculative_decoding_manager.propose_eagle3_draft_token_ids(
                 sampled_token_ids,

@@ -92,7 +92,7 @@ def parse_args():
                         "--prefiller-port",
                         type=int,
                         nargs="+",
-                        default=[8100])
+                        default=[8400])
 
     # For decoder instances
     parser.add_argument("--decoder-hosts",
@@ -104,7 +104,7 @@ def parse_args():
                         "--decoder-port",
                         type=int,
                         nargs="+",
-                        default=[8200])
+                        default=[9400])
 
     args = parser.parse_args()
 

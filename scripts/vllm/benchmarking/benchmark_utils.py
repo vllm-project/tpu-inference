@@ -102,11 +102,48 @@ def postprocess_text_mmlu(preds: List[str],
     choices = ["A", "B", "C", "D", None]
 
     def _parse_answer(output):
-        # ? marks the close parenthesis as optional
-        re_str = r"\s*\(([A-D])\)?\s*\w*"
-        match = re.search(re_str, output, re.IGNORECASE)
-        predicted_answer = match.group(1).upper() if match else None
-        return predicted_answer
+        # TODO: This parser handles output regardless of whether a chat template is enabled.
+        # Currently, the chat-template parsing rules are based on the gpt-oss format.
+        # We will need to add rules for other models, as their output formats may differ.
+
+        # To match 'assistantfinal' block.
+        final_block_match = re.search(r"assistant.*final(.*)", output,
+                                      re.IGNORECASE | re.DOTALL)
+
+        if final_block_match:
+            final_block = final_block_match.group(1)
+
+            # To match: **... (A) ...**
+            re_str = r"\*\*[^\(]*\s*\(?([A-D])\s*\)?"
+            match = re.search(re_str, final_block, re.DOTALL)
+            if match:
+                return match.group(1).upper()
+
+            # To match: choice/answer ... (A)
+            re_str = r"(?:choice|answer)[^\(]*\s*\(?([A-D])\s*\)?"
+            match = re.search(re_str, final_block, re.IGNORECASE | re.DOTALL)
+            if match:
+                return match.group(1).upper()
+
+        # To match ... so/thus answer ... option/choice A
+        re_str_fallback = r"(?:thus|so)\s+answer.*(?:option|choice).*\s*\(?([A-D])\s*\)?"
+        match = re.search(re_str_fallback, output, re.IGNORECASE | re.DOTALL)
+        if match:
+            return match.group(1).upper()
+
+        # To match: ... so/thus answer A
+        re_str_fallback = r"(?:thus|so)\s+answer:?\s*\b([A-D])\b"
+        match = re.search(re_str_fallback, output, re.IGNORECASE | re.DOTALL)
+        if match:
+            return match.group(1).upper()
+
+        # To match: (A)
+        re_str_fallback = r"\s*\(([A-D])\)?\s*\w*"
+        match = re.search(re_str_fallback, output, re.IGNORECASE)
+        if match:
+            return match.group(1).upper()
+
+        return None
 
     preds = [choices.index(_parse_answer(pred.strip())) for pred in preds]
     targets = [choices.index(target.strip().upper()) for target in targets]

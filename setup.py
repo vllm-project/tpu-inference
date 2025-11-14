@@ -35,17 +35,24 @@ def get_requirements() -> List[str]:
     return requirements
 
 
+def get_version():
+    if env_version := os.getenv("VLLM_VERSION_OVERRIDE"):
+        return env_version
+    return "0.0.0"
+
+
 setup(
-    name="tpu_commons",
-    version="0.1.0",
+    name="tpu_inference",
+    version=get_version(),
     description="",
     long_description=open("README.md").read() if hasattr(
         open("README.md"), "read") else "",
     long_description_content_type="text/markdown",
-    author="tpu_commons Contributors",
+    author="tpu_inference Contributors",
     packages=find_packages(),
     python_requires=">=3.10",
     install_requires=get_requirements(),
+    include_package_data=True,
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Developers",
@@ -55,6 +62,6 @@ setup(
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
-        "Topic :: Artificial Intelligence",
+        "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
 )

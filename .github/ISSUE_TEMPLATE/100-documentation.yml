@@ -1,0 +1,29 @@
+name: 📚 Documentation
+description: Report an issue related to https://github.com/vllm-project/tpu-inference/tree/main/docs
+title: "[Doc]: "
+labels: ["documentation"]
+
+body:
+- type: textarea
+  attributes:
+    label: 📚 The doc issue
+    description: >
+      A clear and concise description of what content in https://github.com/vllm-project/tpu-inference/tree/main/docs is an issue.
+  validations:
+    required: true
+- type: textarea
+  attributes:
+    label: Suggest a potential alternative/fix
+    description: >
+      Tell us how we could improve the documentation in this regard.
+- type: markdown
+  attributes:
+    value: >
+      Thanks for contributing 🎉!
+- type: checkboxes
+  id: askllm
+  attributes:
+    label: Before submitting a new issue...
+    options:
+      - label: Make sure you already searched for relevant issues and checked the [documentation page](https://github.com/vllm-project/tpu-inference/tree/main/docs).
+        required: true

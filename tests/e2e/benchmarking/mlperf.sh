@@ -10,7 +10,7 @@
 # you specify the --dataset-name, --dataset-path, and --root-dir flags
 
 # Example default usage: bash tests/e2e/benchmarking/mlperf.sh -r /local/root_dir
-# Example local docker + JAX TPU usage: BUILDKITE_COMMIT=0f199f1 .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_commons/tests/e2e/benchmarking/mlperf.sh
+# Example local docker + JAX TPU usage: BUILDKITE_COMMIT=0f199f1 .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
 
 # Logs the vLLM server output to a file
 LOG_FILE="server.log"
@@ -40,23 +40,23 @@ else
     echo "QUANTIZATION is False. Running without quantization."
 fi
 
-echo extra_serve_args: "${extra_serve_args[@]}"
-
 root_dir=/workspace
 dataset_name=mlperf
 dataset_path=""
 num_prompts=1000
 exit_code=0
+use_dummy_weights=false
 
 helpFunction()
 {
    echo ""
    echo "Usage: $0 [-r full_path_to_root_dir -m model_id]"
-   echo -e "\t-r The path your root directory containing both 'vllm' and 'tpu_commons' (default: /workspace/, which is used in the Dockerfile)"
+   echo -e "\t-r The path your root directory containing both 'vllm' and 'tpu_inference' (default: /workspace/, which is used in the Dockerfile)"
    echo -e "\t-d The dataset name (default: mlperf, which will download the dataset)"
    echo -e "\t-p The path to the processed MLPerf dataset (default: None, which will download the dataset)"
    echo -e "\t-m A space-separated list of HuggingFace model ids to use (default: Qwen/Qwen2.5-1.5B-Instruct, Qwen/Qwen2.5-0.5B-Instruct, meta-llama/Llama-3.1-8B-Instruct and meta-llama/Llama-4-Scout-17B-16E-Instruct)"
    echo -e "\t-n Number of prompts to use for the benchmark (default: 10)"
+   echo -e "\t--use-dummy-weights Use dummy random weight (default: false)"
    exit 1
 }
 
@@ -84,6 +84,11 @@ while [[ "$#" -gt 0 ]]; do
             ;;
         -n|--num-prompts)
             num_prompts="$2"
+            shift
+            shift
+            ;;
+        --use-dummy-weights)
+            use_dummy_weights=true
             shift
             shift
             ;;
@@ -121,15 +126,22 @@ if [ -z "$dataset_path" ]; then
     fi
 fi
 
+if [ "$use_dummy_weights" = true ]; then
+    extra_serve_args+=("--load-format=dummy")
+fi
+
+echo extra_serve_args: "${extra_serve_args[@]}"
+
+
 echo "Using the dataset at $dataset_path"
 
 cd "$root_dir"/vllm || exit
 echo "Current working directory: $(pwd)"
 echo "Using vLLM hash: $(git rev-parse HEAD)"
 
-# Overwrite a few of the vLLM benchmarking scripts with the TPU Commons ones
-cp -r "$root_dir"/tpu_commons/scripts/vllm/benchmarking/*.py "$root_dir"/vllm/benchmarks/
-echo "Using TPU Commons hash: $(git -C "$root_dir"/tpu_commons rev-parse HEAD)"
+# Overwrite a few of the vLLM benchmarking scripts with the TPU Inference ones
+cp -r "$root_dir"/tpu_inference/scripts/vllm/benchmarking/*.py "$root_dir"/vllm/benchmarks/
+echo "Using TPU Inference hash: $(git -C "$root_dir"/tpu_inference rev-parse HEAD)"
 
 cleanUp() {
     echo "Stopping the vLLM server and cleaning up log files..."
@@ -170,7 +182,10 @@ checkThroughputAndRouge() {
     actual_throughput=$(awk '/Total Token throughput \(tok\/s\):/ {print $NF}' "$BENCHMARK_LOG_FILE")
 
     echo "--- Extracted Values ---"
-    if [ -z "$actual_rouge1" ]; then
+    if [ "$SKIP_ACCURACY_TESTS" = "True" ]; then
+        echo "skipping accuracy test"
+        rouge1_pass=1
+    elif [ -z "$actual_rouge1" ]; then
         echo "Rouge1 score: NOT FOUND"
         rouge1_pass=0
     else
@@ -248,6 +263,8 @@ for model_name in $model_list; do
         max_batched_tokens=1024
         if [ "$model_name" == "meta-llama/Llama-4-Scout-17B-16E-Instruct" ]; then
             current_serve_args+=(--hf-overrides '{"architectures": ["Llama4ForCausalLM"]}')
+        elif [ "$model_name" == "deepseek-ai/DeepSeek-R1-0528" ]; then
+            current_serve_args+=(--hf_overrides '{"num_hidden_layers": 12}')
         fi
     fi
 
@@ -290,7 +307,7 @@ for model_name in $model_list; do
         --dataset-name "$dataset_name" \
         --dataset-path "$dataset_path" \
         --num-prompts "$num_prompts" \
-        --run_eval 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
+        --run-eval 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
 
         # TODO (jacobplatin): probably want to add an option to skip this in the future
         if [ "$dataset_name" == "mlperf" ]; then

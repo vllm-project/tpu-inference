@@ -6,10 +6,10 @@ import jax.numpy as jnp
 import pytest
 
 # Import the functions to be tested
-from tpu_commons.utils import (GBYTES, enable_megacore,
-                               get_jax_dtype_from_str_dtype, get_megacore,
-                               get_padded_head_dim, hbm_usage_bytes,
-                               hbm_usage_gb, quantize_kv)
+from tpu_inference.utils import (GBYTES, enable_megacore,
+                                 get_jax_dtype_from_str_dtype, get_megacore,
+                                 get_padded_head_dim, hbm_usage_bytes,
+                                 hbm_usage_gb, quantize_kv)
 
 
 def test_enable_and_get_megacore():
@@ -62,36 +62,59 @@ def test_hbm_usage_bytes_pathways_disabled():
 
 @patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", True)
 @patch("jax.live_arrays")
-def test_hbm_usage_bytes_pathways_enabled(mock_live_arrays):
+@patch("jax.devices")
+def test_hbm_usage_bytes_pathways_enabled(mock_devices, mock_live_arrays):
     """Tests hbm_usage_bytes when VLLM_TPU_USING_PATHWAYS is True."""
+    # Mock TPU v5p devices
+    mock_jax_device = MagicMock()
+    mock_jax_device.device_kind = "TPU v5p"
+    mock_devices.return_value = [mock_jax_device]
+
     # Create mock devices
     mock_device1 = MagicMock()
     mock_device2 = MagicMock()
     devices = [mock_device1, mock_device2]
 
-    # Create mock arrays with sharding
+    # Create mock addressable shards with data property
+    mock_data1_dev1 = MagicMock()
+    mock_data1_dev1.device = mock_device1
+    mock_data1_dev1.nbytes = 2000  # 2000 bytes on device1
+
+    mock_data1_dev2 = MagicMock()
+    mock_data1_dev2.device = mock_device2
+    mock_data1_dev2.nbytes = 2000  # 2000 bytes on device2
+
+    mock_data2_dev1 = MagicMock()
+    mock_data2_dev1.device = mock_device1
+    mock_data2_dev1.nbytes = 1000  # 1000 bytes on device1
+
+    mock_shard1_dev1 = MagicMock()
+    mock_shard1_dev1.data = mock_data1_dev1
+
+    mock_shard1_dev2 = MagicMock()
+    mock_shard1_dev2.data = mock_data1_dev2
+
+    mock_shard2_dev1 = MagicMock()
+    mock_shard2_dev1.data = mock_data2_dev1
+
+    # Create mock arrays with addressable_shards
     mock_array1 = MagicMock()
-    mock_array1.dtype.itemsize = 4  # float32
-    mock_array1.size = 1000  # 1000 elements
-    mock_array1.sharding.device_set = {mock_device1, mock_device2
-                                       }  # Sharded across 2 devices
+    mock_array1.addressable_shards = [mock_shard1_dev1, mock_shard1_dev2]
 
     mock_array2 = MagicMock()
-    mock_array2.dtype.itemsize = 2  # float16
-    mock_array2.size = 500  # 500 elements
-    mock_array2.sharding.device_set = {mock_device1}  # Only on device1
+    mock_array2.addressable_shards = [mock_shard2_dev1]
 
     mock_live_arrays.return_value = [mock_array1, mock_array2]
 
     usage = hbm_usage_bytes(devices)
 
     # Expected calculations:
-    # Array1: 4 bytes * 1000 elements / 2 devices = 2000 bytes per device
-    # Array2: 2 bytes * 500 elements / 1 device = 1000 bytes on device1 only
-    # Device1: 2000 + 1000 = 3000 bytes
-    # Device2: 2000 + 0 = 2000 bytes
-    # hbm_limit = 33550237184 (hardcoded in the function)
-    expected_usage = [(3000, 33550237184), (2000, 33550237184)]
+    # Array1: 2000 bytes on device1, 2000 bytes on device2
+    # Array2: 1000 bytes on device1
+    # Device1 total: 2000 + 1000 = 3000 bytes
+    # Device2 total: 2000 + 0 = 2000 bytes
+    # hbm_limit = 95 * GBYTES for TPU v5p
+    expected_usage = [(3000, 95 * GBYTES), (2000, 95 * GBYTES)]
     assert usage == expected_usage
 
 
@@ -118,8 +141,14 @@ def test_hbm_usage_gb_pathways_disabled():
 
 @patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", True)
 @patch("jax.live_arrays")
-def test_hbm_usage_bytes_pathways_no_arrays(mock_live_arrays):
+@patch("jax.devices")
+def test_hbm_usage_bytes_pathways_no_arrays(mock_devices, mock_live_arrays):
     """Tests hbm_usage_bytes when VLLM_TPU_USING_PATHWAYS is True but no live arrays."""
+    # Mock TPU v6e devices
+    mock_jax_device = MagicMock()
+    mock_jax_device.device_kind = "TPU v6e"
+    mock_devices.return_value = [mock_jax_device]
+
     mock_device1 = MagicMock()
     mock_device2 = MagicMock()
     devices = [mock_device1, mock_device2]
@@ -129,8 +158,9 @@ def test_hbm_usage_bytes_pathways_no_arrays(mock_live_arrays):
 
     usage = hbm_usage_bytes(devices)
 
-    # No arrays means no memory usage
-    expected_usage = [(0, 33550237184), (0, 33550237184)]
+    # No arrays means no memory usage, defaultdict returns 0 for missing keys
+    # HBM limit for TPU v6e is 32 GB
+    expected_usage = [(0, 32 * GBYTES), (0, 32 * GBYTES)]
     assert usage == expected_usage
 
 
