@@ -1,5 +1,5 @@
 notify:
-  - email: "ullm-oncall@rotations.google.com"
+  - email: "buganizer-system+1445761+p1@google.com"
     if: build.state == "failed"
 
 steps:
