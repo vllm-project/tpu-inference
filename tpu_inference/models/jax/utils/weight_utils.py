@@ -316,8 +316,10 @@ def _load_hf_weights_on_thread(vllm_config,
         if hf_key.endswith(".weight"):
             hf_key = hf_key.removesuffix(".weight")
 
-        if not hf_key.startswith('models.'):
-            hf_key = 'model.' + hf_key
+        base_hf_key = hf_key
+
+        if not hf_key.startswith("model."):
+            hf_key = f"model.{hf_key}"
 
         # Find the corresponding model key using the HF key
         if "layers" in hf_key:
@@ -331,7 +333,7 @@ def _load_hf_weights_on_thread(vllm_config,
             model_key = name_map[layer_key]
             model_key = re.sub(r"blocks\.\*", f"blocks.{layer_num}", model_key)
         else:
-            if hf_key not in name_map and hf_key == "lm_head":
+            if hf_key not in name_map and base_hf_key == "lm_head":
                 logger.warning(
                     f"Skip loading {hf_key} due to tie_word_embeddings")
                 continue
