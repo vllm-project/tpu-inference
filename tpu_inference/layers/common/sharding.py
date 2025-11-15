@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 MESH_AXIS_NAMES = ("data", "attn_dp", "expert", "model")
 MESH_AXIS_NAMES_2D = ('data', 'model')
+USE_MLA_KERNEL = os.getenv("USE_MLA_KERNEL", "0")
 
 
 class ShardingAxisNameBase:
@@ -119,7 +120,10 @@ class ShardingConfigManager:
                                                     False)
         if enable_dp_attention:
             # Replicate attention layer when num_kv_heads < TP
-            num_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
+            num_kv_heads = 1 if USE_MLA_KERNEL else vllm_config.model_config.get_total_num_kv_heads()
+            if tensor_parallelism:
+                tensor_parallelism = data_parallelism 
+                data_parallelism = 1
             kv_dtype = utils.get_jax_dtype_from_str_dtype(
                 vllm_config.cache_config.cache_dtype) or jnp.bfloat16
             packing = 4 // jnp.dtype(kv_dtype).itemsize
@@ -131,6 +135,11 @@ class ShardingConfigManager:
             attn_dp = max(
                 int(tensor_parallelism // num_kv_heads_per_device_in_kv_cache),
                 1)
+            print("\n".join([f"*" * 10 + f"attn_dp = {attn_dp}",
+                             f"*" * 10 + f"num_kv_heads = {num_kv_heads}",
+                             f"*" * 10 + f"packing = {packing}",
+                             f"*" * 10 + f"tensor_parallelism = {tensor_parallelism}",
+                             f"*" * 10 + f"num_kv_heads_per_device_in_kv_cache = {num_kv_heads_per_device_in_kv_cache}"]))
             tensor_parallelism = tensor_parallelism // attn_dp
         else:
             attn_dp = 1

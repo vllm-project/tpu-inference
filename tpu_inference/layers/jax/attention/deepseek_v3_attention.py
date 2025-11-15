@@ -14,8 +14,9 @@ import os
 from tpu_inference import utils
 from tpu_inference.kernels.mla.v1.kernel import \
     mla_ragged_paged_attention
-from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
-    ragged_paged_attention
+from tpu_inference.kernels.ragged_paged_attention.v3.util import get_tpu_version
+from tpu_inference.kernels.ragged_paged_attention.v3.kernel import ragged_paged_attention
+    
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import RMSNorm
@@ -223,14 +224,16 @@ class MLA(nnx.Module):
             # Reshape k_rope_BSH to include head dimension for RoPE application
             k_rope_SNH = k_rope_SH[..., None, :]
             k_rope_SNH = self.rope.apply_rope(md.input_positions, k_rope_SNH)
-            k_rope_SNH = jnp.broadcast_to(
-                k_rope_SNH,
-                (k_rope_SNH.shape[0], self.N, self.qk_rope_head_dim))
+            assert k_rope_SNH.shape[1] == 1
+            k_rope_SH = k_rope_SNH[:, 0, :]
+            
             kv_SA = kv_SA[..., :self.kv_lora_rank]
             kv_SA = self.kv_rms_norm(kv_SA)
             kv_SA = nnx.with_sharding_constraint(kv_SA, self.keyvalue_skh)
 
             if not self.use_kernel:
+                k_rope_SNH = jnp.broadcast_to(k_rope_SNH,
+                                              (k_rope_SNH.shape[0], self.N, self.qk_rope_head_dim))
                 # KV up projection.
                 kv_nope_SNH = jnp.einsum("SA,ANH -> SNH", kv_SA,
                                         self.kernel_kv_up_proj_ANH.value)
@@ -294,7 +297,7 @@ class MLA(nnx.Module):
                     q_TNA,
                     q_rope_TNH,
                     kv_SA,
-                    k_rope_SNH,
+                    k_rope_SH,
                     attention_metadata,
                     self.mesh,
                 )
@@ -302,8 +305,8 @@ class MLA(nnx.Module):
                 outputs_TNH = jnp.einsum("TNA,ANH -> TNH", outputs_TNA, kernel_v_up_proj_ANH)
             
             with jax.named_scope("o_proj"):
-                    o_TD = nnx.with_sharding_constraint(
-                        o_TD, self.activation_attention_out_td)
+                    outputs_TNH = nnx.with_sharding_constraint(
+                        outputs_TNH, self.activation_attention_out_td)
                     o_TD = jnp.einsum("TNH,NHD -> TD", outputs_TNH,
                                     self.kernel_o_proj_NHD.value)
                     
@@ -408,7 +411,6 @@ class MLA(nnx.Module):
         to the full history of keys and values stored in the cache.
 
         Args:
-            is_prefill: A boolean indicating if the mode is 'prefill'.
             kv_cache: The key-value cache to be updated and used.
             q_TNH: Query tensor of shape `(query_seq, num_attention_heads, head_dim)`.
             k_SKH: Key tensor of shape `(kv_seq, num_key_value_heads, head_dim)`.
@@ -433,21 +435,55 @@ class MLA(nnx.Module):
             self.keyvalue_skh,  # k
             self.keyvalue_skh,  # k_rope # TODO: is this correct?
             P(ShardingAxisName.MLP_TENSOR),  # kv_cache
-            P(),  # md.seq_lens: Replicated
-            P(),  # page_indices_flat: Replicated
-            P(),  # query_start_loc: Replicated
-            P(),  # distribution: Replicated
+            P(ShardingAxisName.ATTN_DATA),  # md.seq_lens: Replicated
+            P(ShardingAxisName.ATTN_DATA),  # page_indices_flat: Replicated
+            P(ShardingAxisName.ATTN_DATA),  # query_start_loc: Replicated
+            P(ShardingAxisName.ATTN_DATA),  # distribution: Replicated
         )
-        logger.warning(f"********in_specs = {in_specs}")
-        out_specs = (self.attn_o_tnh, P(ShardingAxisName.MLP_TENSOR))
-        logger.warning(f"********out_specs = {in_specs}")
-        logger.warning(f"********input_shapes: q_TNA={q_TNA.shape}, q_rope_TNH={q_rope_TNH.shape}, k_SKA={k_SKA.shape}, k_rope_SNH={k_rope_SNH.shape}, kv_cache={kv_cache.shape} ")
+        # logger.warning(f"********kv_cache.shape = {kv_cache.shape}")
+        # logger.warning(f"********in_specs = {in_specs}")
+        # logger.warning(f"********self.attn_o_tnh = {self.attn_o_tnh}")
+        
+        out_specs = (self.attn_o_tnh,
+                    #  P(ShardingAxisName.MLP_TENSOR),
+                     P(ShardingAxisName.MLP_TENSOR))
+        # logger.warning(f"********out_specs = {in_specs}")
+        # logger.warning(f"********input_shapes: q_TNA={q_TNA.shape}, q_rope_TNH={q_rope_TNH.shape}, k_SKA={k_SKA.shape}, k_rope_SNH={k_rope_SNH.shape}, kv_cache={kv_cache.shape} ")
+        # logger.warning(f"********md: seq_lens={md.seq_lens.shape}, block_tables={md.block_tables.shape}, query_start_loc={md.query_start_loc.shape}, k_rope_SNH={md.request_distribution.shape}")
 
-        def _mla_ragged_paged_attention(*args):
-            return mla_ragged_paged_attention(
+        def _mla_ragged_paged_attention(q, q_rope, k, k_rope, kv_cache, *args):
+            kv_c = kv_cache[..., :self.kv_lora_rank]
+            k_pe = kv_cache[..., self.kv_lora_rank:]
+            # Set reasonable starting estimates for block sizes. (TODO: update this to use tuned sizes)
+            # Referring to get_tuned_block_sizes() in kernels/ragged_paged_attention/v3/tuned_block_sizes.py: 'q_bfloat16_kv_bfloat16/q_head-64_kv_head-2_head-128'/4096 
+            def _initialize_block_sizes():
+                tpu_version = get_tpu_version()
+                assert tpu_version == 7, "MLA kernel is currently only supported on Ironwood!"
+                max_num_tokens = q.shape[0]
+                max_num_seqs = md.seq_lens.shape[0]
+                num_page_indices = md.block_tables.shape[0]
+                assert num_page_indices % max_num_seqs == 0
+                pages_per_seq = num_page_indices // max_num_seqs
+                # num_kv_pages_per_block = min(pages_per_seq, 16)
+                num_kv_pages_per_block = min(pages_per_seq, 2)
+                # num_queries_per_block = min(max_num_tokens, 16)
+                num_queries_per_block = min(max_num_tokens, 2)
+                logger.warning(f"******num_kv_pages_per_block = {num_kv_pages_per_block}")
+                logger.warning(f"******num_queries_per_block = {num_queries_per_block}")
+                return num_kv_pages_per_block, num_queries_per_block
+            
+            num_kv_pages_per_block, num_queries_per_block = _initialize_block_sizes()
+            output, updated_kv_c, updated_k_pe = mla_ragged_paged_attention(
+                q, q_rope, k, k_rope, kv_c, k_pe,
                 *args,
                 sm_scale=self.scale,
+                num_kv_pages_per_block=num_kv_pages_per_block,
+                num_queries_per_block=num_queries_per_block
             )
+            updated_kv_cache = kv_cache.at[..., :self.kv_lora_rank].set(updated_kv_c)
+            updated_kv_cache = updated_kv_cache.at[..., self.kv_lora_rank:].set(updated_k_pe)
+
+            return output, updated_kv_cache
         
         
 

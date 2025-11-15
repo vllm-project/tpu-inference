@@ -168,7 +168,8 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
         layer_names=[f"layer.{i}" for i in range(num_hidden_layers)],
         cache_dtype=kv_cache_jnp_dtype)
 
-    dp_size = mesh.shape.get("data", 1) * mesh.shape.get("attn", 1)
+    # dp_size = mesh.shape.get("data", 1) * mesh.shape.get("attn", 1)
+    dp_size = model.vllm_config.sharding_config.total_dp_size
 
     # NOTE: the inputs don't need to match the actual ones, as long as the consumed weights are the same
     input_ids = jax.random.randint(rng,

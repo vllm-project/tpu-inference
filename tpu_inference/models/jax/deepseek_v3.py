@@ -139,7 +139,7 @@ class DeepSeekV3(nnx.Module):
 
                 query_tnh_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
                 keyvalue_skh_spec=P(ShardingAxisName.MLP_TENSOR, None) # misnomer should be something like keyvalue_sa
-                attn_o_tnh_spec=P(ShardingAxisName.MLP_TENSOR, None, None),
+                attn_o_tnh_spec=P(ShardingAxisName.MLP_TENSOR, None, None)
                 
             else:
                 # TODO: update to use ShardingAxisName
@@ -177,10 +177,10 @@ class DeepSeekV3(nnx.Module):
                 keyvalue_skh=keyvalue_skh_spec,
                 activation_attention_out_td=(None, None),
                 attn_o_tnh=attn_o_tnh_spec,
-                q_da_sharding=(None, 'model'),
-                anh_sharding=(None, 'model', None),
-                kv_da_sharding=(None, 'model'),
-                nhd_sharding=('model', None, None))
+                q_da_sharding=(None, ShardingAxisName.MLP_TENSOR),
+                anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None),
+                kv_da_sharding=(None, ShardingAxisName.MLP_TENSOR),
+                nhd_sharding=(ShardingAxisName.MLP_TENSOR, None, None))
 
         for i in range(first_k_dense_replace):
             block = TransformerBlock(
@@ -206,8 +206,8 @@ class DeepSeekV3(nnx.Module):
                                        hidden_size=hidden_size,
                                        intermediate_size=ffw_intermediate_size,
                                        rngs=self.rng,
-                                       df_sharding=(None, ('model', 'expert')),
-                                       fd_sharding=(('model', 'expert'), None),
+                                       df_sharding=(None, ShardingAxisName.MLP_TENSOR),
+                                       fd_sharding=(ShardingAxisName.MLP_TENSOR, None),
                                        random_init=self.random_init))
 
             self.layers.append(block)
@@ -225,9 +225,9 @@ class DeepSeekV3(nnx.Module):
                 rngs=self.rng,
                 routed_scaling_factor=2.5,
                 dtype=dtype,
-                activation_ffw_td=('data', None),
-                ed_sharding=('model', None),
-                e_sharding=('model', ))
+                activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
+                ed_sharding=(ShardingAxisName.MLP_TENSOR, None),
+                e_sharding=(ShardingAxisName.MLP_TENSOR, ))
             if self.sparse_matmul:
                 # TODO: orginize the SparseMoE and DenseMoE better given they share most interfaces
                 custom_module = SparseMoE(
@@ -241,10 +241,10 @@ class DeepSeekV3(nnx.Module):
                     hidden_act=hidden_act,
                     rngs=self.rng,
                     random_init=self.random_init,
-                    activation_ffw_td=('data', None),
-                    activation_ffw_ted=('data', None, None),
-                    edf_sharding=('model', None, None),
-                    efd_sharding=('model', None, None),
+                    activation_ffw_td=(ShardingAxisName.MLP_TENSOR, None),
+                    activation_ffw_ted=(ShardingAxisName.MLP_DATA, None, None),
+                    edf_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
+                    efd_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
                     quantized_dtype=self.weight_loader.quant_dtype
                     if self.weight_loader.is_model_quantized else None,
                     router=router) if is_moe_layer else DenseFFW(
@@ -254,8 +254,8 @@ class DeepSeekV3(nnx.Module):
                         intermediate_size=ffw_intermediate_size,
                         rngs=self.rng,
                         random_init=self.random_init,
-                        df_sharding=(None, ('model', 'expert')),
-                        fd_sharding=(('model', 'expert'), None))
+                        df_sharding=(None, ShardingAxisName.MLP_TENSOR),
+                        fd_sharding=(ShardingAxisName.MLP_TENSOR, None))
             else:
                 custom_module = MoE(
                     dtype=dtype,
@@ -266,10 +266,10 @@ class DeepSeekV3(nnx.Module):
                     hidden_act=hidden_act,
                     rngs=self.rng,
                     random_init=self.random_init,
-                    activation_ffw_td=('data', None),
-                    activation_ffw_ted=('data', None, None),
-                    edf_sharding=('model', None, None),
-                    efd_sharding=('model', None, None),
+                    activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
+                    activation_ffw_ted=(ShardingAxisName.MLP_DATA, None, None),
+                    edf_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
+                    efd_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
                     router=router) if is_moe_layer else DenseFFW(
                         dtype=dtype,
                         hidden_act=hidden_act,
@@ -277,8 +277,8 @@ class DeepSeekV3(nnx.Module):
                         intermediate_size=ffw_intermediate_size,
                         rngs=self.rng,
                         random_init=self.random_init,
-                        df_sharding=(None, ('model', 'expert')),
-                        fd_sharding=(('model', 'expert'), None))
+                        df_sharding=(None, ShardingAxisName.MLP_TENSOR),
+                        fd_sharding=(ShardingAxisName.MLP_TENSOR, None))
 
             shared_experts = DenseFFW(dtype=dtype,
                                       hidden_act=hidden_act,
@@ -287,8 +287,8 @@ class DeepSeekV3(nnx.Module):
                                       moe_intermediate_size,
                                       rngs=self.rng,
                                       random_init=self.random_init,
-                                      df_sharding=(None, ('model', 'expert')),
-                                      fd_sharding=(('model', 'expert'), None))
+                                      df_sharding=(None, ShardingAxisName.MLP_TENSOR),
+                                      fd_sharding=(ShardingAxisName.MLP_TENSOR, None))
 
             pre_attention_norm = RMSNorm(
                 dims=hidden_size,
@@ -329,8 +329,8 @@ class DeepSeekV3(nnx.Module):
                               hidden_size=hidden_size,
                               dtype=dtype,
                               rngs=self.rng,
-                              vd_sharding=(('data', 'expert', 'model'), None),
-                              dv_sharding=(None, ('data', 'expert', 'model')),
+                              vd_sharding=(ShardingAxisName.MLP_TENSOR, None),
+                              dv_sharding=(None, ShardingAxisName.MLP_TENSOR),
                               random_init=self.random_init)
 
     # For compatibility with flax.
