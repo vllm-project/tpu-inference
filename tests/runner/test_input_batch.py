@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 from vllm.sampling_params import SamplingParams
+from vllm.pooling_params import PoolingParams
 
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
 
@@ -26,14 +27,35 @@ def input_batch():
     )
 
 
+@pytest.fixture
+def input_batch_for_pooling():
+    return InputBatch(
+        max_num_reqs=MAX_NUM_REQS,
+        max_model_len=MAX_MODEL_LEN,
+        max_num_batched_tokens=MAX_NUM_BATCHED_TOKENS,
+        pin_memory=False,
+        vocab_size=VOCAB_SIZE,
+        block_sizes=BLOCK_SIZES,
+        is_pooling_model = True,
+        is_spec_decode=False,
+    )
+
+
+
 def create_dummy_request(req_id: str,
                          prompt_len: int = 10,
                          output_len: int = 5,
                          sampling_params: SamplingParams = None,
+                         pooling_params: PoolingParams = None,
                          block_ids=None) -> CachedRequestState:
     """Helper function to create a CachedRequestState instance."""
+
     if sampling_params is None:
         sampling_params = SamplingParams(temperature=0.8, top_p=0.9, top_k=50)
+
+    if pooling_params:
+        sampling_params = None
+
 
     prompt_token_ids = list(range(prompt_len))
     output_token_ids = list(range(prompt_len, prompt_len + output_len))
@@ -49,7 +71,7 @@ def create_dummy_request(req_id: str,
         prompt_token_ids=prompt_token_ids,
         mm_features=[],
         sampling_params=sampling_params,
-        pooling_params=None,
+        pooling_params=pooling_params,
         block_ids=block_ids,
         num_computed_tokens=0,
         lora_request=None,
@@ -210,3 +232,95 @@ def test_all_greedy_property(input_batch: InputBatch):
     # Remove it, should be true again
     input_batch.random_reqs.remove("req-r")
     assert input_batch.all_greedy
+
+
+
+def test_add_pooling_request(input_batch_for_pooling: InputBatch):
+    pooling_params = PoolingParams(dimensions = 768, normalize = True, use_activation = True)
+    req = create_dummy_request("req-1", prompt_len = 20, output_len = 4, pooling_params = pooling_params)
+    input_batch_for_pooling.add_request(req)
+
+    assert input_batch_for_pooling.num_reqs == 1
+    assert "req-1" in input_batch_for_pooling.req_id_to_index
+    assert input_batch_for_pooling.req_id_to_index["req-1"] == 0
+    assert input_batch_for_pooling.req_ids == ["req-1"]
+    assert len(input_batch_for_pooling.spec_decode_unsupported_reqs) == 0
+
+    assert input_batch_for_pooling.num_prompt_tokens[0] == 20
+    assert input_batch_for_pooling.num_tokens[0] == 24
+    assert input_batch_for_pooling.num_tokens_no_spec[0] == 24
+    expected_tokens = np.array(req.prompt_token_ids + req.output_token_ids)
+    np.testing.assert_array_equal(input_batch_for_pooling.token_ids_cpu[0, :24],
+                                  expected_tokens)
+
+    assert input_batch_for_pooling.get_pooling_params() == [pooling_params]
+
+
+def test_add_multiple_pooling_requests(input_batch_for_pooling: InputBatch):
+    pooling_params_1 = PoolingParams(dimensions=512, normalize=True)
+    pooling_params_2 = PoolingParams(dimensions=1024, normalize=False)
+
+    req1 = create_dummy_request("req-1",
+                                prompt_len=8,
+                                output_len=2,
+                                pooling_params=pooling_params_1)
+    req2 = create_dummy_request("req-2",
+                                prompt_len=6,
+                                output_len=3,
+                                pooling_params=pooling_params_2)
+
+    input_batch_for_pooling.add_request(req1)
+    input_batch_for_pooling.add_request(req2)
+
+    assert input_batch_for_pooling.num_reqs == 2
+    assert input_batch_for_pooling.req_ids == ["req-1", "req-2"]
+
+    pooling_values = input_batch_for_pooling.get_pooling_params()
+    assert pooling_values[0] == pooling_params_1
+    assert pooling_values[1] == pooling_params_2
+
+
+def test_remove_single_pooling_request(input_batch_for_pooling: InputBatch):
+    pooling_params_1 = PoolingParams(dimensions=256)
+    pooling_params_2 = PoolingParams(dimensions=768)
+
+    req1 = create_dummy_request("req-1", pooling_params=pooling_params_1)
+    req2 = create_dummy_request("req-2", pooling_params=pooling_params_2)
+
+    input_batch_for_pooling.add_request(req1)
+    input_batch_for_pooling.add_request(req2)
+
+    removed_index = input_batch_for_pooling.remove_request("req-1")
+    assert removed_index == 0
+    assert "req-1" not in input_batch_for_pooling.pooling_params
+
+    input_batch_for_pooling.condense([removed_index])
+
+    assert input_batch_for_pooling.req_ids == ["req-2"]
+    pooling_values = input_batch_for_pooling.get_pooling_params()
+    assert pooling_values == [pooling_params_2]
+
+
+def test_remove_multiple_pooling_requests(input_batch_for_pooling: InputBatch):
+    pooling_params = [
+        PoolingParams(dimensions=128 + i * 64) for i in range(3)
+    ]
+    reqs = [
+        create_dummy_request(f"req-{i}", pooling_params=pooling_params[i])
+        for i in range(3)
+    ]
+
+    for req in reqs:
+        input_batch_for_pooling.add_request(req)
+
+    removed_indices = []
+    removed_indices.append(input_batch_for_pooling.remove_request("req-0"))
+    removed_indices.append(input_batch_for_pooling.remove_request("req-2"))
+
+    removed_indices = sorted(
+        [idx for idx in removed_indices if idx is not None], reverse=True)
+    input_batch_for_pooling.condense(removed_indices)
+
+    assert input_batch_for_pooling.req_ids == ["req-1"]
+    pooling_values = input_batch_for_pooling.get_pooling_params()
+    assert pooling_values == [pooling_params[1]]
