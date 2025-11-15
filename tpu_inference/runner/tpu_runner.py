@@ -701,27 +701,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 #     "Should not schedule a request that does nothing!")
             return DUMMY_METADATA, EMPTY_MODEL_RUNNER_OUTPUT
 
-<<<<<<< HEAD:tpu_inference/runner/tpu_runner.py
         # TODO(pooyam): I guess we can remove returning sampling_metadata in `_prepare_inputs` after https://github.com/njhill/vllm/commit/b7433ca1a47732394b1bdea4099d98389515954b
         (
             input_ids,
             attn_metadata,
             _,
+            pooling_metadata,
             logits_indices,
             spec_decode_metadata,
             logits_indices_selector,
         ) = self._prepare_inputs(scheduler_output)
-=======
-        (
-            input_ids,
-            attn_metadata,
-            sampling_metadata,
-            pooling_metadata,
-            logits_indices,
-            spec_decode_metadata,
-        ) = self._prepare_inputs(scheduler_output)
 
->>>>>>> 8a07e5ea (merge main):tpu_inference/runner/tpu_jax_runner.py
 
         # multi-modal support
         if self.is_multimodal_model:
@@ -1623,11 +1613,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # This is for making these cpu buffers hidden during tracing
         attention_metadata.query_start_loc_cpu = query_start_loc_cpu
         attention_metadata.seq_lens_cpu = seq_lens_cpu
-<<<<<<< HEAD:tpu_inference/runner/tpu_runner.py
         logits_indices_selector = None
-        return (input_ids, attention_metadata, sampling_metadata,
-                logits_indices, spec_decode_metadata, logits_indices_selector)
-=======
 
         return (
             input_ids,
@@ -1636,8 +1622,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             pooling_metadata,
             logits_indices,
             spec_decode_metadata,
+            logits_indices_selector
         )
->>>>>>> 8a07e5ea (merge main):tpu_inference/runner/tpu_jax_runner.py
 
     def _get_input_ids_embeds(self, input_ids: jax.Array,
                               mm_embeds: list[jax.Array]):
