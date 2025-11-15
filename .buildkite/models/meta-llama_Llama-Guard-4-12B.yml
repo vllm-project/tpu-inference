@@ -1,4 +1,5 @@
 # meta-llama/Llama-Guard-4-12B
+#adding this comment here to get the full buildkite CI test suite to run
 steps:
   - label: "Unit tests for meta-llama/Llama-Guard-4-12B"
     key: "meta-llama_Llama-Guard-4-12B_UnitTest"
