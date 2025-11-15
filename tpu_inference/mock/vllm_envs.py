@@ -189,6 +189,20 @@ def maybe_convert_bool(value: Optional[str]) -> Optional[bool]:
     return bool(int(value))
 
 
+def _get_jax_platforms() -> str:
+    """Get JAX_PLATFORMS from tpu_inference.envs module.
+
+    Returns:
+        The JAX_PLATFORMS value.
+    """
+    try:
+        from tpu_inference import envs
+        return envs.JAX_PLATFORMS
+    except ImportError:
+        # Fallback if tpu_inference.envs is not available
+        return os.getenv("JAX_PLATFORMS", "").lower()
+
+
 def get_vllm_port() -> Optional[int]:
     """Get the port from VLLM_PORT environment variable.
 
@@ -941,7 +955,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Whether using Pathways
     "VLLM_TPU_USING_PATHWAYS":
-    lambda: bool("proxy" in os.getenv("JAX_PLATFORMS", "").lower()),
+    lambda: bool("proxy" in _get_jax_platforms()),
 
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM":

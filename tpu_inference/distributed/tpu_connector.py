@@ -60,7 +60,6 @@ D workflow:
 
 import copy
 import functools
-import os
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -441,8 +440,8 @@ class TPUConnectorWorker:
 
         self.runner: TPUModelRunner = None
         self.mesh: Mesh = None
-        self.multi_host = os.getenv("TPU_MULTIHOST_BACKEND",
-                                    "").lower() == "ray"
+        from tpu_inference import envs
+        self.multi_host = envs.TPU_MULTIHOST_BACKEND == "ray"
         # NOTE(xiang): This can not be the worker rank set in RayDistributedExecutor.
         # The worker rank is assigned with vLLM's sorting logic, which does not work
         # for TPU host topology.
