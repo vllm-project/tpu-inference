@@ -91,13 +91,14 @@ class VllmModelWrapper:
             slice_config = self.vllm_config.device_config.slice
             modified_slice_config = True
             self.vllm_config.device_config.slice = None
+        self.vllm_config.compilation_config.static_forward_context.clear()
+
         vllm_config_for_load = copy.deepcopy(self.vllm_config)
         if modified_slice_config:
             self.vllm_config.device_config.slice = slice_config
         assert self.vllm_config.model_config.dtype in TORCH_DTYPE_TO_JAX, "The model_config.dtype must be a PyTorch dtype."
         vllm_config_for_load.device_config.device = "cpu"
         # Clearing the cached compilation config, otherwise vllm model init will fail
-        vllm_config_for_load.compilation_config.static_forward_context.clear()
 
         # When expert parallelism is enabled, vLLM loads weight in sharding
         # aware manner. Since tpu-inference has its own sharding logic, this

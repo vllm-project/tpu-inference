@@ -191,120 +191,131 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         assert isinstance(layer, FusedMoE)
-
-        w13_weight = t2j(layer.w13_weight, use_dlpack=False)
-        w2_weight = t2j(layer.w2_weight, use_dlpack=False)
-
-        if self.moe.has_bias:
-            w13_bias = t2j(layer.w13_bias, use_dlpack=False)
-            w2_bias = t2j(layer.w2_bias, use_dlpack=False)
-
-        if layer.activation == "swigluoai":
-            # When using swigluoai, vLLM splits gmm output in a interleaved way.
-            # However, interleaved split is not performant on TPU. Therefore,
-            # we preprocess the weight so that splitting gmm output by middle
-            # can still get the same result.
-            w1_weight = w13_weight[:, ::2, :]
-            w3_weight = w13_weight[:, 1::2, :]
-            w13_weight = jnp.concat([w1_weight, w3_weight], axis=1)
+        available_devices = self.mesh.devices.flatten()
+        with jax.default_device(available_devices[0]):
+            w13_weight = t2j(layer.w13_weight, use_dlpack=False)
+            w2_weight = t2j(layer.w2_weight, use_dlpack=False)
 
             if self.moe.has_bias:
-                w1_bias = w13_bias[:, ::2]
-                w3_bias = w13_bias[:, 1::2]
-                w13_bias = jnp.concat([w1_bias, w3_bias], axis=1)
+                w13_bias = t2j(layer.w13_bias, use_dlpack=False)
+                w2_bias = t2j(layer.w2_bias, use_dlpack=False)
 
-        if self.use_kernel and layer.use_ep:
-            # Kernel expects:
-            # w13: (num_experts, 2, hidden_size, intermediate_size)
-            # w2: (num_experts, intermediate_size, hidden_size)
-            # Current format:
-            # w13_weight: (num_experts, 2*intermediate_size, hidden_size)
-            # w2_weight: (num_experts, hidden_size, intermediate_size)
-            num_experts = w13_weight.shape[0]
-            intermediate_size = w13_weight.shape[1] // 2
-            hidden_size = w13_weight.shape[2]
+            if layer.activation == "swigluoai":
+                # When using swigluoai, vLLM splits gmm output in a interleaved way.
+                # However, interleaved split is not performant on TPU. Therefore,
+                # we preprocess the weight so that splitting gmm output by middle
+                # can still get the same result.
+                w1_weight = w13_weight[:, ::2, :]
+                w3_weight = w13_weight[:, 1::2, :]
+                w13_weight = jnp.concat([w1_weight, w3_weight], axis=1)
 
-            # Reshape and transpose w13_weight to (num_experts, 2, hidden_size, intermediate_size)
-            w13_reshaped = w13_weight.reshape(num_experts, 2,
-                                              intermediate_size, hidden_size)
-            w13_weight_transposed = jnp.transpose(w13_reshaped, (0, 1, 3, 2))
+                if self.moe.has_bias:
+                    w1_bias = w13_bias[:, ::2]
+                    w3_bias = w13_bias[:, 1::2]
+                    w13_bias = jnp.concat([w1_bias, w3_bias], axis=1)
 
-            # Transpose w2_weight to (num_experts, intermediate_size, hidden_size)
-            w2_weight_transposed = jnp.transpose(w2_weight, (0, 2, 1))
+            if self.use_kernel and layer.use_ep:
+                # Kernel expects:
+                # w13: (num_experts, 2, hidden_size, intermediate_size)
+                # w2: (num_experts, intermediate_size, hidden_size)
+                # Current format:
+                # w13_weight: (num_experts, 2*intermediate_size, hidden_size)
+                # w2_weight: (num_experts, hidden_size, intermediate_size)
+                num_experts = w13_weight.shape[0]
+                intermediate_size = w13_weight.shape[1] // 2
+                hidden_size = w13_weight.shape[2]
 
-            # Apply EP sharding
-            w13_weight = jax.device_put(
-                w13_weight_transposed,
-                Format(Layout((0, 1, 2, 3)),
-                       NamedSharding(self.mesh, P("model", None, None, None))))
-            w2_weight = jax.device_put(
-                w2_weight_transposed,
-                Format(Layout((0, 1, 2)),
-                       NamedSharding(self.mesh, P("model", None, None))))
+                # Reshape and transpose w13_weight to (num_experts, 2, hidden_size, intermediate_size)
+                w13_reshaped = w13_weight.reshape(num_experts, 2,
+                                                  intermediate_size,
+                                                  hidden_size)
+                w13_weight_transposed = jnp.transpose(w13_reshaped,
+                                                      (0, 1, 3, 2))
 
-            if self.moe.has_bias:
-                w13_bias = w13_bias.reshape(num_experts, 2, intermediate_size)
+                # Transpose w2_weight to (num_experts, intermediate_size, hidden_size)
+                w2_weight_transposed = jnp.transpose(w2_weight, (0, 2, 1))
 
                 # Apply EP sharding
-                w13_bias = jax.device_put(
-                    w13_bias,
-                    Format(Layout((0, 1, 2)),
-                           NamedSharding(self.mesh, P("model", None, None))))
-                w2_bias = jax.device_put(
-                    w2_bias,
-                    Format(Layout((0, 1)),
-                           NamedSharding(self.mesh, P("model", None))))
-
-        else:
-            # Original logic for non-kernel path
-            if layer.use_ep:
                 w13_weight = jax.device_put(
-                    w13_weight,
-                    Format(Layout((0, 1, 2)),
-                           NamedSharding(self.mesh, P("model", None, None))))
+                    w13_weight_transposed,
+                    Format(
+                        Layout((0, 1, 2, 3)),
+                        NamedSharding(self.mesh, P("model", None, None,
+                                                   None))))
                 w2_weight = jax.device_put(
-                    w2_weight,
+                    w2_weight_transposed,
                     Format(Layout((0, 1, 2)),
                            NamedSharding(self.mesh, P("model", None, None))))
 
                 if self.moe.has_bias:
+                    w13_bias = w13_bias.reshape(num_experts, 2,
+                                                intermediate_size)
+
+                    # Apply EP sharding
                     w13_bias = jax.device_put(
                         w13_bias,
-                        Format(Layout((0, 1)),
-                               NamedSharding(self.mesh, P("model", None))))
+                        Format(
+                            Layout((0, 1, 2)),
+                            NamedSharding(self.mesh, P("model", None, None))))
                     w2_bias = jax.device_put(
                         w2_bias,
                         Format(Layout((0, 1)),
                                NamedSharding(self.mesh, P("model", None))))
 
             else:
-                intermediate_size = w13_weight.shape[1] // 2
-                assert intermediate_size == w2_weight.shape[-1]
-                output_sizes = [intermediate_size, intermediate_size]
-                n_shards = self.mesh.shape["model"]
-                assert intermediate_size % n_shards == 0
-                w13_weight = reorder_concatenated_tensor_for_sharding(
-                    w13_weight, output_sizes, n_shards, dim=1)
-                w13_weight = jax.device_put(
-                    w13_weight,
-                    Format(Layout((0, 1, 2)),
-                           NamedSharding(self.mesh, P(None, "model", None))))
-                w2_weight = jax.device_put(
-                    w2_weight,
-                    Format(Layout((0, 1, 2)),
-                           NamedSharding(self.mesh, P(None, None, "model"))))
+                # Original logic for non-kernel path
+                if layer.use_ep:
+                    w13_weight = jax.device_put(
+                        w13_weight,
+                        Format(
+                            Layout((0, 1, 2)),
+                            NamedSharding(self.mesh, P("model", None, None))))
+                    w2_weight = jax.device_put(
+                        w2_weight,
+                        Format(
+                            Layout((0, 1, 2)),
+                            NamedSharding(self.mesh, P("model", None, None))))
 
-                if self.moe.has_bias:
-                    w13_bias = reorder_concatenated_tensor_for_sharding(
-                        w13_bias, output_sizes, n_shards, dim=1)
-                    w13_bias = jax.device_put(
-                        w13_bias,
-                        Format(Layout((0, 1)),
-                               NamedSharding(self.mesh, P(None, "model"))))
-                    w2_bias = jax.device_put(
-                        w2_bias,
-                        Format(Layout((0, 1)),
-                               NamedSharding(self.mesh, P(None, None))))
+                    if self.moe.has_bias:
+                        w13_bias = jax.device_put(
+                            w13_bias,
+                            Format(Layout((0, 1)),
+                                   NamedSharding(self.mesh, P("model", None))))
+                        w2_bias = jax.device_put(
+                            w2_bias,
+                            Format(Layout((0, 1)),
+                                   NamedSharding(self.mesh, P("model", None))))
+
+                else:
+                    intermediate_size = w13_weight.shape[1] // 2
+                    assert intermediate_size == w2_weight.shape[-1]
+                    output_sizes = [intermediate_size, intermediate_size]
+                    n_shards = self.mesh.shape["model"]
+                    assert intermediate_size % n_shards == 0
+                    w13_weight = reorder_concatenated_tensor_for_sharding(
+                        w13_weight, output_sizes, n_shards, dim=1)
+                    w13_weight = jax.device_put(
+                        w13_weight,
+                        Format(
+                            Layout((0, 1, 2)),
+                            NamedSharding(self.mesh, P(None, "model", None))))
+                    w2_weight = jax.device_put(
+                        w2_weight,
+                        Format(
+                            Layout((0, 1, 2)),
+                            NamedSharding(self.mesh, P(None, None, "model"))))
+
+                    if self.moe.has_bias:
+                        w13_bias = reorder_concatenated_tensor_for_sharding(
+                            w13_bias, output_sizes, n_shards, dim=1)
+                        w13_bias = jax.device_put(
+                            w13_bias,
+                            Format(Layout((0, 1)),
+                                   NamedSharding(self.mesh, P(None, "model"))))
+                        w2_bias = jax.device_put(
+                            w2_bias,
+                            Format(Layout((0, 1)),
+                                   NamedSharding(self.mesh, P(None, None))))
 
         layer.w13_weight = Parameter(torch_view(w13_weight),
                                      requires_grad=False)
