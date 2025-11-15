@@ -95,6 +95,11 @@ echo "Python dependencies installed"
 
 IMAGE_NAME="vllm-tpu-pypi"
 docker build --no-cache -f docker/Dockerfile.pypi -t "${IMAGE_NAME}:${BUILDKITE_COMMIT}" .
+echo "docker build ${IMAGE_NAME}:${BUILDKITE_COMMIT}"
+
+
+echo "LOCAL_HF_HOME=$LOCAL_HF_HOME":"DOCKER_HF_HOME=$DOCKER_HF_HOME"
+echo "MODEL_IMPL_TYPE=$MODEL_IMPL_TYPE"
 
 exec docker run \
   --privileged \
@@ -115,3 +120,4 @@ exec docker run \
   ${VLLM_MLA_DISABLE:+-e VLLM_MLA_DISABLE="$VLLM_MLA_DISABLE"} \
   "${IMAGE_NAME}:${BUILDKITE_COMMIT}" \
   "$@" # Pass all script arguments as the command to run in the container
+echo "docker run complete"

@@ -9,7 +9,7 @@ steps:
   # -----------------------------------------------------------------
   # TEST STEPS - Calling wrapper
   # -----------------------------------------------------------------
-   - label: "E2E MLPerf tests for JAX models"
+   - label: "Test Pypi E2E MLPerf tests for JAX models"
      key: test_0
      soft_fail: true
      agents:
