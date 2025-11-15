@@ -45,6 +45,7 @@ def sampling_params():
         temperature=0.0,
         max_tokens=32,
         ignore_eos=True,
+        logprobs=1,
     )
 
 
@@ -171,7 +172,7 @@ def test_data_parallelism_correctness(
     """
     Test that data parallelism produces consistent results compared to a baseline.
     This test compares outputs from a single-device run with data parallel runs
-    to ensure correctness.
+    to ensure correctness, including log probabilities.
     """
     os.environ['SKIP_JAX_PRECOMPILE'] = '1'
     os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '0'
@@ -188,36 +189,87 @@ def test_data_parallelism_correctness(
         data_parallel_size=1,
     )
 
-    # Run with model data parallelism
+    # Run with model data parallelism and async scheduling
     dp_outputs = _run_inference_with_config(
         model_name=model_name,
         test_prompts=small_prompts,
         sampling_params=sampling_params,
         tensor_parallel_size=1,
         data_parallel_size=2,
+        additional_config={"scheduler_config": {
+            "async_scheduling": True
+        }},
     )
 
     # Compare outputs - they should be identical for greedy sampling
     assert len(baseline_outputs) == len(dp_outputs)
 
-    matches = 0
-    mismatches = 0
+    text_matches = 0
+    text_mismatches = 0
+    logprob_mismatches = 0
+    max_logprob_diff = 0.0
 
-    for baseline, dp_result in zip(baseline_outputs, dp_outputs):
+    for i, (baseline, dp_result) in enumerate(zip(baseline_outputs,
+                                                  dp_outputs)):
         baseline_text = baseline.outputs[0].text.strip()
         dp_text = dp_result.outputs[0].text.strip()
 
+        # Check text output
         if baseline_text == dp_text:
-            matches += 1
+            text_matches += 1
         else:
-            mismatches += 1
-            print("Mismatch found:")
+            text_mismatches += 1
+            print(f"Text mismatch found in prompt {i}:")
             print(f"  Baseline: {baseline_text}")
             print(f"  Data Parallel: {dp_text}")
 
-    print(f"✓ Correctness test: {matches} matches, {mismatches} mismatches")
+        # Check log probabilities
+        baseline_logprobs = baseline.outputs[0].logprobs
+        dp_logprobs = dp_result.outputs[0].logprobs
+
+        if baseline_logprobs is not None and dp_logprobs is not None:
+            # Compare log probabilities for each token
+            assert len(baseline_logprobs) == len(dp_logprobs), \
+                f"Logprobs length mismatch: {len(baseline_logprobs)} vs {len(dp_logprobs)}"
+
+            for token_idx, (base_lp, dp_lp) in enumerate(
+                    zip(baseline_logprobs, dp_logprobs)):
+                # Get the top logprob value for the selected token
+                if base_lp and dp_lp:
+                    # Get the top token's logprob from each
+                    base_top_token = list(base_lp.keys())[0]
+                    dp_top_token = list(dp_lp.keys())[0]
+
+                    base_logprob_val = base_lp[base_top_token].logprob
+                    dp_logprob_val = dp_lp[dp_top_token].logprob
+
+                    # Calculate absolute difference
+                    diff = abs(base_logprob_val - dp_logprob_val)
+                    max_logprob_diff = max(max_logprob_diff, diff)
+
+                    # Allow small numerical differences (e.g., 1e-3)
+                    if diff > 1e-3:
+                        logprob_mismatches += 1
+                        print(
+                            f"Logprob mismatch in prompt {i}, token {token_idx}:"
+                        )
+                        print(
+                            f"  Baseline token: {base_top_token}, logprob: {base_logprob_val:.6f}"
+                        )
+                        print(
+                            f"  DP token: {dp_top_token}, logprob: {dp_logprob_val:.6f}"
+                        )
+                        print(f"  Difference: {diff:.6f}")
+
+    print("✓ Correctness test results:")
+    print(f"  Text: {text_matches} matches, {text_mismatches} mismatches")
+    print(f"  Max logprob difference: {max_logprob_diff:.6e}")
+    print(f"  Significant logprob mismatches (>1e-3): {logprob_mismatches}")
 
     # Allow for some variance due to potential numerical differences
     # but most outputs should match with greedy sampling
-    match_rate = matches / len(baseline_outputs)
-    assert match_rate >= 0.9, f"Match rate {match_rate:.2%} is too low"
+    text_match_rate = text_matches / len(baseline_outputs)
+    assert text_match_rate >= 0.9, f"Text match rate {text_match_rate:.2%} is too low"
+
+    # Log probabilities should be very close (allow small numerical errors)
+    assert max_logprob_diff < 0.1, f"Max logprob difference {max_logprob_diff} is too large"
