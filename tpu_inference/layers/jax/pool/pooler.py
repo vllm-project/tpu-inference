@@ -61,6 +61,10 @@ class ResolvedPoolingConfig:
 
 
 class PoolingMethod(nnx.Module):
+    """
+    Base class for pooling methods. Factory method `from_pooling_type` creates
+    specific pooling method instances based on the provided `PoolingType`.
+    """
     @staticmethod
     def from_pooling_type(pooling_type: PoolingType) -> "PoolingMethod":
         if pooling_type is PoolingType.ALL:
@@ -83,15 +87,23 @@ class PoolingMethod(nnx.Module):
 
 
 class AllPoolingMethod(PoolingMethod):
+    """
+    Pools all token embeddings for each request.
+    Most of the time, this is for encoder models; hence, it requires full sequences during the prefill because of bidirectional attention.
+    """
     def __call__(
         self,
         hidden_states: jax.Array,
         pooling_metadata: TPUSupportedPoolingMetadata,
     ) -> jax.Array:
-        pass
+        raise NotImplementedError("ALL pooling is not implemented yet.")
 
 
 class MeanPoolingMethod(PoolingMethod):
+    """
+    Pools by computing the mean of token embeddings for each request.
+    Most of the time, this is for encoder models; hence, it requires full sequences during the prefill because of bidirectional attention.
+    """
     def __call__(
         self,
         hidden_states: jax.Array,
@@ -100,16 +112,20 @@ class MeanPoolingMethod(PoolingMethod):
         padded_prompt_lens = pooling_metadata.prompt_lens
         padded_start_indices = pooling_metadata.first_token_indices
         padded_end_indices = pooling_metadata.last_token_indices
-        cumsum = jnp.cumsum(hidden_states, dtype=jnp.float32)
 
-        return (
-            cumsum[padded_end_indices]
-            - cumsum[padded_start_indices]
-            + hidden_states[padded_start_indices]
-        ) / padded_prompt_lens.unsqueeze(1)
+        def pool_fn(start, end, length):
+            seq = hidden_states[start:end + 1]
+            return jnp.sum(seq, axis=0) / length
+
+        return jax.vmap(pool_fn)(padded_start_indices, padded_end_indices,
+                                 padded_prompt_lens)
 
 
 class LastPoolingMethod(PoolingMethod):
+    """
+    Pools by selecting the last token embedding for each request.
+    Most of the time, this is used for causal/decoder models and is also supported with partial prefill.
+    """
     def __call__(
         self,
         hidden_states: jax.Array,
@@ -119,6 +135,10 @@ class LastPoolingMethod(PoolingMethod):
 
 
 class CLSPoolingMethod(PoolingMethod):
+    """
+    Pools by selecting the [CLS] token (first token) embedding for each request.
+    Most of the time, this is for encoder models; hence, it requires full sequences during the prefill because of bidirectional attention.
+    """
     def __call__(
         self,
         hidden_states: jax.Array,
@@ -128,6 +148,9 @@ class CLSPoolingMethod(PoolingMethod):
 
 
 class PoolerHead(nnx.Module):
+    """
+    Base class for Pooler Heads that process the pooled output.
+    """
     def __call__(
         self,
         pooled: jax.Array,
@@ -139,6 +162,9 @@ class PoolerHead(nnx.Module):
 
 
 class EmbeddingPoolerHead(PoolerHead):
+    """
+    Pooler head for embedding tasks, primarily responsible for normalization.
+    """
     def __init__(self, default_normalize: bool) -> None:
         super().__init__()
         self.default_normalize = default_normalize
@@ -165,6 +191,9 @@ class EmbeddingPoolerHead(PoolerHead):
 
 
 class Pooler(nnx.Module):
+    """
+    Base class for Poolers with factory methods to create Poolers for different tasks.
+    """
     @staticmethod
     def for_encode(pooler_config: PoolerConfig | None) -> "Pooler":
         resolved = ResolvedPoolingConfig.from_config("encode", pooler_config)
@@ -187,6 +216,11 @@ class Pooler(nnx.Module):
 
 
 class EmbeddingPooler(Pooler):
+    """
+    Pooler for embedding tasks.
+    pooling: PoolingMethod instance that performs the pooling operation.
+    head: EmbeddingPoolerHead instance that processes the pooled output, primarily for normalization.
+    """
     def __init__(
         self,
         pooling: PoolingMethod,

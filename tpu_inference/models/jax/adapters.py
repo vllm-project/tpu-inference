@@ -18,7 +18,8 @@ _GENERATE_SUFFIXES = (
 
 class PoolingMixin:
     """
-    same as VllmModelForPooling 
+    VllmModelForPooling
+    The reason for creating this Mixin instead of VllmModelForPooling is due to a conflict in the metaclass between nnx.Module and VllmModelForPooling.
     """
     is_pooling_model: tp.ClassVar[tp.Literal[True]] = True
 
@@ -49,17 +50,6 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
                 mesh=mesh,
             )
 
-
-            # Pooling models do not require language modeling heads.
-            # However, there is a problem: since the pattern for loading weights in nnx
-            # is abstract_module -> module, removing the lm_head attribute or leaves from the abstract_module
-            # results in an error, I think.
-            # This is because, during hf_load_weights, we need to match between the hf_key and nnx_key.
-
-            # for attr in ("model.lm_head"):
-            #     if hasattr(self, attr):
-            #         delattr(self, attr)
-
             if getattr(self, "pooler", None) is None:
                 self._init_pooler(vllm_config=vllm_config)
 
@@ -70,6 +60,9 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
 
 
 def as_embedding_model(cls: _T) -> _T:
+    """
+    convert a `CausalModel` to an embedding model by adding a Pooler for embedding
+    """
 
     class ModelForEmbedding(_create_pooling_model_cls(cls)):
         def _init_pooler(self, vllm_config: VllmConfig) -> None:
@@ -85,7 +78,7 @@ def as_embedding_model(cls: _T) -> _T:
         cls.__name__,
         "ForEmbedding",
     )
-    return ModelForEmbedding  # type: ignore[return-value]
+    return ModelForEmbedding 
 
 
 
@@ -113,4 +106,3 @@ def init_pooler_from_vllm_model(
         raise NotImplementedError(
             f"Pooling initialization for {vllm_model.__class__.__name__} is not implemented."
         )
-
