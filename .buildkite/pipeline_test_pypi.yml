@@ -1,0 +1,18 @@
+x-run-condition: &run-on-nightly-or-tag
+  if: build.env("NIGHTLY") == "1" || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/
+
+notify:
+  - email: "ullm-oncall@rotations.google.com"
+    if: build.state == "failed" && build.branch == "main"
+
+steps:
+  # -----------------------------------------------------------------
+  # TEST STEPS - Calling wrapper
+  # -----------------------------------------------------------------
+   - label: "E2E MLPerf tests for JAX models"
+     key: test_0
+     soft_fail: true
+     agents:
+       queue: tpu_v6e_queue
+     commands:
+       - .buildkite/scripts/run_with_pypi.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh

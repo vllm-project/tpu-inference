@@ -1,0 +1,17 @@
+ARG NIGHTLY_DATE="20250714"
+ARG BASE_IMAGE="us-central1-docker.pkg.dev/tpu-pytorch-releases/docker/xla:nightly_3.12_tpuvm_$NIGHTLY_DATE"
+
+FROM $BASE_IMAGE
+
+# Remove existing versions of dependencies
+RUN pip uninstall -y torch torch_xla torchvision
+
+# Install some basic utilities
+RUN apt-get update && apt-get install -y \
+    git \
+    libopenblas-base libopenmpi-dev libomp-dev
+
+# Install test dependencies
+RUN python3 -m pip install vllm-tpu
+
+CMD ["/bin/bash"]
