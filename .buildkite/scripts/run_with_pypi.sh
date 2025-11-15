@@ -93,13 +93,16 @@ echo "Installing Python dependencies"
 python3 -m pip install --progress-bar off buildkite-test-collector==0.1.9
 echo "Python dependencies installed"
 
-IMAGE_NAME="vllm-tpu-pypi"
-docker build --no-cache -f docker/Dockerfile.pypi -t "${IMAGE_NAME}:${BUILDKITE_COMMIT}" .
 echo "docker build ${IMAGE_NAME}:${BUILDKITE_COMMIT}"
 
 
 echo "LOCAL_HF_HOME=$LOCAL_HF_HOME":"DOCKER_HF_HOME=$DOCKER_HF_HOME"
 echo "MODEL_IMPL_TYPE=$MODEL_IMPL_TYPE"
+
+echo "start docker build"
+IMAGE_NAME="vllm-tpu-pypi"
+docker build --no-cache -f docker/Dockerfile.pypi -t "${IMAGE_NAME}:${BUILDKITE_COMMIT}" .
+echo "docker build complete"
 
 exec docker run \
   --privileged \
