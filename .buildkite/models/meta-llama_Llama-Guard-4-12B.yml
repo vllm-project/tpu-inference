@@ -1,5 +1,4 @@
 # meta-llama/Llama-Guard-4-12B
-#adding this comment here to get the full buildkite CI test suite to run
 steps:
   - label: "Unit tests for meta-llama/Llama-Guard-4-12B"
     key: "meta-llama_Llama-Guard-4-12B_UnitTest"
@@ -16,6 +15,8 @@ steps:
     env:
       CI_STAGE: "UnitTest"
       CI_TARGET: meta-llama/Llama-Guard-4-12B
+      #Adding DUMMY_VAR to see if this will trigger the entire CI test suite
+      DUMMY_VAR: 42
     agents:
       queue: cpu
     commands:

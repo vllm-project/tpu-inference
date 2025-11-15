@@ -221,8 +221,6 @@ def main(args: dict):
             all_passed = False
         print("-" * 80)
 
-    print("hello world") #TODO: REMOVE THIS PRINT STATEMENT
-
     # Calculate and print the final accuracy
     if total_tests > 0:
         accuracy = passed_tests / total_tests
