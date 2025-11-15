@@ -112,13 +112,13 @@ class MeanPoolingMethod(PoolingMethod):
         padded_prompt_lens = pooling_metadata.prompt_lens
         padded_start_indices = pooling_metadata.first_token_indices
         padded_end_indices = pooling_metadata.last_token_indices
+        cumsum = jnp.cumsum(hidden_states, axis = 0, dtype=jnp.float32)
 
-        def pool_fn(start, end, length):
-            seq = hidden_states[start:end + 1]
-            return jnp.sum(seq, axis=0) / length
-
-        return jax.vmap(pool_fn)(padded_start_indices, padded_end_indices,
-                                 padded_prompt_lens)
+        return (
+            cumsum[padded_end_indices]
+            - cumsum[padded_start_indices]
+            + hidden_states[padded_start_indices]
+        ) / padded_prompt_lens[:, None]
 
 
 class LastPoolingMethod(PoolingMethod):
