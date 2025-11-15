@@ -1,4 +1,5 @@
 # async scheduler
+# feature support matrix
 steps:
   - label: "Correctness tests for async scheduler"
     key: "async_scheduler_CorrectnessTest"
@@ -13,6 +14,7 @@ steps:
     env:
       CI_TARGET: "async scheduler"
       CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
     agents:
       queue: cpu
     commands:
@@ -33,6 +35,7 @@ steps:
     env:
       CI_TARGET: "async scheduler"
       CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "feature support matrix"
     agents:
       queue: cpu
     commands:

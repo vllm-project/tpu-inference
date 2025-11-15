@@ -1,4 +1,5 @@
 # JAX-Path Qxix Quantization
+# feature support matrix
 steps:
   # - label: "Correctness tests for JAX-Path Qxix Quantization"
   #   key: "JAX-Path_Qxix_Quantization_CorrectnessTest"
@@ -13,6 +14,7 @@ steps:
   #   env:
   #     CI_TARGET: "JAX-Path Qxix Quantization"
   #     CI_STAGE: "CorrectnessTest"
+  #     CI_CATEGORY: "feature support matrix"
   #   agents:
   #     queue: cpu
   #   commands:
@@ -35,6 +37,7 @@ steps:
     env:
       CI_TARGET: "JAX-Path Qxix Quantization"
       CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "feature support matrix"
     agents:
       queue: cpu
     commands:

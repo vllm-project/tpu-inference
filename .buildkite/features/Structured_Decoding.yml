@@ -1,4 +1,5 @@
 # Structured Decoding
+# feature support matrix
 steps:
   - label: "Correctness tests for Structured Decoding"
     key: "Structured_Decoding_CorrectnessTest"
@@ -13,6 +14,7 @@ steps:
     env:
       CI_TARGET: Structured Decoding
       CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
     agents:
       queue: cpu
     commands:

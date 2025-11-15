@@ -1,4 +1,5 @@
 # Quantized Matmul Attention and KV Cache
+# kernel support matrix
 steps:
   # - label: "Correctness tests for Quantized Matmul Attention and KV Cache"
   #   key: "Quantized_Matmul_Attention_and_KV_Cache_CorrectnessTest"
@@ -13,6 +14,7 @@ steps:
   #   env:
   #     CI_TARGET: "Quantized Matmul Attention and KV Cache"
   #     CI_STAGE: "CorrectnessTest"
+  #     CI_CATEGORY: "kernel support matrix"
   #   agents:
   #     queue: cpu
   #   commands:
@@ -44,6 +46,7 @@ steps:
     env:
       CI_TARGET: "Quantized Matmul Attention and KV Cache"
       CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "kernel support matrix"
     agents:
       queue: cpu
     commands:

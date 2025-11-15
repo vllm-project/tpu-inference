@@ -1,4 +1,5 @@
 # Speculative Decoding: Ngram
+# feature support matrix
 steps:
   - label: "Correctness tests for Speculative Decoding: Ngram"
     key: "Speculative_Decoding-_Ngram_CorrectnessTest"
@@ -17,6 +18,7 @@ steps:
     env:
       CI_TARGET: "Speculative Decoding: Ngram"
       CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
     agents:
       queue: cpu
     commands:
@@ -42,6 +44,7 @@ steps:
     env:
       CI_TARGET: "Speculative Decoding: Ngram"
       CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "feature support matrix"
     agents:
       queue: cpu
     commands:
