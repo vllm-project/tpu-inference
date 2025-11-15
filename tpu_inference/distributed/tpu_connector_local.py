@@ -465,6 +465,7 @@ class _StagingBufferManager():
         self._blocks_for_load: dict[ReqId, int] = {}
 
         self._num_free_blocks: int = self.num_blocks
+        # keep track of the total occupied staging blocks for save and load respectively
         self._num_blocks_for_save: int = 0
         self._num_blocks_for_load: int = 0
 
@@ -680,6 +681,7 @@ class TPUConnectorScheduler():
                 f"  Processing chunk {start_token_idx}-{end_token_idx} with hash {key.chunk_hash}"
             )
             if self.cpu_backend.contains(key, pin_on_hit=True):
+                # NOTE: each key maps to a cpu_chunk which equals to a block
                 num_matched_tokens = end_token_idx
                 num_matched_blocks += 1
                 logger.info(
@@ -721,11 +723,11 @@ class TPUConnectorScheduler():
                     dst_blocks=dummy_dst_blocks,
                     num_skip_leading_tokens=num_computed_tokens,
                 )
-                _num_allocated_blocks = self.staging_buffer_manager.allocate(
+                num_allocated_blocks = self.staging_buffer_manager.allocate(
                     request.request_id,
                     num_blocks=num_blocks_to_load,
                     usage="load")
-                assert _num_allocated_blocks == num_blocks_to_load >= 0, f" failed to allocate {_num_allocated_blocks} (load) staging blocks for request {request.request_id}, expected {num_blocks_to_load}."
+                assert num_allocated_blocks == num_blocks_to_load >= 0, f" failed to allocate {num_allocated_blocks} (load) staging blocks for request {request.request_id}, expected {num_blocks_to_load}."
 
                 self._external_cache_hits[
                     request.request_id] = num_matched_tokens
@@ -811,16 +813,6 @@ class TPUConnectorScheduler():
                 # NOTE(jcgu): I think we do not need the adjustment here;
                 # for load, we should load all the (matched_tokens - skipping_tokens),
                 # since it's been reported to vllm scheduler
-
-                # adjust last partial block
-                # total_matched_blocks = load_spec.num_matched_tokens // self.block_size
-                # last_partial_block_num_tokens = load_spec.num_matched_tokens - total_matched_blocks * self.block_size
-                # need_last_block = self._adjust_last_partial_block(
-                #     last_partial_block_num_tokens)
-                # if need_last_block:
-                #     total_matched_blocks += 1
-                # assert total_matched_blocks <= len(
-                #     all_blocks), f"{total_matched_blocks} > {len(all_blocks)}"
 
                 total_matched_blocks = len(
                     load_spec.dst_blocks) + skip_leading_blocks
@@ -953,11 +945,11 @@ class TPUConnectorScheduler():
                     skip_save=False,
                     src_blocks=src_block_ids,
                 )
-                _num_allocated_blocks = self.staging_buffer_manager.allocate(
+                num_allocated_blocks = self.staging_buffer_manager.allocate(
                     tracker.req_id,
                     num_blocks=num_blocks_to_save,
                     usage="save")
-                assert _num_allocated_blocks == num_blocks_to_save >= 0, f" failed to allocate {_num_allocated_blocks} (save) staging blocks for request {tracker.req_id}, expected {num_blocks_to_save}."
+                assert num_allocated_blocks == num_blocks_to_save >= 0, f" failed to allocate {num_allocated_blocks} (save) staging blocks for request {tracker.req_id}, expected {num_blocks_to_save}."
                 if adjusted_num_total_tokens > tracker.save_watermark:
                     logger.info(
                         f"      -> Old watermark {tracker.save_watermark}, new save_watermark count: {adjusted_num_total_tokens}"

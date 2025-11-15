@@ -68,7 +68,6 @@ def scheduler_factory():
             "TPU_OFFLOAD_PARTIAL_BLOCK_SAVE_BEHAVIOR"] = offload_partial_block_save_behavior
         os.environ["TPU_OFFLOAD_PARTIAL_BLOCK_DYNAMIC_PAD_LOWER_LIMIT"] = str(
             offload_partial_block_dynamic_pad_lower_limit)
-        logger.info(f"-------jcgu----------: {offload_staging_buffer_tokens}")
         if offload_staging_buffer_tokens >= 0:
             os.environ["TPU_OFFLOAD_STAGING_BUFFER_TOKENS"] = str(
                 offload_staging_buffer_tokens)
@@ -228,6 +227,14 @@ class TestStagingBufferManager:
 
 class TestTPUConnectorScheduler:
 
+    def _add_prompt_to_scheduler_cpu_backend(self, scheduler, prompt_tokens):
+        """ add  """
+        keys_gen = scheduler.token_processor.process_tokens(prompt_tokens)
+        keys = list(keys_gen)
+        for i in range(len(keys)):
+            start, end, key = keys[i]
+            scheduler.cpu_backend.add(key, "dummy_data")
+
     def test_get_num_new_matched_tokens_no_hit(self, scheduler_factory,
                                                clean_backend_instance):
         """
@@ -269,11 +276,8 @@ class TestTPUConnectorScheduler:
                                  block_size=scheduler.block_size)
 
         # Simulate a cache hit for the first 3 block
-        keys_gen = scheduler.token_processor.process_tokens(prompt_tokens)
-        keys = list(keys_gen)
-        for i in range(num_matched_blocks):
-            start, end, key = keys[i]
-            scheduler.cpu_backend.add(key, "dummy_data")
+        self._add_prompt_to_scheduler_cpu_backend(
+            scheduler, prompt_tokens[:num_matched_tokens])
 
         num_tokens_to_load, _ = scheduler.get_num_new_matched_tokens(
             request, num_computed_tokens)
@@ -311,11 +315,7 @@ class TestTPUConnectorScheduler:
                                  block_size=scheduler.block_size)
 
         # Simulate a cache hit for the entire prompt
-        keys_gen = scheduler.token_processor.process_tokens(prompt_tokens)
-        keys = list(keys_gen)
-        for i in range(num_prompt_blocks):
-            start, end, key = keys[i]
-            scheduler.cpu_backend.add(key, "dummy_data")
+        self._add_prompt_to_scheduler_cpu_backend(scheduler, prompt_tokens)
 
         num_tokens_to_load, _ = scheduler.get_num_new_matched_tokens(
             request, num_computed_tokens)
@@ -356,11 +356,7 @@ class TestTPUConnectorScheduler:
                                  block_size=scheduler.block_size)
 
         # Simulate a cache hit for the entire prompt
-        keys_gen = scheduler.token_processor.process_tokens(prompt_tokens)
-        keys = list(keys_gen)
-        for i in range(num_prompt_blocks):
-            start, end, key = keys[i]
-            scheduler.cpu_backend.add(key, "dummy_data")
+        self._add_prompt_to_scheduler_cpu_backend(scheduler, prompt_tokens)
 
         num_tokens_to_load, _ = scheduler.get_num_new_matched_tokens(
             request, num_computed_tokens)
