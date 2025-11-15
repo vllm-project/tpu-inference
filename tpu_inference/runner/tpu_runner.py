@@ -51,7 +51,6 @@ from tpu_inference.layers.jax.pool.pooling_metadata import (
     SUPPORTED_POOLING_TASKS,
     TPUSupportedPoolingMetadata,
 )
-from tpu_inference.layers.jax.sharding import build_mesh
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import get_model
 from tpu_inference.models.jax.utils.weight_utils import (

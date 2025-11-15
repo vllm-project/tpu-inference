@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.sharding import Mesh
-from tpu_inference.runner.input_batch_jax import InputBatch
+from tpu_inference.runner.input_batch import InputBatch
 from tpu_inference.utils import device_array
 
 logger = logging.getLogger(__name__)
