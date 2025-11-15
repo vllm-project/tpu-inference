@@ -6,6 +6,7 @@ import pytest
 import torch
 import torchax
 import utils as test_utils
+from jax._src import test_util as jtu
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.interop import torch_view
 from torchax.ops.mappings import j2t, t2j
@@ -23,6 +24,9 @@ from tpu_inference.layers.vllm.quantization.mxfp4 import (VllmMxfp4Config,
 P = PartitionSpec
 MODELS = ["openai/gpt-oss-20b"]
 MXFP4_BLOCK_SIZE = 32
+
+if not jtu.is_device_tpu_at_least(version=7):
+    pytest.skip(allow_module_level=True, reason="Expected TPUv7+")
 
 
 def quantize_to_mxfp4(weight: torch.tensor):
@@ -122,8 +126,6 @@ def test_fused_moe_bias(mesh, num_tokens, intermediate_size, hidden_size,
         (num_experts, hidden_size, intermediate_size), dtype=dtype) / 10
     w1_weight, w1_weight_scale = quantize_to_mxfp4(w1)
     w2_weight, w2_weight_scale = quantize_to_mxfp4(w2)
-
-    print(f'kky {w1_weight.shape=} {w1_weight_scale.shape=}')
 
     w1_bias = torch.randn(
         (num_experts, 2 * intermediate_size), dtype=dtype) / 10
