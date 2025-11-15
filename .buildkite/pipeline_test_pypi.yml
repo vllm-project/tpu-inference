@@ -1,0 +1,43 @@
+steps:
+  # -----------------------------------------------------------------
+  # TEST STEPS - Calling wrapper
+  # -----------------------------------------------------------------
+   - label: "Test Pypi E2E MLPerf tests for JAX models"
+     key: test_0
+     soft_fail: true
+     agents:
+       queue: tpu_v6e_queue
+     commands:
+       - .buildkite/scripts/run_with_pypi.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+
+   - label: "TPU Test 9: test_multimodal.py"
+     key: tpu_test_9
+     soft_fail: true
+     agents:
+       queue: tpu_v6e_queue
+     commands:
+       - .buildkite/scripts/run_with_pypi.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_multimodal.py
+
+   - label: "lora unit tests on single chip"
+     key: test_15
+     soft_fail: true
+     agents:
+       queue: tpu_v6e_queue
+     commands:
+       - |
+         .buildkite/scripts/run_with_pypi.sh \
+           bash -c ' python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_bgmv.py && \
+           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_layers.py'
+
+   - label: "lora unit tests on multi chips"
+     key: test_16
+     soft_fail: true
+     env:
+       USE_V6E8_QUEUE: "True"
+       VLLM_LOG_LEVEL: "INFO"
+     agents:
+       queue: tpu_v6e_8_queue
+     commands:
+       - |
+         .buildkite/scripts/run_with_pypi.sh \
+           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_layers.py'
