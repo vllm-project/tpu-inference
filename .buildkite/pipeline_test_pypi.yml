@@ -1,0 +1,39 @@
+steps:
+  # -----------------------------------------------------------------
+  # TEST STEPS - Calling wrapper
+  # -----------------------------------------------------------------
+   - label: "Performance benchmarks for meta-llama/Llama-3.1-8B-Instruct"
+     key: "meta-llama_Llama-3_1-8B-Instruct_Benchmark"
+     agents:
+      queue: tpu_v6e_queue
+     env:
+      TEST_MODEL: meta-llama/Llama-3.1-8B-Instruct
+      TENSOR_PARALLEL_SIZE: 1
+      MINIMUM_THROUGHPUT_THRESHOLD: 10.77
+      INPUT_LEN: 1800
+      OUTPUT_LEN: 128
+      PREFIX_LEN: 0
+      MAX_MODEL_LEN: 2048
+      MAX_NUM_SEQS: 256
+      MAX_NUM_BATCHED_TOKENS: 1024
+     commands:
+      - |
+        .buildkite/scripts/run_with_pypi.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
+
+   - label: "Performance benchmarks for Qwen/Qwen3-4B"
+     key: "Qwen_Qwen3-4B_Benchmark"
+     agents:
+      queue: tpu_v6e_queue
+     env:
+      TEST_MODEL: Qwen/Qwen3-4B
+      TENSOR_PARALLEL_SIZE: 1
+      MINIMUM_THROUGHPUT_THRESHOLD: 11.00
+      INPUT_LEN: 1800
+      OUTPUT_LEN: 128
+      PREFIX_LEN: 0
+      MAX_MODEL_LEN: 2048
+      MAX_NUM_SEQS: 94
+      MAX_NUM_BATCHED_TOKENS: 4096
+     commands:
+      - |
+       .buildkite/scripts/run_with_pypi.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
