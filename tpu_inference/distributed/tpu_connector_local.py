@@ -98,7 +98,10 @@ from jax.sharding import Mesh
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import \
+    KVConnectorStats
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -110,8 +113,9 @@ from tpu_inference.runner.kv_cache_manager import KVCacheManager
 from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
 
 from .cache_util import (CPU_OFFLOADING_SWAP_OP_TYPE, KVCacheSwapFn,
-                         TokenProcessor, get_kv_cache_swap_fn,
-                         jitted_insert_kv_cache_slices)
+                         TokenProcessor, cdiv,
+                         get_default_kv_connector_staging_buffer_tokens,
+                         get_kv_cache_swap_fn, jitted_insert_kv_cache_slices)
 from .local_cpu_backend import LocalCPUBackend
 
 EngineId = str
@@ -255,6 +259,65 @@ class RequestTracker:
         return output_str
 
 
+@dataclass
+class KVOffloadConnectorStats(KVConnectorStats):
+    """Container for transfer performance metrics"""
+
+    def __post_init__(self):
+        if not self.data:
+            # Empty container init, no data is passed in.
+            self.reset()
+
+    def reset(self):
+        # Must be serializable
+        self.data: dict[str, dict[str, int]] = {
+            "finished_save_blocks": dict(),
+            "finished_load_blocks": dict(),
+        }
+
+    def record_save(self, req: ReqId, num_finished_blocks: int):
+        if req not in self.data["finished_save_blocks"]:
+            self.data["finished_save_blocks"][req] = 0
+        self.data["finished_save_blocks"][req] += num_finished_blocks
+
+    def record_load(self, req: ReqId, num_finished_blocks: int):
+        if req not in self.data["finished_load_blocks"]:
+            self.data["finished_load_blocks"][req] = 0
+        self.data["finished_load_blocks"][req] += num_finished_blocks
+
+    def clone_and_reset(self) -> "KVOffloadConnectorStats":
+        old = copy.copy(self)
+        self.reset()
+        return old
+
+    def is_empty(self) -> bool:
+        return self.num_finished_blocks == 0
+
+    def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
+        return self
+
+    def reduce(self) -> dict[str, int | float]:
+        # Compute compact representative stats suitable for CLI logging
+        if self.is_empty():
+            return {
+                "Num finished save blocks ": 0,
+                "Num finished load blocks ": 0,
+            }
+
+        finished_save_blocks = sum(self.data["finished_save_blocks"].values())
+        finished_load_blocks = sum(self.data["finished_load_blocks"].values())
+
+        return {
+            "Num finished save blocks ": finished_save_blocks,
+            "Num finished load blocks ": finished_load_blocks,
+        }
+
+    @property
+    def num_finished_blocks(self) -> int:
+        return len(self.data["finished_save_blocks"]) + len(
+            self.data["finished_load_blocks"])
+
+
 # The metadata used for communicating between scheduler and worker connectors.
 @dataclass
 class TPUConnectorMetadata(KVConnectorMetadata):
@@ -297,6 +360,14 @@ class TPUConnector(KVConnectorBase_V1):
             "TPUConnector currently only supports %s KV cache layout.",
             REQUIRED_KV_CACHE_LAYOUT)
         return REQUIRED_KV_CACHE_LAYOUT
+
+    @classmethod
+    def build_kv_connector_stats(
+        cls,
+        data: dict[str, dict[str, int]] | None = None
+    ) -> KVConnectorStats | None:
+        return (KVOffloadConnectorStats(
+            data=data) if data is not None else KVOffloadConnectorStats())
 
     ############################################################
     # Scheduler Side Methods
@@ -371,6 +442,153 @@ class TPUConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
 
+    def update_connector_output(self, connector_output: KVConnectorOutput):
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.update_connector_output(connector_output)
+
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        if self.connector_worker is None:
+            return None
+        return self.connector_worker.get_kv_connector_stats()
+
+
+class _StagingBufferManager():
+    """ Bookkeeping the staging buffer inside the connector scheduler.
+    NOTE(jcgu): the operations (e.g., allocate, free, get) to staging buffer / blocks are NOT thread-safe.
+    But it's okay since there is only one connector scheduler instance.
+    """
+
+    def __init__(self, num_blocks: int):
+        self.num_blocks = num_blocks
+        # {req_id: list(num_occupied_staging_blocks)}
+        self._blocks_for_save: dict[ReqId, int] = {}
+        self._blocks_for_load: dict[ReqId, int] = {}
+
+        self._num_free_blocks: int = self.num_blocks
+        # keep track of the total occupied staging blocks for save and load respectively
+        self._num_blocks_for_save: int = 0
+        self._num_blocks_for_load: int = 0
+
+    def get_num_free_staging_blocks(self) -> int:
+        return self._num_free_blocks
+
+    def get_num_used_staging_blocks(self) -> int:
+        return self._num_blocks_for_load + self._num_blocks_for_save
+
+    def allocate(self, req_id: ReqId, num_blocks: int,
+                 usage: Literal["load", "save"]) -> int:
+        if num_blocks < 0:
+            logger.warning(
+                f"  get {num_blocks} staging blocks to allocate for Req:{req_id}."
+            )
+            return num_blocks
+        if num_blocks > self._num_free_blocks:
+            # do not have enough capacity, return 0
+            return 0
+
+        if usage == "load":
+            if req_id in self._blocks_for_load:
+                # NOTE(jcgu): before completing the previous load, new load
+                # should not be triggered for the same request (is this correct?)
+                raise ValueError(
+                    f" Req({req_id}) already has {self._blocks_for_load[req_id]}, and should not have new loads."
+                )
+            else:
+                self._blocks_for_load[req_id] = num_blocks
+            self._num_blocks_for_load += num_blocks
+        elif usage == "save":
+            if req_id in self._blocks_for_save:
+                self._blocks_for_save[req_id] += num_blocks
+            else:
+                self._blocks_for_save[req_id] = num_blocks
+            self._num_blocks_for_save += num_blocks
+        else:
+            raise ValueError(
+                f" Staging buffer manager should not get usage: {usage}")
+        self._num_free_blocks -= num_blocks
+
+        logger.info(
+            f"  allocate {num_blocks} staging blocks to Req:{req_id} for {usage}."
+        )
+        return num_blocks
+
+    def free(self,
+             req_id: ReqId,
+             usage: Literal["load", "save"],
+             num_finished_blocks: Optional[int] = None) -> int:
+        """
+        when num_finished_blocks is not given, we will assume the request is finished and should be removed.
+        """
+        num_freed_blocks = 0
+        # NOTE(jcgu): assuming FIFO execution order for a single request's save and
+        # load operations respectively
+        if usage == "load":
+            if req_id not in self._blocks_for_load:
+                logger.warning(
+                    f" there is no record of staging buffer (usage: {usage}) for Req:{req_id}"
+                )
+                return 0
+            if num_finished_blocks is None:
+                num_freed_blocks = self._blocks_for_load[req_id]
+            else:
+                num_freed_blocks = num_finished_blocks
+            if self._blocks_for_load[req_id] < num_freed_blocks:
+                logger.warning(
+                    f" Req({req_id}) has {num_finished_blocks} load staging buffer to free, but only has {self._blocks_for_load[req_id]} on record."
+                )
+
+            self._blocks_for_load[req_id] -= num_freed_blocks
+            if self._blocks_for_load[req_id] <= 0:
+                del self._blocks_for_load[req_id]
+            self._num_blocks_for_load -= num_freed_blocks
+        elif usage == "save":
+            if req_id not in self._blocks_for_save:
+                logger.warning(
+                    f" there is no record of staging buffer (usage: {usage}) for Req:{req_id}"
+                )
+                return 0
+            if num_finished_blocks is None:
+                num_freed_blocks = self._blocks_for_save[req_id]
+            else:
+                num_freed_blocks = num_finished_blocks
+            if self._blocks_for_save[req_id] < num_freed_blocks:
+                logger.warning(
+                    f" Req({req_id}) has {num_finished_blocks} save staging buffer to free, but only has {self._blocks_for_save[req_id]} on record."
+                )
+
+            self._blocks_for_save[req_id] -= num_freed_blocks
+            if self._blocks_for_save[req_id] <= 0:
+                del self._blocks_for_save[req_id]
+            self._num_blocks_for_save -= num_freed_blocks
+        else:
+            raise ValueError(
+                f" Staging buffer manager should not get usage: {usage}")
+        self._num_free_blocks += num_freed_blocks
+
+        logger.info(
+            f"  free {num_freed_blocks} staging blocks (usage: {usage}) from Req:{req_id}"
+        )
+        return num_freed_blocks
+
+    def get_usage(self, with_details: bool = False):
+        usage_str = (f"Staging Buffer: total={self.num_blocks}, "
+                     f"free={self._num_free_blocks}, "
+                     f"used_for_load={self._num_blocks_for_load}, "
+                     f"used_for_save={self._num_blocks_for_save};")
+        if with_details:
+            blocks_for_save_str = " save_details:{"
+            for req, bn in self._blocks_for_save.items():
+                blocks_for_save_str += f"{req}:{bn},"
+            blocks_for_save_str += "} "
+
+            blocks_for_load_str = " load_details:{"
+            for req, bn in self._blocks_for_load.items():
+                blocks_for_load_str += f"{req}:{bn},"
+            blocks_for_load_str += "}."
+            usage_str += blocks_for_save_str + blocks_for_load_str
+
+        return usage_str
+
 
 class TPUConnectorScheduler():
 
@@ -388,6 +606,7 @@ class TPUConnectorScheduler():
         # as the scheduler output for these requests is minimal.
         self._unfinished_requests: dict[ReqId, "Request"] = {}
         self.load_specs: dict[ReqId, LoadSpec] = {}
+
         # {reqid: total_num_matched_tokens_in_cpu_backend}
         self._external_cache_hits: dict[ReqId, int] = {}
         self.cpu_backend = LocalCPUBackend()
@@ -415,6 +634,18 @@ class TPUConnectorScheduler():
             elif self.partial_block_dynamic_pad_lower_limit >= self.block_size:
                 self.partial_block_save_behavior == "pad"
 
+        # config staging buffer
+        # NOTE(jcgu): Need to find a way to grab page_size_bytes in scheduler
+        # otherwise, we can only use # of tokens as input, instead of buffer size in GB
+        _default_staging_buffer_tokens = get_default_kv_connector_staging_buffer_tokens(
+        )
+        num_staging_buffer_tokens = int(
+            os.getenv("TPU_OFFLOAD_STAGING_BUFFER_TOKENS",
+                      str(_default_staging_buffer_tokens)))
+        self.num_staging_blocks = num_staging_buffer_tokens // self.block_size
+        self.staging_buffer_manager = _StagingBufferManager(
+            num_blocks=self.num_staging_blocks)
+
         logger.info(
             f"TPUConnectorScheduler initialized with: "
             f"block_size={self.block_size}, "
@@ -422,8 +653,8 @@ class TPUConnectorScheduler():
             f"model_name={model_name}, "
             f"decode_save={self.decode_save}, "
             f"partial_block_save_behavior={self.partial_block_save_behavior}, "
-            f"partial_block_dynamic_pad_lower_limit={self.partial_block_dynamic_pad_lower_limit}"
-        )
+            f"partial_block_dynamic_pad_lower_limit={self.partial_block_dynamic_pad_lower_limit}, "
+            f"num_staging_blocks={self.num_staging_blocks}.")
 
     def get_num_new_matched_tokens(
         self,
@@ -441,7 +672,7 @@ class TPUConnectorScheduler():
 
         # Generate keys for the incoming request's tokens
         request_keys = self.token_processor.process_tokens(prompt_token_ids)
-
+        num_matched_blocks = 0
         num_matched_tokens = 0
         # The generator needs to be consumed to count.
         keys = list(request_keys)
@@ -450,7 +681,9 @@ class TPUConnectorScheduler():
                 f"  Processing chunk {start_token_idx}-{end_token_idx} with hash {key.chunk_hash}"
             )
             if self.cpu_backend.contains(key, pin_on_hit=True):
+                # NOTE: each key maps to a cpu_chunk which equals to a block
                 num_matched_tokens = end_token_idx
+                num_matched_blocks += 1
                 logger.info(
                     f"  -> HIT. Total matched tokens so far: {num_matched_tokens}"
                 )
@@ -462,6 +695,42 @@ class TPUConnectorScheduler():
         logger.info(
             f"Request {request.request_id}: Found {num_matched_tokens} (out of {len(prompt_token_ids)} prompt tokens) matched tokens in CPU backend."
         )
+
+        assert num_matched_blocks == cdiv(num_matched_tokens, self.block_size)
+
+        if num_matched_tokens > num_computed_tokens:
+            # planning staging blocks for load
+            # NOTE(jcgu): do not worry about the inconsistency of the staging buffer status;
+            # there is only one connector scheduler who is operating on it.
+            num_avail_staging_blocks = self.staging_buffer_manager.get_num_free_staging_blocks(
+            )
+            num_skip_blocks = num_computed_tokens // self.block_size
+            num_blocks_to_load = num_matched_blocks - num_skip_blocks
+            if num_blocks_to_load > num_avail_staging_blocks:
+                # reduce blocks_to_load (and matched tokens) when there are insufficient staging blocks.
+                logger.info(
+                    f" Req({request.request_id}) found {num_matched_blocks} blocks ({num_matched_tokens} tokens), but only {num_avail_staging_blocks} staging blocks available."
+                )
+                num_blocks_to_load = num_avail_staging_blocks
+                num_matched_tokens = num_blocks_to_load * self.block_size + num_computed_tokens
+
+            # still have something to load
+            if num_blocks_to_load > 0:
+                # NOTE(jcgu): fill real dst_blocks later when blocks get allocated.
+                dummy_dst_blocks = [-1] * num_blocks_to_load
+                self.load_specs[request.request_id] = LoadSpec(
+                    num_matched_tokens=num_matched_tokens,
+                    dst_blocks=dummy_dst_blocks,
+                    num_skip_leading_tokens=num_computed_tokens,
+                )
+                num_allocated_blocks = self.staging_buffer_manager.allocate(
+                    request.request_id,
+                    num_blocks=num_blocks_to_load,
+                    usage="load")
+                assert num_allocated_blocks == num_blocks_to_load >= 0, f" failed to allocate {num_allocated_blocks} (load) staging blocks for request {request.request_id}, expected {num_blocks_to_load}."
+
+                self._external_cache_hits[
+                    request.request_id] = num_matched_tokens
 
         is_full_prefix_hit = (num_matched_tokens > 0
                               and num_matched_tokens == len(prompt_token_ids))
@@ -499,15 +768,6 @@ class TPUConnectorScheduler():
             f"Request {request.request_id}: After accounting for {num_computed_tokens} computed tokens, reporting {num_to_load} tokens to load."
         )
 
-        self._external_cache_hits[request.request_id] = num_matched_tokens
-
-        if num_matched_tokens > num_computed_tokens:
-            # NOTE(jcgu): fill real dst_blocks later when blocks get allocated.
-            self.load_specs[request.request_id] = LoadSpec(
-                num_matched_tokens=num_matched_tokens,
-                dst_blocks=[],
-                num_skip_leading_tokens=num_computed_tokens,
-            )
         return num_to_load, False
 
     def _adjust_last_partial_block(self,
@@ -545,18 +805,20 @@ class TPUConnectorScheduler():
         if num_external_tokens > 0:
             if request.request_id in self.load_specs:
                 load_spec = self.load_specs[request.request_id]
-                # Update loading block info.
+                # Get the real loading block ids .
                 all_blocks = blocks.get_block_ids()[0]
+                assert load_spec.num_skip_leading_tokens % self.block_size == 0
                 skip_leading_blocks = load_spec.num_skip_leading_tokens // self.block_size
-                total_matched_blocks = load_spec.num_matched_tokens // self.block_size
-                # adjust last partial block
-                last_partial_block_num_tokens = load_spec.num_matched_tokens - total_matched_blocks * self.block_size
-                need_last_block = self._adjust_last_partial_block(
-                    last_partial_block_num_tokens)
-                if need_last_block:
-                    total_matched_blocks += 1
-                assert total_matched_blocks <= len(
-                    all_blocks), f"{total_matched_blocks} > {len(all_blocks)}"
+
+                # NOTE(jcgu): I think we do not need the adjustment here;
+                # for load, we should load all the (matched_tokens - skipping_tokens),
+                # since it's been reported to vllm scheduler
+
+                total_matched_blocks = len(
+                    load_spec.dst_blocks) + skip_leading_blocks
+                assert total_matched_blocks == cdiv(
+                    load_spec.num_matched_tokens, self.block_size
+                ), f"{total_matched_blocks} != {load_spec.num_matched_tokens}"
                 dst_blocks = all_blocks[
                     skip_leading_blocks:total_matched_blocks]
                 load_spec.dst_blocks = dst_blocks
@@ -589,31 +851,33 @@ class TPUConnectorScheduler():
         assert adjusted_num_total_blocks <= len(tracker.block_ids)
 
         has_new_tokens = adjusted_num_total_tokens > tracker.save_watermark
-        # Determine if a save is needed for this step
         should_save = False
-        if is_finished:
-            # If the request finished during the decode phase, respect the decode_save flag for saving data.
-            # Otherwise (e.g., finished after prefill), always save data.
-            if tracker.is_decode_phase and not self.decode_save:
-                should_save = False
-                logger.info(
-                    f"Request {tracker.req_id}: Will skip saving final tokens for decoded request because decode_save is False."
-                )
-            else:
-                should_save = True
-        elif has_new_tokens:
+        # Determine if a save is needed for this step
+        # when there are new token KVs (adjusted by saving behavior):
+        # 1. Prefill: always save
+        # 2. Decode (with save_decode=True)
+        #  2.1 regular decode (not finished): accumulate until getting a full block
+        #  2.2 request finished: save
+        if has_new_tokens:
             if not tracker.is_decode_phase:
-                should_save = True  # Prefill
+                # Prefill: always save the new-computed blocks
+                should_save = True
             elif self.decode_save:
-                # Decode: check for block boundary
-                next_block_boundary = (tracker.save_watermark //
-                                       self.block_size + 1) * self.block_size
-                logger.info(
-                    f"in decode phase, next_block_boundary: {next_block_boundary}, "
-                )
-                # NOTE(jcgu): for decode, we do not drop or pad, just accumulate tokens until the next block boundary
-                if num_total_tokens >= next_block_boundary:
+                if is_finished:
+                    # After decode, if there are new final new tokens to save
                     should_save = True
+                else:
+                    # During decode, we do not drop or pad, just accumulate tokens until the next block boundary
+                    next_block_boundary = (
+                        tracker.save_watermark // self.block_size +
+                        1) * self.block_size
+                    logger.info(
+                        f"in decode phase, next_block_boundary: {next_block_boundary}, "
+                    )
+                    if num_total_tokens == next_block_boundary:
+                        # always save the full block for decode (not affected by saving_behavior)
+                        assert num_total_tokens == adjusted_num_total_tokens, f" decode_save: {num_total_tokens} != (adjusted) {adjusted_num_total_tokens}"
+                        should_save = True
 
         logger.info(f"    - Preparing meta for req (save): {tracker.req_id}, "
                     f"is_finished={is_finished}, "
@@ -656,26 +920,47 @@ class TPUConnectorScheduler():
             # will no such an issue.
             num_skip_leading_blocks = tracker.save_watermark // self.block_size
             num_skip_leading_tokens = num_skip_leading_blocks * self.block_size
-            src_block_ids = tracker.block_ids[
-                num_skip_leading_blocks:adjusted_num_total_blocks]
-            # This is a real save operation.
-            save_spec = SaveSpec(
-                num_skip_leading_tokens=num_skip_leading_tokens,
-                num_total_tokens=adjusted_num_total_tokens,
-                is_final_save=is_finished,
-                skip_save=False,
-                src_blocks=src_block_ids,
+
+            # planning staging blocks for save
+            num_blocks_to_save = adjusted_num_total_blocks - num_skip_leading_blocks
+            num_avail_staging_blocks = self.staging_buffer_manager.get_num_free_staging_blocks(
             )
-            if has_new_tokens:
-                last_known_watermark = tracker.save_watermark
-                tracker.save_watermark = adjusted_num_total_tokens
+            if num_blocks_to_save > num_avail_staging_blocks:
+                # reduce blocks_to_save due to limited free staging blocks
                 logger.info(
-                    f"      -> Old watermark {last_known_watermark}, new save_watermark count: {tracker.save_watermark}"
+                    f" Req({tracker.req_id}) have {num_blocks_to_save} ({adjusted_num_total_blocks} - {num_skip_leading_blocks}) blocks to save, but only {num_avail_staging_blocks} staging blocks available."
                 )
-        elif is_finished:
+                num_blocks_to_save = num_avail_staging_blocks
+                adjusted_num_total_blocks = num_skip_leading_blocks + num_blocks_to_save
+                adjusted_num_total_tokens = adjusted_num_total_blocks * self.block_size
+
+            if num_blocks_to_save > 0:
+                src_block_ids = tracker.block_ids[
+                    num_skip_leading_blocks:adjusted_num_total_blocks]
+                # This is a real save operation.
+                save_spec = SaveSpec(
+                    num_skip_leading_tokens=num_skip_leading_tokens,
+                    num_total_tokens=adjusted_num_total_tokens,
+                    is_final_save=is_finished,
+                    skip_save=False,
+                    src_blocks=src_block_ids,
+                )
+                num_allocated_blocks = self.staging_buffer_manager.allocate(
+                    tracker.req_id,
+                    num_blocks=num_blocks_to_save,
+                    usage="save")
+                assert num_allocated_blocks == num_blocks_to_save >= 0, f" failed to allocate {num_allocated_blocks} (save) staging blocks for request {tracker.req_id}, expected {num_blocks_to_save}."
+                if adjusted_num_total_tokens > tracker.save_watermark:
+                    logger.info(
+                        f"      -> Old watermark {tracker.save_watermark}, new save_watermark count: {adjusted_num_total_tokens}"
+                    )
+                    tracker.save_watermark = adjusted_num_total_tokens
+
+        if is_finished and save_spec is None:
+            # For finished requests, there must be a no-op save to update the state in the worker side.
             # This is a "completion-only" signal because should_save is False.
             # NOTE(jcgu): num_total_tokens will be used to unpin tokens;
-            #  apply the number of saved tokens
+            #  apply the number of saved tokens;
             save_spec = SaveSpec(
                 num_skip_leading_tokens=tracker.save_watermark,
                 num_total_tokens=tracker.save_watermark,
@@ -864,6 +1149,54 @@ class TPUConnectorScheduler():
                 f"Prepared {len(metadata.requests_meta)} requests for worker.")
         return metadata
 
+    def update_connector_output(self, connector_output: KVConnectorOutput):
+        """
+        Update KVConnector state from worker-side connectors output.
+
+        Args:
+            connector_output (KVConnectorOutput): the worker-side
+                connectors output.
+        """
+        logger.info(
+            f"TPUConnectorScheduler: getting workers' output: finished_sending: {connector_output.finished_sending}, finished_recving: {connector_output.finished_recving}"
+        )
+
+        # per iteration, update the finished staging blocks
+        if connector_output.kv_connector_stats and connector_output.kv_connector_stats.data is not None:
+            assert isinstance(connector_output.kv_connector_stats,
+                              KVOffloadConnectorStats)
+            assert "finished_save_blocks" in connector_output.kv_connector_stats.data
+            assert "finished_load_blocks" in connector_output.kv_connector_stats.data
+            for req_id, nfb in connector_output.kv_connector_stats.data[
+                    "finished_save_blocks"].items():
+                logger.info(f"  finished_save_blocks for {req_id}: {nfb}")
+                self.staging_buffer_manager.free(req_id,
+                                                 usage="save",
+                                                 num_finished_blocks=nfb)
+            for req_id, nfb in connector_output.kv_connector_stats.data[
+                    "finished_load_blocks"].items():
+                logger.info(f"  finished_load_blocks for {req_id}: {nfb}")
+                self.staging_buffer_manager.free(req_id,
+                                                 usage="load",
+                                                 num_finished_blocks=nfb)
+
+        # clean up staging blocks for the finished requests
+        # save
+        for req_id in connector_output.finished_sending or []:
+            num_freed_blocks = self.staging_buffer_manager.free(req_id,
+                                                                usage="save")
+            logger.info(
+                f"  freed {num_freed_blocks} staging blocks (save) from {req_id}"
+            )
+
+        # load
+        for req_id in connector_output.finished_recving or []:
+            num_freed_blocks = self.staging_buffer_manager.free(req_id,
+                                                                usage="load")
+            logger.info(
+                f"  freed {num_freed_blocks} staging blocks (load) from {req_id}"
+            )
+
     def request_finished(
         self,
         request: "Request",
@@ -929,6 +1262,9 @@ class TPUConnectorWorker:
         # Tracks if wait_for_save has been called for the current step's metadata.
         self._processed_save_for_step = False
 
+        # record finished save / load blocks (with req_ids) for each iteration
+        self.offload_stats = KVOffloadConnectorStats()
+
     def __del__(self):
         logger.info("TPUConnectorWorker: Entering __del__")
         self.save_executor.shutdown(wait=True)
@@ -936,6 +1272,7 @@ class TPUConnectorWorker:
     def register_runner(self, runner: TPUModelRunner):
         logger.info("TPUConnectorWorker: Entering register_runner")
         self.runner = runner
+        self.devices = runner.devices
         self.mesh = runner.mesh
         # Get the spec of the kv_caches
         kv_caches = runner.kv_caches
@@ -1434,6 +1771,12 @@ class TPUConnectorWorker:
                 finished_req_id = future.result()
                 logger.info(
                     f"Save operation completed for request {finished_req_id}")
+
+                if len(meta.save_spec.src_blocks) > 0:
+                    self.offload_stats.record_save(
+                        req=finished_req_id,
+                        num_finished_blocks=len(meta.save_spec.src_blocks))
+
                 if meta.save_spec and meta.save_spec.is_final_save:
                     logger.info(
                         f"Request {finished_req_id}: Final save completed. Marking as finished."
@@ -1593,11 +1936,25 @@ class TPUConnectorWorker:
                 f"{num_blocks_to_load} new blocks.")
 
             load_times.append(time.time() - request_load_start_time)
+            self.finished_load_reqs.add(meta.req_id)
+            if num_blocks_to_load > 0:
+                self.offload_stats.record_load(
+                    req=meta.req_id, num_finished_blocks=num_blocks_to_load)
+
         if load_times:
             aggregate_load_time = sum(load_times)
             logger.info(
                 f"TPUConnectorWorker: Aggregate KV cache load time for {len(load_times)} requests: {aggregate_load_time:.4f} seconds"
             )
+
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        """
+        Get the KV transfer stats for the connector.
+        """
+        # Clear stats for next iteration
+        if not self.offload_stats.is_empty():
+            return self.offload_stats.clone_and_reset()
+        return None
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """
