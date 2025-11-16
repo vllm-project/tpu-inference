@@ -191,6 +191,28 @@ def _substitute_placeholder_token(
     return input_ids.at[token_in_tpu_cur_input_indices].set(update_values)
 
 
+
+def _jax_logprobs_to_lists(logprobs_tensors, cu_num_generated_tokens=None):
+    """Convert JAX LogprobsTensors to LogprobsLists by converting JAX arrays to numpy."""
+    return LogprobsLists(
+        logprob_token_ids=np.asarray(logprobs_tensors.logprob_token_ids.tolist()),
+        logprobs=np.asarray(logprobs_tensors.logprobs.tolist()),
+        sampled_token_ranks=np.asarray(logprobs_tensors.selected_token_ranks.tolist()),
+        cu_num_generated_tokens=cu_num_generated_tokens,
+    )
+
+
+
+def _jax_logprobs_to_lists(logprobs_tensors, cu_num_generated_tokens=None):
+    """Convert JAX LogprobsTensors to LogprobsLists by converting JAX arrays to numpy."""
+    return LogprobsLists(
+        logprob_token_ids=np.asarray(logprobs_tensors.logprob_token_ids.tolist()),
+        logprobs=np.asarray(logprobs_tensors.logprobs.tolist()),
+        sampled_token_ranks=np.asarray(logprobs_tensors.selected_token_ranks.tolist()),
+        cu_num_generated_tokens=cu_num_generated_tokens,
+    )
+
+
 def _reorder_logits_indices(logprobs_lists: LogprobsLists,
                             logits_indices_selector: List[int]):
     return LogprobsLists(
@@ -860,6 +882,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             if logprobs is not None:
                 # Map logprobs back to the pre-dp shuffling order
+                logprobs_lists = _jax_logprobs_to_lists(logprobs)
                 if logits_indices_selector is not None:
                     logprobs_lists = _reorder_logits_indices(
                         logprobs_lists, logits_indices_selector)
@@ -934,6 +957,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         if logprobs is not None:
             # Map logprobs back to the pre-dp shuffling order
+            logprobs_lists = _jax_logprobs_to_lists(logprobs)
             if logits_indices_selector is not None:
                 logprobs_lists = _reorder_logits_indices(
                     logprobs_lists, logits_indices_selector)
