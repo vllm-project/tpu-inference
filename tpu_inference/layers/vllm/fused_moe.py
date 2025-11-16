@@ -8,7 +8,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from tpu_inference.layers.vllm.linear_common import \
     slice_sharded_tensor_for_concatenation
-from tpu_inference.layers.jax.sharding import ShardingAxisName
+from tpu_inference.layers.common.sharding import ShardingAxisName
 P = PartitionSpec
 
 
