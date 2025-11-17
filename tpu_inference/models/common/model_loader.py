@@ -242,10 +242,11 @@ def get_flax_model(
         model = nnx.merge(graphdef, state)
         return model.get_multimodal_embeddings(image_grid_thw, **kwargs)
 
+    embed_sharding = NamedSharding(mesh, PartitionSpec(None))
     # This function will calculates the embeddings of input texts and then merge with the image embeddings
     @functools.partial(
         jax.jit,
-        out_shardings=(logits_sharding),
+        out_shardings=(embed_sharding),
     )
     def run_get_input_embeddings(graphdef, state, *args, **kwargs):
         model = nnx.merge(graphdef, state)
