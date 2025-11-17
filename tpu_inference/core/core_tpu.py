@@ -29,6 +29,7 @@ from vllm.v1.request import Request, RequestStatus
 
 from tpu_inference import utils as common_utils
 from tpu_inference.core import disagg_executor, disagg_utils
+from tpu_inference.runner.tpu_runner import AsyncTPUModelRunnerOutput
 # ======================================================================================
 # Imports for _DisaggOrchestrator (decoupled from vLLM)
 # ======================================================================================
@@ -186,6 +187,8 @@ class _DisaggOrchestrator:
                     if model_output is None:
                         model_output = prefill_engine.model_executor.sample_tokens(
                             grammar_output)
+                    if isinstance(model_output, AsyncTPUModelRunnerOutput):
+                        model_output = model_output.get_output()
 
             if scheduler_output.total_num_scheduled_tokens > 0:
                 logger.debug(f"Prefill result: {model_output}")
@@ -218,15 +221,16 @@ class _DisaggOrchestrator:
                             f"request-{req_id}: tokens={request.all_token_ids} after prefill"
                         )
                         # Remove request from the prefill engine.
+                        if req_id in prefill_engine.scheduler.requests:
+                            request = prefill_engine.scheduler.requests[req_id]
+                            prefill_engine.scheduler.running.remove(request)
+                            prefill_engine.scheduler.encoder_cache_manager.free(
+                                request)
 
-                        request = prefill_engine.scheduler.requests[req_id]
-                        prefill_engine.scheduler.running.remove(request)
-                        prefill_engine.scheduler.encoder_cache_manager.free(
-                            request)
+                            prefill_engine.scheduler.kv_cache_manager.free(
+                                request)
 
-                        prefill_engine.scheduler.kv_cache_manager.free(request)
-
-                        prefill_engine.scheduler.requests.pop(req_id)
+                            prefill_engine.scheduler.requests.pop(req_id)
 
                 for output in (engine_core_outputs.items()
                                if engine_core_outputs else ()):
@@ -335,8 +339,10 @@ class _DisaggOrchestrator:
                 new_block_ids = kv_cache_manager.get_block_ids(req_id)
                 logger.debug(
                     f"inserting {req_id} new_block_ids {new_block_ids}")
-                assert (len(new_block_ids[0]) == math.ceil(
-                    prompt_tokens / self._config.cache_config.block_size))
+                if len(new_block_ids[0]) != math.ceil(
+                        prompt_tokens / self._config.cache_config.block_size):
+                    logger.warning("Running out of blocks in decode engine! ")
+                    break
 
                 decode_engine.model_executor.driver_worker.model_runner.insert_request_with_kv_cache(
                     vllm_request, kv_cache, new_block_ids)
@@ -366,6 +372,8 @@ class _DisaggOrchestrator:
                     if model_output is None:
                         model_output = decode_engine.model_executor.sample_tokens(
                             grammar_output)
+                    if isinstance(model_output, AsyncTPUModelRunnerOutput):
+                        model_output = model_output.get_output()
 
             if scheduler_output.total_num_scheduled_tokens > 0:
                 logger.debug(f"Decode result: {model_output}")
