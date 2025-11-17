@@ -2,7 +2,7 @@ x-run-condition: &run-on-nightly-or-tag
   if: build.env("NIGHTLY") == "1" || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/
 
 notify:
-  - email: "buganizer-system+1445761+p1@google.com"
+  - slack: "vllm#tpu-ci-notifications"
     if: build.state == "failed"
 
 steps:
