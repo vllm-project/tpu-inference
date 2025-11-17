@@ -85,6 +85,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
+from tpu_inference import envs
 from tpu_inference.distributed.utils import (get_host_ip, get_kv_ips,
                                              get_kv_ports,
                                              get_kv_transfer_port, get_node_id,
@@ -440,7 +441,6 @@ class TPUConnectorWorker:
 
         self.runner: TPUModelRunner = None
         self.mesh: Mesh = None
-        from tpu_inference import envs
         self.multi_host = envs.TPU_MULTIHOST_BACKEND == "ray"
         # NOTE(xiang): This can not be the worker rank set in RayDistributedExecutor.
         # The worker rank is assigned with vLLM's sorting logic, which does not work

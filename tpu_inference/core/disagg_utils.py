@@ -4,9 +4,6 @@ from typing import Tuple
 
 from tpu_inference import envs
 
-PREFILL_SLICES = 'PREFILL_SLICES'
-DECODE_SLICES = 'DECODE_SLICES'
-
 
 def is_disagg_enabled() -> bool:
     # We triggrer our code path as long as prefill slices are set. This
