@@ -332,13 +332,15 @@ class CompilationManager:
             index_paddings = self.runner.num_reqs_paddings
         dp_sharding = NamedSharding(self.runner.mesh,
                                     PartitionSpec(ShardingAxisName.ATTN_DATA))
+        hidden_states_sharding = NamedSharding(
+            self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None))
         dp_size = self.runner.vllm_config.sharding_config.total_dp_size
         self._precompile_select_from_array_helper(
             name="select all logits",
             source_paddings=self.runner.num_tokens_paddings,
             indices_paddings=index_paddings,
             hidden_dim=hsize,
-            input_sharding=dp_sharding,
+            input_sharding=hidden_states_sharding,
             indices_sharding=dp_sharding if dp_size > 1 else None,
         )
 
