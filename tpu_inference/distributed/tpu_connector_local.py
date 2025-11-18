@@ -88,6 +88,7 @@ Worker Side Execution:
 import copy
 import os
 import time
+from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Optional, get_args
@@ -100,6 +101,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import \
     KVConnectorStats
+from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -116,6 +118,7 @@ from .cache_util import (CPU_OFFLOADING_SWAP_OP_TYPE, KVCacheSwapFn,
                          TokenProcessor, cdiv,
                          get_default_kv_connector_staging_buffer_tokens,
                          get_kv_cache_swap_fn, jitted_insert_kv_cache_slices)
+from .cpu_chunk_manager import LRUOffloadingManager
 from .local_cpu_backend import LocalCPUBackend
 
 EngineId = str
@@ -130,6 +133,8 @@ REQUIRED_KV_CACHE_LAYOUT = "NHD"
 DEFAULT_HOST_HBM_SWAP_OP_TYPE = "jax"
 
 BLOCK_SIZE_BUCKETS = [1, 2, 4, 8, 16]
+
+CPU_CHUNK_ID = int
 
 # we keep our operations at vllm's block granularity,
 # and provide the following three preferences when handling
@@ -147,6 +152,7 @@ class SaveSpec:
     # total processed tokens for matching / saving
     num_total_tokens: int
     src_blocks: list[int]
+    dst_chunks: list[int]
     # final save for the (newly) finished request
     is_final_save: bool = False
     # A direct signal to the worker to skip the data transfer but still
@@ -158,6 +164,7 @@ class SaveSpec:
 class LoadSpec:
     """Internal scheduler state for a potential load operation."""
     num_matched_tokens: int
+    src_chunks: list[int]
     dst_blocks: list[int]
     can_load: bool = False
     num_skip_leading_tokens: int = 0
@@ -188,6 +195,7 @@ class TPUReqMeta:
                 f", num_matched_tokens={self.load_spec.num_matched_tokens}, "
                 f"can_load={self.load_spec.can_load}, "
                 f"num_skip_leading_tokens={self.load_spec.num_skip_leading_tokens}, "
+                f"src_chunks={self.load_spec.src_chunks}, "
                 f"dst_blocks={self.load_spec.dst_blocks}")
         save_info = f"save_spec_exists={self.save_spec is not None}"
         if self.save_spec:
@@ -196,6 +204,7 @@ class TPUReqMeta:
                 f"num_total_tokens={self.save_spec.num_total_tokens}, "
                 f"is_final_save={self.save_spec.is_final_save}, "
                 f"skip_save={self.save_spec.skip_save}, "
+                f"dst_chunks={self.save_spec.dst_chunks}, "
                 f"src_blocks={self.save_spec.src_blocks}")
 
         return (f"TPUReqMeta(req_id={self.req_id}, "
@@ -270,20 +279,22 @@ class KVOffloadConnectorStats(KVConnectorStats):
 
     def reset(self):
         # Must be serializable
-        self.data: dict[str, dict[str, int]] = {
+        self.data: dict[str, dict[str, list[int]]] = {
             "finished_save_blocks": dict(),
             "finished_load_blocks": dict(),
         }
 
-    def record_save(self, req: ReqId, num_finished_blocks: int):
+    def record_save(self, req: ReqId, saved_chunk_ids: list[int]):
         if req not in self.data["finished_save_blocks"]:
-            self.data["finished_save_blocks"][req] = 0
-        self.data["finished_save_blocks"][req] += num_finished_blocks
+            self.data["finished_save_blocks"][req] = []
+        self.data["finished_save_blocks"][req].extend(
+            copy.deepcopy(saved_chunk_ids))
 
-    def record_load(self, req: ReqId, num_finished_blocks: int):
+    def record_load(self, req: ReqId, loaded_chunk_ids: list[int]):
         if req not in self.data["finished_load_blocks"]:
-            self.data["finished_load_blocks"][req] = 0
-        self.data["finished_load_blocks"][req] += num_finished_blocks
+            self.data["finished_load_blocks"][req] = []
+        self.data["finished_load_blocks"][req].extend(
+            copy.deepcopy(loaded_chunk_ids))
 
     def clone_and_reset(self) -> "KVOffloadConnectorStats":
         old = copy.copy(self)
@@ -475,6 +486,12 @@ class _StagingBufferManager():
     def get_num_used_staging_blocks(self) -> int:
         return self._num_blocks_for_load + self._num_blocks_for_save
 
+    def get_num_used_save_staging_blocks(self, req_id: ReqId) -> int:
+        return self._blocks_for_save.get(req_id, 0)
+
+    def get_num_used_load_staging_blocks(self, req_id: ReqId) -> int:
+        return self._blocks_for_load.get(req_id, 0)
+
     def allocate(self, req_id: ReqId, num_blocks: int,
                  usage: Literal["load", "save"]) -> int:
         if num_blocks < 0:
@@ -598,6 +615,9 @@ class TPUConnectorScheduler():
         self.config = vllm_config.kv_transfer_config
         self.block_size = vllm_config.cache_config.block_size
 
+        # offloading manager
+        self.offload_manager = LRUOffloadingManager(num_cpu_chunks=1024)
+
         self._request_trackers: dict[ReqId, RequestTracker] = {}
         # This dictionary holds the full vLLM Request object for all requests
         # that are currently in a running state (i.e., have been scheduled but
@@ -609,10 +629,15 @@ class TPUConnectorScheduler():
 
         # {reqid: total_num_matched_tokens_in_cpu_backend}
         self._external_cache_hits: dict[ReqId, int] = {}
-        self.cpu_backend = LocalCPUBackend()
+
+        # request ID -> set(block hashes being saved/loaded)
+        self._reqs_being_saved = defaultdict[ReqId, set[CPU_CHUNK_ID]](set)
+        self._reqs_being_loaded = defaultdict[ReqId, set[CPU_CHUNK_ID]](set)
+
         model_name = self.vllm_config.model_config.model
         self.token_processor = TokenProcessor(model_name=model_name,
                                               chunk_size=self.block_size)
+
         self.decode_save = os.getenv("TPU_OFFLOAD_DECODE_SAVE", "0") == "1"
         # NOTE(jcgu): currently, let's nail on chunk_size == block_size
         # chunk_size == n * block_size lead to
@@ -656,6 +681,17 @@ class TPUConnectorScheduler():
             f"partial_block_dynamic_pad_lower_limit={self.partial_block_dynamic_pad_lower_limit}, "
             f"num_staging_blocks={self.num_staging_blocks}.")
 
+    def _get_request_block_hashes(self, req: "Request") -> list[BlockHash]:
+        # request's original block_hashes do not include the last partial block
+
+        # TODO(jcgu): switch back to self-hash function
+        # prompt_token_ids = req.prompt_token_ids
+        # request_keys = self.token_processor.process_tokens(prompt_token_ids)
+        # hashes = [hash for _, _, hash in request_keys]
+        # return hashes
+
+        return req.block_hashes
+
     def get_num_new_matched_tokens(
         self,
         request: "Request",
@@ -665,61 +701,57 @@ class TPUConnectorScheduler():
         Checks for external KV cache hit against the local CPU backend.
         """
         assert num_computed_tokens % self.block_size == 0, f"{num_computed_tokens} % {self.block_size} != 0"
+        # get block_hash
+        block_hashes = self._get_request_block_hashes(request)
+        num_total_blocks = len(block_hashes)
         prompt_token_ids = request.prompt_token_ids
         logger.info(f"Request {request.request_id}: Checking for cache hit. "
                     f"Prompt length: {len(prompt_token_ids)}, "
+                    f"Block_hashes ({num_total_blocks}),"
                     f"Already computed tokens: {num_computed_tokens}. ")
 
-        # Generate keys for the incoming request's tokens
-        request_keys = self.token_processor.process_tokens(prompt_token_ids)
-        num_matched_blocks = 0
-        num_matched_tokens = 0
-        # The generator needs to be consumed to count.
-        keys = list(request_keys)
-        for start_token_idx, end_token_idx, key in keys:
-            logger.info(
-                f"  Processing chunk {start_token_idx}-{end_token_idx} with hash {key.chunk_hash}"
-            )
-            if self.cpu_backend.contains(key, pin_on_hit=True):
-                # NOTE: each key maps to a cpu_chunk which equals to a block
-                num_matched_tokens = end_token_idx
-                num_matched_blocks += 1
-                logger.info(
-                    f"  -> HIT. Total matched tokens so far: {num_matched_tokens}"
-                )
-            else:
-                # Stop at the first cache miss
-                logger.info("  -> MISS. Stopping search.")
-                break
-
+        # look for blocks in the cache
+        num_hits = self.offload_manager.lookup(block_hashes)
+        matched_block_hashes = block_hashes[:num_hits]
+        self.offload_manager.touch(block_hashes)
+        num_matched_blocks = len(matched_block_hashes)
+        num_matched_tokens = min(num_matched_blocks * self.block_size,
+                                 len(prompt_token_ids))
+        num_computed_blocks = num_computed_tokens // self.block_size
+        num_blocks_to_load = num_matched_blocks - num_computed_blocks
         logger.info(
-            f"Request {request.request_id}: Found {num_matched_tokens} (out of {len(prompt_token_ids)} prompt tokens) matched tokens in CPU backend."
+            f"Request {request.request_id}: Found {num_matched_tokens} (out of {len(prompt_token_ids)} prompt tokens) matched tokens ({num_matched_blocks} blocks) in CPU backend (computed_blocks: {num_computed_blocks}, blocks_to_load: {num_blocks_to_load})."
         )
 
-        assert num_matched_blocks == cdiv(num_matched_tokens, self.block_size)
-
-        if num_matched_tokens > num_computed_tokens:
+        if num_blocks_to_load > 0:
             # planning staging blocks for load
             # NOTE(jcgu): do not worry about the inconsistency of the staging buffer status;
             # there is only one connector scheduler who is operating on it.
             num_avail_staging_blocks = self.staging_buffer_manager.get_num_free_staging_blocks(
             )
-            num_skip_blocks = num_computed_tokens // self.block_size
-            num_blocks_to_load = num_matched_blocks - num_skip_blocks
             if num_blocks_to_load > num_avail_staging_blocks:
                 # reduce blocks_to_load (and matched tokens) when there are insufficient staging blocks.
                 logger.info(
                     f" Req({request.request_id}) found {num_matched_blocks} blocks ({num_matched_tokens} tokens), but only {num_avail_staging_blocks} staging blocks available."
                 )
                 num_blocks_to_load = num_avail_staging_blocks
-                num_matched_tokens = num_blocks_to_load * self.block_size + num_computed_tokens
+                num_matched_tokens = (num_blocks_to_load +
+                                      num_computed_blocks) * self.block_size
 
             # still have something to load
             if num_blocks_to_load > 0:
+                # get the src chunk ids to load
+                block_hashes_to_load = block_hashes[num_computed_blocks:(
+                    num_computed_blocks + num_blocks_to_load)]
+                chunks_to_load = self.offload_manager.prepare_load(
+                    block_hashes_to_load)
+                src_chunk_ids = [chunk.chunk_id for chunk in chunks_to_load]
+
                 # NOTE(jcgu): fill real dst_blocks later when blocks get allocated.
                 dummy_dst_blocks = [-1] * num_blocks_to_load
                 self.load_specs[request.request_id] = LoadSpec(
                     num_matched_tokens=num_matched_tokens,
+                    src_chunks=src_chunk_ids,
                     dst_blocks=dummy_dst_blocks,
                     num_skip_leading_tokens=num_computed_tokens,
                 )
@@ -729,6 +761,8 @@ class TPUConnectorScheduler():
                     usage="load")
                 assert num_allocated_blocks == num_blocks_to_load >= 0, f" failed to allocate {num_allocated_blocks} (load) staging blocks for request {request.request_id}, expected {num_blocks_to_load}."
 
+                # record the matched tokens in the cache, it will be needed in
+                # init save_spec
                 self._external_cache_hits[
                     request.request_id] = num_matched_tokens
 
@@ -768,6 +802,7 @@ class TPUConnectorScheduler():
             f"Request {request.request_id}: After accounting for {num_computed_tokens} computed tokens, reporting {num_to_load} tokens to load."
         )
 
+        # external_computed_tokens, load_kv_async
         return num_to_load, False
 
     def _adjust_last_partial_block(self,
@@ -795,37 +830,38 @@ class TPUConnectorScheduler():
                                  blocks: "KVCacheBlocks",
                                  num_external_tokens: int):
         """
-        This hook is not used for the save logic. Trackers are created
-        and managed within `build_connector_meta`.
+        This hook is not used for the save logic.
+        Update the dst_blocks in the load_spec
         """
         logger.info(
             f"TPUConnectorScheduler: Entering update_state_after_alloc Request {request.request_id}: Scheduler allocated "
             f"{num_external_tokens} external tokens.")
         self._unfinished_requests[request.request_id] = request
-        if num_external_tokens > 0:
-            if request.request_id in self.load_specs:
-                load_spec = self.load_specs[request.request_id]
-                # Get the real loading block ids .
-                all_blocks = blocks.get_block_ids()[0]
-                assert load_spec.num_skip_leading_tokens % self.block_size == 0
-                skip_leading_blocks = load_spec.num_skip_leading_tokens // self.block_size
+        if num_external_tokens == 0:
+            return
+        if request.request_id in self.load_specs:
+            block_hashes = self._get_request_block_hashes(request)
+            all_blocks = blocks.get_block_ids()[0]
+            logger.info(
+                f"  Request: {request.request_id} has {len(all_blocks)} blocks / {len(block_hashes)} block hashes.)"
+            )
+            load_spec = self.load_specs[request.request_id]
+            assert load_spec.num_skip_leading_tokens % self.block_size == 0
+            skip_leading_blocks = load_spec.num_skip_leading_tokens // self.block_size
 
-                # NOTE(jcgu): I think we do not need the adjustment here;
-                # for load, we should load all the (matched_tokens - skipping_tokens),
-                # since it's been reported to vllm scheduler
-
-                total_matched_blocks = len(
-                    load_spec.dst_blocks) + skip_leading_blocks
-                assert total_matched_blocks == cdiv(
-                    load_spec.num_matched_tokens, self.block_size
-                ), f"{total_matched_blocks} != {load_spec.num_matched_tokens}"
-                dst_blocks = all_blocks[
-                    skip_leading_blocks:total_matched_blocks]
-                load_spec.dst_blocks = dst_blocks
-                load_spec.can_load = True
-                logger.info(
-                    f"Request {request.request_id} ({len(dst_blocks)} dst_blocks) is ready to load."
-                )
+            total_matched_blocks = len(
+                load_spec.dst_blocks) + skip_leading_blocks
+            assert total_matched_blocks == cdiv(
+                load_spec.num_matched_tokens, self.block_size
+            ), f"{total_matched_blocks} != {load_spec.num_matched_tokens}"
+            dst_blocks = all_blocks[skip_leading_blocks:total_matched_blocks]
+            load_spec.dst_blocks = dst_blocks
+            load_spec.can_load = True
+            self._reqs_being_loaded[request.request_id] |= set(
+                load_spec.src_chunks)
+            logger.info(
+                f"Request {request.request_id} ({len(dst_blocks)} dst_blocks) is ready to load."
+            )
 
     def _prepare_req_meta(
         self,
@@ -838,7 +874,15 @@ class TPUConnectorScheduler():
         needed and prepares the metadata. Also performs the transactional
         update of the tracker's save state.
         """
-        num_total_tokens = len(tracker.token_ids)
+        req_id = tracker.req_id
+        _request = self._unfinished_requests[req_id]
+        block_hashes = self._get_request_block_hashes(_request)
+        self.offload_manager.touch(block_hashes)
+
+        # only consider the tokens covered by block_hashes
+        num_total_blocks = len(block_hashes)
+        num_total_tokens = min(num_total_blocks * self.block_size,
+                               len(tracker.token_ids))
         num_full_blocks = num_total_tokens // self.block_size
         num_full_blocks_tokens = num_full_blocks * self.block_size
         # adjust last partial block
@@ -920,9 +964,9 @@ class TPUConnectorScheduler():
             # will no such an issue.
             num_skip_leading_blocks = tracker.save_watermark // self.block_size
             num_skip_leading_tokens = num_skip_leading_blocks * self.block_size
+            num_blocks_to_save = adjusted_num_total_blocks - num_skip_leading_blocks
 
             # planning staging blocks for save
-            num_blocks_to_save = adjusted_num_total_blocks - num_skip_leading_blocks
             num_avail_staging_blocks = self.staging_buffer_manager.get_num_free_staging_blocks(
             )
             if num_blocks_to_save > num_avail_staging_blocks:
@@ -935,36 +979,54 @@ class TPUConnectorScheduler():
                 adjusted_num_total_tokens = adjusted_num_total_blocks * self.block_size
 
             if num_blocks_to_save > 0:
-                src_block_ids = tracker.block_ids[
+                block_hashes_to_save = block_hashes[
                     num_skip_leading_blocks:adjusted_num_total_blocks]
-                # This is a real save operation.
-                save_spec = SaveSpec(
-                    num_skip_leading_tokens=num_skip_leading_tokens,
-                    num_total_tokens=adjusted_num_total_tokens,
-                    is_final_save=is_finished,
-                    skip_save=False,
-                    src_blocks=src_block_ids,
-                )
-                num_allocated_blocks = self.staging_buffer_manager.allocate(
-                    tracker.req_id,
-                    num_blocks=num_blocks_to_save,
-                    usage="save")
-                assert num_allocated_blocks == num_blocks_to_save >= 0, f" failed to allocate {num_allocated_blocks} (save) staging blocks for request {tracker.req_id}, expected {num_blocks_to_save}."
-                if adjusted_num_total_tokens > tracker.save_watermark:
-                    logger.info(
-                        f"      -> Old watermark {tracker.save_watermark}, new save_watermark count: {adjusted_num_total_tokens}"
+                allocate_output = self.offload_manager.allocate_for_save(
+                    block_hashes_to_save)
+                if allocate_output is not None:
+                    # there are enough chunks to save
+                    chunks_for_save, chunk_idxs = allocate_output
+                    assert num_blocks_to_save == len(chunks_for_save)
+                    src_block_ids = tracker.block_ids[
+                        num_skip_leading_blocks:adjusted_num_total_blocks]
+
+                    dst_chunks = [chunk.chunk_id for chunk in chunks_for_save]
+                    src_blocks = [src_block_ids[idx] for idx in chunk_idxs]
+
+                    # This is a real save operation.
+                    save_spec = SaveSpec(
+                        num_skip_leading_tokens=num_skip_leading_tokens,
+                        num_total_tokens=adjusted_num_total_tokens,
+                        is_final_save=is_finished,
+                        skip_save=False,
+                        src_blocks=src_blocks,
+                        dst_chunks=dst_chunks,
                     )
-                    tracker.save_watermark = adjusted_num_total_tokens
+                    self._reqs_being_saved[req_id] |= set(dst_chunks)
+                    num_allocated_blocks = self.staging_buffer_manager.allocate(
+                        tracker.req_id,
+                        num_blocks=num_blocks_to_save,
+                        usage="save")
+                    assert num_allocated_blocks == num_blocks_to_save >= 0, f" failed to allocate {num_allocated_blocks} (save) staging blocks for request {tracker.req_id}, expected {num_blocks_to_save}."
+
+                    if adjusted_num_total_tokens > tracker.save_watermark:
+                        logger.info(
+                            f"      -> Old watermark {tracker.save_watermark}, new save_watermark count: {adjusted_num_total_tokens}"
+                        )
+                        tracker.save_watermark = adjusted_num_total_tokens
 
         if is_finished and save_spec is None:
             # For finished requests, there must be a no-op save to update the state in the worker side.
             # This is a "completion-only" signal because should_save is False.
             # NOTE(jcgu): num_total_tokens will be used to unpin tokens;
             #  apply the number of saved tokens;
+            # TODO(jcgu): rm the no-op save, since save status has been updated
+            # through kv_connector_output.kv_connector_stats
             save_spec = SaveSpec(
                 num_skip_leading_tokens=tracker.save_watermark,
                 num_total_tokens=tracker.save_watermark,
                 src_blocks=[],
+                dst_chunks=[],
                 is_final_save=True,
                 skip_save=True,
             )
@@ -996,10 +1058,7 @@ class TPUConnectorScheduler():
         )
         for finished_req_id in scheduler_output.finished_req_ids:
             logger.info(f"  - Processing finished req: {finished_req_id}")
-            # Pop tracker and other state first.
-            tracker = self._request_trackers.pop(finished_req_id, None)
-            self._unfinished_requests.pop(finished_req_id, None)
-            self.load_specs.pop(finished_req_id, None)
+            tracker = self._request_trackers[finished_req_id]
 
             if not tracker:
                 logger.warning(
@@ -1018,6 +1077,11 @@ class TPUConnectorScheduler():
                 )
                 metadata.requests_meta.append(req_meta)
 
+            # Pop tracker and other state first.
+            self._request_trackers.pop(finished_req_id, None)
+            self._unfinished_requests.pop(finished_req_id, None)
+            self.load_specs.pop(finished_req_id, None)
+
         # Phase 2: Process newly scheduled requests
         # This block handles requests being scheduled for the very first time.
         # It creates the initial RequestTracker and prepares the first work order.
@@ -1026,7 +1090,11 @@ class TPUConnectorScheduler():
         )
         for request in scheduler_output.scheduled_new_reqs:
             req_id = request.req_id
-            logger.info(f"  - Processing new req: {req_id}")
+
+            _request = self._unfinished_requests[req_id]
+            logger.info(
+                f"  - Processing new req: {req_id}, {len(_request.block_hashes)} block_hashes."
+            )
             num_new_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
 
@@ -1053,6 +1121,7 @@ class TPUConnectorScheduler():
             # Create and store the tracker, which will maintain the request's
             # state for its entire lifetime.
             assert req_id not in self._request_trackers, f"Request {req_id} already has a tracker."
+            # TODO(jcgu): reduce duplicated info in request tracker
             tracker = RequestTracker(
                 req_id=req_id,
                 prompt_len=len(request.prompt_token_ids),
@@ -1087,9 +1156,12 @@ class TPUConnectorScheduler():
         logger.info(
             f"Phase 3: Processing {len(cached_reqs.req_ids)} cached requests.")
         for i, req_id in enumerate(cached_reqs.req_ids):
-            logger.info(f"  - Processing cached req: {req_id}")
             tracker = self._request_trackers[req_id]
             full_request = self._unfinished_requests.get(req_id)
+            _block_hashes = full_request.block_hashes
+            logger.info(
+                f"  - Processing cached req: {req_id}, {len(_block_hashes)} block_hashes."
+            )
 
             if full_request is None:
                 logger.warning(
@@ -1167,22 +1239,48 @@ class TPUConnectorScheduler():
                               KVOffloadConnectorStats)
             assert "finished_save_blocks" in connector_output.kv_connector_stats.data
             assert "finished_load_blocks" in connector_output.kv_connector_stats.data
-            for req_id, nfb in connector_output.kv_connector_stats.data[
+            for req_id, saved_chunk_ids in connector_output.kv_connector_stats.data[
                     "finished_save_blocks"].items():
-                logger.info(f"  finished_save_blocks for {req_id}: {nfb}")
-                self.staging_buffer_manager.free(req_id,
-                                                 usage="save",
-                                                 num_finished_blocks=nfb)
-            for req_id, nfb in connector_output.kv_connector_stats.data[
-                    "finished_load_blocks"].items():
-                logger.info(f"  finished_load_blocks for {req_id}: {nfb}")
-                self.staging_buffer_manager.free(req_id,
-                                                 usage="load",
-                                                 num_finished_blocks=nfb)
+                num_saved_chunks = len(saved_chunk_ids)
+                logger.info(
+                    f"  finished_save_blocks for {req_id}: {saved_chunk_ids}")
+                # free staging blocks
+                self.staging_buffer_manager.free(
+                    req_id, usage="save", num_finished_blocks=num_saved_chunks)
+                # update in-flight save
+                for saved_chunk_id in saved_chunk_ids:
+                    assert saved_chunk_id in self._reqs_being_saved[req_id]
+                    self._reqs_being_saved[req_id].remove(saved_chunk_id)
+                if len(self._reqs_being_saved[req_id]) == 0:
+                    self._reqs_being_saved.pop(req_id, None)
+                # update the status of occupied cpu chunks
+                self.offload_manager.mark_completion(saved_chunk_ids, "save")
 
-        # clean up staging blocks for the finished requests
+            for req_id, loaded_chunk_ids in connector_output.kv_connector_stats.data[
+                    "finished_load_blocks"].items():
+                num_loaded_chunks = len(loaded_chunk_ids)
+                logger.info(
+                    f"  finished_load_blocks for {req_id}: {num_loaded_chunks}"
+                )
+                self.staging_buffer_manager.free(
+                    req_id,
+                    usage="load",
+                    num_finished_blocks=num_loaded_chunks)
+                # update in-flight save
+                for loaded_chunk_id in loaded_chunk_ids:
+                    assert loaded_chunk_id in self._reqs_being_loaded[req_id]
+                    self._reqs_being_loaded[req_id].remove(loaded_chunk_id)
+                if len(self._reqs_being_loaded[req_id]) == 0:
+                    self._reqs_being_loaded.pop(req_id, None)
+                # update the status of occupied cpu chunks
+                self.offload_manager.mark_completion(loaded_chunk_ids, "load")
+
+        # clean up the status of the finished requests
         # save
         for req_id in connector_output.finished_sending or []:
+            if req_id in self._reqs_being_saved:
+                assert len(self._reqs_being_saved[req_id]) == 0
+                self._reqs_being_saved.pop(req_id)
             num_freed_blocks = self.staging_buffer_manager.free(req_id,
                                                                 usage="save")
             logger.info(
@@ -1191,6 +1289,9 @@ class TPUConnectorScheduler():
 
         # load
         for req_id in connector_output.finished_recving or []:
+            if req_id in self._reqs_being_loaded:
+                assert len(self._reqs_being_loaded[req_id]) == 0
+                self._reqs_being_loaded.pop(req_id)
             num_freed_blocks = self.staging_buffer_manager.free(req_id,
                                                                 usage="load")
             logger.info(
@@ -1203,14 +1304,33 @@ class TPUConnectorScheduler():
         block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
-        Signals to the scheduler that the connector is handling the finished
-        request asynchronously. The actual logic to prepare the save operation
-        occurs in `build_connector_meta`.
+        Called when a request has finished, before its blocks are freed.
+
+        True if the request is being saved/sent asynchronously and blocks
+        should not be freed until the request_id is returned from
+        get_finished().
+        Optional KVTransferParams to be included in the request outputs
+        returned by the engine.
+        return:
+            delay_free_blocks, kv_xfer_params
         """
         logger.info("TPUConnectorScheduler: Entering request_finished")
         # Return True to indicate the request is being saved asynchronously
         # and its blocks should not be freed yet.
-        return True, None
+
+        req_id = request.request_id
+        if req_id in self._reqs_being_saved and len(
+                self._reqs_being_saved[req_id]) > 0:
+            return True, None
+        if req_id in self._reqs_being_loaded and len(
+                self._reqs_being_loaded[req_id]) > 0:
+            return True, None
+
+        logger.info(f"TPUConnectorScheduler: finished request: {req_id}")
+        self._reqs_being_saved.pop(req_id, None)
+        self._reqs_being_loaded.pop(req_id, None)
+
+        return False, None
 
 
 class TPUConnectorWorker:
@@ -1240,10 +1360,7 @@ class TPUConnectorWorker:
         self.swap_in_fn: KVCacheSwapFn = None
         self.swap_out_fn: KVCacheSwapFn = None
 
-        self.host = self.config.kv_ip
-        self.kv_transfer_port = self.config.kv_port
-
-        # Get the singleton instance of the CPU backend.
+        # cpu cache
         self.cpu_backend = LocalCPUBackend()
         # The worker needs its own token processor to generate keys.
         model_name = self.vllm_config.model_config.model
@@ -1258,7 +1375,6 @@ class TPUConnectorWorker:
                                                 thread_name_prefix="tpu_saver")
         self.finished_save_reqs: set[ReqId] = set()
         self.finished_load_reqs: set[ReqId] = set()
-        self._tokens_to_unpin: dict[ReqId, list[int]] = {}
         # Tracks if wait_for_save has been called for the current step's metadata.
         self._processed_save_for_step = False
 
@@ -1313,7 +1429,8 @@ class TPUConnectorWorker:
                 "TPUConnectorWorker registered with no KV caches.")
 
         # Pre-compile the JIT functions for KV cache swapping.
-        self._precompile_kv_swap_operations()
+        if self.use_bucketed_swap_ops:
+            self._precompile_kv_swap_operations()
 
     def _decompose_into_buckets(self, num_blocks: int) -> list[int]:
         """
@@ -1567,6 +1684,8 @@ class TPUConnectorWorker:
             return req_id
 
         blocks_to_save = save_spec.src_blocks
+        dst_chunks = save_spec.dst_chunks
+
         num_total_tokens = save_spec.num_total_tokens
         num_skip_leading_tokens = save_spec.num_skip_leading_tokens
         num_blocks_to_save = len(blocks_to_save)
@@ -1587,7 +1706,8 @@ class TPUConnectorWorker:
                     f"num_skip_leading_tokens={num_skip_leading_tokens}, "
                     f"num_total_tokens={num_total_tokens}, "
                     f"num_tokens_to_save={num_tokens_to_save}, "
-                    f"blocks_to_save len={len(blocks_to_save)}")
+                    f"blocks_to_save({len(blocks_to_save)}: {blocks_to_save}, "
+                    f"dst_chunks({len(dst_chunks)}: {dst_chunks} ")
 
         if not blocks_to_save and tokens_to_save:
             logger.warning(
@@ -1663,43 +1783,24 @@ class TPUConnectorWorker:
             )
 
             post_transfer_start_time = time.time()
-            # Generate keys for the entire token sequence to get absolute positions. This to ensure that the delta
-            # tokens that is about to be captured in the cache are correctly mapped. These keys will be recreated
-            # during get_finished() to unpin the correct keys.
-            all_keys_generator = self.token_processor.process_tokens(
-                process_token_ids)
-            all_keys = list(all_keys_generator)
-            # Filter for keys that correspond to the new data we are saving.
-            relevant_keys = []
-            for abs_start_token_idx, abs_end_token_idx, key in all_keys:
-                if abs_start_token_idx >= num_skip_leading_tokens:
-                    relevant_keys.append(
-                        (abs_start_token_idx, abs_end_token_idx, key))
 
-            if relevant_keys:
-                assert len(
-                    relevant_keys
-                ) == num_blocks_to_save, f"{len(relevant_keys)} != {num_blocks_to_save}"
-                for i in range(num_blocks_to_save):
-                    abs_start_token_idx, abs_end_token_idx, key = relevant_keys[
-                        i]
-                    cur_chunk_cross_layers = [
-                        chunks_on_cpu[j][i] for j in range(self.num_layers)
-                    ]
-                    self.cpu_backend.add(key, cur_chunk_cross_layers)
-                    logger.info(
-                        f"Request {req_id}: Saving to CPU chunk: "
-                        f"abs_start_token_idx={abs_start_token_idx}, abs_end_token_idx={abs_end_token_idx}, "
-                        f"chunk_hash={key.chunk_hash}, "
-                        f" local_chunk_idx={i}")
+            for i in range(num_blocks_to_save):
+                chunk_id = dst_chunks[i]
+                cur_chunk_cross_layers = [
+                    chunks_on_cpu[j][i] for j in range(self.num_layers)
+                ]
+                self.cpu_backend.add(chunk_id, cur_chunk_cross_layers)
+                logger.info(f"Request {req_id}: Saving to CPU chunk: "
+                            f"chunk_id={chunk_id}, "
+                            f" local_chunk_idx={i}")
 
-                logger.info(
-                    f"Request {req_id}: Added {len(relevant_keys)} keys to CPU backend."
-                )
+            logger.info(
+                f"Request {req_id}: Added {num_blocks_to_save} chunks to CPU backend."
+            )
 
             post_transfer_duration = time.time() - post_transfer_start_time
             logger.info(
-                f"Request {req_id}: e2e host processing of {len(relevant_keys)} keys took {post_transfer_duration:.4f} seconds."
+                f"Request {req_id}: e2e host processing of {num_blocks_to_save} chunks took {post_transfer_duration:.4f} seconds."
             )
         except Exception as e:
             logger.error(f"Error saving blocks for request {req_id}: {e}",
@@ -1742,10 +1843,7 @@ class TPUConnectorWorker:
                         logger.info(
                             f"Request {meta.req_id}: Final save is a no-op. Marking as finished."
                         )
-                        self.finished_save_reqs.add(meta.req_id)
-                        self._tokens_to_unpin[
-                            meta.req_id] = meta.token_ids[:meta.save_spec.
-                                                          num_total_tokens]
+                        # self.finished_save_reqs.add(meta.req_id)
                     continue
 
                 # If there are tokens to save, submit the task to the thread pool.
@@ -1775,16 +1873,13 @@ class TPUConnectorWorker:
                 if len(meta.save_spec.src_blocks) > 0:
                     self.offload_stats.record_save(
                         req=finished_req_id,
-                        num_finished_blocks=len(meta.save_spec.src_blocks))
+                        saved_chunk_ids=meta.save_spec.dst_chunks)
 
                 if meta.save_spec and meta.save_spec.is_final_save:
                     logger.info(
                         f"Request {finished_req_id}: Final save completed. Marking as finished."
                     )
                     self.finished_save_reqs.add(finished_req_id)
-                    self._tokens_to_unpin[
-                        finished_req_id] = meta.token_ids[:meta.save_spec.
-                                                          num_total_tokens]
 
             except Exception as e:
                 logger.error(f"A save operation failed: {e}", exc_info=True)
@@ -1825,6 +1920,7 @@ class TPUConnectorWorker:
             request_load_start_time = time.time()
             logger.info("TPUConnectorWorker: Starting KV cache load process.")
             dst_blocks = meta.load_spec.dst_blocks
+            src_chunks = meta.load_spec.src_chunks
             num_blocks_to_load = len(dst_blocks)
             num_matched_tokens = meta.load_spec.num_matched_tokens
             num_skip_leading_tokens = meta.load_spec.num_skip_leading_tokens
@@ -1862,48 +1958,20 @@ class TPUConnectorWorker:
                 f"Fetching delta of {num_tokens_to_load_delta} tokens from cache for "
                 f"{num_blocks_to_load} blocks.")
 
-            # 1. Generate keys for the entire matched prefix to find the right
-            # chunks in the backend.
-            keys_generator = self.token_processor.process_tokens(
-                meta.token_ids[:num_matched_tokens])
-
-            # 2. Assemble the per-layer data for the delta tokens on the CPU.
+            # Assemble the per-layer data for the delta tokens on the CPU.
             # We create a list of lists, where the outer list represents layers
             # and the inner lists will hold the data chunks for that layer.
             assembled_kv_on_cpu = [[] for _ in range(self.num_layers)]
-            # Fetch and slice chunks from the backend.
-            for start_token_idx, end_token_idx, key in keys_generator:
-                # This chunk is entirely before the delta, so we can skip it.
-                if end_token_idx <= num_skip_leading_tokens:
-                    continue
-                # This chunk is entirely after the delta.
-                if start_token_idx >= num_matched_tokens:
-                    continue
-
-                cached_value = self.cpu_backend.get(key)
+            # Fetch and chunks from the backend.
+            for i in range(num_blocks_to_load):
+                src_chunk_id = src_chunks[i]
+                cached_value = self.cpu_backend.get(src_chunk_id)
                 if cached_value:
-                    # Calculate the precise slice needed from this specific chunk.
-                    # rel_start_token_idx is the index within this chunk where the delta tokens begin.
-                    if start_token_idx < num_skip_leading_tokens:
-                        assert False, f"start_token_idx {start_token_idx} should not be less than num_skip_leading_tokens {num_skip_leading_tokens}, when cpu_chunk_size == block_size"
-                        rel_start_token_idx = num_skip_leading_tokens - start_token_idx
-                        rel_end_token_idx = end_token_idx - num_skip_leading_tokens
-                        for i in range(self.num_layers):
-                            # NOTE(jcgu): if only one block to load (and it's a padded block),
-                            # then rel_end_token_idx will not be inaccurate (< block_size).
-                            # Slice the jax array fetched from the backend.
-                            sliced_chunk = jax.lax.slice_in_dim(
-                                cached_value[i],
-                                rel_start_token_idx,
-                                rel_end_token_idx,
-                                axis=0)
-                            assembled_kv_on_cpu[i].append(sliced_chunk)
-                    else:
-                        for i in range(self.num_layers):
-                            assembled_kv_on_cpu[i].append(cached_value[i])
+                    for j in range(self.num_layers):
+                        assembled_kv_on_cpu[j].append(cached_value[j])
                 else:
                     logger.error(
-                        f"Cache key {key.chunk_hash} not found in CPU backend for request {meta.req_id}. Inconsistent state detected."
+                        f"Chunk[{src_chunk_id}] not found in CPU backend for request {meta.req_id}. Inconsistent state detected."
                     )
                     return
 
@@ -1938,8 +2006,8 @@ class TPUConnectorWorker:
             load_times.append(time.time() - request_load_start_time)
             self.finished_load_reqs.add(meta.req_id)
             if num_blocks_to_load > 0:
-                self.offload_stats.record_load(
-                    req=meta.req_id, num_finished_blocks=num_blocks_to_load)
+                self.offload_stats.record_load(req=meta.req_id,
+                                               loaded_chunk_ids=src_chunks)
 
         if load_times:
             aggregate_load_time = sum(load_times)
@@ -1974,37 +2042,7 @@ class TPUConnectorWorker:
         self.wait_for_save()
 
         finished_saves = self.finished_save_reqs
-        logger.info(f"Finished saves to report: {finished_saves}")
-
-        # Unpinning logic:
-        # A finished request consists of N prompt tokens and M generated tokens.
-        # The N prompt tokens were pinned during the initial lookup in
-        # `get_num_new_matched_tokens`. The M generated tokens were never
-        # pinned, as they were directly added to the cache.
-        # Here, we generate keys for the full N+M sequence. The call to
-        # `unpin_keys` will correctly unpin the N prompt keys and perform
-        # a harmless no-op for the M generated keys, which were never in
-        # the pinned set to begin with.
-        keys_to_unpin = []
-        for req_id in finished_saves:
-            if req_id in self._tokens_to_unpin:
-                tokens = self._tokens_to_unpin.pop(req_id)
-                keys_generator = self.token_processor.process_tokens(tokens)
-                unpin_keys = [key for _, _, key in keys_generator]
-                keys_to_unpin.extend(unpin_keys)
-                logger.info(
-                    f"Generated {len(unpin_keys)} keys to unpin for request {req_id}."
-                )
-
-        if keys_to_unpin:
-            unpinned_count, found_count = self.cpu_backend.maybe_unpin_keys(
-                keys_to_unpin)
-            logger.info(
-                f"Unpinned {unpinned_count} out of {found_count} existing keys (Request to unpin {len(keys_to_unpin)} keys)."
-            )
-
         self.finished_save_reqs = set()
-
         finished_loads = self.finished_load_reqs
         self.finished_load_reqs = set()
         logger.info(f"Finished saves: {finished_saves}, "
