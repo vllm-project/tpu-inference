@@ -20,8 +20,9 @@ from tpu_inference.layers.vllm.attention import _jax_attn_func
 # sys.path.insert(0, '/home/wenxindong_google_com/tpu-inference')
 
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 import (
-    get_kv_cache_shape,
+    get_kv_cache_shape as get_kv_cache_shape_h64,
 )
+from tpu_inference.kernels.ragged_paged_attention.v3.kernel import get_kv_cache_shape
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 
@@ -56,7 +57,8 @@ def create_test_inputs(
     ) for i in range(dp_size)], axis=0)
     
     # KV cache
-    kv_cache_shape = get_kv_cache_shape(
+    get_kv_cache_shape_fn = get_kv_cache_shape_h64 if head_dim == 64 else get_kv_cache_shape
+    kv_cache_shape = get_kv_cache_shape_fn(
         total_num_pages,
         page_size,
         num_kv_heads,
@@ -1686,3 +1688,11 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+# ================================================================================
+# COMPARISON
+# ================================================================================
+# No DP time:   2.63 ms
+# With DP time: 2.62 ms
+# ✓ DP is 1.00x FASTER
