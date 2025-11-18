@@ -172,14 +172,14 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         self.ep_axis_name = ep_axis_name
         # TODO: Use autotune table once we have it.
         self.block_size = {
-            "bt": 64,
-            "bf": 1536,
+            "bt": 128,
+            "bf": 1024,
             "bd1": 1536,
             "bd2": 1536,
-            "btc": 64,
-            "bfc": 1536,
+            "btc": 128,
+            "bfc": 1024,
             "bd1c": 1536,
-            "bd2c": 1536,
+            "bd2c": 1536
         }
 
     def select_gemm_impl(
@@ -261,6 +261,19 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
             if self.moe.has_bias:
                 w13_bias = w13_bias.reshape(num_experts, 2, intermediate_size)
+
+                # TODO(kyuyeunk): Hardcoded for now, will remove later.
+                w13_bias = jnp.pad(
+                    w13_bias,
+                    ((0, 0), (0, 0),
+                     (0, padded_intermediate_size - intermediate_size)),
+                    constant_values=0,
+                )
+                w2_bias = jnp.pad(
+                    w2_bias,
+                    ((0, 0), (0, padded_hidden_size - hidden_size)),
+                    constant_values=0,
+                )
 
                 # Apply EP sharding
                 w13_bias = jax.device_put(
@@ -367,11 +380,11 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 w1=jax_view(layer.w13_weight),
                 w2=jax_view(layer.w2_weight),
                 # TODO(kyuyeunk): Currently, bias introduces significant
-                # performance degradation. Disable for now.
-                # b1=jax_view(layer.w13_bias) if self.moe.has_bias else None,
-                # b2=jax_view(layer.w2_bias) if self.moe.has_bias else None,
-                b1=None,
-                b2=None,
+                # performance degradation. Suggest disabling for now.
+                b1=jax_view(layer.w13_bias) if self.moe.has_bias else None,
+                b2=jax_view(layer.w2_bias) if self.moe.has_bias else None,
+                # b1=None,
+                # b2=None,
                 gating_output=jax_view(router_logits),
                 top_k=top_k,
                 ep_axis_name=self.ep_axis_name,
