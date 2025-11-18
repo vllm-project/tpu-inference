@@ -1,0 +1,45 @@
+# Quantized Matmul
+# kernel support matrix
+steps:
+  - label: "Correctness tests for Quantized Matmul"
+    key: "Quantized_Matmul_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "Quantized_Matmul_CorrectnessTest" "to be added"
+  - label: "Record correctness test result for Quantized Matmul"
+    key: "record_Quantized_Matmul_CorrectnessTest"
+    depends_on: "Quantized_Matmul_CorrectnessTest"
+    env:
+      CI_TARGET: "Quantized Matmul"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "kernel support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh Quantized_Matmul_CorrectnessTest
+
+  - label: "Performance tests for Quantized Matmul"
+    key: "Quantized_Matmul_PerformanceTest"
+    depends_on: "record_Quantized_Matmul_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "Quantized_Matmul_PerformanceTest" "to be added"
+  - label: "Record performance test result for Quantized Matmul"
+    key: "record_Quantized_Matmul_PerformanceTest"
+    depends_on: "Quantized_Matmul_PerformanceTest"
+    env:
+      CI_TARGET: "Quantized Matmul"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "kernel support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh Quantized_Matmul_PerformanceTest
