@@ -1,7 +1,7 @@
 #!/bin/bash
 
 BUILDKITE_DIR=".buildkite"
-TARGET_FOLDERS="models features"
+TARGET_FOLDERS="models features parallelism quantization"
 MODEL_LIST_KEY="model-list"
 FEATURE_LIST_KEY="feature-list"
 
@@ -38,6 +38,12 @@ for folder_path in $TARGET_FOLDERS; do
           model_list+=("${subject_name}")
           ;;
         "features")
+          feature_list+=("${subject_name}")
+          ;;
+        "parallelism")
+          feature_list+=("${subject_name}")
+          ;;
+        "quantization")
           feature_list+=("${subject_name}")
           ;;
       esac

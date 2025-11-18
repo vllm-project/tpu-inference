@@ -1,4 +1,5 @@
 # Collective Communication Matmul
+# kernel support matrix
 steps:
   - label: "Correctness tests for Collective Communication Matmul"
     key: "Collective_Communication_Matmul_CorrectnessTest"
@@ -13,6 +14,7 @@ steps:
     env:
       CI_TARGET: "Collective Communication Matmul"
       CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "kernel support matrix"
     agents:
       queue: cpu
     commands:

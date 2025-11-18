@@ -1,0 +1,45 @@
+# SP
+# parallelism support matrix
+steps:
+  - label: "Correctness tests for SP"
+    key: "SP_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "SP_CorrectnessTest" "to be added"
+  - label: "Record correctness test result for SP"
+    key: "record_SP_CorrectnessTest"
+    depends_on: "SP_CorrectnessTest"
+    env:
+      CI_TARGET: "SP"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "parallelism support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh SP_CorrectnessTest
+
+  - label: "Performance tests for SP"
+    key: "SP_PerformanceTest"
+    depends_on: "record_SP_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "SP_PerformanceTest" "to be added"
+  - label: "Record performance test result for SP"
+    key: "record_SP_PerformanceTest"
+    depends_on: "SP_PerformanceTest"
+    env:
+      CI_TARGET: "SP"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "parallelism support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh SP_PerformanceTest

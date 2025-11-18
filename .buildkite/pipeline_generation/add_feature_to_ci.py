@@ -1,5 +1,6 @@
 import argparse
 import sys
+from enum import Enum
 from pathlib import Path
 
 from constant import QUEUE_TO_TENSOR_PARALLEL_SIZE_MAP
@@ -9,7 +10,13 @@ TEMPLATE_PATH = SCRIPT_DIR / "feature_template.yml"
 OUTPUT_DIR = SCRIPT_DIR.parent / "features"
 
 
-def generate_from_template(feature_name: str, queue: str) -> None:
+class FeatureCategory(str, Enum):
+    FEATURE_SUPPORT = "feature support matrix"
+    KERNEL_SUPPORT = "kernel support matrix"
+
+
+def generate_from_template(feature_name: str, feature_category: str,
+                           queue: str) -> None:
     """
     Generates a buildkite yml file from feature template.
     Args:
@@ -51,6 +58,7 @@ def generate_from_template(feature_name: str, queue: str) -> None:
     try:
         generated_content = template_content.format(
             FEATURE_NAME=feature_name,
+            CATEGORY=feature_category,
             SANITIZED_FEATURE_NAME=sanitized_feature_name,
             QUEUE=queue,
         )
@@ -90,9 +98,19 @@ def main():
         type=str,
         required=True,
         help="The name of the agent queue to use (ex: 'tpu_v6e_queue')")
-
+    parser.add_argument(
+        '--category',
+        choices=[
+            FeatureCategory.FEATURE_SUPPORT.value,
+            FeatureCategory.KERNEL_SUPPORT.value
+        ],
+        default='feature support matrix',
+        help='[OPTIONAL] Category of feature. (Default: feature support matrix)'
+    )
     args = parser.parse_args()
-    generate_from_template(feature_name=args.feature_name, queue=args.queue)
+    generate_from_template(feature_name=args.feature_name,
+                           feature_category=args.category,
+                           queue=args.queue)
 
 
 if __name__ == "__main__":
