@@ -38,11 +38,18 @@ def run_test(model_name, expected_value, more_args=None):
     if more_args is not None:
         model_args = "{},{}".format(model_args, more_args)
 
+    generation_args = {
+            "temperature": 0, 
+            "seed": 42,
+            "do_sample": False 
+        }
+    
     results = lm_eval.simple_evaluate(
         model="vllm",
         model_args=model_args,
         tasks="gsm8k",
         batch_size="auto",
+        gen_kwargs=generation_args,
     )
 
     measured_value = results["results"][TASK][FILTER]
