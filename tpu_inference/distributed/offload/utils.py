@@ -14,6 +14,10 @@ from vllm.distributed.kv_transfer.kv_connector.factory import \
 from tpu_inference.kernels.dma.host_dma import d2h_dma, h2d_dma
 from tpu_inference.logger import init_logger
 
+ReqId = str
+
+CpuChunkId = int
+
 # Corresponds to the initial hash value
 NONE_HASH = 0
 

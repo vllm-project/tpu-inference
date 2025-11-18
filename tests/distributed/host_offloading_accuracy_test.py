@@ -35,9 +35,9 @@ def sampling_config():
 
 @pytest.fixture
 def kv_transfer_config():
-    """use TPUConnector from tpu_connector_local"""
+    """use TPUOffloadConnector from tpu_connector_local"""
     return KVTransferConfig(
-        kv_connector="TPUConnector",
+        kv_connector="TPUOffloadConnector",
         kv_role="kv_both",
         kv_connector_module_path=
         "tpu_inference.distributed.tpu_connector_local",

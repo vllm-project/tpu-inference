@@ -3,10 +3,11 @@
 
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Literal, Tuple
+from typing import Literal, Optional, Tuple
 
 from vllm.v1.core.kv_cache_utils import BlockHash
 
+from tpu_inference.distributed.offload.utils import CpuChunkId, ReqId
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
@@ -19,7 +20,7 @@ ChunkHash = BlockHash
 
 @dataclass
 class CPUChunk:
-    chunk_id: int
+    chunk_id: CpuChunkId
     ref_cnt: int = -1
     _chunk_hash: ChunkHash | None = None
 
@@ -59,7 +60,7 @@ class CPUChunkPool:
             CPUChunk(idx) for idx in range(num_chunks - 1, -1, -1)
         ]
         # {allocated_chunk_id: chunk_hash}
-        self.allocated_id_to_hash_map: dict[int, ChunkHash] = {}
+        self.allocated_id_to_hash_map: dict[CpuChunkId, ChunkHash] = {}
 
     @property
     def num_free_chunks(self):
@@ -96,7 +97,7 @@ class CPUChunkPool:
         self._num_allocated_chunks -= len(chunks)
 
 
-class LRUOffloadingManager:
+class LRUCacheManager:
 
     def __init__(self, num_cpu_chunks: int):
         self.num_chunks = num_cpu_chunks
@@ -221,3 +222,147 @@ class LRUOffloadingManager:
             self.complete_load(chunk_hashes)
         else:
             raise ValueError(f"Unknown operation: {operation}")
+
+
+class StagingBufferManager():
+    """ Bookkeeping the staging buffer inside the connector scheduler.
+    NOTE(jcgu): the operations (e.g., allocate, free, get) to staging buffer / blocks are NOT thread-safe.
+    But it's okay since there is only one connector scheduler instance.
+    """
+
+    def __init__(self, num_blocks: int):
+        self.num_blocks = num_blocks
+        # {req_id: list(num_occupied_staging_blocks)}
+        self._blocks_for_save: dict[ReqId, int] = {}
+        self._blocks_for_load: dict[ReqId, int] = {}
+
+        self._num_free_blocks: int = self.num_blocks
+        # keep track of the total occupied staging blocks for save and load respectively
+        self._num_blocks_for_save: int = 0
+        self._num_blocks_for_load: int = 0
+
+    def get_num_free_staging_blocks(self) -> int:
+        return self._num_free_blocks
+
+    def get_num_used_staging_blocks(self) -> int:
+        return self._num_blocks_for_load + self._num_blocks_for_save
+
+    def get_num_used_save_staging_blocks(self, req_id: ReqId) -> int:
+        return self._blocks_for_save.get(req_id, 0)
+
+    def get_num_used_load_staging_blocks(self, req_id: ReqId) -> int:
+        return self._blocks_for_load.get(req_id, 0)
+
+    def allocate(self, req_id: ReqId, num_blocks: int,
+                 usage: Literal["load", "save"]) -> int:
+        if num_blocks < 0:
+            logger.warning(
+                f"  get {num_blocks} staging blocks to allocate for Req:{req_id}."
+            )
+            return num_blocks
+        if num_blocks > self._num_free_blocks:
+            # do not have enough capacity, return 0
+            return 0
+
+        if usage == "load":
+            if req_id in self._blocks_for_load:
+                # NOTE(jcgu): before completing the previous load, new load
+                # should not be triggered for the same request (is this correct?)
+                raise ValueError(
+                    f" Req({req_id}) already has {self._blocks_for_load[req_id]}, and should not have new loads."
+                )
+            else:
+                self._blocks_for_load[req_id] = num_blocks
+            self._num_blocks_for_load += num_blocks
+        elif usage == "save":
+            if req_id in self._blocks_for_save:
+                self._blocks_for_save[req_id] += num_blocks
+            else:
+                self._blocks_for_save[req_id] = num_blocks
+            self._num_blocks_for_save += num_blocks
+        else:
+            raise ValueError(
+                f" Staging buffer manager should not get usage: {usage}")
+        self._num_free_blocks -= num_blocks
+
+        logger.info(
+            f"  allocate {num_blocks} staging blocks to Req:{req_id} for {usage}."
+        )
+        return num_blocks
+
+    def free(self,
+             req_id: ReqId,
+             usage: Literal["load", "save"],
+             num_finished_blocks: Optional[int] = None) -> int:
+        """
+        when num_finished_blocks is not given, we will assume the request is finished and should be removed.
+        """
+        num_freed_blocks = 0
+        # NOTE(jcgu): assuming FIFO execution order for a single request's save and
+        # load operations respectively
+        if usage == "load":
+            if req_id not in self._blocks_for_load:
+                logger.warning(
+                    f" there is no record of staging buffer (usage: {usage}) for Req:{req_id}"
+                )
+                return 0
+            if num_finished_blocks is None:
+                num_freed_blocks = self._blocks_for_load[req_id]
+            else:
+                num_freed_blocks = num_finished_blocks
+            if self._blocks_for_load[req_id] < num_freed_blocks:
+                logger.warning(
+                    f" Req({req_id}) has {num_finished_blocks} load staging buffer to free, but only has {self._blocks_for_load[req_id]} on record."
+                )
+
+            self._blocks_for_load[req_id] -= num_freed_blocks
+            if self._blocks_for_load[req_id] <= 0:
+                del self._blocks_for_load[req_id]
+            self._num_blocks_for_load -= num_freed_blocks
+        elif usage == "save":
+            if req_id not in self._blocks_for_save:
+                logger.warning(
+                    f" there is no record of staging buffer (usage: {usage}) for Req:{req_id}"
+                )
+                return 0
+            if num_finished_blocks is None:
+                num_freed_blocks = self._blocks_for_save[req_id]
+            else:
+                num_freed_blocks = num_finished_blocks
+            if self._blocks_for_save[req_id] < num_freed_blocks:
+                logger.warning(
+                    f" Req({req_id}) has {num_finished_blocks} save staging buffer to free, but only has {self._blocks_for_save[req_id]} on record."
+                )
+
+            self._blocks_for_save[req_id] -= num_freed_blocks
+            if self._blocks_for_save[req_id] <= 0:
+                del self._blocks_for_save[req_id]
+            self._num_blocks_for_save -= num_freed_blocks
+        else:
+            raise ValueError(
+                f" Staging buffer manager should not get usage: {usage}")
+        self._num_free_blocks += num_freed_blocks
+
+        logger.info(
+            f"  free {num_freed_blocks} staging blocks (usage: {usage}) from Req:{req_id}"
+        )
+        return num_freed_blocks
+
+    def get_usage(self, with_details: bool = False):
+        usage_str = (f"Staging Buffer: total={self.num_blocks}, "
+                     f"free={self._num_free_blocks}, "
+                     f"used_for_load={self._num_blocks_for_load}, "
+                     f"used_for_save={self._num_blocks_for_save};")
+        if with_details:
+            blocks_for_save_str = " save_details:{"
+            for req, bn in self._blocks_for_save.items():
+                blocks_for_save_str += f"{req}:{bn},"
+            blocks_for_save_str += "} "
+
+            blocks_for_load_str = " load_details:{"
+            for req, bn in self._blocks_for_load.items():
+                blocks_for_load_str += f"{req}:{bn},"
+            blocks_for_load_str += "}."
+            usage_str += blocks_for_save_str + blocks_for_load_str
+
+        return usage_str

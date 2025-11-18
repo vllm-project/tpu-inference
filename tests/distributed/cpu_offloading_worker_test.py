@@ -14,12 +14,13 @@ from jax._src import test_util as jtu
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
-from tpu_inference.distributed.local_cpu_backend import LocalCPUBackend
-from tpu_inference.distributed.tpu_connector_local import LoadSpec, SaveSpec
-from tpu_inference.distributed.tpu_connector_local import \
-    TPUConnector as CPUOffloadingConnector
-from tpu_inference.distributed.tpu_connector_local import (
-    TPUConnectorMetadata, TPUReqMeta)
+from tpu_inference.distributed.cpu_backend import LocalCPUBackend
+from tpu_inference.distributed.offload.tpu_connector_local import (LoadSpec,
+                                                                   SaveSpec)
+from tpu_inference.distributed.offload.tpu_connector_local import \
+    TPUOffloadConnector as CPUOffloadingConnector
+from tpu_inference.distributed.offload.tpu_connector_local import (
+    TPUOffloadConnectorMetadata, TPUReqMeta)
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
 
@@ -62,7 +63,7 @@ class MockVllmConfig:
 
 
 class TestCpuOffloadingSave(jtu.JaxTestCase):
-    """Test the save functionality of the TPUConnectorWorker."""
+    """Test the save functionality of the TPUOffloadConnectorWorker."""
 
     def setUp(self):
         super().setUp()
@@ -473,7 +474,8 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
             save_spec=save_spec,
         )
 
-        connector_metadata = TPUConnectorMetadata(requests_meta=[req_meta])
+        connector_metadata = TPUOffloadConnectorMetadata(
+            requests_meta=[req_meta])
         connector.bind_connector_metadata(connector_metadata)
         logger.info(
             "Connector metadata bound, calling worker.wait_for_save().")
@@ -565,7 +567,7 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
         num_blocks_step2: int,
     ):
         """
-        Tests that the TPUConnectorWorker correctly saves the KV cache in multiple
+        Tests that the TPUOffloadConnectorWorker correctly saves the KV cache in multiple
         steps, respecting the save watermark (skip_leading_tokens).
         """
         os.environ[
@@ -621,7 +623,7 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
         logger.info(
             f"Step 1: req_meta_step1.token_ids={req_meta_step1.token_ids}, req_meta_step1.local_block_ids={req_meta_step1.local_block_ids}, req_meta_step1.save_spec.skip_leading_tokens={req_meta_step1.save_spec.num_skip_leading_tokens}"
         )
-        connector_metadata_step1 = TPUConnectorMetadata(
+        connector_metadata_step1 = TPUOffloadConnectorMetadata(
             requests_meta=[req_meta_step1])
         connector.bind_connector_metadata(connector_metadata_step1)
         worker.wait_for_save()
@@ -681,7 +683,7 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
         logger.info(
             f"Step 2: req_meta_step2.token_ids={req_meta_step2.token_ids}, req_meta_step2.local_block_ids={req_meta_step2.local_block_ids}, req_meta_step2.save_spec.skip_leading_tokens={req_meta_step2.save_spec.num_skip_leading_tokens}"
         )
-        connector_metadata_step2 = TPUConnectorMetadata(
+        connector_metadata_step2 = TPUOffloadConnectorMetadata(
             requests_meta=[req_meta_step2])
 
         # Manually reset worker state to simulate a new scheduler step
@@ -781,17 +783,17 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
         num_computed_blocks: int = 0,
     ):
         """
-        Tests that the TPUConnectorWorker correctly loads only the delta of
+        Tests that the TPUOffloadConnectorWorker correctly loads only the delta of
         the KV cache when a prefix is already computed by vLLM.
 
         This test simulates a scenario where vLLM has already computed a certain
-        number of tokens (prefix) and the TPUConnectorWorker needs to load
+        number of tokens (prefix) and the TPUOffloadConnectorWorker needs to load
         only the remaining "delta" of the KV cache from the CPU backend.
 
         Steps:
         1.  Setup:
             - Create a device mesh and sharding configurations.
-            - Instantiate a TPUConnector with a worker role.
+            - Instantiate a TPUOffloadConnector with a worker role.
             - Create mock source (ground truth) and destination KV caches on the TPU.
             - Register a mock TPUModelRunner with the worker.
 
@@ -802,7 +804,7 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
 
         3.  Prepare and Execute Delta Load:
             - Calculate the number of tokens to load (the delta).
-            - Construct the necessary metadata (`TPUConnectorMetadata`) and `LoadSpec`
+            - Construct the necessary metadata (`TPUOffloadConnectorMetadata`) and `LoadSpec`
             to trigger a delta load operation, skipping the already computed tokens.
             - Bind this metadata to the connector and call the worker's `start_load_kv`
             method to perform the host-to-device (h2d) load for the delta tokens.
@@ -873,7 +875,8 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
                 local_block_ids=local_block_ids,
                 save_spec=save_spec,
             )
-            connector_metadata = TPUConnectorMetadata(requests_meta=[req_meta])
+            connector_metadata = TPUOffloadConnectorMetadata(
+                requests_meta=[req_meta])
             connector.bind_connector_metadata(connector_metadata)
             worker.wait_for_save()
             logger.info(
@@ -911,7 +914,8 @@ class TestCpuOffloadingSave(jtu.JaxTestCase):
                 local_block_ids=local_block_ids,
                 load_spec=load_spec,
             )
-            connector_metadata = TPUConnectorMetadata(requests_meta=[req_meta])
+            connector_metadata = TPUOffloadConnectorMetadata(
+                requests_meta=[req_meta])
             connector.bind_connector_metadata(connector_metadata)
             logger.info("Connector metadata bound, calling start_load_kv.")
             worker.start_load_kv(fwd_ctx=None)

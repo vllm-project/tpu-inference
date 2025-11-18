@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Scheduler side execution:
-TPUConnectorScheduler manages the state of KV cache loading and saving for
+TPUOffloadConnectorScheduler manages the state of KV cache loading and saving for
 each request. It acts as a state machine, tracking the progress of requests
 across multiple scheduling steps and generating work orders (TPUReqMeta) for
-the TPUConnectorWorker.
+the TPUOffloadConnectorWorker.
 
 Core Components:
 - RequestTracker: The primary state object for a request. It tracks the
@@ -75,7 +75,7 @@ State Machine Flow (from the perspective of a request):
             can be safely freed.
 
 Worker Side Execution:
-- The TPUConnectorWorker receives the `TPUConnectorMetadata` containing the list of
+- The TPUOffloadConnectorWorker receives the `TPUOffloadConnectorMetadata` containing the list of
     `TPUReqMeta` objects.
 - `start_load_kv`: Iterates through the metadata. If a `meta.load_spec`
     exists, it reads the corresponding data from the CPU backend and copies it
@@ -110,19 +110,16 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
     from vllm.forward_context import ForwardContext
 
+from tpu_inference.distributed.offload.cpu_backend import LocalCPUBackend
+from tpu_inference.distributed.offload.offload_manager import (
+    LRUCacheManager, StagingBufferManager)
+from tpu_inference.distributed.offload.utils import (
+    CPU_OFFLOADING_SWAP_OP_TYPE, CpuChunkId, KVCacheSwapFn, ReqId,
+    TokenProcessor, cdiv, get_default_kv_connector_staging_buffer_tokens,
+    get_kv_cache_swap_fn, jitted_insert_kv_cache_slices)
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.kv_cache_manager import KVCacheManager
 from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
-
-from .cache_util import (CPU_OFFLOADING_SWAP_OP_TYPE, KVCacheSwapFn,
-                         TokenProcessor, cdiv,
-                         get_default_kv_connector_staging_buffer_tokens,
-                         get_kv_cache_swap_fn, jitted_insert_kv_cache_slices)
-from .cpu_chunk_manager import LRUOffloadingManager
-from .local_cpu_backend import LocalCPUBackend
-
-EngineId = str
-ReqId = str
 
 logger = init_logger(__name__)
 
@@ -133,8 +130,6 @@ REQUIRED_KV_CACHE_LAYOUT = "NHD"
 DEFAULT_HOST_HBM_SWAP_OP_TYPE = "jax"
 
 BLOCK_SIZE_BUCKETS = [1, 2, 4, 8, 16]
-
-CPU_CHUNK_ID = int
 
 # we keep our operations at vllm's block granularity,
 # and provide the following three preferences when handling
@@ -331,25 +326,26 @@ class KVOffloadConnectorStats(KVConnectorStats):
 
 # The metadata used for communicating between scheduler and worker connectors.
 @dataclass
-class TPUConnectorMetadata(KVConnectorMetadata):
+class TPUOffloadConnectorMetadata(KVConnectorMetadata):
     requests_meta: list[TPUReqMeta] = field(default_factory=list)
 
 
-class TPUConnector(KVConnectorBase_V1):
+class TPUOffloadConnector(KVConnectorBase_V1):
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
-        logger.info("TPUConnector: Entering __init__")
+        logger.info("TPUOffloadConnector: Entering __init__")
         assert vllm_config.kv_transfer_config is not None
 
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = \
-                TPUConnectorScheduler(vllm_config)
+                TPUOffloadConnectorScheduler(vllm_config)
             self.connector_worker = None
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
             # The worker needs a reference to the base connector to access
             # the metadata object set by the engine.
-            self.connector_worker = TPUConnectorWorker(vllm_config, self)
+            self.connector_worker = TPUOffloadConnectorWorker(
+                vllm_config, self)
 
     ############################################################
     # Class Methods
@@ -368,7 +364,7 @@ class TPUConnector(KVConnectorBase_V1):
             return None
 
         logger.info_once(
-            "TPUConnector currently only supports %s KV cache layout.",
+            "TPUOffloadConnector currently only supports %s KV cache layout.",
             REQUIRED_KV_CACHE_LAYOUT)
         return REQUIRED_KV_CACHE_LAYOUT
 
@@ -400,7 +396,7 @@ class TPUConnector(KVConnectorBase_V1):
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
-    ) -> TPUConnectorMetadata:
+    ) -> TPUOffloadConnectorMetadata:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
@@ -416,7 +412,7 @@ class TPUConnector(KVConnectorBase_V1):
     # Worker Side Methods
     ############################################################
     def register_kv_caches(self, kv_caches: list[jax.Array]):
-        logger.info("TPUConnector: Entering register_kv_caches")
+        logger.info("TPUOffloadConnector: Entering register_kv_caches")
         """
         We don't register kv_caches in connector, we call `register_runner` and
         use runner.kv_caches directly instead because the ref of runner.kv_caches
@@ -425,7 +421,7 @@ class TPUConnector(KVConnectorBase_V1):
         pass
 
     def register_runner(self, runner: TPUModelRunner) -> None:
-        logger.info("TPUConnector: Entering register_runner")
+        logger.info("TPUOffloadConnector: Entering register_runner")
         assert self.connector_worker is not None
         self.connector_worker.register_runner(runner)
 
@@ -435,17 +431,18 @@ class TPUConnector(KVConnectorBase_V1):
         self.connector_worker.start_load_kv(fwd_ctx)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        logger.info("TPUConnector: Entering wait_for_layer_load")
+        logger.info("TPUOffloadConnector: Entering wait_for_layer_load")
         """TPU connector doesn't support layer wise load."""
         pass
 
     def save_kv_layer(self, **kwargs) -> None:
-        logger.info("TPUConnector: Entering save_kv_layer")
+        logger.info("TPUOffloadConnector: Entering save_kv_layer")
         """TPU connector doesn't support layer wise save."""
         pass
 
     def wait_for_save(self):
-        assert isinstance(self._connector_metadata, TPUConnectorMetadata)
+        assert isinstance(self._connector_metadata,
+                          TPUOffloadConnectorMetadata)
         self.connector_worker.wait_for_save()
 
     def get_finished(self,
@@ -463,160 +460,16 @@ class TPUConnector(KVConnectorBase_V1):
         return self.connector_worker.get_kv_connector_stats()
 
 
-class _StagingBufferManager():
-    """ Bookkeeping the staging buffer inside the connector scheduler.
-    NOTE(jcgu): the operations (e.g., allocate, free, get) to staging buffer / blocks are NOT thread-safe.
-    But it's okay since there is only one connector scheduler instance.
-    """
-
-    def __init__(self, num_blocks: int):
-        self.num_blocks = num_blocks
-        # {req_id: list(num_occupied_staging_blocks)}
-        self._blocks_for_save: dict[ReqId, int] = {}
-        self._blocks_for_load: dict[ReqId, int] = {}
-
-        self._num_free_blocks: int = self.num_blocks
-        # keep track of the total occupied staging blocks for save and load respectively
-        self._num_blocks_for_save: int = 0
-        self._num_blocks_for_load: int = 0
-
-    def get_num_free_staging_blocks(self) -> int:
-        return self._num_free_blocks
-
-    def get_num_used_staging_blocks(self) -> int:
-        return self._num_blocks_for_load + self._num_blocks_for_save
-
-    def get_num_used_save_staging_blocks(self, req_id: ReqId) -> int:
-        return self._blocks_for_save.get(req_id, 0)
-
-    def get_num_used_load_staging_blocks(self, req_id: ReqId) -> int:
-        return self._blocks_for_load.get(req_id, 0)
-
-    def allocate(self, req_id: ReqId, num_blocks: int,
-                 usage: Literal["load", "save"]) -> int:
-        if num_blocks < 0:
-            logger.warning(
-                f"  get {num_blocks} staging blocks to allocate for Req:{req_id}."
-            )
-            return num_blocks
-        if num_blocks > self._num_free_blocks:
-            # do not have enough capacity, return 0
-            return 0
-
-        if usage == "load":
-            if req_id in self._blocks_for_load:
-                # NOTE(jcgu): before completing the previous load, new load
-                # should not be triggered for the same request (is this correct?)
-                raise ValueError(
-                    f" Req({req_id}) already has {self._blocks_for_load[req_id]}, and should not have new loads."
-                )
-            else:
-                self._blocks_for_load[req_id] = num_blocks
-            self._num_blocks_for_load += num_blocks
-        elif usage == "save":
-            if req_id in self._blocks_for_save:
-                self._blocks_for_save[req_id] += num_blocks
-            else:
-                self._blocks_for_save[req_id] = num_blocks
-            self._num_blocks_for_save += num_blocks
-        else:
-            raise ValueError(
-                f" Staging buffer manager should not get usage: {usage}")
-        self._num_free_blocks -= num_blocks
-
-        logger.info(
-            f"  allocate {num_blocks} staging blocks to Req:{req_id} for {usage}."
-        )
-        return num_blocks
-
-    def free(self,
-             req_id: ReqId,
-             usage: Literal["load", "save"],
-             num_finished_blocks: Optional[int] = None) -> int:
-        """
-        when num_finished_blocks is not given, we will assume the request is finished and should be removed.
-        """
-        num_freed_blocks = 0
-        # NOTE(jcgu): assuming FIFO execution order for a single request's save and
-        # load operations respectively
-        if usage == "load":
-            if req_id not in self._blocks_for_load:
-                logger.warning(
-                    f" there is no record of staging buffer (usage: {usage}) for Req:{req_id}"
-                )
-                return 0
-            if num_finished_blocks is None:
-                num_freed_blocks = self._blocks_for_load[req_id]
-            else:
-                num_freed_blocks = num_finished_blocks
-            if self._blocks_for_load[req_id] < num_freed_blocks:
-                logger.warning(
-                    f" Req({req_id}) has {num_finished_blocks} load staging buffer to free, but only has {self._blocks_for_load[req_id]} on record."
-                )
-
-            self._blocks_for_load[req_id] -= num_freed_blocks
-            if self._blocks_for_load[req_id] <= 0:
-                del self._blocks_for_load[req_id]
-            self._num_blocks_for_load -= num_freed_blocks
-        elif usage == "save":
-            if req_id not in self._blocks_for_save:
-                logger.warning(
-                    f" there is no record of staging buffer (usage: {usage}) for Req:{req_id}"
-                )
-                return 0
-            if num_finished_blocks is None:
-                num_freed_blocks = self._blocks_for_save[req_id]
-            else:
-                num_freed_blocks = num_finished_blocks
-            if self._blocks_for_save[req_id] < num_freed_blocks:
-                logger.warning(
-                    f" Req({req_id}) has {num_finished_blocks} save staging buffer to free, but only has {self._blocks_for_save[req_id]} on record."
-                )
-
-            self._blocks_for_save[req_id] -= num_freed_blocks
-            if self._blocks_for_save[req_id] <= 0:
-                del self._blocks_for_save[req_id]
-            self._num_blocks_for_save -= num_freed_blocks
-        else:
-            raise ValueError(
-                f" Staging buffer manager should not get usage: {usage}")
-        self._num_free_blocks += num_freed_blocks
-
-        logger.info(
-            f"  free {num_freed_blocks} staging blocks (usage: {usage}) from Req:{req_id}"
-        )
-        return num_freed_blocks
-
-    def get_usage(self, with_details: bool = False):
-        usage_str = (f"Staging Buffer: total={self.num_blocks}, "
-                     f"free={self._num_free_blocks}, "
-                     f"used_for_load={self._num_blocks_for_load}, "
-                     f"used_for_save={self._num_blocks_for_save};")
-        if with_details:
-            blocks_for_save_str = " save_details:{"
-            for req, bn in self._blocks_for_save.items():
-                blocks_for_save_str += f"{req}:{bn},"
-            blocks_for_save_str += "} "
-
-            blocks_for_load_str = " load_details:{"
-            for req, bn in self._blocks_for_load.items():
-                blocks_for_load_str += f"{req}:{bn},"
-            blocks_for_load_str += "}."
-            usage_str += blocks_for_save_str + blocks_for_load_str
-
-        return usage_str
-
-
-class TPUConnectorScheduler():
+class TPUOffloadConnectorScheduler():
 
     def __init__(self, vllm_config: "VllmConfig"):
-        logger.info("TPUConnectorScheduler: Entering __init__")
+        logger.info("TPUOffloadConnectorScheduler: Entering __init__")
         self.vllm_config = vllm_config
         self.config = vllm_config.kv_transfer_config
         self.block_size = vllm_config.cache_config.block_size
 
         # offloading manager
-        self.offload_manager = LRUOffloadingManager(num_cpu_chunks=1024)
+        self.offload_manager = LRUCacheManager(num_cpu_chunks=1024)
 
         self._request_trackers: dict[ReqId, RequestTracker] = {}
         # This dictionary holds the full vLLM Request object for all requests
@@ -631,8 +484,8 @@ class TPUConnectorScheduler():
         self._external_cache_hits: dict[ReqId, int] = {}
 
         # request ID -> set(block hashes being saved/loaded)
-        self._reqs_being_saved = defaultdict[ReqId, set[CPU_CHUNK_ID]](set)
-        self._reqs_being_loaded = defaultdict[ReqId, set[CPU_CHUNK_ID]](set)
+        self._reqs_being_saved = defaultdict[ReqId, set[CpuChunkId]](set)
+        self._reqs_being_loaded = defaultdict[ReqId, set[CpuChunkId]](set)
 
         model_name = self.vllm_config.model_config.model
         self.token_processor = TokenProcessor(model_name=model_name,
@@ -668,11 +521,11 @@ class TPUConnectorScheduler():
             os.getenv("TPU_OFFLOAD_STAGING_BUFFER_TOKENS",
                       str(_default_staging_buffer_tokens)))
         self.num_staging_blocks = num_staging_buffer_tokens // self.block_size
-        self.staging_buffer_manager = _StagingBufferManager(
+        self.staging_buffer_manager = StagingBufferManager(
             num_blocks=self.num_staging_blocks)
 
         logger.info(
-            f"TPUConnectorScheduler initialized with: "
+            f"TPUOffloadConnectorScheduler initialized with: "
             f"block_size={self.block_size}, "
             f"cpu_chunk_size={self.cpu_chunk_size}, "
             f"model_name={model_name}, "
@@ -834,7 +687,7 @@ class TPUConnectorScheduler():
         Update the dst_blocks in the load_spec
         """
         logger.info(
-            f"TPUConnectorScheduler: Entering update_state_after_alloc Request {request.request_id}: Scheduler allocated "
+            f"TPUOffloadConnectorScheduler: Entering update_state_after_alloc Request {request.request_id}: Scheduler allocated "
             f"{num_external_tokens} external tokens.")
         self._unfinished_requests[request.request_id] = request
         if num_external_tokens == 0:
@@ -934,7 +787,7 @@ class TPUConnectorScheduler():
                     f"should_save={should_save}")
 
         # A SaveSpec is always prepared for a finished request to signal completion,
-        # even if we don't save the underlying KV data. This is to ensure the TPUConnectorWorker
+        # even if we don't save the underlying KV data. This is to ensure the TPUOffloadConnectorWorker
         # can correctly report finished request.
         save_spec = None
         if should_save:
@@ -1045,8 +898,9 @@ class TPUConnectorScheduler():
         )
 
     def build_connector_meta(
-            self, scheduler_output: SchedulerOutput) -> TPUConnectorMetadata:
-        metadata = TPUConnectorMetadata()
+            self,
+            scheduler_output: SchedulerOutput) -> TPUOffloadConnectorMetadata:
+        metadata = TPUOffloadConnectorMetadata()
 
         # Phase 1: Handle and clean up finished requests
         # This block handles requests that have completed their generation.
@@ -1230,7 +1084,7 @@ class TPUConnectorScheduler():
                 connectors output.
         """
         logger.info(
-            f"TPUConnectorScheduler: getting workers' output: finished_sending: {connector_output.finished_sending}, finished_recving: {connector_output.finished_recving}"
+            f"TPUOffloadConnectorScheduler: getting workers' output: finished_sending: {connector_output.finished_sending}, finished_recving: {connector_output.finished_recving}"
         )
 
         # per iteration, update the finished staging blocks
@@ -1314,7 +1168,7 @@ class TPUConnectorScheduler():
         return:
             delay_free_blocks, kv_xfer_params
         """
-        logger.info("TPUConnectorScheduler: Entering request_finished")
+        logger.info("TPUOffloadConnectorScheduler: Entering request_finished")
         # Return True to indicate the request is being saved asynchronously
         # and its blocks should not be freed yet.
 
@@ -1326,17 +1180,19 @@ class TPUConnectorScheduler():
                 self._reqs_being_loaded[req_id]) > 0:
             return True, None
 
-        logger.info(f"TPUConnectorScheduler: finished request: {req_id}")
+        logger.info(
+            f"TPUOffloadConnectorScheduler: finished request: {req_id}")
         self._reqs_being_saved.pop(req_id, None)
         self._reqs_being_loaded.pop(req_id, None)
 
         return False, None
 
 
-class TPUConnectorWorker:
+class TPUOffloadConnectorWorker:
 
-    def __init__(self, vllm_config: VllmConfig, connector: "TPUConnector"):
-        logger.info("TPUConnectorWorker: Entering __init__")
+    def __init__(self, vllm_config: VllmConfig,
+                 connector: "TPUOffloadConnector"):
+        logger.info("TPUOffloadConnectorWorker: Entering __init__")
         self.vllm_config = vllm_config
         self.config = vllm_config.kv_transfer_config
         self.connector = connector
@@ -1382,11 +1238,11 @@ class TPUConnectorWorker:
         self.offload_stats = KVOffloadConnectorStats()
 
     def __del__(self):
-        logger.info("TPUConnectorWorker: Entering __del__")
+        logger.info("TPUOffloadConnectorWorker: Entering __del__")
         self.save_executor.shutdown(wait=True)
 
     def register_runner(self, runner: TPUModelRunner):
-        logger.info("TPUConnectorWorker: Entering register_runner")
+        logger.info("TPUOffloadConnectorWorker: Entering register_runner")
         self.runner = runner
         self.devices = runner.devices
         self.mesh = runner.mesh
@@ -1416,7 +1272,8 @@ class TPUConnectorWorker:
                 host_sharding=self.flatten_host_sharding,
                 device_sharding=self.flatten_device_sharding)
 
-            logger.info("KV Cache details registered in TPUConnectorWorker:")
+            logger.info(
+                "KV Cache details registered in TPUOffloadConnectorWorker:")
             logger.info(f"  - Num layers: {self.num_layers}")
             logger.info(f"  - Shape per layer: {self.shape}")
             logger.info(f"  - DType: {self.dtype}")
@@ -1426,7 +1283,7 @@ class TPUConnectorWorker:
             logger.info(f"  - Layout: {self.kv_cache_layout}")
         else:
             raise ValueError(
-                "TPUConnectorWorker registered with no KV caches.")
+                "TPUOffloadConnectorWorker registered with no KV caches.")
 
         # Pre-compile the JIT functions for KV cache swapping.
         if self.use_bucketed_swap_ops:
@@ -1818,11 +1675,12 @@ class TPUConnectorWorker:
         if self._processed_save_for_step:
             return
 
-        # logger.info("TPUConnectorWorker: Entering wait_for_save")
+        # logger.info("TPUOffloadConnectorWorker: Entering wait_for_save")
         metadata = self.connector._get_connector_metadata()
-        if not isinstance(metadata, TPUConnectorMetadata):
+        if not isinstance(metadata, TPUOffloadConnectorMetadata):
             logger.info(
-                "wait_for_save:not an instances of TPUConnectorMetadata")
+                "wait_for_save:not an instances of TPUOffloadConnectorMetadata"
+            )
             self._processed_save_for_step = True
             return
 
@@ -1899,8 +1757,9 @@ class TPUConnectorWorker:
         # Reset the save processing flag at the start of a new step.
         self._processed_save_for_step = False
         metadata = self.connector._get_connector_metadata()
-        if not isinstance(metadata,
-                          TPUConnectorMetadata) or not metadata.requests_meta:
+        if not isinstance(
+                metadata,
+                TPUOffloadConnectorMetadata) or not metadata.requests_meta:
             logger.info("No load operations scheduled for this step.")
             return
 
@@ -1918,7 +1777,8 @@ class TPUConnectorWorker:
                 continue
 
             request_load_start_time = time.time()
-            logger.info("TPUConnectorWorker: Starting KV cache load process.")
+            logger.info(
+                "TPUOffloadConnectorWorker: Starting KV cache load process.")
             dst_blocks = meta.load_spec.dst_blocks
             src_chunks = meta.load_spec.src_chunks
             num_blocks_to_load = len(dst_blocks)
@@ -2012,7 +1872,7 @@ class TPUConnectorWorker:
         if load_times:
             aggregate_load_time = sum(load_times)
             logger.info(
-                f"TPUConnectorWorker: Aggregate KV cache load time for {len(load_times)} requests: {aggregate_load_time:.4f} seconds"
+                f"TPUOffloadConnectorWorker: Aggregate KV cache load time for {len(load_times)} requests: {aggregate_load_time:.4f} seconds"
             )
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
@@ -2038,7 +1898,7 @@ class TPUConnectorWorker:
         # request IDs are correctly identified and reported back to the engine
         # for resource cleanup. The `wait_for_save` method is idempotent,
         # so this call is a no-op in the normal execution path.
-        logger.info("TPUConnectorWorker: Entering get_finished")
+        logger.info("TPUOffloadConnectorWorker: Entering get_finished")
         self.wait_for_save()
 
         finished_saves = self.finished_save_reqs

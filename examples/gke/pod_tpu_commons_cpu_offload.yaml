@@ -18,7 +18,7 @@ spec:
     - --tensor_parallel_size=8
     - --max_model_len=1024
     - --kv-transfer-config
-    - '{"kv_connector":"TPUConnector","kv_connector_module_path":"tpu_inference.distributed.tpu_connector_local","kv_role":"kv_both"}'
+    - '{"kv_connector":"TPUOffloadConnector","kv_connector_module_path":"tpu_inference.distributed.tpu_connector_local","kv_role":"kv_both"}'
     env:
     - name: HUGGING_FACE_HUB_TOKEN
       valueFrom:

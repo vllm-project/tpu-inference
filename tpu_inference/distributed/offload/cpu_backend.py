@@ -6,13 +6,13 @@ import sys
 from collections import OrderedDict
 from typing import Any, Optional
 
+from tpu_inference.distributed.offload.utils import CpuChunkId
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
 
 GB = 1024**3
 DEFAULT_CPU_CACHE_SIZE_BYTES = 1 * GB
-CpuChunkId = int
 
 
 # TODO(jcgu): creating independent cpu backends since scheduler & worker could be in different processes.

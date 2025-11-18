@@ -4,7 +4,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tpu_inference.distributed.cache_util import jitted_insert_kv_cache_slices
+from tpu_inference.distributed.offload.utils import \
+    jitted_insert_kv_cache_slices
 
 
 def original_jitted_insert_kv_cache_slices(

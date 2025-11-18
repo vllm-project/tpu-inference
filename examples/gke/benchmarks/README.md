@@ -33,7 +33,7 @@ kubectl apply -f deploy-baseline.yaml
 
 ### Option B: vLLM with TPU Host Offload
 
-This deployment configures vLLM to use a `TPUConnector` for KV cache offload to the host CPU memory. This is specified by the `--kv-transfer-config` argument.
+This deployment configures vLLM to use a `TPUOffloadConnector` for KV cache offload to the host CPU memory. This is specified by the `--kv-transfer-config` argument.
 
 ```bash
 kubectl apply -f deploy-cpu-offload.yaml

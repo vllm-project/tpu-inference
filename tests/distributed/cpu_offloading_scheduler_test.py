@@ -8,9 +8,9 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.request import Request
 
-from tpu_inference.distributed.local_cpu_backend import LocalCPUBackend
-from tpu_inference.distributed.tpu_connector_local import (
-    ReqId, RequestTracker, TPUConnectorScheduler, _StagingBufferManager)
+from tpu_inference.distributed.offload.cpu_backend import LocalCPUBackend
+from tpu_inference.distributed.offload.tpu_offload_connector import (
+    ReqId, RequestTracker, Scheduler, _StagingBufferManager)
 from tpu_inference.logger import init_logger
 
 from .cpu_offloading_worker_test import MockVllmConfig
@@ -52,7 +52,7 @@ def clean_backend_instance():
 
 @pytest.fixture
 def scheduler_factory():
-    """Provides a factory function for TPUConnectorScheduler instances."""
+    """Provides a factory function for Scheduler instances."""
 
     def _scheduler(
         block_size: int = _DEFAULT_BLOCK_SIZE,
@@ -71,7 +71,7 @@ def scheduler_factory():
         if offload_staging_buffer_tokens >= 0:
             os.environ["TPU_OFFLOAD_STAGING_BUFFER_TOKENS"] = str(
                 offload_staging_buffer_tokens)
-        return TPUConnectorScheduler(vllm_config)
+        return Scheduler(vllm_config)
 
     return _scheduler
 
@@ -225,7 +225,7 @@ class TestStagingBufferManager:
         assert manager.get_num_used_staging_blocks() == 0
 
 
-class TestTPUConnectorScheduler:
+class TestScheduler:
 
     def _add_prompt_to_scheduler_cpu_backend(self, scheduler, prompt_tokens):
         """ add  """

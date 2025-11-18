@@ -13,9 +13,9 @@ from jax._src import test_util as jtu
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
-from tpu_inference.distributed.local_cpu_backend import LocalCPUBackend
-from tpu_inference.distributed.tpu_connector_local import \
-    TPUConnector as CPUOffloadingConnector
+from tpu_inference.distributed.offload.cpu_backend import LocalCPUBackend
+from tpu_inference.distributed.offload.tpu_offload_connector import \
+    TPUOffloadConnector as CPUOffloadingConnector
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
 
