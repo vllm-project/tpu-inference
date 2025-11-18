@@ -15,6 +15,9 @@ class MockVllmConfig:
         self.parallel_config.placement_group = None
         self.parallel_config.max_parallel_loading_workers = None
 
+        self.sharding_config = MagicMock()
+        self.sharding_config.total_devices = 2
+
         self.model_config = MagicMock()
         self.cache_config = MagicMock()
         self.lora_config = MagicMock()
@@ -127,6 +130,8 @@ class TestTpuRayDistributedExecutor(unittest.TestCase):
         }
 
         executor = self.RayDistributedExecutor(self.vllm_config)
+        executor.vllm_config = self.vllm_config
+        executor.parallel_config = self.vllm_config.parallel_config
 
         # --- Test and Assert ---
         with self.assertRaisesRegex(ValueError,
