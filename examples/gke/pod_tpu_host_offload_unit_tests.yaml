@@ -17,12 +17,12 @@ spec:
     command:
     - /bin/bash
     - -c
-    - "pytest -sv tests/distributed/host_offloading_precompile_test.py"
-    # - "pytest -sv tests/distributed/cpu_offloading_worker_test.py"
-    # - "pytest -sv tests/distributed/cpu_offloading_cache_util_test.py"
-    # - "pytest -sv tests/distributed/host_offloading_accuracy_test.py"
-    # - "pytest -sv tests/distributed/local_cpu_backend_test.py"
-    # - "pytest -sv tests/distributed/host_offloading_precompile_test.py"
+    - "pytest -sv tests/distributed/offload/host_offloading_precompile_test.py"
+    # - "pytest -sv tests/distributed/offload/cpu_offloading_worker_test.py"
+    # - "pytest -sv tests/distributed/offload/cpu_offloading_cache_util_test.py"
+    # - "pytest -sv tests/distributed/offload/host_offloading_accuracy_test.py"
+    # - "pytest -sv tests/distributed/offload/local_cpu_backend_test.py"
+    # - "pytest -sv tests/distributed/offload/host_offloading_precompile_test.py"
     env:
     - name: HUGGING_FACE_HUB_TOKEN
       valueFrom:
