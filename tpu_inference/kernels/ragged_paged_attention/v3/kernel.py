@@ -13,14 +13,12 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import \
-    get_tuned_block_sizes
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (
     align_to, cdiv, get_dtype_bitwidth, get_dtype_packing)
 
 DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
 
-DEFAULT_VMEM_LIMIT_BYTES = 100 * 1024 * 1024
+DEFAULT_VMEM_LIMIT_BYTES = 120 * 1024 * 1024
 
 
 def ref_ragged_paged_attention(
@@ -142,7 +140,7 @@ def ref_ragged_paged_attention(
             mask = jnp.logical_or(mask, q_span - sliding_window >= kv_span)
         if soft_cap is not None:
             attn = soft_cap * jnp.tanh(attn / soft_cap)
-        attn += jnp.where(mask, mask_value, 0.0)
+        attn = jnp.where(mask, mask_value, attn)
         attn = jax.nn.softmax(attn, axis=-1).astype(v.dtype)
 
         out = jnp.einsum("hqk,khd->qhd", attn, v).astype(queries.dtype)
@@ -222,7 +220,22 @@ def get_kv_cache_shape(
     )
 
 
-def _ragged_paged_attention_kernel(
+def _ragged_paged_attention_kernel(*args, **kwargs):
+    distribution_ref = args[3]
+    num_seqs = distribution_ref[2]
+
+    def loop_body(seq_idx, _):
+        return _ragged_paged_attention_kernel_loop(
+            seq_idx,
+            *args,
+            **kwargs,
+        )
+
+    lax.fori_loop(0, num_seqs, loop_body, None)
+
+
+def _ragged_paged_attention_kernel_loop(
+    seq_idx,
     # Prefetch
     kv_lens_ref,  # [max_num_seqs]
     page_indices_ref,  # [max_num_seqs * pages_per_seq]
@@ -289,16 +302,16 @@ def _ragged_paged_attention_kernel(
     assert get_dtype_packing(kv_dtype) == kv_packing
     assert head_dim % 128 == 0
     bkv_sz = bkv_p * page_size
-    seq_idx = pl.program_id(0)
-    num_seqs = pl.num_programs(0)
     decode_end = distribution_ref[0]
     prefill_end = distribution_ref[1]
     mixed_end = distribution_ref[2]
+    num_seqs = mixed_end
 
     q_start = cu_q_lens_ref[seq_idx]
     q_end = cu_q_lens_ref[seq_idx + 1]
     q_len = q_end - q_start
     kv_len = kv_lens_ref[seq_idx]
+    kv_q_gap = kv_len - q_len
 
     def debug_print(msg, *args):
         if debug_mode:
@@ -323,23 +336,19 @@ def _ragged_paged_attention_kernel(
         q,  # [actual_bq_sz * num_q_heads_per_kv_head, head_dim]
         k,  # [bkv_sz, head_dim]
         v,  # [bkv_sz, head_dim]
+        m_prev,
+        l_prev,
+        o_prev,
         *,
-        bq_idx,
-        bkv_idx,
-        kv_head_idx,
+        processed_q_len,
+        processed_kv_len,
+        effective_kv_len,
     ):
         assert len(q.shape) == 2
         assert q.shape[0] % num_q_heads_per_kv_head == 0
         assert q.shape[1] == head_dim
         assert k.shape == v.shape == (bkv_sz, head_dim)
         assert k.dtype == v.dtype
-        head_l_ref = l_ref.at[kv_head_idx, :q.shape[0]]
-        head_m_ref = m_ref.at[kv_head_idx, :q.shape[0]]
-        head_acc_ref = acc_ref.at[kv_head_idx, :q.shape[0]]
-
-        def load_with_init(ref, init_val):
-            return jnp.where(bkv_idx == 0, jnp.full_like(ref, init_val),
-                             ref[...])
 
         # Follow FlashAttention-2 forward pass.
         if q_scale is not None:
@@ -358,22 +367,22 @@ def _ragged_paged_attention_kernel(
         if q_scale is not None:
             s *= q_scale
 
-        q_span = (kv_len - q_len + bq_idx * bq_sz +
+        q_span = (processed_q_len +
                   lax.broadcasted_iota(jnp.int32, s.shape, 0) //
                   num_q_heads_per_kv_head)
-        k_span = bkv_idx * bkv_sz + lax.broadcasted_iota(jnp.int32, s.shape, 1)
-        mask = q_span < k_span
+        k_span = processed_kv_len + lax.broadcasted_iota(jnp.int32, s.shape, 1)
+        mask = jnp.logical_and(q_span < effective_kv_len, k_span
+                               < effective_kv_len)
+        mask = jnp.logical_and(mask, q_span >= k_span)
         # TODO(jevinjiang, xiowei): reduce pages_per_seq based on sliding_window.
         if sliding_window is not None:
-            mask = jnp.logical_or(mask, q_span - sliding_window >= k_span)
+            mask = jnp.logical_and(mask, q_span < k_span + sliding_window)
 
         if soft_cap is not None:
             s = soft_cap * jnp.tanh(s / soft_cap)
-        s += jnp.where(mask, mask_value, 0.0)
+        s = jnp.where(mask, s, mask_value)
         s_rowmax = jnp.max(s, axis=1, keepdims=True)
-        m_prev = load_with_init(head_m_ref, -jnp.inf)
         m_curr = jnp.maximum(m_prev, s_rowmax)
-        head_m_ref[...] = m_curr
         p = jnp.exp(s - broadcast_minor(m_curr, s.shape))
 
         pv = jnp.einsum("nm,md->nd", p, v, preferred_element_type=jnp.float32)
@@ -382,12 +391,10 @@ def _ragged_paged_attention_kernel(
 
         p_rowsum = jnp.sum(p, axis=1, keepdims=True)
         exp_m_diff = jnp.exp(m_prev - m_curr)
-        l_prev = load_with_init(head_l_ref, 0.0)
         l_curr = exp_m_diff * l_prev + p_rowsum
-        head_l_ref[...] = l_curr
-        o_prev = load_with_init(head_acc_ref, 0.0)
         o_curr = broadcast_minor(exp_m_diff, o_prev.shape) * o_prev + pv
-        head_acc_ref[...] = o_curr
+
+        return m_curr, l_curr, o_curr
 
     def _async_copy(src, dst, sem, wait):
         if debug_mode:
@@ -423,7 +430,7 @@ def _ragged_paged_attention_kernel(
         page_indices_offset = seq_idx * pages_per_seq + kv_p_start
 
         # Make sure the current bkv buffer is safe to overwrite.
-        wait_update_kv_cache(bkv_sem_idx)
+        # wait_update_kv_cache(bkv_sem_idx)
 
         debug_print(
             "[RPA debug]"
@@ -609,25 +616,21 @@ def _ragged_paged_attention_kernel(
         def _():
             _send_bo(old_seq_idx, old_bo_idx, bo_sem_idx, wait=True)
 
-    def start_update_kv_cache(seq_idx, bkv_sem_idx, offset, update_sz):
-        bkv_update_ids_ref[bkv_sem_idx] = seq_idx
-        bkv_update_ids_ref[bkv_sem_idx + 2] = offset
-        bkv_update_ids_ref[bkv_sem_idx + 4] = update_sz
-        _update_kv_cache(seq_idx, bkv_sem_idx, offset, update_sz)
+    # def start_update_kv_cache(seq_idx, bkv_sem_idx, offset, update_sz):
+    #   bkv_update_ids_ref[bkv_sem_idx] = seq_idx
+    #   bkv_update_ids_ref[bkv_sem_idx + 2] = offset
+    #   bkv_update_ids_ref[bkv_sem_idx + 4] = update_sz
+    #   _update_kv_cache(seq_idx, bkv_sem_idx, offset, update_sz)
 
-    def wait_update_kv_cache(bkv_sem_idx):
-        update_sz = bkv_update_ids_ref[bkv_sem_idx + 4]
+    # def wait_update_kv_cache(bkv_sem_idx):
+    #   update_sz = bkv_update_ids_ref[bkv_sem_idx + 4]
 
-        @pl.when(update_sz > 0)
-        def _():
-            seq_idx = bkv_update_ids_ref[bkv_sem_idx]
-            offset = bkv_update_ids_ref[bkv_sem_idx + 2]
-            bkv_update_ids_ref[bkv_sem_idx + 4] = 0
-            _update_kv_cache(seq_idx,
-                             bkv_sem_idx,
-                             offset,
-                             update_sz,
-                             wait=True)
+    # @pl.when(update_sz > 0)
+    # def _():
+    # seq_idx = bkv_update_ids_ref[bkv_sem_idx]
+    # offset = bkv_update_ids_ref[bkv_sem_idx + 2]
+    # bkv_update_ids_ref[bkv_sem_idx + 4] = 0
+    # _update_kv_cache(seq_idx, bkv_sem_idx, offset, update_sz, wait=True)
 
     def load_bq(bq_sem_idx, kv_head_idx, *, actual_bq_sz=bq_sz):
         q_ref = (bq_x2_ref.bitcast(
@@ -733,8 +736,10 @@ def _ragged_paged_attention_kernel(
             [src for _ in range(target_minor // src.shape[-1])],
             axis=-1)[..., :shape[-1]]
 
+    def load_with_init(init_cond, ref, init_val):
+        return jnp.where(init_cond, jnp.full_like(ref, init_val), ref[...])
+
     def process(static_q_len=None):
-        num_bkv = cdiv(kv_len, bkv_sz)
         if static_q_len is None:
             actual_bq_sz = bq_sz
             num_bq = cdiv(q_len, actual_bq_sz)
@@ -750,7 +755,8 @@ def _ragged_paged_attention_kernel(
             next_bq_sem_idx = lax.select(bq_sem_idx == 0, 1, 0)
             return next_seq_idx, next_bq_idx, next_bq_sem_idx
 
-        def get_next_bkv_ids(seq_idx, bq_idx, bkv_idx, bkv_sem_idx):
+        def get_next_bkv_ids(seq_idx, bq_idx, bkv_idx, bkv_sem_idx, *,
+                             num_bkv):
             next_bkv_idx = bkv_idx + 1
             is_last_bkv = next_bkv_idx == num_bkv
             next_bkv_idx = lax.select(is_last_bkv, 0, next_bkv_idx)
@@ -766,6 +772,11 @@ def _ragged_paged_attention_kernel(
             next_seq_idx, next_bq_idx, next_bq_sem_idx = get_next_bq_ids(
                 seq_idx, bq_idx, bq_sem_idx)
 
+            processed_q_len = kv_q_gap + bq_idx * actual_bq_sz
+            effective_kv_len = jnp.minimum(kv_len,
+                                           processed_q_len + actual_bq_sz)
+            num_bkv = cdiv(effective_kv_len, bkv_sz)
+
             # Prefetch next bq
             @pl.when(next_seq_idx < num_seqs)
             def prefetch_next_bq():
@@ -775,15 +786,12 @@ def _ragged_paged_attention_kernel(
             def compute_with_bkv(bkv_idx, _):
                 # Create bitmask for KV.
                 assert bkv_sz % kv_packing == 0
-                actual_bkv_sz = jnp.minimum(bkv_sz, kv_len - bkv_idx * bkv_sz)
-                bkv_shape = (bkv_sz, head_dim)
-                bkv_mask = lax.broadcasted_iota(jnp.int32, bkv_shape,
-                                                0) < actual_bkv_sz
 
                 # Get next bkv ids.
                 bkv_sem_idx = sem_ids_ref[1]
                 next_seq_idx, _, next_bkv_idx, next_bkv_sem_idx = get_next_bkv_ids(
-                    seq_idx, bq_idx, bkv_idx, bkv_sem_idx)
+                    seq_idx, bq_idx, bkv_idx, bkv_sem_idx, num_bkv=num_bkv)
+                processed_kv_len = bkv_idx * bkv_sz
 
                 # Prefetch next bkv
                 @pl.when(next_seq_idx < num_seqs)
@@ -802,11 +810,10 @@ def _ragged_paged_attention_kernel(
                                                    bkv_sem_idx)
 
                 # Start updating bkv to kv cache if applicable.
-                # Only needed in first bq loop.
-                @pl.when(jnp.logical_and(update_sz > 0, bq_idx == 0))
-                def update_cur_bkv_to_cache():
-                    start_update_kv_cache(seq_idx, bkv_sem_idx, offset,
-                                          update_sz)
+                # Only needed in last bq loop.
+                # @pl.when(jnp.logical_and(update_sz > 0, bq_idx == num_bq - 1))
+                # def update_cur_bkv_to_cache():
+                #   start_update_kv_cache(seq_idx, bkv_sem_idx, offset, update_sz)
 
                 debug_print(
                     "[RPA debug] -----------flash attention-----------")
@@ -816,6 +823,13 @@ def _ragged_paged_attention_kernel(
                 if debug_mode:
                     # Skip flash attention if debug mode is enabled.
                     return
+
+                effective_bkv_sz = jnp.minimum(
+                    effective_kv_len - bkv_idx * bkv_sz, bkv_sz)
+                effective_bkv_sz = jnp.maximum(effective_bkv_sz, 0)
+                bkv_shape = (bkv_sz, head_dim)
+                bkv_mask = (lax.broadcasted_iota(jnp.int32, bkv_shape, 0)
+                            < effective_bkv_sz)
 
                 # Flash attention with cur bkv and bq
                 # NOTE: kv_packing is divided by 2 because k and v are packed together.
@@ -837,14 +851,32 @@ def _ragged_paged_attention_kernel(
                                      kv_head_idx,
                                      actual_bq_sz=actual_bq_sz)
                         bk, bv = bkv_lst[i]
-                        flash_attention(
+
+                        head_m_ref = m_ref.at[kv_head_idx, :bq.shape[0]]
+                        head_l_ref = l_ref.at[kv_head_idx, :bq.shape[0]]
+                        head_acc_ref = acc_ref.at[kv_head_idx, :bq.shape[0]]
+
+                        m_prev = load_with_init(bkv_idx == 0, head_m_ref,
+                                                -jnp.inf)
+                        l_prev = load_with_init(bkv_idx == 0, head_l_ref, 0.0)
+                        o_prev = load_with_init(bkv_idx == 0, head_acc_ref,
+                                                0.0)
+
+                        m_curr, l_curr, o_curr = flash_attention(
                             bq,
                             bk,
                             bv,
-                            bq_idx=bq_idx,
-                            bkv_idx=bkv_idx,
-                            kv_head_idx=kv_head_idx,
+                            m_prev,
+                            l_prev,
+                            o_prev,
+                            processed_q_len=processed_q_len,
+                            processed_kv_len=processed_kv_len,
+                            effective_kv_len=effective_kv_len,
                         )
+
+                        head_m_ref[...] = m_curr
+                        head_l_ref[...] = l_curr
+                        head_acc_ref[...] = o_curr
 
             lax.fori_loop(0, num_bkv, compute_with_bkv, None, unroll=False)
 
@@ -894,7 +926,7 @@ def _ragged_paged_attention_kernel(
     def epilogue():
         for i in range(2):
             wait_send_bo(i)
-            wait_update_kv_cache(i)
+            # wait_update_kv_cache(i)
 
     ### ------- Kernel end ------- ###
 
@@ -1345,28 +1377,18 @@ def ragged_paged_attention(
     max_num_seqs = kv_lens.shape[0]
     num_page_indices = page_indices.shape[0]
     assert num_page_indices % max_num_seqs == 0
-    pages_per_seq = num_page_indices // max_num_seqs
     num_q_heads_per_kv_head = num_q_heads_per_kv_head_per_q_packing * q_packing
 
     bkv_p = num_kv_pages_per_block
     bq_sz = num_queries_per_block
+
     if bq_sz is None or bkv_p is None:
-        bkv_p, bq_sz = get_tuned_block_sizes(
-            q.dtype,
-            kv_cache.dtype,
-            actual_num_q_heads,
-            actual_num_kv_heads,
-            head_dim,
-            page_size,
-            max_num_tokens,
-            pages_per_seq,
-        )
+        raise ValueError("Both bq_sz and bkv_p must be specified!")
     bkv_sz = bkv_p * page_size
     if vmem_limit_bytes is None:
         # TODO (jevinjiang/jacobplatin): change this to use
         # `get_vmem_estimate_bytes` when VREG spilling is fixed.
         vmem_limit_bytes = DEFAULT_VMEM_LIMIT_BYTES
-    grid = (distribution[2], )
 
     in_specs = [
         pl.BlockSpec(memory_space=pltpu.HBM),
@@ -1429,46 +1451,46 @@ def ragged_paged_attention(
     )
 
     scope_name = f"RPA-bq_{bq_sz}-bkvp_{bkv_p}-p_{page_size}"
-    kernel = jax.named_scope(scope_name)(
-        pl.pallas_call(
-            functools.partial(
-                _ragged_paged_attention_kernel,
-                sm_scale=sm_scale,
-                sliding_window=sliding_window,
-                soft_cap=soft_cap,
-                mask_value=mask_value,
-                q_scale=q_scale,
-                k_scale=k_scale,
-                v_scale=v_scale,
-                chunk_prefill_size=chunk_prefill_size,
-                bq_sz=bq_sz,
-                bkv_p=bkv_p,
-                debug_mode=debug_mode,
-            ),
-            grid_spec=pltpu.PrefetchScalarGridSpec(
-                num_scalar_prefetch=len(scalar_prefetches),
-                in_specs=in_specs,
-                out_specs=out_specs,
-                grid=grid,
-                scratch_shapes=scratch_shapes,
-            ),
-            compiler_params=pltpu.CompilerParams(
-                # TODO(jevinjiang): since each sequence depends on the previous
-                # one, we need some extra work to support Megacore mode.
-                dimension_semantics=("arbitrary", ),
-                vmem_limit_bytes=vmem_limit_bytes,
-            ),
-            out_shape=[
-                jax.ShapeDtypeStruct(shape=q.shape, dtype=q.dtype),
-                jax.ShapeDtypeStruct(shape=kv_cache.shape,
-                                     dtype=kv_cache.dtype),
-            ],
-            input_output_aliases={
-                7: 0,
-                9: 1
-            },
-            name=scope_name,
-        ))
+    kernel = jax.named_scope(scope_name)(pl.pallas_call(
+        functools.partial(
+            _ragged_paged_attention_kernel,
+            sm_scale=sm_scale,
+            sliding_window=sliding_window,
+            soft_cap=soft_cap,
+            mask_value=mask_value,
+            q_scale=q_scale,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            chunk_prefill_size=chunk_prefill_size,
+            bq_sz=bq_sz,
+            bkv_p=bkv_p,
+            debug_mode=debug_mode,
+        ),
+        grid_spec=pltpu.PrefetchScalarGridSpec(
+            num_scalar_prefetch=len(scalar_prefetches),
+            in_specs=in_specs,
+            out_specs=out_specs,
+            grid=(1, ),
+            scratch_shapes=scratch_shapes,
+        ),
+        compiler_params=pltpu.CompilerParams(
+            vmem_limit_bytes=vmem_limit_bytes,
+            disable_bounds_checks=True,
+        ),
+        out_shape=[
+            pltpu.HBM(shape=q.shape, dtype=q.dtype),
+            pltpu.HBM(shape=kv_cache.shape, dtype=kv_cache.dtype),
+        ],
+        input_output_aliases={
+            7: 0,
+            9: 1
+        },
+        name=scope_name,
+    ))
+
+    q = pltpu.with_memory_space_constraint(q, pltpu.HBM)
+    kv = pltpu.with_memory_space_constraint(kv, pltpu.HBM)
+    kv_cache = pltpu.with_memory_space_constraint(kv_cache, pltpu.HBM)
 
     output, updated_kv_cache = kernel(*scalar_prefetches, q, kv, kv_cache)
     return (
