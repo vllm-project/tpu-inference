@@ -1,233 +1,0 @@
-INFO 11-14 05:25:30 [__init__.py:26] TPU info: node_name=cuiq-infer-v7-2 | tpu_type=tpu7x-8 | worker_id=0 | num_chips=8 | num_cores_per_chip=2
-INFO 11-14 05:25:30 [importing.py:44] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
-INFO 11-14 05:25:30 [importing.py:68] Triton not installed or not compatible; certain GPU-related functions will not be available.
-WARNING 11-14 05:25:30 [interface.py:197] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
-INFO 11-14 05:25:31 [utils.py:253] non-default args: {'download_dir': '/mnt/disks/persist', 'max_model_len': 1024, 'tensor_parallel_size': 8, 'num_redundant_experts': None, 'eplb_window_size': None, 'eplb_step_interval': None, 'eplb_log_balancedness': None, 'gpu_memory_utilization': 0.8, 'enable_lora': None, 'reasoning_parser_plugin': '', 'additional_config': {'sharding': {'sharding_strategy': {'enable_dp_attention': 1}}}, 'async_scheduling': True, 'model': 'unsloth/gpt-oss-120b-BF16'}
-INFO 11-14 05:25:32 [model.py:630] Resolved architecture: GptOssForCausalLM
-INFO 11-14 05:25:32 [model.py:1728] Using max model len 1024
-WARNING 11-14 05:25:32 [tpu_jax.py:82] Error getting device name: 'NoneType' object has no attribute 'name'
-INFO 11-14 05:25:32 [scheduler.py:254] Chunked prefill is enabled with max_num_batched_tokens=8192.
-INFO 11-14 05:25:32 [config.py:272] Overriding max cuda graph capture size to 1024 for performance.
-INFO 11-14 05:25:32 [tpu_jax.py:118] Initialized sharding configuration: ShardingConfigManager(total_devices=8, sharding_strategy=ShardingStrategy(tensor_parallelism=4, expert_parallelism=1, sequence_parallelism=1, data_parallelism=1, attention_data_parallelism=2), device_indexes=None)
-WARNING 11-14 05:25:32 [tpu_jax.py:156] The model dtype is not properly set for JAX backend. Overwriting it to jnp.bfloat16
-INFO 11-14 05:25:32 [tpu_jax.py:192] Force using UniProcExecutor for JAX on single host.
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m INFO 11-14 05:25:33 [core.py:94] Initializing a V1 LLM engine (v0.11.1rc7.dev48+gdf4d3a44a) with config: model='unsloth/gpt-oss-120b-BF16', speculative_config=None, tokenizer='unsloth/gpt-oss-120b-BF16', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=1024, download_dir='/mnt/disks/persist', load_format=auto, tensor_parallel_size=8, pipeline_parallel_size=1, data_parallel_size=1, disable_custom_all_reduce=True, quantization=None, enforce_eager=False, kv_cache_dtype=auto, device_config=None, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='openai_gptoss', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None), seed=0, served_model_name=unsloth/gpt-oss-120b-BF16, enable_prefix_caching=True, chunked_prefill_enabled=True, pooler_config=None, compilation_config={'level': None, 'mode': 2, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'openxla', 'custom_ops': ['all'], 'splitting_ops': None, 'compile_mm_encoder': True, 'use_inductor': None, 'compile_sizes': None, 'inductor_compile_config': {'enable_auto_functionalized_v2': False}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'use_cudagraph': True, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': None, 'cudagraph_copy_inputs': False, 'full_cuda_graph': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {}, 'max_cudagraph_capture_size': 1024, 'local_cache_dir': None}
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m WARNING 11-14 05:25:33 [tpu_jax.py:228] Pin memory is not supported on TPU.
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m INFO 11-14 05:25:38 [parallel_state.py:1325] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, TP rank 0, EP rank 0
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m INFO 11-14 05:25:38 [tpu_jax_runner.py:274] Init mesh | mesh=Mesh('data': 1, 'model': 4, axis_types=(Auto, Auto))
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m INFO 11-14 05:25:38 [utils.py:93] Prepared token paddings: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m INFO 11-14 05:25:38 [utils.py:59] Prepared request paddings: [8, 16, 32, 64, 128, 256, 512]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m INFO 11-14 05:25:38 [compilation_manager.py:34] Enabling JAX compile cache.
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m INFO 11-14 05:25:38 [tpu_worker_jax.py:152] Init worker | rank=0 | node_id=0 | is_driver_worker=True | hbm=[(0.0, 94.75), (0.0, 94.75), (0.0, 94.75), (0.0, 94.75), (0.0, 94.75), (0.0, 94.75), (0.0, 94.75), (0.0, 94.75)]GiB
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m INFO 11-14 05:25:38 [model_loader.py:318] Loading model with MODEL_IMPL_TYPE=vllm
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m WARNING 11-14 05:25:39 [rocm.py:34] Failed to import from amdsmi with ModuleNotFoundError("No module named 'amdsmi'")
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m WARNING 11-14 05:25:39 [rocm.py:39] Failed to import from vllm._C with ModuleNotFoundError("No module named 'vllm._C'")
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m WARNING 11-14 05:25:39 [rocm.py:45] Failed to import from vllm._rocm_C with ModuleNotFoundError("No module named 'vllm._rocm_C'")
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m WARNING 11-14 05:25:39 [registry.py:171] _Backend has been renamed to AttentionBackendEnum. Please update your code to use AttentionBackendEnum instead. _Backend will be removed in a future release.
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m INFO 11-14 05:25:39 [tpu_jax.py:63] Cannot use None backend on TPU.
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m INFO 11-14 05:25:39 [tpu_jax.py:66] Using Pallas V1 backend.
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m INFO 11-14 05:25:39 [layer.py:331] Disabling MoE shared_experts cuda stream
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:   0% Completed | 0/73 [00:00<?, ?it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:   1% Completed | 1/73 [00:00<00:11,  6.10it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:   3% Completed | 2/73 [00:00<00:12,  5.59it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:   4% Completed | 3/73 [00:00<00:18,  3.87it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:   5% Completed | 4/73 [00:01<00:21,  3.24it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:   7% Completed | 5/73 [00:01<00:18,  3.64it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:   8% Completed | 6/73 [00:01<00:16,  4.08it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  10% Completed | 7/73 [00:01<00:14,  4.41it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  11% Completed | 8/73 [00:01<00:13,  4.67it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  12% Completed | 9/73 [00:02<00:13,  4.81it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  14% Completed | 10/73 [00:02<00:15,  3.99it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  15% Completed | 11/73 [00:02<00:14,  4.20it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  16% Completed | 12/73 [00:02<00:13,  4.49it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  18% Completed | 13/73 [00:03<00:13,  4.59it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  19% Completed | 14/73 [00:03<00:15,  3.90it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  21% Completed | 15/73 [00:03<00:16,  3.46it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  22% Completed | 16/73 [00:04<00:18,  3.15it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  23% Completed | 17/73 [00:04<00:15,  3.52it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  25% Completed | 18/73 [00:04<00:16,  3.30it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  26% Completed | 19/73 [00:05<00:17,  3.04it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  27% Completed | 20/73 [00:05<00:18,  2.94it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  29% Completed | 21/73 [00:05<00:18,  2.87it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  30% Completed | 22/73 [00:06<00:18,  2.78it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  32% Completed | 23/73 [00:06<00:18,  2.76it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  33% Completed | 24/73 [00:06<00:15,  3.17it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  34% Completed | 25/73 [00:07<00:15,  3.02it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  36% Completed | 26/73 [00:07<00:13,  3.39it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  37% Completed | 27/73 [00:07<00:12,  3.82it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  38% Completed | 28/73 [00:07<00:12,  3.48it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  40% Completed | 29/73 [00:08<00:13,  3.21it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  41% Completed | 30/73 [00:08<00:12,  3.47it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  42% Completed | 31/73 [00:08<00:12,  3.28it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  44% Completed | 32/73 [00:09<00:13,  3.10it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  45% Completed | 33/73 [00:09<00:13,  2.94it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  47% Completed | 34/73 [00:09<00:11,  3.33it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  48% Completed | 35/73 [00:09<00:10,  3.76it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  49% Completed | 36/73 [00:10<00:10,  3.46it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  51% Completed | 37/73 [00:10<00:11,  3.16it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  52% Completed | 38/73 [00:10<00:10,  3.50it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  53% Completed | 39/73 [00:11<00:10,  3.29it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  55% Completed | 40/73 [00:11<00:10,  3.05it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  56% Completed | 41/73 [00:11<00:09,  3.39it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  58% Completed | 42/73 [00:12<00:08,  3.78it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  59% Completed | 43/73 [00:12<00:08,  3.47it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  60% Completed | 44/73 [00:12<00:07,  3.71it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  62% Completed | 45/73 [00:12<00:06,  4.10it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  63% Completed | 46/73 [00:12<00:06,  4.42it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  64% Completed | 47/73 [00:13<00:06,  3.82it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  66% Completed | 48/73 [00:13<00:06,  3.99it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  67% Completed | 49/73 [00:13<00:05,  4.25it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  68% Completed | 50/73 [00:14<00:06,  3.71it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  70% Completed | 51/73 [00:14<00:05,  4.00it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  71% Completed | 52/73 [00:14<00:05,  3.57it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  73% Completed | 53/73 [00:14<00:05,  3.88it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  74% Completed | 54/73 [00:15<00:04,  4.26it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  75% Completed | 55/73 [00:15<00:03,  4.56it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  77% Completed | 56/73 [00:15<00:03,  4.81it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  78% Completed | 57/73 [00:15<00:04,  3.97it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  79% Completed | 58/73 [00:15<00:03,  4.19it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  81% Completed | 59/73 [00:16<00:03,  3.71it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  82% Completed | 60/73 [00:16<00:03,  3.31it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  84% Completed | 61/73 [00:17<00:03,  3.13it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  85% Completed | 62/73 [00:17<00:03,  3.51it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  86% Completed | 63/73 [00:17<00:03,  3.28it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  88% Completed | 64/73 [00:17<00:02,  3.64it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  89% Completed | 65/73 [00:17<00:01,  4.05it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  90% Completed | 66/73 [00:18<00:01,  4.39it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  92% Completed | 67/73 [00:18<00:01,  4.67it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  93% Completed | 68/73 [00:18<00:01,  3.99it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  96% Completed | 70/73 [00:19<00:00,  4.25it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  97% Completed | 71/73 [00:19<00:00,  3.77it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards:  99% Completed | 72/73 [00:19<00:00,  3.48it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards: 100% Completed | 73/73 [00:20<00:00,  3.25it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Loading safetensors checkpoint shards: 100% Completed | 73/73 [00:20<00:00,  3.62it/s]
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m 
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m INFO 11-14 05:26:00 [default_loader.py:314] Loading weights took 20.22 seconds
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m [2025-11-14 05:26:02] WARNING ops_registry.py:36: Duplicate op registration for aten.__and__
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m [2025-11-14 05:26:02] WARNING unquantized.py:94: Bias might return incorrect value.
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m INFO 11-14 05:27:00 [tpu_jax_runner.py:498] Init model | hbm=[(56.45, 94.75), (56.45, 94.75), (0.0, 94.75), (0.0, 94.75), (56.45, 94.75), (56.45, 94.75), (0.0, 94.75), (0.0, 94.75)]GiB
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m INFO 11-14 05:27:00 [tpu_worker_jax.py:175] Memory statistics | total_hbm_limit_gb=757.97GiB | total_hbm_limit_cap_gb=606.37GiB | total_hbm_used_gb=225.81GiB | total_hbm_avail_gb=380.57GiB
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m WARNING 11-14 05:27:00 [kv_cache_utils.py:1095] Hybrid KV cache manager is disabled for this hybrid model, This means we do not enable any optimizations for saving KV cache memory (e.g., dropping the KV cache outside the sliding window). The compute of layers like sliding window is still saved.
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m INFO 11-14 05:27:00 [kv_cache_utils.py:1229] GPU KV cache size: 5,542,336 tokens
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m INFO 11-14 05:27:00 [kv_cache_utils.py:1234] Maximum concurrency for 1,024 tokens per request: 5412.44x
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855] EngineCore failed to start.
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855] Traceback (most recent call last):
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core.py", line 846, in run_engine_core
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]     engine_core = EngineCoreProc(*args, **kwargs)
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core.py", line 619, in __init__
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]     super().__init__(
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core.py", line 110, in __init__
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]     num_gpu_blocks, num_cpu_blocks, kv_cache_config = self._initialize_kv_caches(
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core.py", line 244, in _initialize_kv_caches
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]     self.model_executor.initialize_from_config(kv_cache_configs)
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]   File "/home/wenxindong_google_com/vllm/vllm/v1/executor/abstract.py", line 115, in initialize_from_config
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]     self.collective_rpc("initialize_from_config", args=(kv_cache_configs,))
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]   File "/home/wenxindong_google_com/vllm/vllm/v1/executor/uniproc_executor.py", line 75, in collective_rpc
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]     result = run_method(self.driver_worker, method, args, kwargs)
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]   File "/home/wenxindong_google_com/vllm/vllm/v1/serial_utils.py", line 459, in run_method
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]     return func(*args, **kwargs)
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]            ^^^^^^^^^^^^^^^^^^^^^
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]   File "/home/wenxindong_google_com/vllm/vllm/v1/worker/worker_base.py", line 319, in initialize_from_config
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]     self.worker.initialize_from_config(kv_cache_config)  # type: ignore
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/worker/tpu_worker_jax.py", line 295, in initialize_from_config
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]     self.model_runner.initialize_kv_cache(kv_cache_config)
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/runner/tpu_jax_runner.py", line 510, in initialize_kv_cache
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]     self.kv_cache_manager.initialize_kv_cache(kv_cache_config)
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/runner/kv_cache_manager.py", line 195, in initialize_kv_cache
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]     kv_cache = create_kv_caches(
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]                ^^^^^^^^^^^^^^^^^
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/runner/kv_cache.py", line 93, in create_kv_caches
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]     kv_caches.append(sharded_allocate())
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855]                      ^^^^^^^^^^^^^^^^^^
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855] jax.errors.JaxRuntimeError: RESOURCE_EXHAUSTED: Error allocating device buffer: Attempting to allocate 2.64G. That was not possible. There are 1.30G free.; (0x1x0_HBM1): while running replica 0 and partition 0 of a replicated computation (other replicas may have failed as well).
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855] --------------------
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m ERROR 11-14 05:27:02 [core.py:855] For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Process EngineCore_DP0:
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m Traceback (most recent call last):
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m   File "/mnt/disks/persist/vllm_conda/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m     self.run()
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m   File "/mnt/disks/persist/vllm_conda/lib/python3.12/multiprocessing/process.py", line 108, in run
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m     self._target(*self._args, **self._kwargs)
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core.py", line 859, in run_engine_core
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m     raise e
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core.py", line 846, in run_engine_core
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m     engine_core = EngineCoreProc(*args, **kwargs)
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core.py", line 619, in __init__
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m     super().__init__(
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core.py", line 110, in __init__
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m     num_gpu_blocks, num_cpu_blocks, kv_cache_config = self._initialize_kv_caches(
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core.py", line 244, in _initialize_kv_caches
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m     self.model_executor.initialize_from_config(kv_cache_configs)
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/executor/abstract.py", line 115, in initialize_from_config
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m     self.collective_rpc("initialize_from_config", args=(kv_cache_configs,))
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/executor/uniproc_executor.py", line 75, in collective_rpc
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m     result = run_method(self.driver_worker, method, args, kwargs)
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/serial_utils.py", line 459, in run_method
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m     return func(*args, **kwargs)
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m            ^^^^^^^^^^^^^^^^^^^^^
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m   File "/home/wenxindong_google_com/vllm/vllm/v1/worker/worker_base.py", line 319, in initialize_from_config
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m     self.worker.initialize_from_config(kv_cache_config)  # type: ignore
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/worker/tpu_worker_jax.py", line 295, in initialize_from_config
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m     self.model_runner.initialize_kv_cache(kv_cache_config)
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/runner/tpu_jax_runner.py", line 510, in initialize_kv_cache
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m     self.kv_cache_manager.initialize_kv_cache(kv_cache_config)
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/runner/kv_cache_manager.py", line 195, in initialize_kv_cache
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m     kv_cache = create_kv_caches(
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m                ^^^^^^^^^^^^^^^^^
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m   File "/home/wenxindong_google_com/tpu-inference/tpu_inference/runner/kv_cache.py", line 93, in create_kv_caches
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m     kv_caches.append(sharded_allocate())
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m                      ^^^^^^^^^^^^^^^^^^
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m jax.errors.JaxRuntimeError: RESOURCE_EXHAUSTED: Error allocating device buffer: Attempting to allocate 2.64G. That was not possible. There are 1.30G free.; (0x1x0_HBM1): while running replica 0 and partition 0 of a replicated computation (other replicas may have failed as well).
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m --------------------
-[1;36m(EngineCore_DP0 pid=4095770)[0;0m For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
-Traceback (most recent call last):
-  File "/home/wenxindong_google_com/tpu-inference/examples/offline_inference.py", line 113, in <module>
-    main(args)
-  File "/home/wenxindong_google_com/tpu-inference/examples/offline_inference.py", line 37, in main
-    llm = LLM(**args)
-          ^^^^^^^^^^^
-  File "/home/wenxindong_google_com/vllm/vllm/entrypoints/llm.py", line 341, in __init__
-    self.llm_engine = LLMEngine.from_engine_args(
-                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/wenxindong_google_com/vllm/vllm/v1/engine/llm_engine.py", line 174, in from_engine_args
-    return cls(
-           ^^^^
-  File "/home/wenxindong_google_com/vllm/vllm/v1/engine/llm_engine.py", line 108, in __init__
-    self.engine_core = EngineCoreClient.make_client(
-                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core_client.py", line 93, in make_client
-    return SyncMPClient(vllm_config, executor_class, log_stats)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core_client.py", line 640, in __init__
-    super().__init__(
-  File "/home/wenxindong_google_com/vllm/vllm/v1/engine/core_client.py", line 469, in __init__
-    with launch_core_engines(vllm_config, executor_class, log_stats) as (
-         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/mnt/disks/persist/vllm_conda/lib/python3.12/contextlib.py", line 144, in __exit__
-    next(self.gen)
-  File "/home/wenxindong_google_com/vllm/vllm/v1/engine/utils.py", line 898, in launch_core_engines
-    wait_for_engine_startup(
-  File "/home/wenxindong_google_com/vllm/vllm/v1/engine/utils.py", line 955, in wait_for_engine_startup
-    raise RuntimeError(
-RuntimeError: Engine core initialization failed. See root cause above. Failed core proc(s): {}
