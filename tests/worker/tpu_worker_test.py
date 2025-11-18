@@ -25,6 +25,8 @@ def mock_vllm_config():
     mock_parallel_conf = MagicMock()
     mock_parallel_conf.tensor_parallel_size = 2
     mock_parallel_conf.data_parallel_size = 1
+    mock_parallel_conf.nnodes = 1
+    mock_parallel_conf.nnodes_within_dp = 1
 
     mock_additional_config = {}
 
