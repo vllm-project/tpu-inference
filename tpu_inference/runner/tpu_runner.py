@@ -15,7 +15,7 @@ import vllm.envs as envs
 from flax import nnx
 from jax.experimental import mesh_utils
 from jax.sharding import NamedSharding, PartitionSpec
-from torchax.ops.mappings import j2t, j2t_dtype
+from torchax.ops.mappings import j2t_dtype
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
@@ -192,29 +192,28 @@ def _substitute_placeholder_token(
     return input_ids.at[token_in_tpu_cur_input_indices].set(update_values)
 
 
-def _jax_logprobs_to_lists(logprobs_tensors, cu_num_generated_tokens=None):
+def _jax_logprobs_to_lists(logprobs_tensors,
+                           logits_indices_selector=None,
+                           cu_num_generated_tokens=None):
     """Convert JAX LogprobsTensors to LogprobsLists by converting JAX arrays to numpy."""
+    log_token_ids_list = logprobs_tensors.logprob_token_ids.tolist()
+    logprobs_list = logprobs_tensors.logprobs.tolist()
+    selected_token_ranks_list = logprobs_tensors.selected_token_ranks.tolist()
+
+    if logits_indices_selector is not None:
+        log_token_ids_list = [
+            log_token_ids_list[i] for i in logits_indices_selector
+        ]
+        logprobs_list = [logprobs_list[i] for i in logits_indices_selector]
+        selected_token_ranks_list = [
+            selected_token_ranks_list[i] for i in logits_indices_selector
+        ]
+
     return LogprobsLists(
-        logprob_token_ids=np.asarray(logprobs_tensors.logprob_token_ids.tolist()),
-        logprobs=np.asarray(logprobs_tensors.logprobs.tolist()),
-        sampled_token_ranks=np.asarray(logprobs_tensors.selected_token_ranks.tolist()),
+        logprob_token_ids=np.asarray(log_token_ids_list),
+        logprobs=np.asarray(logprobs_list),
+        sampled_token_ranks=np.asarray(selected_token_ranks_list),
         cu_num_generated_tokens=cu_num_generated_tokens,
-    )
-
-
-def _reorder_logits_indices(logprobs_lists: LogprobsLists,
-                            logits_indices_selector: List[int]):
-    return LogprobsLists(
-        logprob_token_ids=[
-            logprobs_lists.logprob_token_ids[i]
-            for i in logits_indices_selector
-        ],
-        logprobs=[logprobs_lists.logprobs[i] for i in logits_indices_selector],
-        sampled_token_ranks=[
-            logprobs_lists.sampled_token_ranks[i]
-            for i in logits_indices_selector
-        ],
-        cu_num_generated_tokens=logprobs_lists.cu_num_generated_tokens,
     )
 
 
@@ -563,17 +562,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         (scheduler_output, attn_metadata, input_ids, hidden_states, logits,
          aux_hidden_states, spec_decode_metadata, kv_connector_output,
-         logits_indices_selector, padded_num_reqs) = (
-             self.execute_model_state.scheduler_output,
-             self.execute_model_state.attn_metadata,
-             self.execute_model_state.input_ids,
-             self.execute_model_state.hidden_states,
-             self.execute_model_state.logits,
-             self.execute_model_state.aux_hidden_states,
-             self.execute_model_state.spec_decode_metadata,
-             self.execute_model_state.kv_connector_output,
-             self.execute_model_state.logits_indices_selector,
-             self.execute_model_state.padded_num_reqs)
+         logits_indices_selector,
+         padded_num_reqs) = (self.execute_model_state.scheduler_output,
+                             self.execute_model_state.attn_metadata,
+                             self.execute_model_state.input_ids,
+                             self.execute_model_state.hidden_states,
+                             self.execute_model_state.logits,
+                             self.execute_model_state.aux_hidden_states,
+                             self.execute_model_state.spec_decode_metadata,
+                             self.execute_model_state.kv_connector_output,
+                             self.execute_model_state.logits_indices_selector,
+                             self.execute_model_state.padded_num_reqs)
         self.execute_model_state = None
 
         if grammar_output is not None:
@@ -587,13 +586,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 logits,
                 arange,
             )
-        return self._sample_from_logits(scheduler_output, attn_metadata,
-                                        input_ids, hidden_states, logits,
-                                        aux_hidden_states,
-                                        spec_decode_metadata,
-                                        kv_connector_output,
-                                        logits_indices_selector,
-                                        padded_num_reqs)
+        return self._sample_from_logits(
+            scheduler_output, attn_metadata, input_ids, hidden_states, logits,
+            aux_hidden_states, spec_decode_metadata, kv_connector_output,
+            logits_indices_selector, padded_num_reqs)
 
     def _modify_prev_results(self):
         # If copy to host has not been done, we just wait.
@@ -790,12 +786,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if padded_num_reqs is None:
             padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
                 self.input_batch.num_reqs, self.max_num_reqs)
-        
+
         # When using data parallelism, sampling metadata should be sharded along ATTN_DATA axis
         sharding = None
         if self.dp_size > 1:
-            sharding = NamedSharding(self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
-        
+            sharding = NamedSharding(self.mesh,
+                                     PartitionSpec(ShardingAxisName.ATTN_DATA))
+
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
             self.mesh, self.input_batch, padded_num_reqs, sharding=sharding)
         if spec_decode_metadata is None:
@@ -829,8 +826,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if tpu_sampling_metadata.logprobs:
             logprobs = self._compute_and_gather_logprobs(
                 logits, next_tokens, self.model_config.max_logprobs)
-            logprobs_lists = jax.tree.map(lambda x: j2t(x.astype(jnp.float32)),
-                                          logprobs).tolists()
         else:
             logprobs = None
 
@@ -883,10 +878,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             if logprobs is not None:
                 # Map logprobs back to the pre-dp shuffling order
-                logprobs_lists = _jax_logprobs_to_lists(logprobs)
-                if logits_indices_selector is not None:
-                    logprobs_lists = _reorder_logits_indices(
-                        logprobs_lists, logits_indices_selector)
+                logprobs_lists = _jax_logprobs_to_lists(
+                    logprobs, logits_indices_selector)
 
             else:
                 logprobs_lists = None
@@ -958,10 +951,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         if logprobs is not None:
             # Map logprobs back to the pre-dp shuffling order
-            logprobs_lists = _jax_logprobs_to_lists(logprobs)
-            if logits_indices_selector is not None:
-                logprobs_lists = _reorder_logits_indices(
-                    logprobs_lists, logits_indices_selector)
+            logprobs_lists = _jax_logprobs_to_lists(logprobs,
+                                                    logits_indices_selector)
         else:
             logprobs_lists = None
 
