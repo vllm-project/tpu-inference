@@ -192,18 +192,6 @@ def _substitute_placeholder_token(
     return input_ids.at[token_in_tpu_cur_input_indices].set(update_values)
 
 
-
-def _jax_logprobs_to_lists(logprobs_tensors, cu_num_generated_tokens=None):
-    """Convert JAX LogprobsTensors to LogprobsLists by converting JAX arrays to numpy."""
-    return LogprobsLists(
-        logprob_token_ids=np.asarray(logprobs_tensors.logprob_token_ids.tolist()),
-        logprobs=np.asarray(logprobs_tensors.logprobs.tolist()),
-        sampled_token_ranks=np.asarray(logprobs_tensors.selected_token_ranks.tolist()),
-        cu_num_generated_tokens=cu_num_generated_tokens,
-    )
-
-
-
 def _jax_logprobs_to_lists(logprobs_tensors, cu_num_generated_tokens=None):
     """Convert JAX LogprobsTensors to LogprobsLists by converting JAX arrays to numpy."""
     return LogprobsLists(
