@@ -131,8 +131,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
         new_kv_cache, outputs = _jax_attn_func(
             kv_cache,
             query,
-            key,
-            value,
+            key.astype(jnp.bfloat16),
+            value.astype(jnp.bfloat16),
             sinks,
             attn_metadata,
             mesh,
