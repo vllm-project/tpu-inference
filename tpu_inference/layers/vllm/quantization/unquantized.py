@@ -25,8 +25,6 @@ from tpu_inference import envs
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
 from tpu_inference.layers.common.quant_methods import (UNQUANTIZED,
                                                        get_tpu_quant_method)
-from tpu_inference.layers.common.sharding import ShardingAxisName
-
 from tpu_inference.layers.vllm.fused_moe import fused_moe_func_padded
 from tpu_inference.layers.vllm.linear_common import (
     reorder_concatenated_tensor_for_sharding,
