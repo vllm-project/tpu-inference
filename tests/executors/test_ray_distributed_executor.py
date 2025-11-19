@@ -27,6 +27,7 @@ class MockVllmConfig:
         self.prompt_adapter_config = MagicMock()
         self.observability_config = MagicMock()
         self.device_config = MagicMock()
+        self.ec_transfer_config = MagicMock()
 
 
 @patch(
