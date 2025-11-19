@@ -5,8 +5,10 @@ from absl.testing import absltest, parameterized
 from jax._src import dtypes
 from jax._src import test_util as jtu
 
-from tpu_inference.kernels.ragged_paged_attention.v3.kernel import (
-    ragged_paged_attention, ref_ragged_paged_attention)
+from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
+    ragged_paged_attention
+from tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 import (
+    ragged_paged_attention_hd64, ref_ragged_paged_attention_hd64)
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (
     align_to, cdiv, get_dtype_packing)
 
@@ -14,29 +16,22 @@ jax.config.parse_flags_with_absl()
 
 
 @jtu.with_config(jax_numpy_dtype_promotion="standard")
-class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
+class RaggedPagedAttentionHeadDim64KernelTest(jtu.JaxTestCase):
 
-    def _test_ragged_paged_attention(
-        self,
-        seq_lens,  # List[(q_len, kv_len)]
-        num_heads,  # [num_q_heads, num_kv_heads]
-        head_dim,
-        page_size,
-        q_dtype,
-        kv_dtype,
-        num_pages,
-        *,
-        num_kv_pages_per_block=8,
-        num_queries_per_block=64,
-        vmem_limit_bytes=100 * 1024 * 1024,
-        max_num_batched_tokens=512,
-        max_num_seq=8,
-        sliding_window: int | None = None,
-        soft_cap: float | None = None,
-        q_scale: float | None = None,
-        k_scale: float | None = None,
-        v_scale: float | None = None,
-    ):
+    def test_compare_to_padded_kernel(self):
+        seq_lens = [(192, 328), (128, 180), (64, 255)]
+        num_heads = (32, 8)
+        head_dim = 64
+        page_size = 16
+        q_dtype = jnp.bfloat16
+        kv_dtype = jnp.bfloat16
+        num_pages = 1000
+        max_num_batched_tokens = 512
+        max_num_seq = 8
+        num_kv_pages_per_block = 8
+        num_queries_per_block = 64
+        vmem_limit_bytes = 100 * 1024 * 1024
+
         rng = np.random.default_rng(1234)
 
         def gen_random(shape, dtype):
@@ -47,6 +42,8 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             self.skipTest("Expect TPUv4+")
         cu_q_lens = [0]
         kv_lens = []
+        seq_lens = sorted(seq_lens, key=lambda x: x[0])
+        num_decoding_seqs = sum(q_len for q_len, _ in seq_lens if q_len == 1)
         for q_len, kv_len in seq_lens:
             assert q_len <= kv_len
             cu_q_lens.append(cu_q_lens[-1] + q_len)
@@ -65,19 +62,24 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
                        kv_dtype)
         v = gen_random((max_num_batched_tokens, num_kv_heads, head_dim),
                        kv_dtype)
+        attention_sink = None
+
         page_cnt = 0
         page_indices_list = []
         kv_pages_list = []
         kv_packing = get_dtype_packing(kv_dtype)
         padded_head_dim = align_to(head_dim, 128)
-        num_kv_heads_x2 = align_to(num_kv_heads * 2, kv_packing)
+        padded_num_kv_heads = align_to(num_kv_heads, kv_packing)
         for kv_len in kv_lens:
-            kv = gen_random((
-                kv_len,
-                num_kv_heads_x2 // kv_packing,
-                kv_packing,
-                padded_head_dim,
-            ), kv_dtype)
+            kv = gen_random(
+                (
+                    kv_len,
+                    padded_num_kv_heads // kv_packing,
+                    kv_packing,
+                    padded_head_dim,
+                ),
+                kv_dtype,
+            )
             kv = jnp.pad(
                 kv,
                 (
@@ -93,7 +95,7 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             ).reshape(
                 -1,
                 page_size,
-                num_kv_heads_x2 // kv_packing,
+                padded_num_kv_heads // kv_packing,
                 kv_packing,
                 padded_head_dim,
             )
@@ -127,7 +129,200 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
                             (0, max_num_seq + 1 - cu_q_lens.shape[0]))
         kv_lens = jnp.array(kv_lens, dtype=jnp.int32)
         kv_lens = jnp.pad(kv_lens, (0, max_num_seq - kv_lens.shape[0]))
-        distribution = jnp.array([0, 0, len(seq_lens)], dtype=jnp.int32)
+        distribution = jnp.array(
+            [num_decoding_seqs, num_decoding_seqs,
+             len(seq_lens)],
+            dtype=jnp.int32)
+
+        args_hd64 = (
+            q,
+            k,
+            v,
+            kv_cache,
+            kv_lens,
+            page_indices,
+            cu_q_lens,
+            distribution,
+            attention_sink,
+        )
+        kwargs_hd64 = {
+            "sliding_window": None,
+            "soft_cap": None,
+            "q_scale": None,
+            "k_scale": None,
+            "v_scale": None,
+        }
+        output_hd64, _ = ragged_paged_attention_hd64(
+            *args_hd64,
+            **kwargs_hd64,
+            num_kv_pages_per_block=num_kv_pages_per_block,
+            num_queries_per_block=num_queries_per_block,
+            vmem_limit_bytes=vmem_limit_bytes,
+        )
+        output_hd64 = output_hd64[:cu_q_lens[distribution[-1]]]
+
+        # Pad to 128 and run the other kernel.
+        padded_q = jnp.pad(q, ((0, 0), (0, 0), (0, 128 - head_dim)))
+        padded_k = jnp.pad(k, ((0, 0), (0, 0), (0, 128 - head_dim)))
+        padded_v = jnp.pad(v, ((0, 0), (0, 0), (0, 128 - head_dim)))
+
+        args_padded = (
+            padded_q,
+            padded_k,
+            padded_v,
+            kv_cache,
+            kv_lens,
+            page_indices,
+            cu_q_lens,
+            distribution,
+            # attention_sink,
+        )
+        kwargs_padded = {
+            "sliding_window": None,
+            "soft_cap": None,
+            "q_scale": None,
+            "k_scale": None,
+            "v_scale": None,
+        }
+        output_padded, _ = ragged_paged_attention(
+            *args_padded,
+            **kwargs_padded,
+            num_kv_pages_per_block=num_kv_pages_per_block,
+            num_queries_per_block=num_queries_per_block,
+            vmem_limit_bytes=vmem_limit_bytes,
+        )
+        output_padded = output_padded[:cu_q_lens[distribution[-1]]]
+
+        self.assertAllClose(output_hd64,
+                            output_padded[..., :64],
+                            atol=0.2,
+                            rtol=0.2)
+
+    def _test_ragged_paged_attention_hd64(
+        self,
+        seq_lens,  # List[(q_len, kv_len)]
+        num_heads,  # [num_q_heads, num_kv_heads]
+        head_dim,
+        page_size,
+        q_dtype,
+        kv_dtype,
+        num_pages,
+        *,
+        num_kv_pages_per_block=8,
+        num_queries_per_block=64,
+        vmem_limit_bytes=100 * 1024 * 1024,
+        max_num_batched_tokens=512,
+        max_num_seq=8,
+        sliding_window: int | None = None,
+        soft_cap: float | None = None,
+        q_scale: float | None = None,
+        k_scale: float | None = None,
+        v_scale: float | None = None,
+        use_attention_sink: bool = False,
+    ):
+        assert head_dim == 64
+        rng = np.random.default_rng(1234)
+
+        def gen_random(shape, dtype):
+            return jnp.array(rng.random(size=shape,
+                                        dtype=np.float32)).astype(dtype)
+
+        if not jtu.is_device_tpu_at_least(version=4):
+            self.skipTest("Expect TPUv4+")
+        cu_q_lens = [0]
+        kv_lens = []
+        seq_lens = sorted(seq_lens, key=lambda x: x[0])
+        num_decoding_seqs = sum(q_len for q_len, _ in seq_lens if q_len == 1)
+        for q_len, kv_len in seq_lens:
+            assert q_len <= kv_len
+            cu_q_lens.append(cu_q_lens[-1] + q_len)
+            kv_lens.append(kv_len)
+
+        max_num_batched_tokens = max(align_to(cu_q_lens[-1], 128),
+                                     max_num_batched_tokens)
+        max_num_seq = max(align_to(len(seq_lens), 8), max_num_seq)
+        max_kv_len = max(kv_lens)
+        pages_per_seq = cdiv(max_kv_len, page_size)
+        num_q_heads, num_kv_heads = num_heads
+
+        q = gen_random((max_num_batched_tokens, num_q_heads, head_dim),
+                       q_dtype)
+        k = gen_random((max_num_batched_tokens, num_kv_heads, head_dim),
+                       kv_dtype)
+        v = gen_random((max_num_batched_tokens, num_kv_heads, head_dim),
+                       kv_dtype)
+        attention_sink = gen_random(
+            (num_q_heads), jnp.float32) * 10**2 if use_attention_sink else None
+
+        page_cnt = 0
+        page_indices_list = []
+        kv_pages_list = []
+        kv_packing = get_dtype_packing(kv_dtype)
+        padded_head_dim = align_to(head_dim, 128)
+        padded_num_kv_heads = align_to(num_kv_heads, kv_packing)
+        for kv_len in kv_lens:
+            kv = gen_random(
+                (
+                    kv_len,
+                    padded_num_kv_heads // kv_packing,
+                    kv_packing,
+                    padded_head_dim,
+                ),
+                kv_dtype,
+            )
+            kv = jnp.pad(
+                kv,
+                (
+                    (
+                        0,
+                        cdiv(kv_len, page_size) * page_size - kv_len,
+                    ),
+                    (0, 0),
+                    (0, 0),
+                    (0, 0),
+                ),
+                constant_values=jnp.nan,
+            ).reshape(
+                -1,
+                page_size,
+                padded_num_kv_heads // kv_packing,
+                kv_packing,
+                padded_head_dim,
+            )
+            indices = page_cnt + jnp.arange(kv.shape[0], dtype=jnp.int32)
+            indices = jnp.pad(
+                indices,
+                ((0, pages_per_seq - indices.shape[0]), ),
+                constant_values=jnp.nan,
+            )
+            page_indices_list.append(indices)
+            page_cnt += kv.shape[0]
+            kv_pages_list.append(kv)
+
+        kv_cache = jnp.concatenate(kv_pages_list, axis=0)
+        kv_cache = jnp.pad(
+            kv_cache,
+            ((0, num_pages - kv_cache.shape[0]), (0, 0), (0, 0), (0, 0),
+             (0, 0)),
+            constant_values=jnp.nan,
+        )
+        page_indices = jnp.stack(page_indices_list, axis=0)
+        page_indices = jnp.pad(
+            page_indices,
+            ((0, max_num_seq - page_indices.shape[0]), (0, 0)),
+            constant_values=jnp.nan,
+        )
+        page_indices = page_indices.reshape(-1)
+
+        cu_q_lens = jnp.array(cu_q_lens, dtype=jnp.int32)
+        cu_q_lens = jnp.pad(cu_q_lens,
+                            (0, max_num_seq + 1 - cu_q_lens.shape[0]))
+        kv_lens = jnp.array(kv_lens, dtype=jnp.int32)
+        kv_lens = jnp.pad(kv_lens, (0, max_num_seq - kv_lens.shape[0]))
+        distribution = jnp.array(
+            [num_decoding_seqs, num_decoding_seqs,
+             len(seq_lens)],
+            dtype=jnp.int32)
 
         args = (
             q,
@@ -138,6 +333,7 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             page_indices,
             cu_q_lens,
             distribution,
+            attention_sink,
         )
 
         kwargs = {
@@ -148,12 +344,12 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             "v_scale": v_scale,
         }
 
-        expected, expected_kv_cache = ref_ragged_paged_attention(
+        expected, expected_kv_cache = ref_ragged_paged_attention_hd64(
             *args,
             **kwargs,
         )
 
-        output, updated_kv_cache = ragged_paged_attention(
+        output, updated_kv_cache = ragged_paged_attention_hd64(
             *args,
             **kwargs,
             num_kv_pages_per_block=num_kv_pages_per_block,
@@ -179,11 +375,11 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
     def test_ragged_paged_attention_basic(self, dtype):
         seq_lens = [(192, 328), (128, 180), (64, 255)]
         num_heads = (32, 8)
-        head_dim = 128
+        head_dim = 64
         page_size = 16
         num_pages = 1000
 
-        self._test_ragged_paged_attention(
+        self._test_ragged_paged_attention_hd64(
             seq_lens,
             num_heads,
             head_dim,
@@ -197,7 +393,7 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
     @parameterized.product(
         q_dtype=[jnp.bfloat16],
         kv_dtype=[jnp.float8_e5m2, jnp.float8_e4m3fn],
-        kv_scales=[(0.5, 0.5), (1.0, 1.0)],
+        kv_scales=[(0.5, 0.5), (None, None)],
     )
     def test_ragged_paged_attention_quantized_kv_cache(self, q_dtype, kv_dtype,
                                                        kv_scales):
@@ -205,12 +401,12 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             self.skipTest("Expect TPUv5+")
         seq_lens = [(192, 328), (128, 180), (64, 255)]
         num_heads = (32, 8)
-        head_dim = 128
+        head_dim = 64
         page_size = 16
         num_pages = 1000
         k_scale, v_scale = kv_scales
 
-        self._test_ragged_paged_attention(
+        self._test_ragged_paged_attention_hd64(
             seq_lens,
             num_heads,
             head_dim,
@@ -225,8 +421,8 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
     @parameterized.product(
         q_dtype=[jnp.bfloat16],
         kv_dtype=[jnp.float8_e5m2, jnp.float8_e4m3fn],
-        q_scale=[0.5, 1.0],
-        kv_scales=[(0.5, 0.5), (1.0, 1.0)],
+        q_scale=[0.5],
+        kv_scales=[(0.5, 0.5), (None, None)],
     )
     def test_ragged_paged_attention_quantized_attention(
             self, q_dtype, kv_dtype, q_scale, kv_scales):
@@ -234,12 +430,12 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             self.skipTest("Expect TPUv5+")
         seq_lens = [(192, 328), (128, 180), (64, 255)]
         num_heads = (32, 8)
-        head_dim = 128
+        head_dim = 64
         page_size = 16
         num_pages = 1000
         k_scale, v_scale = kv_scales
 
-        self._test_ragged_paged_attention(
+        self._test_ragged_paged_attention_hd64(
             seq_lens,
             num_heads,
             head_dim,
@@ -273,11 +469,11 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             (1, 1328),
         ]
         num_heads = (32, 8)
-        head_dim = 128
+        head_dim = 64
         page_size = 16
         num_pages = 1000
 
-        self._test_ragged_paged_attention(
+        self._test_ragged_paged_attention_hd64(
             seq_lens,
             num_heads,
             head_dim,
@@ -308,11 +504,11 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             (2, 1328),
         ]
         num_heads = (32, 8)
-        head_dim = 128
+        head_dim = 64
         page_size = 16
         num_pages = 1000
 
-        self._test_ragged_paged_attention(
+        self._test_ragged_paged_attention_hd64(
             seq_lens,
             num_heads,
             head_dim,
@@ -343,11 +539,11 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             (1, 1328),
         ]
         num_heads = (32, 8)
-        head_dim = 128
+        head_dim = 64
         page_size = 16
         num_pages = 1000
 
-        self._test_ragged_paged_attention(
+        self._test_ragged_paged_attention_hd64(
             seq_lens,
             num_heads,
             head_dim,
@@ -360,7 +556,7 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
     @parameterized.product(
         num_seqs=[1, 17],
         num_heads=[(32, 8), (12, 2), (5, 1), (3, 3)],
-        head_dim=[80, 240],
+        head_dim=[64],
         dtype=[jnp.float32, jnp.bfloat16],
         # num_kv_pages_per_block=[8, 16],
         # num_queries_per_block=[16, 32],
@@ -381,7 +577,7 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         page_size = 16
         num_pages = 1000
 
-        self._test_ragged_paged_attention(
+        self._test_ragged_paged_attention_hd64(
             seq_lens,
             num_heads,
             head_dim,
@@ -405,11 +601,11 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         q_lens = rng.integers(1, 100, num_seqs)
         kv_lens = q_lens + rng.integers(0, 50, num_seqs)
         seq_lens = list(zip(q_lens.tolist(), kv_lens.tolist()))
-        head_dim = 128
+        head_dim = 64
         page_size = 16
         num_pages = 1000
 
-        self._test_ragged_paged_attention(
+        self._test_ragged_paged_attention_hd64(
             seq_lens,
             num_heads,
             head_dim,
@@ -418,6 +614,37 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             dtype,
             num_pages,
             sliding_window=sliding_window,
+        )
+
+    @parameterized.product(
+        sliding_window=[5, 128],
+        num_heads=[(4, 4), (8, 4), (64, 8)],
+    )
+    def test_ragged_paged_attention_sliding_window_with_attention_sink_hd64(
+        self,
+        sliding_window: int | None,
+        num_heads: tuple[int, int],
+    ):
+        num_seqs = 5
+        dtype = jnp.float32
+        rng = np.random.default_rng(1234)
+        q_lens = rng.integers(1, 100, num_seqs)
+        kv_lens = q_lens + rng.integers(0, 50, num_seqs)
+        seq_lens = list(zip(q_lens.tolist(), kv_lens.tolist()))
+        head_dim = 64
+        page_size = 16
+        num_pages = 1000
+
+        self._test_ragged_paged_attention_hd64(
+            seq_lens,
+            num_heads,
+            head_dim,
+            page_size,
+            dtype,
+            dtype,
+            num_pages,
+            sliding_window=sliding_window,
+            use_attention_sink=True,
         )
 
     @parameterized.product(soft_cap=[None, 50.0], )
@@ -432,11 +659,11 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         q_lens = rng.integers(1, 100, num_seqs)
         kv_lens = q_lens + rng.integers(0, 50, num_seqs)
         seq_lens = list(zip(q_lens.tolist(), kv_lens.tolist()))
-        head_dim = 128
+        head_dim = 64
         page_size = 16
         num_pages = 1000
 
-        self._test_ragged_paged_attention(
+        self._test_ragged_paged_attention_hd64(
             seq_lens,
             num_heads,
             head_dim,
@@ -451,12 +678,12 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         dtype = jnp.float32
         seq_lens = [(192, 328), (128, 180), (64, 255)]
         num_heads = (32, 8)
-        head_dim = 128
+        head_dim = 64
         page_size = 16
         num_pages = 1000
 
         with self.assertRaisesRegex(ValueError, "must be positive"):
-            self._test_ragged_paged_attention(
+            self._test_ragged_paged_attention_hd64(
                 seq_lens,
                 num_heads,
                 head_dim,
@@ -468,7 +695,7 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             )
 
         with self.assertRaisesRegex(ValueError, "must be positive"):
-            self._test_ragged_paged_attention(
+            self._test_ragged_paged_attention_hd64(
                 seq_lens,
                 num_heads,
                 head_dim,
@@ -483,12 +710,12 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         dtype = jnp.float32
         seq_lens = [(192, 328), (128, 180), (64, 255)]
         num_heads = (32, 8)
-        head_dim = 128
+        head_dim = 64
         page_size = 16
         num_pages = 1000
 
         with self.assertRaisesRegex(ValueError, "must not be 0.0"):
-            self._test_ragged_paged_attention(
+            self._test_ragged_paged_attention_hd64(
                 seq_lens,
                 num_heads,
                 head_dim,
