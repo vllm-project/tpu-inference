@@ -80,6 +80,7 @@ For debugging or development purposes, you can install `tpu-inference` from sour
 
     ```shell
     cd tpu-inference
+    pip install -r requirements.txt
     pip install -e .
     cd ..
     ```
