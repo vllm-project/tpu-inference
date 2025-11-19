@@ -44,8 +44,8 @@ OUTPUT_LEN_OVERRIDE=20 # Max tokens to generate for safety classification
 # --- DATA PATHS ---
 # Source URL for the AILuminate CSV (Public Raw GitHub Link)
 RAW_CSV_URL="https://raw.githubusercontent.com/mlcommons/ailuminate/main/airr_official_1.0_demo_en_us_prompt_set_release.csv"
-LOCAL_CSV_FILE="/tmp/airr_official_1.0_demo_en_us_prompt_set_release.csv" # Local file path for Pytest
-#GCS_JSONL_URI="gs://jiries/datasets/ailuminate/airr_official_1.0_demo_en_us_prompt_set_release.jsonl" 
+LOCAL_CSV_FILE="/tmp/airr_official_1.0_demo_en_us_prompt_set_release.csv" 
+LOCAL_JSONL_FILE="/tmp/airr_official_1.0_demo_en_us_prompt_set_release.jsonl"
 # ------------------
 
 TEST_MODE=""

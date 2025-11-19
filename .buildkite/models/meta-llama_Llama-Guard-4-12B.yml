@@ -33,7 +33,7 @@ steps:
       MINIMUM_ACCURACY_THRESHOLD: 0.31
     commands:
       - |
-        .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_llama_guard_4_accuracy.sh
+        .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/safety_model_benchmark.sh --mode accuracy
   - label: "Record integration test result for meta-llama/Llama-Guard-4-12B"
     key: "record_meta-llama_Llama-Guard-4-12B_IntegrationTest"
     depends_on: "meta-llama_Llama-Guard-4-12B_IntegrationTest"
@@ -54,7 +54,7 @@ steps:
       queue: tpu_v6e_queue 
     commands:
       - |
-        .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/llama_guard_perf_recipe.sh
+        .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/safety_model_benchmark.sh --mode performance
   
   - label: "Record performance benchmark result for meta-llama/Llama-Guard-4-12B"
     key: "record_meta-llama_Llama-Guard-4-12B_Benchmark"
