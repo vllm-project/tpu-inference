@@ -8,7 +8,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from tpu_inference.layers.vllm.linear_common import \
     slice_sharded_tensor_for_concatenation
-from tpu_inference.layers.common.sharding import ShardingAxisName
+
 P = PartitionSpec
 
 
@@ -374,6 +374,7 @@ def fused_moe_func(
     assert (num_tokens * topk) % 16 == 0, (
         "The kernel requires num_tokens * topk to be a multiple of "
         f"16 but got {num_tokens}*{topk}={num_tokens*topk}")
+
     hidden_states = hidden_states.reshape(num_tokens, hidden_size)
     gating_output = gating_output.reshape(num_tokens, global_num_experts)
 
@@ -425,6 +426,7 @@ def fused_moe_func(
         )
 
     x = activation_fn(activation, x1, x2)
+
     if use_ep:
         x = expert_sharded_gmm(
             x,

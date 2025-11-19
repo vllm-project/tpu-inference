@@ -19,7 +19,6 @@ from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 
-from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference import envs
 from tpu_inference.logger import init_logger
 
