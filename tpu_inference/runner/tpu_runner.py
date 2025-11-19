@@ -223,6 +223,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self,
         vllm_config: VllmConfig,
         devices: List[Any],
+        rank: int = 0,
+        is_first_rank: bool = True,
+        is_last_rank: bool = True,
     ):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config

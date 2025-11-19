@@ -117,7 +117,7 @@ class TPUWorker:
         # TPU Worker is initialized. The profiler server needs to start after
         # MP runtime is initialized.
         self.profile_dir = None
-        if envs.VLLM_TORCH_PROFILER_DIR and self.rank < 1 and self.pp_world_size == 1:
+        if vllm_envs.VLLM_TORCH_PROFILER_DIR and self.rank < 1 and self.pp_config.pp_world_size == 1:
             if not self.devices or 0 in self.device_ranks:
                 # For TPU, we can only have 1 active profiler session for 1 profiler
                 # server. So we only profile on rank0.
@@ -126,9 +126,9 @@ class TPUWorker:
                             self.profile_dir)
 
         # For PP, we use MPMD so we want to profile every worker.
-        if self.pp_world_size > 1 and envs.VLLM_TORCH_PROFILER_DIR:
+        if self.pp_config.pp_world_size > 1 and vllm_envs.VLLM_TORCH_PROFILER_DIR:
             self.profile_dir = os.path.join(
-                envs.VLLM_TORCH_PROFILER_DIR,
+                vllm_envs.VLLM_TORCH_PROFILER_DIR,
                 f"pprank_{self.rank}_ppworldsize_{self.pp_config.pp_world_size}"
             )
             os.makedirs(self.profile_dir, exist_ok=True)
@@ -161,7 +161,7 @@ class TPUWorker:
         if multihost_backend != "ray" and self.parallel_config.pipeline_parallel_size > 1:
             tpu_ports = [
                 jax_parallel_state.BASE_JAX_PORT + i
-                for i in range(self.pp_world_size)
+                for i in range(self.pp_config.pp_world_size)
             ]
             os.environ["TPU_PROCESS_ADDRESSES"] = ",".join(
                 [f"localhost:{port}" for port in tpu_ports])
@@ -206,7 +206,7 @@ class TPUWorker:
                     if device is None:
                         raise KeyError(
                             f"Device index {device_index} not found in "
-                            f"jax.devices() with IDs {list(device_dict.keys())}!"
+                            f"jax.local_devices() with IDs {list(device_dict.keys())}!"
                         )
                     self.devices.append(device)
                 assert len(self.devices) >= sharding_config.total_devices
@@ -240,9 +240,9 @@ class TPUWorker:
             need_pp=self.parallel_config.pipeline_parallel_size > 1)
 
         ensure_kv_transfer_initialized(self.vllm_config)
-        self.model_runner = TPUModelRunner(self.vllm_config, self.devices,
-                                           self.rank, self.rank == 0,
-                                           self.rank == self.pp_world_size - 1)
+        self.model_runner = TPUModelRunner(
+            self.vllm_config, self.devices, self.rank, self.rank == 0,
+            self.rank == self.pp_config.pp_world_size - 1)
         logger.info(f"Init worker | "
                     f"rank={self.rank} | "
                     f"node_id={get_node_id()} | "

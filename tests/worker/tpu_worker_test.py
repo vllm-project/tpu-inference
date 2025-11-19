@@ -25,6 +25,7 @@ def mock_vllm_config():
     mock_parallel_conf = MagicMock()
     mock_parallel_conf.tensor_parallel_size = 2
     mock_parallel_conf.data_parallel_size = 1
+    mock_parallel_conf.pipeline_parallel_size = 1
     mock_parallel_conf.nnodes = 1
     mock_parallel_conf.nnodes_within_dp = 1
 
@@ -118,8 +119,14 @@ class TestTPUWorker:
 
         worker.init_device()
 
-        mock_jax.devices.assert_not_called()
-        mock_runner_cls.assert_called_once_with(mock_vllm_config, mock_devices)
+        mock_jax.local_devices.assert_not_called()
+        expected_rank = 0
+        expected_is_first_rank = True
+        expected_is_last_rank = True
+        mock_runner_cls.assert_called_once_with(mock_vllm_config, mock_devices,
+                                                expected_rank,
+                                                expected_is_first_rank,
+                                                expected_is_last_rank)
         assert isinstance(worker.model_runner, MagicMock)
 
     @patch('tpu_inference.worker.tpu_worker.TPUModelRunner')
@@ -137,15 +144,24 @@ class TestTPUWorker:
             distributed_init_method="test_method",
             devices=[]  # No devices provided, should trigger auto-detection
         )
-        mock_jax.devices.return_value = ['tpu:0', 'tpu:1', 'tpu:2', 'tpu:3']
+        mock_jax.local_device_count.return_value = 4
+        mock_jax.local_devices.return_value = [
+            'tpu:0', 'tpu:1', 'tpu:2', 'tpu:3'
+        ]
 
         worker.init_device()
 
-        mock_jax.devices.assert_called_once()
+        mock_jax.local_devices.assert_called_once()
         expected_devices = ['tpu:0', 'tpu:1']  # Sliced by tensor_parallel_size
         assert worker.devices == expected_devices
+        expected_rank = 0
+        expected_is_first_rank = True
+        expected_is_last_rank = True
         mock_runner_cls.assert_called_once_with(mock_vllm_config,
-                                                expected_devices)
+                                                expected_devices,
+                                                expected_rank,
+                                                expected_is_first_rank,
+                                                expected_is_last_rank)
 
     @patch('tpu_inference.worker.tpu_worker.utils')
     def test_determine_available_memory(self, mock_utils, mock_vllm_config):
@@ -194,7 +210,7 @@ class TestTPUWorker:
 
         # Assert the runner was called with the scheduler output directly
         worker.model_runner.execute_model.assert_called_once_with(
-            mock_scheduler_input)
+            mock_scheduler_input, None)
         # Assert the final result is the concrete model output
         assert result == mock_model_output
 
