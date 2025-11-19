@@ -13,7 +13,6 @@ from jax._src import test_util as jtu
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
-from tpu_inference.distributed.offload.cpu_backend import LocalCPUBackend
 from tpu_inference.distributed.offload.tpu_offload_connector import \
     TPUOffloadConnector as CPUOffloadingConnector
 from tpu_inference.logger import init_logger
@@ -32,6 +31,7 @@ class MockTPUModelRunner(TPUModelRunner):
         self.mesh = mesh
         self.model_config = None
         self.sampler = None
+        self.devices = jax.devices()
 
     def get_kv_cache_layout(self):
         return "NHD"
@@ -42,7 +42,6 @@ class MockVllmConfig:
     def __init__(self, block_size=_DEFAULT_BLOCK_SIZE):
         self.model_config = self.Model()
         self.cache_config = self.Cache(block_size)
-        self.kv_transfer_config = self.KVTransfer()
 
     class Model:
         model = "test-model"
@@ -52,12 +51,8 @@ class MockVllmConfig:
         def __init__(self, block_size):
             self.block_size = block_size
 
-    class KVTransfer:
-        kv_ip = "localhost"
-        kv_port = 9999
 
-
-class TestHostOffloadingPrecompile(jtu.JaxTestCase):
+class TestTPUOffloadWorkerPrecompile(jtu.JaxTestCase):
     """Test the host offloading precompilation and related functionalities."""
 
     def setUp(self):
@@ -105,9 +100,6 @@ class TestHostOffloadingPrecompile(jtu.JaxTestCase):
 
     def _create_connector(self, swap_op_type: str = "jax"):
         # Clean the singleton backend instance before each test
-        LocalCPUBackend._instance = None
-        LocalCPUBackend._initialized = False
-
         os.environ["TPU_OFFLOAD_SWAP_OP_TYPE"] = swap_op_type
         connector = CPUOffloadingConnector(self.vllm_config,
                                            KVConnectorRole.WORKER)
