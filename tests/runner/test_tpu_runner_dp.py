@@ -102,8 +102,8 @@ class TestTPUJaxRunnerDPInputsLightweight:
         result = self.runner._prepare_inputs_dp(scheduler_output)
 
         # Basic assertions
-        assert len(result) == 6
-        input_ids, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector = result
+        assert len(result) == 7
+        input_ids, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs = result
 
         # Verify utility functions were called
         mock_runner_utils.get_padded_token_len.assert_called()
@@ -380,8 +380,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         # Execute the method
         result = self.runner._prepare_inputs_dp(scheduler_output)
-        input_ids, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector = result
-
+        input_ids, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs = result
         # 1. Verify input_ids content
         expected_input_ids = np.zeros(16, dtype=np.int32)
         expected_input_ids[:2] = [1006, 1007]
@@ -495,7 +494,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         # Execute the method
         result = self.runner._prepare_inputs_dp(scheduler_output)
-        input_ids, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector = result
+        input_ids, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs = result
 
         # 1. Verify input_ids
         expected_input_ids = np.zeros(16, dtype=np.int32)
@@ -724,7 +723,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         self.runner.dp_size = 1
         self.runner._prepare_inputs_non_dp = MagicMock(
-            return_value=(None, None, None, None, None, None))
+            return_value=(None, None, None, None, None, None, None))
 
         scheduler_output = MagicMock()
         self.runner._prepare_inputs(scheduler_output)
