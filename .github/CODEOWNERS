@@ -29,7 +29,7 @@
 /tpu_inference/layers/vllm/ @kyuyeunk @hfan @vanbasten23
 
 # JAX Model Implementations
-/tpu_inference/models/jax/qwen2_5_vl.py @hfan @KWang1998
+/tpu_inference/models/jax/qwen2_5_vl.py @hfan @kwang3939
 /tpu_inference/models/jax/gpt_oss.py @bzgoogle
 /tpu_inference/models/jax/deepseek_v3.py @bzgoogle
 /tpu_inference/models/vllm/ @kyuyeunk @hfan @vanbasten23
@@ -40,10 +40,10 @@
 /tpu_inference/runner/persistent_batch_manager.py @py4 @wenxindongwork
 /tpu_inference/runner/speculative_decoding_manager.py @py4 @Lumosis
 /tpu_inference/executors/ @sixiang-google @mrjunwan-lang
-/tpu_inference/core/ @sixiang-google @mrjunwan-lang
+/tpu_inference/core/ @sixiang-google @mrjunwan-lang @wenxindongwork
 
 # Worker Management
-/tpu_inference/worker/ @sixiang-google @mrjunwan-lang @py4 @vanbasten23
+/tpu_inference/worker/ @sixiang-google @mrjunwan-lang @py4 @vanbasten23 @wenxindongwork
 
 # Speculative Decoding
 /tpu_inference/spec_decode/ @py4 @Lumosis
