@@ -172,6 +172,14 @@ def _fused_ep_moe_kernel(
     assert w2_hbm.dtype == t_dtype
 
     h_per_packing = hidden_size // t_packing
+
+    print(f"tokens_hbm.shape: {tokens_hbm.shape}")
+    print(f"w2_hbm.shape: {w2_hbm.shape}")
+    print(f"w1_hbm.shape: {w1_hbm.shape}")
+    print(f"hidden_size from w2: {hidden_size}")
+    print(f"t_packing: {t_packing}")
+    print(f"h_per_packing: {h_per_packing}")
+    print(f"tokens_hbm.shape[-1]: {tokens_hbm.shape[-1]}")
     assert tokens_hbm.shape[-1] == h_per_packing
     bd1_per_packing = bd1 // t_packing
     bd2_per_packing = bd2 // t_packing
@@ -866,7 +874,7 @@ def fused_ep_moe(
     num_devices = ep_size
 
     num_tokens, actual_hidden_size = tokens.shape
-    num_experts, intermediate_size, _ = w2.shape
+    num_experts, actual_intermediate_size, _ = w2.shape
 
     assert num_tokens % ep_size == 0
     assert num_experts % ep_size == 0
@@ -878,12 +886,39 @@ def fused_ep_moe(
     t_dtype = tokens.dtype
     t_packing = get_dtype_packing(t_dtype)
     hidden_size = align_to(actual_hidden_size, 128 * t_packing)
-    if hidden_size != actual_hidden_size:
+    intermediate_size = align_to(actual_intermediate_size, 128 * t_packing)
+    if hidden_size != actual_hidden_size or intermediate_size != actual_intermediate_size:
         tokens = jnp.pad(
             tokens,
             ((0, 0), (0, hidden_size - actual_hidden_size)),
             constant_values=0,
         )
+        # pad w1 & w2 to be multiple of t_packing*128
+        # Pad w1: (num_experts, 2, hidden_size, intermediate_size)
+        w1 = jnp.pad(
+            w1,
+            ((0, 0), (0, 0), (0, hidden_size - actual_hidden_size), (0, intermediate_size - actual_intermediate_size)),
+            constant_values=0,
+        )
+        # Pad w2: (num_experts, intermediate_size, hidden_size)
+        w2 = jnp.pad(
+            w2,
+            ((0, 0), (0, intermediate_size - actual_intermediate_size), (0, hidden_size - actual_hidden_size)),
+            constant_values=0,
+        )
+    """
+    if intermediate_size != actual_intermediate_size:
+        w1 = jnp.pad(
+            w1,
+            ((0, 0), (0, 0), (0, 0), (0, intermediate_size - actual_intermediate_size)),
+            constant_values=0,
+        )
+        w2 = jnp.pad(
+            w2,
+            ((0, 0), (0, intermediate_size - actual_intermediate_size), (0, 0)),
+            constant_values=0,
+        )
+    """
     tokens = tokens.reshape(-1, t_packing, hidden_size // t_packing)
     bt = min(bt, local_num_tokens)
     bf = min(bf, intermediate_size)
