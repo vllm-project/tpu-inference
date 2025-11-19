@@ -124,7 +124,7 @@ class DeepSeekV3(nnx.Module):
                                  hidden_size=hidden_size,
                                  dtype=dtype,
                                  rngs=self.rng,
-                                 vd_sharding=(('data', 'expert', 'model'),
+                                 vd_sharding=(ShardingAxisName.MLP_TENSOR,
                                               None),
                                  random_init=self.random_init)
 
@@ -332,6 +332,23 @@ class DeepSeekV3(nnx.Module):
                               vd_sharding=(ShardingAxisName.MLP_TENSOR, None),
                               dv_sharding=(None, ShardingAxisName.MLP_TENSOR),
                               random_init=self.random_init)
+        
+        self._print_model_architecture()
+        
+    def _print_model_architecture(self):
+        num_display_layers = 5
+
+        logger.info("### Embedding ###")
+        nnx.display(self.embedder)
+
+        logger.info(f"\n### First {num_display_layers} Layers ###")
+        # Loop through the slice and display each layer
+        for i, layer in enumerate(self.layers[:num_display_layers]):
+            logger.info(f"\n--- Layer {i} ---")
+            nnx.display(layer)
+
+        logger.info("\n### LM Head ###")
+        nnx.display(self.lm_head)
 
     # For compatibility with flax.
     def apply(self, variables, *args, **kwargs):

@@ -305,6 +305,7 @@ class MLA(nnx.Module):
                 outputs_TNH = jnp.einsum("TNA,ANH -> TNH", outputs_TNA, kernel_v_up_proj_ANH)
             
             with jax.named_scope("o_proj"):
+                    # TODO: Consider all-gathering activations first during MLA so that you can shard the output projections (since these account for ~365*61 = 22GB in FP16).
                     outputs_TNH = nnx.with_sharding_constraint(
                         outputs_TNH, self.activation_attention_out_td)
                     o_TD = jnp.einsum("TNH,NHD -> TD", outputs_TNH,
@@ -452,8 +453,8 @@ class MLA(nnx.Module):
         # logger.warning(f"********md: seq_lens={md.seq_lens.shape}, block_tables={md.block_tables.shape}, query_start_loc={md.query_start_loc.shape}, k_rope_SNH={md.request_distribution.shape}")
 
         def _mla_ragged_paged_attention(q, q_rope, k, k_rope, kv_cache, *args):
-            kv_c = kv_cache[..., :self.kv_lora_rank]
-            k_pe = kv_cache[..., self.kv_lora_rank:]
+            # kv_c = kv_cache[..., :self.kv_lora_rank]
+            # k_pe = kv_cache[..., self.kv_lora_rank:]
             # Set reasonable starting estimates for block sizes. (TODO: update this to use tuned sizes)
             # Referring to get_tuned_block_sizes() in kernels/ragged_paged_attention/v3/tuned_block_sizes.py: 'q_bfloat16_kv_bfloat16/q_head-64_kv_head-2_head-128'/4096 
             def _initialize_block_sizes():
@@ -468,33 +469,38 @@ class MLA(nnx.Module):
                 num_kv_pages_per_block = min(pages_per_seq, 2)
                 # num_queries_per_block = min(max_num_tokens, 16)
                 num_queries_per_block = min(max_num_tokens, 2)
-                logger.warning(f"******num_kv_pages_per_block = {num_kv_pages_per_block}")
-                logger.warning(f"******num_queries_per_block = {num_queries_per_block}")
+                # logger.warning(f"******num_kv_pages_per_block = {num_kv_pages_per_block}")
+                # logger.warning(f"******num_queries_per_block = {num_queries_per_block}")
                 return num_kv_pages_per_block, num_queries_per_block
             
             num_kv_pages_per_block, num_queries_per_block = _initialize_block_sizes()
-            output, updated_kv_c, updated_k_pe = mla_ragged_paged_attention(
-                q, q_rope, k, k_rope, kv_c, k_pe,
+            output, kv_cache = mla_ragged_paged_attention(
+                # !START Change 3f
+                q, q_rope, k, k_rope, kv_cache,
+                # !END Change 3f
                 *args,
                 sm_scale=self.scale,
                 num_kv_pages_per_block=num_kv_pages_per_block,
                 num_queries_per_block=num_queries_per_block
             )
-            updated_kv_cache = kv_cache.at[..., :self.kv_lora_rank].set(updated_kv_c)
-            updated_kv_cache = updated_kv_cache.at[..., self.kv_lora_rank:].set(updated_k_pe)
+            # kv_cache = kv_cache.at[..., :self.kv_lora_rank].set(updated_kv_c)
+            # kv_cache = kv_cache.at[..., self.kv_lora_rank:].set(updated_k_pe)
 
-            return output, updated_kv_cache
+            return kv_cache, output
         
         
 
-        output_TNH, kv_cache = jax.jit(
+        kv_cache, output_TNH  = jax.jit(
             shard_map.shard_map(
                 _mla_ragged_paged_attention,
                 mesh=mesh,
                 in_specs=in_specs,
                 out_specs=out_specs,
                 check_rep=False,
-            ))(
+                ),
+                # TODO: Confirm if you need this since kernel.py already donates.
+                donate_argnums=(4,) # donate kv_cache so that updates are done in place.
+            )(
                 q_TNA,
                 q_rope_TNH,
                 k_SKA,
