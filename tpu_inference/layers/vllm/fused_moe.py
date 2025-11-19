@@ -123,8 +123,8 @@ def tensor_sharded_gmm_merged_column_parallel(
     gmm_result = shard_map(
         _gmm,
         mesh=mesh,
-        in_specs=(P(ShardingAxisName.MLP_DATA, None), P(None, ShardingAxisName.MLP_TENSOR, None), P(ShardingAxisName.MLP_DATA)),
-        out_specs=(P(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR)),
+        in_specs=(P("data", None), P(None, "model", None), P("data")),
+        out_specs=(P("data", "model")),
         check_rep=False,
     )(lhs, rhs, group_sizes)
 
@@ -136,12 +136,12 @@ def tensor_sharded_gmm_merged_column_parallel(
         gmm_result = shard_map(
             _add_bias,
             mesh=mesh,
-            in_specs=(P(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR), P(None, ShardingAxisName.MLP_TENSOR), P(ShardingAxisName.MLP_DATA)),
-            out_specs=(P(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR)),
+            in_specs=(P("data", "model"), P(None, "model"), P("data")),
+            out_specs=(P("data", "model")),
             check_rep=False,
         )(gmm_result, rhs_bias, group_sizes)
 
-    n_shards = mesh.shape['model'] * mesh.shape.get('attn_dp', 1)
+    n_shards = mesh.shape["model"]
     output_sizes = [intermediate_size, intermediate_size]
 
     return slice_sharded_tensor_for_concatenation(gmm_result, output_sizes,
@@ -171,17 +171,16 @@ def tensor_sharded_gmm_row_parallel(
 
     def _gmm_all_reduce(lhs, rhs, group_sizes):
         r = _gmm(lhs, rhs, group_sizes)
-        return jax.lax.psum(r, axis_name=ShardingAxisName.MLP_TENSOR)
+        return jax.lax.psum(r, axis_name="model")
 
     gmm_result = shard_map(
         _gmm_all_reduce,
         mesh=mesh,
-    in_specs=(P(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR),
-            P(None, None, ShardingAxisName.MLP_TENSOR), P(ShardingAxisName.MLP_DATA)),
-    out_specs=(P(ShardingAxisName.MLP_DATA)),
+    in_specs=(P("data", "model"),
+            P(None, None, "model"), P("data")),
+    out_specs=(P("data")),
     check_rep=False,
     )(lhs, rhs, group_sizes)
-    # jax.debug.print("gmm_result before bias {} {}", gmm_result.sum(), gmm_result.ravel()[:10])
     if rhs_bias is not None:
         def _add_bias(gmm_result_local, rhs_bias_local, group_sizes_global):
             rhs_bis = jnp.repeat(rhs_bias_local, group_sizes_global, 0, total_repeat_length=m//mesh.shape["data"])
@@ -190,8 +189,8 @@ def tensor_sharded_gmm_row_parallel(
         gmm_result = shard_map(
             _add_bias,
             mesh=mesh,
-            in_specs=(P(ShardingAxisName.MLP_DATA), P(), P(ShardingAxisName.MLP_DATA)),
-            out_specs=(P(ShardingAxisName.MLP_DATA)),
+            in_specs=(P("data"), P(), P("data")),
+            out_specs=(P("data")),
             check_rep=False,
         )(gmm_result, rhs_bias, group_sizes)
 
@@ -215,7 +214,8 @@ def expert_sharded_gmm(
     num_experts_per_shard = num_experts // ep_size
     group_offset = jnp.arange(0, num_experts, num_experts_per_shard)
     group_offset = jax.lax.with_sharding_constraint(
-        group_offset, NamedSharding(mesh, P(ShardingAxisName.EXPERT)))
+        group_offset, NamedSharding(mesh, P("model")))
+
     def _gmm(lhs, rhs, group_sizes, group_offset):
         # Group offset for this shard. `group_offset` is sharded, and in this
         # sharded function, it has only 1 element and `group_offset.shape` is
@@ -254,9 +254,8 @@ def expert_sharded_gmm(
     gmm_res = shard_map(
         _gmm,
         mesh=mesh,
-        in_specs=(P(ShardingAxisName.MLP_DATA, None), P(ShardingAxisName.EXPERT, None,
-                         None), P(ShardingAxisName.MLP_DATA), P(ShardingAxisName.EXPERT)),
-        out_specs=(P(ShardingAxisName.EXPERT, None)),
+        in_specs=(P("data", None), P("model", None, None), P("data"), P("model")),
+        out_specs=(P("model", None)),
         check_rep=False,
     )(lhs, rhs, group_sizes, group_offset)
 
@@ -275,11 +274,12 @@ def expert_sharded_gmm(
     recv_sizes = send_sizes
 
     input_offsets = jax.lax.with_sharding_constraint(
-        input_offsets, NamedSharding(mesh, P(ShardingAxisName.EXPERT)))
+        input_offsets, NamedSharding(mesh, P("model")))
     send_sizes = jax.lax.with_sharding_constraint(
-        send_sizes, NamedSharding(mesh, P(ShardingAxisName.EXPERT)))
+        send_sizes, NamedSharding(mesh, P("model")))
     output_offsets = jax.lax.with_sharding_constraint(
-        output_offsets, NamedSharding(mesh, P(ShardingAxisName.EXPERT)))
+        output_offsets, NamedSharding(mesh, P("model")))
+
     def _ragged_all_to_all(operand, input_offsets, send_sizes, output_offsets,
                            recv_sizes):
         output = jnp.zeros_like(operand)
@@ -310,7 +310,8 @@ def expert_sharded_gmm(
                                          send_sizes_of_shard,
                                          output_offsets_of_shard,
                                          recv_sizes_of_shard,
-                                         axis_name=ShardingAxisName.EXPERT)
+                                         axis_name="model")
+
     # Use ragged_all_to_all to send the result from gmm for each expert to all
     # the shards.  In the working example, the result would be:
     #       A, A, A, A     A, A, A, A     A, A, A, A     A, A, A, A
@@ -331,8 +332,7 @@ def expert_sharded_gmm(
     return shard_map(
         _ragged_all_to_all,
         mesh=mesh,
-        in_specs=(P(ShardingAxisName.EXPERT, None), P(ShardingAxisName.EXPERT),
-                  P(ShardingAxisName.EXPERT), P(ShardingAxisName.EXPERT), P()),
+        in_specs=(P("model", None), P("model"), P("model"), P("model"), P()),
         out_specs=(P()),
         check_rep=False,
     )(gmm_res, input_offsets, send_sizes, output_offsets, recv_sizes)
@@ -368,7 +368,7 @@ def fused_moe_func(
     hidden_size = hidden_states.shape[-1]
     num_tokens = hidden_states.size // hidden_size
     assert global_num_experts == w1.shape[0]
-    ep_size = mesh.shape['model'] * mesh.shape.get("attn_dp", 1)  # only used if use_ep is True.
+    ep_size = mesh.shape["model"]  # only used if use_ep is True.
     intermediate_size = w2.shape[-1]
     dtype = hidden_states.dtype
     assert (num_tokens * topk) % 16 == 0, (
@@ -398,13 +398,10 @@ def fused_moe_func(
     x, group_sizes, topk_argsort_revert_indices = shard_map(
         _process_tokens_locally,
         mesh=mesh,
-        in_specs=(P(ShardingAxisName.ATTN_DATA, None), P(ShardingAxisName.ATTN_DATA, None)),
-        out_specs=(P(ShardingAxisName.ATTN_DATA, None), P(ShardingAxisName.ATTN_DATA), P(ShardingAxisName.ATTN_DATA)),
+        in_specs=(P("data", None), P("data", None)),
+        out_specs=(P("data", None), P("data"), P("data")),
         check_rep=False,
     )(hidden_states, topk_indices)
-    
-    # jax.debug.print("hidden_state before gmm {} {}", x.sum(), x.ravel()[:10])
-    # jax.debug.print("group_sizes {} {}", group_sizes.sum(), group_sizes)
     if use_ep:
         x = expert_sharded_gmm(
             x,
@@ -426,11 +423,8 @@ def fused_moe_func(
             mesh=mesh,
             intermediate_size=intermediate_size,
         )
-        # jax.debug.print("hidden_state after first gmm x1 {} {}", x1.sum(), x1.ravel()[:10])
-        # jax.debug.print("hidden_state after first gmm x2 {} {}", x2.sum(), x2.ravel()[:10])
 
     x = activation_fn(activation, x1, x2)
-    # jax.debug.print("hidden_state after activation {} {}", x.sum(), x.ravel()[:10])
     if use_ep:
         x = expert_sharded_gmm(
             x,
@@ -443,7 +437,7 @@ def fused_moe_func(
         )
     else:
         x = jax.lax.with_sharding_constraint(
-            x, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, "model")))
+            x, NamedSharding(mesh, P("data", "model")))
         x = tensor_sharded_gmm_row_parallel(
             x,
             w2,
@@ -452,7 +446,6 @@ def fused_moe_func(
             transpose_rhs=True,
             mesh=mesh,
         )
-        # jax.debug.print("hidden_state after second gmm {} {}", x.sum(), x.ravel()[:10])
 
     def _finalize_output(x_local, topk_argsort_revert_indices_local, topk_weights_local):
         x_local = x_local[topk_argsort_revert_indices_local].reshape(-1, topk, hidden_size)
@@ -463,16 +456,14 @@ def fused_moe_func(
     x = shard_map(
         _finalize_output,
         mesh=mesh,
-        in_specs=(P(ShardingAxisName.ATTN_DATA, None), P(ShardingAxisName.ATTN_DATA), P(ShardingAxisName.ATTN_DATA, None)),
-        out_specs=(P(ShardingAxisName.ATTN_DATA, None)),
+        in_specs=(P("data", None), P("data"), P("data", None)),
+        out_specs=(P("data", None)),
         check_rep=False,
     )(x, topk_argsort_revert_indices, topk_weights)
-    # jax.debug.print("hidden_state after finalize output {} {}", x.sum(), x.ravel()[:10])
     x = x.reshape(orig_shape)
 
     if reduce_results:
-        x = jax.lax.with_sharding_constraint(x, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA)))
-        # jax.debug.print("hidden_state after reducing result {} {}", x.sum(), x.ravel()[:10])
+        x = jax.lax.with_sharding_constraint(x, NamedSharding(mesh, P("data")))
     return x
 
 
