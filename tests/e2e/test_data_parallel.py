@@ -9,12 +9,6 @@ import pytest
 from vllm import LLM, EngineArgs, SamplingParams
 
 
-@pytest.fixture
-def model_name():
-    """Small model for faster testing."""
-    return "Qwen/Qwen2.5-1.5B-Instruct"
-
-
 @pytest.fixture(autouse=True)
 def setup_new_model_design():
     """Automatically set NEW_MODEL_DESIGN=True for all tests."""
@@ -66,7 +60,7 @@ def _run_inference_with_config(model_name: str,
         max_model_len=32,
         tensor_parallel_size=tensor_parallel_size,
         data_parallel_size=data_parallel_size,
-        gpu_memory_utilization=0.95,
+        gpu_memory_utilization=0.98,
         max_num_batched_tokens=128,
         max_num_seqs=16,
         enable_prefix_caching=enable_prefix_caching,
@@ -88,7 +82,6 @@ def _run_inference_with_config(model_name: str,
 
 
 def test_model_data_parallelism(
-    model_name: str,
     test_prompts: list,
     sampling_params: SamplingParams,
 ):
@@ -100,9 +93,12 @@ def test_model_data_parallelism(
     Equivalent to:
     python examples/offline_inference.py --tensor_parallel_size=4 --data_parallel_size=2
     """
+    # Use Llama 1B for this test
+    test_model = "meta-llama/Llama-3.2-1B-Instruct"
+    
     # Test with data parallelism enabled
     outputs = _run_inference_with_config(
-        model_name=model_name,
+        model_name=test_model,
         test_prompts=test_prompts,
         sampling_params=sampling_params,
         tensor_parallel_size=1,
@@ -121,7 +117,6 @@ def test_model_data_parallelism(
 
 
 def test_attention_data_parallelism(
-    model_name: str,
     test_prompts: list,
     sampling_params: SamplingParams,
 ):
@@ -134,6 +129,9 @@ def test_attention_data_parallelism(
     python examples/offline_inference.py --tensor_parallel_size=8 --kv-cache-dtype=fp8 \
         --additional_config='{"sharding":{"sharding_strategy": {"enable_dp_attention":1}}}'
     """
+    # Use Llama 1B for this test
+    test_model = "meta-llama/Llama-3.2-1B-Instruct"
+    
     additional_config = {
         "sharding": {
             "sharding_strategy": {
@@ -144,7 +142,7 @@ def test_attention_data_parallelism(
 
     # Test with attention data parallelism enabled
     outputs = _run_inference_with_config(
-        model_name=model_name,
+        model_name=test_model,
         test_prompts=test_prompts,
         sampling_params=sampling_params,
         tensor_parallel_size=8,
@@ -167,7 +165,6 @@ def test_attention_data_parallelism(
 
 
 def test_data_parallelism_correctness(
-    model_name: str,
     test_prompts: list,
     sampling_params: SamplingParams,
 ):
@@ -178,7 +175,7 @@ def test_data_parallelism_correctness(
     """
     os.environ['SKIP_JAX_PRECOMPILE'] = '1'
     os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '0'
-
+    model_name = "Qwen/Qwen2.5-1.5B-Instruct"
     # Use a smaller subset of prompts for correctness testing
     small_prompts = test_prompts[:10]
 
