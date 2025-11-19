@@ -787,7 +787,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
                 self.input_batch.num_reqs, self.max_num_reqs)
 
-        # When using data parallelism, sampling metadata should be sharded along ATTN_DATA axis
         sharding = None
         if self.dp_size > 1:
             sharding = NamedSharding(self.mesh,
