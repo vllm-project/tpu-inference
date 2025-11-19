@@ -13,6 +13,7 @@ from vllm.utils.func_utils import supports_kw
 from tpu_inference import envs
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.adapters import as_embedding_model
 from tpu_inference.models.jax.utils.quantization.quantization_utils import (
     apply_qwix_on_abstract_model, apply_qwix_quantization,
     load_random_weights_into_qwix_abstract_model)
@@ -184,6 +185,7 @@ def _get_nnx_model(
     return jit_model
 
 
+
 # TODO(pooyam): We need to refactor this. This is returning a bunch of functions that do not work with all models and this is not very easy to see from the code.
 def get_flax_model(
     vllm_config: VllmConfig,
@@ -191,12 +193,22 @@ def get_flax_model(
     mesh: Mesh,
     is_draft_model: bool = False,
 ) -> nnx.Module:
-    if is_draft_model:
-        model_class = _get_model_architecture(
-            vllm_config.speculative_config.draft_model_config.hf_config)
-    else:
-        model_class = _get_model_architecture(
-            vllm_config.model_config.hf_config)
+
+    model_config = (
+        vllm_config.speculative_config.draft_model_config
+        if is_draft_model
+        else vllm_config.model_config
+    )
+
+    model_class = _get_model_architecture(model_config.hf_config)
+
+    convert_type = getattr(model_config, "convert_type", "none")
+    if convert_type == "embed":
+        logger.debug_once( "Converting %s to embedding model", model_class.__name__)
+        model_class = as_embedding_model(model_class)
+    elif convert_type not in ("none", "generate"):
+        raise NotImplementedError( f"TPU JAX backend does not support convert_type={convert_type!r} yet")
+
     jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
     kv_cache_sharding = NamedSharding(
         mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None, "model"))
@@ -270,7 +282,7 @@ def get_flax_model(
         run_get_multimodal_embeddings, graphdef)
     get_input_embeddings_fn = functools.partial(run_get_input_embeddings,
                                                 graphdef)
-    lora_manager, model = None, None
+    lora_manager, _ = None, None
     combine_hidden_states_fn = functools.partial(combine_hidden_states,
                                                  graphdef)
 

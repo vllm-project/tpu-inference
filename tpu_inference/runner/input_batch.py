@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from vllm.lora.request import LoRARequest
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.utils.collection_utils import swap_dict_values
 from vllm.v1.core.sched.output import NewRequestData
@@ -52,9 +53,11 @@ class InputBatch:
         pin_memory: bool,
         vocab_size: int,
         block_sizes: list[int],
+        is_pooling_model: bool = False,
         is_spec_decode: bool = False,
     ):
         self.is_spec_decode = is_spec_decode
+        self.is_pooling_model = is_pooling_model
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
         self.max_num_batched_tokens = max_num_batched_tokens
@@ -131,6 +134,7 @@ class InputBatch:
         self.req_output_token_ids: list[Optional[list[int]]] = []
 
         self.request_distribution: list[int] = [0, 0, 0]
+        self.pooling_params: dict[str, PoolingParams] = {}
 
     @property
     def req_ids(self) -> list[str]:
@@ -175,71 +179,73 @@ class InputBatch:
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
         self.block_table.add_row(request.block_ids, req_index)
 
-        sampling_params = request.sampling_params
+        if sampling_params := request.sampling_params:
+            if (self.is_spec_decode
+                    and is_spec_decode_unsupported(sampling_params)):
+                self.spec_decode_unsupported_reqs.add(req_id)
 
-        if (self.is_spec_decode
-                and is_spec_decode_unsupported(sampling_params)):
-            self.spec_decode_unsupported_reqs.add(req_id)
+            if sampling_params.sampling_type == SamplingType.GREEDY:
+                # Avoid later division by zero.
+                self.temperature_cpu[req_index] = -1.0
+                self.greedy_reqs.add(req_id)
+            else:
+                self.temperature_cpu[req_index] = sampling_params.temperature
+                self.random_reqs.add(req_id)
 
-        if sampling_params.sampling_type == SamplingType.GREEDY:
-            # Avoid later division by zero.
-            self.temperature_cpu[req_index] = -1.0
-            self.greedy_reqs.add(req_id)
-        else:
-            self.temperature_cpu[req_index] = sampling_params.temperature
-            self.random_reqs.add(req_id)
+            self.top_p_cpu[req_index] = sampling_params.top_p
+            top_k = sampling_params.top_k
+            if top_k <= 0 or top_k >= self.vocab_size:
+                top_k = 1
+            self.top_k_cpu[req_index] = top_k
+            if sampling_params.min_tokens:
+                self.min_tokens[req_index] = (sampling_params.min_tokens,
+                                              sampling_params.all_stop_token_ids)
 
-        self.top_p_cpu[req_index] = sampling_params.top_p
-        top_k = sampling_params.top_k
-        if top_k <= 0 or top_k >= self.vocab_size:
-            top_k = 1
-        self.top_k_cpu[req_index] = top_k
-        if sampling_params.min_tokens:
-            self.min_tokens[req_index] = (sampling_params.min_tokens,
-                                          sampling_params.all_stop_token_ids)
 
-        # NOTE(woosuk): self.generators should not include the requests that
-        # do not have their own generator.
-        if request.generator is not None:
-            self.generators[req_index] = request.generator
+            # NOTE(woosuk): self.generators should not include the requests that
+            # do not have their own generator.
+            if request.generator is not None:
+                self.generators[req_index] = request.generator
 
-        if sampling_params.logprobs is not None:
-            self.num_logprobs[req_id] = sampling_params.logprobs
-        if sampling_params.logit_bias is not None:
-            self.logit_bias[req_index] = sampling_params.logit_bias
+            if sampling_params.logprobs is not None:
+                self.num_logprobs[req_id] = sampling_params.logprobs
+            if sampling_params.logit_bias is not None:
+                self.logit_bias[req_index] = sampling_params.logit_bias
 
-        if sampling_params.allowed_token_ids:
-            self.has_allowed_token_ids.add(req_id)
-            if self.allowed_token_ids_mask_cpu is None:
-                # Lazy allocation for this tensor, which can be large.
+            if sampling_params.allowed_token_ids:
+                self.has_allowed_token_ids.add(req_id)
+                if self.allowed_token_ids_mask_cpu is None:
+                    # Lazy allocation for this tensor, which can be large.
+                    # False means we don't fill with -inf.
+                    self.allowed_token_ids_mask = jnp.zeros(self.max_num_reqs,
+                                                            self.vocab_size,
+                                                            dtype=jnp.bool)
+                    self.allowed_token_ids_mask_cpu = np.zeros(self.max_num_reqs,
+                                                               self.vocab_size,
+                                                               dtype=np.bool)
+                self.allowed_token_ids_mask_cpu[req_index] = True
                 # False means we don't fill with -inf.
-                self.allowed_token_ids_mask = jnp.zeros(self.max_num_reqs,
-                                                        self.vocab_size,
-                                                        dtype=jnp.bool)
-                self.allowed_token_ids_mask_cpu = np.zeros(self.max_num_reqs,
-                                                           self.vocab_size,
-                                                           dtype=np.bool)
-            self.allowed_token_ids_mask_cpu[req_index] = True
-            # False means we don't fill with -inf.
-            self.allowed_token_ids_mask_cpu[req_index][
-                sampling_params.allowed_token_ids] = False
+                self.allowed_token_ids_mask_cpu[req_index][
+                    sampling_params.allowed_token_ids] = False
 
-        if sampling_params.bad_words_token_ids:
-            self.bad_words_token_ids[
-                req_index] = sampling_params.bad_words_token_ids
+            if sampling_params.bad_words_token_ids:
+                self.bad_words_token_ids[
+                    req_index] = sampling_params.bad_words_token_ids
 
-        # Add request lora ID
-        if request.lora_request:
-            lora_id = request.lora_request.lora_int_id
-            if lora_id not in self.lora_id_to_request_ids:
-                self.lora_id_to_request_ids[lora_id] = set()
+            # Add request lora ID
+            if request.lora_request:
+                lora_id = request.lora_request.lora_int_id
+                if lora_id not in self.lora_id_to_request_ids:
+                    self.lora_id_to_request_ids[lora_id] = set()
 
-            self.request_lora_mapping[req_index] = lora_id
-            self.lora_id_to_request_ids[lora_id].add(request.req_id)
-            self.lora_id_to_lora_request[lora_id] = request.lora_request
-        else:
-            # No LoRA
-            self.request_lora_mapping[req_index] = 0
+                self.request_lora_mapping[req_index] = lora_id
+                self.lora_id_to_request_ids[lora_id].add(request.req_id)
+                self.lora_id_to_lora_request[lora_id] = request.lora_request
+            else:
+                # No LoRA
+                self.request_lora_mapping[req_index] = 0
+        elif pooling_params := request.pooling_params:
+            self.pooling_params[req_id] = pooling_params
 
     def remove_request(self, req_id: str) -> Optional[int]:
         """This method must always be followed by a call to condense()."""
@@ -256,6 +262,9 @@ class InputBatch:
         self.min_tokens.pop(req_index, None)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
+        if self.is_pooling_model:
+            self.pooling_params.pop(req_id, None)
+            return req_index
 
         # LoRA
         lora_id = self.request_lora_mapping[req_index]
@@ -410,6 +419,10 @@ class InputBatch:
     @property
     def max_num_logprobs(self) -> Optional[int]:
         return max(self.num_logprobs.values()) if self.num_logprobs else None
+
+    def get_pooling_params(self) -> list[PoolingParams]:
+        assert len(self.pooling_params) == len(self.req_ids)
+        return [self.pooling_params[req_id] for req_id in self.req_ids]
 
     def make_lora_inputs(
         self, num_scheduled_tokens: np.ndarray
