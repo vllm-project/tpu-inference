@@ -15,8 +15,6 @@ steps:
     env:
       CI_STAGE: "UnitTest"
       CI_TARGET: meta-llama/Llama-Guard-4-12B
-      #Adding DUMMY_VAR to see if this will trigger the entire CI test suite
-      DUMMY_VAR: 42
     agents:
       queue: cpu
     commands:

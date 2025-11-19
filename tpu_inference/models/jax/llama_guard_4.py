@@ -1,10 +1,15 @@
-"""
-🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨
-This model is a work in progress
+from tpu_inference.logger import init_logger
 
-The following Llama Guard 4 model implementation only has the text portion implemented thus far. 
-Any multimodal inputs passed to this model will fail
-"""
+logger = init_logger(__name__)
+
+# --- CRITICAL FIX: Add logger.warning() call here ---
+logger.warning(
+    "🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨\n"
+    "Llama Guard 4 (JAX) is WIP: Only the text modality is currently implemented. "
+    "Multimodal inputs will fail.\n"
+    "🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨"
+)
+
 import re
 from typing import List, Optional, Tuple, Any
 
