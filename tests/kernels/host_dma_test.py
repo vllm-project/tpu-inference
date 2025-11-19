@@ -95,11 +95,13 @@ class HostHbmDmaTest(jtu.JaxTestCase):
         res = self.create_sharded_array(model_axis_size, "device")
         if res is None:
             return
-        original_device_data, _, host_sharding = res
+        original_device_data, device_sharding, host_sharding = res
 
         # 2. Test Device-to-Host (d2h) DMA
-        host_data = d2h_dma(original_device_data, host_sharding)
+        host_data = d2h_dma(original_device_data, device_sharding,
+                            host_sharding)
         jax.block_until_ready(host_data)
+        assert host_data.sharding.memory_kind == "pinned_host"
 
         # 3. Verification
         assert host_data.sharding == host_sharding
@@ -115,11 +117,13 @@ class HostHbmDmaTest(jtu.JaxTestCase):
         res = self.create_sharded_array(model_axis_size, "host")
         if res is None:
             return
-        original_host_data, device_sharding, _ = res
+        original_host_data, device_sharding, host_sharding = res
 
         # 2. Test Host-to-Device (h2d) DMA
-        device_data = h2d_dma(original_host_data, device_sharding)
+        device_data = h2d_dma(original_host_data, host_sharding,
+                              device_sharding)
         jax.block_until_ready(device_data)
+        assert device_data.sharding.memory_kind == "device"
 
         # 3. Verification
         assert device_data.sharding == device_sharding
@@ -147,16 +151,20 @@ class HostHbmDmaTest(jtu.JaxTestCase):
         original_device_data, device_sharding, host_sharding = res
 
         # 2. Test Device-to-Host (d2h) DMA
-        host_data = d2h_dma(original_device_data, host_sharding)
+        host_data = d2h_dma(original_device_data, device_sharding,
+                            host_sharding)
         jax.block_until_ready(host_data)
+        assert host_data.sharding.memory_kind == "pinned_host"
 
         # 3. Verification for d2h
         assert host_data.sharding == host_sharding
         self.assertArraysEqual(original_device_data, host_data)
 
         # 4. Test Host-to-Device (h2d) DMA
-        reloaded_device_data = h2d_dma(host_data, device_sharding)
+        reloaded_device_data = h2d_dma(host_data, host_sharding,
+                                       device_sharding)
         jax.block_until_ready(reloaded_device_data)
+        assert reloaded_device_data.sharding.memory_kind == "device"
 
         # 5. Verification for h2d
         assert reloaded_device_data.sharding == device_sharding
