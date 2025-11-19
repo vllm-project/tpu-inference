@@ -723,7 +723,7 @@ def _ragged_paged_attention_kernel(
         vec = ref[start::step]
         return vec
 
-    def strided_load_bkv(bkv_sem_idx, start, step, *, bkv_mask):
+    def strided_load_bkv(bkv_sem_idx, start, step):
         assert start % kv_packing == 0
         assert step % kv_packing == 0
         start //= kv_packing
@@ -732,13 +732,13 @@ def _ragged_paged_attention_kernel(
             bkv_sz * step, actual_head_dim_x2))
 
         kv = strided_load(kv_ref, start, step)
-        kv = lax.select(bkv_mask, kv, jnp.zeros_like(kv))
         bitwidth = 32 // kv_packing
         repack_ty = jnp.dtype(f"uint{bitwidth}")
         lst = []
         for i in range(0, kv_packing):
             cur_kv = pltpu.bitcast((kv >> (i * bitwidth)).astype(repack_ty),
                                    kv_dtype)
+            # cur_kv = jnp.nan_to_num(cur_kv)
             lst.append(cur_kv)
         return lst
 
@@ -806,10 +806,6 @@ def _ragged_paged_attention_kernel(
             def compute_with_bkv(bkv_idx, _):
                 # Create bitmask for KV.
                 assert bkv_sz % kv_packing == 0
-                actual_bkv_sz = jnp.minimum(bkv_sz, kv_len - bkv_idx * bkv_sz)
-                bkv_shape = (bkv_sz, actual_head_dim_x2)
-                bkv_mask = lax.broadcasted_iota(jnp.int32, bkv_shape,
-                                                0) < actual_bkv_sz
 
                 # Get next bkv ids.
                 bkv_sem_idx = sem_ids_ref[1]
@@ -859,7 +855,6 @@ def _ragged_paged_attention_kernel(
                         bkv_sem_idx,
                         kv_head_start,
                         num_kv_heads,
-                        bkv_mask=bkv_mask,
                     )
                     assert len(bkv_lst) == kv_packing
                     for i in range(kv_packing):
@@ -942,6 +937,7 @@ def _ragged_paged_attention_kernel(
 
     @pl.when(seq_idx == 0)
     def prologue():
+        bkv_x2_ref[...] = jnp.zeros(bkv_x2_ref.shape, bkv_x2_ref.dtype)
         start_fetch_bq(0, 0, 0)
         start_fetch_bkv(0, bkv_idx_start, 0)
 
