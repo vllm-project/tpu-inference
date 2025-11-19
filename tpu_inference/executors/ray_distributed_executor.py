@@ -108,6 +108,9 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
             ip_port = self.collective_rpc("get_node_kv_ip_port")
             for item in ip_port:
                 set_node_kv_ip_port(item)
+        self.uses_sampler = self.vllm_config.model_config.runner_type != "pooling" and (
+            self.vllm_config.ec_transfer_config is None
+            or not self.vllm_config.ec_transfer_config.is_ec_producer)
 
     def _initialize_ray_cluster(self) -> None:
         """Initialize the distributed cluster with Ray.
