@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 import sys
 from collections import OrderedDict
 from typing import Any, Optional
@@ -15,7 +14,6 @@ GB = 1024**3
 DEFAULT_CPU_CACHE_SIZE_BYTES = 1 * GB
 
 
-# TODO(jcgu): creating independent cpu backends since scheduler & worker could be in different processes.
 class LocalCPUBackend:
     """
     A singleton in-memory CPU backend for storing KV cache keys and values.
@@ -29,18 +27,14 @@ class LocalCPUBackend:
     size limit and support for pinning cache entries to prevent eviction.
     """
 
-    def __init__(self,
-                 max_cpu_cache_size_bytes: int = DEFAULT_CPU_CACHE_SIZE_BYTES):
-        env_cache_size_gb = os.getenv("TPU_OFFLOAD_CPU_CACHE_SIZE_GB")
-        self.max_cpu_cache_size_bytes = (int(env_cache_size_gb) *
-                                         GB if env_cache_size_gb is not None
-                                         else max_cpu_cache_size_bytes)
-
-        # The cache is an OrderedDict for LRU behavior.
+    def __init__(self, num_cpu_chunks: int):
+        self.max_num_cpu_chunks = num_cpu_chunks
         self.cache: OrderedDict[CpuChunkId, Any] = OrderedDict()
         self.current_size_bytes = 0
-        logger.info("Singleton LocalCPUBackend initialized."
-                    f"CPU cache size: {self.max_cpu_cache_size_bytes} bytes")
+        self.num_occupied_cpu_chunks = 0
+        logger.info(
+            "LocalCPUBackend initialized."
+            f"CPU cache capacity: {self.max_num_cpu_chunks} chunks / pages.")
 
     def _get_value_size(self, value: Any) -> int:
         """Calculates the size of a cache value in bytes."""
@@ -55,33 +49,42 @@ class LocalCPUBackend:
             size_in_bytes = sys.getsizeof(value)
         return size_in_bytes
 
-    def add(self, key: CpuChunkId, value: Any) -> bool:
+    def add(self, chunk_id: CpuChunkId, value: Any) -> bool:
         """
         Adds a key-value pair to the cache.
 
         If the cache is full, it evicts the least recently used, unpinned
         entries until there is enough space.
         """
+        if chunk_id < 0 or chunk_id >= self.max_num_cpu_chunks:
+            # TODO(jcgu): report failure when offload scheduler / worker
+            # can handle failed operations.
+            raise ValueError(f" get invalid chunk_id: {chunk_id}")
+
         # Add the new item.
-        if key in self.cache:
-            old_value = self.cache.pop(key)
+        if chunk_id in self.cache:
+            old_value = self.cache.pop(chunk_id)
             self.current_size_bytes -= self._get_value_size(old_value)
             del old_value
+            self.num_occupied_cpu_chunks -= 1
 
-        self.cache[key] = value
+        self.cache[chunk_id] = value
+        self.num_occupied_cpu_chunks += 1
         value_size = self._get_value_size(value)
         self.current_size_bytes += value_size
-        logger.info(f"Added key: {key} (size:{value_size}) to CPU backend.")
-        logger.info(f"Cache size: {self.current_size_bytes} bytes / "
-                    f"{self.max_cpu_cache_size_bytes} bytes")
+        logger.info(
+            f"Added chunk_id: {chunk_id} (size:{value_size}) to CPU backend.")
+        logger.info(
+            f"Cache: {self.current_size_bytes} bytes, {self.num_occupied_cpu_chunks} occupied chunks."
+        )
         return True
 
-    def get(self, key: CpuChunkId) -> Optional[Any]:
+    def get(self, chunk_id: CpuChunkId) -> Optional[Any]:
         """
-        Gets the value for a given key and marks it as recently used.
+        Gets the value for a given chunk_id and marks it as recently used.
         """
-        if key in self.cache:
-            return self.cache[key]
+        if chunk_id in self.cache:
+            return self.cache[chunk_id]
         return None
 
     def reclaim_unoccupied_chunks(self, occupied_chunk_ids: list[CpuChunkId]):

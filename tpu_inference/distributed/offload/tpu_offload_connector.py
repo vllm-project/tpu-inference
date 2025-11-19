@@ -139,6 +139,8 @@ BLOCK_SIZE_BUCKETS = [1, 2, 4, 8, 16]
 # 3. dynamic: keep the partial block as is.
 PARTIAL_BLOCK_SAVE_BEHAVIOR = Literal["drop", "pad", "dynamic"]
 
+DEFAULT_TPU_OFFLOAD_CPU_CHUNKS = 1024
+
 
 @dataclass
 class SaveSpec:
@@ -469,7 +471,11 @@ class TPUOffloadConnectorScheduler():
         self.block_size = vllm_config.cache_config.block_size
 
         # offloading manager
-        self.offload_manager = LRUCacheManager(num_cpu_chunks=1024)
+        self.num_cpu_chunks = int(
+            os.getenv("TPU_OFFLOAD_NUM_CPU_CHUNKS",
+                      str(DEFAULT_TPU_OFFLOAD_CPU_CHUNKS)))
+        self.offload_manager = LRUCacheManager(
+            num_cpu_chunks=self.num_cpu_chunks)
 
         self._request_trackers: dict[ReqId, RequestTracker] = {}
         # This dictionary holds the full vLLM Request object for all requests
@@ -528,6 +534,7 @@ class TPUOffloadConnectorScheduler():
             f"TPUOffloadConnectorScheduler initialized with: "
             f"block_size={self.block_size}, "
             f"cpu_chunk_size={self.cpu_chunk_size}, "
+            f"num_cpu_chunks={self.num_cpu_chunks}, "
             f"model_name={model_name}, "
             f"decode_save={self.decode_save}, "
             f"partial_block_save_behavior={self.partial_block_save_behavior}, "
@@ -1217,7 +1224,10 @@ class TPUOffloadConnectorWorker:
         self.swap_out_fn: KVCacheSwapFn = None
 
         # cpu cache
-        self.cpu_backend = LocalCPUBackend()
+        self.num_cpu_chunks = int(
+            os.getenv("TPU_OFFLOAD_NUM_CPU_CHUNKS",
+                      str(DEFAULT_TPU_OFFLOAD_CPU_CHUNKS)))
+        self.cpu_backend = LocalCPUBackend(num_cpu_chunks=self.num_cpu_chunks)
         # The worker needs its own token processor to generate keys.
         model_name = self.vllm_config.model_config.model
         logger.info(
