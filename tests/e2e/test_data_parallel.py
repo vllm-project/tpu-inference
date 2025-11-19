@@ -130,7 +130,7 @@ def test_attention_data_parallelism(
         --additional_config='{"sharding":{"sharding_strategy": {"enable_dp_attention":1}}}'
     """
     # Use Llama 1B for this test
-    test_model = "meta-llama/Llama-3.2-1B-Instruct"
+    test_model = "Qwen/Qwen3-0.6B"
     
     additional_config = {
         "sharding": {
