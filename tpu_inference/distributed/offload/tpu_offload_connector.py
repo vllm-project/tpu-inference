@@ -467,7 +467,6 @@ class TPUOffloadConnectorScheduler():
     def __init__(self, vllm_config: "VllmConfig"):
         logger.info("TPUOffloadConnectorScheduler: Entering __init__")
         self.vllm_config = vllm_config
-        self.config = vllm_config.kv_transfer_config
         self.block_size = vllm_config.cache_config.block_size
 
         # offloading manager
@@ -1201,7 +1200,6 @@ class TPUOffloadConnectorWorker:
                  connector: "TPUOffloadConnector"):
         logger.info("TPUOffloadConnectorWorker: Entering __init__")
         self.vllm_config = vllm_config
-        self.config = vllm_config.kv_transfer_config
         self.connector = connector
         self.block_size = vllm_config.cache_config.block_size
 

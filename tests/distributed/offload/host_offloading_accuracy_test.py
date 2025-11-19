@@ -28,30 +28,34 @@ def parse_outputs(outputs):
 def sampling_config():
     """deterministic sampling config"""
     return SamplingParams(temperature=0,
-                          max_tokens=10,
+                          max_tokens=20,
                           seed=42,
                           ignore_eos=True)
 
 
 @pytest.fixture
 def kv_transfer_config():
-    """use TPUOffloadConnector from tpu_connector_local"""
+    """use  from tpu_connector_local"""
     return KVTransferConfig(
         kv_connector="TPUOffloadConnector",
         kv_role="kv_both",
         kv_connector_module_path=
-        "tpu_inference.distributed.tpu_connector_local",
+        "tpu_inference.distributed.offload.tpu_offload_connector",
     )
 
 
-def test_kv_cache_cpu_offloading_accuracy(
+def _test_kv_cache_cpu_offloading_accuracy(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     kv_transfer_config: KVTransferConfig,
+    swap_op_type: str,
+    decode_save: str,
 ):
     with monkeypatch.context():
         os.environ['SKIP_JAX_PRECOMPILE'] = '1'
-        os.environ['TPU_OFFLOAD_SWAP_OP_TYPE'] = "pallas"
+        os.environ['TPU_OFFLOAD_SKIP_JAX_PRECOMPILE'] = '1'
+        os.environ['TPU_OFFLOAD_SWAP_OP_TYPE'] = swap_op_type
+        os.environ['TPU_OFFLOAD_DECODE_SAVE'] = decode_save
         llm = LLM(model="meta-llama/Llama-3.2-3B",
                   max_model_len=1024,
                   tensor_parallel_size=8,
@@ -80,3 +84,25 @@ def test_kv_cache_cpu_offloading_accuracy(
             assert text1 == text2
         for tokens1, tokens2 in zip(out_tokens1, out_tokens2):
             assert tokens1 == tokens2
+
+        del llm
+        # Waiting for TPUs to be released.
+        time.sleep(20)
+
+
+def test_kv_cache_cpu_offloading_accuracy(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    kv_transfer_config: KVTransferConfig,
+):
+    swap_op_types = ["pallas", "jax"]
+    decode_saves = ["0", "1"]
+    for swap_op_type in swap_op_types:
+        for decode_save in decode_saves:
+            _test_kv_cache_cpu_offloading_accuracy(
+                monkeypatch,
+                sampling_config,
+                kv_transfer_config,
+                swap_op_type,
+                decode_save,
+            )
