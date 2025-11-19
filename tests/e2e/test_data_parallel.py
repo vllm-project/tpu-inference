@@ -95,7 +95,7 @@ def test_model_data_parallelism(
     """
     # Use Llama 1B for this test
     test_model = "meta-llama/Llama-3.2-1B-Instruct"
-    
+
     # Test with data parallelism enabled
     outputs = _run_inference_with_config(
         model_name=test_model,
@@ -131,7 +131,7 @@ def test_attention_data_parallelism(
     """
     # Use Llama 1B for this test
     test_model = "Qwen/Qwen3-0.6B"
-    
+
     additional_config = {
         "sharding": {
             "sharding_strategy": {
