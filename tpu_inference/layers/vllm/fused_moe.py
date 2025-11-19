@@ -209,7 +209,7 @@ def expert_sharded_gmm(
     # adapted from https://github.com/pytorch/xla/blob/1d409399474197c484894be90b75d9855393dda5/torch_xla/experimental/custom_kernel.py#L1401
     m, k, g = lhs.shape[0], lhs.shape[1], rhs.shape[0]
     n = rhs.shape[1] if transpose_rhs else rhs.shape[2]
-    tm, tk, tn = _get_tiling_size_for_gmm_kernel(m//mesh.shape["data"], k, n, g)
+    tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
 
     num_experts_per_shard = num_experts // ep_size
     group_offset = jnp.arange(0, num_experts, num_experts_per_shard)
@@ -254,7 +254,7 @@ def expert_sharded_gmm(
     gmm_res = shard_map(
         _gmm,
         mesh=mesh,
-        in_specs=(P("data", None), P("model", None, None), P("data"), P("model")),
+        in_specs=(P(), P("model", None, None), P(), P("model")),
         out_specs=(P("model", None)),
         check_rep=False,
     )(lhs, rhs, group_sizes, group_offset)
