@@ -1,0 +1,732 @@
+INFO 11-14 06:25:57 [__init__.py:26] TPU info: node_name=cuiq-infer-v7-2 | tpu_type=tpu7x-8 | worker_id=0 | num_chips=8 | num_cores_per_chip=2
+INFO 11-14 06:25:57 [importing.py:44] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+INFO 11-14 06:25:57 [importing.py:68] Triton not installed or not compatible; certain GPU-related functions will not be available.
+WARNING 11-14 06:25:57 [interface.py:197] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+INFO 11-14 06:25:57 [utils.py:253] non-default args: {'download_dir': '/mnt/disks/persist', 'max_model_len': 1024, 'tensor_parallel_size': 4, 'num_redundant_experts': None, 'eplb_window_size': None, 'eplb_step_interval': None, 'eplb_log_balancedness': None, 'enable_lora': None, 'reasoning_parser_plugin': '', 'model': 'unsloth/gpt-oss-120b-BF16'}
+INFO 11-14 06:25:58 [model.py:630] Resolved architecture: GptOssForCausalLM
+INFO 11-14 06:25:58 [model.py:1728] Using max model len 1024
+WARNING 11-14 06:25:58 [tpu_jax.py:82] Error getting device name: 'NoneType' object has no attribute 'name'
+INFO 11-14 06:25:58 [scheduler.py:254] Chunked prefill is enabled with max_num_batched_tokens=8192.
+INFO 11-14 06:25:58 [config.py:272] Overriding max cuda graph capture size to 1024 for performance.
+INFO 11-14 06:25:58 [tpu_jax.py:118] Initialized sharding configuration: ShardingConfigManager(total_devices=4, sharding_strategy=ShardingStrategy(tensor_parallelism=4, expert_parallelism=1, sequence_parallelism=1, data_parallelism=1, attention_data_parallelism=1), device_indexes=None)
+WARNING 11-14 06:25:58 [tpu_jax.py:156] The model dtype is not properly set for JAX backend. Overwriting it to jnp.bfloat16
+INFO 11-14 06:25:58 [tpu_jax.py:192] Force using UniProcExecutor for JAX on single host.
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:25:59 [core.py:94] Initializing a V1 LLM engine (v0.11.1rc7.dev48+gdf4d3a44a) with config: model='unsloth/gpt-oss-120b-BF16', speculative_config=None, tokenizer='unsloth/gpt-oss-120b-BF16', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=1024, download_dir='/mnt/disks/persist', load_format=auto, tensor_parallel_size=4, pipeline_parallel_size=1, data_parallel_size=1, disable_custom_all_reduce=True, quantization=None, enforce_eager=False, kv_cache_dtype=auto, device_config=None, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='openai_gptoss', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None), seed=0, served_model_name=unsloth/gpt-oss-120b-BF16, enable_prefix_caching=True, chunked_prefill_enabled=True, pooler_config=None, compilation_config={'level': None, 'mode': 2, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'openxla', 'custom_ops': ['all'], 'splitting_ops': None, 'compile_mm_encoder': True, 'use_inductor': None, 'compile_sizes': None, 'inductor_compile_config': {'enable_auto_functionalized_v2': False}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'use_cudagraph': True, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': None, 'cudagraph_copy_inputs': False, 'full_cuda_graph': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {}, 'max_cudagraph_capture_size': 1024, 'local_cache_dir': None}
+[1;36m(EngineCore_DP0 pid=59613)[0;0m WARNING 11-14 06:25:59 [tpu_jax.py:228] Pin memory is not supported on TPU.
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:26:05 [parallel_state.py:1325] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, TP rank 0, EP rank 0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:26:05 [tpu_jax_runner.py:274] Init mesh | mesh=Mesh('data': 1, 'model': 4, axis_types=(Auto, Auto))
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:26:05 [utils.py:93] Prepared token paddings: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:26:05 [utils.py:59] Prepared request paddings: [8, 16, 32, 64, 128, 256]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:26:05 [compilation_manager.py:34] Enabling JAX compile cache.
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:26:05 [tpu_worker_jax.py:152] Init worker | rank=0 | node_id=0 | is_driver_worker=True | hbm=[(0.0, 94.75), (0.0, 94.75), (0.0, 94.75), (0.0, 94.75)]GiB
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:26:05 [model_loader.py:318] Loading model with MODEL_IMPL_TYPE=vllm
+[1;36m(EngineCore_DP0 pid=59613)[0;0m WARNING 11-14 06:26:06 [rocm.py:34] Failed to import from amdsmi with ModuleNotFoundError("No module named 'amdsmi'")
+[1;36m(EngineCore_DP0 pid=59613)[0;0m WARNING 11-14 06:26:06 [rocm.py:39] Failed to import from vllm._C with ModuleNotFoundError("No module named 'vllm._C'")
+[1;36m(EngineCore_DP0 pid=59613)[0;0m WARNING 11-14 06:26:06 [rocm.py:45] Failed to import from vllm._rocm_C with ModuleNotFoundError("No module named 'vllm._rocm_C'")
+[1;36m(EngineCore_DP0 pid=59613)[0;0m WARNING 11-14 06:26:06 [registry.py:171] _Backend has been renamed to AttentionBackendEnum. Please update your code to use AttentionBackendEnum instead. _Backend will be removed in a future release.
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:26:06 [tpu_jax.py:63] Cannot use None backend on TPU.
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:26:06 [tpu_jax.py:66] Using Pallas V1 backend.
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:26:06 [layer.py:331] Disabling MoE shared_experts cuda stream
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:   0% Completed | 0/73 [00:00<?, ?it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:   1% Completed | 1/73 [00:00<00:11,  6.05it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:   3% Completed | 2/73 [00:00<00:13,  5.37it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:   4% Completed | 3/73 [00:00<00:18,  3.82it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:   5% Completed | 4/73 [00:01<00:21,  3.22it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:   7% Completed | 5/73 [00:01<00:18,  3.63it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:   8% Completed | 6/73 [00:01<00:16,  4.05it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  10% Completed | 7/73 [00:01<00:15,  4.38it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  11% Completed | 8/73 [00:01<00:14,  4.63it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  12% Completed | 9/73 [00:02<00:13,  4.78it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  14% Completed | 10/73 [00:02<00:15,  3.96it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  15% Completed | 11/73 [00:02<00:14,  4.17it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  16% Completed | 12/73 [00:02<00:13,  4.47it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  18% Completed | 13/73 [00:03<00:13,  4.56it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  19% Completed | 14/73 [00:03<00:15,  3.87it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  21% Completed | 15/73 [00:03<00:16,  3.42it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  22% Completed | 16/73 [00:04<00:18,  3.12it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  23% Completed | 17/73 [00:04<00:16,  3.46it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  25% Completed | 18/73 [00:04<00:16,  3.27it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  26% Completed | 19/73 [00:05<00:17,  3.03it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  27% Completed | 20/73 [00:05<00:18,  2.92it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  29% Completed | 21/73 [00:05<00:18,  2.87it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  30% Completed | 22/73 [00:06<00:18,  2.80it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  32% Completed | 23/73 [00:06<00:17,  2.78it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  33% Completed | 24/73 [00:06<00:15,  3.19it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  34% Completed | 25/73 [00:07<00:15,  3.05it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  36% Completed | 26/73 [00:07<00:13,  3.41it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  37% Completed | 27/73 [00:07<00:11,  3.83it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  38% Completed | 28/73 [00:07<00:12,  3.51it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  40% Completed | 29/73 [00:08<00:13,  3.17it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  41% Completed | 30/73 [00:08<00:12,  3.53it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  42% Completed | 31/73 [00:08<00:12,  3.32it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  44% Completed | 32/73 [00:09<00:13,  3.07it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  45% Completed | 33/73 [00:09<00:13,  2.96it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  47% Completed | 34/73 [00:09<00:11,  3.34it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  48% Completed | 35/73 [00:09<00:10,  3.78it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  49% Completed | 36/73 [00:10<00:10,  3.40it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  51% Completed | 37/73 [00:10<00:11,  3.16it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  52% Completed | 38/73 [00:10<00:09,  3.52it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  53% Completed | 39/73 [00:11<00:10,  3.25it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  55% Completed | 40/73 [00:11<00:10,  3.09it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  56% Completed | 41/73 [00:11<00:09,  3.45it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  58% Completed | 42/73 [00:12<00:08,  3.87it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  59% Completed | 43/73 [00:12<00:08,  3.52it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  60% Completed | 44/73 [00:12<00:07,  3.72it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  62% Completed | 45/73 [00:12<00:06,  4.10it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  63% Completed | 46/73 [00:12<00:06,  4.43it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  64% Completed | 47/73 [00:13<00:06,  3.84it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  66% Completed | 48/73 [00:13<00:06,  3.95it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  67% Completed | 49/73 [00:13<00:05,  4.22it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  68% Completed | 50/73 [00:14<00:06,  3.68it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  70% Completed | 51/73 [00:14<00:05,  3.95it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  71% Completed | 52/73 [00:14<00:06,  3.49it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  73% Completed | 53/73 [00:14<00:05,  3.81it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  74% Completed | 54/73 [00:15<00:04,  4.17it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  75% Completed | 55/73 [00:15<00:04,  4.47it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  77% Completed | 56/73 [00:15<00:03,  4.74it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  78% Completed | 57/73 [00:15<00:04,  3.92it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  79% Completed | 58/73 [00:15<00:03,  4.15it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  81% Completed | 59/73 [00:16<00:03,  3.73it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  82% Completed | 60/73 [00:16<00:03,  3.31it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  84% Completed | 61/73 [00:17<00:03,  3.13it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  85% Completed | 62/73 [00:17<00:03,  3.50it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  86% Completed | 63/73 [00:17<00:03,  3.26it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  88% Completed | 64/73 [00:17<00:02,  3.61it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  89% Completed | 65/73 [00:18<00:01,  4.03it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  90% Completed | 66/73 [00:18<00:01,  4.38it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  92% Completed | 67/73 [00:18<00:01,  4.66it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  93% Completed | 68/73 [00:18<00:01,  3.87it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  96% Completed | 70/73 [00:19<00:00,  4.28it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  97% Completed | 71/73 [00:19<00:00,  3.73it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards:  99% Completed | 72/73 [00:19<00:00,  3.38it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards: 100% Completed | 73/73 [00:20<00:00,  3.19it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Loading safetensors checkpoint shards: 100% Completed | 73/73 [00:20<00:00,  3.60it/s]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m 
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:26:27 [default_loader.py:314] Loading weights took 20.31 seconds
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:26:29] WARNING ops_registry.py:36: Duplicate op registration for aten.__and__
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:26:29] WARNING unquantized.py:94: Bias might return incorrect value.
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:27:32 [tpu_jax_runner.py:498] Init model | hbm=[(56.45, 94.75), (56.45, 94.75), (56.45, 94.75), (56.45, 94.75)]GiB
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:27:32 [tpu_worker_jax.py:175] Memory statistics | total_hbm_limit_gb=378.98GiB | total_hbm_limit_cap_gb=341.09GiB | total_hbm_used_gb=225.81GiB | total_hbm_avail_gb=115.28GiB
+[1;36m(EngineCore_DP0 pid=59613)[0;0m WARNING 11-14 06:27:32 [kv_cache_utils.py:1095] Hybrid KV cache manager is disabled for this hybrid model, This means we do not enable any optimizations for saving KV cache memory (e.g., dropping the KV cache outside the sliding window). The compute of layers like sliding window is still saved.
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:27:32 [kv_cache_utils.py:1229] GPU KV cache size: 1,678,784 tokens
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:27:32 [kv_cache_utils.py:1234] Maximum concurrency for 1,024 tokens per request: 1639.44x
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:27:36 [kv_cache_manager.py:216] Init kv-cache | num_layers=36 | shape=(num_blocks, (64, 4, 2, 128)) | num_blocks=[26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231, 26231] | sharding=NamedSharding(mesh=Mesh('data': 1, 'model': 4, axis_types=(Auto, Auto)), spec=PartitionSpec('data', None, 'model'), memory_kind=device) | dtype=bfloat16 | hbm=[(85.27, 94.75), (85.27, 94.75), (85.27, 94.75), (85.27, 94.75)]Gb
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:27:36 [core.py:247] init engine (profile, create kv cache, warmup model) took 3.16 seconds
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:27:36 [tpu_jax.py:118] Initialized sharding configuration: ShardingConfigManager(total_devices=4, sharding_strategy=ShardingStrategy(tensor_parallelism=4, expert_parallelism=1, sequence_parallelism=1, data_parallelism=1, attention_data_parallelism=1), device_indexes=None)
+[1;36m(EngineCore_DP0 pid=59613)[0;0m WARNING 11-14 06:27:36 [tpu_jax.py:156] The model dtype is not properly set for JAX backend. Overwriting it to jnp.bfloat16
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:27:36 [tpu_jax.py:192] Force using UniProcExecutor for JAX on single host.
+INFO 11-14 06:27:37 [llm.py:350] Supported tasks: ['generate']
+Adding requests:   0%|          | 0/35 [00:00<?, ?it/s]Adding requests: 100%|██████████| 35/35 [00:00<00:00, 1969.69it/s]
+Processed prompts:   0%|          | 0/35 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s][1;36m(EngineCore_DP0 pid=59613)[0;0m /mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torchax/tensor.py:154: UserWarning: Explicitly requested dtype int64 requested in astype is not available, and will be truncated to dtype int32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+[1;36m(EngineCore_DP0 pid=59613)[0;0m   res = jax_function(self._elem, *args, **kwargs)
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:37] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:37] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:37] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:37] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:37] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:37] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:37] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:37] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:38] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m input_ids: [13225    11   922  1308   382     0     0     0     0     0     0     0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m      0     0     0     0]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Couldn`t find tuned sizes for the RPA v3 kernel with %s ('TPU v7', 64, 'q_bfloat16_kv_bfloat16', 'q_head-16_kv_head-2_head-64', 1024)
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Couldn`t find tuned sizes for the RPA v3 kernel with %s ('TPU v7', 64, 'q_bfloat16_kv_bfloat16', 'q_head-16_kv_head-2_head-64', 1024)
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:27:47 [tpu_jax_runner.py:879] debugging: next_tokens [5928   11   11   11   11   11   11   11]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:47] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:48] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:49] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:49] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:49] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:49] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:49] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:49] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:49] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:27:49] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m input_ids: [  5928    976   9029    328  10128    382    976  10803    328    290
+[1;36m(EngineCore_DP0 pid=59613)[0;0m   72948    553    976   5277    328  20837    382    976  10464    328
+[1;36m(EngineCore_DP0 pid=59613)[0;0m     290   5553   6737    382   5299   1991   7238    553    402    261
+[1;36m(EngineCore_DP0 pid=59613)[0;0m    7024  34263   3214    402    290   3259    540   1001   1058     30
+[1;36m(EngineCore_DP0 pid=59613)[0;0m     637  29511 111692     11   1218    382    290   8415    328    290
+[1;36m(EngineCore_DP0 pid=59613)[0;0m    9624     30    637   1412   1284   2242    290 141737  22834     30
+[1;36m(EngineCore_DP0 pid=59613)[0;0m     637   1118  29055    382    290 135869  44225  18658     30  26693
+[1;36m(EngineCore_DP0 pid=59613)[0;0m  130491    382   7567    306   1118  21689   3352     30   4827  21574
+[1;36m(EngineCore_DP0 pid=59613)[0;0m   60202    673  47910    656 119707  94978     30   4827    553    290
+[1;36m(EngineCore_DP0 pid=59613)[0;0m    4242  18864  16691    328   7867     30   4827   2226    392  47787
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       1   3182    395     30   4827   2226    392   9512      1   3182
+[1;36m(EngineCore_DP0 pid=59613)[0;0m     395     30   4827    382    290   9029    328  11930     30   4827
+[1;36m(EngineCore_DP0 pid=59613)[0;0m     382    290  15377  10038    395   8568     30   4827    382    290
+[1;36m(EngineCore_DP0 pid=59613)[0;0m   18842    328  45986     30   4827    382    290   9324    591    290
+[1;36m(EngineCore_DP0 pid=59613)[0;0m   16464    316    290  11628   4358     30   4827    382    290  66387
+[1;36m(EngineCore_DP0 pid=59613)[0;0m    2438    328   3411    306  93235     30   4827    382    290  60196
+[1;36m(EngineCore_DP0 pid=59613)[0;0m    5542   6247  30837    402  16464     30   4827    382    290  10574
+[1;36m(EngineCore_DP0 pid=59613)[0;0m   17921    306   1039  17624   2420     30   4827    382    290  37511
+[1;36m(EngineCore_DP0 pid=59613)[0;0m   20608    306    290   2375     30   4827    382    290   2758   1114
+[1;36m(EngineCore_DP0 pid=59613)[0;0m     328    290 120264    306    290   5396   3641     30   4827    382
+[1;36m(EngineCore_DP0 pid=59613)[0;0m     290   2758  34879    306   1704 192328     30   4827    382    290
+[1;36m(EngineCore_DP0 pid=59613)[0;0m    1645  36116   6439    306    290   2375    656   2086    328  15027
+[1;36m(EngineCore_DP0 pid=59613)[0;0m   29735     30   4827    382    290   2273    656   1118  13940   1199
+[1;36m(EngineCore_DP0 pid=59613)[0;0m   55414    316   2501   4232     30  34405   4931    382   5542    472
+[1;36m(EngineCore_DP0 pid=59613)[0;0m     290  10098    328    290  84042  11628     30  20600   9742    290
+[1;36m(EngineCore_DP0 pid=59613)[0;0m   17346    328   5985  37575   2409     30  20600  23699    290   4756
+[1;36m(EngineCore_DP0 pid=59613)[0;0m     392  17883  25778      1  98735     30  20600    382  70808    483
+[1;36m(EngineCore_DP0 pid=59613)[0;0m   20420    289    290  27430     30  20600  33842    290  32727    328
+[1;36m(EngineCore_DP0 pid=59613)[0;0m     290  86447    514  73535     30  20600    673    290   1577  15806
+[1;36m(EngineCore_DP0 pid=59613)[0;0m   20134  13761    328    290   5553  20431     30  20600    673    290
+[1;36m(EngineCore_DP0 pid=59613)[0;0m    1577   1647    316   5229    402    290  28479     30  20600  11955
+[1;36m(EngineCore_DP0 pid=59613)[0;0m     290   5765  78572    328  71273     30  20600  11955    290  14030
+[1;36m(EngineCore_DP0 pid=59613)[0;0m     392     47   2037    326   4659 184888  69029      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Couldn`t find tuned sizes for the RPA v3 kernel with %s ('TPU v7', 64, 'q_bfloat16_kv_bfloat16', 'q_head-16_kv_head-2_head-64', 1024)
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Couldn`t find tuned sizes for the RPA v3 kernel with %s ('TPU v7', 64, 'q_bfloat16_kv_bfloat16', 'q_head-16_kv_head-2_head-64', 1024)
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:06 [tpu_jax_runner.py:879] debugging: next_tokens [78200 12650    25 13712   261   279   279   279   279   279   279   279
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:06 [tpu_jax_runner.py:879]    279   279   279   279   279   279   279   279   279   279   279   279
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:06 [tpu_jax_runner.py:879]    279   279   279   279   279   279   410   279   279   279  1214 78200
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:06 [tpu_jax_runner.py:879]  78200 78200 78200 78200 78200 78200 78200 78200 78200 78200 78200 78200
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:06 [tpu_jax_runner.py:879]  78200 78200 78200 78200 78200 78200 78200 78200 78200 78200 78200 78200
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:06 [tpu_jax_runner.py:879]  78200 78200 78200 78200]
+INFO 11-14 06:28:06 [loggers.py:221] Engine 000: Avg prompt throughput: 11.3 tokens/s, Avg generation throughput: 1.2 tokens/s, Running: 35 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:06] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:06] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:06] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:06] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:06] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m [2025-11-14 06:28:07] WARNING tensor.py:143: In-place to .data modifications still results a copy on TPU
+[1;36m(EngineCore_DP0 pid=59613)[0;0m input_ids: [78200 12650    25 13712   261   279   279   279   279   279   279   279
+[1;36m(EngineCore_DP0 pid=59613)[0;0m    279   279   279   279   279   279   279   279   279   279   279   279
+[1;36m(EngineCore_DP0 pid=59613)[0;0m    279   279   279   279   279   279   410   279   279   279  1214     0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m      0     0     0     0     0     0     0     0     0     0     0     0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m      0     0     0     0     0     0     0     0     0     0     0     0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m      0     0     0     0]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Couldn`t find tuned sizes for the RPA v3 kernel with %s ('TPU v7', 64, 'q_bfloat16_kv_bfloat16', 'q_head-16_kv_head-2_head-64', 1024)
+[1;36m(EngineCore_DP0 pid=59613)[0;0m Couldn`t find tuned sizes for the RPA v3 kernel with %s ('TPU v7', 64, 'q_bfloat16_kv_bfloat16', 'q_head-16_kv_head-2_head-64', 1024)
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879] debugging: next_tokens [  326    13  3592    11 10480    32   637   976   976 26693    41   976
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879]  47787  9512   976   976   976   976   976   976   976   976   976   976
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879]    976   976 86356   976   976   976  4066   976   976   976   309   326
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879]    326   326   326   326   326   326   326   326   326   326   326   326
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879]    326   326   326   326   326   326   326   326   326   326   326   326
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879]    326   326   326   326]
+INFO 11-14 06:28:20 [loggers.py:221] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.4 tokens/s, Running: 35 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+[1;36m(EngineCore_DP0 pid=59613)[0;0m input_ids: [  326    13  3592    11 10480    32   637   976   976 26693    41   976
+[1;36m(EngineCore_DP0 pid=59613)[0;0m  47787  9512   976   976   976   976   976   976   976   976   976   976
+[1;36m(EngineCore_DP0 pid=59613)[0;0m    976   976 86356   976   976   976  4066   976   976   976   309     0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m      0     0     0     0     0     0     0     0     0     0     0     0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m      0     0     0     0     0     0     0     0     0     0     0     0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m      0     0     0     0]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879] debugging: next_tokens [   357    279     11    889  11310   7024  29511 141737 135869 130491
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879]    6824   4242  20862  20862   9029  15377  18842   9324  66387  60196
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879]   10574  37511   2758   2758   1645   2273    382  17346   4756  32634
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879]     256   1577   1577   5765    461    357    357    357    357    357
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879]     357    357    357    357    357    357    357    357    357    357
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879]     357    357    357    357    357    357    357    357    357    357
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879]     357    357    357    357]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m input_ids: [   357    279     11    889  11310   7024  29511 141737 135869 130491
+[1;36m(EngineCore_DP0 pid=59613)[0;0m    6824   4242  20862  20862   9029  15377  18842   9324  66387  60196
+[1;36m(EngineCore_DP0 pid=59613)[0;0m   10574  37511   2758   2758   1645   2273    382  17346   4756  32634
+[1;36m(EngineCore_DP0 pid=59613)[0;0m     256   1577   1577   5765    461      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879] debugging: next_tokens [   939  19936  26205    480   1218  34263 111692  90157  44225    382
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879]     385  18864    395    395    328  10038    328    591   2438   5542
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879]   17921  20608   1114  34879  36116    656   5542    328    392    328
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879]     425  15806   1647  78572   5805    939    939    939    939    939
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879]     939    939    939    939    939    939    939    939    939    939
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879]     939    939    939    939    939    939    939    939    939    939
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879]     939    939    939    939]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m input_ids: [   939  19936  26205    480   1218  34263 111692  90157  44225    382
+[1;36m(EngineCore_DP0 pid=59613)[0;0m     385  18864    395    395    328  10038    328    591   2438   5542
+[1;36m(EngineCore_DP0 pid=59613)[0;0m   17921  20608   1114  34879  36116    656   5542    328    392    328
+[1;36m(EngineCore_DP0 pid=59613)[0;0m     425  15806   1647  78572   5805      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879] debugging: next_tokens [  220     0    11  1217 18305  3214    11   306   382  7567 94978 16691
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879]  13399 48323 11930   395 45986   290   328  6247   306   306   328   306
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879]   6439  1118   472  5985 17883   290 17045 20134   316   328  2337   220
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879]    220   220   220   220   220   220   220   220   220   220   220   220
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879]    220   220   220   220   220   220   220   220   220   220   220   220
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879]    220   220   220   220]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m input_ids: [  220     0    11  1217 18305  3214    11   306   382  7567 94978 16691
+[1;36m(EngineCore_DP0 pid=59613)[0;0m  13399 48323 11930   395 45986   290   328  6247   306   306   328   306
+[1;36m(EngineCore_DP0 pid=59613)[0;0m   6439  1118   472  5985 17883   290 17045 20134   316   328  2337     0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m      0     0     0     0     0     0     0     0     0     0     0     0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m      0     0     0     0     0     0     0     0     0     0     0     0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m      0     0     0     0]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879] debugging: next_tokens [ 1130  1843 19691 21849   261   853   290   220 18658   306   673   328
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879]  44532  1279   382  8568   382 16464  3411 30837  1039   290   290  1704
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879]    306 13940   290 37575 25778 27430    25 13761  5229 71273  5140  1130
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879]   1130  1130  1130  1130  1130  1130  1130  1130  1130  1130  1130  1130
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879]   1130  1130  1130  1130  1130  1130  1130  1130  1130  1130  1130  1130
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:20 [tpu_jax_runner.py:879]   1130  1130  1130  1130]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m input_ids: [ 1130  1843 19691 21849   261   853   290   220 18658   306   673   328
+[1;36m(EngineCore_DP0 pid=59613)[0;0m  44532  1279   382  8568   382 16464  3411 30837  1039   290   290  1704
+[1;36m(EngineCore_DP0 pid=59613)[0;0m    306 13940   290 37575 25778 27430    25 13761  5229 71273  5140     0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m      0     0     0     0     0     0     0     0     0     0     0     0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m      0     0     0     0     0     0     0     0     0     0     0     0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m      0     0     0     0]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879] debugging: next_tokens [  2101    481     11  13525   4010    220   8415  10037    540    290
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]     261   7867  14856   5070 134455    382    290    316    306    402
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]   17624   2375 120264 192328    290   1199  10098   2409      1    382
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]   27596    328    402    673 120668   2101   2101   2101   2101   2101
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]    2101   2101   2101   2101   2101   2101   2101   2101   2101   2101
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]    2101   2101   2101   2101   2101   2101   2101   2101   2101   2101
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]    2101   2101   2101   2101]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m input_ids: [  2101    481     11  13525   4010    220   8415  10037    540    290
+[1;36m(EngineCore_DP0 pid=59613)[0;0m     261   7867  14856   5070 134455    382    290    316    306    402
+[1;36m(EngineCore_DP0 pid=59613)[0;0m   17624   2375 120264 192328    290   1199  10098   2409      1    382
+[1;36m(EngineCore_DP0 pid=59613)[0;0m   27596    328    402    673 120668      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879] debugging: next_tokens [  2890    679   8851     13    328    994    328     17    290  95231
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]   18753    553     13    817     13  18016  41904    290  93235  16464
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]    2420    382    306    382   2375  55414    328    673  98735  22696
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]  114581    290    290  22696   2866   2890   2890   2890   2890   2890
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]    2890   2890   2890   2890   2890   2890   2890   2890   2890   2890
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]    2890   2890   2890   2890   2890   2890   2890   2890   2890   2890
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]    2890   2890   2890   2890]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m input_ids: [  2890    679   8851     13    328    994    328     17    290  95231
+[1;36m(EngineCore_DP0 pid=59613)[0;0m   18753    553     13    817     13  18016  41904    290  93235  16464
+[1;36m(EngineCore_DP0 pid=59613)[0;0m    2420    382    306    382   2375  55414    328    673  98735  22696
+[1;36m(EngineCore_DP0 pid=59613)[0;0m  114581    290    290  22696   2866      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879] debugging: next_tokens [ 14396   1062     11   1877   3470   7238    290     13 168662   5094
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]    5985   1402    279  20333    279     13  27965  11628    382    382
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]     382    290    290  97176    656    316    290   9742     11  70808
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]   83283   5553  28479   7582    645  14396  14396  14396  14396  14396
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]   14396  14396  14396  14396  14396  14396  14396  14396  14396  14396
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]   14396  14396  14396  14396  14396  14396  14396  14396  14396  14396
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]   14396  14396  14396  14396]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m input_ids: [ 14396   1062     11   1877   3470   7238    290     13 168662   5094
+[1;36m(EngineCore_DP0 pid=59613)[0;0m    5985   1402    279  20333    279     13  27965  11628    382    382
+[1;36m(EngineCore_DP0 pid=59613)[0;0m     382    290    290  97176    656    316    290   9742     11  70808
+[1;36m(EngineCore_DP0 pid=59613)[0;0m   83283   5553  28479   7582    645      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879] debugging: next_tokens [ 26178    945   9861    581    326    402   9624    279  17982  21689
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]     326     16    976     13    976    279    350    382    220  36181
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]   79575 116102   5396     13   2086   2501  84042    656   1217    316
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]      20  20431    673    656   1730  26178  26178  26178  26178  26178
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]   26178  26178  26178  26178  26178  26178  26178  26178  26178  26178
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]   26178  26178  26178  26178  26178  26178  26178  26178  26178  26178
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]   26178  26178  26178  26178]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m input_ids: [ 26178    945   9861    581    326    402   9624    279  17982  21689
+[1;36m(EngineCore_DP0 pid=59613)[0;0m     326     16    976     13    976    279    350    382    220  36181
+[1;36m(EngineCore_DP0 pid=59613)[0;0m   79575 116102   5396     13   2086   2501  84042    656   1217    316
+[1;36m(EngineCore_DP0 pid=59613)[0;0m      20  20431    673    656   1730      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879] debugging: next_tokens [ 38193   5359     11   4901  16044    290    382    976    306   3352
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]    9407     13    279    279   6052    976 142474   4358     15     13
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]      13  13728   3641    279    328   4232  11628  40833   5542  34569
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]      13    673  58186  17382    787  38193  38193  38193  38193  38193
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]   38193  38193  38193  38193  38193  38193  38193  38193  38193  38193
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]   38193  38193  38193  38193  38193  38193  38193  38193  38193  38193
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]   38193  38193  38193  38193]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m input_ids: [ 38193   5359     11   4901  16044    290    382    976    306   3352
+[1;36m(EngineCore_DP0 pid=59613)[0;0m    9407     13    279    279   6052    976 142474   4358     15     13
+[1;36m(EngineCore_DP0 pid=59613)[0;0m      13  13728   3641    279    328   4232  11628  40833   5542  34569
+[1;36m(EngineCore_DP0 pid=59613)[0;0m      13    673  58186  17382    787      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879] debugging: next_tokens [ 31639    503   1383    316   3518   3259  70929 141737  12650     13
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]    2309   2502   3206    976    316   6052    741    448  18210    279
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]     279     11    382    976  15027    382     13  83400    472  51290
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]    6240  63580  81203  59442    461    637    637    637    637    637
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]     637    637    637    637    637    637    637    637    637    637
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]     637    637    637    637    637    637    637    637    637    637
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]     637    637    637    637]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m input_ids: [ 31639    503   1383    316   3518   3259  70929 141737  12650     13
+[1;36m(EngineCore_DP0 pid=59613)[0;0m    2309   2502   3206    976    316   6052    741    448  18210    279
+[1;36m(EngineCore_DP0 pid=59613)[0;0m     279     11    382    976  15027    382     13  83400    472  51290
+[1;36m(EngineCore_DP0 pid=59613)[0;0m    6240  63580  81203  59442    461      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879] debugging: next_tokens [   220   1309   6235   2575    290    540 101363    673     11    279
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]    1218  49968   8224    279    290    316    279 178600  93235    976
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]     976   1118    316   6145  29735   4358    279     13    290  27073
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]    4827 186233     13     13 103502    220    220    220    220    220
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]     220    220    220    220    220    220    220    220    220    220
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]     220    220    220    220    220    220    220    220    220    220
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]     220    220    220    220]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m input_ids: [   220   1309   6235   2575    290    540 101363    673     11    279
+[1;36m(EngineCore_DP0 pid=59613)[0;0m    1218  49968   8224    279    290    316    279 178600  93235    976
+[1;36m(EngineCore_DP0 pid=59613)[0;0m     976   1118    316   6145  29735   4358    279     13    290  27073
+[1;36m(EngineCore_DP0 pid=59613)[0;0m    4827 186233     13     13 103502      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879] debugging: next_tokens [    17   6544     11    326   5553   1001     13    261  10128    976
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]   10518   1953   1299   3206   4928    290    976   7670     13   6052
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]    6145    382   6690   6052    382   8309    976    279    392     13
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]     382     13   1679   1679 147000     17     17     17     17     17
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]      17     17     17     17     17     17     17     17     17     17
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]      17     17     17     17     17     17     17     17     17     17
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]      17     17     17     17]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m input_ids: [    17   6544     11    326   5553   1001     13    261  10128    976
+[1;36m(EngineCore_DP0 pid=59613)[0;0m   10518   1953   1299   3206   4928    290    976   7670     13   6052
+[1;36m(EngineCore_DP0 pid=59613)[0;0m    6145    382   6690   6052    382   8309    976    279    392     13
+[1;36m(EngineCore_DP0 pid=59613)[0;0m     382     13   1679   1679 147000      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879] debugging: next_tokens [    13  14647 117320  41990   6737   1058    279  18965     13    279
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]     261   9578    634   8224    392    279  41904    350    279    382
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]    6052   7567   8642    382 133467  73972    279    976  20865   1679
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]     290   3627    673    673    787     13     13     13     13     13
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]      13     13     13     13     13     13     13     13     13     13
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]      13     13     13     13     13     13     13     13     13     13
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]      13     13     13     13]
+Processed prompts:   3%|▎         | 1/35 [00:44<24:59, 44.09s/it, est. speed input: 0.11 toks/s, output: 0.36 toks/s][1;36m(EngineCore_DP0 pid=59613)[0;0m input_ids: [   787  14647 117320  41990   6737   1058    279  18965     13    279
+[1;36m(EngineCore_DP0 pid=59613)[0;0m     261   9578    634   8224    392    279  41904    350    279    382
+[1;36m(EngineCore_DP0 pid=59613)[0;0m    6052   7567   8642    382 133467  73972    279    976  20865   1679
+[1;36m(EngineCore_DP0 pid=59613)[0;0m     290   3627    673    673      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0      0      0      0      0      0      0
+[1;36m(EngineCore_DP0 pid=59613)[0;0m       0      0      0      0]
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879] debugging: next_tokens [   461     11     13  20837   6059     13    976     11    279   3206
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]    2140     25   3176   1299    279   3206  27965  47490    976    279
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]     382    306    326     25  13999     13   3206   6052 173689    673
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]    1308  13898    448    261    461    461    461    461    461    461
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]     461    461    461    461    461    461    461    461    461    461
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]     461    461    461    461    461    461    461    461    461    461
+[1;36m(EngineCore_DP0 pid=59613)[0;0m INFO 11-14 06:28:21 [tpu_jax_runner.py:879]     461    461    461    461]
+Processed prompts: 100%|██████████| 35/35 [00:44<00:00, 44.09s/it, est. speed input: 7.50 toks/s, output: 12.69 toks/s]Processed prompts: 100%|██████████| 35/35 [00:44<00:00,  1.26s/it, est. speed input: 7.50 toks/s, output: 12.69 toks/s]
+--------------------------------------------------
+Prompt: 'Hello, my name is'
+Generated text: ' John Doe and I am 30 years old."\n```\n\n### 2.'
+--------------------------------------------------
+Prompt: 'The capital of France is'
+Generated text: ' Paris.\n\nGreat! If you have any more questions or need further assistance,'
+--------------------------------------------------
+Prompt: 'The colors of the rainbow are'
+Generated text: ': red, orange, yellow, green, blue, indigo, violet.'
+--------------------------------------------------
+Prompt: 'The future of AI is'
+Generated text: ' bright, but it also presents challenges. As we continue to develop and integrate AI'
+--------------------------------------------------
+Prompt: 'The president of the United States is'
+Generated text: ' a political figure who holds a position of power and influence within the United States government'
+--------------------------------------------------
+Prompt: 'How many players are on a standard soccer team on the field at one time?'
+Generated text: '\n\nA standard soccer team has 11 players on the field at one time.'
+--------------------------------------------------
+Prompt: 'In Greek mythology, who is the god of the sea?'
+Generated text: '\n\nIn Greek mythology, the god of the sea is Poseidon.\n\nThe'
+--------------------------------------------------
+Prompt: 'In what year did the Titanic sink?'
+Generated text: '\n\nThe Titanic sank in 1912.\n\nThe Titanic was a massive,'
+--------------------------------------------------
+Prompt: 'In which museum is the Mona Lisa displayed?'
+Generated text: '\n\nThe Mona Lisa is displayed at the Louvre Museum in Paris, France.\n\n'
+--------------------------------------------------
+Prompt: 'Mount Everest is located in which mountain range?'
+Generated text: '\n\nMount Everest is located in the Himalaya mountain range.\n\nThe\n\nIt'
+--------------------------------------------------
+Prompt: 'What ancient empire was ruled by Julius Caesar?'
+Generated text: '\n\nJulius Caesar was a Roman general and statesman who played a key'
+--------------------------------------------------
+Prompt: 'What are the four fundamental forces of nature?'
+Generated text: '\n\nThe four fundamental forces of nature are:\n\n1. Gravitational force:'
+--------------------------------------------------
+Prompt: 'What does "CPU" stand for?'
+Generated text: '\n\nCPU stands for Central Processing Unit.\n\nThe\n\nIt looks like your message'
+--------------------------------------------------
+Prompt: 'What does "HTML" stand for?'
+Generated text: '\n\nHTML stands for HyperText Markup Language.\n\nThe\n\nIt looks like'
+--------------------------------------------------
+Prompt: 'What is the capital of Australia?'
+Generated text: '\n\nThe capital of Australia is Canberra.\n\nThe answer to the question "\n\n'
+--------------------------------------------------
+Prompt: 'What is the chemical symbol for gold?'
+Generated text: '\n\nThe chemical symbol for gold is Au.\n\nThe answer to the\n\nIt'
+--------------------------------------------------
+Prompt: 'What is the currency of Switzerland?'
+Generated text: '\n\nThe currency of Switzerland is the Swiss franc (CHF).\n\nThe Swiss franc'
+--------------------------------------------------
+Prompt: 'What is the distance from the Earth to the Sun called?'
+Generated text: '\n\nThe distance from the Earth to the Sun is called an astronomical unit (AU'
+--------------------------------------------------
+Prompt: 'What is the freezing point of water in Celsius?'
+Generated text: '\n\nThe freezing point of water in Celsius is 0 degrees Celsius.\n\nThe'
+--------------------------------------------------
+Prompt: 'What is the hardest known natural substance on Earth?'
+Generated text: '\n\nThe hardest known natural substance on Earth is diamond.\n\nThe answer is\n\n'
+--------------------------------------------------
+Prompt: 'What is the largest planet in our solar system?'
+Generated text: '\n\nThe largest planet in our solar system is Jupiter.\n\nThe correct answer is'
+--------------------------------------------------
+Prompt: 'What is the longest river in the world?'
+Generated text: '\n\nThe longest river in the world is the Nile River, which is located in'
+--------------------------------------------------
+Prompt: 'What is the main function of the kidneys in the human body?'
+Generated text: '\n\nThe main function of the kidneys in the human body is to filter blood and'
+--------------------------------------------------
+Prompt: 'What is the main ingredient in guacamole?'
+Generated text: '\n\nThe main ingredient in guacamole is avocado.\n\nThe correct answer is:'
+--------------------------------------------------
+Prompt: 'What is the most spoken language in the world by number of native speakers?'
+Generated text: '\n\nThe most spoken language in the world by number of native speakers is Mandarin Chinese'
+--------------------------------------------------
+Prompt: 'What is the process by which plants use sunlight to create food?'
+Generated text: '\n\nThe process by which plants use sunlight to create food is called photosynthesis.'
+--------------------------------------------------
+Prompt: 'Which country is known as the Land of the Rising Sun?'
+Generated text: '\n\nJapan is known as the Land of the Rising Sun.\n\nThe\n\nIt'
+--------------------------------------------------
+Prompt: 'Who developed the theory of general relativity?'
+Generated text: '\n\nThe theory of general relativity was developed by Albert Einstein.\n\nThe answer'
+--------------------------------------------------
+Prompt: 'Who directed the original "Star Wars" trilogy?'
+Generated text: '\n\nThe original "Star Wars" trilogy, also known as the "Original Trilogy'
+--------------------------------------------------
+Prompt: 'Who is credited with inventing the telephone?'
+Generated text: '\n\nThe invention of the telephone is primarily credited to Alexander Graham Bell. He was'
+--------------------------------------------------
+Prompt: 'Who painted the ceiling of the Sistine Chapel?'
+Generated text: '**  \n   *Answer: Michelangelo.*\n\n5. **What is the name'
+--------------------------------------------------
+Prompt: 'Who was the first female Prime Minister of the United Kingdom?'
+Generated text: '\n\nThe first female Prime Minister of the United Kingdom was Margaret Thatcher. She served'
+--------------------------------------------------
+Prompt: 'Who was the first person to walk on the moon?'
+Generated text: '\n\nThe first person to walk on the moon was Neil Armstrong. He was an'
+--------------------------------------------------
+Prompt: 'Who wrote the American Declaration of Independence?'
+Generated text: '\n\nThe American Declaration of Independence was primarily written by Thomas Jefferson. He was a'
+--------------------------------------------------
+Prompt: 'Who wrote the novel "Pride and Prejudice"?'
+Generated text: "',\n        'options': ['Emily Brontë', 'Jane Austen', '"
+--------------------------------------------------
