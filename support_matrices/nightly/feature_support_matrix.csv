@@ -1,8 +1,10 @@
 Feature,CorrectnessTest,PerformanceTest
 "Chunked Prefill",✅,✅
-"Multimodal Inputs",✅,❌
+"MLA",to be added,to be added
+"MoE",to be added,to be added
+"Multimodal Inputs",✅,✅
 "Prefix Caching",✅,✅
 "Single Program Multi Data",✅,✅
 "Speculative Decoding: Ngram",❌,N/A
-"Structured Decoding",✅,N/A
-"async scheduler",❌,N/A
+"Structured Decoding",✅,to be added
+"async scheduler",✅,✅
