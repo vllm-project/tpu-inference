@@ -36,7 +36,7 @@
 
 # Runner and Execution
 /tpu_inference/runner/ @kyuyeunk @py4 @wenxindongwork @sixiang-google  @mrjunwan-lang
-/tpu_inference/runner/tpu_jax_runner.py @py4 @kyuyeunk @wenxindongwork @sixiang-google
+/tpu_inference/runner/tpu_runner.py @py4 @kyuyeunk @wenxindongwork @sixiang-google
 /tpu_inference/runner/persistent_batch_manager.py @py4 @wenxindongwork
 /tpu_inference/runner/speculative_decoding_manager.py @py4 @Lumosis
 /tpu_inference/executors/ @sixiang-google @mrjunwan-lang
