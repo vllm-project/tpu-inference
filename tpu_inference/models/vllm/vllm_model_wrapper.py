@@ -120,8 +120,7 @@ class VllmModelWrapper:
 
         # Load the vLLM model and wrap it into a new model whose forward
         # function can calculate the hidden_state and logits.
-        available_devices = self.mesh.devices.flatten()
-        with load_context, jax.default_device(available_devices[0]):
+        with load_context, jax.default_device(jax.devices('cpu')[0]):
             vllm_model = vllm_get_model(vllm_config=vllm_config_for_load)
         lora_manager = None
         if vllm_config_for_load.lora_config is not None:
