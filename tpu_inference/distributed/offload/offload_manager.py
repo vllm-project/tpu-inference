@@ -79,6 +79,7 @@ class CPUChunkPool:
         ret: list[CPUChunk] = [
             self.free_chunk_list.pop() for _ in range(num_required_chunks)
         ]
+        self._num_allocated_chunks += num_required_chunks
         for chunk, chunk_hash in zip(ret, chunk_hashes):
             chunk._chunk_hash = chunk_hash
             assert chunk.chunk_id not in self.allocated_id_to_hash_map
@@ -86,15 +87,16 @@ class CPUChunkPool:
 
         return ret
 
-    def release_chunks(self, chunks: list[CPUChunk]):
-        for chunk in chunks:
-            if not chunk.is_ready_to_evict:
-                logger.warning(f"  Chunk[{chunk.chunk_id}] is still in use.")
-            assert chunk.chunk_id in self.allocated_id_to_hash_map
-            self.allocated_id_to_hash_map.pop(chunk.chunk_id)
-            self.free_chunk_list.append(chunk)
-            chunk.reset()
-        self._num_allocated_chunks -= len(chunks)
+    def release_chunk(self, chunk: CPUChunk) -> bool:
+        if not chunk.is_ready_to_evict:
+            logger.warning(f"  Chunk[{chunk.chunk_id}] is still in use.")
+            return False
+        assert chunk.chunk_id in self.allocated_id_to_hash_map
+        self.allocated_id_to_hash_map.pop(chunk.chunk_id)
+        chunk.reset()
+        self.free_chunk_list.append(chunk)
+        self._num_allocated_chunks -= 1
+        return True
 
 
 class LRUCacheManager:
@@ -155,10 +157,10 @@ class LRUCacheManager:
                 return None
 
         # evict chunks
-        self.chunk_pool.release_chunks([
-            self.cpu_cache.pop(evicting_chunk_hash)
-            for evicting_chunk_hash in to_evict
-        ])
+        for evicting_chunk_hash in to_evict:
+            evicting_chunk = self.cpu_cache.pop(evicting_chunk_hash)
+            # always true, since all evicting chunks are ready to evict
+            self.chunk_pool.release_chunk(evicting_chunk)
 
         new_chunk_hashes = [chunk_hashes[i] for i in new_chunk_idxs]
         # allocate
@@ -200,10 +202,14 @@ class LRUCacheManager:
 
     def mark_completion(self, chunk_ids, operation: Literal['save',
                                                             'load']) -> None:
-        chunk_hashes = [
-            self.chunk_pool.allocated_id_to_hash_map[chunk_id]
-            for chunk_id in chunk_ids
-        ]
+        try:
+            chunk_hashes = [
+                self.chunk_pool.allocated_id_to_hash_map[chunk_id]
+                for chunk_id in chunk_ids
+            ]
+        except Exception as e:
+            raise ValueError(f' failed to retrieve chunk hashes: {e}')
+
         chunk_hashes = []
         unknown_chunk_ids = []
         for chunk_id in chunk_ids:

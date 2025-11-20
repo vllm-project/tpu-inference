@@ -20,6 +20,7 @@ spec:
     - "pytest -sv tests/distributed/offload/cpu_backend_test.py"
     - "pytest -sv tests/distributed/offload/tpu_offload_connector_worker_test.py"
     - "pytest -sv tests/distributed/offload/tpu_offload_utils_test.py"
+    - "pytest -sv tests/distributed/offload/tpu_offload_manager_test.py"
     - "pytest -sv tests/distributed/offload/tpu_offload_accuracy_test.py"
     env:
     - name: HUGGING_FACE_HUB_TOKEN
