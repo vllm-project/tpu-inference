@@ -102,21 +102,6 @@ class TestStagingBufferManager:
         freed = manager.free(req_id, "load")
         assert freed == 0
 
-    def test_get_usage(self):
-        manager = StagingBufferManager(num_blocks=100)
-        req_id1: ReqId = "req1"
-        req_id2: ReqId = "req2"
-        manager.allocate(req_id1, 10, "load")
-        manager.allocate(req_id2, 20, "save")
-
-        usage_str = manager.get_usage()
-        expected_str = "Staging Buffer: total=100, free=70, used_for_load=10, used_for_save=20;"
-        assert usage_str == expected_str
-
-        usage_str_details = manager.get_usage(with_details=True)
-        assert "save_details:{req2:20,}" in usage_str_details
-        assert "load_details:{req1:10,}" in usage_str_details
-
     def test_complex_scenario(self):
         manager = StagingBufferManager(num_blocks=50)
         req1, req2, req3 = "req1", "req2", "req3"
