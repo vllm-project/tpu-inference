@@ -19,3 +19,9 @@ def pytest_addoption(parser):
                      type=str,
                      default=None,
                      help="Model name to test fp8-kv (e.g., 'model1')")
+    parser.addoption(
+        "--dataset-path",
+        type=str,
+        default=None,
+        help=
+        "Path to the dataset file used for accuracy evaluation (CSV or PKL).")

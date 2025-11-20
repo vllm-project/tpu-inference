@@ -16,9 +16,9 @@
 LOG_FILE="server.log"
 BENCHMARK_LOG_FILE="benchmark.log"
 # The sentinel message that indicates the server is ready (in LOG_FILE)
-READY_MESSAGE="Application startup complete."
+export READY_MESSAGE="Application startup complete."
 # After how long we should timeout if the server doesn't start
-TIMEOUT_SECONDS=1800
+export TIMEOUT_SECONDS=1800
 
 # The minimum ROUGE1 and throughput scores we expect
 # TODO (jacobplatin): these are very low, so we'll want to boost them eventually
@@ -59,6 +59,10 @@ helpFunction()
    echo -e "\t--use-dummy-weights Use dummy random weight (default: false)"
    exit 1
 }
+
+# Access shared benchmarking functionality
+# shellcheck disable=SC1091
+source "$(dirname "$0")/bench_utils.sh"
 
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
@@ -142,18 +146,6 @@ echo "Using vLLM hash: $(git rev-parse HEAD)"
 # Overwrite a few of the vLLM benchmarking scripts with the TPU Inference ones
 cp -r "$root_dir"/tpu_inference/scripts/vllm/benchmarking/*.py "$root_dir"/vllm/benchmarks/
 echo "Using TPU Inference hash: $(git -C "$root_dir"/tpu_inference rev-parse HEAD)"
-
-cleanUp() {
-    echo "Stopping the vLLM server and cleaning up log files..."
-    pkill -f "vllm serve $1"
-    # Kill all processes related to vllm.
-    pgrep -f -i vllm | xargs -r kill -9
-
-    # Clean up log files. Use -f to avoid errors if files don't exist.
-    rm -f "$LOG_FILE"
-    rm -f "$BENCHMARK_LOG_FILE"
-    echo "Cleanup complete."
-}
 
 checkThroughputAndRouge() {
     # This function checks whether the ROUGE1 score and total token throughput
@@ -272,42 +264,17 @@ for model_name in $model_list; do
     echo "Spinning up the vLLM server..."
     (vllm serve "$model_name" --max-model-len=1024 --disable-log-requests --max-num-batched-tokens "$max_batched_tokens" "${current_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
 
+    waitForServerReady
 
-
-    # Run a busy loop to block until the server is ready to receive requests
-    did_find_ready_message=false
-    start_time=$(date +%s)
-    while true; do
-        current_time=$(date +%s)
-        elapsed_time=$((current_time - start_time))
-
-        sleep 5
-
-        # Check for timeout so we don't wait forever
-        if [[ "$elapsed_time" -ge "$TIMEOUT_SECONDS" ]]; then
-            echo "TIMEOUT: Waited $elapsed_time seconds (limit was $TIMEOUT_SECONDS). The string '$READY_MESSAGE' was NOT found."
-            cleanUp "$model_name"
-            exit 1
-        fi
-
-        if grep -q "$READY_MESSAGE" "$LOG_FILE" ; then
-            did_find_ready_message=true
-            break
-        fi
-    done
-
-
-
-    if $did_find_ready_message; then
-        echo "Starting the benchmark for $model_name..."
-        echo "Current working directory: $(pwd)"
-        python benchmarks/benchmark_serving.py \
-        --backend vllm \
-        --model "$model_name" \
-        --dataset-name "$dataset_name" \
-        --dataset-path "$dataset_path" \
-        --num-prompts "$num_prompts" \
-        --run-eval 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
+    echo "Starting the benchmark for $model_name..."
+    echo "Current working directory: $(pwd)"
+    python benchmarks/benchmark_serving.py \
+    --backend vllm \
+    --model "$model_name" \
+    --dataset-name "$dataset_name" \
+    --dataset-path "$dataset_path" \
+    --num-prompts "$num_prompts" \
+    --run-eval 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
 
         # TODO (jacobplatin): probably want to add an option to skip this in the future
         if [ "$dataset_name" == "mlperf" ]; then
@@ -316,10 +283,7 @@ for model_name in $model_list; do
                 exit_code=1
             fi
         fi
-    else
-        echo "vLLM server did not start successfully."
-        exit_code=1
-    fi
+
     cleanUp "$model_name"
 done
 
