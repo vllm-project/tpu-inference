@@ -78,7 +78,7 @@ class SpeculativeDecodingManager:
 
     def propose_eagle3_draft_token_ids(
         self,
-        sampled_token_ids: list[list[int]],
+        sampled_token_ids: list[np.ndarray],
         aux_hidden_states: Optional[tuple[jnp.ndarray, ...]],
         attn_metadata: AttentionMetadata,
         spec_decode_metadata: Optional[SpecDecodeMetadata],
@@ -91,7 +91,7 @@ class SpeculativeDecodingManager:
         req_ids = self.runner.input_batch.req_ids
         next_token_ids: list[int] = []
         for i, token_ids in enumerate(sampled_token_ids):
-            if token_ids:
+            if token_ids.size != 0:
                 # Common case.
                 next_token_id = token_ids[-1]
             else:
