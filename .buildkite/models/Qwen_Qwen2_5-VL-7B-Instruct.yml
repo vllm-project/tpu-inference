@@ -1,5 +1,5 @@
 # Qwen/Qwen2.5-VL-7B-Instruct
-# multimodel
+# multimodal
 steps:
   - label: "Unit tests for Qwen/Qwen2.5-VL-7B-Instruct"
     key: "Qwen_Qwen2_5-VL-7B-Instruct_UnitTest"
@@ -16,7 +16,7 @@ steps:
     env:
       CI_TARGET: Qwen/Qwen2.5-VL-7B-Instruct
       CI_STAGE: "UnitTest"
-      CI_CATEGORY: "multimodel"
+      CI_CATEGORY: "multimodal"
     agents:
       queue: cpu
     commands:
@@ -42,7 +42,7 @@ steps:
     env:
       CI_TARGET: Qwen/Qwen2.5-VL-7B-Instruct
       CI_STAGE: "IntegrationTest"
-      CI_CATEGORY: "multimodel"
+      CI_CATEGORY: "multimodal"
     agents:
       queue: cpu
     commands:
@@ -64,7 +64,7 @@ steps:
     env:
       CI_TARGET: Qwen/Qwen2.5-VL-7B-Instruct
       CI_STAGE: "Benchmark"
-      CI_CATEGORY: "multimodel"
+      CI_CATEGORY: "multimodal"
     agents:
       queue: cpu
     commands:

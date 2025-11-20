@@ -50,7 +50,14 @@ process_models() {
         local category
         category=$(buildkite-agent meta-data get "${model}_category" --default "text-only")
         # Define the category-specific CSV filename
-        local category_filename=${category// /_}
+        local category_filename
+        if [ "$category" == "text-only" ]; then
+            category_filename="text_only_model"
+        elif [ "$category" == "multimodal" ]; then
+            category_filename="multimodal_model"
+        else
+            category_filename=${category// /_}
+        fi
         local category_csv="${category_filename}_support_matrix.csv"
         # Initialize CSV if not exists
         if [ ! -f "$category_csv" ]; then

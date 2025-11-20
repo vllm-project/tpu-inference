@@ -16,7 +16,7 @@ class ModelType(str, Enum):
 
 class ModelCategory(str, Enum):
     TEXT_ONLY = "text-only"
-    MULTIMODEL = "multimodel"
+    MULTIMODAL = "multimodal"
 
 
 MODEL_TYPE_TO_TEMPLATE = {
@@ -122,11 +122,11 @@ def main():
     parser.add_argument(
         '--category',
         choices=[
-            ModelCategory.TEXT_ONLY.value, ModelCategory.MULTIMODEL.value
+            ModelCategory.TEXT_ONLY.value, ModelCategory.MULTIMODAL.value
         ],
         default='text-only',
         help=
-        '[OPTIONAL] Category of model. Must be "text-only" or "multimodel". (Default: text-only)'
+        '[OPTIONAL] Category of model. Must be "text-only" or "multimodal". (Default: text-only)'
     )
 
     args = parser.parse_args()
