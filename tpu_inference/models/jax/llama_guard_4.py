@@ -25,7 +25,7 @@ logger = init_logger(__name__)
 
 logger.warning(
     "🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨\n"
-    "Llama Guard 4 (JAX) is WIP: Only the text modality is currently implemented. "
+    "Llama Guard 4 (JAX) is WIP: Only the text modality is currently implemented.  "
     "Multimodal inputs will fail.\n"
     "🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨")
 
