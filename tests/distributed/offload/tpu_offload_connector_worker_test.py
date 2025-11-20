@@ -2,6 +2,7 @@
 
 import functools
 import os
+import random
 from typing import List
 
 import jax
@@ -13,8 +14,12 @@ from jax._src import test_util as jtu
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
+from tpu_inference.distributed.offload.tpu_offload_connector import (LoadSpec,
+                                                                     SaveSpec)
 from tpu_inference.distributed.offload.tpu_offload_connector import \
     TPUOffloadConnector as CPUOffloadingConnector
+from tpu_inference.distributed.offload.tpu_offload_connector import (
+    TPUOffloadConnectorMetadata, TPUReqMeta)
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
 
@@ -52,14 +57,15 @@ class MockVllmConfig:
             self.block_size = block_size
 
 
-class TestTPUOffloadWorkerPrecompile(jtu.JaxTestCase):
-    """Test the host offloading precompilation and related functionalities."""
+class TestCpuOffloadingSave(jtu.JaxTestCase):
+    """Test the save functionality of the TPUOffloadConnectorWorker."""
 
     def setUp(self):
         super().setUp()
         self.vllm_config = MockVllmConfig(block_size=_DEFAULT_BLOCK_SIZE)
         self.num_layers = 2
-        self.num_blocks = 128  # Increased for larger tests
+        self.num_blocks = 24
+        self.num_cpu_chunks = 24
         self.block_size = self.vllm_config.cache_config.block_size
         self.num_heads = 8
         self.head_size = 128
@@ -98,9 +104,14 @@ class TestTPUOffloadWorkerPrecompile(jtu.JaxTestCase):
         except RuntimeError:
             return None
 
-    def _create_connector(self, swap_op_type: str = "jax"):
-        # Clean the singleton backend instance before each test
+    def _create_connector(self,
+                          swap_op_type: str = "jax",
+                          use_precompiled_swap_ops: bool = False):
         os.environ["TPU_OFFLOAD_SWAP_OP_TYPE"] = swap_op_type
+        os.environ[
+            "TPU_OFFLOAD_SKIP_JAX_PRECOMPILE"] = "0" if use_precompiled_swap_ops else "1"
+        os.environ["TPU_OFFLOAD_NUM_CPU_CHUNKS"] = str(self.num_cpu_chunks)
+
         connector = CPUOffloadingConnector(self.vllm_config,
                                            KVConnectorRole.WORKER)
         worker = connector.connector_worker
@@ -149,8 +160,7 @@ class TestTPUOffloadWorkerPrecompile(jtu.JaxTestCase):
         """
         Tests the _decompose_into_buckets function for correct greedy decomposition.
         """
-        os.environ["TPU_OFFLOAD_SKIP_JAX_PRECOMPILE"] = "0"
-        connector = self._create_connector()
+        connector = self._create_connector(use_precompiled_swap_ops="0")
         worker = connector.connector_worker
         self.assertEqual(worker._decompose_into_buckets(num_blocks),
                          expected_buckets)
@@ -167,9 +177,9 @@ class TestTPUOffloadWorkerPrecompile(jtu.JaxTestCase):
         Tests that _precompile_kv_swap_operations runs without errors and
         modifies the cache content.
         """
-        # Unset skip flag to allow precompilation to run
-        os.environ["TPU_OFFLOAD_SKIP_JAX_PRECOMPILE"] = "0"
-        connector = self._create_connector(swap_op_type=swap_op_type)
+        connector = self._create_connector(swap_op_type,
+                                           use_precompiled_swap_ops="0")
+
         worker = connector.connector_worker
 
         # Keep a copy of the original cache content on the host
@@ -187,3 +197,239 @@ class TestTPUOffloadWorkerPrecompile(jtu.JaxTestCase):
                 for orig, new in zip(original_cache_host, new_cache_host)),
             "Cache content should not have changed after precompilation.",
         )
+
+    @parameterized.named_parameters(
+        dict(
+            testcase_name="_regular_multi_block_save",
+            num_blocks_to_save=5,
+        ),
+        dict(
+            testcase_name="_regular_multi_block_save_with_compile_jax",
+            num_blocks_to_save=5,
+            use_precompiled_swap_ops=True,
+        ),
+        dict(
+            testcase_name="_regular_multi_block_save_with_compile_pallas",
+            num_blocks_to_save=5,
+            use_precompiled_swap_ops=True,
+            swap_op_type="pallas",
+        ),
+        dict(
+            testcase_name="_final_save",
+            num_blocks_to_save=1,
+            is_final_save=True,
+            skip_save=False,
+        ),
+        dict(
+            testcase_name="_final_skip_save",
+            num_blocks_to_save=0,
+            is_final_save=True,
+            skip_save=True,
+        ),
+    )
+    def test_tpu_connector_save(
+        self,
+        num_blocks_to_save: int,
+        is_final_save: bool = False,
+        skip_save: bool = False,
+        use_precompiled_swap_ops: bool = False,
+        swap_op_type: str = "jax",
+    ):
+        if num_blocks_to_save > self.num_blocks or num_blocks_to_save > self.num_cpu_chunks:
+            self.skipTest(
+                f"num_blocks_to_save {num_blocks_to_save} exceeds ModelRunner / OffloadConnectorWorker's capacity"
+            )
+
+        # Prepare and Execute Save
+        all_block_ids = list(range(self.num_blocks))
+        all_chunk_ids = list(range(self.num_cpu_chunks))
+        src_block_ids = random.sample(all_block_ids, num_blocks_to_save)
+        dst_chunk_ids = random.sample(all_chunk_ids, num_blocks_to_save)
+        num_tokens_to_save = num_blocks_to_save * self.block_size
+        num_total_tokens = num_tokens_to_save
+        save_spec = SaveSpec(
+            num_skip_leading_tokens=0,
+            num_total_tokens=num_total_tokens,
+            is_final_save=is_final_save,
+            skip_save=skip_save,
+            src_blocks=src_block_ids,
+            dst_chunks=dst_chunk_ids,
+        )
+
+        logger.info(f"Starting test_tpu_connector_save with: "
+                    f"num_blocks_to_save={num_blocks_to_save}, "
+                    f"is_final_save={is_final_save}, "
+                    f"skip_save={skip_save}, "
+                    f"use_precompiled_swap_ops={use_precompiled_swap_ops}, "
+                    f"swap_op_type={swap_op_type};"
+                    f"Swapspec: {save_spec}")
+
+        total_token_ids = list(range(num_total_tokens))
+
+        req_id = "save_req"
+        req_meta = TPUReqMeta(
+            req_id=req_id,
+            token_ids=total_token_ids,
+            local_block_ids=src_block_ids,
+            save_spec=save_spec,
+        )
+
+        connector_metadata = TPUOffloadConnectorMetadata(
+            requests_meta=[req_meta])
+
+        connector = self._create_connector(swap_op_type,
+                                           use_precompiled_swap_ops)
+        worker = connector.connector_worker
+        connector.bind_connector_metadata(connector_metadata)
+        logger.info(
+            "Connector metadata bound, calling worker.wait_for_save().")
+        worker.wait_for_save()
+        logger.info("worker.wait_for_save() completed.")
+
+        # Verification
+        logger.info("Starting verification phase.")
+        cpu_backend = worker.cpu_backend
+        kv_caches = worker.runner.kv_caches
+
+        if skip_save or num_tokens_to_save == 0:
+            logger.info(" no blocks to save")
+            assert cpu_backend.num_saved_cpu_chunks == 0
+            self.assertEmpty(worker.finished_save_reqs)
+            self.assertEmpty(worker.offload_stats.data["finished_save_blocks"])
+            return
+
+        # verify the saved chunks
+        assert req_id in worker.offload_stats.data["finished_save_blocks"]
+        assert dst_chunk_ids == worker.offload_stats.data[
+            "finished_save_blocks"][req_id]
+
+        for tpu_block_id, cpu_chunk_id in zip(src_block_ids, dst_chunk_ids):
+            cpu_kv_chunk = cpu_backend.get(cpu_chunk_id)
+            for layer_idx in range(self.num_layers):
+                tpu_kv_block = kv_caches[layer_idx][tpu_block_id]
+                self.assertArraysEqual(np.array(tpu_kv_block),
+                                       np.array(cpu_kv_chunk[layer_idx]))
+
+        logger.info("Saved data verification completed.")
+
+        if is_final_save:
+            finished_saves, _ = worker.get_finished()
+            logger.info(
+                f"is_final_save is True. Finished requests: {finished_saves}")
+            self.assertIn(req_id, finished_saves)
+
+    @parameterized.named_parameters(
+        dict(
+            testcase_name="_single_block_",
+            num_blocks_to_operate=1,
+        ),
+        dict(
+            testcase_name="_multi_blocks_compile_jax",
+            num_blocks_to_operate=5,
+            use_precompiled_swap_ops=True,
+            swap_op_type="jax",
+        ),
+        dict(
+            testcase_name="_multi_blocks_compile_pallas",
+            num_blocks_to_operate=5,
+            use_precompiled_swap_ops=True,
+            swap_op_type="pallas",
+        ),
+    )
+    def test_tpu_connector_load(
+        self,
+        num_blocks_to_operate: int,
+        use_precompiled_swap_ops: bool = False,
+        swap_op_type: str = "jax",
+    ):
+        """
+        This test simulates a scenario where some amount of blocks get
+        offloaded to cpu cache, and then get loaded into tpu kv cache.
+        Both swap-out and swap-in are tested.
+
+        Steps:
+        1. Setup:
+        2. Simulate a save operation
+        3. Load the data
+        4. Verification
+        """
+        if num_blocks_to_operate > self.num_blocks or num_blocks_to_operate > self.num_cpu_chunks:
+            self.skipTest(
+                f"num_blocks_to_save {num_blocks_to_operate} exceeds ModelRunner / OffloadConnectorWorker's capacity"
+            )
+        # 1. Setup
+        connector = self._create_connector(swap_op_type,
+                                           use_precompiled_swap_ops)
+        worker = connector.connector_worker
+        # Ground truth cache on TPU
+        src_kv_cache = worker.runner.kv_caches
+        # Destination cache on TPU, should be modified by the load operation
+        dst_kv_cache = [
+            jax.device_put(jnp.zeros(self.cache_shape, dtype=self.cache_dtype),
+                           self.device_sharding)
+            for _ in range(self.num_layers)
+        ]
+        jax.block_until_ready(dst_kv_cache)
+
+        # Prepare
+        all_block_ids = list(range(self.num_blocks))
+        all_chunk_ids = list(range(self.num_cpu_chunks))
+        src_block_ids = random.sample(all_block_ids, num_blocks_to_operate)
+        dst_chunk_ids = random.sample(all_chunk_ids, num_blocks_to_operate)
+        num_tokens_to_save = num_blocks_to_operate * self.block_size
+        num_total_tokens = num_tokens_to_save
+        save_spec = SaveSpec(
+            num_skip_leading_tokens=0,
+            num_total_tokens=num_tokens_to_save,
+            is_final_save=False,
+            skip_save=False,
+            src_blocks=src_block_ids,
+            dst_chunks=dst_chunk_ids,
+        )
+        total_token_ids = list(range(num_total_tokens))
+        req_id = "save_req"
+        req_meta = TPUReqMeta(
+            req_id=req_id,
+            token_ids=total_token_ids,
+            local_block_ids=src_block_ids,
+            save_spec=save_spec,
+        )
+        connector_metadata = TPUOffloadConnectorMetadata(
+            requests_meta=[req_meta])
+        connector.bind_connector_metadata(connector_metadata)
+        logger.info(
+            "Connector metadata bound, calling worker.wait_for_save().")
+        worker.wait_for_save()
+        logger.info("worker.wait_for_save() completed.")
+
+        # 3. Prepare and Execute Delta Load
+        worker.runner.kv_caches = dst_kv_cache
+        load_spec = LoadSpec(
+            num_matched_tokens=num_tokens_to_save,
+            dst_blocks=src_block_ids,
+            src_chunks=dst_chunk_ids,
+            can_load=True,
+            num_skip_leading_tokens=0,
+        )
+        req_meta = TPUReqMeta(
+            req_id="load_req",
+            token_ids=total_token_ids,
+            local_block_ids=src_block_ids,
+            load_spec=load_spec,
+        )
+        connector_metadata = TPUOffloadConnectorMetadata(
+            requests_meta=[req_meta])
+        connector.bind_connector_metadata(connector_metadata)
+        logger.info("Connector metadata bound, calling start_load_kv.")
+        worker.start_load_kv(fwd_ctx=None)
+        jax.block_until_ready(worker.runner.kv_caches)
+        logger.info("start_load_kv completed and blocked until ready.")
+
+        # verify the data
+        # we will donate the original kv_cache ref
+        dst_kv_cache = worker.runner.kv_caches
+        for src_block_id in src_block_ids:
+            for layer_idx in range(self.num_layers):
+                self.assertArraysEqual(
+                    np.array(src_kv_cache[layer_idx][src_block_id]),
+                    np.array(dst_kv_cache[layer_idx][src_block_id]))
