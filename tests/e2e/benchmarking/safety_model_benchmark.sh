@@ -133,7 +133,6 @@ run_accuracy_check() {
     echo -e "\n--- Running Accuracy Check (Mode: ACCURACY) ---"
 
     CONFTEST_DIR="/workspace/tpu-inference/scripts/vllm/integration"
-    CONFTEST_DIR="/mnt/disks/jiries-disk_data/tpu-inference/scripts/vllm/integration"
 
     RELATIVE_TEST_FILE="test_safety_model_accuracy.py"
 
