@@ -15,7 +15,7 @@ import os
 import pandas as pd
 from tpu_inference.core import disagg_utils 
 
-# --- HAZARD MAPPING (REQUIRED FOR LABEL CONVERSION) ---
+# --- HAZARD MAPPING ---
 # This mapping is based on the MLCommons taxonomy and is needed for the data loader.
 # The ailuminate test set is a standard dataset for safety models
 HAZARD_MAPPING = {
@@ -109,7 +109,6 @@ def safety_test_data_loader(request):
     dataset_path = request.config.getoption("--dataset-path")
     
     if not dataset_path:
-        # This is expected in CI if the benchmark task definition isn't passing it yet.
         pytest.skip("The --dataset-path argument is required for data loading.")
 
     # Load the full dataset (Pandas handles GCS URI)

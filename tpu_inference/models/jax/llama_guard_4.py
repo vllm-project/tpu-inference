@@ -1,15 +1,5 @@
 from tpu_inference.logger import init_logger
 
-logger = init_logger(__name__)
-
-# --- CRITICAL FIX: Add logger.warning() call here ---
-logger.warning(
-    "🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨\n"
-    "Llama Guard 4 (JAX) is WIP: Only the text modality is currently implemented. "
-    "Multimodal inputs will fail.\n"
-    "🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨"
-)
-
 import re
 from typing import List, Optional, Tuple, Any
 
@@ -34,6 +24,13 @@ from tpu_inference.models.jax.utils.weight_utils import (
     transpose_params)
 
 logger = init_logger(__name__)
+
+logger.warning(
+    "🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨\n"
+    "Llama Guard 4 (JAX) is WIP: Only the text modality is currently implemented. "
+    "Multimodal inputs will fail.\n"
+    "🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨"
+)
 
 class LlamaGuard4ForCausalLM(nnx.Module):
 

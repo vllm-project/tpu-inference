@@ -22,7 +22,6 @@
 set -e
 
 # --- Configuration & Defaults ---
-# Variables now rely on being set in the environment (e.g., via export or CI YAML)
 MODEL_NAME="${TEST_MODEL}"
 TP_SIZE="${TENSOR_PARALLEL_SIZE}"
 
@@ -96,7 +95,6 @@ else
 fi
 
 # Convert to JSONL to be compatible with vllm bench serve command
-# TODO: ensure this conversion works
 if [ ! -f "$LOCAL_JSONL_FILE" ] || [ "$TEST_MODE" == "performance" ]; then
     echo "Converting CSV to JSONL for performance run..."
     
@@ -131,21 +129,14 @@ fi
 run_accuracy_check() {
     echo -e "\n--- Running Accuracy Check (Mode: ACCURACY) ---"
     
-    # 1. Define the correct execution directory for conftest.py discovery
-    #CONFTEST_DIR="/workspace/tpu-inference/scripts/vllm/integration"
-    CONFTEST_DIR="/mnt/disks/jiries-disk_data/tpu-inference/scripts/vllm/integration"
+    CONFTEST_DIR="/workspace/tpu-inference/scripts/vllm/integration"
 
-    # 2. Calculate the relative path from $CONFTEST_DIR to the test file.
-    # We must go up three levels and then down into the test folder.
     RELATIVE_TEST_FILE="test_safety_model_accuracy.py"
     
-    # 3. Directory Change and Pytest Execution (in a subshell)
     (
-        # Change to the directory containing conftest.py
         cd "$CONFTEST_DIR" || { echo "Error: Failed to find conftest directory: $CONFTEST_DIR"; exit 1; }
         echo "Running pytest from: $(pwd)"
         
-        # Execute Pytest, running the test file using the relative path
         python -m pytest -s -rP "$RELATIVE_TEST_FILE::test_safety_model_accuracy_check" \
             --tensor-parallel-size="$TP_SIZE" \
             --model-name="$MODEL_NAME" \
@@ -160,7 +151,6 @@ run_accuracy_check() {
 run_performance_benchmark() {
     echo -e "\n--- Running Performance Benchmark (Mode: PERFORMANCE) ---"
 
-    # 1. Benchmark Execution (against the running server)
     vllm bench serve \
         --model "$MODEL_NAME" \
         --endpoint "/v1/completions" \
@@ -171,7 +161,6 @@ run_performance_benchmark() {
         --custom-output-len "$OUTPUT_LEN_OVERRIDE" \
         2>&1 | tee "$BENCHMARK_LOG_FILE"
 
-    # 2. Check throughput metric from the log file
     ACTUAL_THROUGHPUT=$(awk '/Output token throughput \(tok\/s\):/ {print $NF}' "$BENCHMARK_LOG_FILE")
 
     if [ -z "$ACTUAL_THROUGHPUT" ]; then
@@ -181,7 +170,6 @@ run_performance_benchmark() {
     
     echo "Actual Output Token Throughput: $ACTUAL_THROUGHPUT tok/s"
     
-    # 3. Perform float comparison
     if awk -v actual="$ACTUAL_THROUGHPUT" -v target="$TARGET_THROUGHPUT" 'BEGIN { exit !(actual >= target) }'; then
         echo "PERFORMANCE CHECK PASSED: $ACTUAL_THROUGHPUT >= $TARGET_THROUGHPUT"
         return 0
@@ -196,11 +184,11 @@ run_performance_benchmark() {
 # Set initial trap to ensure cleanup happens even on immediate exit
 trap 'cleanUp "$MODEL_NAME"' EXIT
 
-# --- 1. RUN TEST MODE (Offline Accuracy) ---
+# --- 1. RUN TEST MODE  ---
 if [ "$TEST_MODE" == "accuracy" ]; then
     run_accuracy_check
     EXIT_CODE=$?
-    # Exit immediately after offline test, as server setup is unnecessary
+
     exit $EXIT_CODE
 fi
 
@@ -208,17 +196,15 @@ fi
 if [ "$TEST_MODE" == "performance" ]; then
     echo "Spinning up the vLLM server for $MODEL_NAME (TP=$TP_SIZE)..."
 
-    # Server startup (NOTE: No SKIP_JAX_PRECOMPILE=1 here)
+    # Server startup
     (vllm serve "$MODEL_NAME" \
         --tensor-parallel-size "$TP_SIZE" \
         --max-model-len="$MAX_MODEL_LEN" \
         --max-num-batched-tokens="$MAX_BATCHED_TOKENS" \
         2>&1 | tee -a "$LOG_FILE") &
 
-    # WAIT FOR SERVER (Shared Function Call)
-    waitForServerReady # Exits 1 on timeout
+    waitForServerReady
 
-    # Execute performance test
     run_performance_benchmark
     EXIT_CODE=$?
 fi

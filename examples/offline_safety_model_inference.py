@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 """
-Example script for running offline safety classification inference on Llama Guard 4.
+Example script for running offline safety classification inference on safety models.
 
-applies the Llama Guard 4 chat template to 35 prompts from the ailuminate dataset, 
+Currently supported models: 
+ - Llama Guard 4 (meta-llama/Llama-Guard-4-12B)
+
+applies the safety model's chat template to 35 prompts from the ailuminate dataset, 
 and runs inference using the JAX backend. It calculates the final accuracy based on 
 the model's 'safe'/'unsafe' and S-code classification.
 
@@ -59,7 +62,6 @@ def create_parser():
 
     # Add sampling params
     sampling_group = parser.add_argument_group("Sampling parameters")
-    # For Llama Guard, we want deterministic output.
     sampling_group.add_argument("--max-tokens", type=int, default=128)
     sampling_group.add_argument("--temperature", type=float, default=0.0)
     sampling_group.add_argument("--top-p", type=float, default=1.0)
@@ -68,7 +70,6 @@ def create_parser():
 
 
 def main(args: dict):
-    # Pop arguments not used by LLM
     max_tokens = args.pop("max_tokens")
     temperature = args.pop("temperature")
     top_p = args.pop("top_p")
