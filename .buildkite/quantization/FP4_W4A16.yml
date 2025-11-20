@@ -1,0 +1,45 @@
+# FP4 W4A16
+# quantization support matrix
+steps:
+  - label: "Correctness tests for FP4 W4A16"
+    key: "FP4_W4A16_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "FP4_W4A16_CorrectnessTest" "to be added"
+  - label: "Record correctness test result for FP4 W4A16"
+    key: "record_FP4_W4A16_CorrectnessTest"
+    depends_on: "FP4_W4A16_CorrectnessTest"
+    env:
+      CI_TARGET: "FP4 W4A16"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "quantization support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh FP4_W4A16_CorrectnessTest
+
+  - label: "Performance tests for FP4 W4A16"
+    key: "FP4_W4A16_PerformanceTest"
+    depends_on: "record_FP4_W4A16_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "FP4_W4A16_PerformanceTest" "to be added"
+  - label: "Record performance test result for FP4 W4A16"
+    key: "record_FP4_W4A16_PerformanceTest"
+    depends_on: "FP4_W4A16_PerformanceTest"
+    env:
+      CI_TARGET: "FP4 W4A16"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "quantization support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh FP4_W4A16_PerformanceTest

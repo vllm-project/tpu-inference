@@ -1,0 +1,59 @@
+# CODEOWNERS file for tpu-inference
+# This file defines code ownership for different parts of the repository.
+# Each line is a file pattern followed by one or more owners.
+# Owners are notified when PRs modify code in their areas.
+#
+# Order matters - the last matching pattern takes precedence.
+# Analysis includes full history from tpu_commons and tpu_inference paths.
+
+# Default owners for everything in the repo (fallback)
+* @vipannalla
+
+# CI/CD and Build Configuration
+/.buildkite/ @jcyang43 @QiliangCui
+/.github/ @jcyang43 @QiliangCui
+
+# Documentation
+/docs/ @bvrockwell
+/README.md @bvrockwell
+/CONTRIBUTING.md @jrplatin @bvrockwell
+
+# Distributed Computing
+/tpu_inference/distributed/ @mrjunwan-lang @sixiang-google
+
+# Kernel Implementations (Performance-critical)
+/tpu_inference/kernels/ @kyuyeunk @yaochengji @bythew3i
+
+# JAX Model Layers - Attention
+/tpu_inference/layers/jax/ @py4 @bzgoogle @jrplatin @gpolovets1
+/tpu_inference/layers/vllm/ @kyuyeunk @hfan @vanbasten23
+
+# JAX Model Implementations
+/tpu_inference/models/jax/qwen2_5_vl.py @hfan @kwang3939
+/tpu_inference/models/jax/gpt_oss.py @bzgoogle
+/tpu_inference/models/jax/deepseek_v3.py @bzgoogle
+/tpu_inference/models/vllm/ @kyuyeunk @hfan @vanbasten23
+
+# Runner and Execution
+/tpu_inference/runner/ @kyuyeunk @py4 @wenxindongwork @sixiang-google  @mrjunwan-lang
+/tpu_inference/runner/tpu_runner.py @py4 @kyuyeunk @wenxindongwork @sixiang-google
+/tpu_inference/runner/persistent_batch_manager.py @py4 @wenxindongwork
+/tpu_inference/runner/speculative_decoding_manager.py @py4 @Lumosis
+/tpu_inference/executors/ @sixiang-google @mrjunwan-lang
+/tpu_inference/core/ @sixiang-google @mrjunwan-lang @wenxindongwork
+
+# Worker Management
+/tpu_inference/worker/ @sixiang-google @mrjunwan-lang @py4 @vanbasten23 @wenxindongwork
+
+# Speculative Decoding
+/tpu_inference/spec_decode/ @py4 @Lumosis
+
+# Platform Support
+/tpu_inference/platforms/ @sixiang-google @mrjunwan-lang
+
+# LoRA and Adapters
+/tpu_inference/lora/ @vanbasten23
+/tpu_inference/runner/lora_utils.py @vanbasten23
+
+# Docker Configuration
+/docker/ @jrplatin @QiliangCui

@@ -1,17 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import os
 from typing import Tuple
 
-PREFILL_SLICES = 'PREFILL_SLICES'
-DECODE_SLICES = 'DECODE_SLICES'
+from tpu_inference import envs
 
 
 def is_disagg_enabled() -> bool:
     # We triggrer our code path as long as prefill slices are set. This
     # allows us to test interleave mode effectively with the code path
     # for comparison purposes.
-    return PREFILL_SLICES in os.environ
+    return bool(envs.PREFILL_SLICES)
 
 
 def _parse_slices(slices_str: str) -> Tuple[int, ...]:
@@ -40,12 +38,12 @@ def _parse_slices(slices_str: str) -> Tuple[int, ...]:
 
 
 def get_prefill_slices() -> Tuple[int, ...]:
-    if PREFILL_SLICES not in os.environ:
+    if not envs.PREFILL_SLICES:
         return ()
-    return _parse_slices(os.environ[PREFILL_SLICES])
+    return _parse_slices(envs.PREFILL_SLICES)
 
 
 def get_decode_slices() -> Tuple[int, ...]:
-    if DECODE_SLICES not in os.environ:
+    if not envs.DECODE_SLICES:
         return ()
-    return _parse_slices(os.environ[DECODE_SLICES])
+    return _parse_slices(envs.DECODE_SLICES)

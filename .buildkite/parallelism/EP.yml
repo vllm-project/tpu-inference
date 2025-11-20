@@ -1,0 +1,45 @@
+# EP
+# parallelism support matrix
+steps:
+  - label: "Correctness tests for EP"
+    key: "EP_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "EP_CorrectnessTest" "to be added"
+  - label: "Record correctness test result for EP"
+    key: "record_EP_CorrectnessTest"
+    depends_on: "EP_CorrectnessTest"
+    env:
+      CI_TARGET: "EP"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "parallelism support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh EP_CorrectnessTest
+
+  - label: "Performance tests for EP"
+    key: "EP_PerformanceTest"
+    depends_on: "record_EP_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "EP_PerformanceTest" "to be added"
+  - label: "Record performance test result for EP"
+    key: "record_EP_PerformanceTest"
+    depends_on: "EP_PerformanceTest"
+    env:
+      CI_TARGET: "EP"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "parallelism support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh EP_PerformanceTest

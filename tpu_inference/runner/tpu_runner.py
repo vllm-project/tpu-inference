@@ -28,7 +28,7 @@ from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              DraftTokenIds, KVConnectorOutput, LogprobsLists,
-                             ModelRunnerOutput)
+                             LogprobsTensors, ModelRunnerOutput)
 from vllm.v1.request import Request
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.worker.kv_connector_model_runner_mixin import \
@@ -122,9 +122,10 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
             next_tokens_cpu = next_tokens_cpu[self.logits_indices_selector]
         selected_token_ids = np.expand_dims(next_tokens_cpu[:self._num_reqs],
                                             1)
-        valid_sampled_token_ids = selected_token_ids.tolist()
+
+        valid_sampled_token_ids = [token_id for token_id in selected_token_ids]
         for i in self._discard_sampled_tokens_req_indices:
-            valid_sampled_token_ids[i].clear()
+            valid_sampled_token_ids[i] = np.array([])
         self._model_runner_output.sampled_token_ids = valid_sampled_token_ids
         return self._model_runner_output
 
@@ -153,6 +154,7 @@ class ExecuteModelState:
     spec_decode_metadata: Optional[SpecDecodeMetadata]
     kv_connector_output: Optional[KVConnectorOutput]
     logits_indices_selector: Optional[List[int]] = None
+    padded_num_reqs: Optional[int] = None
 
 
 @functools.partial(jax.jit, donate_argnums=(0, 1, 2))
@@ -190,18 +192,28 @@ def _substitute_placeholder_token(
     return input_ids.at[token_in_tpu_cur_input_indices].set(update_values)
 
 
-def _reorder_logits_indices(logprobs_lists, logits_indices_selector):
+def _jax_logprobs_to_lists(logprobs_tensors,
+                           logits_indices_selector=None,
+                           cu_num_generated_tokens=None):
+    """Convert JAX LogprobsTensors to LogprobsLists by converting JAX arrays to numpy."""
+    log_token_ids_list = logprobs_tensors.logprob_token_ids.tolist()
+    logprobs_list = logprobs_tensors.logprobs.tolist()
+    selected_token_ranks_list = logprobs_tensors.selected_token_ranks.tolist()
+
+    if logits_indices_selector is not None:
+        log_token_ids_list = [
+            log_token_ids_list[i] for i in logits_indices_selector
+        ]
+        logprobs_list = [logprobs_list[i] for i in logits_indices_selector]
+        selected_token_ranks_list = [
+            selected_token_ranks_list[i] for i in logits_indices_selector
+        ]
+
     return LogprobsLists(
-        logprob_token_ids=[
-            logprobs_lists.logprob_token_ids[i]
-            for i in logits_indices_selector
-        ],
-        logprobs=[logprobs_lists.logprobs[i] for i in logits_indices_selector],
-        sampled_token_ranks=[
-            logprobs_lists.sampled_token_ranks[i]
-            for i in logits_indices_selector
-        ],
-        cu_num_generated_tokens=logprobs_lists.cu_num_generated_tokens,
+        logprob_token_ids=np.asarray(log_token_ids_list),
+        logprobs=np.asarray(logprobs_list),
+        sampled_token_ranks=np.asarray(selected_token_ranks_list),
+        cu_num_generated_tokens=cu_num_generated_tokens,
     )
 
 
@@ -211,6 +223,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self,
         vllm_config: VllmConfig,
         devices: List[Any],
+        rank: int = 0,
+        is_first_rank: bool = True,
+        is_last_rank: bool = True,
     ):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -553,16 +568,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         (scheduler_output, attn_metadata, input_ids, hidden_states, logits,
          aux_hidden_states, spec_decode_metadata, kv_connector_output,
-         logits_indices_selector) = (
-             self.execute_model_state.scheduler_output,
-             self.execute_model_state.attn_metadata,
-             self.execute_model_state.input_ids,
-             self.execute_model_state.hidden_states,
-             self.execute_model_state.logits,
-             self.execute_model_state.aux_hidden_states,
-             self.execute_model_state.spec_decode_metadata,
-             self.execute_model_state.kv_connector_output,
-             self.execute_model_state.logits_indices_selector)
+         logits_indices_selector,
+         padded_num_reqs) = (self.execute_model_state.scheduler_output,
+                             self.execute_model_state.attn_metadata,
+                             self.execute_model_state.input_ids,
+                             self.execute_model_state.hidden_states,
+                             self.execute_model_state.logits,
+                             self.execute_model_state.aux_hidden_states,
+                             self.execute_model_state.spec_decode_metadata,
+                             self.execute_model_state.kv_connector_output,
+                             self.execute_model_state.logits_indices_selector,
+                             self.execute_model_state.padded_num_reqs)
         self.execute_model_state = None
 
         if grammar_output is not None:
@@ -576,12 +592,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 logits,
                 arange,
             )
-        return self._sample_from_logits(scheduler_output, attn_metadata,
-                                        input_ids, hidden_states, logits,
-                                        aux_hidden_states,
-                                        spec_decode_metadata,
-                                        kv_connector_output,
-                                        logits_indices_selector)
+        return self._sample_from_logits(
+            scheduler_output, attn_metadata, input_ids, hidden_states, logits,
+            aux_hidden_states, spec_decode_metadata, kv_connector_output,
+            logits_indices_selector, padded_num_reqs)
 
     def _modify_prev_results(self):
         # If copy to host has not been done, we just wait.
@@ -598,11 +612,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             next_tokens_cpu = next_tokens_cpu[pre_logits_indices_selector]
         selected_token_ids = np.expand_dims(next_tokens_cpu[:len(pre_req_ids)],
                                             1)
-        valid_sampled_token_ids = selected_token_ids.tolist()
+        valid_sampled_token_ids = [token_id for token_id in selected_token_ids]
 
         # Mask out the sampled tokens that should not be sampled.
         for i in pre_discard_sampled_tokens_req_indices:
-            valid_sampled_token_ids[i].clear()
+            valid_sampled_token_ids[i] = np.array([])
         # Append sampled tokens
         for pre_req_idx, req_state, _ in pre_request_seq_lens:
             sampled_ids = valid_sampled_token_ids[pre_req_idx]
@@ -695,6 +709,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logits_indices,
             spec_decode_metadata,
             logits_indices_selector,
+            padded_num_reqs,
         ) = self._prepare_inputs(scheduler_output)
 
         is_llama_guard_4 = ( hasattr(self.model_config.hf_config, "architectures") #TODO: Remove Llama Guard 4 specific condition once the LG4 Vision portion is implemented
@@ -767,7 +782,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             aux_hidden_states=aux_hidden_states,
             spec_decode_metadata=spec_decode_metadata,
             kv_connector_output=kv_connector_output,
-            logits_indices_selector=logits_indices_selector)
+            logits_indices_selector=logits_indices_selector,
+            padded_num_reqs=padded_num_reqs)
         return attn_metadata, None
 
     def _sample_from_logits(
@@ -781,11 +797,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         spec_decode_metadata: Optional[SpecDecodeMetadata],
         kv_connector_output: Optional[KVConnectorOutput],
         logits_indices_selector: Optional[List[int]] = None,
+        padded_num_reqs: Optional[int] = None,
     ) -> ModelRunnerOutput | AsyncTPUModelRunnerOutput:
-        padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
-            self.input_batch.num_reqs, self.max_num_reqs)
+        if padded_num_reqs is None:
+            padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
+                self.input_batch.num_reqs, self.max_num_reqs)
+
+        sharding = None
+        if self.dp_size > 1:
+            sharding = NamedSharding(self.mesh,
+                                     PartitionSpec(ShardingAxisName.ATTN_DATA))
+
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
-            self.mesh, self.input_batch, padded_num_reqs)
+            self.mesh, self.input_batch, padded_num_reqs, sharding=sharding)
         if spec_decode_metadata is None:
             next_tokens = sample(
                 self.rng_params_for_sampling,
@@ -869,10 +893,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             if logprobs is not None:
                 # Map logprobs back to the pre-dp shuffling order
-                logprobs_lists = logprobs.tolists()
-                if logits_indices_selector is not None:
-                    logprobs_lists = _reorder_logits_indices(
-                        logprobs_lists, logits_indices_selector)
+                logprobs_lists = _jax_logprobs_to_lists(
+                    logprobs, logits_indices_selector)
 
             else:
                 logprobs_lists = None
@@ -911,7 +933,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             if logits_indices_selector is not None:
                 next_tokens = next_tokens[logits_indices_selector]
             selected_token_ids = np.expand_dims(next_tokens[:num_reqs], 1)
-            valid_sampled_token_ids = selected_token_ids.tolist()
+            valid_sampled_token_ids = [
+                token_id for token_id in selected_token_ids
+            ]
         else:
             valid_sampled_token_ids = self.rejection_sampler.parse_output(
                 next_tokens, self.input_batch.vocab_size,
@@ -920,7 +944,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Mask out the sampled tokens that should not be sampled.
         for i in discard_sampled_tokens_req_indices:
-            valid_sampled_token_ids[i].clear()
+            valid_sampled_token_ids[i] = np.array([])
         # Append sampled tokens
         for req_idx, req_state, _ in request_seq_lens:
             sampled_ids = valid_sampled_token_ids[req_idx]
@@ -942,10 +966,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         if logprobs is not None:
             # Map logprobs back to the pre-dp shuffling order
-            logprobs_lists = logprobs.tolists()
-            if logits_indices_selector is not None:
-                logprobs_lists = _reorder_logits_indices(
-                    logprobs_lists, logits_indices_selector)
+            logprobs_lists = _jax_logprobs_to_lists(logprobs,
+                                                    logits_indices_selector)
         else:
             logprobs_lists = None
 
@@ -989,7 +1011,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
     @staticmethod
     @functools.partial(jax.jit, static_argnames=("max_logprobs", ))
-    def _compute_and_gather_logprobs(logits, next_tokens, max_logprobs):
+    def _compute_and_gather_logprobs(logits, next_tokens,
+                                     max_logprobs) -> LogprobsTensors:
         logprobs = compute_logprobs(logits)
         return gather_logprobs(logprobs, next_tokens, max_logprobs)
 
@@ -1405,6 +1428,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logits_indices,
             spec_decode_metadata,
             logits_indices_selector,
+            padded_num_reqs,
         )
 
     def _prepare_inputs_non_dp(self, scheduler_output: "VllmSchedulerOutput"):
@@ -1571,7 +1595,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         attention_metadata.seq_lens_cpu = seq_lens_cpu
         logits_indices_selector = None
         return (input_ids, attention_metadata, sampling_metadata,
-                logits_indices, spec_decode_metadata, logits_indices_selector)
+                logits_indices, spec_decode_metadata, logits_indices_selector,
+                padded_num_reqs)
 
     def _get_input_ids_embeds(self, input_ids: jax.Array,
                               mm_embeds: list[jax.Array]):

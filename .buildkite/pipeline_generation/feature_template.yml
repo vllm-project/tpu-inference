@@ -1,4 +1,5 @@
 # {FEATURE_NAME}
+# {CATEGORY}
 steps:
   - label: "Correctness tests for {FEATURE_NAME}"
     key: "{SANITIZED_FEATURE_NAME}_CorrectnessTest"
@@ -13,6 +14,7 @@ steps:
     env:
       CI_TARGET: "{FEATURE_NAME}"
       CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "{CATEGORY}"
     agents:
       queue: cpu
     commands:
@@ -33,6 +35,7 @@ steps:
     env:
       CI_TARGET: "{FEATURE_NAME}"
       CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "{CATEGORY}"
     agents:
       queue: cpu
     commands:

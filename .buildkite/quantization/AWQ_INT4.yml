@@ -1,0 +1,45 @@
+# AWQ INT4
+# quantization support matrix
+steps:
+  - label: "Correctness tests for AWQ INT4"
+    key: "AWQ_INT4_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "AWQ_INT4_CorrectnessTest" "to be added"
+  - label: "Record correctness test result for AWQ INT4"
+    key: "record_AWQ_INT4_CorrectnessTest"
+    depends_on: "AWQ_INT4_CorrectnessTest"
+    env:
+      CI_TARGET: "AWQ INT4"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "quantization support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh AWQ_INT4_CorrectnessTest
+
+  - label: "Performance tests for AWQ INT4"
+    key: "AWQ_INT4_PerformanceTest"
+    depends_on: "record_AWQ_INT4_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "AWQ_INT4_PerformanceTest" "to be added"
+  - label: "Record performance test result for AWQ INT4"
+    key: "record_AWQ_INT4_PerformanceTest"
+    depends_on: "AWQ_INT4_PerformanceTest"
+    env:
+      CI_TARGET: "AWQ INT4"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "quantization support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh AWQ_INT4_PerformanceTest

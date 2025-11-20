@@ -1,5 +1,7 @@
 notify:
-  - email: "buganizer-system+1445761+p1@google.com"
+  - email: "ullm-test-notifications-external@google.com"
+    if: build.state == "failed" && build.branch == "main"
+  - slack: "vllm#tpu-ci-notifications"
     if: build.state == "failed" && build.branch == "main"
 
 steps:

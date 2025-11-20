@@ -3,6 +3,7 @@ import os
 
 import requests
 
+from tpu_inference import envs
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
@@ -32,14 +33,14 @@ def get_tpu_metadata(key: str = "") -> str:
 
 
 def get_tpu_type() -> str:
-    tpu_type = os.getenv("TPU_ACCELERATOR_TYPE", None)
+    tpu_type = envs.TPU_ACCELERATOR_TYPE
     if tpu_type is None:
         tpu_type = get_tpu_metadata(key="accelerator-type")
     return tpu_type
 
 
 def get_node_name() -> str:
-    tpu_name = os.getenv("TPU_NAME", None)
+    tpu_name = envs.TPU_NAME
     if not tpu_name:
         tpu_name = get_tpu_metadata(key="instance-id")
     return tpu_name
@@ -47,7 +48,7 @@ def get_node_name() -> str:
 
 def get_node_worker_id() -> int:
     """For multi-host TPU VM, this returns the worker id for the current node."""
-    worker_id = os.getenv("TPU_WORKER_ID", None)
+    worker_id = envs.TPU_WORKER_ID
     if worker_id is None:
         worker_id = get_tpu_metadata(key="agent-worker-number")
     if worker_id is None:
