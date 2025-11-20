@@ -23,12 +23,6 @@ from tpu_inference.models.jax.utils.weight_utils import (
 
 logger = init_logger(__name__)
 
-logger.warning(
-    "🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨\n"
-    "Llama Guard 4 (JAX) is WIP: Only the text modality is currently implemented.  "
-    "Multimodal inputs will fail.\n"
-    "🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨")
-
 
 class LlamaGuard4ForCausalLM(nnx.Module):
 
@@ -37,6 +31,11 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                  rng: PRNGKey,
                  mesh: Mesh,
                  force_random_weights: bool = False):
+        logger.warning(
+            "🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨\n"
+            "Llama Guard 4 (JAX) is WIP: Only the text modality is currently implemented.  "
+            "Multimodal inputs will fail.\n"
+            "🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨")
         assert mesh is not None
 
         self.vllm_config = vllm_config
