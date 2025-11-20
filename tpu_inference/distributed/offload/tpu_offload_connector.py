@@ -277,20 +277,20 @@ class KVOffloadConnectorStats(KVConnectorStats):
     def reset(self):
         # Must be serializable
         self.data: dict[str, dict[str, list[int]]] = {
-            "finished_save_blocks": dict(),
-            "finished_load_blocks": dict(),
+            "finished_save_chunks": dict(),
+            "finished_load_chunks": dict(),
         }
 
     def record_save(self, req: ReqId, saved_chunk_ids: list[int]):
-        if req not in self.data["finished_save_blocks"]:
-            self.data["finished_save_blocks"][req] = []
-        self.data["finished_save_blocks"][req].extend(
+        if req not in self.data["finished_save_chunks"]:
+            self.data["finished_save_chunks"][req] = []
+        self.data["finished_save_chunks"][req].extend(
             copy.deepcopy(saved_chunk_ids))
 
     def record_load(self, req: ReqId, loaded_chunk_ids: list[int]):
-        if req not in self.data["finished_load_blocks"]:
-            self.data["finished_load_blocks"][req] = []
-        self.data["finished_load_blocks"][req].extend(
+        if req not in self.data["finished_load_chunks"]:
+            self.data["finished_load_chunks"][req] = []
+        self.data["finished_load_chunks"][req].extend(
             copy.deepcopy(loaded_chunk_ids))
 
     def clone_and_reset(self) -> "KVOffloadConnectorStats":
@@ -312,18 +312,18 @@ class KVOffloadConnectorStats(KVConnectorStats):
                 "Num finished load blocks ": 0,
             }
 
-        finished_save_blocks = sum(self.data["finished_save_blocks"].values())
-        finished_load_blocks = sum(self.data["finished_load_blocks"].values())
+        finished_save_chunks = sum(self.data["finished_save_chunks"].values())
+        finished_load_chunks = sum(self.data["finished_load_chunks"].values())
 
         return {
-            "Num finished save blocks ": finished_save_blocks,
-            "Num finished load blocks ": finished_load_blocks,
+            "Num finished save chunks ": finished_save_chunks,
+            "Num finished load chunks": finished_load_chunks,
         }
 
     @property
     def num_finished_blocks(self) -> int:
-        return len(self.data["finished_save_blocks"]) + len(
-            self.data["finished_load_blocks"])
+        return len(self.data["finished_save_chunks"]) + len(
+            self.data["finished_load_chunks"])
 
 
 # The metadata used for communicating between scheduler and worker connectors.
@@ -1096,13 +1096,13 @@ class TPUOffloadConnectorScheduler():
         if connector_output.kv_connector_stats and connector_output.kv_connector_stats.data is not None:
             assert isinstance(connector_output.kv_connector_stats,
                               KVOffloadConnectorStats)
-            assert "finished_save_blocks" in connector_output.kv_connector_stats.data
-            assert "finished_load_blocks" in connector_output.kv_connector_stats.data
+            assert "finished_save_chunks" in connector_output.kv_connector_stats.data
+            assert "finished_load_chunks" in connector_output.kv_connector_stats.data
             for req_id, saved_chunk_ids in connector_output.kv_connector_stats.data[
-                    "finished_save_blocks"].items():
+                    "finished_save_chunks"].items():
                 num_saved_chunks = len(saved_chunk_ids)
                 logger.info(
-                    f"  finished_save_blocks for {req_id}: {saved_chunk_ids}")
+                    f"  finished_save_chunks for {req_id}: {saved_chunk_ids}")
                 # free staging blocks
                 self.staging_buffer_manager.free(
                     req_id, usage="save", num_finished_blocks=num_saved_chunks)
@@ -1116,10 +1116,10 @@ class TPUOffloadConnectorScheduler():
                 self.offload_manager.mark_completion(saved_chunk_ids, "save")
 
             for req_id, loaded_chunk_ids in connector_output.kv_connector_stats.data[
-                    "finished_load_blocks"].items():
+                    "finished_load_chunks"].items():
                 num_loaded_chunks = len(loaded_chunk_ids)
                 logger.info(
-                    f"  finished_load_blocks for {req_id}: {num_loaded_chunks}"
+                    f"  finished_load_chunks for {req_id}: {num_loaded_chunks}"
                 )
                 self.staging_buffer_manager.free(
                     req_id,
