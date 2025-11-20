@@ -180,6 +180,17 @@ class TestLlama4WeightLoader:
     def test_get_layer_num(self, weight_loader, hf_key, expected_num):
         """Tests the private _get_layer_num utility function."""
         assert weight_loader._get_layer_num(hf_key) == expected_num
+    
+    @pytest.mark.parametrize("hf_key, expected_num", [
+        ("language_model.model.layers.10.feed_forward.experts.4.down_proj.weight", 4),
+        ("language_model.model.layers.0.feed_forward.experts.0.gate_proj.weight_scale", 0),
+        ("language_model.model.layers.5.feed_forward.experts.128.up_proj.weight", 128),
+        ("language_model.model.norm.weight", None),
+        ("language_model.model.layers.15.self_attn.q_proj.weight", None),
+    ])
+    def test_get_expert_num(self, weight_loader, hf_key, expected_num):
+        """Tests the private _get_expert_num utility function to extract the expert index."""
+        assert weight_loader._get_expert_num(hf_key) == expected_num
 
     @pytest.mark.parametrize("hf_key, expected", [
         ("language_model.model.layers.15.self_attn.q_proj.weight",
