@@ -132,6 +132,13 @@ class TpuPlatform(Platform):
         # For v0, the default block size is 16.
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = cast(BlockSize, 16)
+
+        if cache_config and cache_config.cache_dtype == "fp8" and cls.get_device_name(
+        ) == "TPU v6e":
+            logger.info(
+                "Automatically using fp8_e5m2 for FP8 KV cache on TPU v6e.")
+            cache_config.cache_dtype = "fp8_e5m2"
+
         compilation_config = vllm_config.compilation_config
 
         # TPU only supports DYNAMO_TRACE_ONCE compilation level
