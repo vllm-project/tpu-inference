@@ -26,6 +26,7 @@ from jaxtyping import Float
 from qwix._src.core.ragged_dot import ragged_dot as qwix_ragged_dot
 from qwix._src.providers import ptq
 
+from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.layers.jax.moe.moe import CombineExperts, MoE
@@ -61,6 +62,8 @@ class DeepSeekV3Router(nnx.Module):
     random_init: bool = False
 
     router_bias_dtype: jnp.dtype = jnp.float32
+
+    use_moe_kernel: bool = False
 
     def get_topk_indices(self, scores_TE: Float) -> Float:
         """Get the topk indices of the scores.
@@ -109,18 +112,22 @@ class DeepSeekV3Router(nnx.Module):
         scores_TE = jnp.einsum("TD,DE -> TE", x_TD, self.kernel_DE.value)
         scores_TE = nnx.sigmoid(scores_TE)
 
-        original_scores_TE = scores_TE
-        topk_indices_TX = self.get_topk_indices(scores_TE)
-        weights_TX = jnp.take_along_axis(original_scores_TE,
-                                         topk_indices_TX,
-                                         axis=-1)
+        if self.use_moe_kernel:
+            return scores_TE
+        
+        else:
+            original_scores_TE = scores_TE
+            topk_indices_TX = self.get_topk_indices(scores_TE)
+            weights_TX = jnp.take_along_axis(original_scores_TE,
+                                            topk_indices_TX,
+                                            axis=-1)
 
-        if self.norm_topk_prob:
-            weights_TX /= jnp.sum(weights_TX, axis=-1)[..., None] + 1e-20
+            if self.norm_topk_prob:
+                weights_TX /= jnp.sum(weights_TX, axis=-1)[..., None] + 1e-20
 
-        weights_TX *= self.routed_scaling_factor
+            weights_TX *= self.routed_scaling_factor
 
-        return weights_TX, topk_indices_TX
+            return weights_TX, topk_indices_TX
 
     def __post_init__(self, rngs: nnx.Rngs):
         """Generates the router kernel (weights and bias) for routing."""
@@ -161,6 +168,7 @@ class SparseMoE(MoE):
     mesh: jax.sharding.Mesh
     # This should be set if and only if you have quantized your model (via Qwix)
     quantized_dtype: Optional[jnp.dtype] = None
+    use_moe_kernel: bool = False
 
     def __post_init__(self, rngs: nnx.Rngs):
         super().__post_init__(rngs)
@@ -568,48 +576,78 @@ class SparseMoE(MoE):
         """Performs the forward pass of the Sparse MoE layer."""
         x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
-        router_weights_TX, selected_experts_TX = self.router(x_TD)
+        if not self.use_moe_kernel:
+            router_weights_TX, selected_experts_TX = self.router(x_TD)
 
-        in_specs = (
-            PartitionSpec(),  # Replicated `self`
-            PartitionSpec(*self.activation_ffw_td),  # Sharded x_TD
-            PartitionSpec(),  # Replicated router_weights_TX
-            PartitionSpec(),  # Replicated selected_experts_TX
-            PartitionSpec(*self.edf_sharding),  # Sharded gating kernel
-            PartitionSpec(*self.edf_sharding),  # Sharded up-projection kernel
-            PartitionSpec(
-                *self.efd_sharding),  # Sharded down-projection kernel
-        )
-        out_specs = PartitionSpec(*self.activation_ffw_td)
+            in_specs = (
+                PartitionSpec(),  # Replicated `self`
+                PartitionSpec(*self.activation_ffw_td),  # Sharded x_TD
+                PartitionSpec(),  # Replicated router_weights_TX
+                PartitionSpec(),  # Replicated selected_experts_TX
+                PartitionSpec(*self.edf_sharding),  # Sharded gating kernel
+                PartitionSpec(*self.edf_sharding),  # Sharded up-projection kernel
+                PartitionSpec(
+                    *self.efd_sharding),  # Sharded down-projection kernel
+            )
+            out_specs = PartitionSpec(*self.activation_ffw_td)
 
-        mapped_moe_fwd = partial(jax.shard_map,
-                                 mesh=self.mesh,
-                                 in_specs=in_specs,
-                                 out_specs=out_specs,
-                                 check_vma=False)(
-                                     SparseMoE._distributed_sparse_moe_fwd)
+            mapped_moe_fwd = partial(jax.experimental.shard_map.shard_map,
+                                    mesh=self.mesh,
+                                    in_specs=in_specs,
+                                    out_specs=out_specs,
+                                    check_rep=False)(
+                                        SparseMoE._distributed_sparse_moe_fwd)
 
-        kernel_gating_EDF = self.kernel_gating_EDF.value
-        kernel_up_proj_EDF = self.kernel_up_proj_EDF.value
-        kernel_down_proj_EFD = self.kernel_down_proj_EFD.value
+            kernel_gating_EDF = self.kernel_gating_EDF.value
+            kernel_up_proj_EDF = self.kernel_up_proj_EDF.value
+            kernel_down_proj_EFD = self.kernel_down_proj_EFD.value
 
-        if self.quantized_dtype:
-            if not isinstance(kernel_gating_EDF, ptq.WithAux):
-                kernel_gating_EDF = manually_quantize_qwix_weight(
-                    kernel_gating_EDF, self.quantized_dtype, [0, 2], {},
-                    "absmax")
-            if not isinstance(kernel_up_proj_EDF, ptq.WithAux):
-                kernel_up_proj_EDF = manually_quantize_qwix_weight(
-                    kernel_up_proj_EDF, self.quantized_dtype, [0, 2], {},
-                    "absmax")
-            if not isinstance(kernel_down_proj_EFD, ptq.WithAux):
-                kernel_down_proj_EFD = manually_quantize_qwix_weight(
-                    kernel_down_proj_EFD, self.quantized_dtype, [0, 1], {},
-                    "absmax")
-            kernel_gating_EDF = kernel_gating_EDF.array
-            kernel_up_proj_EDF = kernel_up_proj_EDF.array
-            kernel_down_proj_EFD = kernel_down_proj_EFD.array
+            if self.quantized_dtype:
+                if not isinstance(kernel_gating_EDF, ptq.WithAux):
+                    kernel_gating_EDF = manually_quantize_qwix_weight(
+                        kernel_gating_EDF, self.quantized_dtype, [0, 2], {},
+                        "absmax")
+                if not isinstance(kernel_up_proj_EDF, ptq.WithAux):
+                    kernel_up_proj_EDF = manually_quantize_qwix_weight(
+                        kernel_up_proj_EDF, self.quantized_dtype, [0, 2], {},
+                        "absmax")
+                if not isinstance(kernel_down_proj_EFD, ptq.WithAux):
+                    kernel_down_proj_EFD = manually_quantize_qwix_weight(
+                        kernel_down_proj_EFD, self.quantized_dtype, [0, 1], {},
+                        "absmax")
+                kernel_gating_EDF = kernel_gating_EDF.array
+                kernel_up_proj_EDF = kernel_up_proj_EDF.array
+                kernel_down_proj_EFD = kernel_down_proj_EFD.array
 
-        return mapped_moe_fwd(self, x_TD, router_weights_TX,
-                              selected_experts_TX, kernel_gating_EDF,
-                              kernel_up_proj_EDF, kernel_down_proj_EFD)
+            return mapped_moe_fwd(self, x_TD, router_weights_TX,
+                                selected_experts_TX, kernel_gating_EDF,
+                                kernel_up_proj_EDF, kernel_down_proj_EFD)
+        
+        else:
+            router_logits_TE = self.router(x_TD)
+            block_size = {
+                "bt": 32,
+                "bf": 512,
+                "bd1": 512,
+                "bd2": 512,
+                "btc": 32,
+                "bfc": 256,
+                "bd1c": 256,
+                "bd2c": 256,
+            }
+            ep_axis_name = self.efd_sharding[0]
+            mlp1_weight_E2DF = jnp.stack(
+                [self.kernel_gating_EDF.value, self.kernel_up_proj_EDF.value],
+                axis=1
+            )
+            output_TD = fused_ep_moe(
+                mesh=self.mesh,
+                tokens=x_TD,
+                w1=mlp1_weight_E2DF,
+                w2=self.kernel_down_proj_EFD.value,
+                gating_output=router_logits_TE,
+                top_k=self.router.num_experts_per_tok,
+                ep_axis_name=ep_axis_name,
+                **block_size,
+            )
+            return output_TD
