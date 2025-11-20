@@ -106,6 +106,10 @@ class DeepSeekV3(nnx.Module):
             logger.info("sparse matmul is disabled, using dense matmul")
         self.mesh = mesh
 
+        self.use_moe_kernel = bool(int(os.getenv("USE_MOE_EP_KERNEL", "0"))),
+        if self.use_moe_kernel:
+            logger.info("MoE kernel is enabled")
+
         self.weight_loader = DeepSeekV3WeightLoader(
             vllm_config=vllm_config,
             num_layers=num_layers,
@@ -239,6 +243,7 @@ class DeepSeekV3(nnx.Module):
                     efd_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
                     quantized_dtype=self.weight_loader.quant_dtype
                     if self.weight_loader.is_model_quantized else None,
+                    use_moe_kernel = self.use_moe_kernel,
                     router=router) if is_moe_layer else DenseFFW(
                         dtype=dtype,
                         hidden_act=hidden_act,
