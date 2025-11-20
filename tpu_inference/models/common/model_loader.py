@@ -35,8 +35,8 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     from tpu_inference.models.jax.gpt_oss import GptOss
     from tpu_inference.models.jax.llama3 import LlamaForCausalLM
     from tpu_inference.models.jax.llama4 import Llama4ForCausalLM
-    from tpu_inference.models.jax.llama_guard_4 import LlamaGuard4ForCausalLM
     from tpu_inference.models.jax.llama_eagle3 import EagleLlama3ForCausalLM
+    from tpu_inference.models.jax.llama_guard_4 import LlamaGuard4ForCausalLM
     from tpu_inference.models.jax.phi3 import Phi3ForCausalLM
     from tpu_inference.models.jax.qwen2 import Qwen2ForCausalLM
     from tpu_inference.models.jax.qwen2_5_vl import \

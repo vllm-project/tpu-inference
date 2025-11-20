@@ -7,13 +7,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from vllm.config import ModelConfig
 
-from tpu_inference.models.jax.llama_guard_4 import (
-    LlamaGuard4ForCausalLM, LlamaGuard4WeightLoader)
+from tpu_inference.models.jax.llama_guard_4 import (LlamaGuard4ForCausalLM,
+                                                    LlamaGuard4WeightLoader)
+
 
 class MockParamLlamaGuard4:
     """A mock for a parameter used in the LlamaGuard4 model."""
@@ -50,7 +50,7 @@ class MockVllmConfig:
 
         # Downsizing the following to avoid OOM
         self.model_config.get_vocab_size.return_value = 1024
-        self.model_config.get_hidden_size.return_value = 128 
+        self.model_config.get_hidden_size.return_value = 128
         self.model_config.model = model_name
 
         self.additional_config = {
@@ -70,9 +70,9 @@ class MockVllmConfig:
         text_config_mock.num_attention_heads = 4
         text_config_mock.num_key_value_heads = 2
         text_config_mock.head_dim = 32
-        
+
         hf_config_mock = MagicMock()
-        hf_config_mock.text_config = text_config_mock 
+        hf_config_mock.text_config = text_config_mock
 
         self.model_config.hf_config = hf_config_mock
 
@@ -109,28 +109,30 @@ def mock_vllm_config_llama_guard_4() -> MockVllmConfig:
 class TestLlamaGuard4ForCausalLM:
     """Tests for the main LlamaGuard4ForCausalLM model class."""
 
-    def test_init_llama_guard_4(self, mock_vllm_config_llama_guard_4, rng, mesh):
+    def test_init_llama_guard_4(self, mock_vllm_config_llama_guard_4, rng,
+                                mesh):
         """Tests correct initialization and parameter detection."""
-        model = LlamaGuard4ForCausalLM(mock_vllm_config_llama_guard_4, rng, mesh)
-        
+        model = LlamaGuard4ForCausalLM(mock_vllm_config_llama_guard_4, rng,
+                                       mesh)
+
         # Check model name is correctly set in the config
         assert "llama-guard-4" in model.vllm_config.model_config.model.lower()
 
-        assert model.hidden_size == 128 
+        assert model.hidden_size == 128
 
     def test_create_model_with_random_weights(self,
                                               mock_vllm_config_llama_guard_4,
-                                              rng,
-                                              mesh):
+                                              rng, mesh):
         """
         Tests that random weight initialization creates concrete, non-zero-variance arrays.
         """
         with jax.set_mesh(mesh):
-            model = LlamaGuard4ForCausalLM(vllm_config=mock_vllm_config_llama_guard_4,
-                                           rng=rng,
-                                           mesh=mesh,
-                                           force_random_weights=True)
-            
+            model = LlamaGuard4ForCausalLM(
+                vllm_config=mock_vllm_config_llama_guard_4,
+                rng=rng,
+                mesh=mesh,
+                force_random_weights=True)
+
             embedding_weight = model.embedder.input_embedding_table_VD.value
             attention_q_kernel = model.layers[0].attn.kernel_q_proj_DNH.value
             final_norm_scale = model.final_norm.scale.value
@@ -201,7 +203,7 @@ class TestLlamaGuard4WeightLoader:
 
         hidden_size = 5120
         vocab_size = 202048
-        
+
         original_weight = jnp.ones((vocab_size, hidden_size))
         dummy_weights = [
             ("language_model.model.embed_tokens.weight", original_weight),

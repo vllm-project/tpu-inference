@@ -1,16 +1,14 @@
-from tpu_inference.logger import init_logger
-
 import re
-from typing import List, Optional, Tuple, Any
+from typing import Any, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+import torch
 from flax import nnx
 from flax.typing import PRNGKey
-from jax.sharding import Mesh, NamedSharding
+from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
-import torch
 
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
 from tpu_inference.layers.jax.attention.llama4_attention import Llama4Attention
@@ -29,8 +27,8 @@ logger.warning(
     "🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨\n"
     "Llama Guard 4 (JAX) is WIP: Only the text modality is currently implemented. "
     "Multimodal inputs will fail.\n"
-    "🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨"
-)
+    "🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨")
+
 
 class LlamaGuard4ForCausalLM(nnx.Module):
 
@@ -49,7 +47,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         self.mesh = mesh
         self.is_verbose = getattr(self.vllm_config.additional_config,
                                   "is_verbose", False)
-        
+
         self.use_qk_norm = getattr(text_config, "use_qk_norm", True)
 
         vocab_size = model_config.get_vocab_size()
@@ -61,11 +59,13 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         hidden_act: str = getattr(text_config, "hidden_act", "silu")
 
         rms_norm_eps = getattr(text_config, "rms_norm_eps", 1e-5)
-        self.num_attention_heads = getattr(text_config, "num_attention_heads", 40)
-        self.num_key_value_heads = getattr(text_config, "num_key_value_heads", 8)
+        self.num_attention_heads = getattr(text_config, "num_attention_heads",
+                                           40)
+        self.num_key_value_heads = getattr(text_config, "num_key_value_heads",
+                                           8)
         self.head_dim = getattr(text_config, "head_dim", 128)
 
-        intermediate_size =  getattr(text_config, "intermediate_size", 8192)
+        intermediate_size = getattr(text_config, "intermediate_size", 8192)
 
         self.rope_theta_text = getattr(text_config, "rope_theta", 500000.0)
         self.rope_scaling = getattr(text_config, "rope_scaling")
@@ -84,18 +84,17 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         self.layers = []
 
         for i in range(self.num_layers):
-            use_attention_rope = True 
+            use_attention_rope = True
 
-            custom_module = DenseFFW(
-                dtype=self.dtype,
-                hidden_act=hidden_act,
-                hidden_size=self.hidden_size,
-                intermediate_size=intermediate_size,
-                random_init=force_random_weights,
-                rngs=self.rng,
-                df_sharding=P(None, 'model'),
-                fd_sharding=P('model', None),
-                activation_ffw_td=P('data', None))
+            custom_module = DenseFFW(dtype=self.dtype,
+                                     hidden_act=hidden_act,
+                                     hidden_size=self.hidden_size,
+                                     intermediate_size=intermediate_size,
+                                     random_init=force_random_weights,
+                                     rngs=self.rng,
+                                     df_sharding=P(None, 'model'),
+                                     fd_sharding=P('model', None),
+                                     activation_ffw_td=P('data', None))
 
             attn = Llama4Attention(
                 hidden_size=self.hidden_size,
@@ -105,10 +104,14 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                 head_dim=self.head_dim,
                 rope_theta=self.rope_theta_text,
                 rope_scaling={
-                    "scale_factor": self.rope_scaling["factor"],
-                    "low_freq_factor": self.rope_scaling["low_freq_factor"],
-                    "high_freq_factor": self.rope_scaling["high_freq_factor"],
-                    "original_max_position_embeddings": self.rope_scaling["original_max_position_embeddings"]
+                    "scale_factor":
+                    self.rope_scaling["factor"],
+                    "low_freq_factor":
+                    self.rope_scaling["low_freq_factor"],
+                    "high_freq_factor":
+                    self.rope_scaling["high_freq_factor"],
+                    "original_max_position_embeddings":
+                    self.rope_scaling["original_max_position_embeddings"]
                 },
                 rngs=self.rng,
                 rope_input_ordering="interleaved",
@@ -121,7 +124,6 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                 attention_chunk_size=None if use_attention_rope else 8192,
                 mesh=self.mesh,
                 random_init=force_random_weights,
-
                 activation_attention_td=('data', 'model'),
                 activation_q_td=('data', 'model'),
                 query_tnh=P('data', 'model', None),
@@ -170,14 +172,13 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             random_init=force_random_weights,
         )
 
-        self.lm_head = LMhead(
-            vocab_size=vocab_size,
-            hidden_size=self.hidden_size,
-            dtype=self.dtype,
-            rngs=self.rng,
-            vd_sharding=(('data', 'model'), None),
-            dv_sharding=(None, ('data', 'model')),
-            random_init=force_random_weights)
+        self.lm_head = LMhead(vocab_size=vocab_size,
+                              hidden_size=self.hidden_size,
+                              dtype=self.dtype,
+                              rngs=self.rng,
+                              vd_sharding=(('data', 'model'), None),
+                              dv_sharding=(None, ('data', 'model')),
+                              random_init=force_random_weights)
         if self.is_verbose:
             self._print_model_architecture()
 
@@ -186,7 +187,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         logger.info("### Embedding ###")
         nnx.display(self.embedder)
 
-        logger.info(f"\n### Layers ###")
+        logger.info("\n### Layers ###")
         for i, layer in enumerate(self.layers):
             logger.info(f"\n--- Layer {i} ---")
             nnx.display(layer)
@@ -206,14 +207,14 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         weight_loader.load_weights(self)
 
     def __call__(
-            self,
-            kv_caches: List[jax.Array],
-            input_ids: jax.Array,
-            attention_metadata: AttentionMetadata,
-            inputs_embeds: Optional[jax.Array] = None,
-            layer_metadata_tuple: Optional[Tuple] = None,
-            lora_metadata: Optional[Any] = None,  
-            *args, 
+        self,
+        kv_caches: List[jax.Array],
+        input_ids: jax.Array,
+        attention_metadata: AttentionMetadata,
+        inputs_embeds: Optional[jax.Array] = None,
+        layer_metadata_tuple: Optional[Tuple] = None,
+        lora_metadata: Optional[Any] = None,
+        *args,
     ) -> Tuple[List[KVCacheType], jax.Array]:
         is_prefill = False
 
@@ -225,7 +226,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             raise ValueError(
                 "Cannot run forward pass: Both input_ids and inputs_embeds are None."
             )
-        
+
         for (i, block) in enumerate(self.layers):
             kv_cache = kv_caches[i]
             new_kv_cache, x_TD = block(x_TD, is_prefill, kv_cache,
@@ -251,6 +252,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         Computes the embeddings for text input (used for input to fusion).
         """
         return self.embedder.encode(input_ids)
+
 
 class LlamaGuard4WeightLoader:
 

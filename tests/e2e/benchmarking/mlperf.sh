@@ -16,9 +16,9 @@
 LOG_FILE="server.log"
 BENCHMARK_LOG_FILE="benchmark.log"
 # The sentinel message that indicates the server is ready (in LOG_FILE)
-READY_MESSAGE="Application startup complete."
+export READY_MESSAGE="Application startup complete."
 # After how long we should timeout if the server doesn't start
-TIMEOUT_SECONDS=1800
+export TIMEOUT_SECONDS=1800
 
 # The minimum ROUGE1 and throughput scores we expect
 # TODO (jacobplatin): these are very low, so we'll want to boost them eventually
@@ -61,6 +61,7 @@ helpFunction()
 }
 
 # Access shared benchmarking functionality
+# shellcheck disable=SC1091
 source "$(dirname "$0")/bench_utils.sh"
 
 while [[ "$#" -gt 0 ]]; do

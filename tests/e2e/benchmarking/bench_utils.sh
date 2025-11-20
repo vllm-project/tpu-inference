@@ -1,14 +1,16 @@
+#!/bin/bash
 # SPDX-License-Identifier: Apache-2.0
 
 # -----------------------------------------------------------------------------
 # BENCHMARK UTILITY FUNCTIONS
-# This file is sourced by various performance scripts (e.g., mlperf.sh, 
+# This file is sourced by various performance scripts (e.g., mlperf.sh,
 # llama_guard_perf_recipe.sh) to share common functions.
 # -----------------------------------------------------------------------------
 
 # waitForServerReady: Blocks execution until the server prints the READY_MESSAGE or times out.
 # This logic is shared across all benchmark scripts.
 waitForServerReady() {
+    # shellcheck disable=SC2155
     local start_time=$(date +%s)
     echo "Waiting for server ready message: '$READY_MESSAGE'"
 
@@ -45,4 +47,3 @@ cleanUp() {
     rm -f "$BENCHMARK_LOG_FILE"
     echo "Cleanup complete."
 }
-
