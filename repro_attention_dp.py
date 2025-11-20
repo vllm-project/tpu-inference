@@ -7,6 +7,7 @@ Usage:
 """
 
 import argparse
+from functools import partial
 import time
 from pathlib import Path
 import numpy as np
@@ -15,6 +16,8 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, PartitionSpec as P
 from jax import NamedSharding, shard_map
+from jax.experimental.layout import Layout, Format
+
 from tpu_inference.layers.vllm.attention import _jax_attn_func
 # import sys
 # sys.path.insert(0, '/home/wenxindong_google_com/tpu-inference')
@@ -23,14 +26,15 @@ from tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 import (
     get_kv_cache_shape as get_kv_cache_shape_h64,
 )
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import get_kv_cache_shape
-from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.sharding import MESH_AXIS_NAMES_2D, ShardingAxisName
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.utils import make_optimized_mesh
 
 
 def create_test_inputs(
     batch_size: int = 256, 
     max_num_tokens: int = 256, 
-    num_q_heads: int = 32,
+    num_q_heads: int = 64,
     num_kv_heads: int = 8,
     head_dim: int = 64,
     page_size: int = 256,
@@ -1443,7 +1447,17 @@ def create_test_inputs(
     elif dp_size == 2:
         page_indices = jnp.array(page_indices_rank0 + page_indices_rank1, dtype=jnp.int32)
     
-    attention_sink = None    
+    attention_sink = jnp.array([1.0859375,  1.125,      0.09326172, 1.0859375,  0.91796875, 1.4140625,
+                      0.953125,   0.38671875, 1.140625,   1.0625,     1.546875,   1.6171875,
+                        0.69140625, 0.4453125,  1.65625,    1.3359375,  1.4296875,  1.0234375,
+                        1.3828125,  1.890625,   0.953125,   0.70703125, 0.80078125, 0.953125,
+                        1.375 ,     0.30664062, 1.2265625,  1.203125,   1.265625,   1.03125,
+                        2.171875,   1.2265625,  0.890625,   0.69140625, 0.44921875, 1.28125,
+                        0.984375 ,  0.87109375, 0.59375,    0.70703125, 1.515625,   1.6796875,
+                        1.6171875  ,1.2109375,  1.6328125,  1.25,       1.8125,     0.53515625,
+                        1.4609375 , 0.8828125,  2.34375,    0.91015625, 0.56640625, 1.3125,
+                        1.125 ,     0.75390625, 0.63671875, 2.078125,   1.2890625,  1.3828125,
+                        0.84765625, 0.64453125, 1.4921875,  1.6484375 ]  )
     sm_scale = head_dim ** -0.5
     
     print(f"\nInput creation (dp_size={dp_size}):")
@@ -1482,18 +1496,34 @@ def run(inputs, dump_dir, dp_size=2, num_devices=8, dp=True):
             print(f"  {key}: {val.shape} {val.dtype}")
     
     devices = jax.devices()
-    dp_size = 2
+    dp_size = 2 # don't change
+    total_devices = 8
     if dp: 
-        device_array = np.array(devices[:8]).reshape(dp_size, -1)
+        device_array = np.array(devices[:total_devices]).reshape(dp_size, -1)
+        mesh_shape = (dp_size, total_devices // dp_size)
     else: 
-        device_array = np.array(devices[:4]).reshape(1, -1)
-    mesh = Mesh(
+        device_array = np.array(devices[:total_devices//dp_size]).reshape(1, -1)
+        mesh_shape = (1, total_devices // dp_size)
+    
+    mesh = make_optimized_mesh(mesh_shape,
+                                       MESH_AXIS_NAMES_2D,
+                                       devices=devices)
+    print("optimal mesh created:", mesh.devices)
+    mesh_dummy = Mesh(
         device_array,
         axis_names=(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD),
     )
-    print(f"Mesh: {mesh}")
+    print("dummy mesh created:", mesh_dummy.devices)
 
-    def _attention_wrapper(q, k, v, kv_cache, kv_lens, page_indices, cu_q_lens, distribution):
+    @partial(jax.jit,     
+        compiler_options={
+        "xla_tpu_all_gather_collective_matmul_mode":
+        "post_spmd_conservative",
+        "xla_tpu_reduce_scatter_collective_matmul_mode":
+        "post_spmd_conservative"
+    }
+)
+    def _attention_wrapper(q, k, v, kv_cache, kv_lens, page_indices, cu_q_lens, distribution, attention_sink):
 
         attention_metadata = AttentionMetadata(
             input_positions=None, 
@@ -1516,7 +1546,7 @@ def run(inputs, dump_dir, dp_size=2, num_devices=8, dp=True):
             q=q_reshaped,
             k=k_reshaped,
             v=v_reshaped,
-            sinks=None,
+            sinks=attention_sink,
             attention_metadata=attention_metadata,
             mesh=mesh,
             scale=inputs['sm_scale'],
@@ -1526,14 +1556,14 @@ def run(inputs, dump_dir, dp_size=2, num_devices=8, dp=True):
             q_scale=None,
             k_scale=None,
             v_scale=None,
-            sliding_window=None,
+            sliding_window=128,
         )
         
         outputs = outputs.reshape(batch_size, num_heads, head_dim)
         
         return outputs, new_kv_cache
     
-    attention_fn = jax.jit(_attention_wrapper)
+    attention_fn = _attention_wrapper
     
     # Lower and dump HLO
     print("\nLowering computation...")
@@ -1546,6 +1576,7 @@ def run(inputs, dump_dir, dp_size=2, num_devices=8, dp=True):
         inputs['page_indices'],
         inputs['cu_q_lens'],
         inputs['distribution'],
+        inputs['attention_sink'],
     )
     
     # Dump HLO
@@ -1568,7 +1599,7 @@ def run(inputs, dump_dir, dp_size=2, num_devices=8, dp=True):
     inputs['page_indices'] = jax.device_put(inputs['page_indices'], NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA)))
     inputs['cu_q_lens'] = jax.device_put(inputs['cu_q_lens'], NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA)))
     inputs['distribution'] = jax.device_put(inputs['distribution'], NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA)))
-    
+    inputs['attention_sink'] = jax.device_put(inputs['attention_sink'], NamedSharding(mesh, P(ShardingAxisName.ATTN_HEAD)))
     # Warm up
     print("Warming up...")
     for _ in range(3):
@@ -1581,13 +1612,14 @@ def run(inputs, dump_dir, dp_size=2, num_devices=8, dp=True):
             inputs['page_indices'],
             inputs['cu_q_lens'],
             inputs['distribution'],
+            inputs['attention_sink'],
         )
         jax.block_until_ready(result)
     
     # Benchmark
     print("Benchmarking ...")
     times = []
-    dump_dir = f"gs://wenxindong-vm/trace/debug/gptoss/kernel/dp{dp}"
+    dump_dir = f"gs://wenxindong-vm/trace/debug/gptoss/kernel/dp={dp}"
     jax.profiler.start_trace(dump_dir)
     for i in range(10):
         start = time.time()
@@ -1600,6 +1632,7 @@ def run(inputs, dump_dir, dp_size=2, num_devices=8, dp=True):
             inputs['page_indices'],
             inputs['cu_q_lens'],
             inputs['distribution'],
+            inputs['attention_sink'],
         )
         jax.block_until_ready(result)
         elapsed = time.time() - start
