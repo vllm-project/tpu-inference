@@ -5,17 +5,8 @@ set -e
 REPO_URL="https://github.com/vllm-project/tpu-inference.git"
 TARGET_BRANCH="main"
 
-# Conditional Configuration for Release vs. Nightly
-if [ "${NIGHTLY}" = "1" ]; then
-  # Set path and commit message for nightly builds.
-  ARTIFACT_DOWNLOAD_PATH="support_matrices/nightly"
-  COMMIT_MESSAGE="[skip ci] Update nightly support matrices"
-else
-  # Set path and commit message for release tag builds.
-  COMMIT_TAG="${BUILDKITE_TAG:-unknown-tag}"
-  ARTIFACT_DOWNLOAD_PATH="support_matrices"
-  COMMIT_MESSAGE="[skip ci] Update support matrices for ${COMMIT_TAG}"
-fi
+COMMIT_MESSAGE="Update verified commit hashes"
+
 # Construct the repository URL with the access token for authentication.
 AUTHENTICATED_REPO_URL="https://x-access-token:${GITHUB_PAT}@${REPO_URL#https://}"
 
@@ -34,12 +25,24 @@ git fetch origin "${TARGET_BRANCH}"
 git checkout "${TARGET_BRANCH}"
 git reset --hard origin/"${TARGET_BRANCH}"
 
-echo "--- Downloading CSV artifacts"
-mkdir -p "${ARTIFACT_DOWNLOAD_PATH}"
-buildkite-agent artifact download "*.csv" "${ARTIFACT_DOWNLOAD_PATH}/" --flat
+VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH" --default "")
 
-echo "--- Staging downloaded artifacts"
-git add "${ARTIFACT_DOWNLOAD_PATH}"/*.csv
+if [ -z "${VLLM_COMMIT_HASH}" ]; then
+    echo "VLLM_COMMIT_HASH not found in buildkite meta-data"
+    exit 1
+fi
+
+if [ -z "${BUILDKITE_COMMIT:-}" ]; then
+    echo "BUILDKITE_COMMIT not found"
+    exit 1
+fi
+
+if [ ! -f verified_commit_hashes.csv ]; then
+    echo "timestamp,vllm_commit_hash,tpu_inference_commit_hash" > verified_commit_hashes.csv
+fi
+echo "$(date '+%Y-%m-%d %H:%M:%S'),${VLLM_COMMIT_HASH},${BUILDKITE_COMMIT}" >> verified_commit_hashes.csv
+
+git add verified_commit_hashes.csv
 
 # --- Check for changes before committing ---
 if git diff --quiet --cached; then

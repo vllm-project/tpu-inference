@@ -436,6 +436,9 @@ class RejectionSamplerTestHelper:
             batch_size=len(num_draft_tokens),
             padded_tokens_length=int(sum(num_draft_tokens)))
 
+        # Convert numpy arrays to lists for comparison
+        parsed_output = [x.tolist() for x in parsed_output]
+
         assert parsed_output == test_case.expected, \
             f"Test '{test_case.name}': Expected {test_case.expected}, got {parsed_output}"
 
@@ -512,6 +515,9 @@ class TestRejectionSampler:
             batch_size=len(num_draft_tokens),
             padded_tokens_length=int(sum(num_draft_tokens)))
 
+        # Convert numpy arrays to lists for comparison
+        parsed_output = [x.tolist() for x in parsed_output]
+
         expected = [[10, 20, 30, 40], [50, 60, 70]]
         assert parsed_output == expected, f"Expected {expected}, got {parsed_output}"
 
@@ -535,6 +541,9 @@ class TestRejectionSampler:
             batch_size=len(num_draft_tokens),
             padded_tokens_length=int(sum(num_draft_tokens)))
 
+        # Convert numpy arrays to lists for comparison
+        parsed_output = [x.tolist() for x in parsed_output]
+
         expected = [[10], [20, 30, 40]]
         assert parsed_output == expected, f"Expected {expected}, got {parsed_output}"
 
@@ -556,6 +565,9 @@ class TestRejectionSampler:
             batch_size=len(num_draft_tokens),
             padded_tokens_length=int(sum(num_draft_tokens)))
 
+        # Convert numpy arrays to lists for comparison
+        parsed_output = [x.tolist() for x in parsed_output]
+
         expected = [[10, 20]]  # Invalid tokens filtered out
         assert parsed_output == expected, f"Expected {expected}, got {parsed_output}"
 
@@ -576,6 +588,9 @@ class TestRejectionSampler:
             num_draft_tokens_cpu=np.asarray(num_draft_tokens),
             batch_size=len(num_draft_tokens),
             padded_tokens_length=int(sum(num_draft_tokens)))
+
+        # Convert numpy arrays to lists for comparison
+        parsed_output = [x.tolist() for x in parsed_output]
 
         expected = [[50], [60]]  # Only bonus tokens
         assert parsed_output == expected, f"Expected {expected}, got {parsed_output}"
@@ -631,6 +646,9 @@ class TestRejectionSampler:
             num_draft_tokens_cpu=np.asarray(num_draft_tokens),
             batch_size=len(num_draft_tokens),
             padded_tokens_length=int(sum(num_draft_tokens)))
+
+        # Convert numpy arrays to lists for comparison
+        parsed_output = [x.tolist() for x in parsed_output]
 
         expected = [[1, 5]]  # Should ignore all padding
         assert parsed_output == expected, f"Expected {expected}, got {parsed_output}"
@@ -777,6 +795,9 @@ class TestRejectionSampler:
             batch_size=len(num_draft_tokens),
             padded_tokens_length=int(sum(num_draft_tokens)))
 
+        # Convert numpy arrays to lists for comparison
+        parsed_output = [x.tolist() for x in parsed_output]
+
         expected = [list(range(1, 28)) + [99]]  # Tokens up to mismatch point
         assert parsed_output == expected, f"Expected {expected}, got {parsed_output}"
 
@@ -884,6 +905,9 @@ class TestNonGreedyRejectionSampler:
                 num_draft_tokens_cpu=np.asarray(num_draft_tokens),
                 batch_size=1,
                 padded_tokens_length=4)
+
+            # Convert numpy arrays to lists for comparison
+            parsed_output = [x.tolist() for x in parsed_output]
             outputs.append(parsed_output)
 
         # All outputs should be identical with same seed
@@ -1064,6 +1088,9 @@ class TestNonGreedyRejectionSampler:
             batch_size=2,
             padded_tokens_length=0)
 
+        # Convert numpy arrays to lists for comparison
+        parsed_output = [x.tolist() for x in parsed_output]
+
         # Should get bonus tokens for empty sequences
         expected = [[77], [88]]
         assert parsed_output == expected, f"Expected {expected}, got {parsed_output}"
@@ -1151,6 +1178,10 @@ class TestNonGreedyRejectionSampler:
             greedy_output, VOCAB_SIZE, np.asarray(num_draft_tokens), 1, 3)
         non_greedy_parsed = rejection_sampler.parse_output(
             non_greedy_output, VOCAB_SIZE, np.asarray(num_draft_tokens), 1, 3)
+
+        # Convert numpy arrays to lists for comparison
+        greedy_parsed = [x.tolist() for x in greedy_parsed]
+        non_greedy_parsed = [x.tolist() for x in non_greedy_parsed]
 
         # For perfect match, greedy should have all tokens + bonus
         assert greedy_parsed == [[5, 15, 25, 99]]

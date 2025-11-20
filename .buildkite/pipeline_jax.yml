@@ -265,6 +265,7 @@ steps:
   # NOTIFICATION STEP
   # -----------------------------------------------------------------
    - label: "TPU Test Notification"
+     key: tpu_test_notification
      depends_on:
        - test_0
        - test_1
