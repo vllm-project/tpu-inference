@@ -59,8 +59,12 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
         if arch in _MODEL_REGISTRY:
             return _MODEL_REGISTRY[arch]
     raise UnsupportedArchitectureError(
-        f"Model architectures {architectures} are not supported for now. "
-        f"Supported architectures: {list(_MODEL_REGISTRY.keys())}")
+        # f"Model architectures {architectures} are not supported for now. "
+        # f"Supported architectures: {list(_MODEL_REGISTRY.keys())}"
+        f"Model architectures {arch} not "
+        "registered in tpu-inference. Falling back to vLLM-native "
+        f"Pytorch definition. JAX-native architectures: {_MODEL_REGISTRY.keys()}"
+    )
 
 
 def _get_nnx_model(
@@ -328,8 +332,8 @@ def get_model(
             # Convert the error message to a string to check its contents
             error_msg = str(e)
 
-            logger.warning(f"Flax model failed with: '{error_msg}'. "
-                           "Falling back to vLLM implementation.")
+            logger.warning(error_msg)
+
             # Fall back to the vLLM model and updating the dtype accordingly
             vllm_config.model_config.dtype = j2t_dtype(
                 vllm_config.model_config.dtype.dtype)
