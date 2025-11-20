@@ -31,10 +31,14 @@ class LocalCPUBackend:
         self.max_num_cpu_chunks = num_cpu_chunks
         self.cache: OrderedDict[CpuChunkId, Any] = OrderedDict()
         self.current_size_bytes = 0
-        self.num_occupied_cpu_chunks = 0
+        self._num_saved_cpu_chunks = 0
         logger.info(
             "LocalCPUBackend initialized."
             f"CPU cache capacity: {self.max_num_cpu_chunks} chunks / pages.")
+
+    @property
+    def num_saved_cpu_chunks(self) -> int:
+        return self._num_saved_cpu_chunks
 
     def _get_value_size(self, value: Any) -> int:
         """Calculates the size of a cache value in bytes."""
@@ -66,16 +70,16 @@ class LocalCPUBackend:
             old_value = self.cache.pop(chunk_id)
             self.current_size_bytes -= self._get_value_size(old_value)
             del old_value
-            self.num_occupied_cpu_chunks -= 1
+            self._num_saved_cpu_chunks -= 1
 
         self.cache[chunk_id] = value
-        self.num_occupied_cpu_chunks += 1
+        self._num_saved_cpu_chunks += 1
         value_size = self._get_value_size(value)
         self.current_size_bytes += value_size
         logger.info(
             f"Added chunk_id: {chunk_id} (size:{value_size}) to CPU backend.")
         logger.info(
-            f"Cache: {self.current_size_bytes} bytes, {self.num_occupied_cpu_chunks} occupied chunks."
+            f"Cache: {self.current_size_bytes} bytes, {self._num_saved_cpu_chunks} occupied chunks."
         )
         return True
 

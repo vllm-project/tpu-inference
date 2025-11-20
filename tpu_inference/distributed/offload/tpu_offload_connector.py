@@ -1616,6 +1616,7 @@ class TPUOffloadConnectorWorker:
                 f"extracted_blocks_tpu: {flat_kv_caches_tpu[0].shape}, {flat_kv_caches_tpu[0].sharding}"
             )
 
+            chunks_on_cpu = None
             if self.use_bucketed_swap_ops:
                 chunks_on_cpu = self._bucketed_swap_out_fn(flat_kv_caches_tpu)
             else:
