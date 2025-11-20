@@ -14,6 +14,7 @@ def setup_new_model_design():
     """Automatically set NEW_MODEL_DESIGN=True for all tests."""
     os.environ['NEW_MODEL_DESIGN'] = 'True'
 
+
 @pytest.fixture
 def test_prompts():
     """Simple test prompts for data parallelism testing."""
