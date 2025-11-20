@@ -727,7 +727,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         elif is_llama_guard_4 and any(self.mm_manager.runner.requests[req_id].mm_features for req_id in self.mm_manager.runner.input_batch.req_ids):
                     raise NotImplementedError(
                         "Llama Guard 4 (JAX) currently supports only text inputs. "
-                        "Multimodal processing via 'inputs_embeds' is not yet implemented."
+                        "Multimodal processing not yet implemented."
                     )
         else:
             mm_embeds = []
