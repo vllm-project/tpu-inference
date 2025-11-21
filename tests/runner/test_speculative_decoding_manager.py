@@ -321,7 +321,7 @@ class TestSpeculativeDecodingManager:
         )
 
         # Inputs
-        sampled_token_ids = [np.array([1]), np.array([2])]
+        sampled_token_ids = [[1], [2]]
         aux_hidden_states = MagicMock()
         attn_metadata = MagicMock()
         attn_metadata.seq_lens.shape = [2]

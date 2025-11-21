@@ -128,7 +128,7 @@ class RejectionSampler:
         num_draft_tokens_cpu: np.ndarray,
         batch_size: int,
         padded_tokens_length: int,
-    ) -> list[np.ndarray]:
+    ) -> list[list[int]]:
         """Parse the output of the rejection sampler.
 
         Args:
@@ -177,7 +177,7 @@ class RejectionSampler:
             else:
                 seq_tokens = valid_main_tokens
 
-            outputs.append(seq_tokens)
+            outputs.append(seq_tokens.tolist())
             start_idx = end_idx
 
         return outputs
