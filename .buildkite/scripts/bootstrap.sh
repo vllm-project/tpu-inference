@@ -1,5 +1,5 @@
 #!/bin/bash
-
+# comment
 # --- Skip build if only docs/icons changed ---
 echo "--- :git: Checking changed files"
 
