@@ -486,9 +486,10 @@ class Qwen2_5_VisionTransformer(nnx.Module):
             dtype=dtype,
             rngs=rngs)
 
-        self.enable_vision_padding = vllm_config.additional_config.get(
-            "enable_vision_padding",
-            False) if vllm_config.additional_config else False
+        additional_config = getattr(vllm_config, "additional_config",
+                                    None) or {}
+        self.enable_vision_padding = additional_config.get(
+            "enable_vision_padding", False)
 
     def rotary_pos_emb_thw(self, t, h, w):
         hpos_ids, wpos_ids = jnp.indices((h, w))
