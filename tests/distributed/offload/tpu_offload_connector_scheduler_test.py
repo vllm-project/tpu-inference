@@ -9,7 +9,8 @@ from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.request import Request
 
 from tpu_inference.distributed.offload.tpu_offload_connector import (
-    DEFAULT_TPU_OFFLOAD_CPU_CHUNKS, TPUOffloadConnectorScheduler)
+    DEFAULT_TPU_OFFLOAD_CPU_CHUNKS, RequestTracker,
+    TPUOffloadConnectorScheduler)
 
 _DEFAULT_BLOCK_SIZE = 16
 
@@ -34,20 +35,21 @@ def create_request(
     prompt_token_ids: list[int],
     block_size: int,
     num_computed_tokens: int = 0,
+    generated_token_ids: list[int] = [],
 ) -> Request:
     """Creates a mock vLLM request object."""
     req = MagicMock(spec=Request)
     req.request_id = request_id
     req.req_id = request_id  # for NewRequestData
     req.prompt_token_ids = prompt_token_ids
-    req.all_token_ids = prompt_token_ids
-    req.num_computed_tokens = num_computed_tokens
+    req.all_token_ids = prompt_token_ids + generated_token_ids
+    req.num_computed_tokens = num_computed_tokens + len(generated_token_ids)
     req.block_size = block_size
     req.block_ids = [[]]
     # Mock the block_hashes property to return a list of mock hashes
     req.block_hashes = [
         f"hash_{i}".encode()
-        for i in range(len(prompt_token_ids) // block_size)
+        for i in range(len(req.all_token_ids) // block_size)
     ]
     return req
 
@@ -340,3 +342,159 @@ class TestTPUOffloadConnectorScheduler:
         tracker = scheduler._request_trackers["req1"]
         # after creating SaveSpec, we also update tracker.save_watermark
         assert tracker.save_watermark == num_tokens_in_cache
+
+    @pytest.mark.parametrize("prompt_len, seq_len, decode_save", [(63, 64, 1),
+                                                                  (18, 64, 1),
+                                                                  (18, 64, 0)])
+    def test_build_connector_meta_decode_with_save(self, scheduler_factory,
+                                                   prompt_len, seq_len,
+                                                   decode_save):
+        """
+        Tests metadata generation for a decode step that triggers a save.
+        1. the first decode (hit block boundary) + decode_save (save one block)
+        2. th N-th decode (hit block bounary) + decode_save (save one block)
+        2. th N-th decode (hit block bounary) + not decode_save (no save)
+        """
+
+        scheduler = scheduler_factory(
+            offload_decode_save=decode_save,
+            offload_staging_buffer_tokens=_DEFAULT_BLOCK_SIZE * 10,
+            offload_num_cpu_chunks=10)
+
+        prompt_tokens = list(range(prompt_len))
+        generated_tokens = list(range(prompt_len, seq_len))
+        req_id = "req1"
+        request = create_request(req_id,
+                                 prompt_token_ids=prompt_tokens,
+                                 block_size=scheduler.block_size,
+                                 num_computed_tokens=seq_len,
+                                 generated_token_ids=generated_tokens)
+        num_blocks = (seq_len + scheduler.block_size -
+                      1) // scheduler.block_size
+        request.block_ids = [i for i in range(num_blocks)]
+
+        if decode_save == 1:
+            # the last token in seq hasn't been computed (kv) yet
+            num_saved_tokens = (
+                (seq_len - 1) // scheduler.block_size) * scheduler.block_size
+        else:
+            num_saved_tokens = (prompt_len //
+                                scheduler.block_size) * scheduler.block_size
+
+        # Setup initial state
+        # request tracker only tracks the computed tokens
+        tracker = RequestTracker(req_id="req1",
+                                 prompt_len=prompt_len,
+                                 token_ids=request.all_token_ids[:-1],
+                                 block_ids=request.block_ids,
+                                 save_watermark=num_saved_tokens)
+
+        scheduler._request_trackers["req1"] = tracker
+        scheduler._unfinished_requests["req1"] = request
+
+        # Simulate a decode step
+        cached_req_data = CachedRequestData.make_empty()
+        cached_req_data.req_ids = ["req1"]
+        cached_req_data.new_block_ids = ([], )
+        scheduler_output = SchedulerOutput(
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=cached_req_data,
+            num_scheduled_tokens={"req1": 1},
+            total_num_scheduled_tokens=1,
+            finished_req_ids=set(),
+            scheduled_encoder_inputs={},
+            scheduled_spec_decode_tokens={},
+            num_common_prefix_blocks=0,
+            free_encoder_mm_hashes=[],
+            structured_output_request_ids={},
+            grammar_bitmask=None,
+        )
+
+        metadata = scheduler.build_connector_meta(scheduler_output)
+
+        if seq_len % scheduler.block_size != 0 or decode_save != 1:
+            # no save when there is no new full computed block
+            assert len(metadata.requests_meta) == 0
+        else:
+            req_meta = metadata.requests_meta[0]
+            # save spec
+            assert req_meta.req_id == "req1"
+            assert req_meta.load_spec is None
+            assert req_meta.save_spec is not None
+            assert req_meta.save_spec.num_total_tokens == seq_len
+            assert req_meta.save_spec.num_skip_leading_tokens == num_saved_tokens
+            assert req_meta.save_spec.src_blocks == [num_blocks - 1]
+            assert len(req_meta.save_spec.dst_chunks) == 1
+            assert not req_meta.save_spec.is_final_save
+            # staging buffer
+            assert "req1" in scheduler.staging_buffer_manager._blocks_for_save
+            assert scheduler.staging_buffer_manager._blocks_for_save[
+                "req1"] == 1
+            # chunk_id for save
+            assert "req1" in scheduler._reqs_being_saved
+            assert len(scheduler._reqs_being_saved["req1"]) == 1
+
+            assert tracker.save_watermark == seq_len
+
+    def test_build_connector_meta_finished_request(self, scheduler_factory):
+        """
+        Tests metadata generation for a finished request.
+        When using request's default block hash (fully-computed blocks only),
+        a finished request either saves the last full block in their last
+        decode step, or given up the last partial block; when it's treated as a
+        finished request, there is no blocks to save.
+
+        """
+
+        scheduler = scheduler_factory(offload_decode_save=1)
+        prompt_len = scheduler.block_size + 4
+        final_seq_len = scheduler.block_size * 2 + 3
+        prompt_tokens = list(range(prompt_len))
+        generated_tokens = list(range(prompt_len, final_seq_len))
+        req_id = "req1"
+        request = create_request(req_id,
+                                 prompt_token_ids=prompt_tokens,
+                                 block_size=scheduler.block_size,
+                                 num_computed_tokens=final_seq_len,
+                                 generated_token_ids=generated_tokens)
+        num_blocks = (final_seq_len + scheduler.block_size -
+                      1) // scheduler.block_size
+        request.block_ids = [i for i in range(num_blocks)]
+
+        num_saved_tokens = (final_seq_len //
+                            scheduler.block_size) * scheduler.block_size
+
+        # Setup initial state
+        tracker = RequestTracker(req_id="req1",
+                                 prompt_len=prompt_len,
+                                 token_ids=request.all_token_ids[:-1],
+                                 block_ids=request.block_ids,
+                                 save_watermark=num_saved_tokens)
+        scheduler._request_trackers["req1"] = tracker
+        scheduler._unfinished_requests["req1"] = request
+
+        scheduler_output = SchedulerOutput(
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=CachedRequestData.make_empty(),
+            num_scheduled_tokens={},
+            total_num_scheduled_tokens=0,
+            finished_req_ids={"req1"},
+            scheduled_encoder_inputs={},
+            scheduled_spec_decode_tokens={},
+            num_common_prefix_blocks=0,
+            free_encoder_mm_hashes=[],
+            structured_output_request_ids={},
+            grammar_bitmask=None,
+        )
+
+        metadata = scheduler.build_connector_meta(scheduler_output)
+
+        assert req_id not in scheduler._unfinished_requests
+        assert req_id not in scheduler._request_trackers
+        assert len(metadata.requests_meta) == 1
+        req_meta = metadata.requests_meta[0]
+        assert req_meta.save_spec is not None
+        assert req_meta.save_spec.is_final_save
+        assert req_meta.save_spec.skip_save
+        assert req_meta.save_spec.src_blocks == []
+        assert req_meta.save_spec.dst_chunks == []
