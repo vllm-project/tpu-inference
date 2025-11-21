@@ -438,6 +438,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self.input_ids_cpu = np.zeros(self.max_num_tokens, dtype=np.int32)
         self.positions_cpu = np.zeros(self.max_num_tokens, dtype=np.int32)
+        # Note: self.input_batch and self.block_tables_cpu are both initialized
+        # with only 1 block_size. For hybrid kv cache, it will be re-init
+        # in kv_cache_manager's maybe_reinitialize_input_batch.
         self.block_tables_cpu = [
             np.zeros((self.max_num_reqs, self.max_num_blocks_per_req),
                      dtype=np.int32)
