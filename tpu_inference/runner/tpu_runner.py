@@ -1381,7 +1381,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                         0].get_cpu_tensor()[req_indices_dp[dp_rank]]
             # Convert block_tables to 1D on cpu.
             block_tables = block_tables.reshape(-1)
-            block_tables = device_array(self.mesh, (block_tables))
+            block_tables = device_array(
+                self.mesh,
+                (block_tables),
+                sharding=data_parallel_attn_sharding,
+            )
 
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
