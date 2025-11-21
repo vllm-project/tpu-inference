@@ -1,6 +1,11 @@
 # The environment variables override should be imported before any other
 # modules to ensure that the environment variables are set before any
 # other modules are imported.
+from vllm.platforms import _current_platform  # Internal state variable
+from vllm.platforms import _init_trace  # Internal trace variable
+from vllm.platforms import (resolve_current_platform_cls_qualname,
+                            resolve_obj_by_qualname)
+
 import tpu_inference.env_override  # noqa: F401
 from tpu_inference import envs
 from tpu_inference import tpu_info as ti
@@ -15,6 +20,22 @@ if "proxy" in envs.JAX_PLATFORMS:
         import pathwaysutils
         pathwaysutils.initialize()
         logger.info("Module pathwaysutils is imported.")
+
+        # Pathways requires eager resolution of vllm.current_platform instead of
+        # lazy resolution in the normal code path. Since this part involves
+        # global topology discovery across multiple hosts, the platform
+        # resolution must happen before other components are loaded.
+        logger.info("Eagerly resolving vLLM current_platform for Pathways.")
+        platform_cls_qualname = resolve_current_platform_cls_qualname()
+        resolved_platform_instance = resolve_obj_by_qualname(
+            platform_cls_qualname)()
+        vllm.platforms._current_platform = resolved_platform_instance
+        vllm.platforms._init_trace = "".join(traceback.format_stack())
+
+        vllm.platforms.current_platform = resolved_platform_instance
+        logger.info(
+            f"vLLM platform resolved to: {resolved_platform_instance.__class__.__name__}"
+        )
     except Exception as e:
         logger.error(
             f"Error occurred while importing pathwaysutils or logging TPU info: {e}"
