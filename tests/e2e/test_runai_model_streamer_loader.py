@@ -28,7 +28,9 @@ from vllm import LLM, SamplingParams
 
 @pytest.fixture
 def sampling_config():
-    return SamplingParams(temperature=0, max_tokens=10, ignore_eos=True)
+    return SamplingParams(temperature=0,
+                          max_tokens=10,
+                          ignore_eos=True)
 
 
 @pytest.fixture
@@ -63,8 +65,9 @@ def test_correctness(
     # Set ENV variables so that runai_model_streamer uses anonymous GCS access.
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "fake-project")
     monkeypatch.setenv("RUNAI_STREAMER_GCS_USE_ANONYMOUS_CREDENTIALS", "true")
-    monkeypatch.setenv("CLOUD_STORAGE_EMULATOR_ENDPOINT",
-                       "https://storage.googleapis.com")
+    monkeypatch.setenv(
+        "CLOUD_STORAGE_EMULATOR_ENDPOINT", "https://storage.googleapis.com"
+    )
     gcs_llm = LLM(model=gcs_model_name,
                   load_format="runai_streamer",
                   max_model_len=128,
@@ -83,8 +86,9 @@ def test_correctness(
     hf_outputs = hf_llm.generate([prompt], sampling_config)
     hf_output_text = hf_outputs[0].outputs[0].text
     del hf_llm
-    time.sleep(10)  # Wait for TPUs to be released
+    time.sleep(10) # Wait for TPUs to be released
 
     assert gcs_output_text == hf_output_text, (
         f"Outputs do not match! "
-        f"GCS output: {gcs_output_text}, HF output: {hf_output_text}")
+        f"GCS output: {gcs_output_text}, HF output: {hf_output_text}"
+    )

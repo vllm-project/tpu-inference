@@ -8,10 +8,10 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.ops.mappings import j2t_dtype
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
-from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.model_loader.runai_streamer_loader import \
-    RunaiModelStreamerLoader
 from vllm.utils.func_utils import supports_kw
+from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.runai_streamer_loader import RunaiModelStreamerLoader
+
 
 from tpu_inference import envs
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -40,8 +40,6 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     from tpu_inference.models.jax.llama4 import Llama4ForCausalLM
     from tpu_inference.models.jax.llama_eagle3 import EagleLlama3ForCausalLM
     from tpu_inference.models.jax.llama_guard_4 import LlamaGuard4ForCausalLM
-    from tpu_inference.models.jax.phi3 import Phi3ForCausalLM
-    from tpu_inference.models.jax.qwen2 import Qwen2ForCausalLM
     from tpu_inference.models.jax.qwen2_5_vl import \
         Qwen2_5_VLForConditionalGeneration
     from tpu_inference.models.jax.qwen3 import Qwen3ForCausalLM
@@ -49,11 +47,9 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     _MODEL_REGISTRY["DeepseekV3ForCausalLM"] = DeepSeekV3
     _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
     _MODEL_REGISTRY["Llama4ForConditionalGeneration"] = LlamaGuard4ForCausalLM
-    _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
     _MODEL_REGISTRY["Qwen3ForCausalLM"] = Qwen3ForCausalLM
     _MODEL_REGISTRY[
         "Qwen2_5_VLForConditionalGeneration"] = Qwen2_5_VLForConditionalGeneration
-    _MODEL_REGISTRY["Phi3ForCausalLM"] = Phi3ForCausalLM
     _MODEL_REGISTRY["Eagle3LlamaForCausalLM"] = EagleLlama3ForCausalLM
     _MODEL_REGISTRY["GptOssForCausalLM"] = GptOss
 
@@ -62,8 +58,10 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
         if arch in _MODEL_REGISTRY:
             return _MODEL_REGISTRY[arch]
     raise UnsupportedArchitectureError(
-        f"Model architectures {architectures} are not supported for now. "
-        f"Supported architectures: {list(_MODEL_REGISTRY.keys())}")
+        f"Model architectures {architectures} not "
+        "registered in tpu-inference. Falling back to vLLM-native "
+        f"Pytorch definition. JAX-native architectures: {list(_MODEL_REGISTRY.keys())}"
+    )
 
 
 def _get_nnx_model(
@@ -187,8 +185,7 @@ def _get_nnx_model(
                 model_weights = vllm_config.model_config.model
                 if hasattr(vllm_config.model_config, "model_weights"):
                     model_weights = vllm_config.model_config.model_weights
-                weights_iterator = loader._get_weights_iterator(
-                    model_weights, vllm_config.model_config.revision)
+                weights_iterator = loader._get_weights_iterator(model_weights, vllm_config.model_config.revision)
                 # We set the weights iterator at runtime, to prevent having to change
                 # every model's load_weights signature. This also prevents us from hitting
                 # a TypeError at runtime if you use the RunaiModelStreamerLoader with any
@@ -347,8 +344,8 @@ def get_model(
             # Convert the error message to a string to check its contents
             error_msg = str(e)
 
-            logger.warning(f"Flax model failed with: '{error_msg}'. "
-                           "Falling back to vLLM implementation.")
+            logger.warning(error_msg)
+
             # Fall back to the vLLM model and updating the dtype accordingly
             vllm_config.model_config.dtype = j2t_dtype(
                 vllm_config.model_config.dtype.dtype)

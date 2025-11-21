@@ -88,7 +88,7 @@ def test_get_model_architecture_unsupported():
     unsupported architecture.
     """
     config = PretrainedConfig(architectures=["UnsupportedModel"])
-    with pytest.raises(ValueError, match="not supported"):
+    with pytest.raises(ValueError, match="not registered"):
         model_loader._get_model_architecture(config)
 
 

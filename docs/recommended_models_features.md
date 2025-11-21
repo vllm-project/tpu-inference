@@ -22,3 +22,5 @@ These tables show the models currently tested for accuracy and performance.
 ## Recommended Features
 
 This table shows the features currently tested for accuracy and performance.
+
+{{ read_csv('../support_matrices/feature_support_matrix.csv', keep_default_na=False) }}

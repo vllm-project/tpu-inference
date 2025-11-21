@@ -11,15 +11,18 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import jax
-import jax.dlpack
 import jax.numpy as jnp
 import torch
-import torchax
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
+from jax.dlpack import from_dlpack
+from torch.utils.dlpack import to_dlpack
+from torchax.interop import jax_view
 from safetensors import safe_open
 from vllm.config import VllmConfig
+
+import torchax
 
 from tpu_inference import envs, utils
 from tpu_inference.logger import init_logger
@@ -200,12 +203,11 @@ def shard_put(x: jax.Array, shardings, mesh: jax.sharding.Mesh) -> jax.Array:
         return jax.device_put(x, shardings)
 
 
-def get_default_maps(vllm_config, mesh: Mesh,
+def get_default_maps(model_config, mesh: Mesh,
                      name_map: dict[str, str]) -> MetadataMap:
     """Load weights from one model weights file to the model, run on single thread."""
     sharding_size = mesh.shape["model"]
 
-    model_config = vllm_config.model_config
     hf_config = model_config.hf_config
 
     num_heads = hf_config.num_attention_heads
@@ -268,16 +270,16 @@ def get_default_maps(vllm_config, mesh: Mesh,
                        pad_map=pad_keys,
                        bias_pad_map=bias_pad_keys)
 
-
-def _load_and_shard_weight(vllm_config,
-                           params: nnx.State,
-                           shardings: Any,
-                           metadata_map: MetadataMap,
-                           mesh: Mesh,
-                           hf_key: str,
-                           hf_weight: jax.Array,
-                           keep_original_dtype_keys_regex: list[str]
-                           | None = None):
+def _load_and_shard_weight(
+    vllm_config,
+    params: nnx.State,
+    shardings: Any,
+    metadata_map: MetadataMap,
+    mesh: Mesh,
+    hf_key: str,
+    hf_weight: jax.Array,
+    keep_original_dtype_keys_regex: list[str] | None = None
+):
     name_map = metadata_map.name_map
     reshape_keys = metadata_map.reshape_map
     bias_reshape_keys = metadata_map.bias_reshape_map
@@ -328,13 +330,13 @@ def _load_and_shard_weight(vllm_config,
             logger.warning(f"Skip loading {hf_key} due to tie_word_embeddings")
             return
         if hf_key not in name_map and "t2d" in hf_key:
-            logger.warning(
-                f"Skip loading {hf_key} as it's not used in eagle-3 for now")
+            logger.warning(f"Skip loading {hf_key} as it's not used in eagle-3 for now")
             return
         model_key = name_map.get(hf_key, hf_key)
 
     model_weight, model_sharding = get_param_and_sharding(
-        params, shardings, model_key)
+        params, shardings, model_key
+    )
 
     logger.debug(
         "before transform | "
@@ -354,17 +356,14 @@ def _load_and_shard_weight(vllm_config,
                 hf_weight = jnp.reshape(hf_weight, reshape_keys[key])
                 if head_dim_pad > 0:
                     if "o_proj" in key:
-                        hf_weight = jnp.pad(hf_weight, ((0, 0), (0, 0),
-                                                        (0, head_dim_pad)))
+                        hf_weight = jnp.pad(hf_weight, ((0, 0), (0, 0), (0, head_dim_pad)))
                     else:
-                        hf_weight = jnp.pad(hf_weight,
-                                            ((0, 0), (0, head_dim_pad),
-                                             (0, 0)))
+                        hf_weight = jnp.pad(hf_weight, ((0, 0), (0, head_dim_pad), (0, 0)))
                 break
-    for key in transpose_keys:
-        if key in hf_key:
-            hf_weight = jnp.transpose(hf_weight, transpose_keys[key])
-            break
+        for key in transpose_keys:
+            if key in hf_key:
+                hf_weight = jnp.transpose(hf_weight, transpose_keys[key])
+                break
 
     # Pad num-kv-heads
     if hf_key.endswith(".bias"):
@@ -404,6 +403,7 @@ def _load_hf_weights_on_thread(
     weights_file: str,
     filter_regex: Optional[str] = None,
     keep_original_dtype_keys_regex: Optional[list[str]] = None,
+    exclude_regex: Optional[list[str]] = None,
 ):
     """Loads weights from a single weights file."""
     try:
@@ -412,7 +412,19 @@ def _load_hf_weights_on_thread(
         shardings = params
 
     for hf_key, hf_weight in model_weights_single_file_generator(
-            weights_file, framework="flax", filter_regex=filter_regex):
+        weights_file, framework="flax", filter_regex=filter_regex
+    ):
+        # Check if the key should be excluded
+        if exclude_regex:
+            should_exclude = False
+            for pattern in exclude_regex:
+                if re.search(pattern, hf_key):
+                    logger.info(
+                        f"Excluding {hf_key} based on pattern {pattern}")
+                    should_exclude = True
+                    break
+            if should_exclude:
+                continue
         _load_and_shard_weight(
             vllm_config,
             params,
@@ -433,6 +445,7 @@ def load_hf_weights(
     filter_regex: Optional[str] = None,
     is_draft_model: bool = False,
     keep_original_dtype_keys_regex: Optional[list[str]] = None,
+    exclude_regex: Optional[list[str]] = None,
 ):
     """Load weights into a JAX model from either an iterator or files."""
     params = nnx.state(model)
@@ -471,7 +484,8 @@ def load_hf_weights(
         else:
             model_path = vllm_config.model_config.model
         weights_files = get_model_weights_files(
-            model_path, vllm_config.load_config.download_dir)
+            model_path, vllm_config.load_config.download_dir
+        )
         max_workers = min(64, len(weights_files))
         # NOTE(xiang): Disable multi-threading mode if running on multi-host.
         # Because multi-threading would cause different JAX processes to load
@@ -488,9 +502,10 @@ def load_hf_weights(
                     mesh,
                     weights_file,
                     filter_regex=filter_regex,
-                    keep_original_dtype_keys_regex=
-                    keep_original_dtype_keys_regex,
-                ) for weights_file in weights_files
+                    keep_original_dtype_keys_regex=keep_original_dtype_keys_regex,
+                    exclude_regex=exclude_regex
+                )
+                for weights_file in weights_files
             ]
             for future in futures:
                 future.result()

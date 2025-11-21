@@ -18,6 +18,7 @@ steps:
     env:
       CI_TARGET: "runai_model_streamer_loader"
       CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
     agents:
       queue: cpu
     commands:
