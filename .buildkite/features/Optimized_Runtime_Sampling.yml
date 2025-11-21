@@ -1,0 +1,45 @@
+# Optimized Runtime Sampling (top k, top p, temperature, logit output)
+# feature support matrix
+steps:
+  - label: "Correctness tests for Optimized Runtime Sampling"
+    key: "optimized_runtime_sampling_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "optimized_runtime_sampling_CorrectnessTest" "to be added"
+  - label: "Record correctness test result for Optimized Runtime Sampling"
+    key: "record_optimized_runtime_sampling_CorrectnessTest"
+    depends_on: "optimized_runtime_sampling_CorrectnessTest"
+    env:
+      CI_TARGET: "Optimized Runtime Sampling (top k, top p, temperature, logit output)"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh optimized_runtime_sampling_CorrectnessTest
+
+  - label: "Performance tests for Optimized Runtime Sampling"
+    key: "optimized_runtime_sampling_PerformanceTest"
+    depends_on: "record_optimized_runtime_sampling_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "optimized_runtime_sampling_PerformanceTest" "to be added"
+  - label: "Record performance test result for Optimized Runtime Sampling"
+    key: "record_optimized_runtime_sampling_PerformanceTest"
+    depends_on: "optimized_runtime_sampling_PerformanceTest"
+    env:
+      CI_TARGET: "Optimized Runtime Sampling (top k, top p, temperature, logit output)"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh optimized_runtime_sampling_PerformanceTest
