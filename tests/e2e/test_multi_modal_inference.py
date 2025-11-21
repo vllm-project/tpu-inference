@@ -4,9 +4,9 @@
 # This script is a self-contained test that runs a single prompt and
 # compares the output to a known-good output.
 
+import os
 from dataclasses import asdict
 
-import tpu_inference.envs as envs
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.multimodal.image import convert_image_mode
@@ -24,8 +24,9 @@ def test_multi_modal_inference(monkeypatch):
     """
     Runs multi-modal inference and verifies the output.
     """
-    envs.environment_variables['SKIP_JAX_PRECOMPILE'] = lambda: True  # Skip warmup to save time.
-    envs.environment_variables['VLLM_XLA_CHECK_RECOMPILATION'] = lambda: False  # Allow compilation during execution.
+    os.environ['SKIP_JAX_PRECOMPILE'] = '1'  # Skip warmup to save time.
+    os.environ[
+        'VLLM_XLA_CHECK_RECOMPILATION'] = '0'  # Allow compilation during execution.
 
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
