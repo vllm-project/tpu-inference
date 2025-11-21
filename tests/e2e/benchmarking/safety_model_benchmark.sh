@@ -132,8 +132,7 @@ fi
 run_accuracy_check() {
     echo -e "\n--- Running Accuracy Check (Mode: ACCURACY) ---"
 
-    CONFTEST_DIR="/workspace/tpu-inference/scripts/vllm/integration"
-    CONFTEST_DIR="/mnt/disks/jiries-disk_data/tpu-inference/scripts/vllm/integration"
+    CONFTEST_DIR="/workspace/tpu_inference/scripts/vllm/integration"
 
     RELATIVE_TEST_FILE="test_safety_model_accuracy.py"
 
@@ -146,8 +145,6 @@ run_accuracy_check() {
             --model-name="$MODEL_NAME" \
             --expected-value="$MINIMUM_ACCURACY_THRESHOLD" \
             --dataset-path="$LOCAL_CSV_FILE"
-
-        return $?
     )
     return $?
 }

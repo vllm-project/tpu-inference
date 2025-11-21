@@ -15,6 +15,7 @@ steps:
     env:
       CI_STAGE: "UnitTest"
       CI_TARGET: meta-llama/Llama-Guard-4-12B
+      CI_CATEGORY: "text-only"
     agents:
       queue: cpu
     commands:
@@ -40,6 +41,7 @@ steps:
     env:
       CI_TARGET: meta-llama/Llama-Guard-4-12B
       CI_STAGE: "IntegrationTest"
+      CI_CATEGORY: "text-only"
     agents:
       queue: cpu
     commands:
@@ -62,6 +64,7 @@ steps:
     env:
       CI_TARGET: meta-llama/Llama-Guard-4-12B
       CI_STAGE: "Benchmark"
+      CI_CATEGORY: "text-only"
     agents:
       queue: cpu
     commands:
