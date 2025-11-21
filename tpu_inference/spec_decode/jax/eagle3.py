@@ -51,7 +51,8 @@ class Eagle3Proposer:
         """Loads the draft model."""
         self.model_fn, self.compute_logits_fn, self.combine_hidden_states_fn, _, self.state, _, _ = get_model(
             self.vllm_config, self.rng_key, self.mesh, is_draft_model=True)
-        del self.state.model['embed_tokens']
+        if 'embed_tokens' in self.state.model:
+            del self.state.model['embed_tokens']
         self.state.model.embed_tokens = target_model.model.embed
 
     @functools.partial(jax.jit, static_argnums=(0, ))

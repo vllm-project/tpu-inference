@@ -197,12 +197,11 @@ def shard_put(x: jax.Array, shardings, mesh: jax.sharding.Mesh) -> jax.Array:
         return jax.device_put(x, shardings)
 
 
-def get_default_maps(vllm_config, mesh: Mesh,
+def get_default_maps(model_config, mesh: Mesh,
                      name_map: dict[str, str]) -> MetadataMap:
     """Load weights from one model weights file to the model, run on single thread."""
     sharding_size = mesh.shape["model"]
 
-    model_config = vllm_config.model_config
     hf_config = model_config.hf_config
 
     num_heads = hf_config.num_attention_heads
@@ -273,7 +272,8 @@ def _load_hf_weights_on_thread(vllm_config,
                                weights_file: str,
                                filter_regex: str | None = None,
                                keep_original_dtype_keys_regex: list[str]
-                               | None = None):
+                               | None = None,
+                               exclude_regex: list[str] | None = None):
     name_map = metadata_map.name_map
     reshape_keys = metadata_map.reshape_map
     bias_reshape_keys = metadata_map.bias_reshape_map
@@ -297,6 +297,18 @@ def _load_hf_weights_on_thread(vllm_config,
 
     for hf_key, hf_weight in model_weights_single_file_generator(
             weights_file, framework="flax", filter_regex=filter_regex):
+
+        # Check if the key should be excluded
+        if exclude_regex:
+            should_exclude = False
+            for pattern in exclude_regex:
+                if re.search(pattern, hf_key):
+                    logger.info(
+                        f"Excluding {hf_key} based on pattern {pattern}")
+                    should_exclude = True
+                    break
+            if should_exclude:
+                continue
 
         # Check if the key should retain its original dtype
         keep_original_dtype = False
@@ -408,7 +420,8 @@ def load_hf_weights(vllm_config,
                     mesh: Mesh,
                     filter_regex: str | None = None,
                     is_draft_model: bool = False,
-                    keep_original_dtype_keys_regex: list[str] | None = None):
+                    keep_original_dtype_keys_regex: list[str] | None = None,
+                    exclude_regex: list[str] | None = None):
     """Load weights from all model weights files to the model, run in multi threads."""
     if is_draft_model:
         model_path = vllm_config.speculative_config.draft_model_config.model
@@ -433,8 +446,8 @@ def load_hf_weights(vllm_config,
                 mesh,
                 weights_file,
                 filter_regex=filter_regex,
-                keep_original_dtype_keys_regex=keep_original_dtype_keys_regex)
-            for weights_file in weights_files
+                keep_original_dtype_keys_regex=keep_original_dtype_keys_regex,
+                exclude_regex=exclude_regex) for weights_file in weights_files
         ]
         for future in futures:
             future.result()
