@@ -123,9 +123,11 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         selected_token_ids = np.expand_dims(next_tokens_cpu[:self._num_reqs],
                                             1)
 
-        valid_sampled_token_ids = [token_id for token_id in selected_token_ids]
+        valid_sampled_token_ids = [
+            token_id.tolist() for token_id in selected_token_ids
+        ]
         for i in self._discard_sampled_tokens_req_indices:
-            valid_sampled_token_ids[i] = np.array([])
+            valid_sampled_token_ids[i].clear()
         self._model_runner_output.sampled_token_ids = valid_sampled_token_ids
         return self._model_runner_output
 
@@ -614,11 +616,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             next_tokens_cpu = next_tokens_cpu[pre_logits_indices_selector]
         selected_token_ids = np.expand_dims(next_tokens_cpu[:len(pre_req_ids)],
                                             1)
-        valid_sampled_token_ids = [token_id for token_id in selected_token_ids]
+        valid_sampled_token_ids = [
+            token_id.tolist() for token_id in selected_token_ids
+        ]
 
         # Mask out the sampled tokens that should not be sampled.
         for i in pre_discard_sampled_tokens_req_indices:
-            valid_sampled_token_ids[i] = np.array([])
+            valid_sampled_token_ids[i].clear()
         # Append sampled tokens
         for pre_req_idx, req_state, _ in pre_request_seq_lens:
             sampled_ids = valid_sampled_token_ids[pre_req_idx]
@@ -941,9 +945,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 next_tokens = next_tokens[logits_indices_selector]
             selected_token_ids = np.expand_dims(next_tokens[:num_reqs], 1)
             valid_sampled_token_ids = [
-                token_id for token_id in selected_token_ids
+                token_id.tolist() for token_id in selected_token_ids
             ]
         else:
+            # TODO?
             valid_sampled_token_ids = self.rejection_sampler.parse_output(
                 next_tokens, self.input_batch.vocab_size,
                 spec_decode_metadata.draft_lengths_cpu, num_reqs,
@@ -951,11 +956,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Mask out the sampled tokens that should not be sampled.
         for i in discard_sampled_tokens_req_indices:
-            valid_sampled_token_ids[i] = np.array([])
+            valid_sampled_token_ids[i].clear()
         # Append sampled tokens
         for req_idx, req_state, _ in request_seq_lens:
             sampled_ids = valid_sampled_token_ids[req_idx]
-            if sampled_ids.size == 0:
+            if len(sampled_ids) == 0:
                 continue
 
             start_idx = self.input_batch.num_tokens_no_spec[req_idx]
@@ -988,7 +993,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     scheduler_output,
                     input_ids,
                 )
-
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,

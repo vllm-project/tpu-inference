@@ -173,9 +173,10 @@ class RejectionSampler:
             # Add bonus token if it's valid
             bonus_token = bonus_tokens[i]
             if bonus_token != PLACEHOLDER_TOKEN_ID and bonus_token < vocab_size:
-                seq_tokens = np.concatenate([valid_main_tokens, [bonus_token]])
+                seq_tokens = np.concatenate([valid_main_tokens,
+                                             [bonus_token]]).tolist()
             else:
-                seq_tokens = valid_main_tokens
+                seq_tokens = valid_main_tokens.tolist()
 
             outputs.append(seq_tokens)
             start_idx = end_idx

@@ -499,7 +499,7 @@ class TestDPScheduler:
                     "req2": 1,
                     "req3": 2
                 },
-                sampled_token_ids=torch.tensor([100, 200, 300]),
+                sampled_token_ids=torch.tensor([100, 200, 300]),  # TODO
                 logprobs=None,
                 prompt_logprobs_dict={},
                 pooler_output=None,
@@ -574,7 +574,7 @@ class TestDPScheduler:
                     "req3": 2,
                     "req4": 3
                 },
-                sampled_token_ids=torch.tensor([100, 200, 300, 400]),
+                sampled_token_ids=torch.tensor([100, 200, 300, 400]),  #TODO
                 logprobs=None,
                 prompt_logprobs_dict={},
                 pooler_output=None,
