@@ -2,23 +2,56 @@ import copy
 import functools
 import os
 import random
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple, cast
+from typing import Any, cast
 
 import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
 import torch
-import vllm.envs as envs
 from flax import nnx
 from jax.experimental import mesh_utils
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.ops.mappings import j2t_dtype
+
+import vllm.envs as envs
+from tpu_inference import utils as common_utils
+from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.jax.sample.rejection_sampler import RejectionSampler
+from tpu_inference.layers.jax.sample.sampling import (
+    compute_logprobs,
+    gather_logprobs,
+    sample,
+)
+from tpu_inference.layers.jax.sample.sampling_metadata import (
+    TPUSupportedSamplingMetadata,
+)
+from tpu_inference.layers.jax.sharding import ShardingAxisName, ShardingConfigManager
+from tpu_inference.logger import init_logger
+from tpu_inference.models.common.model_loader import get_model
+from tpu_inference.models.jax.utils.weight_utils import (
+    shard_put,
+    transfer_state_with_mappings,
+)
+from tpu_inference.runner import utils as runner_utils
+from tpu_inference.runner.compilation_manager import CompilationManager
+from tpu_inference.runner.input_batch_jax import CachedRequestState, InputBatch
+from tpu_inference.runner.kv_cache_manager import KVCacheManager
+from tpu_inference.runner.lora_utils import LoraUtils
+from tpu_inference.runner.multimodal_manager import MultiModalManager
+from tpu_inference.runner.persistent_batch_manager import PersistentBatchManager
+from tpu_inference.runner.speculative_decoding_manager import (
+    SpecDecodeMetadata,
+    SpeculativeDecodingManager,
+)
+from tpu_inference.runner.structured_decoding_manager import StructuredDecodingManager
+from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
+from tpu_inference.utils import device_array, make_optimized_mesh, time_function
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer import (get_kv_transfer_group,
-                                          has_kv_transfer_group)
+from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.forward_context import set_forward_context
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
@@ -31,8 +64,7 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              LogprobsTensors, ModelRunnerOutput)
 from vllm.v1.request import Request
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-from vllm.v1.worker.kv_connector_model_runner_mixin import \
-    KVConnectorModelRunnerMixin
+from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from tpu_inference import utils as common_utils
@@ -108,7 +140,7 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         next_tokens: jax.Array,
         num_reqs: int,
         discard_sampled_tokens_req_indices: list[int],
-        logits_indices_selector: Optional[List[int]] = None,
+        logits_indices_selector: list[int] | None = None,
     ):
         self._model_runner_output = model_runner_output
         self._next_tokens = next_tokens
@@ -137,7 +169,7 @@ class AsyncPreResults:
     request_seq_lens: list[tuple[int, CachedRequestState, int]]
     discard_sampled_tokens_req_indices: list[int]
     placeholder_req_id_to_index: dict[str, int]
-    logits_indices_selector: Optional[List[int]] = None
+    logits_indices_selector: list[int] | None = None
 
 
 @dataclass
@@ -147,7 +179,7 @@ class ExecuteModelState:
 
     scheduler_output: "VllmSchedulerOutput"
     attn_metadata: AttentionMetadata
-    input_ids: Optional[jax.Array]
+    input_ids: jax.Array | None
     hidden_states: jax.Array
     logits: jax.Array
     aux_hidden_states: Optional[jax.Array]
@@ -552,7 +584,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def execute_model(
         self,
         scheduler_output: "VllmSchedulerOutput",
-        intermediate_tensors: Optional[IntermediateTensors] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | None:
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called "
@@ -797,7 +829,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self,
         scheduler_output: "VllmSchedulerOutput",
         attn_metadata: AttentionMetadata,
-        input_ids: Optional[jax.Array],
+        input_ids: jax.Array | None,
         hidden_states: jax.Array,
         logits: jax.Array,
         aux_hidden_states: Optional[jax.Array],
@@ -1617,26 +1649,26 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         else:
             return input_ids, None
 
-    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+    def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.speculative_decoding_manager.take_draft_token_ids()
 
     ###### Local disagg utilities ######
 
     def get_kv_cache_for_block_ids(
         self,
-        block_ids: List[int],
-    ) -> List[jax.Array]:
+        block_ids: list[int],
+    ) -> list[jax.Array]:
         return self.kv_cache_manager.get_kv_cache_for_block_ids(block_ids)
 
     def transfer_kv_cache(self,
-                          kv_cache_slices: List[jax.Array]) -> List[jax.Array]:
+                          kv_cache_slices: list[jax.Array]) -> list[jax.Array]:
         return self.kv_cache_manager.transfer_kv_cache(kv_cache_slices)
 
     def insert_request_with_kv_cache(
         self,
         request: "Request",
-        kv_cache_slices: List[jax.Array],
-        block_ids: List[List[int]],
+        kv_cache_slices: list[jax.Array],
+        block_ids: list[list[int]],
     ):
         return self.kv_cache_manager.insert_request_with_kv_cache(
             request, kv_cache_slices, block_ids)
@@ -1646,8 +1678,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def _sync_weights(
         self,
         updated_weights: jaxtyping.PyTree,
-        mappings: Dict[str, Tuple[str, Tuple[str]]],
-        transpose_keys: Dict[str, Tuple[int]],
+        mappings: dict[str, tuple[str, tuple[str]]],
+        transpose_keys: dict[str, tuple[int]],
         reshard_fn: Callable[[jaxtyping.PyTree, jaxtyping.PyTree],
                              jaxtyping.PyTree] = None
     ) -> None:
