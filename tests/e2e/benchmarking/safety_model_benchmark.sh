@@ -145,8 +145,6 @@ run_accuracy_check() {
             --model-name="$MODEL_NAME" \
             --expected-value="$MINIMUM_ACCURACY_THRESHOLD" \
             --dataset-path="$LOCAL_CSV_FILE"
-
-        return $?
     )
     return $?
 }
