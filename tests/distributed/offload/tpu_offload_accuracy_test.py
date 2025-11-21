@@ -77,6 +77,7 @@ def _test_kv_cache_cpu_offloading_accuracy(
         out_texts2, out_tokens2 = parse_outputs(outputs)
         time.sleep(1)
 
+        # TODO(jcgu): check some internal states to verify save and load operations.
         # output1 and output2 should be idential
         assert len(out_texts1) == len(out_texts2)
         assert len(out_tokens1) == len(out_tokens2)
