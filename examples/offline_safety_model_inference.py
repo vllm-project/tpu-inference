@@ -18,11 +18,11 @@ python examples/offline_safety_model_inference.py \
     --max-num_batched_tokens=4096
 """
 
-import tpu_inference.envs as envs
 import vllm.envs as vllm_envs
 from vllm import LLM, EngineArgs
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
+import tpu_inference.envs as envs
 from tpu_inference.core import disagg_utils
 
 

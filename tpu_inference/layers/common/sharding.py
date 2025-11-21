@@ -1,6 +1,5 @@
 import json
 import math
-import os
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, List, Optional
 

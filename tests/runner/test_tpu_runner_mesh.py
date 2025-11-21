@@ -1,5 +1,4 @@
 """Unit tests for TPUModelRunner mesh initialization."""
-import os
 from unittest.mock import Mock, patch
 
 import pytest

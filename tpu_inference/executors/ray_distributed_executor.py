@@ -74,7 +74,8 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         self.forward_dag: Optional[ray.dag.CompiledDAG] = None
 
         # Ensure Ray compiled DAG channel type is set for vLLM
-        os.environ["VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE"] = tpu_envs.VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE
+        os.environ[
+            "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE"] = tpu_envs.VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE
 
         # Currently, this requires USE_RAY_SPMD_WORKER=True.
         self.use_ray_compiled_dag = True
@@ -91,7 +92,8 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         # Ensure Ray usage stats collection setting is propagated to Ray workers.
         # Ray workers inherit environment variables, so we explicitly set this
         # based on our configuration (defaults to "0" to disable stats).
-        os.environ["RAY_USAGE_STATS_ENABLED"] = tpu_envs.RAY_USAGE_STATS_ENABLED
+        os.environ[
+            "RAY_USAGE_STATS_ENABLED"] = tpu_envs.RAY_USAGE_STATS_ENABLED
 
         # Create the parallel GPU workers.
         self._init_workers_ray(placement_group)

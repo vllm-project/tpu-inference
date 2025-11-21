@@ -3,11 +3,12 @@
 
 import time
 
-import tpu_inference.envs as envs
 import vllm.envs as vllm_envs
 from vllm import LLM, EngineArgs
 from vllm.lora.request import LoRARequest
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+import tpu_inference.envs as envs
 
 
 def create_parser():
