@@ -16,6 +16,7 @@ from tpu_inference.kernels.mla.v1.kernel import \
     mla_ragged_paged_attention
 from tpu_inference.kernels.ragged_paged_attention.v3.util import get_tpu_version
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import ragged_paged_attention
+from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import get_tuned_block_sizes
     
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.base import create_param
@@ -396,7 +397,9 @@ class MLA(nnx.Module):
 
     def mla_attention(
         self,
+        # !START Change 3f1:
         kv_cache: KVCache,
+        # !END Change 3f1
         q_TNA: jax.Array,
         q_rope_TNH: jax.Array,
         k_SKA: jax.Array,
@@ -412,7 +415,9 @@ class MLA(nnx.Module):
         to the full history of keys and values stored in the cache.
 
         Args:
+            # !START Change 3f1:
             kv_cache: The key-value cache to be updated and used.
+            # !END Change 3f1
             q_TNH: Query tensor of shape `(query_seq, num_attention_heads, head_dim)`.
             k_SKH: Key tensor of shape `(kv_seq, num_key_value_heads, head_dim)`.
             v_SKH: Value tensor of shape `(kv_seq, num_key_value_heads, head_dim)`.
@@ -431,11 +436,13 @@ class MLA(nnx.Module):
         """
         md = attention_metadata
         in_specs = (
+            # !START Change 3f3:
             self.query_tnh,  # q
             self.query_tnh,  # q_rope # TODO: is this correct?
             self.keyvalue_skh,  # k
             self.keyvalue_skh,  # k_rope # TODO: is this correct?
             P(ShardingAxisName.MLP_TENSOR),  # kv_cache
+            # !END Change 3f3:
             P(ShardingAxisName.ATTN_DATA),  # md.seq_lens: Replicated
             P(ShardingAxisName.ATTN_DATA),  # page_indices_flat: Replicated
             P(ShardingAxisName.ATTN_DATA),  # query_start_loc: Replicated
@@ -445,9 +452,12 @@ class MLA(nnx.Module):
         # logger.warning(f"********in_specs = {in_specs}")
         # logger.warning(f"********self.attn_o_tnh = {self.attn_o_tnh}")
         
+        # !START Change 3f4:
         out_specs = (self.attn_o_tnh,
                     #  P(ShardingAxisName.MLP_TENSOR),
                      P(ShardingAxisName.MLP_TENSOR))
+        # !END Change 3f4:
+
         # logger.warning(f"********out_specs = {in_specs}")
         # logger.warning(f"********input_shapes: q_TNA={q_TNA.shape}, q_rope_TNH={q_rope_TNH.shape}, k_SKA={k_SKA.shape}, k_rope_SNH={k_rope_SNH.shape}, kv_cache={kv_cache.shape} ")
         # logger.warning(f"********md: seq_lens={md.seq_lens.shape}, block_tables={md.block_tables.shape}, query_start_loc={md.query_start_loc.shape}, k_rope_SNH={md.request_distribution.shape}")
@@ -455,9 +465,15 @@ class MLA(nnx.Module):
         def _mla_ragged_paged_attention(q, q_rope, k, k_rope, kv_cache, *args):
             # kv_c = kv_cache[..., :self.kv_lora_rank]
             # k_pe = kv_cache[..., self.kv_lora_rank:]
-            # Set reasonable starting estimates for block sizes. (TODO: update this to use tuned sizes)
-            # Referring to get_tuned_block_sizes() in kernels/ragged_paged_attention/v3/tuned_block_sizes.py: 'q_bfloat16_kv_bfloat16/q_head-64_kv_head-2_head-128'/4096 
+            
+
+            # !START Change 3f5
+            # TODO: should this be run/potentially recompiled forward pass?
             def _initialize_block_sizes():
+                # Set reasonable starting estimates for block sizes. (TODO: update this to use tuned sizes)
+                # Referring to get_tuned_block_sizes() in kernels/ragged_paged_attention/v3/tuned_block_sizes.py: 'TPU v7'/128/'q_bfloat16_kv_bfloat16/q_head-128_kv_head-1_head-128'/4096 
+                # Page size = 128
+                # dtype=bf16
                 tpu_version = get_tpu_version()
                 assert tpu_version == 7, "MLA kernel is currently only supported on Ironwood!"
                 max_num_tokens = q.shape[0]
@@ -466,31 +482,55 @@ class MLA(nnx.Module):
                 assert num_page_indices % max_num_seqs == 0
                 pages_per_seq = num_page_indices // max_num_seqs
                 # num_kv_pages_per_block = min(pages_per_seq, 16)
-                num_kv_pages_per_block = min(pages_per_seq, 2)
+                bkv_p, bq_sz = get_tuned_block_sizes(
+                    q.dtype,
+                    kv_cache.dtype,
+                    self.num_attention_heads,
+                    1,
+                    self.qk_nope_head_dim,
+                    kv_cache.shape[1], # page size
+                    max_num_tokens,
+                    pages_per_seq,
+                )
+                # num_kv_pages_per_block = min(pages_per_seq, 2)
+                num_kv_pages_per_block = min(pages_per_seq, bkv_p)
                 # num_queries_per_block = min(max_num_tokens, 16)
-                num_queries_per_block = min(max_num_tokens, 2)
-                # logger.warning(f"******num_kv_pages_per_block = {num_kv_pages_per_block}")
+                # num_queries_per_block = min(max_num_tokens, bq_sz) # OOMS at 8
+                num_queries_per_block = min(max_num_tokens, 4) # OOMS at 8
+
+                logger.warning(f"******pages_per_seq = {pages_per_seq}, bkv_p = {bkv_p}")
+                logger.warning(f"******max_num_tokens = {max_num_tokens}, bq_sz = {bq_sz}")
                 # logger.warning(f"******num_queries_per_block = {num_queries_per_block}")
                 return num_kv_pages_per_block, num_queries_per_block
             
             num_kv_pages_per_block, num_queries_per_block = _initialize_block_sizes()
+            # !END Change 3f5
+
+            # !START Change 3f2:
             output, kv_cache = mla_ragged_paged_attention(
+                # !END Change 3f2:
+
                 # !START Change 3f
                 q, q_rope, k, k_rope, kv_cache,
                 # !END Change 3f
                 *args,
                 sm_scale=self.scale,
+                # !START Change 3f5
                 num_kv_pages_per_block=num_kv_pages_per_block,
                 num_queries_per_block=num_queries_per_block
+                # !END Change 3f5
             )
             # kv_cache = kv_cache.at[..., :self.kv_lora_rank].set(updated_kv_c)
             # kv_cache = kv_cache.at[..., self.kv_lora_rank:].set(updated_k_pe)
 
+            # !START Change 3f2:
             return kv_cache, output
+            # !END Change 3f2:
         
         
-
+        # !START Change 3f2:
         kv_cache, output_TNH  = jax.jit(
+            # !END Change 3f2
             shard_map.shard_map(
                 _mla_ragged_paged_attention,
                 mesh=mesh,
@@ -499,17 +539,23 @@ class MLA(nnx.Module):
                 check_rep=False,
                 ),
                 # TODO: Confirm if you need this since kernel.py already donates.
+                # !START Change 3f6:
                 donate_argnums=(4,) # donate kv_cache so that updates are done in place.
+                # !END Change 3f6
             )(
                 q_TNA,
                 q_rope_TNH,
                 k_SKA,
                 k_rope_SNH,
+                # !START Change 3f1:
                 kv_cache,
+                # !END Change 3f1
                 md.seq_lens,
                 md.block_tables,
                 md.query_start_loc,
                 md.request_distribution,
             )
+        # !START Change 3f2:
         return kv_cache, output_TNH
+        # !END Change 3f2
 

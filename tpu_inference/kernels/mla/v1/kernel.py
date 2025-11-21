@@ -55,24 +55,19 @@ def update_kv_cache(
     # TODO!! revisit whether these padding assumptions are correct!
 
     # !START Change 5a:
-    # actual_r_dim = new_k_pe.shape[-1]
     # Align/pad the new_kv data and confirm shapes match kv cache.
     # TODO: should just be aligning nope_dim + r_dim instead of each separately?
-    # r_dim = align_to(actual_r_dim, 128)
-    # if actual_r_dim != r_dim:
-    #     new_k_pe = jnp.pad(new_k_pe, ((0, 0), (0, r_dim - actual_r_dim)),
-    #                        constant_values=0)
-    # actual_lkv_dim = new_kv_c.shape[-1]
-    # lkv_dim = align_to(actual_lkv_dim, 128)
-    # if actual_lkv_dim != lkv_dim:
-    #     new_kv_c = jnp.pad(new_kv_c, ((0, 0), (0, lkv_dim - actual_lkv_dim)),
-    #                        constant_values=0)
-    actual_kv_dim = new_kv_c.shape[-1] + new_k_pe.shape[-1]
-    kv_dim = align_to(actual_kv_dim, 128)
-    if actual_kv_dim != align_to(actual_kv_dim, 128):
-        new_k_pe = jnp.pad(new_k_pe, ((0, 0), (0, kv_dim - actual_kv_dim)),
+    actual_r_dim = new_k_pe.shape[-1]
+    r_dim = align_to(actual_r_dim, 128)
+    if actual_r_dim != r_dim:
+        new_k_pe = jnp.pad(new_k_pe, ((0, 0), (0, r_dim - actual_r_dim)),
                            constant_values=0)
-    kv_c_dim = new_kv_c.shape[-1]
+    actual_lkv_dim = new_kv_c.shape[-1]
+    lkv_dim = align_to(actual_lkv_dim, 128)
+    if actual_lkv_dim != lkv_dim:
+        new_kv_c = jnp.pad(new_kv_c, ((0, 0), (0, lkv_dim - actual_lkv_dim)),
+                           constant_values=0)
+    kv_dim = r_dim + lkv_dim
     # _, page_size_per_kv_packing, kv_packing, cache_lkv_dim = cache_kv_c.shape
     # _, page_size_per_kv_packing, kv_packing, _ = cache_kv_c.shape
     _, page_size_per_kv_packing, kv_packing, cache_kv_dim = cache_kv.shape
@@ -119,9 +114,9 @@ def update_kv_cache(
             # logger.warning(f"new_kv_c shape = {new_k_pe.shape}")
 
             cache_kv_ = cache_kv_.at[page_idx, row,
-                                         col, ..., :kv_c_dim].set(new_kv_c[q_start + j])
+                                         col, ..., :lkv_dim].set(new_kv_c[q_start + j])
             cache_kv_ = cache_kv_.at[page_idx, row,
-                                         col, ..., kv_c_dim:].set(new_k_pe[q_start + j])
+                                         col, ..., lkv_dim:].set(new_k_pe[q_start + j])
             return cache_kv_
 
         # TODO: Update signature to accept one KV cache.
@@ -138,7 +133,6 @@ def update_kv_cache(
     # return cache_kv_c, cache_k_pe
     return cache_kv
     # !END Change 5a
-
 
 def ref_mla_ragged_paged_attention(
     ql_nope: jax.Array,  # [num_tokens, actual_num_q_heads, actual_lkv_dim]
@@ -455,6 +449,8 @@ def static_validate_inputs(
         kv_packing,
         kv_dim,
     ) = cache_kv.shape
+    lkv_dim = align_to(actual_lkv_dim, 128)
+    r_dim = align_to(actual_r_dim, 128)
     # _, _, _, r_dim = cache_k_pe.shape
 
     # if lkv_dim != align_to(actual_lkv_dim, 128):
@@ -464,7 +460,7 @@ def static_validate_inputs(
     # if r_dim != align_to(actual_r_dim, 128):
     #     raise ValueError(
     #         f"Expected {r_dim=} is equal to {align_to(actual_r_dim, 128)=}")
-    if kv_dim != align_to(actual_lkv_dim + actual_r_dim, 128):
+    if kv_dim != lkv_dim + r_dim:
         raise ValueError(
             f"Expected {kv_dim=} is equal to {align_to(actual_lkv_dim + actual_r_dim, 128)=}")
     if not (cache_kv.dtype == new_kv_c.dtype == new_k_pe.dtype):
