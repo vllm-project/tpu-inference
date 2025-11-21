@@ -30,7 +30,7 @@ class ModelRequestData(NamedTuple):
     stop_token_ids: Optional[list[int]] = None
 
 
-# Currently Qwen2.5-VL is the only supported multi-modal
+# Currently Qwen2.5-VL is the only supported mulasadti-modal
 # Qwen2.5-VL
 def run_qwen2_5_vl(questions: list[str], modality: str,
                    args) -> ModelRequestData:
