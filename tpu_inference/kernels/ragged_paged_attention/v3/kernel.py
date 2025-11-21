@@ -393,12 +393,11 @@ def _ragged_paged_attention_kernel(
         if debug_mode:
             # Skip DMA if debug mode is enabled.
             return
+        cp = pltpu.make_async_copy(src, dst, sem)
         if wait:
-            # Wait on a dummy DMA on dst ref to save SREGs used for
-            # index/offset calculation.
-            pltpu.make_async_copy(dst, dst, sem).wait()
+            cp.wait()
         else:
-            pltpu.make_async_copy(src, dst, sem).start()
+            cp.start()
 
     def _fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx, *, wait=False):
         sem = sems.at[0, bkv_sem_idx]
@@ -481,9 +480,10 @@ def _ragged_paged_attention_kernel(
             return kv_len_start + offset, bkv_sz_frm_new
         else:
             offset = jnp.minimum(kv_left_frm_cache, page_size * bkv_p)
+            dst = vmem_ref.at[pl.ds(0, offset + bkv_sz_frm_new)]
             _async_copy(
-                src=vmem_ref,
-                dst=vmem_ref.at[pl.ds(0, offset + bkv_sz_frm_new)],
+                src=dst,
+                dst=dst,
                 sem=sem,
                 wait=True,
             )
@@ -551,12 +551,10 @@ def _ragged_paged_attention_kernel(
                 unroll=False,
             )
         else:
+            dst = cache_hbm_ref.at[pl.ds(0, update_sz)],
             _async_copy(
-                src=cache_hbm_ref,
-                dst=cache_hbm_ref.at[pl.ds(
-                    page_indices_ref[page_indices_offset] * page_size + ignore,
-                    update_sz,
-                )],
+                src=dst,
+                dst=dst,
                 sem=sem,
                 wait=True,
             )
@@ -578,12 +576,21 @@ def _ragged_paged_attention_kernel(
         debug_print("[RPA debug] q_end={}", q_end)
         debug_print("[RPA debug] sz={}", sz)
 
-        _async_copy(
-            q_hbm_ref.at[:, pl.ds(q_len_start, sz)],
-            vmem_ref.at[:, pl.ds(0, sz)],
-            sem,
-            wait,
-        )
+        if not wait:
+            _async_copy(
+                q_hbm_ref.at[:, pl.ds(q_len_start, sz)],
+                vmem_ref.at[:, pl.ds(0, sz)],
+                sem,
+                wait,
+            )
+        else:
+            dst = vmem_ref.at[:, pl.ds(0, sz)]
+            _async_copy(
+                dst,
+                dst,
+                sem,
+                wait,
+            )
 
     def _send_bo(seq_idx, bo_idx, bo_sem_idx, *, wait=False):
         sem = sems.at[2, bo_sem_idx]
@@ -602,12 +609,21 @@ def _ragged_paged_attention_kernel(
         debug_print("[RPA debug] q_end={}", q_end)
         debug_print("[RPA debug] sz={}", sz)
 
-        _async_copy(
-            vmem_ref.at[:, pl.ds(0, sz)],
-            o_hbm_ref.at[:, pl.ds(q_len_start, sz)],
-            sem,
-            wait,
-        )
+        if not wait:
+            _async_copy(
+                vmem_ref.at[:, pl.ds(0, sz)],
+                o_hbm_ref.at[:, pl.ds(q_len_start, sz)],
+                sem,
+                wait,
+            )
+        else:
+            dst = o_hbm_ref.at[:, pl.ds(q_len_start, sz)]
+            _async_copy(
+                dst,
+                dst,
+                sem,
+                wait,
+            )
 
     def start_fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx):
         return _fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx)
