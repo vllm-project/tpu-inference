@@ -24,10 +24,11 @@ upload_pipeline() {
     VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
-    buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
+    # buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
+    buildkite-agent pipeline upload .buildkite/models/meta-llama_Llama-Guard-4-12B.yml
     # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
-    buildkite-agent pipeline upload .buildkite/main.yml
-    buildkite-agent pipeline upload .buildkite/nightly_releases.yml
+    # buildkite-agent pipeline upload .buildkite/main.yml
+    # buildkite-agent pipeline upload .buildkite/nightly_releases.yml
 }
 
 echo "--- Starting Buildkite Bootstrap ---"
