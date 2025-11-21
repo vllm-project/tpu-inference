@@ -35,7 +35,7 @@ def sampling_config():
 
 @pytest.fixture
 def kv_transfer_config():
-    """use  from tpu_connector_local"""
+    """use TPUOffloadConnector"""
     return KVTransferConfig(
         kv_connector="TPUOffloadConnector",
         kv_role="kv_both",
