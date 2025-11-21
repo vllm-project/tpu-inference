@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import tpu_inference.envs as envs
 import vllm.envs as vllm_envs
 from vllm import LLM, EngineArgs
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
+import tpu_inference.envs as envs
 from tpu_inference.core import disagg_utils
 
 

@@ -1,6 +1,5 @@
 import copy
 import functools
-import os
 import random
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -13,8 +12,6 @@ import numpy as np
 import torch
 import vllm.envs as vllm_envs
 from flax import nnx
-
-import tpu_inference.envs as envs
 from jax.experimental import mesh_utils
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.ops.mappings import j2t_dtype
@@ -37,6 +34,7 @@ from vllm.v1.worker.kv_connector_model_runner_mixin import \
     KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
+import tpu_inference.envs as envs
 from tpu_inference import utils as common_utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
