@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
-
-import vllm.envs as envs
+import tpu_inference.envs as envs
+import vllm.envs as vllm_envs
 from vllm import LLM, EngineArgs
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -87,10 +86,10 @@ def main(args: dict):
         'Who wrote the novel "Pride and Prejudice"?',
     ]
 
-    if envs.VLLM_TORCH_PROFILER_DIR is not None:
+    if vllm_envs.VLLM_TORCH_PROFILER_DIR is not None:
         llm.start_profile()
     outputs = llm.generate(prompts, sampling_params)
-    if envs.VLLM_TORCH_PROFILER_DIR is not None:
+    if vllm_envs.VLLM_TORCH_PROFILER_DIR is not None:
         llm.stop_profile()
 
     # Print the outputs.
@@ -104,7 +103,7 @@ def main(args: dict):
 
 if __name__ == "__main__":
     # Skip long warmup for local simple test.
-    os.environ['SKIP_JAX_PRECOMPILE'] = '1'
+    envs.environment_variables['SKIP_JAX_PRECOMPILE'] = lambda: True
 
     parser = create_parser()
     args: dict = vars(parser.parse_args())

@@ -6,6 +6,7 @@ import time
 from dataclasses import asdict
 
 import pytest
+import tpu_inference.envs as envs
 from vllm import LLM, EngineArgs, SamplingParams
 
 
@@ -177,8 +178,8 @@ def test_data_parallelism_correctness(
     This test compares outputs from a single-device run with data parallel runs
     to ensure correctness, including log probabilities.
     """
-    os.environ['SKIP_JAX_PRECOMPILE'] = '1'
-    os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '0'
+    envs.environment_variables['SKIP_JAX_PRECOMPILE'] = lambda: True
+    envs.environment_variables['VLLM_XLA_CHECK_RECOMPILATION'] = lambda: False
     model_name = "Qwen/Qwen2.5-1.5B-Instruct"
     # Use a smaller subset of prompts for correctness testing
     small_prompts = test_prompts[:10]

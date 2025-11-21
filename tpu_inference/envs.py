@@ -15,11 +15,13 @@ if TYPE_CHECKING:
     PREFILL_SLICES: str = ""
     DECODE_SLICES: str = ""
     SKIP_JAX_PRECOMPILE: bool = False
+    VLLM_XLA_CHECK_RECOMPILATION: bool = False
     MODEL_IMPL_TYPE: str = "flax_nnx"
     NEW_MODEL_DESIGN: bool = False
     PHASED_PROFILING_DIR: str = ""
     PYTHON_TRACER_LEVEL: int = 1
     USE_MOE_EP_KERNEL: bool = False
+    NUM_SLICES: int = 1
     RAY_USAGE_STATS_ENABLED: str = "0"
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: str = "shm"
 
@@ -48,6 +50,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Skip JAX precompilation step during initialization
     "SKIP_JAX_PRECOMPILE":
     lambda: bool(int(os.getenv("SKIP_JAX_PRECOMPILE", "0"))),
+    # Check for XLA recompilation during execution
+    "VLLM_XLA_CHECK_RECOMPILATION":
+    lambda: bool(int(os.getenv("VLLM_XLA_CHECK_RECOMPILATION", "0"))),
     # Model implementation type (e.g., "flax_nnx")
     "MODEL_IMPL_TYPE":
     lambda: os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower(),
@@ -63,6 +68,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use custom expert-parallel kernel for MoE (Mixture of Experts)
     "USE_MOE_EP_KERNEL":
     lambda: bool(int(os.getenv("USE_MOE_EP_KERNEL", "0"))),
+    # Number of TPU slices for multi-slice mesh
+    "NUM_SLICES":
+    lambda: int(os.getenv("NUM_SLICES", "1")),
     # Enable/disable Ray usage statistics collection
     "RAY_USAGE_STATS_ENABLED":
     lambda: os.getenv("RAY_USAGE_STATS_ENABLED", "0"),
