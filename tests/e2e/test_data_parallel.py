@@ -6,14 +6,13 @@ import time
 from dataclasses import asdict
 
 import pytest
-import tpu_inference.envs as envs
 from vllm import LLM, EngineArgs, SamplingParams
 
 
 @pytest.fixture(autouse=True)
 def setup_new_model_design():
     """Automatically set NEW_MODEL_DESIGN=True for all tests."""
-    os.environ['NEW_MODEL_DESIGN'] = '1'
+    os.environ['NEW_MODEL_DESIGN'] = 'True'
 
 
 @pytest.fixture
@@ -178,8 +177,8 @@ def test_data_parallelism_correctness(
     This test compares outputs from a single-device run with data parallel runs
     to ensure correctness, including log probabilities.
     """
-    envs.environment_variables['SKIP_JAX_PRECOMPILE'] = lambda: True
-    envs.environment_variables['VLLM_XLA_CHECK_RECOMPILATION'] = lambda: False
+    os.environ['SKIP_JAX_PRECOMPILE'] = '1'
+    os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '0'
     model_name = "Qwen/Qwen2.5-1.5B-Instruct"
     # Use a smaller subset of prompts for correctness testing
     small_prompts = test_prompts[:10]
