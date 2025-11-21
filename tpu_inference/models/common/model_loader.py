@@ -59,11 +59,9 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
         if arch in _MODEL_REGISTRY:
             return _MODEL_REGISTRY[arch]
     raise UnsupportedArchitectureError(
-        # f"Model architectures {architectures} are not supported for now. "
-        # f"Supported architectures: {list(_MODEL_REGISTRY.keys())}"
-        f"Model architectures {arch} not "
+        f"Model architectures {architectures} not "
         "registered in tpu-inference. Falling back to vLLM-native "
-        f"Pytorch definition. JAX-native architectures: {_MODEL_REGISTRY.keys()}"
+        f"Pytorch definition. JAX-native architectures: {list(_MODEL_REGISTRY.keys())}"
     )
 
 
