@@ -17,8 +17,9 @@ spec:
     command:
     - /bin/bash
     - -c
-    - "pytest -sv tests/distributed/offload/cpu_backend_test.py"
+    - "pytest -sv tests/distributed/offload/tpu_offload_cpu_backend_test.py"
     - "pytest -sv tests/distributed/offload/tpu_offload_connector_worker_test.py"
+    - "pytest -sv tests/distributed/offload/tpu_offload_connector_scheduler_test.py"
     - "pytest -sv tests/distributed/offload/tpu_offload_utils_test.py"
     - "pytest -sv tests/distributed/offload/tpu_offload_manager_test.py"
     - "pytest -sv tests/distributed/offload/tpu_offload_accuracy_test.py"

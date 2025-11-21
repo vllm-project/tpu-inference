@@ -132,9 +132,9 @@ DEFAULT_HOST_HBM_SWAP_OP_TYPE = "jax"
 BLOCK_SIZE_BUCKETS = [1, 2, 4, 8, 16]
 
 # we keep our operations at vllm's block granularity,
-# and provide the following three preferences when handling
+# and want to provide the following three preferences when handling
 # the last partial block during save:
-# 1. drop: drop the entire partial block
+# 1. [supported] drop: drop the entire partial block
 # 2. pad: pad to a full block
 # 3. dynamic: keep the partial block as is.
 PARTIAL_BLOCK_SAVE_BEHAVIOR = Literal["drop", "pad", "dynamic"]
@@ -496,10 +496,11 @@ class TPUOffloadConnectorScheduler():
                                               chunk_size=self.block_size)
 
         self.decode_save = os.getenv("TPU_OFFLOAD_DECODE_SAVE", "0") == "1"
-        # NOTE(jcgu): currently, let's nail on chunk_size == block_size
+        # NOTE(jcgu): currently, let's make chunk_size == block_size
         # chunk_size == n * block_size lead to
         #  1. multi-size chunks
-        #  2. complicated resize (split, concatenate) operations based on real-chunk-size in save and load
+        #  2. complicated resize (split, concatenate) operations due to
+        #     real-chunk-size in save and load
         self.cpu_chunk_size = self.block_size
 
         # define partial_block saving behavior
@@ -515,6 +516,10 @@ class TPUOffloadConnectorScheduler():
                 self.partial_block_save_behavior == "drop"
             elif self.partial_block_dynamic_pad_lower_limit >= self.block_size:
                 self.partial_block_save_behavior == "pad"
+        logger.info(
+            f" partial_block_save_behavior is configed to {self.partial_block_save_behavior}, but we only support drop now."
+        )
+        self.partial_block_save_behavior = "drop"
 
         # config staging buffer
         # NOTE(jcgu): Need to find a way to grab page_size_bytes in scheduler
@@ -541,13 +546,7 @@ class TPUOffloadConnectorScheduler():
 
     def _get_request_block_hashes(self, req: "Request") -> list[BlockHash]:
         # request's original block_hashes do not include the last partial block
-
-        # TODO(jcgu): switch back to self-hash function
-        # prompt_token_ids = req.prompt_token_ids
-        # request_keys = self.token_processor.process_tokens(prompt_token_ids)
-        # hashes = [hash for _, _, hash in request_keys]
-        # return hashes
-
+        # TODO(jcgu): switch back to token_processor
         return req.block_hashes
 
     def get_num_new_matched_tokens(

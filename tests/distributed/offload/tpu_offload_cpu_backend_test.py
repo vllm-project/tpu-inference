@@ -40,7 +40,7 @@ class TestLocalCPUBackend:
         assert retrieved_list_value == value_list
         assert backend.current_size_bytes == 50 + 20 + 30
 
-        assert backend.num_occupied_cpu_chunks == 2
+        assert backend.num_saved_cpu_chunks == 2
 
     def test_add_invalid_chunk_id(self):
         """Verifies that adding a value with an invalid chunk_id raises a ValueError."""
@@ -50,7 +50,7 @@ class TestLocalCPUBackend:
         with pytest.raises(ValueError):
             backend.add(CpuChunkId(-1), value)
 
-        assert backend.num_occupied_cpu_chunks == 0
+        assert backend.num_saved_cpu_chunks == 0
 
     def test_reclaim_unoccupied_chunks(self):
         """Tests that unoccupied chunks are reclaimed correctly."""
