@@ -9,7 +9,7 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
-          bash -c 'SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 python3 /workspace/tpu_inference/examples/offline_inference.py --model=google/gemma-3-27b-it --tensor_parallel_size=8 --task=generate --max_model_len=1024 --max_num_seqs=1'
+          bash -c 'VLLM_XLA_CHECK_RECOMPILATION=0 python3 /workspace/tpu_inference/examples/offline_inference.py --model=google/gemma-3-27b-it --tensor_parallel_size=8 --task=generate --max_model_len=1024 --max_num_seqs=1'
   - label: "Record unit test result for google/gemma-3-27b-it"
     key: "record_google_gemma-3-27b-it_UnitTest"
     depends_on: "google_gemma-3-27b-it_UnitTest"

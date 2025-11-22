@@ -18,8 +18,6 @@ python examples/offline_safety_model_inference.py \
     --max-num_batched_tokens=4096
 """
 
-import os
-
 import vllm.envs as envs
 from vllm import LLM, EngineArgs
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -95,6 +93,7 @@ def main(args: dict):
     # Set model defaults using the loaded config
     args.setdefault("model", CONFIG["MODEL_NAME_TAG"])
     args.setdefault("hf_overrides", CONFIG["ARCHITECTURE_OVERRIDES"])
+    args.setdefault("enforce_eager", True)
 
     #TODO: Make test cases generalizable. Currently they only apply to models that adhere to the MLCommons hazards taxonomy.
     test_cases_raw = [  # (raw prompt, expected output)
@@ -219,9 +218,6 @@ def main(args: dict):
 
 
 if __name__ == "__main__":
-    # Skip long warmup for local simple test.
-    os.environ['SKIP_JAX_PRECOMPILE'] = '1'
-
     parser = create_parser()
     args: dict = vars(parser.parse_args())
 

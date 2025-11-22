@@ -56,13 +56,6 @@ def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
-    # Test SKIP_JAX_PRECOMPILE (default False)
-    assert envs.SKIP_JAX_PRECOMPILE is False
-    monkeypatch.setenv("SKIP_JAX_PRECOMPILE", "1")
-    assert envs.SKIP_JAX_PRECOMPILE is True
-    monkeypatch.setenv("SKIP_JAX_PRECOMPILE", "0")
-    assert envs.SKIP_JAX_PRECOMPILE is False
-
     # Test NEW_MODEL_DESIGN (default False)
     assert envs.NEW_MODEL_DESIGN is False
     monkeypatch.setenv("NEW_MODEL_DESIGN", "1")
@@ -133,7 +126,6 @@ def test_dir_returns_all_env_vars():
     assert len(env_vars) == len(environment_variables)
     assert "JAX_PLATFORMS" in env_vars
     assert "TPU_NAME" in env_vars
-    assert "SKIP_JAX_PRECOMPILE" in env_vars
     assert "MODEL_IMPL_TYPE" in env_vars
 
 
