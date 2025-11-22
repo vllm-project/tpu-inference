@@ -1,13 +1,13 @@
-import os
 import time
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-import vllm.envs as envs
+import vllm.envs as vllm_envs
 from jax.sharding import NamedSharding, PartitionSpec
 
+import tpu_inference.envs as envs
 from tpu_inference.core.disagg_utils import is_disagg_enabled
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -30,10 +30,10 @@ class CompilationManager:
 
     def __init__(self, runner: "TPUModelRunner"):
         self.runner = runner
-        if not envs.VLLM_DISABLE_COMPILE_CACHE:
+        if not vllm_envs.VLLM_DISABLE_COMPILE_CACHE:
             logger.info("Enabling JAX compile cache.")
             jax.config.update("jax_compilation_cache_dir",
-                              envs.VLLM_XLA_CACHE_PATH)
+                              vllm_envs.VLLM_XLA_CACHE_PATH)
 
     def _create_dummy_tensor(self,
                              shape: Tuple[int, ...],
@@ -67,8 +67,7 @@ class CompilationManager:
         logger.info("Compilation finished in %.2f [secs].", end - start)
 
     def capture_model(self) -> None:
-        if os.getenv("SKIP_JAX_PRECOMPILE",
-                     False) or self.runner.model_config.enforce_eager:
+        if envs.SKIP_JAX_PRECOMPILE or self.runner.model_config.enforce_eager:
             return
         logger.info("Precompile all the subgraphs with possible input shapes.")
 
