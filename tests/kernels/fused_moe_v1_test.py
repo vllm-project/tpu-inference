@@ -125,28 +125,27 @@ class MoEKernelTest(jtu.JaxTestCase):
             w1, w1_scale = sub_channel_quantize(w1, w_dtype, subc_quant_wsz)
             w2, w2_scale = sub_channel_quantize(w2, w_dtype, subc_quant_wsz)
 
-        actual = jax.block_until_ready(
-            fused_ep_moe(
-                mesh=self.mesh,
-                tokens=a,
-                w1=w1,
-                w2=w2,
-                gating_output=gating_output,
-                top_k=top_k,
-                renormalize_topk_logits=renormalize_topk_logits,
-                act_fn=act_fn,
-                subc_quant_wsz=subc_quant_wsz,
-                w1_scale=w1_scale,
-                w2_scale=w2_scale,
-                bt=bt,
-                bf=bf,
-                bd1=bd1,
-                bd2=bd2,
-                btc=btc,
-                bfc=bfc,
-                bd1c=bd1c,
-                bd2c=bd2c,
-            ))
+        actual = fused_ep_moe(
+            mesh=self.mesh,
+            tokens=a,
+            w1=w1,
+            w2=w2,
+            gating_output=gating_output,
+            top_k=top_k,
+            renormalize_topk_logits=renormalize_topk_logits,
+            act_fn=act_fn,
+            subc_quant_wsz=subc_quant_wsz,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            bt=bt,
+            bf=bf,
+            bd1=bd1,
+            bd2=bd2,
+            btc=btc,
+            bfc=bfc,
+            bd1c=bd1c,
+            bd2c=bd2c,
+        )
         expected = ref_moe(
             a,
             w1,

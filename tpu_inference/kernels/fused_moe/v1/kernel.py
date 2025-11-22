@@ -535,7 +535,7 @@ def _fused_ep_moe_kernel(
                         0,
                         pl.ds(offset // subc_quant_wsz, bd1_per_t_packing //
                               subc_quant_wsz),
-                        0:1,
+                        pl.ds(0, 1),
                         pl.ds(bf_id * bf, bf),
                     ],
                     dst_ref=b_w1_scale_x2_vmem.at[bw1_sem_id, p],
@@ -561,7 +561,7 @@ def _fused_ep_moe_kernel(
                         local_e_id,
                         pl.ds(bf_id * bf // subc_quant_wsz, bf //
                               subc_quant_wsz),
-                        0:1,
+                        pl.ds(0, 1),
                         pl.ds(offset, bd2_per_t_packing),
                     ],
                     dst_ref=b_w2_scale_x2_vmem.at[bw2_sem_id, p],
@@ -589,7 +589,7 @@ def _fused_ep_moe_kernel(
                         1,
                         pl.ds(offset // subc_quant_wsz, bd1_per_t_packing //
                               subc_quant_wsz),
-                        0:1,
+                        pl.ds(0, 1),
                         pl.ds(bf_id * bf, bf),
                     ],
                     dst_ref=b_w3_scale_x2_vmem.at[bw3_sem_id, p],
