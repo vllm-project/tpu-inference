@@ -422,6 +422,10 @@ class DeepSeekV3WeightLoader:
         self.is_verbose = vllm_config.additional_config.get(
             "is_verbose", None) is not None
         self.num_routed_experts = num_local_experts
+        self.attn_heads = attn_heads
+        self.qk_nope_head_dim = qk_nope_head_dim
+        self.v_head_dim = v_head_dim
+        self.kv_lora_rank = kv_lora_rank
         self.model_dtype = model_dtype
         # self.use_mla_kernel = use_mla_kernel
         self.num_dense_layers = num_dense_layers
@@ -915,27 +919,41 @@ class DeepSeekV3WeightLoader:
                     # logger.warning(f"self.num_dense_layers = {self.num_dense_layers}")
                     # if USE_MLA_KERNEL and "kv_b_proj" in loaded_name and layer_num >= self.num_dense_layers:
                     if USE_MLA_KERNEL and "kv_b_proj" in loaded_name:
-                        # logger.warning(f"Original loaded_name = {loaded_name}")
+                        # loaded_weight shape: (num_heads * (d_k + d_v), kv_lora_rank)
+                        # scale shape: (num_heads * (d_k + d_v) / block_n, kv_lora_rank / block_k)
+
+                        # Reshape to (Heads, D_k+D_v, In) and split
+                        weight_reshaped = loaded_weight.view(self.attn_heads, self.qk_nope_head_dim + self.v_head_dim, self.kv_lora_rank)
+                        k_weight = weight_reshaped[:, :self.qk_nope_head_dim, :].reshape(-1, self.kv_lora_rank)
+                        v_weight = weight_reshaped[:, self.qk_nope_head_dim:, :].reshape(-1, self.kv_lora_rank)
+
+                        loaded_weights_list = [k_weight, v_weight]
                         loaded_names = [loaded_name.replace("kv_b_proj", "k_b_proj"),
                                         loaded_name.replace("kv_b_proj", "v_b_proj")]
-                        # logger.warning(f"New loaded names = {loaded_names}")
-                        kv_dim = loaded_weight.shape[0]
-                        assert loaded_weight.shape[0] % 2 == 0, f"{kv_dim} from kv_b_proj is not divisible by 2!"
 
-                        # load_weight_slices = [(slice(None), slice(0, kv_dim // 2)),
-                        #                       (slice(None), slice(kv_dim // 2, kv_dim))]
-                        load_weight_slices = [(slice(0, kv_dim // 2), slice(None)),
-                                              (slice(kv_dim // 2, kv_dim), slice(None))]
-                        kv_dim = scale.shape[0]
-                        load_scale_slices = [(slice(0, kv_dim // 2), slice(None)),
-                                              (slice(kv_dim // 2, kv_dim), slice(None))]
+                        scales_list = [None, None]
+                        if scale is not None:
+                            bn = self.quantization_block_size_n
+                            bk = self.quantization_block_size_k
+                            scale_reshaped = scale.view(self.attn_heads, (self.qk_nope_head_dim + self.v_head_dim) // bn, self.kv_lora_rank // bk)
+                            
+                            k_scale = scale_reshaped[:, :self.qk_nope_head_dim // bn, :].reshape(-1, self.kv_lora_rank // bk)
+                            v_scale = scale_reshaped[:, self.qk_nope_head_dim // bn:, :].reshape(-1, self.kv_lora_rank // bk)
+                            scales_list = [k_scale, v_scale]
+
+                        load_weight_slices = [None, None]
+                        load_scale_slices = [None, None]
                     else:
+                        loaded_weights_list = [loaded_weight]
                         loaded_names = [loaded_name]
                         load_weight_slices = [None]
+                        scales_list = [scale]
                         load_scale_slices = [None]
                     # logger.warning(f"USE_MLA_KERNEL = {USE_MLA_KERNEL}")
                     # logger.warning(f"load_weight_slices = {load_weight_slices}")
-                    for loaded_name, load_weight_slice, load_scale_slice in zip(loaded_names, load_weight_slices, load_scale_slices):     
+                    for loaded_name, loaded_weight, scale, load_weight_slice, load_scale_slice in zip(
+                            loaded_names, loaded_weights_list, scales_list, load_weight_slices, load_scale_slices
+                            ):
                         # logger.warning(f"Final loaded_name = {loaded_name}")
                         weight_bytes, weight_shards = self._load_individual_weight(
                             loaded_name,
