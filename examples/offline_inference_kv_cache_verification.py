@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-This script performs an automated correctness verification for the TPUConnector.
+This script performs an automated correctness verification for the TPUOffloadConnector.
 
 The verification works by performing a two-stage experiment for multiple prompts:
 1.  Baseline Run: For each prompt, it first runs a text generation using a
@@ -8,7 +8,7 @@ The verification works by performing a two-stage experiment for multiple prompts
     output from this run is considered the "source of truth".
 
 2.  Test Run: It then runs the exact same text generation, but this time
-    with the TPUConnector enabled via the `--kv-transfer-config` argument.
+    with the TPUOffloadConnector enabled via the `--kv-transfer-config` argument.
     It runs the generation twice to verify prefix caching.
 
 3.  Comparison: The script compares the output from each test run against the
@@ -131,7 +131,7 @@ def main(args: dict):
         time.sleep(10)
 
         # 2. Run the test with the local tpu kv connector enabled
-        print("\n--- Running Test (with TPUConnector) ---")
+        print("\n--- Running Test (with TPUOffloadConnector) ---")
         # With the connector, we run generation twice to test the prefix cache
         test_llm, test_params = setup_llm(args)
         test_outputs = run_invocations(test_llm,
