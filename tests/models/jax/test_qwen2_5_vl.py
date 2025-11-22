@@ -90,6 +90,7 @@ class MockVllmConfig:
         self.device_config = MagicMock(spec=DeviceConfig)
         self.load_config = MagicMock()
         self.extra_configs = {}
+        self.additional_config = {}
 
 
 @pytest.fixture(scope="module")
