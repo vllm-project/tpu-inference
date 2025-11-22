@@ -161,6 +161,7 @@ class VllmModelWrapper:
             input_ids: jax.Array,
             attn_metadata: AttentionMetadata,
             input_embeds: jax.Array,
+            input_positions: jax.Array,
             layer_name_to_kvcache_index: Sequence[Tuple[str, int]],
             lora_metadata,
             intermediate_tensors: JaxIntermediateTensors = None,
@@ -187,8 +188,8 @@ class VllmModelWrapper:
                     torch_view(params_and_buffers),
                     kwargs={
                         "input_ids": torch_view(input_ids),
-                        "positions": torch_view(attn_metadata.input_positions),
-                        "intermediate_tensors": intermediate_tensors,
+                        "positions": torch_view(input_positions),
+                        "intermediate_tensors": None,
                         "inputs_embeds": None,
                     },
                     tie_weights=False,
