@@ -47,6 +47,7 @@ class MLA(nnx.Module):
     rope_scaling: dict[str, Any]
     dtype: jnp.dtype
     kv_cache_dtype: str
+    # use_kernel: bool
     mesh: Mesh
 
     q_lora_rank: int
@@ -86,7 +87,7 @@ class MLA(nnx.Module):
         self.N = self.num_attention_heads
         self.K = self.num_key_value_heads
         self.D = self.hidden_size
-        self.use_kernel = os.getenv("USE_MLA_KERNEL", "0")
+        self.use_kernel = os.getenv("USE_MLA_KERNEL", False)
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
 
         if not self.use_kernel:
@@ -132,14 +133,32 @@ class MLA(nnx.Module):
             self.dtype,
             random_init=self.random_init,
         )
-        self.kernel_kv_up_proj_ANH = create_param(
-            rngs,
-            (self.kv_lora_rank, self.N,
-             self.qk_nope_head_dim + self.v_head_dim),
-            self.anh_sharding,
-            self.dtype,
-            random_init=self.random_init,
-        )
+        if self.use_kernel:
+            self.kernel_k_up_proj_ANH = create_param(
+                rngs,
+                (self.kv_lora_rank, self.N,
+                self.qk_nope_head_dim),
+                self.anh_sharding,
+                self.dtype,
+                random_init=self.random_init,
+            )
+            self.kernel_v_up_proj_ANH = create_param(
+                rngs,
+                (self.kv_lora_rank, self.N,
+                self.v_head_dim),
+                self.anh_sharding,
+                self.dtype,
+                random_init=self.random_init,
+            )
+        else:    
+            self.kernel_kv_up_proj_ANH = create_param(
+                rngs,
+                (self.kv_lora_rank, self.N,
+                self.qk_nope_head_dim + self.v_head_dim),
+                self.anh_sharding,
+                self.dtype,
+                random_init=self.random_init,
+            )
         self.kernel_o_proj_NHD = create_param(
             rngs, (self.N, self.v_head_dim, self.D),
             self.nhd_sharding,
@@ -207,8 +226,7 @@ class MLA(nnx.Module):
             q_rope_TNH = self.rope.apply_rope(md.input_positions, q_rope_TNH)
             if self.use_kernel:
                 # Absorbe the K up-projection matrix into q
-                kernel_k_up_proj_ANH = self.kernel_kv_up_proj_ANH[..., :self.qk_nope_head_dim]
-                q_TNA = jnp.einsum("TNH,ANH -> TNA", q_nope_TNH, kernel_k_up_proj_ANH)
+                q_TNA = jnp.einsum("TNH,ANH -> TNA", q_nope_TNH, self.kernel_k_up_proj_ANH.value)
                 q_TNA = nnx.with_sharding_constraint(q_TNA, self.query_tnh)
             else:
                 # Concatenate the nope and rope queries.
@@ -302,8 +320,7 @@ class MLA(nnx.Module):
                     attention_metadata,
                     self.mesh,
                 )
-                kernel_v_up_proj_ANH = self.kernel_kv_up_proj_ANH[..., self.qk_nope_head_dim:]
-                outputs_TNH = jnp.einsum("TNA,ANH -> TNH", outputs_TNA, kernel_v_up_proj_ANH)
+                outputs_TNH = jnp.einsum("TNA,ANH -> TNH", outputs_TNA, self.kernel_v_up_proj_ANH.value)
             
             with jax.named_scope("o_proj"):
                     # TODO: Consider all-gathering activations first during MLA so that you can shard the output projections (since these account for ~365*61 = 22GB in FP16).

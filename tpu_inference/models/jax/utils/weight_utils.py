@@ -49,8 +49,8 @@ class MetadataMap:
 
 
 def print_param_info(param: nnx.Param, name: str):
-    logger.warning(f"Global shape for {name}: {param.value.shape}")
-    logger.warning(f"Sharding for {name}: {param.sharding}")
+    # logger.warning(f"Global shape for {name}: {param.value.shape}")
+    # logger.warning(f"Sharding for {name}: {param.sharding}")
 
     logger.warning(
         f"Shape of {name} on a single device: {param.value.addressable_shards[0].data.shape}"
@@ -61,13 +61,20 @@ def transpose_params(param_key: str, param_tensor: jax.Array, transpose_map):
     for key, value in transpose_map.items():
         if key in param_key:
             return jnp.transpose(param_tensor, value)
+            
     return param_tensor  # Base case / no-op
 
 
 def reshape_params(param_key: str, param_tensor: jax.Array, shape_map):
     for key, new_shape in shape_map.items():
         if key in param_key:
-            return jnp.reshape(param_tensor, new_shape)
+            # logger.warning(f"Matched the following key: {param_key} with {key}")
+            try:
+                # logger.warning(f"param_tensor of shape {param_tensor.shape} with new_shape = {new_shape}")
+                return jnp.reshape(param_tensor, new_shape)
+            except:
+                # logger.warning(f"shape_map = {shape_map}")
+                raise ValueError(f"Cannot reshape for key={key}, new_shape={new_shape}, param_shape={param_tensor.shape}")
     return param_tensor  # Base case / no-op
 
 

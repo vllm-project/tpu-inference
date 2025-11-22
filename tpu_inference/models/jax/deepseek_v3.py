@@ -39,7 +39,7 @@ DTYPE_VIEW_MAP = {
     jnp.dtype(jnp.float32): torch.uint32,
 }
 
-USE_MLA_KERNEL = os.getenv("USE_MLA_KERNEL", "0")
+USE_MLA_KERNEL = os.getenv("USE_MLA_KERNEL", None)
 
 
 @dataclass
@@ -64,7 +64,7 @@ class DeepSeekV3(nnx.Module):
         # NOTE: this dtype may be implicitly overriden if using to Qwix to load in the quantized weights
         dtype: jnp.dtype = jnp.bfloat16
         num_attention_heads: int = 128
-        num_key_value_heads: int = 1 if USE_MLA_KERNEL else 128
+        num_key_value_heads: int = 128
         ffw_intermediate_size: int = 18432
         moe_intermediate_size: int = 2048
         num_experts_per_token: int = 8
@@ -131,7 +131,13 @@ class DeepSeekV3(nnx.Module):
         self.layers = []
 
         def _create_mla() -> MLA:
-
+            # global USE_MLA_KERNEL
+            # ORIGINAL_USE_MLA_KERNEL = USE_MLA_KERNEL
+            # USE_MLA_KERNEL = use_mla
+            # if not use_mla_kernel:
+                # if "USE_MLA_KERNEL" in os.environ:
+                    # del os.environ["USE_MLA_KERNEL"]
+            # if USE_MLA_KERNEL:
             if USE_MLA_KERNEL:
                 qkv_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
                 kv_cache_spec = P(ShardingAxisName.MLP_TENSOR)
@@ -162,10 +168,11 @@ class DeepSeekV3(nnx.Module):
                 rms_norm_eps=rms_norm_eps,
                 v_head_dim=v_head_dim,
                 mesh=self.mesh,
+                # use_kernel=use_mla_kernel,
                 random_init=self.random_init,
                 hidden_size=hidden_size,
                 num_attention_heads=num_attention_heads,
-                num_key_value_heads=num_key_value_heads,
+                num_key_value_heads=1 if USE_MLA_KERNEL else num_key_value_heads,
                 head_dim=v_head_dim,  # MLA uses v_head_dim as head_dim
                 dtype=dtype,
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
@@ -181,8 +188,10 @@ class DeepSeekV3(nnx.Module):
                 anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None),
                 kv_da_sharding=(None, ShardingAxisName.MLP_TENSOR),
                 nhd_sharding=(ShardingAxisName.MLP_TENSOR, None, None))
+                # nhd_sharding=(ShardingAxisName.MLP_TENSOR, None, None)), ORIGINAL_USE_MLA_KERNEL
 
         for i in range(first_k_dense_replace):
+            # attn, use_mla =_create_mla(False)
             block = TransformerBlock(
                 pre_attention_norm=RMSNorm(
                     dims=hidden_size,
@@ -209,6 +218,12 @@ class DeepSeekV3(nnx.Module):
                                        df_sharding=(None, ShardingAxisName.MLP_TENSOR),
                                        fd_sharding=(ShardingAxisName.MLP_TENSOR, None),
                                        random_init=self.random_init))
+            # global USE_MLA_KERNEL
+            # USE_MLA_KERNEL= use_mla
+            # if USE_MLA_KERNEL:
+            #     os.environ["USE_MLA_KERNEL"] = str(USE_MLA_KERNEL)
+            # elif "USE_MLA_KERNEL" in os.environ:
+            #     del os.environ["USE_MLA_KERNEL"]
 
             self.layers.append(block)
 
@@ -396,8 +411,9 @@ class DeepSeekV3WeightLoader:
 
     def __init__(self, vllm_config: VllmConfig, num_layers, hidden_size,
                  q_lora_rank, kv_lora_rank, attn_heads, qk_nope_head_dim,
-                 qk_rope_head_dim, v_head_dim, num_local_experts, model_dtype):
-
+                 qk_rope_head_dim, v_head_dim, num_local_experts, model_dtype,
+                #  use_mla_kernel=True, num_dense_layers=None):
+                num_dense_layers=None):
         self.num_layers = num_layers
         self.names_and_weights_generator = model_weights_generator(
             model_name_or_path=vllm_config.model_config.model,
@@ -407,6 +423,11 @@ class DeepSeekV3WeightLoader:
             "is_verbose", None) is not None
         self.num_routed_experts = num_local_experts
         self.model_dtype = model_dtype
+        # self.use_mla_kernel = use_mla_kernel
+        self.num_dense_layers = num_dense_layers
+        if not self.num_dense_layers:
+            self.num_dense_layers = vllm_config.model_config.hf_config.first_k_dense_replace
+
 
         self._transpose_map = {
             # dense mlp
@@ -418,6 +439,8 @@ class DeepSeekV3WeightLoader:
             r"q_b_proj": (2, 0, 1),
             r"kv_a_proj_with_mqa": (1, 0),
             r"kv_b_proj": (2, 0, 1),
+            r"k_b_proj": (2, 0, 1),
+            r"v_b_proj": (2, 0, 1),
             r"o_proj": (1, 2, 0),
             # moe
             r"mlp\.gate\.weight": (1, 0),
@@ -435,6 +458,10 @@ class DeepSeekV3WeightLoader:
             (attn_heads, qk_nope_head_dim + qk_rope_head_dim, q_lora_rank),
             "kv_b_proj":
             (attn_heads, qk_nope_head_dim + v_head_dim, kv_lora_rank),
+            "k_b_proj":
+            (attn_heads, qk_nope_head_dim, kv_lora_rank),
+            "v_b_proj":
+            (attn_heads, v_head_dim, kv_lora_rank),
             "o_proj": (hidden_size, attn_heads, v_head_dim)
         }
 
@@ -494,6 +521,14 @@ class DeepSeekV3WeightLoader:
             "model.layers.*.mlp.shared_experts.up_proj.weight":
             "layers.*.shared_experts.kernel_up_proj_DF",
         }
+        if USE_MLA_KERNEL:
+            self._loaded_to_standardized_keys.update({
+                "model.layers.*.self_attn.k_b_proj.weight":
+                "layers.*.attn.kernel_k_up_proj_ANH",
+                "model.layers.*.self_attn.v_b_proj.weight":
+                "layers.*.attn.kernel_v_up_proj_ANH",
+            }
+        )
 
         # TODO (jacobplatin): we shouldn't hard-code this, but the logic to obtain the true quantized dtype
         # is non-trivial and the default checkpoints all use this dtype
@@ -501,6 +536,7 @@ class DeepSeekV3WeightLoader:
 
         self.is_model_quantized = not vllm_config.additional_config.get(
             "skip_quantization", False)
+        # logger.warning(f"is_model_quantized = {self.is_model_quantized}")
         if self.is_model_quantized:
             # TODO (jacobplatin): expand support eventually
             quantization_type = vllm_config.model_config.hf_config.quantization_config[
@@ -529,6 +565,12 @@ class DeepSeekV3WeightLoader:
                 "kv_b_proj": (attn_heads, (qk_nope_head_dim + v_head_dim) //
                               self.quantization_block_size_n,
                               kv_lora_rank // self.quantization_block_size_n),
+                "k_b_proj": (attn_heads, qk_nope_head_dim //
+                              self.quantization_block_size_n,
+                              kv_lora_rank // self.quantization_block_size_n),
+                "v_b_proj": (attn_heads, v_head_dim //
+                             self.quantization_block_size_n,
+                             kv_lora_rank // self.quantization_block_size_n),
                 "o_proj":
                 (hidden_size // self.quantization_block_size_n, attn_heads,
                  v_head_dim // self.quantization_block_size_n),
@@ -567,6 +609,8 @@ class DeepSeekV3WeightLoader:
     def _transpose_params(self, param_key: str, param_tensor: jax.Array):
         for key, value in self._transpose_map.items():
             if re.search(key, param_key):
+                # logger.warning(f"Matched the following key: {param_key} with {key} for transposition")
+                # logger.warning(f"Transposing param of shape {param_tensor.shape} to shape {value}")
                 return jnp.transpose(param_tensor, value)
         return param_tensor  # Base case / no-op
 
@@ -595,7 +639,9 @@ class DeepSeekV3WeightLoader:
                                 weight,
                                 model_params,
                                 model_mesh,
-                                scale=None) -> Tuple[int, int]:
+                                scale=None,
+                                weight_slice: slice = None,
+                                scale_slice: slice = None) -> Tuple[int, int]:
         """
         Loads a single weight into the model.
 
@@ -614,8 +660,19 @@ class DeepSeekV3WeightLoader:
             Tuple[int, int]: The size (in bytes) for the given layer overall and per shard.
                 NOTE: if using the pre-quantized model (with Qwix), we'll include the scale size as well.
         """
+        if weight_slice is not None:
+            # logger.warning(f"Original weight shape = {weight.shape}")
+            weight = weight[*weight_slice]
+            # logger.warning(f"Sliced weight shape = {weight.shape}")
         mapped_name = self.map_loaded_to_standardized_name(name)
+        # logger.warning(f"Raw Name = {name}")
+        # if USE_MLA_KERNEL and "k_b_proj" in name:
+            # logger.warning(f"Name = {name}")
+            # logger.warning(f"Mapped name = {mapped_name}")
         base_model_weight = get_param(model_params, mapped_name)
+        # logger.warning(f"mapped_name = {mapped_name}")
+        # logger.warning(f"base_model_weight = {base_model_weight}")
+        # logger.warning(f"weight shape = {weight.shape}")
         model_weight = base_model_weight.array.qvalue if hasattr(
             base_model_weight, "array") else base_model_weight
         sharding = base_model_weight.array.qvalue.sharding if hasattr(
@@ -629,16 +686,21 @@ class DeepSeekV3WeightLoader:
         if torch_view_type:
             # Avoid unnecessary upcasting and mem copy by viewing the tensor's
             # raw data as integers before converting to a JAX array.
+            # logger.warning(f"Shape before weight_np: {weight.shape}")
             weight_np = jnp.array(
                 weight.view(torch_view_type).numpy()).view(cast_type)
+            # logger.warning(f"Shape after weight_np: {weight_np.shape}; torch_view_type = {torch_view_type}; cast_type = {cast_type}")
         else:
             raise ValueError(
                 f"Unsupported dtype for tensor conversion: {cast_type}")
 
         if scale is not None:
             scale = scale.to(torch.float32).numpy().astype(self.scale_dtype)
+        if scale_slice is not None:
+            scale = scale[*scale_slice]
 
         # Reshape and transpose weights if necessary.
+        # logger.warning(f"Reshape name = {name}, weight_np = {weight_np.shape}")
         weight_np = reshape_params(name, weight_np, self._weight_shape_map)
         if scale is not None:
             scale = reshape_params(name, scale, self._scale_shape_map)
@@ -827,7 +889,7 @@ class DeepSeekV3WeightLoader:
                         if scale is not None:
                             stacked_scales = self._process_moe_weights(
                                 loaded_name, scale, mlp_experts_up_proj_scales)
-                    if stacked_weights is not None:
+                    if stacked_weights is not None:    
                         weight_bytes, weight_shards = self._load_individual_weight(
                             loaded_name,
                             stacked_weights,
@@ -844,21 +906,54 @@ class DeepSeekV3WeightLoader:
                                 f"Cumulative local memory: {cumulative_local_memory} GB"
                             )
                 else:
-                    weight_bytes, weight_shards = self._load_individual_weight(
-                        loaded_name,
-                        loaded_weight,
-                        model_params,
-                        model_for_loading.mesh,
-                        scale=scale)
-                    if self.is_verbose:
-                        cumulative_global_memory += weight_bytes
-                        cumulative_local_memory += weight_shards
-                        logger.info(
-                            f"Cumulative global memory: {cumulative_global_memory} GB"
-                        )
-                        logger.info(
-                            f"Cumulative local memory: {cumulative_local_memory} GB"
-                        )
+                    # TODO: update USE_MLA_KERNEL to use vllm_config.model_config.use_mla
+                    # if "layer" in loaded_name:
+                        # layer_num = int(re.search(r"layers\.(\d+)", loaded_name).group(1))
+                        # logger.warning(f"layer_num = {layer_num}")
+                    # else:
+                        # logger.warning("No layers found!")
+                    # logger.warning(f"self.num_dense_layers = {self.num_dense_layers}")
+                    # if USE_MLA_KERNEL and "kv_b_proj" in loaded_name and layer_num >= self.num_dense_layers:
+                    if USE_MLA_KERNEL and "kv_b_proj" in loaded_name:
+                        # logger.warning(f"Original loaded_name = {loaded_name}")
+                        loaded_names = [loaded_name.replace("kv_b_proj", "k_b_proj"),
+                                        loaded_name.replace("kv_b_proj", "v_b_proj")]
+                        # logger.warning(f"New loaded names = {loaded_names}")
+                        kv_dim = loaded_weight.shape[0]
+                        assert loaded_weight.shape[0] % 2 == 0, f"{kv_dim} from kv_b_proj is not divisible by 2!"
+
+                        # load_weight_slices = [(slice(None), slice(0, kv_dim // 2)),
+                        #                       (slice(None), slice(kv_dim // 2, kv_dim))]
+                        load_weight_slices = [(slice(0, kv_dim // 2), slice(None)),
+                                              (slice(kv_dim // 2, kv_dim), slice(None))]
+                        kv_dim = scale.shape[0]
+                        load_scale_slices = [(slice(0, kv_dim // 2), slice(None)),
+                                              (slice(kv_dim // 2, kv_dim), slice(None))]
+                    else:
+                        loaded_names = [loaded_name]
+                        load_weight_slices = [None]
+                        load_scale_slices = [None]
+                    # logger.warning(f"USE_MLA_KERNEL = {USE_MLA_KERNEL}")
+                    # logger.warning(f"load_weight_slices = {load_weight_slices}")
+                    for loaded_name, load_weight_slice, load_scale_slice in zip(loaded_names, load_weight_slices, load_scale_slices):     
+                        # logger.warning(f"Final loaded_name = {loaded_name}")
+                        weight_bytes, weight_shards = self._load_individual_weight(
+                            loaded_name,
+                            loaded_weight,
+                            model_params,
+                            model_for_loading.mesh,
+                            scale=scale,
+                            weight_slice=load_weight_slice,
+                            scale_slice=load_scale_slice)
+                        if self.is_verbose:
+                            cumulative_global_memory += weight_bytes
+                            cumulative_local_memory += weight_shards
+                            logger.info(
+                                f"Cumulative global memory: {cumulative_global_memory} GB"
+                            )
+                            logger.info(
+                                f"Cumulative local memory: {cumulative_local_memory} GB"
+                            )
 
         del mlp_experts_gate_proj_weights
         del mlp_experts_up_proj_weights
