@@ -15,6 +15,8 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /workspace/vllm
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 RUN git clone $VLLM_REPO /workspace/vllm
+RUN pip install -r requirements/common.txt --retries 3
+RUN pip install -r requirements/test.txt --retries 3
 
 # Install vllm-tpu from PyPI
 RUN python3 -m pip install -v --no-cache-dir vllm-tpu
@@ -29,7 +31,10 @@ RUN python3 -m pip install --no-cache-dir \
     tblib
 
 # Install tpu_inference
-WORKDIR /workspace/tpu_inference   
+WORKDIR /workspace/tpu_inference  
+# These are needed for the E2E benchmarking tests (i.e. tests/e2e/benchmarking/mlperf.sh) 
+COPY requirements_benchmarking.txt .
+RUN pip install -r requirements_benchmarking.txt --retries 3
 COPY . . 
 
 CMD ["/bin/bash"]
