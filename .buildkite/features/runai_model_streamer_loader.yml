@@ -1,0 +1,26 @@
+# runai_model_streamer_loader
+# The RunAI Model Streamer is a high-performance model loader that serves as an
+# alternative to the default Hugging Face loader. Instead of downloading a model
+# to local disk, it streams the weights from object storage (like GCS) into
+# GPU memory. This streaming process is significantly faster than the traditional
+# disk-based loading method.
+steps:
+  - label: "Correctness tests for runai_model_streamer_loader"
+    key: "runai_model_streamer_loader_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness
+  - label: "Record correctness test result for runai_model_streamer_loader"
+    key: "record_runai_model_streamer_loader_CorrectnessTest"
+    depends_on: "runai_model_streamer_loader_CorrectnessTest"
+    env:
+      CI_TARGET: "runai_model_streamer_loader"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh runai_model_streamer_loader_CorrectnessTest
