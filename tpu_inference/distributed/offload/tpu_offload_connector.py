@@ -312,8 +312,12 @@ class KVOffloadConnectorStats(KVConnectorStats):
                 "Num finished load blocks ": 0,
             }
 
-        finished_save_chunks = sum(self.data["finished_save_chunks"].values())
-        finished_load_chunks = sum(self.data["finished_load_chunks"].values())
+        finished_save_chunks = sum(
+            len(chunk_list)
+            for chunk_list in self.data["finished_save_chunks"].values())
+        finished_load_chunks = sum(
+            len(chunk_list)
+            for chunk_list in self.data["finished_load_chunks"].values())
 
         return {
             "Num finished save chunks ": finished_save_chunks,
