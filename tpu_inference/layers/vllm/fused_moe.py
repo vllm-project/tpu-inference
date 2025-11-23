@@ -143,7 +143,6 @@ def tensor_sharded_gmm_merged_column_parallel(
             mesh=mesh,
             in_specs=(P("data", "model"), P(None, "model"), P("data")),
             out_specs=(P("data", "model")),
-            check_rep=False,
         )(gmm_result, rhs_bias, group_sizes)
 
     n_shards = mesh.shape["model"]
@@ -200,7 +199,6 @@ def tensor_sharded_gmm_row_parallel(
             mesh=mesh,
             in_specs=(P("data"), P(), P("data")),
             out_specs=(P("data")),
-            check_rep=False,
         )(gmm_result, rhs_bias, group_sizes)
 
     return gmm_result
