@@ -12,9 +12,6 @@ from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
 
-GB = 1024**3
-DEFAULT_CPU_CACHE_SIZE_BYTES = 1 * GB
-
 ChunkHash = BlockHash
 
 
