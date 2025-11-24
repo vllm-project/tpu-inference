@@ -48,12 +48,13 @@ def mesh() -> Mesh:
 
 @pytest.fixture
 def vllm_config() -> MagicMock:
-    """Provides a mock VllmConsfig objesct."""
+    """Provides a mock VllmConsfisg objesct."""
     model = "Qwen/Qwen3-0.6B"
     mock_config = MagicMock(spec=VllmConfig)
     mock_config.model_config = ModelConfig(model)
     mock_config.model_config.dtype = jnp.bfloat16
     mock_config.load_config = MagicMock()
+
     mock_config.load_config.load_format = "auto"
     mock_config.load_config.download_dir = None
     mock_config.additional_config = {}

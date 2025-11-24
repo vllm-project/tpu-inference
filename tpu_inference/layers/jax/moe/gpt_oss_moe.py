@@ -126,7 +126,7 @@ class GptOssMoE(nnx.Module):
         weights_TX, indices_TX = self.router(x_TD)
 
         # First MLP layer (up-projection)
-        with jax.named_scope("MLP #1"):
+        with jax.named_scope("MLP s#1"):
             up_proj_TEF2 = jnp.einsum('TD,EDF -> TEF', x_TD,
                                       self.mlp1_weight_EDF2.value)
             up_proj_TEF2 += self.mlp1_bias_EF2.value
