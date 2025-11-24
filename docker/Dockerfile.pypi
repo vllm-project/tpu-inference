@@ -33,6 +33,8 @@ RUN python3 -m pip install --no-cache-dir \
 
 # Install tpu_inference
 WORKDIR /workspace/tpu_inference  
+COPY requirements.txt .
+RUN pip install -r requirements.txt --retries 3
 # These are needed for the E2E benchmarking tests (i.e. tests/e2e/benchmarking/mlperf.sh) 
 COPY requirements_benchmarking.txt .
 RUN pip install -r requirements_benchmarking.txt --retries 3
