@@ -20,6 +20,7 @@ from flax import nnx
 from flax.typing import Sharding
 from jaxtyping import Float
 
+from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
 
@@ -66,6 +67,7 @@ class Router(nnx.Module):
     activation_ffw_td: Sharding
     ed_sharding: Sharding
     random_init: bool = False
+    use_moe_kernel: bool = False
 
     def __call__(self, x_TD: Float):
         """Routes tokens to experts.
@@ -83,14 +85,17 @@ class Router(nnx.Module):
         router_act = modeling_flax_utils.ACT2FN[self.router_act]
         router_logits_TE = jnp.einsum('TD,DE -> TE', x_TD,
                                       self.kernel_DE.value)
-        weights_TX, selected_experts_TX = jax.lax.top_k(
-            router_logits_TE, self.num_experts_per_tok)
-        if self.router_act != "sigmoid":  # sigmoid does not accept axis argument.
-            normalized_weights_TX = router_act(weights_TX.astype(self.dtype),
-                                               axis=-1)
+        if self.use_moe_kernel:
+            return router_logits_TE
         else:
-            normalized_weights_TX = router_act(weights_TX.astype(self.dtype))
-        return normalized_weights_TX, selected_experts_TX
+            weights_TX, selected_experts_TX = jax.lax.top_k(
+                router_logits_TE, self.num_experts_per_tok)
+            if self.router_act != "sigmoid":  # sigmoid does not accept axis argument.
+                normalized_weights_TX = router_act(weights_TX.astype(self.dtype),
+                                                axis=-1)
+            else:
+                normalized_weights_TX = router_act(weights_TX.astype(self.dtype))
+            return normalized_weights_TX, selected_experts_TX
 
     def __post_init__(self, rngs: nnx.Rngs):
         """Generates the router kernel (weights) for routing."""
@@ -124,6 +129,8 @@ class MoE(nnx.Module):
     edf_sharding: Sharding
     efd_sharding: Sharding
     random_init: bool = False
+    mesh: jax.sharding.Mesh
+    use_moe_kernel: bool = False
 
     def __call__(self, x_TD: Float):
         """Performs the forward pass of the MoE layer.
@@ -136,20 +143,49 @@ class MoE(nnx.Module):
         """
         x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
-        weights_TX, indices_TX = self.router(x_TD)
-        one_hot_indices_TXE = jax.nn.one_hot(
-            indices_TX, num_classes=self.num_local_experts, dtype=self.dtype)
-        full_weights_TE = jnp.sum(one_hot_indices_TXE * weights_TX[..., None],
-                                  axis=1)
-
-        # Some models use the routing scores to weight the data instead of
-        # weighting the expert outputs.
-        if self.apply_expert_weight_before_computation:
-            with jax.named_scope("pre_computing_weight"):
-                return self._moe_fwd_preapply_router_weights(
-                    x_TD, full_weights_TE)
+        if self.use_moe_kernel:
+            router_logits_TE = self.router(x_TD)
+            block_size = {
+                "bt": 16,
+                "bf": 1024,
+                "bd1": 1024,
+                "bd2": 1024,
+                "btc": 64,
+                "bfc": 256,
+                "bd1c": 512,
+                "bd2c": 512,
+            }
+            ep_axis_name = self.efd_sharding[0]
+            self.mlp1_weight_E2DF = jnp.stack(
+                [self.kernel_gating_EDF.value, self.kernel_up_proj_EDF.value],
+                axis=1
+            )
+            output_TD = fused_ep_moe(
+                mesh=self.mesh,
+                tokens=x_TD,
+                w1=self.mlp1_weight_E2DF,
+                w2=self.kernel_down_proj_EFD.value,
+                gating_output=router_logits_TE,
+                top_k=self.router.num_experts_per_tok,
+                ep_axis_name=ep_axis_name,
+                **block_size,
+            )
+            return output_TD    
         else:
-            return self._moe_fwd(x_TD, full_weights_TE)
+            weights_TX, indices_TX = self.router(x_TD)
+            one_hot_indices_TXE = jax.nn.one_hot(
+                indices_TX, num_classes=self.num_local_experts, dtype=self.dtype)
+            full_weights_TE = jnp.sum(one_hot_indices_TXE * weights_TX[..., None],
+                                    axis=1)
+
+            # Some models use the routing scores to weight the data instead of
+            # weighting the expert outputs.
+            if self.apply_expert_weight_before_computation:
+                with jax.named_scope("pre_computing_weight"):
+                    return self._moe_fwd_preapply_router_weights(
+                        x_TD, full_weights_TE)
+            else:
+                return self._moe_fwd(x_TD, full_weights_TE)        
 
     def __post_init__(self, rngs: nnx.Rngs):
         """Generates the kernels (weights) for the router and experts (gating, up-projection, and down-projection layers)."""
