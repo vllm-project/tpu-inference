@@ -10,8 +10,7 @@ from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.request import Request
 
 from tpu_inference.distributed.offload.tpu_offload_connector import (
-    DEFAULT_TPU_OFFLOAD_CPU_CHUNKS, RequestTracker,
-    TPUOffloadConnectorScheduler)
+    RequestTracker, TPUOffloadConnectorScheduler)
 
 _DEFAULT_BLOCK_SIZE = 16
 
@@ -63,7 +62,7 @@ def scheduler_factory():
         block_size: int = _DEFAULT_BLOCK_SIZE,
         offload_decode_save: int = 0,
         offload_staging_buffer_tokens: int = -1,
-        offload_num_cpu_chunks: int = DEFAULT_TPU_OFFLOAD_CPU_CHUNKS,
+        offload_num_cpu_chunks: int = -1,
     ):
         # update config
         vllm_config = MockVllmConfig(block_size=block_size)
