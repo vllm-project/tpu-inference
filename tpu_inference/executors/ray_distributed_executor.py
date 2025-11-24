@@ -18,7 +18,6 @@ from vllm.v1.executor.ray_distributed_executor import \
 from vllm.v1.executor.ray_executor import RayWorkerMetaData
 from vllm.v1.executor.ray_utils import RayWorkerWrapper, _wait_until_pg_ready
 
-import tpu_inference.envs as tpu_envs
 from tpu_inference.logger import init_logger
 
 try:
@@ -73,9 +72,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
     def _init_executor(self) -> None:
         self.forward_dag: Optional[ray.dag.CompiledDAG] = None
 
-        # Ensure Ray compiled DAG channel type is set for vLLM
-        os.environ[
-            "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE"] = tpu_envs.VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE
+        os.environ["VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE"] = "shm"
 
         # Currently, this requires USE_RAY_SPMD_WORKER=True.
         self.use_ray_compiled_dag = True
@@ -89,11 +86,10 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         self._initialize_ray_cluster()
         placement_group = self.parallel_config.placement_group
 
-        # Ensure Ray usage stats collection setting is propagated to Ray workers.
-        # Ray workers inherit environment variables, so we explicitly set this
-        # based on our configuration (defaults to "0" to disable stats).
-        os.environ[
-            "RAY_USAGE_STATS_ENABLED"] = tpu_envs.RAY_USAGE_STATS_ENABLED
+        # Disable Ray usage stats collection.
+        ray_usage = os.environ.get("RAY_USAGE_STATS_ENABLED", "0")
+        if ray_usage != "1":
+            os.environ["RAY_USAGE_STATS_ENABLED"] = "0"
 
         # Create the parallel GPU workers.
         self._init_workers_ray(placement_group)
