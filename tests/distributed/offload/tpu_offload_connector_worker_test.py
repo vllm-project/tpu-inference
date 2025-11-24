@@ -47,6 +47,7 @@ class MockVllmConfig:
     def __init__(self, block_size=_DEFAULT_BLOCK_SIZE):
         self.model_config = self.Model()
         self.cache_config = self.Cache(block_size)
+        self.kv_transfer_config = self.KVTransferConfig()
 
     class Model:
         model = "test-model"
@@ -55,6 +56,10 @@ class MockVllmConfig:
 
         def __init__(self, block_size):
             self.block_size = block_size
+
+    class KVTransferConfig:
+        ip = "ip"
+        port = 1234
 
 
 class TestCpuOffloadingSave(jtu.JaxTestCase):
