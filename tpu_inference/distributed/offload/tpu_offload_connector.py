@@ -511,9 +511,8 @@ class TPUOffloadConnectorScheduler():
 
         # config staging buffer
         # NOTE(jcgu): Need to find a way to grab page_size_bytes in scheduler
-        # otherwise, we can only use # of tokens as input, instead of buffer size in GB
-        num_staging_buffer_tokens = envs.TPU_OFFLOAD_STAGING_BUFFER_TOKENS
-        self.num_staging_blocks = num_staging_buffer_tokens // self.block_size
+        # otherwise, we can only use # of blocks as input, instead of buffer size in GB
+        self.num_staging_blocks = envs.TPU_OFFLOAD_NUM_STAGING_BLOCKS
         self.staging_buffer_manager = StagingBufferManager(
             num_blocks=self.num_staging_blocks)
 
@@ -698,19 +697,15 @@ class TPUOffloadConnectorScheduler():
         block_hashes = self._get_request_block_hashes(_request)
         self.offload_manager.touch(block_hashes)
 
-        # only consider the tokens covered by block_hashes
+        # only consider the tokens covered by block_hashes;
+        # currently full blocks only
         num_total_blocks = len(block_hashes)
         num_total_tokens = min(num_total_blocks * self.block_size,
                                len(tracker.token_ids))
         num_full_blocks = num_total_tokens // self.block_size
-        num_full_blocks_tokens = num_full_blocks * self.block_size
-        # adjust last partial block
-        last_partial_block_num_tokens = num_total_tokens - num_full_blocks_tokens
-        need_last_block = self._adjust_last_partial_block(
-            last_partial_block_num_tokens)
-        adjusted_num_total_tokens = num_total_tokens if need_last_block else num_full_blocks_tokens
-        adjusted_num_total_blocks = num_full_blocks + (1 if need_last_block
-                                                       else 0)
+        num_full_block_tokens = num_full_blocks * self.block_size
+        adjusted_num_total_tokens = num_full_block_tokens
+        adjusted_num_total_blocks = num_full_blocks
         assert adjusted_num_total_blocks <= len(tracker.block_ids)
 
         has_new_tokens = adjusted_num_total_tokens > tracker.save_watermark
