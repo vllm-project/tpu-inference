@@ -81,9 +81,11 @@ def _run_inference_with_config(model_name: str,
         time.sleep(5)
 
 
+@pytest.mark.parametrize("model_impl_type", ["vllm", "flax_nnx"])
 def test_model_data_parallelism(
     test_prompts: list,
     sampling_params: SamplingParams,
+    model_impl_type: str,
 ):
     """
     Test model-wise data parallelism where data=2 in the mesh axis.
@@ -95,6 +97,7 @@ def test_model_data_parallelism(
     """
     # Use Llama 1B for this test
     test_model = "meta-llama/Llama-3.2-1B-Instruct"
+    os.environ['MODEL_IMPL_TYPE'] = model_impl_type
 
     # Test with data parallelism enabled
     outputs = _run_inference_with_config(
@@ -103,6 +106,7 @@ def test_model_data_parallelism(
         sampling_params=sampling_params,
         tensor_parallel_size=1,
         data_parallel_size=2,
+        async_scheduling=True,
     )
 
     # Verify we got outputs for all prompts
@@ -175,7 +179,7 @@ def test_data_parallelism_correctness(
     """
     os.environ['SKIP_JAX_PRECOMPILE'] = '1'
     os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '0'
-    model_name = "Qwen/Qwen2.5-1.5B-Instruct"
+    model_name = "meta-llama/Llama-3.2-1B-Instruct"
     # Use a smaller subset of prompts for correctness testing
     small_prompts = test_prompts[:10]
 
