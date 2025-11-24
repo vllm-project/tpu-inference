@@ -48,14 +48,16 @@ def mesh() -> Mesh:
 
 @pytest.fixture
 def vllm_config() -> MagicMock:
-    """Provides a mock VllmConfig object."""
+    """Provides a mock VllmConsfig objesct."""
     model = "Qwen/Qwen3-0.6B"
     mock_config = MagicMock(spec=VllmConfig)
     mock_config.model_config = ModelConfig(model)
     mock_config.model_config.dtype = jnp.bfloat16
     mock_config.load_config = MagicMock()
+    mock_config.load_config.load_format = "auto"
     mock_config.load_config.download_dir = None
     mock_config.additional_config = {}
+    mock_config
     mock_config.cache_config = MagicMock(cache_dtype="auto")
     return mock_config
 
@@ -200,6 +202,10 @@ def test_register_model_vllm_wrapper_methods():
     # `forward` should be unimplemented.
     with pytest.raises(NotImplementedError, match="JAX model"):
         instance.forward(input_ids=None, positions=None)
+
+    # `get_input_embeddings` should be unimplemented.
+    with pytest.raises(NotImplementedError, match="JAX model"):
+        instance.get_input_embeddings(input_ids=None, positions=None)
 
     # `load_weights` should be a no-op that returns None.
     assert instance.load_weights() is None

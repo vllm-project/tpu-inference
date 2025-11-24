@@ -166,9 +166,10 @@ class ShardingConfigManager:
                     f"LoRA is not supported with data parallelism "
                     f"(DP size: {total_dp_size}). Please disable LoRA or "
                     f"set data parallelism to 1.")
+        if sharding_strategy.attention_data_parallelism > 1:
             if not os.environ.get("NEW_MODEL_DESIGN", False):
                 raise ValueError(
-                    "Must run DP with NEW_MODEL_DESIGN enabled. Please set the "
+                    "Must run Attention DP with NEW_MODEL_DESIGN enabled. Please set the "
                     "NEW_MODEL_DESIGN=True.")
 
     @property

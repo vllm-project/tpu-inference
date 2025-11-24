@@ -235,7 +235,7 @@ def get_flax_model(
             hidden_states_sharding,  # aux hidden states
         ),
         donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
-        static_argnums=6,  #6 is layer_name_to_kvcache_index
+        static_argnums=7,  #7 is layer_name_to_kvcache_index
     )
     def run_model(graphdef, state, *args):
         model = nnx.merge(graphdef, state)
@@ -439,6 +439,17 @@ def register_model(arch: str, model: Any) -> None:
             "This is a JAX model and does not implement the PyTorch forward method."
         )
 
+    # Same as `forward`, this is a dummy method to satisfy vLLM's type checks.
+    def unimplemented_get_input_embeddings(
+        self,
+        input_ids: "torch.Tensor",
+        positions: "torch.Tensor",
+        inputs_embeds: Optional["torch.Tensor"] = None,
+    ) -> "torch.Tensor":
+        raise NotImplementedError(
+            "This is a JAX model and does not implement the PyTorch get_input_embeddings method."
+        )
+
     # We need a custom __init__ that only calls torch.nn.Module's init,
     # to avoid triggering JAX logic when vLLM inspects the class.
     def wrapper_init(self, *args, **kwargs):
@@ -452,6 +463,7 @@ def register_model(arch: str, model: Any) -> None:
         {
             "__init__": wrapper_init,
             "forward": unimplemented_forward,
+            "get_input_embeddings": unimplemented_get_input_embeddings,
             # Prevent vLLM from trying to load weights into this dummy class.
             "load_weights": lambda self, *args, **kwargs: None,
         })

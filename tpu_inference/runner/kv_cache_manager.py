@@ -3,12 +3,14 @@ from typing import TYPE_CHECKING, Dict, List
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import vllm.envs as envs
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.ops.mappings import t2j_dtype
 from vllm.attention import Attention
 from vllm.attention.backends.abstract import AttentionType
 from vllm.config import get_layers_from_vllm_config
+from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec, MLAAttentionSpec,
                                         SlidingWindowSpec)
@@ -174,6 +176,11 @@ class KVCacheManager:
             )
             self.runner.input_batch = new_input_batch
             self.runner.persistent_batch_manager.input_batch = new_input_batch
+            self.runner.block_tables_cpu = [
+                np.zeros((self.runner.max_num_reqs,
+                          cdiv(self.runner.max_model_len, block_size)),
+                         dtype=np.int32) for block_size in block_sizes
+            ]
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         self.maybe_reinitialize_input_batch(kv_cache_config)
