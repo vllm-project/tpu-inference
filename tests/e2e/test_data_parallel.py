@@ -179,7 +179,7 @@ def test_data_parallelism_correctness(
     """
     os.environ['SKIP_JAX_PRECOMPILE'] = '1'
     os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '0'
-    model_name = "meta-llama/Llama-3.2-1B-Instruct"
+    model_name = "Qwen/Qwen2.5-1.5B-Instruct"
     # Use a smaller subset of prompts for correctness testing
     small_prompts = test_prompts[:10]
 
