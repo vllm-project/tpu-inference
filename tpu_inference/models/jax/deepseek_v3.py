@@ -277,6 +277,7 @@ class DeepSeekV3(nnx.Module):
                     apply_expert_weight_before_computation=False,
                     hidden_size=hidden_size,
                     intermediate_size_moe=moe_intermediate_size,
+                    mesh=self.mesh,
                     hidden_act=hidden_act,
                     rngs=self.rng,
                     random_init=self.random_init,
