@@ -1,9 +1,9 @@
 """Unit tests for TPUModelRunner mesh initialization."""
+import os
 from unittest.mock import Mock, patch
 
 import pytest
 
-import tpu_inference.envs as envs
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
@@ -53,7 +53,7 @@ class TestTPUModelRunnerMeshInit:
     def test_init_mesh_2d_model_without_device_order(self, runner_instance,
                                                      mock_vllm_config):
         """Test 2d mesh creation without enforced device order."""
-        with patch.dict(envs.environment_variables, {'NEW_MODEL_DESIGN': lambda: False}), \
+        with patch.dict(os.environ, {'NEW_MODEL_DESIGN': ''}), \
              patch('tpu_inference.runner.tpu_runner.make_optimized_mesh') as mock_make_mesh, \
              patch('tpu_inference.runner.tpu_runner.logger'):
 
@@ -79,7 +79,7 @@ class TestTPUModelRunnerMeshInit:
         """Test 2d mesh creation with enforced device order."""
         mock_vllm_config.sharding_config.device_indexes = [0, 1, 2, 3]
 
-        with patch.dict(envs.environment_variables, {'NEW_MODEL_DESIGN': lambda: False}), \
+        with patch.dict(os.environ, {'NEW_MODEL_DESIGN': ''}), \
              patch('jax.make_mesh') as mock_jax_mesh, \
              patch('tpu_inference.runner.tpu_runner.logger'):
 
@@ -103,7 +103,7 @@ class TestTPUModelRunnerMeshInit:
     def test_init_mesh_new_model_single_slice(self, runner_instance,
                                               mock_vllm_config):
         """Test new model mesh creation with single slice."""
-        with patch.dict(envs.environment_variables, {'NEW_MODEL_DESIGN': lambda: True, 'NUM_SLICES': lambda: 1}), \
+        with patch.dict(os.environ, {'NEW_MODEL_DESIGN': '1', 'NUM_SLICES': '1'}), \
              patch('tpu_inference.runner.tpu_runner.mesh_utils') as mock_mesh_utils, \
              patch('jax.sharding.Mesh') as mock_jax_mesh, \
              patch('tpu_inference.runner.tpu_runner.logger'):
@@ -134,7 +134,7 @@ class TestTPUModelRunnerMeshInit:
                                              mock_vllm_config):
         """Test new model mesh creation with multiple slices."""
         num_slices = 2
-        with patch.dict(envs.environment_variables, {'NEW_MODEL_DESIGN': lambda: True, 'NUM_SLICES': lambda: num_slices}), \
+        with patch.dict(os.environ, {'NEW_MODEL_DESIGN': '1', 'NUM_SLICES': str(num_slices)}), \
              patch('tpu_inference.runner.tpu_runner.mesh_utils') as mock_mesh_utils, \
              patch('jax.sharding.Mesh') as mock_jax_mesh, \
              patch('tpu_inference.runner.tpu_runner.logger'):

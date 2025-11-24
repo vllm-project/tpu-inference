@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import time
 
 import vllm.envs as vllm_envs
 from vllm import LLM, EngineArgs
 from vllm.lora.request import LoRARequest
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-
-import tpu_inference.envs as envs
 
 
 def create_parser():
@@ -78,7 +77,7 @@ def main(args: dict):
 
 if __name__ == "__main__":
     # Skip long warmup for local simple test.
-    envs.environment_variables['SKIP_JAX_PRECOMPILE'] = lambda: True
+    os.environ['SKIP_JAX_PRECOMPILE'] = '1'
 
     parser = create_parser()
     args: dict = vars(parser.parse_args())
