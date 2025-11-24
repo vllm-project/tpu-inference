@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: tpu-offline-inference
+  namespace: default
+spec:
+  ports:
+  - name: http-tpu-offline-inference
+    port: 80
+    protocol: TCP
+    targetPort: 8000
+  selector:
+    app: tpu-offline-inference
+  sessionAffinity: None
+  type: LoadBalancer
