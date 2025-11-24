@@ -104,8 +104,8 @@ def _prepare_output_dir(source: Path, output: Path, overwrite: bool) -> Path:
     LOGGER.info("Copying essential metadata files...")
     for item in source_root.iterdir():
         if item.is_file() and not item.name.endswith(".safetensors"):
-            shutil.copy2(item, output / item.name)
-
+            # shutil.copy2(item, output / item.name
+            shutil.copyfile(item, output / item.name)
     LOGGER.info("Creating empty placeholders for %d model shards...", 163)
     for i in range(1, 164):
         FILENAME = f"model-{i:05}-of-000163.safetensors"
@@ -177,7 +177,7 @@ def _apply_quantization(vllm_config: VllmConfig, mesh: Mesh,
                                         model,
                                         rng,
                                         mesh,
-                                        apply_to_abstract_model=True)
+                                        apply_to_abstract_model=False)
     return model
 
 
