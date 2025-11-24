@@ -5,6 +5,6 @@ Feature,CorrectnessTest,PerformanceTest
 "Out-of-tree model support",to be added,to be added
 "Prefix Caching",✅,✅
 "Single Program Multi Data",✅,✅
-"Speculative Decoding: Ngram",✅,✅
+"Speculative Decoding: Ngram",✅,❌
 "Structured Decoding",✅,to be added
 "async scheduler",✅,✅
