@@ -217,10 +217,6 @@ class TpuPlatform(Platform):
                            "Forcing --disable_chunked_mm_input.")
             scheduler_config.disable_chunked_mm_input = True
 
-        kv_transfer_config = vllm_config.kv_transfer_config
-        if kv_transfer_config is not None:
-            assert kv_transfer_config.kv_connector == "TPUConnector"
-        # Late initialization to avoid circular import.
         from tpu_inference.core.sched.dp_scheduler import \
             update_vllm_config_for_dp_scheduler
         update_vllm_config_for_dp_scheduler(vllm_config)

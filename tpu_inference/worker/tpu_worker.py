@@ -26,6 +26,8 @@ from tpu_inference.distributed import jax_parallel_state
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.distributed.utils import (get_device_topology_order_id,
                                              get_host_ip, get_kv_transfer_port)
+from tpu_inference.distributed.offload.utils import \
+    get_default_kv_connector_staging_buffer_tokens
 from tpu_inference.layers.common.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
@@ -335,6 +337,33 @@ class TPUWorker(WorkerBase):
         total_hbm_limit_gb = round(total_hbm_limit / utils.GBYTES, 2)
         total_hbm_limit_cap_gb = round(total_hbm_limit_cap / utils.GBYTES, 2)
         total_hbm_used_gb = round(total_hbm_used / utils.GBYTES, 2)
+
+        if self.vllm_config.kv_transfer_config is not None:
+            kv_transfer_config = self.vllm_config.kv_transfer_config
+            if kv_transfer_config.kv_connector == "TPUOffloadConnector" and kv_transfer_config.kv_connector_module_path == "tpu_inference.distributed.offload.tpu_offload_connector":
+                # If kv offloading is enabled, we need to account for the memory used by the KV transfer buffer.
+                _default_staging_buffer_tokens = get_default_kv_connector_staging_buffer_tokens(
+                )
+                staging_buffer_tokens = int(
+                    os.getenv("TPU_OFFLOAD_STAGING_BUFFER_TOKENS",
+                              str(_default_staging_buffer_tokens)))
+                # calculate staging buffer size
+                staging_buffer_pages = staging_buffer_tokens // self.vllm_config.cache_config.block_size
+
+                # TODO(jcgu): verify page_size_bytes
+                kv_cache_specs = self.model_runner.get_kv_cache_spec()
+                num_layers = len(kv_cache_specs)
+                assert len(kv_cache_specs) >= 1
+                vllm_page_size_bytes = kv_cache_specs[0].page_size_bytes
+                # rpa_page_size_bytes = get_rpa_page_size_bytes(self.model_runner.mesh,
+                #                                             kv_cache_specs)
+                stage_buffer_size_bytes = staging_buffer_pages * num_layers * vllm_page_size_bytes
+
+                total_hbm_avail = total_hbm_avail - stage_buffer_size_bytes
+                logger.info(
+                    f"  ALERT: KV offloading enabled. Deducting {stage_buffer_size_bytes} Bytes ({staging_buffer_pages} pages) from available HBM for staging buffer."
+                )
+
         total_hbm_avail_gb = round(total_hbm_avail / utils.GBYTES, 2)
 
         logger.info(f"Memory statistics | "
@@ -444,6 +473,11 @@ class TPUWorker(WorkerBase):
         # method should be changed to return `dict[str, AbstractKVCacheSpec]`,
         # and the vLLM side should be updated to handle the translation.
         return self.model_runner.get_kv_cache_spec()
+
+    def get_kv_connector_handshake_metadata(self) -> dict | None:
+        """Get KV connector metadata from this worker if available."""
+        # NOTE: we are not using it right now.
+        return
 
     def initialize_from_config(
         self,

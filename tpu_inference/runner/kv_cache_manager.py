@@ -25,6 +25,8 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mla import MLAAttention
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionType
+from vllm.v1.attention.backends.utils import (get_kv_cache_layout,
+                                              set_kv_cache_layout)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec, MLAAttentionSpec,
                                         SlidingWindowSpec)
@@ -32,6 +34,8 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from tpu_inference import utils
 from tpu_inference import utils as common_utils
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.distributed.offload.utils import \
+    get_kv_connector_cache_layout
 from tpu_inference.logger import init_logger
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
@@ -44,6 +48,10 @@ if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 logger = init_logger(__name__)
+
+# default layout (order) used by kv cache manager
+# N=num_blocks, H=num_heads and D=head_size
+DEFAULT_KV_CACHE_LAYOUT = "NHD"
 
 
 class KVCacheManager:
@@ -249,6 +257,10 @@ class KVCacheManager:
 
         return kv_cache_spec
 
+    def get_kv_cache_layout(self):
+        # return the layout (mostly "NHD" or "HND") of kv cache
+        return get_kv_cache_layout()
+
     def maybe_reinitialize_input_batch(self,
                                        kv_cache_config: KVCacheConfig) -> None:
         block_sizes = [
@@ -293,6 +305,18 @@ class KVCacheManager:
             else:
                 for layer_name in group.layer_names:
                     layer_name_to_spec[layer_name] = group.kv_cache_spec
+
+        # set the kv cache layout which is needed by kv connectors
+        # NOTE(jcgu): please update the default value when the order changes
+        set_kv_cache_layout(DEFAULT_KV_CACHE_LAYOUT)
+        # verify kv cache layout is matched between the cache manager and
+        # the kv connector (if configured)
+        _required_kv_layout = get_kv_connector_cache_layout()
+        if (_required_kv_layout
+                and _required_kv_layout != DEFAULT_KV_CACHE_LAYOUT):
+            raise ValueError(
+                f"KV cache layout ({DEFAULT_KV_CACHE_LAYOUT}) does not match with the "
+                f"kv_connector's required layout ({_required_kv_layout})")
 
         kv_caches = self.runner.kv_caches
         num_blocks_list = []
