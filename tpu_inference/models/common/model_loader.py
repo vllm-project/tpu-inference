@@ -8,6 +8,9 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.ops.mappings import j2t_dtype
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
+from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.runai_streamer_loader import \
+    RunaiModelStreamerLoader
 from vllm.utils.func_utils import supports_kw
 
 from tpu_inference import envs
@@ -177,7 +180,23 @@ def _get_nnx_model(
         # the model creation again, otherwise the model forward will have
         # non-trivial overhead in PjitFunction.
         with mesh:
-            model.load_weights(rng)
+            loader = get_model_loader(vllm_config.load_config)
+            if isinstance(loader, RunaiModelStreamerLoader):
+                model_weights = vllm_config.model_config.model
+                if hasattr(vllm_config.model_config, "model_weights"):
+                    model_weights = vllm_config.model_config.model_weights
+                weights_iterator = loader._get_weights_iterator(
+                    model_weights, vllm_config.model_config.revision)
+                # We set the weights iterator at runtime, to prevent having to change
+                # every model's load_weights signature. This also prevents us from hitting
+                # a TypeError at runtime if you use the RunaiModelStreamerLoader with any
+                # flax_nnx model whose load_weights function does not accept the
+                # weights_iterator keyword argument.
+                vllm_config.model_config.model_weights_iterator = weights_iterator
+                model.load_weights(rng)
+                del vllm_config.model_config.model_weights_iterator
+            else:
+                model.load_weights(rng)
             jit_model = create_jit_model(
                 model,
                 use_qwix_on_abstract_model=should_apply_qwix_on_abstract_model)
