@@ -128,9 +128,6 @@ logger = init_logger(__name__)
 # kv cache layout needed by cpu offloading mechanism
 REQUIRED_KV_CACHE_LAYOUT = "NHD"
 
-# default swap op type
-DEFAULT_HOST_HBM_SWAP_OP_TYPE = "jax"
-
 BLOCK_SIZE_BUCKETS = [1, 2, 4, 8, 16]
 
 # we keep our operations at vllm's block granularity,
@@ -139,9 +136,7 @@ BLOCK_SIZE_BUCKETS = [1, 2, 4, 8, 16]
 # 1. [supported] drop: drop the entire partial block
 # 2. pad: pad to a full block
 # 3. dynamic: keep the partial block as is.
-PARTIAL_BLOCK_SAVE_BEHAVIOR = Literal["drop", "pad", "dynamic"]
-
-DEFAULT_TPU_OFFLOAD_CPU_CHUNKS = 1024
+PARTIAL_BLOCK_SAVE_BEHAVIOR = Literal["drop"]
 
 
 @dataclass
@@ -512,24 +507,7 @@ class TPUOffloadConnectorScheduler():
         #     real-chunk-size in save and load
         self.cpu_chunk_size = self.block_size
 
-        # TODO(jcgu): rm
-        # define partial_block saving behavior
-        self.partial_block_save_behavior: PARTIAL_BLOCK_SAVE_BEHAVIOR = \
-            os.getenv("TPU_OFFLOAD_PARTIAL_BLOCK_SAVE_BEHAVIOR", "drop")
-        assert self.partial_block_save_behavior in get_args(
-            PARTIAL_BLOCK_SAVE_BEHAVIOR
-        ), f"{self.partial_block_save_behavior} not in {get_args(PARTIAL_BLOCK_SAVE_BEHAVIOR)}"
-        self.partial_block_dynamic_pad_lower_limit = \
-            int(os.getenv("TPU_OFFLOAD_PARTIAL_BLOCK_DYNAMIC_PAD_LOWER_LIMIT", "0"))
-        if self.partial_block_save_behavior == "dynamic":
-            if self.partial_block_dynamic_pad_lower_limit <= 0:
-                self.partial_block_save_behavior == "drop"
-            elif self.partial_block_dynamic_pad_lower_limit >= self.block_size:
-                self.partial_block_save_behavior == "pad"
-        logger.info(
-            f" partial_block_save_behavior is configed to {self.partial_block_save_behavior}, but we only support drop now."
-        )
-        self.partial_block_save_behavior = "drop"
+        self.partial_block_save_behavior: PARTIAL_BLOCK_SAVE_BEHAVIOR = "drop"
 
         # config staging buffer
         # NOTE(jcgu): Need to find a way to grab page_size_bytes in scheduler
@@ -547,7 +525,6 @@ class TPUOffloadConnectorScheduler():
             f"model_name={model_name}, "
             f"decode_save={self.decode_save}, "
             f"partial_block_save_behavior={self.partial_block_save_behavior}, "
-            f"partial_block_dynamic_pad_lower_limit={self.partial_block_dynamic_pad_lower_limit}, "
             f"num_staging_blocks={self.num_staging_blocks}.")
 
     def _get_request_block_hashes(self, req: "Request") -> list[BlockHash]:
@@ -667,27 +644,6 @@ class TPUOffloadConnectorScheduler():
 
         # external_computed_tokens, load_kv_async
         return num_to_load, False
-
-    def _adjust_last_partial_block(self,
-                                   last_partial_block_num_tokens: int) -> bool:
-        """
-        adjust prompt token / len based on pre-configed save behavior
-        when the last block of request's token is partially used.
-        In order to keep all the saved kv be aligned with block_size,
-        we may
-         1. drop the partial block
-         2. pad the partial block to be a full block
-         3. drop or pad based on actual num_tokens in the last partial block
-
-        Input: num of tokens in the last partial block (could be 0)
-        Output: the last partial block should be kept (True) or dropped (False)
-        """
-        if self.partial_block_save_behavior == "pad":
-            return True if last_partial_block_num_tokens > 0 else False
-        elif self.partial_block_save_behavior == "drop":
-            return False
-        elif self.partial_block_save_behavior == "dynamic":
-            return True if last_partial_block_num_tokens >= self.partial_block_dynamic_pad_lower_limit else False
 
     def update_state_after_alloc(self, request: "Request",
                                  blocks: "KVCacheBlocks",
