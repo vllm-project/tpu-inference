@@ -26,8 +26,6 @@ from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 
 from tpu_inference import envs, utils
 from tpu_inference.distributed import jax_parallel_state
-from tpu_inference.distributed.offload.utils import \
-    get_default_kv_connector_staging_buffer_tokens
 from tpu_inference.distributed.utils import (get_host_ip, get_kv_transfer_port,
                                              get_node_id)
 from tpu_inference.layers.common.sharding import ShardingConfigManager
@@ -296,11 +294,7 @@ class TPUWorker:
             kv_transfer_config = self.vllm_config.kv_transfer_config
             if kv_transfer_config.kv_connector == "TPUOffloadConnector" and kv_transfer_config.kv_connector_module_path == "tpu_inference.distributed.offload.tpu_offload_connector":
                 # If kv offloading is enabled, we need to account for the memory used by the KV transfer buffer.
-                _default_staging_buffer_tokens = get_default_kv_connector_staging_buffer_tokens(
-                )
-                staging_buffer_tokens = int(
-                    os.getenv("TPU_OFFLOAD_STAGING_BUFFER_TOKENS",
-                              str(_default_staging_buffer_tokens)))
+                staging_buffer_tokens = envs.TPU_OFFLOAD_STAGING_BUFFER_TOKENS
                 # calculate staging buffer size
                 staging_buffer_pages = staging_buffer_tokens // self.vllm_config.cache_config.block_size
 

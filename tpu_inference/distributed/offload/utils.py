@@ -25,8 +25,6 @@ logger = init_logger(__name__)
 
 CPU_OFFLOADING_SWAP_OP_TYPE = Literal["jax", "pallas"]
 
-DEFAULT_TPU_OFFLOAD_STAGING_BUFFER_TOKENS = 8192
-
 
 @dataclass(order=True)
 class CacheKey:
@@ -108,10 +106,6 @@ def get_kv_connector_cache_layout():
         logger.info_once(
             "Connectors do not specify a kv cache layout, defaulting to NHD.")
     return None
-
-
-def get_default_kv_connector_staging_buffer_tokens() -> int:
-    return DEFAULT_TPU_OFFLOAD_STAGING_BUFFER_TOKENS
 
 
 SwapFn = Callable[
