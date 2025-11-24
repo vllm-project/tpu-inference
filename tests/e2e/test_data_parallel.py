@@ -67,6 +67,7 @@ def _run_inference_with_config(model_name: str,
         additional_config=additional_config,
         kv_cache_dtype=kv_cache_dtype,
         async_scheduling=async_scheduling,
+        enforce_eager=True,
     )
 
     engine_args_dict = asdict(engine_args)
@@ -177,7 +178,6 @@ def test_data_parallelism_correctness(
     This test compares outputs from a single-device run with data parallel runs
     to ensure correctness, including log probabilities.
     """
-    os.environ['SKIP_JAX_PRECOMPILE'] = '1'
     os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '0'
     model_name = "Qwen/Qwen2.5-1.5B-Instruct"
     # Use a smaller subset of prompts for correctness testing
