@@ -62,18 +62,12 @@ def scheduler_factory():
     def _scheduler(
         block_size: int = _DEFAULT_BLOCK_SIZE,
         offload_decode_save: int = 0,
-        offload_partial_block_save_behavior: str = "drop",
-        offload_partial_block_dynamic_pad_lower_limit: int = 0,
         offload_staging_buffer_tokens: int = -1,
         offload_num_cpu_chunks: int = DEFAULT_TPU_OFFLOAD_CPU_CHUNKS,
     ):
         # update config
         vllm_config = MockVllmConfig(block_size=block_size)
         os.environ["TPU_OFFLOAD_DECODE_SAVE"] = str(offload_decode_save)
-        os.environ[
-            "TPU_OFFLOAD_PARTIAL_BLOCK_SAVE_BEHAVIOR"] = offload_partial_block_save_behavior
-        os.environ["TPU_OFFLOAD_PARTIAL_BLOCK_DYNAMIC_PAD_LOWER_LIMIT"] = str(
-            offload_partial_block_dynamic_pad_lower_limit)
         if offload_staging_buffer_tokens >= 0:
             os.environ["TPU_OFFLOAD_STAGING_BUFFER_TOKENS"] = str(
                 offload_staging_buffer_tokens)
@@ -238,7 +232,6 @@ class TestTPUOffloadConnectorScheduler:
         """
         num_staging_blocks = num_staging_tokens // _DEFAULT_BLOCK_SIZE
         scheduler = scheduler_factory(
-            offload_partial_block_save_behavior="drop",
             offload_staging_buffer_tokens=num_staging_tokens,
             offload_num_cpu_chunks=100)
 
