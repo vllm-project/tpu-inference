@@ -112,13 +112,13 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
     from vllm.forward_context import ForwardContext
 
+from tpu_inference import envs
 from tpu_inference.distributed.offload.cpu_backend import LocalCPUBackend
 from tpu_inference.distributed.offload.offload_manager import (
     LRUCacheManager, StagingBufferManager)
 from tpu_inference.distributed.offload.utils import (
     CPU_OFFLOADING_SWAP_OP_TYPE, CpuChunkId, KVCacheSwapFn, ReqId,
-    TokenProcessor, get_default_kv_connector_staging_buffer_tokens,
-    get_kv_cache_swap_fn, jitted_insert_kv_cache_slices)
+    TokenProcessor, get_kv_cache_swap_fn, jitted_insert_kv_cache_slices)
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.kv_cache_manager import KVCacheManager
 from tpu_inference.runner.tpu_runner import TPUModelRunner
@@ -480,9 +480,7 @@ class TPUOffloadConnectorScheduler():
         self.block_size = vllm_config.cache_config.block_size
 
         # offloading manager
-        self.num_cpu_chunks = int(
-            os.getenv("TPU_OFFLOAD_NUM_CPU_CHUNKS",
-                      str(DEFAULT_TPU_OFFLOAD_CPU_CHUNKS)))
+        self.num_cpu_chunks = envs.TPU_OFFLOAD_NUM_CPU_CHUNKS
         self.offload_manager = LRUCacheManager(
             num_cpu_chunks=self.num_cpu_chunks)
 
@@ -506,7 +504,7 @@ class TPUOffloadConnectorScheduler():
         self.token_processor = TokenProcessor(model_name=model_name,
                                               chunk_size=self.block_size)
 
-        self.decode_save = os.getenv("TPU_OFFLOAD_DECODE_SAVE", "0") == "1"
+        self.decode_save = envs.TPU_OFFLOAD_DECODE_SAVE
         # NOTE(jcgu): currently, let's make chunk_size == block_size
         # chunk_size == n * block_size lead to
         #  1. multi-size chunks
@@ -514,6 +512,7 @@ class TPUOffloadConnectorScheduler():
         #     real-chunk-size in save and load
         self.cpu_chunk_size = self.block_size
 
+        # TODO(jcgu): rm
         # define partial_block saving behavior
         self.partial_block_save_behavior: PARTIAL_BLOCK_SAVE_BEHAVIOR = \
             os.getenv("TPU_OFFLOAD_PARTIAL_BLOCK_SAVE_BEHAVIOR", "drop")
@@ -535,11 +534,7 @@ class TPUOffloadConnectorScheduler():
         # config staging buffer
         # NOTE(jcgu): Need to find a way to grab page_size_bytes in scheduler
         # otherwise, we can only use # of tokens as input, instead of buffer size in GB
-        _default_staging_buffer_tokens = get_default_kv_connector_staging_buffer_tokens(
-        )
-        num_staging_buffer_tokens = int(
-            os.getenv("TPU_OFFLOAD_STAGING_BUFFER_TOKENS",
-                      str(_default_staging_buffer_tokens)))
+        num_staging_buffer_tokens = envs.TPU_OFFLOAD_STAGING_BUFFER_TOKENS
         self.num_staging_blocks = num_staging_buffer_tokens // self.block_size
         self.staging_buffer_manager = StagingBufferManager(
             num_blocks=self.num_staging_blocks)
@@ -1214,15 +1209,13 @@ class TPUOffloadConnectorWorker:
 
         self.runner: Optional[TPUModelRunner] = None
         self.mesh: Optional[Mesh] = None
-        self.swap_op_type = os.getenv("TPU_OFFLOAD_SWAP_OP_TYPE",
-                                      default=DEFAULT_HOST_HBM_SWAP_OP_TYPE)
+        self.swap_op_type = envs.TPU_OFFLOAD_SWAP_OP_TYPE
         assert self.swap_op_type in get_args(CPU_OFFLOADING_SWAP_OP_TYPE)
         # TODO(jcgu): check libtpu compatibility for pallas dma kernel
         logger.info(
             f"(cpu offloading) swap operation type is {self.swap_op_type}")
 
-        self.use_bucketed_swap_ops = os.getenv(
-            "TPU_OFFLOAD_SKIP_JAX_PRECOMPILE", "0") == "0"
+        self.use_bucketed_swap_ops = not envs.TPU_OFFLOAD_SKIP_JAX_PRECOMPILE
         logger.info(
             f"(cpu offloading) use_bucketed_swap_ops={self.use_bucketed_swap_ops}"
         )
@@ -1231,9 +1224,7 @@ class TPUOffloadConnectorWorker:
         self.swap_out_fn: KVCacheSwapFn = None
 
         # cpu cache
-        self.num_cpu_chunks = int(
-            os.getenv("TPU_OFFLOAD_NUM_CPU_CHUNKS",
-                      str(DEFAULT_TPU_OFFLOAD_CPU_CHUNKS)))
+        self.num_cpu_chunks = envs.TPU_OFFLOAD_NUM_CPU_CHUNKS
         self.cpu_backend = LocalCPUBackend(num_cpu_chunks=self.num_cpu_chunks)
         # The worker needs its own token processor to generate keys.
         model_name = self.vllm_config.model_config.model
