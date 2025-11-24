@@ -184,7 +184,7 @@ run_performance_benchmark() {
 # --- MAIN EXECUTION FLOW ---
 
 # Set initial trap to ensure cleanup happens even on immediate exit
-trap 'cleanUp "$MODEL_NAME"' EXIT
+trap 'cleanUp "$MODEL_NAME" || true' EXIT
 
 # --- 1. RUN TEST MODE  ---
 if [ "$TEST_MODE" == "accuracy" ]; then
