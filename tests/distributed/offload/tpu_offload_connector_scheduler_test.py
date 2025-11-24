@@ -61,15 +61,15 @@ def scheduler_factory():
     def _scheduler(
         block_size: int = _DEFAULT_BLOCK_SIZE,
         offload_decode_save: int = 0,
-        offload_staging_buffer_tokens: int = -1,
+        offload_num_staging_blocks: int = -1,
         offload_num_cpu_chunks: int = -1,
     ):
         # update config
         vllm_config = MockVllmConfig(block_size=block_size)
         os.environ["TPU_OFFLOAD_DECODE_SAVE"] = str(offload_decode_save)
-        if offload_staging_buffer_tokens >= 0:
-            os.environ["TPU_OFFLOAD_STAGING_BUFFER_TOKENS"] = str(
-                offload_staging_buffer_tokens)
+        if offload_num_staging_blocks >= 0:
+            os.environ["TPU_OFFLOAD_NUM_STAGING_BLOCKS"] = str(
+                offload_num_staging_blocks)
         if offload_num_cpu_chunks > 0:
             os.environ["TPU_OFFLOAD_NUM_CPU_CHUNKS"] = str(
                 offload_num_cpu_chunks)
@@ -111,9 +111,8 @@ class TestTPUOffloadConnectorScheduler:
         5. skip 1 block + full-hit + only 1 staging block
         6. skip 1 block + full-hit + no staging block
         """
-        num_staging_tokens = num_staging_blocks * _DEFAULT_BLOCK_SIZE
         scheduler = scheduler_factory(
-            offload_staging_buffer_tokens=num_staging_tokens)
+            offload_num_staging_blocks=num_staging_blocks)
         prompt_len = scheduler.block_size * num_prompt_blocks
         num_computed_tokens = scheduler.block_size * num_computed_blocks
         num_blocks_to_load = num_matched_blocks - num_computed_blocks
@@ -231,7 +230,7 @@ class TestTPUOffloadConnectorScheduler:
         """
         num_staging_blocks = num_staging_tokens // _DEFAULT_BLOCK_SIZE
         scheduler = scheduler_factory(
-            offload_staging_buffer_tokens=num_staging_tokens,
+            offload_num_staging_blocks=num_staging_blocks,
             offload_num_cpu_chunks=100)
 
         # calculate the groundtruth
@@ -347,10 +346,9 @@ class TestTPUOffloadConnectorScheduler:
         2. th N-th decode (hit block bounary) + not decode_save (no save)
         """
 
-        scheduler = scheduler_factory(
-            offload_decode_save=decode_save,
-            offload_staging_buffer_tokens=_DEFAULT_BLOCK_SIZE * 10,
-            offload_num_cpu_chunks=10)
+        scheduler = scheduler_factory(offload_decode_save=decode_save,
+                                      offload_num_staging_blocks=10,
+                                      offload_num_cpu_chunks=10)
 
         prompt_tokens = list(range(prompt_len))
         generated_tokens = list(range(prompt_len, seq_len))

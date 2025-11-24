@@ -294,9 +294,7 @@ class TPUWorker:
             kv_transfer_config = self.vllm_config.kv_transfer_config
             if kv_transfer_config.kv_connector == "TPUOffloadConnector" and kv_transfer_config.kv_connector_module_path == "tpu_inference.distributed.offload.tpu_offload_connector":
                 # If kv offloading is enabled, we need to account for the memory used by the KV transfer buffer.
-                staging_buffer_tokens = envs.TPU_OFFLOAD_STAGING_BUFFER_TOKENS
-                # calculate staging buffer size
-                staging_buffer_pages = staging_buffer_tokens // self.vllm_config.cache_config.block_size
+                staging_buffer_pages = envs.TPU_OFFLOAD_NUM_STAGING_BLOCKS
 
                 kv_cache_specs = self.model_runner.get_kv_cache_spec()
                 num_layers = len(kv_cache_specs)
