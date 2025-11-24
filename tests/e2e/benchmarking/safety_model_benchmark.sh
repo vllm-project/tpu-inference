@@ -40,7 +40,7 @@ TARGET_THROUGHPUT="450.00"
 MAX_MODEL_LEN=4096
 MAX_BATCHED_TOKENS=4096
 NUM_PROMPTS=500
-OUTPUT_LEN_OVERRIDE=20 # Max tokens to generate for safety classification
+OUTPUT_LEN_OVERRIDE=20 # Max tokens to generate for safety classification.
 
 # --- DATA PATHS ---
 # Source URL for the AILuminate CSV (Public Raw GitHub Link)
