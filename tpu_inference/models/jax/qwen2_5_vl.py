@@ -488,8 +488,8 @@ class Qwen2_5_VisionTransformer(nnx.Module):
 
         additional_config = getattr(vllm_config, "additional_config",
                                     None) or {}
-        self.enable_vision_padding = additional_config.get(
-            "enable_vision_padding", False)
+        self.enable_dynamic_image_sizes = additional_config.get(
+            "enable_dynamic_image_sizes", False)
 
     def rotary_pos_emb_thw(self, t, h, w):
         hpos_ids, wpos_ids = jnp.indices((h, w))
@@ -719,7 +719,7 @@ class Qwen2_5_VisionTransformer(nnx.Module):
         # """Shape: `(num_images, 3)`
         # This should be in `(grid_t, grid_h, grid_w)` format.
         # """
-        if self.enable_vision_padding:
+        if self.enable_dynamic_image_sizes:
             window_index, rotary_pos_emb, cu_seqlens, cu_window_seqlens = self.compute_aux_arrays(
                 grid_thw)
             x_padded, window_index, rotary_pos_emb, cu_seqlens, cu_window_seqlens, num_tokens = self.pad_inputs(
@@ -1138,7 +1138,7 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
     ) -> None:
         vc = self.vllm_config.model_config.hf_config.vision_config
         patch_input_dim = vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size
-        if self.visual.enable_vision_padding:
+        if self.visual.enable_dynamic_image_sizes:
             spatial_merge_unit = vc.spatial_merge_size**2
             max_num_batched_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
             mm_kwargs = self.vllm_config.model_config.multimodal_config.mm_processor_kwargs or {}
