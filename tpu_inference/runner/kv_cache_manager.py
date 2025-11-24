@@ -65,7 +65,7 @@ class KVCacheManager:
                 if use_mla:
                     kv_cache_spec[f"layer.{i}"] = MLAAttentionSpec(
                         block_size=block_size,
-                        num_kv_heads=num_kv_heads,
+                        num_kv_heads=1,
                         head_size=head_size,
                         dtype=self.runner.kv_cache_dtype,
                         cache_dtype_str=self.runner.vllm_config.cache_config.
@@ -90,7 +90,7 @@ class KVCacheManager:
                     if use_mla:
                         kv_cache_spec[f"layer.{i}"] = MLAAttentionSpec(
                             block_size=block_size,
-                            num_kv_heads=num_kv_heads,
+                            num_kv_heads=1,
                             head_size=head_size,
                             dtype=self.runner.kv_cache_dtype,
                             cache_dtype_str=self.runner.vllm_config.
@@ -131,7 +131,8 @@ class KVCacheManager:
                     elif use_mla:
                         kv_cache_spec[f"layer.{i}"] = MLAAttentionSpec(
                             block_size=block_size,
-                            num_kv_heads=attn_module.num_kv_heads,
+                            # num_kv_heads=attn_module.num_kv_heads,
+                            num_kv_heads=1,
                             head_size=attn_module.head_size,
                             dtype=self.runner.kv_cache_dtype,
                             cache_dtype_str=self.runner.vllm_config.

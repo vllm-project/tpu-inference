@@ -415,9 +415,10 @@ class TPUWorker:
                 f"Recalculating number of KV blocks using actual page size.")
 
             available_memory = self.determine_available_memory()
+            logger.warning(f"Available memory = {available_memory}")
             num_blocks = get_num_blocks(self.vllm_config, len(kv_cache_specs),
                                         available_memory, attention_page_size_bytes)
-
+            logger.warning(f"num_blocks = {num_blocks}")
             cache_config = self.vllm_config.cache_config
             cache_config.num_gpu_blocks_override = num_blocks
 
