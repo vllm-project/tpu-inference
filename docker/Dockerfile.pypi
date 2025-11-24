@@ -11,16 +11,27 @@ RUN apt-get update && apt-get install -y \
     git \
     libopenblas-base libopenmpi-dev libomp-dev
 
+# Install tpu_inference
+WORKDIR /workspace/tpu_inference
+COPY . .
+RUN export TARGET_TAG=$(git tag -l "v*" --sort=-v:refname | grep -E "^v[0-9]+\.[0-9]+\.[0-9]+$" | head -n 1) && \
+    echo "Found tpu_inference tag: $TARGET_TAG" && \
+    git checkout "$TARGET_TAG" && \
+    echo -n "$TARGET_TAG" > /tmp/target_version
+
 # Clone vLLM
 WORKDIR /workspace/vllm
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 RUN git clone $VLLM_REPO /workspace/vllm
-RUN pip install -r requirements/tpu.txt --retries 3
-#RUN pip install -r requirements/common.txt --retries 3
-#RUN pip install -r requirements/test.txt --retries 3
+RUN export TARGET_TAG=$(cat /tmp/target_version) && \
+    echo "Syncing vLLM to match tpu_inference tag: $TARGET_TAG" && \
+    git checkout "$TARGET_TAG"
 
 # Install vllm-tpu from PyPI
-RUN python3 -m pip install -v --no-cache-dir vllm-tpu
+RUN export TARGET_TAG=$(cat /tmp/target_version) && \
+    export PIP_VERSION=$(echo "$TARGET_TAG" | sed 's/^v//') && \
+    echo "Installing vllm-tpu version: $PIP_VERSION" && \
+    python3 -m pip install -v --no-cache-dir "vllm-tpu==$PIP_VERSION"
 
 # Install test dependencies
 RUN python3 -m pip install -e tests/vllm_test_utils
@@ -30,14 +41,5 @@ RUN python3 -m pip install --no-cache-dir \
     git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d#egg=lm-eval[api] \
     pytest-cov \
     tblib
-
-# Install tpu_inference
-WORKDIR /workspace/tpu_inference  
-COPY requirements.txt .
-RUN pip install -r requirements.txt --retries 3
-# These are needed for the E2E benchmarking tests (i.e. tests/e2e/benchmarking/mlperf.sh) 
-COPY requirements_benchmarking.txt .
-RUN pip install -r requirements_benchmarking.txt --retries 3
-COPY . . 
 
 CMD ["/bin/bash"]
