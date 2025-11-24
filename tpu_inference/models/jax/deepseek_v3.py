@@ -363,6 +363,7 @@ class DeepSeekV3WeightLoader:
             download_dir=vllm_config.load_config.download_dir)
         self.is_verbose = vllm_config.additional_config.get(
             "is_verbose", None) is not None
+        self.is_verbose = True
         self.num_routed_experts = num_local_experts
         self.model_dtype = model_dtype
 
@@ -455,17 +456,21 @@ class DeepSeekV3WeightLoader:
 
         # TODO (jacobplatin): we shouldn't hard-code this, but the logic to obtain the true quantized dtype
         # is non-trivial and the default checkpoints all use this dtype
-        self.quant_dtype = jnp.float8_e4m3fn
+        # self.quant_dtype = jnp.float8_e4m3fn
 
         self.is_model_quantized = not vllm_config.additional_config.get(
             "skip_quantization", False)
         if self.is_model_quantized:
             # TODO (jacobplatin): expand support eventually
-            quantization_type = vllm_config.model_config.hf_config.quantization_config[
-                "quant_method"]
-            assert quantization_type == "fp8", "DeepSeek only supports the fp8 quantization method for now"
+            # quantization_type = vllm_config.model_config.hf_config.quantization_config[
+            #    "quant_method"]
+            # assert quantization_type == "fp8", "DeepSeek only supports the fp8 quantization method for now"
             self.scale_dtype, self.quant_dtype = get_quant_dtype_from_qwix_config(
                 vllm_config)
+
+            # 1. HARDCODE the correct scale/quant dtypes for the quantization task
+            self.scale_dtype = jnp.bfloat16
+            self.quant_dtype = jnp.float4_e2m1fn
 
             logger.info(
                 f"Quantizing DeepSeek with quantization dtype: {self.quant_dtype} and scale dtype: {self.scale_dtype}"
@@ -476,10 +481,15 @@ class DeepSeekV3WeightLoader:
             assert len(
                 quantization_block_sizes
             ) == 2, f"Expected only 2 quantization block sizes but got {quantization_block_sizes}"
-            self.quantization_block_size_n = quantization_block_sizes[0]
-            self.quantization_block_size_k = quantization_block_sizes[1]
+            # self.quantization_block_size_n = quantization_block_sizes[0]
+            # self.quantization_block_size_k = quantization_block_sizes[1]
+
+            TPU_FP4_SUBCHANNEL_SIZE = 16
+            self.quantization_block_size_n = 1
+            self.quantization_block_size_k = TPU_FP4_SUBCHANNEL_SIZE
+
             # TODO (jacobplatin): remove this check in the future
-            assert self.quantization_block_size_n == self.quantization_block_size_k, "Quantization block size n and k must be the same!"
+            # assert self.quantization_block_size_n == self.quantization_block_size_k, "Quantization block size n and k must be the same!"
             # NOTE: this is only needed for pre-quantized models
             self._scale_shape_map = {
                 "q_b_proj": (1, qk_nope_head_dim + qk_rope_head_dim,

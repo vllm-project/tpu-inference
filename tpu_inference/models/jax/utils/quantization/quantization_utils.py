@@ -94,6 +94,48 @@ DEFAULT_GPT_OSS_FP4_CONFIG = {
     }
 }
 
+DEFAULT_GPT_OSS_TPU_FP4_CONFIG = {
+    "qwix": {
+        "use_abstract_model":
+        True,
+        "scale_dtype":
+        "bfloat16",
+        "rules": [
+            {
+                "module_path": ".*custom_module",
+                "weight_qtype": "float4_e2m1fn",
+                "act_qtype": None,
+                "tile_size": 256,
+            },
+        ],
+    }
+}
+
+DEFAULT_DEEPSEEK_TPU_FP4_CONFIG = {
+    "qwix": {
+        "use_abstract_model":
+        True,
+        "scale_dtype":
+        "bfloat16",
+        "rules": [
+            {
+                # Target all standard experts (assuming they are under 'custom_module')
+                "module_path": ".*custom_module",
+                "weight_qtype": "float4_e2m1fn",
+                "act_qtype": None,
+                "tile_size": 256,
+            },
+            {
+                # Target the shared expert modules
+                "module_path": ".*shared_experts",
+                "weight_qtype": "float4_e2m1fn",
+                "act_qtype": None,
+                "tile_size": 256,
+            },
+        ],
+    }
+}
+
 
 def parse_qwix_config_to_rules(
         qwix_config: List[dict]) -> List[qwix.QuantizationRule]:
