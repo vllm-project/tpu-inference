@@ -524,6 +524,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def get_kv_cache_spec(self):
         return self.kv_cache_manager.get_kv_cache_spec()
 
+    def get_kv_cache_layout(self):
+        return self.kv_cache_manager.get_kv_cache_layout()
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         self.kv_cache_config = kv_cache_config
         self.use_hybrid_kvcache = len(kv_cache_config.kv_cache_groups) > 1
