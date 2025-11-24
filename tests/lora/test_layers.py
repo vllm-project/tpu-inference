@@ -91,7 +91,6 @@ def populate_loras(
     index_to_id: list[Optional[int]],
     lora_layer: BaseLayerWithLoRA,
     baselayer_weights: torch.Tensor,
-    generate_embeddings_tensor: int = 0,
     repeats: int = 1,
 ) -> tuple[dict[int, LoRALayerWeights], dict[int, list[LoRALayerWeights]]]:
     """This method populates the lora weights (lora_a and lora_b) in the lora layers (BaseLayerWithLoRA).
@@ -103,8 +102,6 @@ def populate_loras(
         lora_layer: the LoRAlayer to populate.
         baselayer_weights: the PyTorch tensor containing the layer's
             weights.
-        generate_embeddings_tensor: whether to generate an
-            embeddings tensor for each LoRA.
         repeats: must only be set for column parallel packed
             layers. Indicates the number of loras to compose
             together to create a single lora layer.
@@ -131,7 +128,6 @@ def populate_loras(
                     baselayer_weights.device).init_random_lora(
                         module_name=f"fake_{i}",
                         weight=baselayer_weights,
-                        generate_embeddings_tensor=generate_embeddings_tensor,
                     )
                 sublora.lora_b = sublora.lora_b[(sublora_len *
                                                  i):(sublora_len * (i + 1)), :]
@@ -147,7 +143,6 @@ def populate_loras(
                     slot_idx,
                     lora_a=lora.lora_a,
                     lora_b=lora.lora_b,
-                    embeddings_tensor=lora.embeddings_tensor,
                 )
 
             lora_dict[lora_id] = lora
@@ -546,7 +541,6 @@ def _update_punica_wrapper_metadata(punica_wrapper, index_mapping,
             index_to_id,
             lora_config.max_loras,
             vocab_size=512,
-            extra_vocab_size=lora_config.lora_extra_vocab_size,
         )
         assert jax_view(punica_wrapper._lora_indices_per_batch).platform(
         ) == 'tpu', 'punica_wrapper._lora_indices_per_batch should have been moved to TPU.'

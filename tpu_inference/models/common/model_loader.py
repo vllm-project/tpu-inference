@@ -37,8 +37,6 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     from tpu_inference.models.jax.llama4 import Llama4ForCausalLM
     from tpu_inference.models.jax.llama_eagle3 import EagleLlama3ForCausalLM
     from tpu_inference.models.jax.llama_guard_4 import LlamaGuard4ForCausalLM
-    from tpu_inference.models.jax.phi3 import Phi3ForCausalLM
-    from tpu_inference.models.jax.qwen2 import Qwen2ForCausalLM
     from tpu_inference.models.jax.qwen2_5_vl import \
         Qwen2_5_VLForConditionalGeneration
     from tpu_inference.models.jax.qwen3 import Qwen3ForCausalLM
@@ -46,11 +44,9 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     _MODEL_REGISTRY["DeepseekV3ForCausalLM"] = DeepSeekV3
     _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
     _MODEL_REGISTRY["Llama4ForConditionalGeneration"] = LlamaGuard4ForCausalLM
-    _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
     _MODEL_REGISTRY["Qwen3ForCausalLM"] = Qwen3ForCausalLM
     _MODEL_REGISTRY[
         "Qwen2_5_VLForConditionalGeneration"] = Qwen2_5_VLForConditionalGeneration
-    _MODEL_REGISTRY["Phi3ForCausalLM"] = Phi3ForCausalLM
     _MODEL_REGISTRY["Eagle3LlamaForCausalLM"] = EagleLlama3ForCausalLM
     _MODEL_REGISTRY["GptOssForCausalLM"] = GptOss
 
@@ -59,8 +55,10 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
         if arch in _MODEL_REGISTRY:
             return _MODEL_REGISTRY[arch]
     raise UnsupportedArchitectureError(
-        f"Model architectures {architectures} are not supported for now. "
-        f"Supported architectures: {list(_MODEL_REGISTRY.keys())}")
+        f"Model architectures {architectures} not "
+        "registered in tpu-inference. Falling back to vLLM-native "
+        f"Pytorch definition. JAX-native architectures: {list(_MODEL_REGISTRY.keys())}"
+    )
 
 
 def _get_nnx_model(
@@ -219,7 +217,7 @@ def get_flax_model(
             hidden_states_sharding,  # aux hidden states
         ),
         donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
-        static_argnums=6,  #6 is layer_name_to_kvcache_index
+        static_argnums=7,  #7 is layer_name_to_kvcache_index
     )
     def run_model(graphdef, state, *args):
         model = nnx.merge(graphdef, state)
@@ -328,8 +326,8 @@ def get_model(
             # Convert the error message to a string to check its contents
             error_msg = str(e)
 
-            logger.warning(f"Flax model failed with: '{error_msg}'. "
-                           "Falling back to vLLM implementation.")
+            logger.warning(error_msg)
+
             # Fall back to the vLLM model and updating the dtype accordingly
             vllm_config.model_config.dtype = j2t_dtype(
                 vllm_config.model_config.dtype.dtype)
@@ -423,6 +421,17 @@ def register_model(arch: str, model: Any) -> None:
             "This is a JAX model and does not implement the PyTorch forward method."
         )
 
+    # Same as `forward`, this is a dummy method to satisfy vLLM's type checks.
+    def unimplemented_get_input_embeddings(
+        self,
+        input_ids: "torch.Tensor",
+        positions: "torch.Tensor",
+        inputs_embeds: Optional["torch.Tensor"] = None,
+    ) -> "torch.Tensor":
+        raise NotImplementedError(
+            "This is a JAX model and does not implement the PyTorch get_input_embeddings method."
+        )
+
     # We need a custom __init__ that only calls torch.nn.Module's init,
     # to avoid triggering JAX logic when vLLM inspects the class.
     def wrapper_init(self, *args, **kwargs):
@@ -436,6 +445,7 @@ def register_model(arch: str, model: Any) -> None:
         {
             "__init__": wrapper_init,
             "forward": unimplemented_forward,
+            "get_input_embeddings": unimplemented_get_input_embeddings,
             # Prevent vLLM from trying to load weights into this dummy class.
             "load_weights": lambda self, *args, **kwargs: None,
         })

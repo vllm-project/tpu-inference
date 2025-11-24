@@ -1,8 +1,10 @@
 Feature,CorrectnessTest,PerformanceTest
 "Chunked Prefill",✅,✅
 "Multimodal Inputs",✅,✅
+"Optimized Runtime Sampling (top k, top p, temperature, logit output)",to be added,to be added
+"Out-of-tree model support",to be added,to be added
 "Prefix Caching",✅,✅
 "Single Program Multi Data",✅,✅
 "Speculative Decoding: Ngram",✅,❌
 "Structured Decoding",✅,to be added
-"async scheduler",❌,N/A
+"async scheduler",✅,✅

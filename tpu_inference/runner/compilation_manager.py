@@ -1,6 +1,6 @@
 import os
 import time
-from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -135,12 +135,6 @@ class CompilationManager:
                 ShardingAxisName.ATTN_DATA, )) if dp_size > 1 else None
 
         # Keep existing pattern for complex array operations
-        block_tables = self.runner.block_table_cpu[:self.runner.max_num_reqs]
-        block_tables = block_tables.reshape(-1)
-        block_tables = device_array(self.runner.mesh,
-                                    block_tables,
-                                    sharding=dp_sharding)
-
         seq_lens = self._create_dummy_tensor((self.runner.max_num_reqs, ),
                                              jnp.int32, dp_sharding)
         query_start_loc = self._create_dummy_tensor(
@@ -152,26 +146,45 @@ class CompilationManager:
                                             request_distribution,
                                             sharding=dp_sharding)
 
-        attention_metadata = AttentionMetadata(
-            input_positions=positions,
-            block_tables=block_tables,
-            seq_lens=seq_lens,
-            query_start_loc=query_start_loc,
-            request_distribution=request_distribution,
-        )
+        attention_metadata_per_layer: Dict[str, AttentionMetadata] = {}
+        uniform_attention_metadata: AttentionMetadata = None
+        for kv_cache_gid, kv_cache_group in enumerate(
+                self.runner.kv_cache_config.kv_cache_groups):
+            block_tables = self.runner.block_tables_cpu[
+                kv_cache_gid][:self.runner.max_num_reqs]
+            block_tables = block_tables.reshape(-1)
+            block_tables = device_array(self.runner.mesh,
+                                        block_tables,
+                                        sharding=dp_sharding)
+
+            attention_metadata_gid = AttentionMetadata(
+                input_positions=positions,
+                block_tables=block_tables,
+                seq_lens=seq_lens,
+                query_start_loc=query_start_loc,
+                request_distribution=request_distribution,
+            )
+            if not self.runner.use_hybrid_kvcache:
+                # all layers share the same attention metadata
+                uniform_attention_metadata = attention_metadata_gid
+            else:
+                for layer_name in kv_cache_group.layer_names:
+                    attention_metadata_per_layer[
+                        layer_name] = attention_metadata_gid
 
         def model_fn_wrapper(
             state,
             kv_caches,
             input_ids,
             attention_metadata,
+            positions,
             inputs_embeds,
             layer_name_to_kvcache_index,
             lora_metadata,
         ):
             kv_caches, hidden_states, _ = self.runner.model_fn(
                 state, kv_caches, input_ids, attention_metadata, inputs_embeds,
-                layer_name_to_kvcache_index, lora_metadata)
+                positions, layer_name_to_kvcache_index, lora_metadata)
             self.runner.kv_caches = kv_caches
             return hidden_states
 
@@ -179,6 +192,10 @@ class CompilationManager:
                 self.runner.lora_config, np.array([num_tokens],
                                                   dtype=np.int32)):
             lora_metadata = self.runner.lora_utils.extract_lora_metadata()
+            if self.runner.use_hybrid_kvcache:
+                attention_metadata = attention_metadata_per_layer
+            else:
+                attention_metadata = uniform_attention_metadata
             self._run_compilation(
                 name,
                 model_fn_wrapper,
@@ -186,6 +203,7 @@ class CompilationManager:
                 self.runner.kv_caches,
                 input_ids,
                 attention_metadata,
+                positions,
                 inputs_embeds,
                 tuple(self.runner.layer_name_to_kvcache_index.items()),
                 lora_metadata,
