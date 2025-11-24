@@ -145,9 +145,7 @@ class TestTPUWorker:
             devices=[]  # No devices provided, should trigger auto-detection
         )
         mock_jax.device_count.return_value = 4
-        mock_jax.devices.return_value = [
-            'tpu:0', 'tpu:1', 'tpu:2', 'tpu:3'
-        ]
+        mock_jax.devices.return_value = ['tpu:0', 'tpu:1', 'tpu:2', 'tpu:3']
 
         worker.init_device()
 
