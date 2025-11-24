@@ -141,6 +141,7 @@ run_accuracy_check() {
         echo "Running pytest from: $(pwd)"
 
         python -m pytest -s -rP "$RELATIVE_TEST_FILE::test_safety_model_accuracy_check" \
+            -W ignore::DeprecationWarning \
             --tensor-parallel-size="$TP_SIZE" \
             --model-name="$MODEL_NAME" \
             --expected-value="$MINIMUM_ACCURACY_THRESHOLD" \
