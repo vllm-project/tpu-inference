@@ -121,9 +121,9 @@ class ShardingConfigManager:
         if enable_dp_attention:
             # Replicate attention layer when num_kv_heads < TP
             num_kv_heads = 1 if USE_MLA_KERNEL else vllm_config.model_config.get_total_num_kv_heads()
-            if tensor_parallelism:
-                tensor_parallelism = data_parallelism 
-                data_parallelism = 1
+            # if tensor_parallelism:
+                # tensor_parallelism = data_parallelism 
+                # data_parallelism = 1
             kv_dtype = utils.get_jax_dtype_from_str_dtype(
                 vllm_config.cache_config.cache_dtype) or jnp.bfloat16
             packing = 4 // jnp.dtype(kv_dtype).itemsize

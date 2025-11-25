@@ -514,7 +514,8 @@ class MLA(nnx.Module):
                 # num_queries_per_block = min(max_num_tokens, 16)
                 # num_queries_per_block = min(max_num_tokens, bq_sz) # OOMS at 8
                 num_queries_per_block = min(max_num_tokens, 4) # OOMS at 8
-
+                logger.warning(f"******max_num_seqs = {max_num_seqs}")
+                logger.warning(f"******num_page_indices = {num_page_indices}")
                 logger.warning(f"******pages_per_seq = {pages_per_seq}, bkv_p = {bkv_p}")
                 logger.warning(f"******max_num_tokens = {max_num_tokens}, bq_sz = {bq_sz}")
                 # logger.warning(f"******num_queries_per_block = {num_queries_per_block}")
