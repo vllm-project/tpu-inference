@@ -144,14 +144,12 @@ class TestTPUWorker:
             distributed_init_method="test_method",
             devices=[]  # No devices provided, should trigger auto-detection
         )
-        mock_jax.local_device_count.return_value = 4
-        mock_jax.local_devices.return_value = [
-            'tpu:0', 'tpu:1', 'tpu:2', 'tpu:3'
-        ]
+        mock_jax.device_count.return_value = 4
+        mock_jax.devices.return_value = ['tpu:0', 'tpu:1', 'tpu:2', 'tpu:3']
 
         worker.init_device()
 
-        mock_jax.local_devices.assert_called_once()
+        mock_jax.devices.assert_called_once()
         expected_devices = ['tpu:0', 'tpu:1']  # Sliced by tensor_parallel_size
         assert worker.devices == expected_devices
         expected_rank = 0

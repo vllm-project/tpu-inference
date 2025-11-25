@@ -239,7 +239,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         lora_index_to_id: list[Optional[int]],
         max_loras: int,
         vocab_size: int,
-        extra_vocab_size: int,
     ):
         # Pad the prompt mapping to avoid running into recompiles on the TPU
         # TODO: Should this happen inside mapping internally? If so how can we
@@ -258,7 +257,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             lora_index_to_id,
             max_loras,
             vocab_size,
-            extra_vocab_size,
+            0,  # extra_vocab_size
             "cpu",
         )
         with torchax.default_env():

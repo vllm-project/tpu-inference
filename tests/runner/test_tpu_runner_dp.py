@@ -46,8 +46,15 @@ class TestTPUJaxRunnerDPInputsLightweight:
         self.runner.query_start_loc_cpu = np.zeros(10, dtype=np.int32)
         self.runner.seq_lens_cpu = np.zeros(8, dtype=np.int32)
         self.runner.logits_indices_cpu = np.zeros(8, dtype=np.int32)
-        self.runner.block_table_cpu = np.zeros((8, 8), dtype=np.int32)
+        self.runner.block_tables_cpu = [np.zeros((8, 8), dtype=np.int32)]
         self.runner.arange_cpu = np.arange(64, dtype=np.int64)
+
+        # mock kv cache group
+        mock_kv_cache_config = MagicMock()
+        mock_kv_cache_group = MagicMock()
+        mock_kv_cache_config.kv_cache_groups = [mock_kv_cache_group]
+        self.runner.kv_cache_config = mock_kv_cache_config
+        self.runner.use_hybrid_kvcache = False
 
         # Mock scheduler config for async scheduling
         self.runner.scheduler_config = MagicMock()
@@ -102,8 +109,8 @@ class TestTPUJaxRunnerDPInputsLightweight:
         result = self.runner._prepare_inputs_dp(scheduler_output)
 
         # Basic assertions
-        assert len(result) == 7
-        input_ids, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs = result
+        assert len(result) == 8
+        input_ids, positions, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs = result
 
         # Verify utility functions were called
         mock_runner_utils.get_padded_token_len.assert_called()
@@ -380,7 +387,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         # Execute the method
         result = self.runner._prepare_inputs_dp(scheduler_output)
-        input_ids, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs = result
+        input_ids, positions, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs = result
         # 1. Verify input_ids content
         expected_input_ids = np.zeros(16, dtype=np.int32)
         expected_input_ids[:2] = [1006, 1007]
@@ -494,7 +501,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         # Execute the method
         result = self.runner._prepare_inputs_dp(scheduler_output)
-        input_ids, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs = result
+        input_ids, positions, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs = result
 
         # 1. Verify input_ids
         expected_input_ids = np.zeros(16, dtype=np.int32)

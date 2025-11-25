@@ -161,6 +161,7 @@ class VllmModelWrapper:
             input_ids: jax.Array,
             attn_metadata: AttentionMetadata,
             input_embeds: jax.Array,
+            input_positions: jax.Array,
             layer_name_to_kvcache_index: Sequence[Tuple[str, int]],
             lora_metadata,
             intermediate_tensors: JaxIntermediateTensors = None,
@@ -187,8 +188,8 @@ class VllmModelWrapper:
                     torch_view(params_and_buffers),
                     kwargs={
                         "input_ids": torch_view(input_ids),
-                        "positions": torch_view(attn_metadata.input_positions),
-                        "intermediate_tensors": intermediate_tensors,
+                        "positions": torch_view(input_positions),
+                        "intermediate_tensors": None,
                         "inputs_embeds": None,
                     },
                     tie_weights=False,
@@ -268,10 +269,9 @@ def replace_set_lora(model):
         index: int,
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
-        embeddings_tensor: Optional[torch.Tensor],
     ):
         with torchax.default_env():
-            self._original_set_lora(index, lora_a, lora_b, embeddings_tensor)
+            self._original_set_lora(index, lora_a, lora_b)
 
     def _tpu_reset_lora(self, index: int):
         with torchax.default_env():

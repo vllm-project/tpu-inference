@@ -212,10 +212,20 @@ class TPUWorker:
                 assert len(self.devices) >= sharding_config.total_devices
                 self.devices = self.devices[:sharding_config.total_devices]
             else:
-                assert jax.local_device_count(
-                ) >= sharding_config.total_devices
-                self.devices = jax.local_devices()[:sharding_config.
-                                                   total_devices]
+                if self.pp_config.pp_world_size > 1:
+                    # We only support a mixed tp + pp scenario that tp size is
+                    #  smaller or equals the total TPUs in one node
+                    # say: we have 4 nodes with 4 TPUs each, we can only do pp:4, tp:4, but not pp:2, tp:8
+                    assert jax.local_device_count(
+                    ) >= sharding_config.total_devices
+                    self.devices = jax.local_devices()[:sharding_config.
+                                                       total_devices]
+                else:
+                    # In a multi-host distributed env, say: Ray, local_device count may smaller
+                    # than the total devices, we just choose the smaller set here.
+                    self.devices = jax.devices()[:sharding_config.
+                                                 total_devices]
+
         # Initialize the vLLM distribution layer as a single chip environment,
         # we'll swap the model's parallel modules with TPU SPMD equivalents.
         with set_current_vllm_config(self.vllm_config):

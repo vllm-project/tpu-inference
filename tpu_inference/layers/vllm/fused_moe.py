@@ -110,7 +110,8 @@ def tensor_sharded_gmm_merged_column_parallel(
     # adapted from https://github.com/pytorch/xla/blob/1d409399474197c484894be90b75d9855393dda5/torch_xla/experimental/custom_kernel.py#L1401
     m, k, g = lhs.shape[0], lhs.shape[1], rhs.shape[0]
     n = rhs.shape[1] if transpose_rhs else rhs.shape[2]
-    tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
+    tm, tk, tn = _get_tiling_size_for_gmm_kernel(m // mesh.shape["data"], k, n,
+                                                 g)
 
     _gmm = functools.partial(
         gmm,
@@ -123,14 +124,26 @@ def tensor_sharded_gmm_merged_column_parallel(
     gmm_result = shard_map(
         _gmm,
         mesh=mesh,
-        in_specs=(P(), P(None, "model", None), P()),
-        out_specs=(P(None, "model")),
+        in_specs=(P("data", None), P(None, "model", None), P("data")),
+        out_specs=(P("data", "model")),
         check_rep=False,
     )(lhs, rhs, group_sizes)
 
     if rhs_bias is not None:
-        rhs_bis = jnp.repeat(rhs_bias, group_sizes, 0, total_repeat_length=m)
-        gmm_result = (gmm_result + rhs_bis).astype(gmm_result.dtype)
+
+        def _add_bias(gmm_result_local, rhs_bias_local, group_sizes_global):
+            rhs_bis = jnp.repeat(rhs_bias_local,
+                                 group_sizes_global,
+                                 0,
+                                 total_repeat_length=m // mesh.shape["data"])
+            return (gmm_result_local + rhs_bis).astype(gmm_result_local.dtype)
+
+        gmm_result = shard_map(
+            _add_bias,
+            mesh=mesh,
+            in_specs=(P("data", "model"), P(None, "model"), P("data")),
+            out_specs=(P("data", "model")),
+        )(gmm_result, rhs_bias, group_sizes)
 
     n_shards = mesh.shape["model"]
     output_sizes = [intermediate_size, intermediate_size]
@@ -150,7 +163,8 @@ def tensor_sharded_gmm_row_parallel(
     # adapted from https://github.com/pytorch/xla/blob/1d409399474197c484894be90b75d9855393dda5/torch_xla/experimental/custom_kernel.py#L1401
     m, k, g = lhs.shape[0], lhs.shape[1], rhs.shape[0]
     n = rhs.shape[1] if transpose_rhs else rhs.shape[2]
-    tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
+    tm, tk, tn = _get_tiling_size_for_gmm_kernel(m // mesh.shape["data"], k, n,
+                                                 g)
 
     _gmm = functools.partial(
         gmm,
@@ -167,14 +181,25 @@ def tensor_sharded_gmm_row_parallel(
     gmm_result = shard_map(
         _gmm_all_reduce,
         mesh=mesh,
-        in_specs=(P(None, "model"), P(None, None, "model"), P()),
-        out_specs=(P()),
+        in_specs=(P("data", "model"), P(None, None, "model"), P("data")),
+        out_specs=(P("data")),
         check_rep=False,
     )(lhs, rhs, group_sizes)
-
     if rhs_bias is not None:
-        rhs_bias = jnp.repeat(rhs_bias, group_sizes, 0, total_repeat_length=m)
-        gmm_result = (gmm_result + rhs_bias).astype(gmm_result.dtype)
+
+        def _add_bias(gmm_result_local, rhs_bias_local, group_sizes_global):
+            rhs_bis = jnp.repeat(rhs_bias_local,
+                                 group_sizes_global,
+                                 0,
+                                 total_repeat_length=m // mesh.shape["data"])
+            return (gmm_result_local + rhs_bis).astype(gmm_result_local.dtype)
+
+        gmm_result = shard_map(
+            _add_bias,
+            mesh=mesh,
+            in_specs=(P("data"), P(), P("data")),
+            out_specs=(P("data")),
+        )(gmm_result, rhs_bias, group_sizes)
 
     return gmm_result
 
@@ -366,15 +391,27 @@ def fused_moe_func(
         topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
     topk_weights = topk_weights.astype(dtype)
 
-    topk_indices_flat = topk_indices.flatten()
-    topk_argsort_indices = jnp.argsort(topk_indices_flat)
-    topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
-    token_indices = jnp.arange(num_tokens, dtype=jnp.int32).repeat(topk)
-    token_indices_sorted = token_indices[topk_argsort_indices]
-    group_sizes = jnp.bincount(topk_indices_flat, length=global_num_experts)
+    def _process_tokens_locally(hidden_states_local, topk_indices_local):
+        num_tokens_local = hidden_states_local.shape[0]
+        topk_indices_flat = topk_indices_local.flatten()
+        topk_argsort_indices = jnp.argsort(topk_indices_flat)
+        topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
+        token_indices = jnp.arange(num_tokens_local,
+                                   dtype=jnp.int32).repeat(topk)
+        token_indices_sorted = token_indices[topk_argsort_indices]
+        group_sizes_local = jnp.bincount(topk_indices_flat,
+                                         length=global_num_experts)
 
-    x = hidden_states[token_indices_sorted]
+        x = hidden_states_local[token_indices_sorted]
+        return x, group_sizes_local, topk_argsort_revert_indices
 
+    x, group_sizes, topk_argsort_revert_indices = shard_map(
+        _process_tokens_locally,
+        mesh=mesh,
+        in_specs=(P("data", None), P("data", None)),
+        out_specs=(P("data", None), P("data"), P("data")),
+        check_rep=False,
+    )(hidden_states, topk_indices)
     if use_ep:
         x = expert_sharded_gmm(
             x,
@@ -411,7 +448,7 @@ def fused_moe_func(
         )
     else:
         x = jax.lax.with_sharding_constraint(
-            x, NamedSharding(mesh, P(None, "model")))
+            x, NamedSharding(mesh, P("data", "model")))
         x = tensor_sharded_gmm_row_parallel(
             x,
             w2,
@@ -421,13 +458,25 @@ def fused_moe_func(
             mesh=mesh,
         )
 
-    x = x[topk_argsort_revert_indices].reshape(-1, topk, hidden_size)
-    x = x * jnp.expand_dims(topk_weights, axis=-1)
-    x = x.sum(axis=-2)
+    def _finalize_output(x_local, topk_argsort_revert_indices_local,
+                         topk_weights_local):
+        x_local = x_local[topk_argsort_revert_indices_local].reshape(
+            -1, topk, hidden_size)
+        x_local = x_local * jnp.expand_dims(topk_weights_local, axis=-1)
+        x_local = x_local.sum(axis=-2)
+        return x_local
+
+    x = shard_map(
+        _finalize_output,
+        mesh=mesh,
+        in_specs=(P("data", None), P("data"), P("data", None)),
+        out_specs=(P("data", None)),
+        check_rep=False,
+    )(x, topk_argsort_revert_indices, topk_weights)
     x = x.reshape(orig_shape)
 
     if reduce_results:
-        x = jax.lax.with_sharding_constraint(x, NamedSharding(mesh, P()))
+        x = jax.lax.with_sharding_constraint(x, NamedSharding(mesh, P("data")))
     return x
 
 

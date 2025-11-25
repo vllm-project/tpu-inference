@@ -295,7 +295,8 @@ class Qwen3ForCausalLM(nnx.Module):
                 "lm_head": "model.lm_head",
             })
 
-        metadata_map = get_default_maps(self.vllm_config, self.mesh, mappings)
+        metadata_map = get_default_maps(self.vllm_config.model_config,
+                                        self.mesh, mappings)
         load_hf_weights(vllm_config=self.vllm_config,
                         model=self,
                         metadata_map=metadata_map,

@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING, Any, Optional, Tuple, Union, cast
 
 import jax.numpy as jnp
+import torch
 import vllm.envs as vllm_envs
 from torchax.ops.mappings import j2t_dtype
 from tpu_info import device
@@ -83,6 +84,14 @@ class TpuPlatform(Platform):
             return 'TPU'
 
     @classmethod
+    def fp8_dtype(cls) -> torch.dtype:
+        if cls.get_device_name().lower() == "tpu v6e":
+            logger.info(
+                "Automatically using fp8_e5m2 for FP8 KV cache on TPU v6e.")
+            return torch.float8_e5m2
+        return torch.float8_e4m3fn
+
+    @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         raise NotImplementedError
 
@@ -132,6 +141,7 @@ class TpuPlatform(Platform):
         # For v0, the default block size is 16.
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = cast(BlockSize, 16)
+
         compilation_config = vllm_config.compilation_config
 
         # TPU only supports DYNAMO_TRACE_ONCE compilation level
@@ -265,4 +275,8 @@ class TpuPlatform(Platform):
         """
         Returns if the current platform needs to sync weight loader.
         """
+        return True
+
+    @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
         return True
