@@ -44,6 +44,9 @@ def gen_moe_inputs(
         jax.nn.one_hot(top_k_indices, num_experts, dtype=jnp.float32),
         axis=1,
     ) * 30)
+    import pdb
+    pdb.set_trace()
+    # xw32q: why does we set up gating_output by adding a one_hot?
     gating_output = (gating_output + one_hot).astype(dtype)
     return a, w1, w2, gating_output
 
@@ -80,8 +83,10 @@ class MoEKernelTest(jtu.JaxTestCase):
                 (-1 if x.coords[0] % 2 else 1) * x.coords[1],
             ),
         )
+        # xw32: self.mesh_devices=[TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0), TpuDevice(id=2, process_index=0, coords=(0,1,0), core_on_chip=0), TpuDevice(id=3, process_index=0, coords=(1,1,0), core_on_chip=0), TpuDevice(id=1, process_index=0, coords=(1,0,0), core_on_chip=0)]
         self.mesh = Mesh(np.array(self.mesh_devices).reshape(1, -1),
                          axis_names=("data", "model"))
+        # xw32: Mesh(axis_sizes=(1, 4), axis_names=('data', 'model'), axis_types=(Auto, Auto))
 
     def _test_moe(
         self,

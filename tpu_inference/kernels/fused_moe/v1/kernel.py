@@ -164,21 +164,26 @@ def _fused_ep_moe_kernel(
     w1_scale_hbm,  # None | F32(local_num_experts, 2, cdiv(hidden_size, subc_quant_wsz), 1, intermediate_size)
         w2_scale_hbm,  # None | F32(local_num_experts, cdiv(intermediate_size, subc_quant_wsz), 1, hidden_size)
         gating_hbm,  # (local_num_tokens, padded_num_experts)
-        a2a_g_hbm,  # (num_experts, bt, t_packing, hidden_size // t_packing)
+        # xw32q: what is a2a_g_hbm?
+    a2a_g_hbm,  # (num_experts, bt, t_packing, hidden_size // t_packing)
         # Output
     output_hbm,  # (local_num_tokens, hidden_size)
         # Scratch
+        # xw32q: what is t2e and d2e?
     t2e_routing_x2_smem,  # <bt_sem_id> (2, bt, padded_num_experts)
         d2e_count_x2_smem,  # <bt_sem_id> (2, num_devices, 1, padded_num_experts)
         expert_offsets_x2_smem,  # <bt_sem_id> (2, 2, padded_num_experts): for a2a_s and a2a_g
         expert_starts_x2_smem,  # <bt_sem_id> (2, 1, padded_num_experts)
         expert_sizes_x2_smem,  # <bt_sem_id> (2, 1, padded_num_experts)
-        a2a_s_sends_x2_smem,  # <e_sem_id> (2,)
+        # what does 's' stand for in a2a_s_sends_x2_smem?
+    a2a_s_sends_x2_smem,  # <e_sem_id> (2,)
         a2a_s_x2_vmem,  # <e_sem_id> (2, bt * num_devices, t_packing, hidden_size // t_packing)
         a2a_s_acc_x2_vmem,  # <e_sem_id> (2, bt * num_devices, t_packing, hidden_size // t_packing)
         ### Accumulation for gathered tokens:
+        # xw32q: what does 'g' stand for in a2a_g_acc_vmem?
     a2a_g_acc_vmem,  # (top_k, bt, t_packing, hidden_size // t_packing)
         ### Expert weight double buffering:
+        # xw32q: what does 'b' stand for in b_gating_x2_vmem?
     b_gating_x2_vmem,  # <bt_sem_id> (2, bt, padded_num_experts)
         b_output_x2_vmem,  # <bt_sem_id> (2, bt, hidden_size)
         b_w1_x2_vmem,  # <bw_sem_id> (2, t_packing, bd1 // t_packing, bf)
@@ -286,6 +291,7 @@ def _fused_ep_moe_kernel(
         ).wait()
 
     def get_top_k(input, top_k, renormalize_topk_logits):
+        # xw32q: what's the shape of input here?
         assert len(input.shape) == 2, input.shape
         input = input.astype(jnp.float32)
         top_k_logits_lst = []
@@ -1070,6 +1076,7 @@ def fused_ep_moe(
         jax.Array | None
     ) = None,  # (num_experts, cdiv(intermediate_size, subc_quant_wsz), hidden_size)
     # Kernel tuning parameters.
+    # xw32: what are these block sizes for?
     bt: int,
     bf: int,
     bd1: int,

@@ -98,18 +98,22 @@ def ref_ragged_paged_attention(
 
         # Update the kv cache.
         assert kv_len - q_len >= 0
-        gathered_kv = kv_cache[indices]
+        gathered_kv = kv_cache[
+            indices]  # [(indices_end-indices_start), page_size, num_kv_heads_x2_per_kv_packing, kv_packing, head_dim]
         gathered_shape = gathered_kv.shape
-        gathered_kv = gathered_kv.reshape(-1, *gathered_shape[-3:])
+        gathered_kv = gathered_kv.reshape(
+            -1, *gathered_shape[-3:]
+        )  # [(indices_end-indices_start)*page_size, num_kv_heads_x2_per_kv_packing, kv_packing, head_dim]
         gathered_kv = gathered_kv.at[kv_len - q_len:kv_len].set(
             merged_kv[q_start:q_end])
         kv_cache = kv_cache.at[indices].set(
             gathered_kv.reshape(gathered_shape))
 
         kv = gathered_kv.reshape(
-            -1, num_kv_heads_x2,
-            head_dim)[:, :actual_num_kv_heads * 2, :].reshape(
-                -1, actual_num_kv_heads, head_dim * 2)
+            -1, num_kv_heads_x2, head_dim
+        )[:, :actual_num_kv_heads * 2, :].reshape(
+            -1, actual_num_kv_heads, head_dim * 2
+        )  # [(indices_end-indices_start)*page_size, actual_num_kv_heads, head_dim*2]
         k = kv[:kv_len, :, :head_dim][:, :, :actual_head_dim]
         v = kv[:kv_len, :, head_dim:][:, :, :actual_head_dim]
         k = jnp.repeat(k, actual_num_q_heads_per_kv_head, axis=1)
@@ -392,6 +396,7 @@ def _ragged_paged_attention_kernel(
     def _async_copy(src, dst, sem, wait):
         if debug_mode:
             # Skip DMA if debug mode is enabled.
+            # xw32q: why can we skip dma if debug mode is enabled?
             return
         cp = pltpu.make_async_copy(src, dst, sem)
         if wait:
@@ -826,6 +831,7 @@ def _ragged_paged_attention_kernel(
 
                 # Start updating bkv to kv cache if applicable.
                 # Only needed in first bq loop.
+                # xw32q: why do we only need to update kv_cache in the first bq loop?
                 @pl.when(jnp.logical_and(update_sz > 0, bq_idx == 0))
                 def update_cur_bkv_to_cache():
                     start_update_kv_cache(seq_idx, bkv_sem_idx, offset,
@@ -992,7 +998,7 @@ def prepare_inputs(
             head_dim,
         )
         # TODO(jevinjiang): Explore fusing swapping non-tiling axis to DMA.
-        .swapaxes(0, 1))
+        .swapaxes(0, 1))  # xw32q: why swap axes?
     # TODO(kyuyeunk, chengjiyao): Add kv quantization here.
     kv = merge_kv(k, v)
     return q, kv
