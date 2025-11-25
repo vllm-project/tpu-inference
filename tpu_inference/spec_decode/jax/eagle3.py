@@ -9,9 +9,12 @@ import numpy as np
 from vllm.config import VllmConfig
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import get_model
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.utils import device_array
+
+logger = init_logger(__name__)
 
 
 class Eagle3Proposer:
@@ -51,9 +54,22 @@ class Eagle3Proposer:
         """Loads the draft model."""
         self.model_fn, self.compute_logits_fn, self.combine_hidden_states_fn, _, self.state, _, _ = get_model(
             self.vllm_config, self.rng_key, self.mesh, is_draft_model=True)
-        if 'embed_tokens' in self.state.model:
-            del self.state.model['embed_tokens']
-        self.state.model.embed_tokens = target_model.model.embed
+
+        draft_embed_tokens = getattr(self.state.model, 'embed_tokens', None)
+        if draft_embed_tokens is None or ~jnp.any(
+                draft_embed_tokens.embedding):
+            logger.info(
+                "Draft model does not have embedding. Setting draft model's embed_tokens to target model's embed"
+            )
+            self.state.model.embed_tokens = target_model.model.embed
+        elif jnp.array_equal(draft_embed_tokens.embedding,
+                             target_model.model.embed.embedding):
+            logger.info(
+                "Draft model's embed_tokens is identical to target model's embed. Sharing the embedding."
+            )
+            self.state.model.embed_tokens = target_model.model.embed
+        else:
+            logger.info("Draft model has its own embed_tokens.")
 
     @functools.partial(jax.jit, static_argnums=(0, ))
     def _prepare_input_ids(

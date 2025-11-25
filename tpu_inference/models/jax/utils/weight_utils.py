@@ -402,7 +402,6 @@ def _load_hf_weights_on_thread(
     weights_file: str,
     filter_regex: Optional[str] = None,
     keep_original_dtype_keys_regex: Optional[list[str]] = None,
-    exclude_regex: Optional[list[str]] = None,
 ):
     """Loads weights from a single weights file."""
     try:
@@ -412,17 +411,6 @@ def _load_hf_weights_on_thread(
 
     for hf_key, hf_weight in model_weights_single_file_generator(
             weights_file, framework="flax", filter_regex=filter_regex):
-        # Check if the key should be excluded
-        if exclude_regex:
-            should_exclude = False
-            for pattern in exclude_regex:
-                if re.search(pattern, hf_key):
-                    logger.info(
-                        f"Excluding {hf_key} based on pattern {pattern}")
-                    should_exclude = True
-                    break
-            if should_exclude:
-                continue
         _load_and_shard_weight(
             vllm_config,
             params,
@@ -443,7 +431,6 @@ def load_hf_weights(
     filter_regex: Optional[str] = None,
     is_draft_model: bool = False,
     keep_original_dtype_keys_regex: Optional[list[str]] = None,
-    exclude_regex: Optional[list[str]] = None,
 ):
     """Load weights into a JAX model from either an iterator or files."""
     params = nnx.state(model)
@@ -491,17 +478,17 @@ def load_hf_weights(
             max_workers = 1
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
-                executor.submit(_load_hf_weights_on_thread,
-                                vllm_config,
-                                params,
-                                metadata_map,
-                                mesh,
-                                weights_file,
-                                filter_regex=filter_regex,
-                                keep_original_dtype_keys_regex=
-                                keep_original_dtype_keys_regex,
-                                exclude_regex=exclude_regex)
-                for weights_file in weights_files
+                executor.submit(
+                    _load_hf_weights_on_thread,
+                    vllm_config,
+                    params,
+                    metadata_map,
+                    mesh,
+                    weights_file,
+                    filter_regex=filter_regex,
+                    keep_original_dtype_keys_regex=
+                    keep_original_dtype_keys_regex,
+                ) for weights_file in weights_files
             ]
             for future in futures:
                 future.result()
