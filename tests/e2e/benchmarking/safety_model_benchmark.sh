@@ -34,7 +34,13 @@ export TIMEOUT_SECONDS=600
 # Check thresholds (set in CI YAML env block)
 # shellcheck disable=SC2269
 MINIMUM_ACCURACY_THRESHOLD=${MINIMUM_ACCURACY_THRESHOLD}
-TARGET_THROUGHPUT="450.00"
+if [ "$TP_SIZE" -eq 1 ]; then
+    TARGET_THROUGHPUT="225.00" # New threshold for single device
+elif [ "$TP_SIZE" -ge 8 ]; then
+    TARGET_THROUGHPUT="487.00" # Threshold for high-parallelism (TP=8)
+else
+    TARGET_THROUGHPUT="487.00"
+fi
 
 # Benchmark/Serve Settings
 MAX_MODEL_LEN=4096
