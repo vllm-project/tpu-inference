@@ -195,6 +195,8 @@ def _fused_ep_moe_kernel(
         a2a_gather_sem,
         a2a_acc_sem,
         *,
+        actual_hidden_size: int,
+        actual_intermediate_size: int,
         top_k: int,
         renormalize_topk_logits: bool,
         ep_axis_name: str,
@@ -703,7 +705,18 @@ def _fused_ep_moe_kernel(
                 for p_id in range(t_packing):
                     t = pltpu.bitcast(t_b32.astype(repack_ty), t_dtype)
                     t_b32 = t_b32 >> t_bitwidth
+
+                    # Create mask for hidden_size dimension - zero out padded inputs
+                    bd1_elem_start = bd1c_id * bd1c_per_t_packing * t_packing + p_id * bd1c_per_t_packing
+                    hidden_mask = lax.broadcasted_iota(
+                        jnp.int32, t.shape,
+                        1) + bd1_elem_start < actual_hidden_size
+                    t = jnp.where(hidden_mask, t, jnp.zeros_like(t))
+
                     for bfc_id in range(cdiv(bf, bfc)):
+                        # Calculate the intermediate dimension range for this block
+                        bf_start = bfc_id * bfc
+
                         w_slices = (
                             p_id,
                             pl.ds(bd1c_id * bd1c_per_t_packing,
@@ -711,6 +724,13 @@ def _fused_ep_moe_kernel(
                             pl.ds(bfc_id * bfc, bfc),
                         )
                         w1 = w1_vmem[*w_slices]
+                        # Create mask for intermediate_size dimension - zero out padded weights
+                        intermediate_mask = lax.broadcasted_iota(
+                            jnp.int32, w1.shape,
+                            1) + bf_start < actual_intermediate_size
+                        w1 = jnp.where(intermediate_mask, w1,
+                                       jnp.zeros_like(w1))
+
                         acc1 = jnp.dot(t,
                                        w1,
                                        preferred_element_type=jnp.float32)
@@ -728,6 +748,9 @@ def _fused_ep_moe_kernel(
                             acc1 *= w1_scale
 
                         w3 = w3_vmem[*w_slices]
+                        # Apply same mask to w3
+                        w3 = jnp.where(intermediate_mask, w3,
+                                       jnp.zeros_like(w3))
 
                         acc3 = jnp.dot(t,
                                        w3,
@@ -743,6 +766,13 @@ def _fused_ep_moe_kernel(
                             w3_scale = jnp.broadcast_to(
                                 w3_scale_vmem[*w3_scale_slices], acc3.shape)
                             acc3 *= w3_scale
+
+                        # Mask accumulations beyond actual_intermediate_size
+                        acc_mask = lax.broadcasted_iota(
+                            jnp.int32, acc1.shape,
+                            1) + bf_start < actual_intermediate_size
+                        acc1 = jnp.where(acc_mask, acc1, jnp.zeros_like(acc1))
+                        acc3 = jnp.where(acc_mask, acc3, jnp.zeros_like(acc3))
 
                         acc_slices = (pl.ds(btc_id * btc,
                                             btc), pl.ds(bfc_id * bfc, bfc))
@@ -790,10 +820,22 @@ def _fused_ep_moe_kernel(
                     res = jnp.zeros((btc, bd2c_per_t_packing),
                                     dtype=jnp.float32)
                     for bfc_id in range(cdiv(bf, bfc)):
+                        bf_start = bfc_id * bfc
+
                         acc_slices = (pl.ds(btc_id * btc,
                                             btc), pl.ds(bfc_id * bfc, bfc))
                         acc1 = acc1_vmem[*acc_slices]
                         acc3 = acc3_vmem[*acc_slices]
+
+                        # Mask intermediate activations beyond actual_intermediate_size
+                        intermediate_mask = lax.broadcasted_iota(
+                            jnp.int32, acc1.shape,
+                            1) + bf_start < actual_intermediate_size
+                        acc1 = jnp.where(intermediate_mask, acc1,
+                                         jnp.zeros_like(acc1))
+                        acc3 = jnp.where(intermediate_mask, acc3,
+                                         jnp.zeros_like(acc3))
+
                         act = activation_fn(acc1, acc3, act_fn)
                         w2 = w2_vmem[
                             p_id,
@@ -816,6 +858,14 @@ def _fused_ep_moe_kernel(
                                 w2_scale_vmem[*w2_scale_slices], acc.shape)
                             acc *= w2_scale
                         res += acc
+
+                    # Mask output beyond actual_hidden_size
+                    bd2_elem_start = bd2c_id * bd2c_per_t_packing * t_packing + p_id * bd2c_per_t_packing
+                    output_mask = lax.broadcasted_iota(
+                        jnp.int32, res.shape,
+                        1) + bd2_elem_start < actual_hidden_size
+                    res = jnp.where(output_mask, res, jnp.zeros_like(res))
+
                     res = pltpu.bitcast(res, jnp.uint32)
                     if t_packing == 2:
                         res = res >> 16 << (16 * p_id)
@@ -1118,12 +1168,10 @@ def fused_ep_moe(
     assert bd2 % bd2c == 0
 
     btc = min(btc, bt * num_devices)
+    # Minimal padding for alignment - no longer pad to full block sizes (bd1, bd2, bf)
+    # This reduces memory waste and unnecessary computation
     hidden_size = align_to(actual_hidden_size, 128 * t_packing)
-    # TODO(jevinjiang): instead of padding outside the kernel, we can try dynammic
-    # masking inside the kernel.
-    hidden_size = align_to(hidden_size, bd1)
-    hidden_size = align_to(hidden_size, bd2)
-    intermediate_size = align_to(actual_intermediate_size, bf)
+    intermediate_size = align_to(actual_intermediate_size, 128)
 
     # TODO(jevinjiang): we should dump scale as the kernel expected shape in the
     # checkpoint offline or reshape right after weight loading.
