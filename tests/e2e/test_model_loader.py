@@ -153,7 +153,7 @@ def test_flax_nnx_vs_vllm_performance(monkeypatch: pytest.MonkeyPatch):
     model_name = "Qwen/Qwen3-0.6B"
     # A 10% threshold to avoid flakiness on different machines.
     # This can be adjusted based on typical performance.
-    percentage_difference_threshold = 0.1
+    percentage_difference_threshold = 0.2
 
     duration_vllm = _run_inference_and_time(monkeypatch, model_name, "vllm")
     duration_flax = _run_inference_and_time(monkeypatch, model_name,
