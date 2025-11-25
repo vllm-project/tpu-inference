@@ -28,7 +28,7 @@ from typing import List, Tuple
 
 import vllm.envs as envs
 from vllm import LLM, EngineArgs, SamplingParams
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 def create_parser():
@@ -89,6 +89,8 @@ def run_invocations(llm: LLM, sampling_params: SamplingParams,
         print(f"--- Invocation {i + 1}/{num_invocations} ---")
         outputs = llm.generate(prompts, sampling_params)
         all_outputs.append(outputs[0].outputs[0].text)
+        # reset prefix cache
+        llm.llm_engine.engine_core.reset_prefix_cache()
         time.sleep(5)
 
     if envs.VLLM_TORCH_PROFILER_DIR is not None:
