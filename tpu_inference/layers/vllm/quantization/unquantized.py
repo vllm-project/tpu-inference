@@ -108,6 +108,8 @@ class VllmUnquantizedLinearMethod(UnquantizedLinearMethod):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        assert isinstance(layer, LinearBase)
+
         with jax.named_scope(layer._get_name()):
             if in_sharding := self.jax_config.get_input_sharding(x):
                 x.shard_(NamedSharding(self.jax_config.mesh, in_sharding))
@@ -170,14 +172,14 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         self.ep_axis_name = ep_axis_name
         # TODO: Use autotune table once we have it.
         self.block_size = {
-            "bt": 16,
-            "bf": 384,
-            "bd1": 512,
-            "bd2": 512,
-            "btc": 16,
-            "bfc": 384,
-            "bd1c": 256,
-            "bd2c": 256,
+            "bt": 64,
+            "bf": 1024,
+            "bd1": 1536,
+            "bd2": 1536,
+            "btc": 64,
+            "bfc": 1024,
+            "bd1c": 1536,
+            "bd2c": 1536,
         }
 
     def select_gemm_impl(
@@ -348,9 +350,13 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 tokens=jax_view(x),
                 w1=jax_view(layer.w13_weight),
                 w2=jax_view(layer.w2_weight),
+                b1=jax_view(layer.w13_bias) if self.moe.has_bias else None,
+                b2=jax_view(layer.w2_bias) if self.moe.has_bias else None,
                 gating_output=jax_view(router_logits),
                 top_k=top_k,
                 ep_axis_name=self.ep_axis_name,
+                renormalize_topk_logits=renormalize,
+                act_fn=activation,
                 **self.block_size,
             )
         else:

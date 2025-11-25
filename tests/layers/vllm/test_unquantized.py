@@ -1,4 +1,3 @@
-import os
 import tempfile
 
 import jax
@@ -416,7 +415,6 @@ def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
 @pytest.mark.parametrize("topk", [2])
 def test_fused_moe(use_ep, mesh, num_tokens, intermediate_size, hidden_size,
                    num_experts, topk):
-    os.environ['VLLM_DISABLE_SHARED_EXPERTS_STREAM'] = '1'
     torch.manual_seed(42)
     dtype = torch.bfloat16
 
@@ -496,7 +494,6 @@ def test_fused_moe(use_ep, mesh, num_tokens, intermediate_size, hidden_size,
 @pytest.mark.parametrize("topk", [2])
 def test_fused_moe_bias(mesh, num_tokens, intermediate_size, hidden_size,
                         num_experts, topk):
-    os.environ['VLLM_DISABLE_SHARED_EXPERTS_STREAM'] = '1'
     torch.manual_seed(42)
     dtype = torch.bfloat16
 
@@ -563,7 +560,6 @@ def test_fused_moe_bias(mesh, num_tokens, intermediate_size, hidden_size,
 @pytest.mark.parametrize("activation", ["silu", "swigluoai"])
 def test_fused_moe_activation(mesh, num_tokens, intermediate_size, hidden_size,
                               num_experts, topk, activation):
-    os.environ['VLLM_DISABLE_SHARED_EXPERTS_STREAM'] = '1'
     torch.manual_seed(42)
     dtype = torch.bfloat16
 
@@ -613,21 +609,20 @@ def test_fused_moe_activation(mesh, num_tokens, intermediate_size, hidden_size,
         vllm_fused_moe(jax_a, score)
 
 
-@pytest.mark.parametrize("use_ep", [True])
 @pytest.mark.parametrize("mesh",
                          [test_utils.get_spmd_mesh(jax.local_device_count())])
 @pytest.mark.parametrize("num_tokens", [128, 512])
 @pytest.mark.parametrize("intermediate_size", [256, 512])
 @pytest.mark.parametrize("hidden_size", [256])
 @pytest.mark.parametrize("num_experts", [32])
-@pytest.mark.parametrize("topk", [2])
-def test_fused_moe_use_kernel(use_ep, mesh, num_tokens, intermediate_size,
-                              hidden_size, num_experts, topk):
+@pytest.mark.parametrize("topk", [8])
+@pytest.mark.parametrize("has_bias", [False, True])
+def test_fused_moe_use_kernel(mesh, num_tokens, intermediate_size, hidden_size,
+                              num_experts, topk, has_bias):
 
     if jax.local_device_count() < 8:
         pytest.skip("Test requires at least 8 devices")
 
-    os.environ['VLLM_DISABLE_SHARED_EXPERTS_STREAM'] = '1'
     torch.manual_seed(42)
     dtype = torch.bfloat16
 
@@ -636,6 +631,10 @@ def test_fused_moe_use_kernel(use_ep, mesh, num_tokens, intermediate_size,
         (num_experts, 2 * intermediate_size, hidden_size), dtype=dtype) / 10
     w2 = torch.randn(
         (num_experts, hidden_size, intermediate_size), dtype=dtype) / 10
+    if has_bias:
+        b1 = torch.randn(
+            (num_experts, 2 * intermediate_size), dtype=dtype) / 10
+        b2 = torch.randn((num_experts, hidden_size), dtype=dtype) / 10
 
     # Use deterministic gating_output generation (same logic as fused_moe_v1_test.py)
     # Generate base gating scores with deterministic pattern
@@ -679,7 +678,7 @@ def test_fused_moe_use_kernel(use_ep, mesh, num_tokens, intermediate_size,
     vllm_config = engine_args.create_engine_config()
     vllm_config.model_config.dtype = dtype
     vllm_config.parallel_config = ParallelConfig(
-        tensor_parallel_size=mesh.devices.size, enable_expert_paralle=use_ep)
+        tensor_parallel_size=mesh.devices.size, enable_expert_paralle=True)
 
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
     with set_current_vllm_config(vllm_config):
@@ -693,11 +692,15 @@ def test_fused_moe_use_kernel(use_ep, mesh, num_tokens, intermediate_size,
             tp_size=mesh.devices.size,
             dp_size=1,
             quant_config=quant_config,
+            has_bias=has_bias,
         )
-        vllm_fused_moe.moe_parallel_config.use_ep = use_ep
+        vllm_fused_moe.moe_parallel_config.use_ep = True
 
     vllm_fused_moe.w13_weight.data = w1
     vllm_fused_moe.w2_weight.data = w2
+    if has_bias:
+        vllm_fused_moe.w13_bias.data = b1
+        vllm_fused_moe.w2_bias.data = b2
 
     p_spec = P('model', )
     jax_a = torch_view(t2j(a, use_dlpack=False))
