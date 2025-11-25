@@ -108,7 +108,10 @@ def test_pipeline_parallelism_jax_model(
         assert len(output.outputs) > 0
         assert len(output.outputs[0].text.strip()) > 0
 
-    print(f"✓ Pipeline Parallelism Jax model test passed with {len(outputs)} outputs")
+    print(
+        f"✓ Pipeline Parallelism Jax model test passed with {len(outputs)} outputs"
+    )
+
 
 @pytest.mark.skip(reason="PP is not fully enabled.")
 def test_pipeline_parallelism_vllm_model(
@@ -123,7 +126,7 @@ def test_pipeline_parallelism_vllm_model(
     Equivalent to:
     MODEL_IMPL_TYPE=vllm python examples/offline_inference.py --tensor_parallel_size=2 --pipeline_parallel_size=2
     """
-    
+
     os.environ['MODEL_IMPL_TYPE'] = 'vllm'
     # Test with data parallelism enabled
     outputs = _run_inference_with_config(
@@ -142,7 +145,10 @@ def test_pipeline_parallelism_vllm_model(
         assert len(output.outputs) > 0
         assert len(output.outputs[0].text.strip()) > 0
 
-    print(f"✓ Pipeline Parallelism vLLM model test passed with {len(outputs)} outputs")
+    print(
+        f"✓ Pipeline Parallelism vLLM model test passed with {len(outputs)} outputs"
+    )
+
 
 @pytest.mark.skip(reason="PP is not fully enabled.")
 def test_pipeline_parallelism_jax_model_correctness(
