@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 
@@ -9,9 +9,7 @@ from tpu_inference.runner.persistent_batch_manager import \
 
 class TestPersistentBatchManager(unittest.TestCase):
 
-    @patch('vllm.platforms.tpu.USE_TPU_INFERENCE', True)
-    @patch('tpu_inference.distributed.jax_parallel_state.get_pp_group')
-    def test_update_states_pp_non_last_rank(self, mock_get_pp_group):
+    def test_update_states_pp_non_last_rank(self):
         """
         the current rank is not the last rank.
 
@@ -19,10 +17,6 @@ class TestPersistentBatchManager(unittest.TestCase):
         the internal state of the PersistentBatchManager (including request
         states and the input batch) is correctly updated.
         """
-
-        mock_pp_group = MagicMock()
-        mock_pp_group.is_last_rank = False
-        mock_get_pp_group.return_value = mock_pp_group
 
         req_id = 101
         initial_output_tokens = [10, 20]
@@ -44,8 +38,12 @@ class TestPersistentBatchManager(unittest.TestCase):
         encoder_cache = MagicMock()
         model_config = MagicMock()
 
-        manager = PersistentBatchManager(requests, input_batch, encoder_cache,
-                                         False, model_config)
+        manager = PersistentBatchManager(requests,
+                                         input_batch,
+                                         encoder_cache,
+                                         False,
+                                         model_config,
+                                         is_last_rank=False)
 
         scheduler_output = MagicMock()
         req_data = MagicMock()
