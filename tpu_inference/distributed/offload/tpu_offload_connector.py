@@ -246,7 +246,7 @@ class RequestTracker:
         self.block_ids.extend(new_block_ids)
         self.token_ids.extend(new_token_ids)
 
-        # NOTE(jcgu): is it always true? will MTP affect this judegment?
+        # NOTE(jcgu): is it always true? will MTP affect this judgement?
         # When a request is scheduled again, and the number of new tokens
         # is 1 (excluding chunked prefill), the request is in decode phase.
         if len(new_token_ids) == 1:
@@ -711,7 +711,7 @@ class TPUOffloadConnectorScheduler():
         has_new_tokens = adjusted_num_total_tokens > tracker.save_watermark
         should_save = False
         # Determine if a save is needed for this step
-        # when there are new token KVs (adjusted by saving behavior):
+        # when there are new token KVs:
         # 1. Prefill: always save
         # 2. Decode (with save_decode=True)
         #  2.1 regular decode (not finished): accumulate until getting a full block
