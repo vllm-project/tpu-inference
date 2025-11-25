@@ -9,8 +9,8 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
-          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_model_loader::test_register_model_success \
-          /workspace/tpu_inference/tests/e2e/test_model_loader::test_registered_model_passes_vllm_interface_check
+          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_model_loader.py::test_register_model_success \
+          /workspace/tpu_inference/tests/e2e/test_model_loader.py::test_registered_model_passes_vllm_interface_check
 
   - label: "Record correctness test result for Out-of-tree model support"
     key: "record_out_of_tree_model_support_CorrectnessTest"
@@ -33,9 +33,8 @@ steps:
       queue: tpu_v6e_queue
     commands:
       - |
-      - |
         .buildkite/scripts/run_in_docker.sh \
-          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_model_loader::test_flax_nnx_vs_vllm_performance
+          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_model_loader.py::test_flax_nnx_vs_vllm_performance
 
   - label: "Record performance test result for Out-of-tree model support"
     key: "record_out_of_tree_model_support_PerformanceTest"
