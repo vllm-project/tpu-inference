@@ -254,7 +254,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.mm_manager = MultiModalManager(self)
         self.persistent_batch_manager = PersistentBatchManager(
             self.requests, self.input_batch, self.encoder_cache,
-            self.uses_mrope, self.model_config)
+            self.uses_mrope, self.model_config, self.is_last_rank)
         self.lora_utils = LoraUtils(self)
 
         cache_dtype = self.cache_config.cache_dtype

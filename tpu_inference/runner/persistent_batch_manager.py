@@ -1,7 +1,6 @@
 from typing import Dict
 
 import jax
-from vllm.distributed import get_pp_group
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
 from tpu_inference.logger import init_logger
@@ -15,12 +14,13 @@ class PersistentBatchManager:
     def __init__(self, requests: Dict[str, CachedRequestState],
                  input_batch: InputBatch, encoder_cache: Dict[str,
                                                               'jax.Array'],
-                 uses_mrope: bool, model_config):
+                 uses_mrope: bool, model_config, is_last_rank: bool):
         self.requests = requests
         self.input_batch = input_batch
         self.encoder_cache = encoder_cache
         self.uses_mrope = uses_mrope
         self.model_config = model_config
+        self.is_last_rank = is_last_rank
 
     def _reorder_batch(self, scheduler_output: "VllmSchedulerOutput") -> int:
         """ Reorder the sheduled requests to RPA kernel friendly distribution
@@ -174,7 +174,6 @@ class PersistentBatchManager:
                     )
 
         # Update the states of the running/resumed requests.
-        is_last_rank = get_pp_group().is_last_rank
         req_data = scheduler_output.scheduled_cached_reqs
         for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
@@ -187,7 +186,7 @@ class PersistentBatchManager:
             req_state.num_computed_tokens = num_computed_tokens
             req_index = self.input_batch.req_id_to_index.get(req_id)
 
-            if not is_last_rank:
+            if not self.is_last_rank:
                 # When using PP, the scheduler sends the sampled tokens back,
                 # because there's no direct communication between the first-
                 # stage worker and the last-stage worker.
@@ -238,7 +237,7 @@ class PersistentBatchManager:
 
             # For the last rank, we don't need to update the token_ids_cpu
             # because the sampled tokens are already cached.
-            if not is_last_rank:
+            if not self.is_last_rank:
                 start_token_index = num_computed_tokens
                 end_token_index = num_computed_tokens + len(new_token_ids)
                 self.input_batch.token_ids_cpu[
