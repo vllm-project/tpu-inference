@@ -116,8 +116,10 @@ def _run_inference_and_time(monkeypatch: pytest.MonkeyPatch, model_name: str,
         try:
             llm = LLM(
                 model=model_name,
-                max_model_len=256,
+                max_model_len=128,
                 tensor_parallel_size=1,
+                enable_prefix_caching=False,
+                gpu_memory_utilization=0.98,
             )
             prompts = ["Hello, my name is"]
             sampling_params = SamplingParams(max_tokens=16)
@@ -148,8 +150,7 @@ def test_flax_nnx_vs_vllm_performance(monkeypatch: pytest.MonkeyPatch):
     a short generation for both backends and asserts that the percentage
     difference is within a reasonable threshold.
     """
-    # model_name = "Qwen/Qwen3-0.6B"
-    model_name = "meta-llama/Llama-3.2-1B-Instruct"
+    model_name = "Qwen/Qwen3-0.6B"
     # A 10% threshold to avoid flakiness on different machines.
     # This can be adjusted based on typical performance.
     percentage_difference_threshold = 0.1
