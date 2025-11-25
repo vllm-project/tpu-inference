@@ -304,6 +304,8 @@ class EagleLlama3ForCausalLM(nnx.Module):
             "fc": "model.fc.kernel",
             "lm_head": "lm_head.kernel",
             "d2t": "draft_id_to_target_id",
+            "embed_tokens":
+            "model.embed_tokens.embedding",  # Some checkpoints need this
         }
 
         # Define keys to keep in original dtype (e.g., float32 for stability)
@@ -311,8 +313,6 @@ class EagleLlama3ForCausalLM(nnx.Module):
             r".*d2t.*",
         ]
 
-        # `embed_tokens` is shared between target and draft.
-        exclude_regex = [r".*embed_tokens.*"]
         metadata_map = get_default_maps(
             self.vllm_config.speculative_config.draft_model_config, self.mesh,
             mappings)
@@ -325,10 +325,9 @@ class EagleLlama3ForCausalLM(nnx.Module):
             metadata_map=metadata_map,
             mesh=self.mesh,
             is_draft_model=True,
-            keep_original_dtype_keys_regex=keep_original_dtype_keys_regex,
-            exclude_regex=exclude_regex if exclude_regex else None)
+            keep_original_dtype_keys_regex=keep_original_dtype_keys_regex)
 
-        # If the embedding is not initialized, initialize it with a dummpy array here to pass jit compilation. The real weights will be shared from the target model in eagle3 class.
+        # If the embedding is not initialized, initialize it with a dummy array here to pass jit compilation. The real weights will be shared from the target model in eagle3 class.
         if isinstance(self.model.embed_tokens.embedding.value,
                       jax.ShapeDtypeStruct):
             self.model.embed_tokens.embedding.value = jnp.zeros(

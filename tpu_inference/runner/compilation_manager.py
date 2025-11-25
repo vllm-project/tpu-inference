@@ -548,7 +548,9 @@ class CompilationManager:
     def _precompile_eagle3_helpers(self) -> None:
         logger.info(
             "Compiling eagle3 jitted helpers with different input shapes.")
-        hidden_size = self.runner.model_config.get_hidden_size()
+        target_hidden_size = self.runner.model_config.get_hidden_size()
+        draft_hidden_size = self.runner.speculative_config.draft_model_config.get_hidden_size(
+        )
         dtype = self.runner.model_config.dtype
 
         num_kv_cache_groups = len(self.runner.kv_cache_config.kv_cache_groups)
@@ -595,7 +597,7 @@ class CompilationManager:
 
         for num_logits in self.runner.num_logits_paddings:
             hidden_states = self._create_dummy_tensor(
-                (num_logits, hidden_size), jnp.bfloat16)
+                (num_logits, draft_hidden_size), jnp.bfloat16)
             self._run_compilation(
                 "eagle3_get_draft_token_ids",
                 self.runner.drafter._get_draft_token_ids,
@@ -606,8 +608,8 @@ class CompilationManager:
         input_ids_loop = self._create_dummy_tensor(
             (self.runner.max_num_reqs, ), jnp.int32,
             NamedSharding(self.runner.mesh, PartitionSpec()))
-        target_hidden_state_loop = self._create_dummy_tensor(
-            (self.runner.max_num_reqs, hidden_size), dtype,
+        draft_hidden_state_loop = self._create_dummy_tensor(
+            (self.runner.max_num_reqs, draft_hidden_size), dtype,
             NamedSharding(self.runner.mesh, PartitionSpec(None, None)))
         next_token_ids = self._create_dummy_tensor(
             (self.runner.max_num_reqs, ), jnp.int32)
@@ -615,9 +617,12 @@ class CompilationManager:
             (self.runner.max_num_reqs, ), jnp.int32)
         for num_tokens in self.runner.num_tokens_paddings:
             aux_hidden_states = [
-                self._create_dummy_tensor((num_tokens, hidden_size), dtype),
-                self._create_dummy_tensor((num_tokens, hidden_size), dtype),
-                self._create_dummy_tensor((num_tokens, hidden_size), dtype),
+                self._create_dummy_tensor((num_tokens, target_hidden_size),
+                                          dtype),
+                self._create_dummy_tensor((num_tokens, target_hidden_size),
+                                          dtype),
+                self._create_dummy_tensor((num_tokens, target_hidden_size),
+                                          dtype),
             ]
 
             positions = self._create_dummy_tensor((num_tokens, ), jnp.int32)
@@ -648,15 +653,15 @@ class CompilationManager:
             input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32)
             aux_hidden_states = [
                 self._create_dummy_tensor(
-                    (num_tokens, hidden_size), jnp.bfloat16,
+                    (num_tokens, target_hidden_size), jnp.bfloat16,
                     NamedSharding(self.runner.mesh, PartitionSpec(None,
                                                                   None))),
                 self._create_dummy_tensor(
-                    (num_tokens, hidden_size), jnp.bfloat16,
+                    (num_tokens, target_hidden_size), jnp.bfloat16,
                     NamedSharding(self.runner.mesh, PartitionSpec(None,
                                                                   None))),
                 self._create_dummy_tensor(
-                    (num_tokens, hidden_size), jnp.bfloat16,
+                    (num_tokens, target_hidden_size), jnp.bfloat16,
                     NamedSharding(self.runner.mesh, PartitionSpec(None,
                                                                   None))),
             ]
@@ -688,17 +693,17 @@ class CompilationManager:
                 state,
                 kv_caches,
                 input_ids,
-                target_hidden_states,
+                draft_hidden_states,
                 attention_metadata,
             ):
                 kv_caches, hidden_states, _ = self.runner.drafter.model_fn(
-                    state, kv_caches, input_ids, target_hidden_states,
+                    state, kv_caches, input_ids, draft_hidden_states,
                     attention_metadata)
                 self.runner.kv_caches = kv_caches
                 return hidden_states
 
-            target_hidden_states = self._create_dummy_tensor(
-                (num_tokens, hidden_size), dtype,
+            draft_hidden_states = self._create_dummy_tensor(
+                (num_tokens, draft_hidden_size), dtype,
                 NamedSharding(self.runner.mesh, PartitionSpec(None, "model")))
             input_ids = self._create_dummy_tensor(
                 (num_tokens, ), jnp.int32,
@@ -709,7 +714,7 @@ class CompilationManager:
                 self.runner.drafter.state,
                 self.runner.kv_caches,
                 input_ids,
-                target_hidden_states,
+                draft_hidden_states,
                 attention_metadata,
                 num_tokens=num_tokens,
             )
@@ -741,13 +746,13 @@ class CompilationManager:
                 self.runner.drafter.state,
                 self.runner.kv_caches,
                 input_ids_loop,
-                target_hidden_state_loop,
+                draft_hidden_state_loop,
                 attention_metadata,
                 num_tokens=num_tokens,
             )
 
             hidden_states = self._create_dummy_tensor(
-                (num_tokens, hidden_size), jnp.bfloat16,
+                (num_tokens, draft_hidden_size), jnp.bfloat16,
                 NamedSharding(self.runner.mesh, PartitionSpec(None, None)))
 
             self._run_compilation(
