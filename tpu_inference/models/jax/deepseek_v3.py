@@ -146,18 +146,25 @@ class DeepSeekV3(nnx.Module):
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
                 rngs=self.rng,
-                activation_attention_td=(None, None),
-                activation_q_td=(None, None),
-                query_tnh=P(None, 'model', None),
-                keyvalue_skh=P(None, 'model', None),
-                activation_attention_out_td=(None, None),
-                attn_o_tnh=P(None, 'model', None),
-                q_da_sharding=(None, 'model'),
-                anh_sharding=(None, 'model', None),
-                kv_da_sharding=(None, 'model'),
-                nhd_sharding=('model', None, None))
+
+                activation_attention_td=None, # WAS: (None, None)
+                activation_q_td=None,         # WAS: (None, None) 
+                activation_attention_out_td=None, # WAS: (None, None) 
+                
+
+                query_tnh=P(None, None, None), # WAS: P(None, 'model', None)
+                keyvalue_skh=P(None, None, None), # WAS: P(None, 'model', None)
+                attn_o_tnh=P(None, None, None), # WAS: P(None, 'model', None)
+                q_da_sharding=(None, None), # WAS: (None, 'model')
+                anh_sharding=(None, None, None), # WAS: (None, 'model', None)
+                kv_da_sharding=(None, None), # WAS: (None, 'model')
+                nhd_sharding=(None, None, None), # WAS: ('model', None, None)
+            )
+
+        logger.info("CHECKPOINT 1: Starting Dense Transformer Block initialization (Layers 0-2).")
 
         for i in range(first_k_dense_replace):
+            logger.info(f"CHECKPOINT 1.1: Assembling Layer {i} TransformerBlock.")
             block = TransformerBlock(
                 pre_attention_norm=RMSNorm(
                     dims=hidden_size,
@@ -187,8 +194,10 @@ class DeepSeekV3(nnx.Module):
 
             self.layers.append(block)
 
+        logger.info("CHECKPOINT 2: Starting MoE Transformer Block initialization (Layers 3-60).") 
         for i in range(first_k_dense_replace, num_layers):
             is_moe_layer = ((i + 1) % interleave_moe_layer_step == 0)
+            logger.info(f"CHECKPOINT 2.1: Initializing Layer {i} MoE Router.")
             router = DeepSeekV3Router(
                 random_init=self.random_init,
                 hidden_size=hidden_size,
@@ -203,6 +212,7 @@ class DeepSeekV3(nnx.Module):
                 activation_ffw_td=('data', None),
                 ed_sharding=('model', None),
                 e_sharding=('model', ))
+            logger.info(f"CHECKPOINT 2.2: Initializing Layer {i} MoE/SparseMoE module.")
             if self.sparse_matmul:
                 # TODO: orginize the SparseMoE and DenseMoE better given they share most interfaces
                 custom_module = SparseMoE(
@@ -283,6 +293,7 @@ class DeepSeekV3(nnx.Module):
                 dtype=dtype,
             )
 
+            logger.info(f"CHECKPOINT 2.3: Assembling Layer {i} SharedExpertsTransformerBlock.")
             block = SharedExpertsTransformerBlock(
                 custom_module=custom_module,
                 attn=_create_mla(),

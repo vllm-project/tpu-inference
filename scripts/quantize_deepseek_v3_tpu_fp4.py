@@ -166,18 +166,27 @@ def _apply_quantization(vllm_config: VllmConfig, mesh: Mesh,
 
     # NO MANUAL PATCHES NEEDED HERE. DeepSeekV3 handles its own config keys.
     rng = jax.random.PRNGKey(seed)
-    # --- START CRITICAL PATCH: Force initialization onto CPU to avoid OOM ---
+
+    vllm_config.model_config.hf_config.num_hidden_layers = 4 
+    LOGGER.warning("DEBUG: Temporarily limiting model layers to 4 for compilation test.")
+
+
     with jax.default_device(jax.devices('cpu')[0]):
         # Model creation (initializes weights as large BF16 buffers) happens on CPU RAM
         model = DeepSeekV3(vllm_config, rng, mesh)
-    # --- END CRITICAL PATCH ---
+
+    #model.weight_loader.load_weights_metadata()
+
+    # This must be done because we skipped model.load_weights(rng)
+    model.initialize_cache()
+
     with mesh:
         #model.load_weights(rng)
         model = apply_qwix_quantization(vllm_config,
                                         model,
                                         rng,
                                         mesh,
-                                        apply_to_abstract_model=False)
+                                        apply_to_abstract_model=False) 
     return model
 
 
@@ -188,6 +197,8 @@ def _to_host_float32(array: jax.Array) -> np.ndarray:
 
 def _collect_packed_weights(
         model: DeepSeekV3) -> Dict[str, Tuple[torch.Tensor, torch.Tensor]]:
+    LOGGER.info(f"DEBUG: Model object reference: {model}")
+    import pdb; pdb.set_trace()
     params = nnx.state(model)
     replacements: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
     num_layers = model.vllm_config.model_config.hf_config.num_hidden_layers

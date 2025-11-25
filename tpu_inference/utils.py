@@ -57,6 +57,8 @@ def get_num_kv_heads_by_tp(num_kv_heads: int, tp_size: int) -> int:
 
 
 def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
+    return [] #temporary change because we are on CPU
+
     usage = []
     if vllm_envs.VLLM_TPU_USING_PATHWAYS:
         return pathways_hbm_usage_gb(devices)

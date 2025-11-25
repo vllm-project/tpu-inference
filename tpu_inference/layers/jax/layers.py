@@ -56,7 +56,7 @@ class RMSNorm(nnx.Module):
         dtype: The data type for computations.
     """
     dims: int
-    activation_ffw_td: Sharding = ()
+    activation_ffw_td: Sharding = None #()
     random_init: bool = False
     epsilon: float = 1e-6
     with_scale: bool = True

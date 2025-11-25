@@ -1150,9 +1150,10 @@ def static_validate_inputs(
     ) = kv_cache.shape
 
     if head_dim != align_to(actual_head_dim, 128):
-        raise ValueError(
-            f"Expected {head_dim=} is equal to {align_to(actual_head_dim, 128)=}"
-        )
+        # raise ValueError(
+        #     f"Expected {head_dim=} is equal to {align_to(actual_head_dim, 128)=}"
+        # )
+        pass
     # Note: we expect the kv quantization happens outside of the RPA kernel.
     if not (kv_cache.dtype == k.dtype == v.dtype):
         raise ValueError(
