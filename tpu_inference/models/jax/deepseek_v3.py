@@ -307,6 +307,8 @@ class DeepSeekV3(nnx.Module):
                               vd_sharding=(('data', 'expert', 'model'), None),
                               dv_sharding=(None, ('data', 'expert', 'model')),
                               random_init=self.random_init)
+        # For Flax 0.12.0 compatibility.
+        self.layers = nnx.List(self.layers)
 
     # For compatibility with flax.
     def apply(self, variables, *args, **kwargs):

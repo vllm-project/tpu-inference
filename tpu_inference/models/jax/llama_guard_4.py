@@ -82,7 +82,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
 
         self.layers = []
 
-        for i in range(self.num_layers):
+        for _ in range(self.num_layers):
             use_attention_rope = True
 
             custom_module = DenseFFW(dtype=self.dtype,
@@ -160,6 +160,9 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                                      pre_mlp_norm=pre_mlp_norm,
                                      use_attention_rope=use_attention_rope)
             self.layers.append(block)
+
+        # For Flax 0.12.0 compatibility.
+        self.layers = nnx.List(self.layers)
 
         self.final_norm = RMSNorm(
             dims=self.hidden_size,

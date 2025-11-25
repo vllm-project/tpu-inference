@@ -223,7 +223,7 @@ class Phi3Model(nnx.Module):
             embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
         )
-        self.layers = [
+        self.layers = nnx.List([
             Phi3DecoderLayer(
                 config=hf_config,
                 dtype=dtype,
@@ -232,7 +232,8 @@ class Phi3Model(nnx.Module):
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype)
             for _ in range(hf_config.num_hidden_layers)
-        ]
+        ])
+
         self.norm = nnx.RMSNorm(
             hidden_size,
             epsilon=rms_norm_eps,
