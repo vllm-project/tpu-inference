@@ -402,7 +402,8 @@ class TPUWorker:
 
         # TODO(kyuyeunk): Instead of checking page_size_bytes here, introduce
         # feature that allows overriding page_size_bytes of KVCacheSpec.
-        vllm_page_size_bytes = get_uniform_page_size(kv_cache_specs)
+        vllm_page_size_bytes = get_uniform_page_size(
+            list(kv_cache_specs.values()))
         rpa_page_size_bytes = get_rpa_page_size_bytes(self.model_runner.mesh,
                                                       kv_cache_specs)
 
