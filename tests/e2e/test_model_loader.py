@@ -26,6 +26,35 @@ def cleanup_registries():
         ModelRegistry.models.clear()
 
 
+@pytest.fixture
+def sampling_config():
+    return SamplingParams(temperature=0,
+                          max_tokens=120,
+                          ignore_eos=True,
+                          repetition_penalty=1,
+                          frequency_penalty=0,
+                          presence_penalty=0,
+                          min_p=0,
+                          logprobs=None)
+
+
+@pytest.fixture
+def test_prompts():
+    """Simple test prompts for data parallelism testing."""
+    return [
+        "Hello, my name is",
+        "The capital of France is",
+        "The colors of the rainbow are",
+        "The future of AI is",
+        "The president of the United States is",
+        "How many players are on a standard soccer team?",
+        "In Greek mythology, who is the god of the sea?",
+        "What is the capital of Australia?",
+        "What is the largest planet in our solar system?",
+        "Who developed the theory of general relativity?",
+    ]
+
+
 class DummyGoodModel(nnx.Module):
     """A valid model that conforms to the expected interface."""
 
@@ -109,28 +138,29 @@ def test_registered_model_passes_vllm_interface_check(cleanup_registries):
 
 
 def _run_inference_and_time(monkeypatch: pytest.MonkeyPatch, model_name: str,
-                            model_impl_type: str):
+                            model_impl_type: str, test_prompts: list,
+                            sampling_config: SamplingParams):
     with monkeypatch.context():
         monkeypatch.setenv("MODEL_IMPL_TYPE", model_impl_type)
-        start_time = time.time()
+
         try:
             llm = LLM(
                 model=model_name,
-                max_model_len=128,
+                max_model_len=256,
+                max_num_batched_tokens=128,
+                max_num_seqs=16,
                 tensor_parallel_size=1,
                 enable_prefix_caching=False,
                 gpu_memory_utilization=0.98,
             )
-            prompts = ["Hello, my name is"]
-            sampling_params = SamplingParams(max_tokens=16)
-            _ = llm.generate(prompts, sampling_params)
+            start_time = time.time()
+            _ = llm.generate(test_prompts, sampling_config)
+            end_time = time.time()
+            duration = end_time - start_time
         except Exception as e:
             pytest.fail(
                 f"{model_impl_type} implementation failed with an exception: {e}"
             )
-
-        end_time = time.time()
-        duration = end_time - start_time
 
         del llm
         import gc
@@ -140,7 +170,9 @@ def _run_inference_and_time(monkeypatch: pytest.MonkeyPatch, model_name: str,
         return duration
 
 
-def test_flax_nnx_vs_vllm_performance(monkeypatch: pytest.MonkeyPatch):
+def test_flax_nnx_vs_vllm_performance(test_prompts: list,
+                                      sampling_config: SamplingParams,
+                                      monkeypatch: pytest.MonkeyPatch):
     """
     Compares the performance of flax_nnx and vllm model implementations.
 
@@ -150,14 +182,15 @@ def test_flax_nnx_vs_vllm_performance(monkeypatch: pytest.MonkeyPatch):
     a short generation for both backends and asserts that the percentage
     difference is within a reasonable threshold.
     """
-    model_name = "Qwen/Qwen3-0.6B"
-    # A 10% threshold to avoid flakiness on different machines.
-    # This can be adjusted based on typical performance.
-    percentage_difference_threshold = 0.2
+    model_name = "Qwen/Qwen3-4B"
+    # This should be 2-3% but 5% reduces flakiness.
+    percentage_difference_threshold = 0.05
 
-    duration_vllm = _run_inference_and_time(monkeypatch, model_name, "vllm")
+    duration_vllm = _run_inference_and_time(monkeypatch, model_name, "vllm",
+                                            test_prompts, sampling_config)
     duration_flax = _run_inference_and_time(monkeypatch, model_name,
-                                            "flax_nnx")
+                                            "flax_nnx", test_prompts,
+                                            sampling_config)
 
     print(f"vLLM (PyTorch) implementation took {duration_vllm:.2f} seconds.")
     print(f"flax_nnx (JAX) implementation took {duration_flax:.2f} seconds.")
