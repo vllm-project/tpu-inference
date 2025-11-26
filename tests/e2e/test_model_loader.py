@@ -1,11 +1,17 @@
 # tests/e2e/test_model_loader.py
 
+import os
+import re
+import signal
+import subprocess
+import sys
+import tempfile
 import time
 
 import pytest
+import requests
 import torch
 from flax import nnx
-from vllm import LLM, SamplingParams
 from vllm.model_executor.models.registry import ModelRegistry
 
 from tpu_inference.models.common.model_loader import (_MODEL_REGISTRY,
@@ -24,35 +30,6 @@ def cleanup_registries():
     _MODEL_REGISTRY.clear()
     if hasattr(ModelRegistry, "models"):
         ModelRegistry.models.clear()
-
-
-@pytest.fixture
-def sampling_config():
-    return SamplingParams(temperature=0,
-                          max_tokens=120,
-                          ignore_eos=True,
-                          repetition_penalty=1,
-                          frequency_penalty=0,
-                          presence_penalty=0,
-                          min_p=0,
-                          logprobs=None)
-
-
-@pytest.fixture
-def test_prompts():
-    """Simple test prompts for data parallelism testing."""
-    return [
-        "Hello, my name is",
-        "The capital of France is",
-        "The colors of the rainbow are",
-        "The future of AI is",
-        "The president of the United States is",
-        "How many players are on a standard soccer team?",
-        "In Greek mythology, who is the god of the sea?",
-        "What is the capital of Australia?",
-        "What is the largest planet in our solar system?",
-        "Who developed the theory of general relativity?",
-    ]
 
 
 class DummyGoodModel(nnx.Module):
@@ -137,76 +114,141 @@ def test_registered_model_passes_vllm_interface_check(cleanup_registries):
     assert is_vllm_model(vllm_compatible_model)
 
 
-def _run_inference_and_time(monkeypatch: pytest.MonkeyPatch, model_name: str,
-                            model_impl_type: str, test_prompts: list,
-                            sampling_config: SamplingParams):
-    with monkeypatch.context():
-        monkeypatch.setenv("MODEL_IMPL_TYPE", model_impl_type)
+def _run_server_and_bench(model_name: str, model_impl_type: str,
+                          port: int) -> float:
+    env = os.environ.copy()
+    env["MODEL_IMPL_TYPE"] = model_impl_type
 
+    # Start server
+    server_cmd = [
+        sys.executable,
+        "-m",
+        "vllm.entrypoints.cli.main",
+        "serve",
+        model_name,
+        "--port",
+        str(port),
+        "--max-model-len",
+        "2048",
+        "--tensor-parallel-size",
+        "1",
+        "--disable-log-requests",
+        "--no-enable-prefix-caching",
+        "--gpu-memory-utilization",
+        "0.90",
+    ]
+
+    print(f"Starting server ({model_impl_type}) on port {port}...")
+    # Use a new process group so we can kill the server and its children
+    # Use temporary files for stdout/stderr to avoid pipe buffer deadlocks
+    stdout_file = tempfile.TemporaryFile(mode='w+b')
+    stderr_file = tempfile.TemporaryFile(mode='w+b')
+    server_process = subprocess.Popen(server_cmd,
+                                      env=env,
+                                      stdout=stdout_file,
+                                      stderr=stderr_file,
+                                      preexec_fn=os.setsid)
+
+    try:
+        # Wait for server to be ready
+        start_time = time.time()
+        server_ready = False
+        while time.time() - start_time < 600:  # 10 minutes timeout
+            try:
+                if requests.get(
+                        f"http://localhost:{port}/health").status_code == 200:
+                    server_ready = True
+                    break
+            except requests.exceptions.RequestException:
+                pass
+
+            if server_process.poll() is not None:
+                stdout_file.seek(0)
+                stderr_file.seek(0)
+                stdout = stdout_file.read().decode("utf-8", errors="replace")
+                stderr = stderr_file.read().decode("utf-8", errors="replace")
+                raise RuntimeError(
+                    f"Server process exited unexpectedly.\nStdout: {stdout}\nStderr: {stderr}"
+                )
+
+            time.sleep(5)
+
+        if not server_ready:
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            stdout = stdout_file.read().decode("utf-8", errors="replace")
+            stderr = stderr_file.read().decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"Server failed to start within timeout.\nStdout: {stdout}\nStderr: {stderr}"
+            )
+
+        print("Server is ready. Running benchmark...")
+
+        # Run benchmark
+        bench_cmd = [
+            "vllm", "bench", "serve", "--model", model_name, "--port",
+            str(port), "--dataset-name", "random", "--random-input-len", "50",
+            "--random-output-len", "128", "--num-prompts", "20"
+        ]
+
+        result = subprocess.run(bench_cmd,
+                                env=env,
+                                capture_output=True,
+                                text=True)
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Benchmark failed.\nStdout: {result.stdout}\nStderr: {result.stderr}"
+            )
+
+        # Parse throughput
+        # Output example: "Request throughput (req/s): 12.34"
+        match = re.search(r"Request throughput \(req/s\):\s+([\d\.]+)",
+                          result.stdout)
+        if not match:
+            raise ValueError(
+                f"Could not parse throughput from output:\n{result.stdout}")
+
+        throughput = float(match.group(1))
+        return throughput
+
+    finally:
+        print("Stopping server...")
         try:
-            llm = LLM(
-                model=model_name,
-                max_model_len=256,
-                max_num_batched_tokens=128,
-                max_num_seqs=16,
-                tensor_parallel_size=1,
-                enable_prefix_caching=False,
-                gpu_memory_utilization=0.98,
-            )
-            start_time = time.time()
-            _ = llm.generate(test_prompts, sampling_config)
-            end_time = time.time()
-            duration = end_time - start_time
-        except Exception as e:
-            pytest.fail(
-                f"{model_impl_type} implementation failed with an exception: {e}"
-            )
-
-        del llm
-        import gc
-        gc.collect()
-        time.sleep(10)  # wait for TPU to be released
-
-        return duration
+            os.killpg(os.getpgid(server_process.pid), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        server_process.wait()
+        stdout_file.close()
+        stderr_file.close()
+        # Wait for TPU cleanup
+        time.sleep(5)
 
 
-def test_flax_nnx_vs_vllm_performance(test_prompts: list,
-                                      sampling_config: SamplingParams,
-                                      monkeypatch: pytest.MonkeyPatch):
+def test_flax_nnx_vs_vllm_performance():
     """
     Compares the performance of flax_nnx and vllm model implementations.
 
     This test ensures that the JAX-native (`flax_nnx`) implementation's
     performance is not significantly different from the vLLM-native PyTorch
-    (`vllm`) implementation. It measures the time taken for model loading and
-    a short generation for both backends and asserts that the percentage
+    (`vllm`) implementation. It measures the request throughput for both
+    backends and asserts that the percentage
     difference is within a reasonable threshold.
     """
     model_name = "Qwen/Qwen3-4B"
     # This should be 2-3% but 5% reduces flakiness.
     percentage_difference_threshold = 0.05
 
-    duration_vllm = _run_inference_and_time(monkeypatch, model_name, "vllm",
-                                            test_prompts, sampling_config)
-    duration_flax = _run_inference_and_time(monkeypatch, model_name,
-                                            "flax_nnx", test_prompts,
-                                            sampling_config)
+    throughput_vllm = _run_server_and_bench(model_name, "vllm", 8001)
+    throughput_flax = _run_server_and_bench(model_name, "flax_nnx", 8002)
 
-    print(f"vLLM (PyTorch) implementation took {duration_vllm:.2f} seconds.")
-    print(f"flax_nnx (JAX) implementation took {duration_flax:.2f} seconds.")
+    print(f"vLLM (PyTorch) throughput: {throughput_vllm:.2f} req/s.")
+    print(f"flax_nnx (JAX) throughput: {throughput_flax:.2f} req/s.")
 
-    # Calculate the percentage difference
-    if duration_vllm == 0:
-        # Avoid division by zero if the vLLM part was instantaneous
-        # (unlikely, but good practice).
-        # In this case, any non-zero duration for flax is a huge difference,
-        # but for simplicity, we can pass if both are near-zero.
-        assert duration_flax < 1.0, "vLLM was instantaneous, but flax_nnx took over a second."
-    else:
-        percentage_diff = abs(duration_flax - duration_vllm) / duration_vllm
-        print(f"Percentage difference in duration: {percentage_diff:.2%}.")
+    percentage_diff = abs(throughput_flax - throughput_vllm) / throughput_vllm
+    print(f"Percentage difference in throughput: {percentage_diff:.2%}.")
 
-        assert percentage_diff < percentage_difference_threshold, (
-            f"The performance difference between flax_nnx and vllm is too high. "
-            f"Difference: {percentage_diff:.2%}, Threshold: {percentage_difference_threshold:.2%}"
-        )
+    assert percentage_diff < percentage_difference_threshold, (
+        f"The performance difference between flax_nnx and vllm is too high. "
+        f"Difference: {percentage_diff:.2%}, Threshold: {percentage_difference_threshold:.2%}"
+    )
