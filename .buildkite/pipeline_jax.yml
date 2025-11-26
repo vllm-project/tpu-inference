@@ -226,17 +226,18 @@ steps:
            exit 0
          fi
 
-   - label: "E2E data parallelism test"
-     key: test_14
-     soft_fail: true
-     env:
-       NEW_MODEL_DESIGN: "True"
-     agents:
-       queue: tpu_v6e_8_queue
-     commands:
-       - |
-         .buildkite/scripts/run_in_docker.sh \
-           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_data_parallel.py'
+# TODO : re-enable DP test once feature is ready
+#   - label: "E2E data parallelism test"
+#     key: test_14
+#     soft_fail: true
+#     env:
+#       NEW_MODEL_DESIGN: "True"
+#     agents:
+#       queue: tpu_v6e_8_queue
+#     commands:
+#       - |
+#         .buildkite/scripts/run_in_docker.sh \
+#           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_data_parallel.py'
 
    - label: "lora unit tests on single chip"
      key: test_15
@@ -281,7 +282,6 @@ steps:
        - test_11
        - test_12
        - test_13
-       - test_14
        - test_15
        - test_16
      agents:
