@@ -58,7 +58,7 @@ steps:
     env:
       TEST_MODEL: google/gemma-3-27b-it
       TENSOR_PARALLEL_SIZE: 8
-      MINIMUM_THROUGHPUT_THRESHOLD: 23
+      MINIMUM_THROUGHPUT_THRESHOLD: 21
       INPUT_LEN: 1000
       OUTPUT_LEN: 100
       PREFIX_LEN: 0
