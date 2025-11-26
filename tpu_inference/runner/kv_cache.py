@@ -3,7 +3,6 @@ from typing import Any, List
 import jax
 import jax.numpy as jnp
 import numpy as np
-import os
 from jax._src import dtypes
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.ops.mappings import t2j_dtype
@@ -37,7 +36,6 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh, total_num_pages: int,
         shape = list(
             get_kv_cache_shape_fn(total_num_pages, page_size,
                                   actual_head_dim, kv_dtype))
-        logger.warning(f"********KV cache shape from MLA: {shape}")
     else:
         get_kv_cache_shape_fn = (
             rpa_hd64.get_kv_cache_shape if actual_head_dim == 64 \
@@ -88,7 +86,6 @@ def create_kv_caches(
                                                num_kv_heads, head_size,
                                                cache_dtype, use_mla)
 
-    # TODO: Is this correctly sharding the KV cache across requests?
     if use_mla:
         sharding = NamedSharding(
             mesh,

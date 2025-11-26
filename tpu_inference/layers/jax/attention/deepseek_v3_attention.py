@@ -9,7 +9,6 @@ from flax.typing import Sharding
 from jax.experimental import shard_map
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
-import os
 
 from tpu_inference import utils
 from tpu_inference.kernels.mla.v1.kernel import \
@@ -25,10 +24,6 @@ from tpu_inference.layers.jax.rope import DeepseekScalingRotaryEmbedding
 from tpu_inference.layers.jax.sharding import ShardingAxisName
 
 KVCache = Tuple[jax.Array, jax.Array]
-
-from tpu_inference.logger import init_logger
-logger = init_logger(__name__)
-
 
 # TODO (wenxindongwork): Add MLA KV cache implementation. For now, cache complete KV vectors.
 @dataclass(kw_only=True)
@@ -76,7 +71,6 @@ class MLA(nnx.Module):
     quant: Any | None = None
     rope_mscale_all_dim: float = 1.0
     use_mla_kernel: bool = False
-
 
     rngs: InitVar[nnx.Rngs]
 
@@ -225,7 +219,7 @@ class MLA(nnx.Module):
             q_rope_TNH = q_TNH[..., self.qk_nope_head_dim:]
             q_rope_TNH = self.rope.apply_rope(md.input_positions, q_rope_TNH)
             if self.use_mla_kernel:
-                # Absorbe the K up-projection matrix into q
+                # Absorbe the k up-projection matrix into q
                 q_TNA = jnp.einsum("TNH,ANH -> TNA", q_nope_TNH, self.kernel_k_up_proj_ANH.value)
                 q_TNA = nnx.with_sharding_constraint(q_TNA, self.query_tnh)
             else:
@@ -273,7 +267,7 @@ class MLA(nnx.Module):
             # q, k, v head dimension to be multiple of 128. For now, we will
             # pad the q, k, v dimension to multiple of 128.
             # We should update the MLA kv cache implementation in the future.
-            if not self.use_mla_kernel: # MLA kernel handles pading
+            if not self.use_mla_kernel: # MLA kernel handles padding
                 multiple_of_128 = ((self.qk_head_dim - 1) // 128 + 1) * 128
                 q_TNH = jnp.pad(q_TNH, ((0, 0), (0, 0),
                                         (0, multiple_of_128 - self.qk_head_dim)))
@@ -287,7 +281,6 @@ class MLA(nnx.Module):
             if not self.use_mla_kernel: # MLA does not currently support quantized KV!   
                 if self.kv_cache_quantized_dtype: 
                     # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
-                    # q_scale = self._q_scale
                     k_scale = self._k_scale
                     v_scale = self._v_scale
                     k_SNH, v_SNH = utils.quantize_kv(k_SNH, v_SNH,
@@ -323,7 +316,6 @@ class MLA(nnx.Module):
                 outputs_TNH = jnp.einsum("TNA,ANH -> TNH", outputs_TNA, self.kernel_v_up_proj_ANH.value)
             
             with jax.named_scope("o_proj"):
-                    # TODO: Consider all-gathering activations first during MLA so that you can shard the output projections (since these account for ~365*61 = 22GB in FP16).
                     outputs_TNH = nnx.with_sharding_constraint(
                         outputs_TNH, self.activation_attention_out_td)
                     o_TD = jnp.einsum("TNH,NHD -> TD", outputs_TNH,
@@ -383,7 +375,6 @@ class MLA(nnx.Module):
             P(),  # distribution: Replicated
         )
         out_specs = (self.attn_o_tnh, P(None, None, "model"))
-        logger.warning(f"out_specs = {out_specs}")
 
         def _ragged_paged_attention(*args):
             outputs =  ragged_paged_attention(
@@ -393,7 +384,6 @@ class MLA(nnx.Module):
                 k_scale=k_scale,
                 v_scale=v_scale,
             )
-            logger.warning("ragged_paged_attention outputs = {outputs}")
             return outputs
 
         output_TNH, kv_cache = jax.jit(
@@ -417,9 +407,7 @@ class MLA(nnx.Module):
 
     def mla_attention(
         self,
-        # !START Change 3f1:
         kv_cache: KVCache,
-        # !END Change 3f1
         q_TNA: jax.Array,
         q_rope_TNH: jax.Array,
         k_SKA: jax.Array,
@@ -435,9 +423,7 @@ class MLA(nnx.Module):
         to the full history of keys and values stored in the cache.
 
         Args:
-            # !START Change 3f1:
             kv_cache: The key-value cache to be updated and used.
-            # !END Change 3f1
             q_TNH: Query tensor of shape `(query_seq, num_attention_heads, head_dim)`.
             k_SKH: Key tensor of shape `(kv_seq, num_key_value_heads, head_dim)`.
             v_SKH: Value tensor of shape `(kv_seq, num_key_value_heads, head_dim)`.
@@ -456,44 +442,25 @@ class MLA(nnx.Module):
         """
         md = attention_metadata
         in_specs = (
-            # !START Change 3f3:
             self.query_tnh,  # q
-            self.query_tnh,  # q_rope # TODO: is this correct?
+            self.query_tnh,  # q_rope
             self.keyvalue_skh,  # k
-            self.keyvalue_skh,  # k_rope # TODO: is this correct?
+            self.keyvalue_skh,  # k_rope
             P(ShardingAxisName.MLP_TENSOR),  # kv_cache
-            # !END Change 3f3:
             P(ShardingAxisName.ATTN_DATA),  # md.seq_lens: Replicated
             P(ShardingAxisName.ATTN_DATA),  # page_indices_flat: Replicated
             P(ShardingAxisName.ATTN_DATA),  # query_start_loc: Replicated
             P(ShardingAxisName.ATTN_DATA),  # distribution: Replicated
         )
-        # logger.warning(f"********kv_cache.shape = {kv_cache.shape}")
-        # logger.warning(f"********in_specs = {in_specs}")
-        # logger.warning(f"********self.attn_o_tnh = {self.attn_o_tnh}")
         
-        # !START Change 3f4:
         out_specs = (self.attn_o_tnh,
-                    #  P(ShardingAxisName.MLP_TENSOR),
                      P(ShardingAxisName.MLP_TENSOR))
-        # !END Change 3f4:
-
-        # logger.warning(f"********out_specs = {in_specs}")
-        # logger.warning(f"********input_shapes: q_TNA={q_TNA.shape}, q_rope_TNH={q_rope_TNH.shape}, k_SKA={k_SKA.shape}, k_rope_SNH={k_rope_SNH.shape}, kv_cache={kv_cache.shape} ")
-        # logger.warning(f"********md: seq_lens={md.seq_lens.shape}, block_tables={md.block_tables.shape}, query_start_loc={md.query_start_loc.shape}, k_rope_SNH={md.request_distribution.shape}")
 
         def _mla_ragged_paged_attention(q, q_rope, k, k_rope, kv_cache, *args):
-            # kv_c = kv_cache[..., :self.kv_lora_rank]
-            # k_pe = kv_cache[..., self.kv_lora_rank:]
-            
-
-            # !START Change 3f5
             # TODO: should this be run/potentially recompiled forward pass?
             def _initialize_block_sizes():
                 # Set reasonable starting estimates for block sizes. (TODO: update this to use tuned sizes)
-                # Referring to get_tuned_block_sizes() in kernels/ragged_paged_attention/v3/tuned_block_sizes.py: 'TPU v7'/128/'q_bfloat16_kv_bfloat16/q_head-128_kv_head-1_head-128'/4096 
-                # Page size = 128
-                # dtype=bf16
+                # Referring to get_tuned_block_sizes() in kernels/ragged_paged_attention/v3/tuned_block_sizes.py: 'TPU v7'/128/'q_bfloat16_kv_bfloat16/q_head-128_kv_head-1_head-128'/4096
                 tpu_version = get_tpu_version()
                 assert tpu_version == 7, "MLA kernel is currently only supported on Ironwood!"
                 max_num_tokens = q.shape[0]
@@ -513,44 +480,21 @@ class MLA(nnx.Module):
                     pages_per_seq,
                 )
                 num_kv_pages_per_block = min(min(pages_per_seq, bkv_p), 4)
-                # num_queries_per_block = min(max_num_tokens, 16)
-                # num_queries_per_block = min(max_num_tokens, bq_sz) # OOMS at 8
                 num_queries_per_block = min(min(max_num_tokens, bq_sz), 4) # OOMS at 8
-                logger.warning(f"******max_num_seqs = {max_num_seqs}")
-                logger.warning(f"******num_page_indices = {num_page_indices}")
-                logger.warning(f"******pages_per_seq = {pages_per_seq}, bkv_p = {bkv_p}")
-                logger.warning(f"******max_num_tokens = {max_num_tokens}, bq_sz = {bq_sz}")
-                logger.warning(f"******num_queries_per_block = {num_queries_per_block}")
                 return num_kv_pages_per_block, num_queries_per_block
             
             num_kv_pages_per_block, num_queries_per_block = _initialize_block_sizes()
-            # !END Change 3f5
-
-            # !START Change 3f2:
             output, kv_cache = mla_ragged_paged_attention(
-                # !END Change 3f2:
-
-                # !START Change 3f
                 q, q_rope, k, k_rope, kv_cache,
-                # !END Change 3f
                 *args,
                 sm_scale=self.scale,
-                # !START Change 3f5
                 num_kv_pages_per_block=num_kv_pages_per_block,
                 num_queries_per_block=num_queries_per_block
-                # !END Change 3f5
             )
-            # kv_cache = kv_cache.at[..., :self.kv_lora_rank].set(updated_kv_c)
-            # kv_cache = kv_cache.at[..., self.kv_lora_rank:].set(updated_k_pe)
 
-            # !START Change 3f2:
             return kv_cache, output
-            # !END Change 3f2:
         
-        
-        # !START Change 3f2:
         kv_cache, output_TNH  = jax.jit(
-            # !END Change 3f2
             shard_map.shard_map(
                 _mla_ragged_paged_attention,
                 mesh=mesh,
@@ -559,23 +503,17 @@ class MLA(nnx.Module):
                 check_rep=False,
                 ),
                 # TODO: Confirm if you need this since kernel.py already donates.
-                # !START Change 3f6:
-                donate_argnums=(4,) # donate kv_cache so that updates are done in place.
-                # !END Change 3f6
+                donate_argnums=(4,)
             )(
                 q_TNA,
                 q_rope_TNH,
                 k_SKA,
                 k_rope_SNH,
-                # !START Change 3f1:
                 kv_cache,
-                # !END Change 3f1
                 md.seq_lens,
                 md.block_tables,
                 md.query_start_loc,
                 md.request_distribution,
             )
-        # !START Change 3f2:
         return kv_cache, output_TNH
-        # !END Change 3f2
 

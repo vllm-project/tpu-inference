@@ -130,7 +130,6 @@ class CompilationManager:
         assert num_tokens is not None
 
         dp_size = self.runner.vllm_config.sharding_config.total_dp_size
-        logger.warning(f"***** dp_size = {dp_size}")
         dp_sharding = NamedSharding(
             self.runner.mesh, PartitionSpec(
                 ShardingAxisName.ATTN_DATA, )) if dp_size > 1 else None
@@ -153,10 +152,6 @@ class CompilationManager:
                                             request_distribution,
                                             sharding=dp_sharding)
 
-        logger.warning(f"***** seq_lens = {seq_lens.shape}")    
-        logger.warning(f"***** query_start_loc = {query_start_loc.shape}")    
-        logger.warning(f"***** positions = {positions.shape}")    
-        logger.warning(f"***** request_distribution = {request_distribution.shape}")    
         attention_metadata = AttentionMetadata(
             input_positions=positions,
             block_tables=block_tables,

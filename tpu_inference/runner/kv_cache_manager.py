@@ -3,7 +3,6 @@ import math
 from typing import TYPE_CHECKING, Dict, List
 
 import jax
-import os
 import jax.numpy as jnp
 import vllm.envs as envs
 from jax.sharding import NamedSharding, PartitionSpec
@@ -192,12 +191,7 @@ class KVCacheManager:
             dp_size = self.runner.vllm_config.sharding_config.total_dp_size
             # num_blocks must be a multiple of dp_size
             num_blocks = math.ceil(num_blocks / dp_size) * dp_size
-            # NOTE: we'll multiply the num_kv_heads by 2 in the function
-            if self.use_mla:
-                head_size = self.runner.model_config.hf_config.kv_lora_rank + \
-                    self.runner.model_config.hf_config.qk_rope_head_dim
-            else:
-                head_size = representative_spec.head_size
+            head_size = representative_spec.head_size
             kv_cache = create_kv_caches(
                 num_blocks=num_blocks,
                 block_size=representative_spec.block_size,
