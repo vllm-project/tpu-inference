@@ -17,12 +17,12 @@ from tpu_inference.logger import init_logger
 logger = init_logger(__name__)
 
 DEFAULT_KV_CACHE_DTYPE = jnp.bfloat16
-USE_MLA_KERNEL = os.getenv("USE_MLA_KERNEL", "0")
 
 
 def get_kv_cache_shape_with_mesh(mesh: Mesh, total_num_pages: int,
                                  page_size: int, actual_num_kv_heads: int,
-                                 actual_head_dim: int, kv_dtype: any):
+                                 actual_head_dim: int, kv_dtype: any, 
+                                 use_mla: bool = False):
     """Gets the KV cache shape based on the mesh configuration."""
 
     model_cnt = mesh.shape["model"]
@@ -31,7 +31,7 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh, total_num_pages: int,
     # specific model, rather than being determined by the head_dim. If new
     # models are introduced with a head_dim of 64, this will require additional
     # model-specific adjustments.
-    if USE_MLA_KERNEL:
+    if use_mla:
         get_kv_cache_shape_fn = mla.get_kv_cache_shape
         # During decode this is [1, 128, 2, 640]
         shape = list(
@@ -59,6 +59,7 @@ def create_kv_caches(
     mesh: Mesh,
     layer_names: List[str],
     cache_dtype: jnp.dtype = DEFAULT_KV_CACHE_DTYPE,
+    use_mla: bool = False,
 ) -> List[jax.Array]:
     """
     Creates a list of KV cache where each array mapps to single attention layer.
@@ -85,10 +86,10 @@ def create_kv_caches(
 
     cache_shape = get_kv_cache_shape_with_mesh(mesh, num_blocks, block_size,
                                                num_kv_heads, head_size,
-                                               cache_dtype)
+                                               cache_dtype, use_mla)
 
     # TODO: Is this correctly sharding the KV cache across requests?
-    if USE_MLA_KERNEL:
+    if use_mla:
         sharding = NamedSharding(
             mesh,
             PartitionSpec(ShardingAxisName.MLP_TENSOR))
@@ -124,7 +125,7 @@ def get_attention_page_size_bytes(mesh: Mesh, kv_cache_specs: dict[str, Any]) ->
     """
 
     # Import it here to avoid circular import.
-    from vllm.v1.kv_cache_interface import AttentionSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
     page_size_bytes_set = set()
     for kv_cache_spec in kv_cache_specs.values():
@@ -132,7 +133,7 @@ def get_attention_page_size_bytes(mesh: Mesh, kv_cache_specs: dict[str, Any]) ->
 
         dtype = t2j_dtype(kv_cache_spec.dtype)
         bits = dtypes.bit_width(dtype)
-
+        use_mla = isinstance(kv_cache_spec, MLAAttentionSpec)
         kv_cache_shape = get_kv_cache_shape_with_mesh(
             mesh=mesh,
             total_num_pages=1,  # Pass 1 to get shape of a single page.
@@ -140,6 +141,7 @@ def get_attention_page_size_bytes(mesh: Mesh, kv_cache_specs: dict[str, Any]) ->
             actual_num_kv_heads=kv_cache_spec.num_kv_heads,
             actual_head_dim=kv_cache_spec.head_size,
             kv_dtype=dtype,
+            use_mla=use_mla,
         )
         page_size_bytes = (bits * np.prod(kv_cache_shape)) // 8
         page_size_bytes_set.add(page_size_bytes)

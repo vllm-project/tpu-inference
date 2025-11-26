@@ -14,7 +14,6 @@ if TYPE_CHECKING:
 
 MESH_AXIS_NAMES = ("data", "attn_dp", "expert", "model")
 MESH_AXIS_NAMES_2D = ('data', 'model')
-USE_MLA_KERNEL = os.getenv("USE_MLA_KERNEL", "0")
 
 
 class ShardingAxisNameBase:
@@ -120,7 +119,7 @@ class ShardingConfigManager:
                                                     False)
         if enable_dp_attention:
             # Replicate attention layer when num_kv_heads < TP
-            num_kv_heads = 1 if USE_MLA_KERNEL else vllm_config.model_config.get_total_num_kv_heads()
+            num_kv_heads = 1 if vllm_config.model_config.use_mla else vllm_config.model_config.get_total_num_kv_heads()
             # if tensor_parallelism:
                 # tensor_parallelism = data_parallelism 
                 # data_parallelism = 1

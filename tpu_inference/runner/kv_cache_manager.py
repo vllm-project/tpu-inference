@@ -29,7 +29,6 @@ if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 logger = init_logger(__name__)
-USE_MLA_KERNEL = os.getenv("USE_MLA_KERNEL", "0")
 
 class KVCacheManager:
 
@@ -40,11 +39,11 @@ class KVCacheManager:
         # means this layer will perform attention using the keys and values
         # from the KV cache of `shared_kv_cache_layers[layer_name]`.
         self.shared_kv_cache_layers: dict[str, str] = {}
+        self.use_mla = self.runner.model_config.use_mla
 
     def get_kv_cache_spec(self):
         # TODO(xiang): this hack tricks engine core to init successfully
         block_size = self.runner.cache_config.block_size
-        use_mla = self.runner.model_config.use_mla
         kv_cache_spec: dict[str, KVCacheSpec] = {}
 
         # If use pure jax (MODEL_IMPL_TYPE=flax_nnx), we don't register
@@ -62,7 +61,7 @@ class KVCacheManager:
             head_size = common_utils.get_padded_head_dim(
                 model_config.get_head_size())
             for i in range(model_config.get_num_layers(parallel_config)):
-                if use_mla:
+                if self.use_mla:
                     kv_cache_spec[f"layer.{i}"] = MLAAttentionSpec(
                         block_size=block_size,
                         num_kv_heads=1,
@@ -87,7 +86,7 @@ class KVCacheManager:
 
                 # Eagle3 has only 1 layer
                 for i in range(1):
-                    if use_mla:
+                    if self.use_mla:
                         kv_cache_spec[f"layer.{i}"] = MLAAttentionSpec(
                             block_size=block_size,
                             num_kv_heads=1,
@@ -128,7 +127,7 @@ class KVCacheManager:
                                 attn_module.head_size),
                             dtype=self.runner.kv_cache_dtype,
                             sliding_window=attn_module.sliding_window)
-                    elif use_mla:
+                    elif self.use_mla:
                         kv_cache_spec[f"layer.{i}"] = MLAAttentionSpec(
                             block_size=block_size,
                             # num_kv_heads=attn_module.num_kv_heads,
@@ -200,7 +199,7 @@ class KVCacheManager:
             # num_blocks must be a multiple of dp_size
             num_blocks = (num_blocks // dp_size) * dp_size
             # NOTE: we'll multiply the num_kv_heads by 2 in the function
-            if USE_MLA_KERNEL:
+            if self.use_mla:
                 head_size = self.runner.model_config.hf_config.kv_lora_rank + \
                     self.runner.model_config.hf_config.qk_rope_head_dim
             else:
@@ -213,6 +212,7 @@ class KVCacheManager:
                 mesh=self.runner.mesh,
                 layer_names=[f'kv_cache_tensor.{i}'],
                 cache_dtype=t2j_dtype(representative_spec.dtype),
+                use_mla=self.use_mla,
             )[0]
             kv_caches.append(kv_cache)
             num_blocks_list.append(num_blocks)

@@ -39,8 +39,6 @@ DTYPE_VIEW_MAP = {
     jnp.dtype(jnp.float32): torch.uint32,
 }
 
-USE_MLA_KERNEL = os.getenv("USE_MLA_KERNEL", None)
-
 
 @dataclass
 class DeepSeekV3(nnx.Module):
@@ -73,6 +71,7 @@ class DeepSeekV3(nnx.Module):
         hidden_act: str = "silu"
         rms_norm_eps: float = 1e-06
         first_k_dense_replace: int = 3  # replace the first few MOE layers to dense layer.
+        self.use_mla_kernel: bool = self.vllm_config.model_config.use_mla
 
         num_shared_experts = 1
         rope_theta = 10000
@@ -118,7 +117,8 @@ class DeepSeekV3(nnx.Module):
             qk_rope_head_dim=qk_rope_head_dim,
             v_head_dim=v_head_dim,
             num_local_experts=num_local_experts,
-            model_dtype=dtype)
+            model_dtype=dtype,
+            use_mla_kernel=self.use_mla_kernel)
 
         self.embedder = Embedder(vocab_size=vocab_size,
                                  hidden_size=hidden_size,
@@ -138,7 +138,7 @@ class DeepSeekV3(nnx.Module):
                 # if "USE_MLA_KERNEL" in os.environ:
                     # del os.environ["USE_MLA_KERNEL"]
             # if USE_MLA_KERNEL:
-            if USE_MLA_KERNEL:
+            if self.use_mla_kernel:
                 qkv_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
                 kv_cache_spec = P(ShardingAxisName.MLP_TENSOR)
 
@@ -152,7 +152,7 @@ class DeepSeekV3(nnx.Module):
                 query_tnh_spec = P(None, 'model', None)
                 keyvalue_skh_spec=P(None, 'model', None) 
                 # activation_attention_out_td=(None, None),
-                attn_o_tnh_spec=P(None, 'model', None),
+                attn_o_tnh_spec=P(None, 'model', None)
                 # q_da_sharding=(None, 'model'),
                 # anh_spec=(None, 'model', None),
                 # kv_da_spec=(None, 'model'),
@@ -168,11 +168,11 @@ class DeepSeekV3(nnx.Module):
                 rms_norm_eps=rms_norm_eps,
                 v_head_dim=v_head_dim,
                 mesh=self.mesh,
-                # use_kernel=use_mla_kernel,
+                use_mla_kernel=self.use_mla_kernel,
                 random_init=self.random_init,
                 hidden_size=hidden_size,
                 num_attention_heads=num_attention_heads,
-                num_key_value_heads=1 if USE_MLA_KERNEL else num_key_value_heads,
+                num_key_value_heads=1 if self.use_mla_kernel else num_key_value_heads,
                 head_dim=v_head_dim,  # MLA uses v_head_dim as head_dim
                 dtype=dtype,
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
@@ -218,12 +218,6 @@ class DeepSeekV3(nnx.Module):
                                        df_sharding=(None, ShardingAxisName.MLP_TENSOR),
                                        fd_sharding=(ShardingAxisName.MLP_TENSOR, None),
                                        random_init=self.random_init))
-            # global USE_MLA_KERNEL
-            # USE_MLA_KERNEL= use_mla
-            # if USE_MLA_KERNEL:
-            #     os.environ["USE_MLA_KERNEL"] = str(USE_MLA_KERNEL)
-            # elif "USE_MLA_KERNEL" in os.environ:
-            #     del os.environ["USE_MLA_KERNEL"]
 
             self.layers.append(block)
 
@@ -412,8 +406,7 @@ class DeepSeekV3WeightLoader:
     def __init__(self, vllm_config: VllmConfig, num_layers, hidden_size,
                  q_lora_rank, kv_lora_rank, attn_heads, qk_nope_head_dim,
                  qk_rope_head_dim, v_head_dim, num_local_experts, model_dtype,
-                #  use_mla_kernel=True, num_dense_layers=None):
-                num_dense_layers=None):
+                use_mla_kernel=False):
         self.num_layers = num_layers
         self.names_and_weights_generator = model_weights_generator(
             model_name_or_path=vllm_config.model_config.model,
@@ -427,10 +420,7 @@ class DeepSeekV3WeightLoader:
         self.v_head_dim = v_head_dim
         self.kv_lora_rank = kv_lora_rank
         self.model_dtype = model_dtype
-        # self.use_mla_kernel = use_mla_kernel
-        self.num_dense_layers = num_dense_layers
-        if not self.num_dense_layers:
-            self.num_dense_layers = vllm_config.model_config.hf_config.first_k_dense_replace
+        self.use_mla_kernel = use_mla_kernel
 
 
         self._transpose_map = {
@@ -525,7 +515,7 @@ class DeepSeekV3WeightLoader:
             "model.layers.*.mlp.shared_experts.up_proj.weight":
             "layers.*.shared_experts.kernel_up_proj_DF",
         }
-        if USE_MLA_KERNEL:
+        if self.use_mla_kernel:
             self._loaded_to_standardized_keys.update({
                 "model.layers.*.self_attn.k_b_proj.weight":
                 "layers.*.attn.kernel_k_up_proj_ANH",
@@ -916,9 +906,7 @@ class DeepSeekV3WeightLoader:
                         # logger.warning(f"layer_num = {layer_num}")
                     # else:
                         # logger.warning("No layers found!")
-                    # logger.warning(f"self.num_dense_layers = {self.num_dense_layers}")
-                    # if USE_MLA_KERNEL and "kv_b_proj" in loaded_name and layer_num >= self.num_dense_layers:
-                    if USE_MLA_KERNEL and "kv_b_proj" in loaded_name:
+                    if self.use_mla_kernel and "kv_b_proj" in loaded_name:
                         # loaded_weight shape: (num_heads * (d_k + d_v), kv_lora_rank)
                         # scale shape: (num_heads * (d_k + d_v) / block_n, kv_lora_rank / block_k)
 

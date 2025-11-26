@@ -47,7 +47,6 @@ class MLA(nnx.Module):
     rope_scaling: dict[str, Any]
     dtype: jnp.dtype
     kv_cache_dtype: str
-    # use_kernel: bool
     mesh: Mesh
 
     q_lora_rank: int
@@ -76,6 +75,8 @@ class MLA(nnx.Module):
     rope_input_ordering: str = "split"
     quant: Any | None = None
     rope_mscale_all_dim: float = 1.0
+    use_mla_kernel: bool = False
+
 
     rngs: InitVar[nnx.Rngs]
 
@@ -87,10 +88,9 @@ class MLA(nnx.Module):
         self.N = self.num_attention_heads
         self.K = self.num_key_value_heads
         self.D = self.hidden_size
-        self.use_kernel = os.getenv("USE_MLA_KERNEL", False)
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
 
-        if not self.use_kernel:
+        if not self.use_mla_kernel:
             assert self.N == self.K, "N and K must be equal for MLA"
 
         if self.rope_scaling["factor"] <= 1.0:
@@ -133,7 +133,7 @@ class MLA(nnx.Module):
             self.dtype,
             random_init=self.random_init,
         )
-        if self.use_kernel:
+        if self.use_mla_kernel:
             self.kernel_k_up_proj_ANH = create_param(
                 rngs,
                 (self.kv_lora_rank, self.N,
@@ -224,7 +224,7 @@ class MLA(nnx.Module):
             q_nope_TNH = q_TNH[..., :self.qk_nope_head_dim]
             q_rope_TNH = q_TNH[..., self.qk_nope_head_dim:]
             q_rope_TNH = self.rope.apply_rope(md.input_positions, q_rope_TNH)
-            if self.use_kernel:
+            if self.use_mla_kernel:
                 # Absorbe the K up-projection matrix into q
                 q_TNA = jnp.einsum("TNH,ANH -> TNA", q_nope_TNH, self.kernel_k_up_proj_ANH.value)
                 q_TNA = nnx.with_sharding_constraint(q_TNA, self.query_tnh)
@@ -250,7 +250,7 @@ class MLA(nnx.Module):
             kv_SA = self.kv_rms_norm(kv_SA)
             kv_SA = nnx.with_sharding_constraint(kv_SA, self.keyvalue_skh)
 
-            if not self.use_kernel:
+            if not self.use_mla_kernel:
                 k_rope_SNH = jnp.broadcast_to(k_rope_SNH,
                                               (k_rope_SNH.shape[0], self.N, self.qk_rope_head_dim))
                 # KV up projection.
@@ -273,7 +273,7 @@ class MLA(nnx.Module):
             # q, k, v head dimension to be multiple of 128. For now, we will
             # pad the q, k, v dimension to multiple of 128.
             # We should update the MLA kv cache implementation in the future.
-            if not self.use_kernel: # MLA kernel handles pading
+            if not self.use_mla_kernel: # MLA kernel handles pading
                 multiple_of_128 = ((self.qk_head_dim - 1) // 128 + 1) * 128
                 q_TNH = jnp.pad(q_TNH, ((0, 0), (0, 0),
                                         (0, multiple_of_128 - self.qk_head_dim)))
@@ -284,7 +284,7 @@ class MLA(nnx.Module):
             
             q_scale = k_scale = v_scale = None
 
-            if not self.use_kernel: # MLA does not currently support quantized KV!   
+            if not self.use_mla_kernel: # MLA does not currently support quantized KV!   
                 if self.kv_cache_quantized_dtype: 
                     # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
                     # q_scale = self._q_scale
@@ -383,15 +383,18 @@ class MLA(nnx.Module):
             P(),  # distribution: Replicated
         )
         out_specs = (self.attn_o_tnh, P(None, None, "model"))
+        logger.warning(f"out_specs = {out_specs}")
 
         def _ragged_paged_attention(*args):
-            return ragged_paged_attention(
+            outputs =  ragged_paged_attention(
                 *args,
                 sm_scale=self.scale,
                 q_scale=q_scale,
                 k_scale=k_scale,
                 v_scale=v_scale,
             )
+            logger.warning("ragged_paged_attention outputs = {outputs}")
+            return outputs
 
         output_TNH, kv_cache = jax.jit(
             shard_map.shard_map(
@@ -509,16 +512,15 @@ class MLA(nnx.Module):
                     max_num_tokens,
                     pages_per_seq,
                 )
-                # num_kv_pages_per_block = min(pages_per_seq, 2)
-                num_kv_pages_per_block = min(pages_per_seq, bkv_p)
+                num_kv_pages_per_block = min(min(pages_per_seq, bkv_p), 4)
                 # num_queries_per_block = min(max_num_tokens, 16)
                 # num_queries_per_block = min(max_num_tokens, bq_sz) # OOMS at 8
-                num_queries_per_block = min(max_num_tokens, 4) # OOMS at 8
+                num_queries_per_block = min(min(max_num_tokens, bq_sz), 4) # OOMS at 8
                 logger.warning(f"******max_num_seqs = {max_num_seqs}")
                 logger.warning(f"******num_page_indices = {num_page_indices}")
                 logger.warning(f"******pages_per_seq = {pages_per_seq}, bkv_p = {bkv_p}")
                 logger.warning(f"******max_num_tokens = {max_num_tokens}, bq_sz = {bq_sz}")
-                # logger.warning(f"******num_queries_per_block = {num_queries_per_block}")
+                logger.warning(f"******num_queries_per_block = {num_queries_per_block}")
                 return num_kv_pages_per_block, num_queries_per_block
             
             num_kv_pages_per_block, num_queries_per_block = _initialize_block_sizes()
