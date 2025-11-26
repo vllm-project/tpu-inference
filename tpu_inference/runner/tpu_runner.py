@@ -822,18 +822,31 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
             self.mesh, self.input_batch, padded_num_reqs, sharding=sharding)
+
+        # TODO(pooyam): Should we move this to `_prepare_inputs`?
+        if tpu_sampling_metadata.do_sampling:
+            self.rng_params_for_sampling, step_rng = jax.random.split(
+                self.rng_params_for_sampling)
+        else:
+            step_rng = self.rng_params_for_sampling
+
         if spec_decode_metadata is None:
             next_tokens = sample(
-                self.rng_params_for_sampling,
+                step_rng,
                 self.mesh,
                 logits,
                 tpu_sampling_metadata,
             )
         else:
+            if tpu_sampling_metadata.do_sampling:
+                bonus_rng, rejection_rng = jax.random.split(step_rng)
+            else:
+                bonus_rng = step_rng
+                rejection_rng = step_rng
             bonus_logits = self._select_from_array_fn(
                 logits, spec_decode_metadata.bonus_logits_indices)
             bonus_token_ids = sample(
-                self.rng_params_for_sampling,
+                bonus_rng,
                 self.mesh,
                 bonus_logits,
                 tpu_sampling_metadata,
@@ -847,7 +860,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 target_logits=target_logits,
                 bonus_token_ids=bonus_token_ids,
                 sampling_metadata=tpu_sampling_metadata,
-                key=self.rng_params_for_sampling,
+                key=rejection_rng,
             )
 
         if tpu_sampling_metadata.logprobs:
