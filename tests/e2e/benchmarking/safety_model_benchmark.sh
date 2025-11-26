@@ -34,13 +34,19 @@ export TIMEOUT_SECONDS=600
 # Check thresholds (set in CI YAML env block)
 # shellcheck disable=SC2269
 MINIMUM_ACCURACY_THRESHOLD=${MINIMUM_ACCURACY_THRESHOLD}
-TARGET_THROUGHPUT="450.00"
+if [ "$TP_SIZE" -eq 1 ]; then
+    TARGET_THROUGHPUT="225.00" # New threshold for single device
+elif [ "$TP_SIZE" -ge 8 ]; then
+    TARGET_THROUGHPUT="487.00" # Threshold for high-parallelism (TP=8)
+else
+    TARGET_THROUGHPUT="487.00"
+fi
 
 # Benchmark/Serve Settings
 MAX_MODEL_LEN=4096
 MAX_BATCHED_TOKENS=4096
 NUM_PROMPTS=500
-OUTPUT_LEN_OVERRIDE=20 # Max tokens to generate for safety classification
+OUTPUT_LEN_OVERRIDE=20 # Max tokens to generate for safety classification.
 
 # --- DATA PATHS ---
 # Source URL for the AILuminate CSV (Public Raw GitHub Link)
@@ -132,8 +138,7 @@ fi
 run_accuracy_check() {
     echo -e "\n--- Running Accuracy Check (Mode: ACCURACY) ---"
 
-    CONFTEST_DIR="/workspace/tpu-inference/scripts/vllm/integration"
-    CONFTEST_DIR="/mnt/disks/jiries-disk_data/tpu-inference/scripts/vllm/integration"
+    CONFTEST_DIR="/workspace/tpu_inference/scripts/vllm/integration"
 
     RELATIVE_TEST_FILE="test_safety_model_accuracy.py"
 
@@ -142,12 +147,11 @@ run_accuracy_check() {
         echo "Running pytest from: $(pwd)"
 
         python -m pytest -s -rP "$RELATIVE_TEST_FILE::test_safety_model_accuracy_check" \
+            -W ignore::DeprecationWarning \
             --tensor-parallel-size="$TP_SIZE" \
             --model-name="$MODEL_NAME" \
             --expected-value="$MINIMUM_ACCURACY_THRESHOLD" \
             --dataset-path="$LOCAL_CSV_FILE"
-
-        return $?
     )
     return $?
 }
@@ -186,7 +190,7 @@ run_performance_benchmark() {
 # --- MAIN EXECUTION FLOW ---
 
 # Set initial trap to ensure cleanup happens even on immediate exit
-trap 'cleanUp "$MODEL_NAME"' EXIT
+trap 'cleanUp "$MODEL_NAME" || true' EXIT
 
 # --- 1. RUN TEST MODE  ---
 if [ "$TEST_MODE" == "accuracy" ]; then
