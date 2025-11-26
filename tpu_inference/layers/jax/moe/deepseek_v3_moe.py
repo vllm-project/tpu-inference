@@ -90,7 +90,7 @@ class DeepSeekV3Router(nnx.Module):
                 - indices: Indices of selected experts, shape (sequence, num_experts_per_tok).
         """
         x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
+        #x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
 
         scores_TE = jnp.einsum("TD,DE -> TE", x_TD, self.kernel_DE.value)
         scores_TE = nnx.sigmoid(scores_TE)

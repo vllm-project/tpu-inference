@@ -127,7 +127,7 @@ class DenseFFW(nnx.Module):
         """
         # TODO consider to create factories for einsum(?)
         x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
+        #x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
         with jax.named_scope("wi_0"):
             gating_TF = jnp.einsum('TD,DF -> TF', x_TD,
                                    self.kernel_gating_DF.value)
@@ -220,7 +220,7 @@ class Embedder(nnx.Module):
             `(sequence, vocab_size)`.
         """
         x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD, self.prelogit_td)
+        #x_TD = nnx.with_sharding_constraint(x_TD, self.prelogit_td)
 
         with jax.named_scope("embedder_decode_projection"):
             logits_TV = jnp.einsum('VD,TD -> TV',

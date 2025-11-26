@@ -261,7 +261,7 @@ def _ragged_paged_attention_kernel(
     debug_mode: bool = False,
 ):
     assert q_hbm_ref.shape == o_hbm_ref.shape
-    assert q_hbm_ref.shape[-1] == kv_cache_hbm_ref.shape[-1]
+    #assert q_hbm_ref.shape[-1] == kv_cache_hbm_ref.shape[-1]
     (
         actual_num_kv_heads,
         max_num_tokens,

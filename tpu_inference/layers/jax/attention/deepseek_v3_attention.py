@@ -312,6 +312,21 @@ class MLA(nnx.Module):
                 - The attention output tensor of shape
                   `(seq, num_q_heads, head_dim)`.
         """
+        import logging; logger = logging.getLogger(__name__) 
+        
+        # Log the shape of the query projection output
+        logger.info(f"DEBUG SHAPE: q_TNH.shape (Query projection output): {q_TNH.shape}")
+        
+        # Log the shape of the KV cache (the input buffer)
+        logger.info(f"DEBUG SHAPE: kv_cache.shape (KV cache buffer): {kv_cache.shape}")
+        
+        # Log the last dimension of the query projection, as requested
+        logger.info(f"DEBUG SHAPE: q_TNH.shape[-1] (Query head dim): {q_TNH.shape[-1]}")
+        
+        # Log the last dimension of the KV cache, as requested
+        logger.info(f"DEBUG SHAPE: kv_cache.shape[-1] (KV cache head dim): {kv_cache.shape[-1]}")
+        # --- END SHAPE LOGGING PATCH ---
+
         md = attention_metadata
         in_specs = (
             self.query_tnh,  # q

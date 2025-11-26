@@ -226,8 +226,8 @@ class DeepSeekV3(nnx.Module):
                     hidden_act=hidden_act,
                     rngs=self.rng,
                     random_init=self.random_init,
-                    activation_ffw_td=('data', None),
-                    activation_ffw_ted=('data', None, None),
+                    activation_ffw_td=None,  # ('data', None),
+                    activation_ffw_ted=None, # ('data', None, None),
                     edf_sharding=('model', None, None),
                     efd_sharding=('model', None, None),
                     quantized_dtype=self.weight_loader.quant_dtype
@@ -251,8 +251,8 @@ class DeepSeekV3(nnx.Module):
                     hidden_act=hidden_act,
                     rngs=self.rng,
                     random_init=self.random_init,
-                    activation_ffw_td=('data', None),
-                    activation_ffw_ted=('data', None, None),
+                    activation_ffw_td=None, #('data', None),
+                    activation_ffw_ted=None, #('data', None, None),
                     edf_sharding=('model', None, None),
                     efd_sharding=('model', None, None),
                     router=router) if is_moe_layer else DenseFFW(

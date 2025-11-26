@@ -203,6 +203,12 @@ def _collect_packed_weights(
     replacements: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
     num_layers = model.vllm_config.model_config.hf_config.num_hidden_layers
     for layer in range(num_layers):
+
+        if layer < 3:
+            # Dense layers (0, 1, 2) do not use the MoE paths defined in _PACK_TARGETS.
+            # We skip them entirely.
+            continue
+
         for jax_path_tpl, hf_tpl in _PACK_TARGETS.items():
             jax_path = jax_path_tpl.format(layer=layer)
             hf_key = hf_tpl.format(layer=layer)

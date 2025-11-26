@@ -36,6 +36,11 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh, total_num_pages: int,
         get_kv_cache_shape_fn(total_num_pages, page_size,
                               actual_num_kv_heads // model_cnt,
                               actual_head_dim, kv_dtype))
+    from tpu_inference.kernels.ragged_paged_attention.v3.util import align_to
+    
+    correct_aligned_head_dim = align_to(actual_head_dim, 128)
+    shape[4] = correct_aligned_head_dim 
+    
     shape[2] *= model_cnt
     return tuple(shape)
 
