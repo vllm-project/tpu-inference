@@ -12,8 +12,9 @@ steps:
     secrets:
       - DOCKERHUB_TOKEN
     commands:
+      - "VLLM_COMMIT_HASH=$$(buildkite-agent meta-data get 'VLLM_COMMIT_HASH')"
       - "yes | docker system prune -a"
-      - "docker build --no-cache -f docker/Dockerfile -t vllm/vllm-tpu:nightly -t vllm/vllm-tpu:nightly-$BUILDKITE_COMMIT ."
+      - "docker build --build-arg VLLM_COMMIT_HASH=$$VLLM_COMMIT_HASH --no-cache -f docker/Dockerfile -t vllm/vllm-tpu:nightly -t vllm/vllm-tpu:nightly-$BUILDKITE_COMMIT-$$VLLM_COMMIT_HASH ."
       - "docker push vllm/vllm-tpu:nightly"
       - "docker push vllm/vllm-tpu:nightly-$BUILDKITE_COMMIT"
     plugins:
@@ -28,8 +29,9 @@ steps:
     secrets:
       - DOCKERHUB_TOKEN
     commands:
+      - "VLLM_COMMIT_HASH=$$(buildkite-agent meta-data get 'VLLM_COMMIT_HASH')"
       - "yes | docker system prune -a"
-      - "docker build --no-cache --build-arg IS_FOR_V7X=true -f docker/Dockerfile -t vllm/vllm-tpu:nightly-ironwood -t vllm/vllm-tpu:nightly-ironwood-$BUILDKITE_COMMIT ."
+      - "docker build --build-arg VLLM_COMMIT_HASH=$$VLLM_COMMIT_HASH --no-cache --build-arg IS_FOR_V7X=true -f docker/Dockerfile -t vllm/vllm-tpu:nightly-ironwood -t vllm/vllm-tpu:nightly-ironwood-$BUILDKITE_COMMIT-$$VLLM_COMMIT_HASH ."
       - "docker push vllm/vllm-tpu:nightly-ironwood"
       - "docker push vllm/vllm-tpu:nightly-ironwood-$BUILDKITE_COMMIT"
     plugins:
