@@ -2,7 +2,6 @@ import functools
 from typing import TYPE_CHECKING, Dict, List
 
 import jax
-import os
 import jax.numpy as jnp
 import numpy as np
 import vllm.envs as envs

@@ -411,7 +411,7 @@ class TPUWorker:
             logger.info(
                 f"KV cache page size calculated by vLLM "
                 f"({vllm_page_size_bytes} Bytes) does not match with actual "
-                f"page size used by RPA kernel ({attention_page_size_bytes} Bytes). "
+                f"page size used by Attention kernel ({attention_page_size_bytes} Bytes). "
                 f"Recalculating number of KV blocks using actual page size.")
 
             available_memory = self.determine_available_memory()

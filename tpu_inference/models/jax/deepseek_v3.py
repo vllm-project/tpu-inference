@@ -4,7 +4,6 @@ from typing import List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
-import os
 import torch
 from flax import nnx
 from flax.typing import PRNGKey
@@ -131,32 +130,15 @@ class DeepSeekV3(nnx.Module):
         self.layers = []
 
         def _create_mla() -> MLA:
-            # global USE_MLA_KERNEL
-            # ORIGINAL_USE_MLA_KERNEL = USE_MLA_KERNEL
-            # USE_MLA_KERNEL = use_mla
-            # if not use_mla_kernel:
-                # if "USE_MLA_KERNEL" in os.environ:
-                    # del os.environ["USE_MLA_KERNEL"]
-            # if USE_MLA_KERNEL:
             if self.use_mla_kernel:
-                qkv_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
-                kv_cache_spec = P(ShardingAxisName.MLP_TENSOR)
-
-
                 query_tnh_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
                 keyvalue_skh_spec=P(ShardingAxisName.MLP_TENSOR, None) # misnomer should be something like keyvalue_sa
                 attn_o_tnh_spec=P(ShardingAxisName.MLP_TENSOR, None, None)
                 
             else:
-                # TODO: update to use ShardingAxisName
-                query_tnh_spec = P(None, 'model', None)
-                keyvalue_skh_spec=P(None, 'model', None) 
-                # activation_attention_out_td=(None, None),
-                attn_o_tnh_spec=P(None, 'model', None)
-                # q_da_sharding=(None, 'model'),
-                # anh_spec=(None, 'model', None),
-                # kv_da_spec=(None, 'model'),
-                # nhd_spec=('model', None, None)
+                query_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
+                keyvalue_skh_spec=P(None, ShardingAxisName.MLP_TENSOR, None) 
+                attn_o_tnh_spec=P(None, ShardingAxisName.MLP_TENSOR, None)
 
             return MLA(
                 rope_theta=rope_theta,
@@ -188,10 +170,8 @@ class DeepSeekV3(nnx.Module):
                 anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None),
                 kv_da_sharding=(None, ShardingAxisName.MLP_TENSOR),
                 nhd_sharding=(ShardingAxisName.MLP_TENSOR, None, None))
-                # nhd_sharding=(ShardingAxisName.MLP_TENSOR, None, None)), ORIGINAL_USE_MLA_KERNEL
 
         for i in range(first_k_dense_replace):
-            # attn, use_mla =_create_mla(False)
             block = TransformerBlock(
                 pre_attention_norm=RMSNorm(
                     dims=hidden_size,
@@ -433,8 +413,8 @@ class DeepSeekV3WeightLoader:
             r"q_b_proj": (2, 0, 1),
             r"kv_a_proj_with_mqa": (1, 0),
             r"kv_b_proj": (2, 0, 1),
-            r"k_b_proj": (2, 0, 1),
-            r"v_b_proj": (2, 0, 1),
+            r"k_b_proj": (2, 0, 1), # used for MLA kernel
+            r"v_b_proj": (2, 0, 1), # used for MLA kernel
             r"o_proj": (1, 2, 0),
             # moe
             r"mlp\.gate\.weight": (1, 0),
@@ -530,7 +510,6 @@ class DeepSeekV3WeightLoader:
 
         self.is_model_quantized = not vllm_config.additional_config.get(
             "skip_quantization", False)
-        # logger.warning(f"is_model_quantized = {self.is_model_quantized}")
         if self.is_model_quantized:
             # TODO (jacobplatin): expand support eventually
             quantization_type = vllm_config.model_config.hf_config.quantization_config[
@@ -559,9 +538,11 @@ class DeepSeekV3WeightLoader:
                 "kv_b_proj": (attn_heads, (qk_nope_head_dim + v_head_dim) //
                               self.quantization_block_size_n,
                               kv_lora_rank // self.quantization_block_size_n),
+                # used for MLA kernel
                 "k_b_proj": (attn_heads, qk_nope_head_dim //
                               self.quantization_block_size_n,
                               kv_lora_rank // self.quantization_block_size_n),
+                # used for MLA kernel
                 "v_b_proj": (attn_heads, v_head_dim //
                              self.quantization_block_size_n,
                              kv_lora_rank // self.quantization_block_size_n),
@@ -603,8 +584,6 @@ class DeepSeekV3WeightLoader:
     def _transpose_params(self, param_key: str, param_tensor: jax.Array):
         for key, value in self._transpose_map.items():
             if re.search(key, param_key):
-                # logger.warning(f"Matched the following key: {param_key} with {key} for transposition")
-                # logger.warning(f"Transposing param of shape {param_tensor.shape} to shape {value}")
                 return jnp.transpose(param_tensor, value)
         return param_tensor  # Base case / no-op
 
@@ -655,18 +634,9 @@ class DeepSeekV3WeightLoader:
                 NOTE: if using the pre-quantized model (with Qwix), we'll include the scale size as well.
         """
         if weight_slice is not None:
-            # logger.warning(f"Original weight shape = {weight.shape}")
             weight = weight[*weight_slice]
-            # logger.warning(f"Sliced weight shape = {weight.shape}")
         mapped_name = self.map_loaded_to_standardized_name(name)
-        # logger.warning(f"Raw Name = {name}")
-        # if USE_MLA_KERNEL and "k_b_proj" in name:
-            # logger.warning(f"Name = {name}")
-            # logger.warning(f"Mapped name = {mapped_name}")
         base_model_weight = get_param(model_params, mapped_name)
-        # logger.warning(f"mapped_name = {mapped_name}")
-        # logger.warning(f"base_model_weight = {base_model_weight}")
-        # logger.warning(f"weight shape = {weight.shape}")
         model_weight = base_model_weight.array.qvalue if hasattr(
             base_model_weight, "array") else base_model_weight
         sharding = base_model_weight.array.qvalue.sharding if hasattr(
@@ -680,10 +650,8 @@ class DeepSeekV3WeightLoader:
         if torch_view_type:
             # Avoid unnecessary upcasting and mem copy by viewing the tensor's
             # raw data as integers before converting to a JAX array.
-            # logger.warning(f"Shape before weight_np: {weight.shape}")
             weight_np = jnp.array(
                 weight.view(torch_view_type).numpy()).view(cast_type)
-            # logger.warning(f"Shape after weight_np: {weight_np.shape}; torch_view_type = {torch_view_type}; cast_type = {cast_type}")
         else:
             raise ValueError(
                 f"Unsupported dtype for tensor conversion: {cast_type}")
@@ -694,7 +662,6 @@ class DeepSeekV3WeightLoader:
             scale = scale[*scale_slice]
 
         # Reshape and transpose weights if necessary.
-        # logger.warning(f"Reshape name = {name}, weight_np = {weight_np.shape}")
         weight_np = reshape_params(name, weight_np, self._weight_shape_map)
         if scale is not None:
             scale = reshape_params(name, scale, self._scale_shape_map)
@@ -883,7 +850,7 @@ class DeepSeekV3WeightLoader:
                         if scale is not None:
                             stacked_scales = self._process_moe_weights(
                                 loaded_name, scale, mlp_experts_up_proj_scales)
-                    if stacked_weights is not None:    
+                    if stacked_weights is not None:
                         weight_bytes, weight_shards = self._load_individual_weight(
                             loaded_name,
                             stacked_weights,
@@ -900,17 +867,10 @@ class DeepSeekV3WeightLoader:
                                 f"Cumulative local memory: {cumulative_local_memory} GB"
                             )
                 else:
-                    # TODO: update USE_MLA_KERNEL to use vllm_config.model_config.use_mla
-                    # if "layer" in loaded_name:
-                        # layer_num = int(re.search(r"layers\.(\d+)", loaded_name).group(1))
-                        # logger.warning(f"layer_num = {layer_num}")
-                    # else:
-                        # logger.warning("No layers found!")
                     if self.use_mla_kernel and "kv_b_proj" in loaded_name:
                         # loaded_weight shape: (num_heads * (d_k + d_v), kv_lora_rank)
                         # scale shape: (num_heads * (d_k + d_v) / block_n, kv_lora_rank / block_k)
-
-                        # Reshape to (Heads, D_k+D_v, In) and split
+                        # Reshape to (num_heads, (d_k + d_v), kv_lora_rank) and split
                         weight_reshaped = loaded_weight.view(self.attn_heads, self.qk_nope_head_dim + self.v_head_dim, self.kv_lora_rank)
                         k_weight = weight_reshaped[:, :self.qk_nope_head_dim, :].reshape(-1, self.kv_lora_rank)
                         v_weight = weight_reshaped[:, self.qk_nope_head_dim:, :].reshape(-1, self.kv_lora_rank)
@@ -937,12 +897,11 @@ class DeepSeekV3WeightLoader:
                         load_weight_slices = [None]
                         scales_list = [scale]
                         load_scale_slices = [None]
-                    # logger.warning(f"USE_MLA_KERNEL = {USE_MLA_KERNEL}")
-                    # logger.warning(f"load_weight_slices = {load_weight_slices}")
+
                     for loaded_name, loaded_weight, scale, load_weight_slice, load_scale_slice in zip(
                             loaded_names, loaded_weights_list, scales_list, load_weight_slices, load_scale_slices
                             ):
-                        # logger.warning(f"Final loaded_name = {loaded_name}")
+
                         weight_bytes, weight_shards = self._load_individual_weight(
                             loaded_name,
                             loaded_weight,

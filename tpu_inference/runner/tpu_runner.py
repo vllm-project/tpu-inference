@@ -306,7 +306,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             sharding_strategy.expert_size,
             sharding_strategy.tp_size,
         )
-        # logger.warning(f"**********mesh_shape = {mesh_shape}")
+
         return mesh_utils.create_device_mesh(
             mesh_shape,
             self.devices,
@@ -392,7 +392,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # The total number of requests is dp_size * max_num_seqs
         self.max_num_reqs = max(self.dp_size * scheduler_config.max_num_seqs,
                                 MIN_NUM_SEQS)
-        logger.warning(f"self.max_num_reqs = {self.max_num_reqs}; self.dp_size = {self.dp_size}; scheduler_config.max_num_seqs = {scheduler_config.max_num_seqs}")
         # [16, 32, 64, 128, 256, 512, 1024, 2048]
         self.num_tokens_paddings = runner_utils.get_token_paddings(
             min_token_size=max(16, self.dp_size),
@@ -444,7 +443,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.num_reqs_paddings_per_dp = [
             padding // self.dp_size for padding in self.num_reqs_paddings
         ]
-        logger.warning(f"self.num_reqs_paddings = {self.num_reqs_paddings}")
 
         # Padding for logits. Without speculative decoding, each request has one position to select from.
         # With speculative decoding, each request has multiple positions to select from.
@@ -677,7 +675,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                | None]:
         self.persistent_batch_manager.update_states(
             scheduler_output, self.get_mrope_input_positions_fn)
-        # logger.warning("******* executing model!")
         if not scheduler_output.total_num_scheduled_tokens:
             if has_kv_transfer_group():
                 return DUMMY_METADATA, self.kv_connector_no_forward(
@@ -694,7 +691,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 # raise Exception(
                 #     "Should not schedule a request that does nothing!")
             return DUMMY_METADATA, EMPTY_MODEL_RUNNER_OUTPUT
-        # logger.warning("******* preparing_inputs!")
+
         # TODO(pooyam): I guess we can remove returning sampling_metadata in `_prepare_inputs` after https://github.com/njhill/vllm/commit/b7433ca1a47732394b1bdea4099d98389515954b
         (
             input_ids,
@@ -1183,14 +1180,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         return input_ids
 
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
-        logger.warning(f"*******self.dp_size = {self.dp_size}")
         if self.dp_size > 1:
             return self._prepare_inputs_dp(scheduler_output)
         else:
             return self._prepare_inputs_non_dp(scheduler_output)
 
     def _prepare_inputs_dp(self, scheduler_output: "VllmSchedulerOutput"):
-        # logger.warning("*******Using DP input prep!")
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -1206,12 +1201,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
          padded_total_num_scheduled_tokens, padded_num_reqs_per_dp_rank,
          logits_indices_selector, max_num_reqs_per_dp_rank
          ) = self._prepare_dp_input_metadata(scheduler_output)
-        logger.warning("Made it to line 1135!!")
-        logger.warning(f"prepare_dp_input_metadata outputs: req_ids_dp={req_ids_dp}, req_indices_dp={req_indices_dp}, "
-                       f"num_scheduled_tokens_per_dp_rank={num_scheduled_tokens_per_dp_rank}, scheduled_tokens_per_dp_rank={scheduled_tokens_per_dp_rank}, "
-                       f"num_req_per_dp_rank={num_req_per_dp_rank}, padded_num_scheduled_tokens_per_dp_rank={padded_num_scheduled_tokens_per_dp_rank}, "
-                       f"padded_num_reqs={padded_num_reqs}, padded_total_num_scheduled_tokens={padded_total_num_scheduled_tokens}, "
-                       f"padded_num_reqs_per_dp_rank={padded_num_reqs_per_dp_rank}, logits_indices_selector={logits_indices_selector}, max_num_reqs_per_dp_rank={max_num_reqs_per_dp_rank}")
         # Multi-modal support
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -1281,7 +1270,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             input_ids_cpu[total_num_scheduled_tokens:] = 0
 
         # Prepare the attention metadata (query_start_loc_cpu, seq_lens_cpu)
-        # logger.warning(f"**********dp_size = {dp_size}")
         for dp_rank in range(dp_size):
             req_offset = dp_rank * max_num_reqs_per_dp_rank
             query_start_loc_cpu = self.query_start_loc_cpu[

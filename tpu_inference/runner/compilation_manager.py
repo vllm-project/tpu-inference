@@ -140,7 +140,6 @@ class CompilationManager:
         assert num_tokens is not None
 
         dp_size = self.runner.vllm_config.sharding_config.total_dp_size
-        logger.warning(f"***** dp_size = {dp_size}")
         dp_sharding = NamedSharding(
             self.runner.mesh, PartitionSpec(
                 ShardingAxisName.ATTN_DATA, )) if dp_size > 1 else None

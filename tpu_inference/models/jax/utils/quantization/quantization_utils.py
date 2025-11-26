@@ -169,7 +169,6 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
         cache_dtype=kv_cache_jnp_dtype,
         use_mla=model.vllm_config.model_config.use_mla,)
 
-    # dp_size = mesh.shape.get("data", 1) * mesh.shape.get("attn", 1)
     dp_size = model.vllm_config.sharding_config.total_dp_size
 
     # NOTE: the inputs don't need to match the actual ones, as long as the consumed weights are the same
