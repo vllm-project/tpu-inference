@@ -1375,6 +1375,7 @@ class TPUOffloadConnectorWorker:
         # Fast path: handle bucket-sized transfers
         if num_blocks in BLOCK_SIZE_BUCKETS:
             flat_kv_caches_cpu = self.swap_out_fn(flat_kv_caches_tpu)
+            jax.block_until_ready(flat_kv_caches_cpu)
             split_size_list = [self.block_size] * num_blocks
             return [
                 jax.lax.split(flat_layer_cache, split_size_list, axis=0)
@@ -1405,6 +1406,7 @@ class TPUOffloadConnectorWorker:
             # Swap the bucket to CPU, result is a flat tensor for this bucket. We are doing the chunking inside this function to avoid returning any jnp.concatenate
             # of kv cache for the the bucketed blocks
             cpu_chunk_flat_per_layer = self.swap_out_fn(tpu_chunk)
+            jax.block_until_ready(cpu_chunk_flat_per_layer)
             # Split the flat bucket tensor into block-sized chunks and append
             split_size_list = [self.block_size] * decomposed_block_size
             for i, layer_cache in enumerate(cpu_chunk_flat_per_layer):
