@@ -601,6 +601,7 @@ class CompilationManager:
             self._run_compilation(
                 "eagle3_get_draft_token_ids",
                 self.runner.drafter._get_draft_token_ids,
+                self.runner.drafter.state,
                 hidden_states,
                 num_logits=num_logits,
             )
@@ -645,9 +646,9 @@ class CompilationManager:
                 num_reqs,
             ):
                 target_hidden_states, input_ids, last_token_indices, _ = self.runner.drafter._filter_token_and_prepare_initial_inputs(
-                    token_indices, query_start_loc, seq_lens, input_ids,
-                    aux_hidden_states, attention_metadata, next_token_ids,
-                    num_reqs)
+                    self.runner.drafter.state, token_indices, query_start_loc,
+                    seq_lens, input_ids, aux_hidden_states, attention_metadata,
+                    next_token_ids, num_reqs)
                 return target_hidden_states, input_ids, last_token_indices
 
             input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32)
@@ -724,6 +725,7 @@ class CompilationManager:
             self._run_compilation(
                 "eagle3_prepare_hidden_states_and_input_ids",
                 self.runner.drafter._prepare_hidden_states_and_input_ids,
+                self.runner.drafter.state,
                 aux_hidden_states,
                 query_start_loc,
                 target_token_ids,
@@ -758,6 +760,7 @@ class CompilationManager:
             self._run_compilation(
                 "eagle3_select_inputs_for_loop_speculation",
                 self.runner.drafter._select_inputs_for_loop_speculation,
+                self.runner.drafter.state,
                 positions,
                 hidden_states,
                 hidden_states,
@@ -768,6 +771,7 @@ class CompilationManager:
             self._run_compilation(
                 "eagle3_select_draft_token_ids",
                 self.runner.drafter._select_draft_token_ids,
+                self.runner.drafter.state,
                 hidden_states,
                 last_token_indices,
                 num_tokens=num_tokens,
