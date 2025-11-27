@@ -182,6 +182,9 @@ class GptOss(nnx.Module):
             random_init=self.random_init,
         )
 
+        # For Flax 0.12.0 compatibility.
+        self.layers = nnx.List(self.layers)
+
     # For compatibility with flax.
     def apply(self, variables, *args, **kwargs):
         return self.__call__(*args, **kwargs)

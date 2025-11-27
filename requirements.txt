@@ -8,9 +8,9 @@ google-cloud-storage
 jax[tpu]==0.8.0
 jaxlib==0.8.0
 jaxtyping
-flax==0.11.1
+flax==0.12.0
 torchax==0.0.7
-qwix==0.1.1
+qwix==0.1.4
 torchvision==0.24.0
 pathwaysutils
 parameterized

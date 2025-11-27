@@ -141,6 +141,8 @@ class Eagle3LlamaModel(nnx.Module):
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype)
         ]
+        # For Flax 0.12.0 compatibility.
+        self.layers = nnx.List(self.layers)
 
         if hasattr(hf_config, "target_hidden_size"):
             input_size = hf_config.target_hidden_size * 3

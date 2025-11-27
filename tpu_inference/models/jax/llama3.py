@@ -243,7 +243,7 @@ class LlamaModel(nnx.Module):
                 init_fn, (ShardingAxisName.VOCAB, None)),
             rngs=rng,
         )
-        self.layers = [
+        self.layers = nnx.List(
             LlamaDecoderLayer(
                 config=hf_config,
                 dtype=dtype,
@@ -251,8 +251,7 @@ class LlamaModel(nnx.Module):
                 mesh=mesh,
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype)
-            for _ in range(hf_config.num_hidden_layers)
-        ]
+            for _ in range(hf_config.num_hidden_layers))
         self.norm = nnx.RMSNorm(
             hidden_size,
             epsilon=rms_norm_eps,
