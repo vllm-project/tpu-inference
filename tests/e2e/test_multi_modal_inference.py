@@ -8,8 +8,6 @@ import os
 from dataclasses import asdict
 
 import pytest
-
-import tpu_inference.envs as envs
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.multimodal.image import convert_image_mode
