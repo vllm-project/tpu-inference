@@ -52,7 +52,7 @@ class DeepSeekV3(nnx.Module):
         self.rng = nnx.Rngs(rng)
 
         # NOTE: the default is 61
-        num_layers: int = vllm_config.model_config.hf_config.num_hidden_layers
+        num_layers: int = 20
         num_local_experts: int = 256
 
         vocab_size: int = 129280
@@ -152,9 +152,9 @@ class DeepSeekV3(nnx.Module):
                 keyvalue_skh=P(None, ('model', 'expert'), None),
                 activation_attention_out_td=(None, None),
                 attn_o_tnh=P(None, ('model', 'expert'), None),
-                q_da_sharding=(None, ('model', 'expert')),
+                q_da_sharding=('model', None),
                 anh_sharding=(None, ('model', 'expert'), None),
-                kv_da_sharding=(None, ('model', 'expert')),
+                kv_da_sharding=('model', None),
                 nhd_sharding=(('model', 'expert'), None, None))
 
         for i in range(first_k_dense_replace):
@@ -220,6 +220,8 @@ class DeepSeekV3(nnx.Module):
                     activation_ffw_ted=('data', None, 'model'),
                     edf_sharding=(None , 'model', 'expert'),
                     efd_sharding=(None , 'expert', 'model'),
+                    quantized_dtype=self.weight_loader.quant_dtype
+                    if self.weight_loader.is_model_quantized else None,
                     router=router) if is_moe_layer else DenseFFW(
                         dtype=dtype,
                         hidden_act=hidden_act,
