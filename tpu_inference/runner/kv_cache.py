@@ -114,7 +114,7 @@ def get_rpa_page_size_bytes(mesh: Mesh, kv_cache_specs: dict[str, Any]) -> int:
         assert isinstance(kv_cache_spec, AttentionSpec)
 
         dtype = t2j_dtype(kv_cache_spec.dtype)
-        bits = dtypes.bit_width(dtype)
+        bits = dtypes.itemsize_bits(dtype)
 
         kv_cache_shape = get_kv_cache_shape_with_mesh(
             mesh=mesh,
