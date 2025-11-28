@@ -1,6 +1,5 @@
 import copy
 import functools
-import os
 import random
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -11,7 +10,7 @@ import jax.numpy as jnp
 import jaxtyping
 import numpy as np
 import torch
-import vllm.envs as envs
+import vllm.envs as vllm_envs
 from flax import nnx
 from jax.experimental import mesh_utils
 from jax.sharding import NamedSharding, PartitionSpec
@@ -35,6 +34,7 @@ from vllm.v1.worker.kv_connector_model_runner_mixin import \
     KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
+import tpu_inference.envs as envs
 from tpu_inference import utils as common_utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
@@ -291,7 +291,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.rng_key = jax.random.key(self.model_config.seed)
 
     def _init_mesh(self) -> None:
-        if os.getenv("NEW_MODEL_DESIGN", False):
+        if envs.NEW_MODEL_DESIGN:
             self.mesh = self._create_new_model_mesh()
         else:
             # NOTE(wenxindongwork): The new MoE kernel expects a 2D mesh, so we need
@@ -302,7 +302,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         logger.info(f"Init mesh | mesh={self.mesh}")
 
     def _create_new_model_mesh(self) -> jax.sharding.Mesh:
-        num_slices = int(os.environ.get('NUM_SLICES', 1))
+        num_slices = envs.NUM_SLICES
 
         logger.info(f"Creating new model mesh | devices={len(self.devices)}, "
                     f"num_slices={num_slices}")
@@ -371,7 +371,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                        devices=self.devices)
 
     def _init_phased_profiling(self) -> None:
-        self.phased_profiling_dir = os.getenv("PHASED_PROFILING_DIR", "")
+        self.phased_profiling_dir = envs.PHASED_PROFILING_DIR
         self.phase_based_profiler = None
         if self.phased_profiling_dir:
             self.phase_based_profiler = runner_utils.PhasedBasedProfiler(
@@ -413,7 +413,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             min_token_size=max(16, self.dp_size),
             max_token_size=scheduler_config.max_num_batched_tokens *
             self.dp_size,
-            padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
+            padding_gap=vllm_envs.VLLM_TPU_BUCKET_PADDING_GAP)
         self.num_tokens_paddings_per_dp = [
             padding // self.dp_size for padding in self.num_tokens_paddings
         ]
