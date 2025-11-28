@@ -166,9 +166,11 @@ class DeepSeekV3(nnx.Module):
                 keyvalue_skh=keyvalue_skh_spec,
                 activation_attention_out_td=(None, None),
                 attn_o_tnh=attn_o_tnh_spec,
-                q_da_sharding=(None, ShardingAxisName.MLP_TENSOR),
+                q_da_sharding=(None, ShardingAxisName.VOCAB),
+                # q_da_sharding=(None, ShardingAxisName.MLP_TENSOR),
                 anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None),
-                kv_da_sharding=(None, ShardingAxisName.MLP_TENSOR),
+                kv_da_sharding=(None, ShardingAxisName.VOCAB),
+                # kv_da_sharding=(None, ShardingAxisName.MLP_TENSOR),
                 nhd_sharding=(ShardingAxisName.MLP_TENSOR, None, None))
 
         for i in range(first_k_dense_replace):

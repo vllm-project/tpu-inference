@@ -219,7 +219,7 @@ class MLA(nnx.Module):
             q_rope_TNH = q_TNH[..., self.qk_nope_head_dim:]
             q_rope_TNH = self.rope.apply_rope(md.input_positions, q_rope_TNH)
             if self.use_mla_kernel:
-                # Absorbe the k up-projection matrix into q
+                # Absorb the k up-projection matrix into q
                 q_TNA = jnp.einsum("TNH,ANH -> TNA", q_nope_TNH, self.kernel_k_up_proj_ANH.value)
                 q_TNA = nnx.with_sharding_constraint(q_TNA, self.query_tnh)
             else:

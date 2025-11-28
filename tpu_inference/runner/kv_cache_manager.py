@@ -191,12 +191,11 @@ class KVCacheManager:
             dp_size = self.runner.vllm_config.sharding_config.total_dp_size
             # num_blocks must be a multiple of dp_size
             num_blocks = math.ceil(num_blocks / dp_size) * dp_size
-            head_size = representative_spec.head_size
             kv_cache = create_kv_caches(
                 num_blocks=num_blocks,
                 block_size=representative_spec.block_size,
                 num_kv_heads=representative_spec.num_kv_heads,
-                head_size=head_size,
+                head_size=representative_spec.head_size,
                 mesh=self.runner.mesh,
                 layer_names=[f'kv_cache_tensor.{i}'],
                 cache_dtype=t2j_dtype(representative_spec.dtype),
