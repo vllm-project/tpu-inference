@@ -49,28 +49,28 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("DECODE_SLICES", ""),
     # Skip JAX precompilation step during initialization
     "SKIP_JAX_PRECOMPILE":
-    lambda: bool(int(os.getenv("SKIP_JAX_PRECOMPILE", "0"))),
+    lambda: bool(int(os.getenv("SKIP_JAX_PRECOMPILE", "0") or "0")),
     # Check for XLA recompilation during execution
     "VLLM_XLA_CHECK_RECOMPILATION":
-    lambda: bool(int(os.getenv("VLLM_XLA_CHECK_RECOMPILATION", "0"))),
+    lambda: bool(int(os.getenv("VLLM_XLA_CHECK_RECOMPILATION", "0") or "0")),
     # Model implementation type (e.g., "flax_nnx")
     "MODEL_IMPL_TYPE":
     lambda: os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower(),
     # Enable new experimental model design
     "NEW_MODEL_DESIGN":
-    lambda: bool(int(os.getenv("NEW_MODEL_DESIGN", "0"))),
+    lambda: bool(int(os.getenv("NEW_MODEL_DESIGN", "0") or "0")),
     # Directory to store phased profiling output
     "PHASED_PROFILING_DIR":
     lambda: os.getenv("PHASED_PROFILING_DIR", ""),
     # Python tracer level for profiling
     "PYTHON_TRACER_LEVEL":
-    lambda: int(os.getenv("PYTHON_TRACER_LEVEL", "1")),
+    lambda: int(os.getenv("PYTHON_TRACER_LEVEL", "1") or "1"),
     # Use custom expert-parallel kernel for MoE (Mixture of Experts)
     "USE_MOE_EP_KERNEL":
-    lambda: bool(int(os.getenv("USE_MOE_EP_KERNEL", "0"))),
+    lambda: bool(int(os.getenv("USE_MOE_EP_KERNEL", "0") or "0")),
     # Number of TPU slices for multi-slice mesh
     "NUM_SLICES":
-    lambda: int(os.getenv("NUM_SLICES", "1")),
+    lambda: int(os.getenv("NUM_SLICES", "1") or "1"),
     # Enable/disable Ray usage statistics collection
     "RAY_USAGE_STATS_ENABLED":
     lambda: os.getenv("RAY_USAGE_STATS_ENABLED", "0"),
