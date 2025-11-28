@@ -56,6 +56,12 @@ def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
+    # Ensure clean environment for boolean vars by setting to default "0"
+    monkeypatch.setenv("SKIP_JAX_PRECOMPILE", "0")
+    monkeypatch.setenv("VLLM_XLA_CHECK_RECOMPILATION", "0")
+    monkeypatch.setenv("NEW_MODEL_DESIGN", "0")
+    monkeypatch.setenv("USE_MOE_EP_KERNEL", "0")
+
     # Test SKIP_JAX_PRECOMPILE (default False)
     assert envs.SKIP_JAX_PRECOMPILE is False
     monkeypatch.setenv("SKIP_JAX_PRECOMPILE", "1")
@@ -82,6 +88,10 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_integer_env_vars(monkeypatch: pytest.MonkeyPatch):
+    # Ensure clean environment for integer vars by setting to defaults
+    monkeypatch.setenv("PYTHON_TRACER_LEVEL", "1")
+    monkeypatch.setenv("NUM_SLICES", "1")
+
     assert envs.PYTHON_TRACER_LEVEL == 1
     monkeypatch.setenv("PYTHON_TRACER_LEVEL", "3")
     assert envs.PYTHON_TRACER_LEVEL == 3
