@@ -43,7 +43,6 @@ def update_kv_cache(
         distribution: jax.Array,  # i32[3]
 ) -> tuple[jax.Array, jax.Array]:
     """Update KV cache with new tokens."""
-
     actual_r_dim = new_k_pe.shape[-1]
     r_dim = align_to(actual_r_dim, 128)
     if actual_r_dim != r_dim:
@@ -374,7 +373,6 @@ def static_validate_inputs(
 
     actual_lkv_dim = ql_nope.shape[2]
     actual_r_dim = q_pe.shape[2]
-    
     (
         _,
         page_size_per_kv_packing,
