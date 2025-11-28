@@ -14,6 +14,23 @@ waitForServerReady() {
     local start_time=$(date +%s)
     echo "Waiting for server ready message: '$READY_MESSAGE'"
 
+    local fatal_error_patterns=(
+        "RuntimeError:"
+        "ValueError:"
+        "FileNotFoundError:"
+        "TypeError:"
+        "ImportError:"
+        "NotImplementedError:"
+        "AssertionError:"
+        "TimeoutError:"
+        "OSError:"
+        "AttributeError:"
+        "NVMLError:"
+    )
+
+    local error_regex
+    error_regex=$(IFS=\|; echo "${fatal_error_patterns[*]}")
+
     while true; do
         current_time=$(date +%s)
         elapsed_time=$((current_time - start_time))
@@ -26,7 +43,13 @@ waitForServerReady() {
             exit 1
         fi
 
-        if grep -q "$READY_MESSAGE" "$LOG_FILE" ; then
+        if grep -Eq "$error_regex" "$LOG_FILE"; then
+            echo "FATAL ERROR DETECTED: The server log contains a fatal error pattern."
+            # Call cleanup and exit (cleanup must be handled by the calling script's trap)
+            exit 1
+        fi
+
+        if grep -Fq "$READY_MESSAGE" "$LOG_FILE" ; then
             echo "Server is ready."
             return 0
         fi
