@@ -462,7 +462,7 @@ def gmm(
 
             if is_last_k_tile:
                 if rhs_scale is not None:
-                    acc *= jnp.concat([rhs_scale[...]] * (tm // 8), axis=0)
+                    acc *= jnp.broadcast_to(rhs_scale[...], acc.shape)
 
                 loaded_out = out[...].astype(jnp.float32)
                 if not is_first_b_tile:
@@ -540,8 +540,8 @@ def gmm(
     else:
 
         rhs_scale = jnp.swapaxes(rhs_scale, 1, 2)
-        rhs_scale = jnp.stack([rhs_scale] * 8, 2)
-        rhs_scale_block_spec = pl.BlockSpec((None, None, 8, tn),
+        rhs_scale = jnp.expand_dims(rhs_scale, 2)
+        rhs_scale_block_spec = pl.BlockSpec((None, None, 1, tn),
                                             rhs_scale_transform_indices)
 
     lhs_bytes = lhs.size * lhs.itemsize
