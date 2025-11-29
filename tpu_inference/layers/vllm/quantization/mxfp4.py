@@ -1,3 +1,4 @@
+from functools import partial
 from typing import Callable, Optional, Union
 
 import jax
@@ -170,69 +171,76 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
     def process_weights_after_loading(self, layer: torch.nn.Module):
         assert isinstance(layer, FusedMoE)
         assert layer.moe_config.has_bias, "mxfp4 quantization alwyas use bias."
+        print(f'kky {layer.layer_name=}')
 
-        w13_weight = u8_unpack_e2m1(t2j(layer.w13_weight, use_dlpack=False))
-        w13_weight_scale = e8m0_to_fp32(
-            t2j(layer.w13_weight_scale, use_dlpack=False))
+        w13_weight = t2j(layer.w13_weight, use_dlpack=False)
+        w13_weight_scale = t2j(layer.w13_weight_scale, use_dlpack=False)
         w13_bias = t2j(layer.w13_bias, use_dlpack=False)
 
-        w2_weight = u8_unpack_e2m1(t2j(layer.w2_weight, use_dlpack=False))
-        w2_weight_scale = e8m0_to_fp32(
-            t2j(layer.w2_weight_scale, use_dlpack=False))
+        w2_weight = t2j(layer.w2_weight, use_dlpack=False)
+        w2_weight_scale = t2j(layer.w2_weight_scale, use_dlpack=False)
         w2_bias = t2j(layer.w2_bias, use_dlpack=False)
 
-        # Dequantize fp4 weights into fp32.
-        w13_weight = dequantize_block_weight(w13_weight, w13_weight_scale,
-                                             MXFP4_BLOCK_SIZE, jnp.float32)
-        w2_weight = dequantize_block_weight(w2_weight, w2_weight_scale,
-                                            MXFP4_BLOCK_SIZE, jnp.float32)
+        @partial(jax.jit, static_argnames=("mesh"))
+        def wrapper(w13_weight, w13_weight_scale, w13_bias, w2_weight,
+                    w2_weight_scale, w2_bias, mesh):
+            w13_weight = u8_unpack_e2m1(w13_weight)
+            w13_weight_scale = e8m0_to_fp32(w13_weight_scale)
+            w2_weight = u8_unpack_e2m1(w2_weight)
+            w2_weight_scale = e8m0_to_fp32(w2_weight_scale)
 
-        # Requantize the weights into TPU friendly block size.
-        orig_intermediate_size = w2_weight.shape[-1]
-        w13_weight, w13_weight_scale = quantize_block_weight(
-            w13_weight, 512, jnp.float4_e2m1fn)
-        w2_weight, w2_weight_scale = quantize_block_weight(
-            w2_weight, 512, jnp.float4_e2m1fn)
+            # Dequantize fp4 weights into fp32.
+            w13_weight = dequantize_block_weight(w13_weight, w13_weight_scale,
+                                                 MXFP4_BLOCK_SIZE, jnp.float32)
+            w2_weight = dequantize_block_weight(w2_weight, w2_weight_scale,
+                                                MXFP4_BLOCK_SIZE, jnp.float32)
 
-        # PyTorch does not have support for fp4. To make it compatible with it,
-        # we bitcast quantized weights into uint4 before converting them into
-        # PyTorch tensor and bitcast it back into fp4 during inference time.
-        w13_weight = jax.lax.bitcast_convert_type(w13_weight, jnp.uint4)
-        w2_weight = jax.lax.bitcast_convert_type(w2_weight, jnp.uint4)
+            # Requantize the weights into TPU friendly block size.
+            orig_intermediate_size = w2_weight.shape[-1]
+            w13_weight, w13_weight_scale = quantize_block_weight(
+                w13_weight, 512, jnp.float4_e2m1fn)
+            w2_weight, w2_weight_scale = quantize_block_weight(
+                w2_weight, 512, jnp.float4_e2m1fn)
 
-        num_experts, hidden_size, intermediate_size = w2_weight.shape
+            # PyTorch does not have support for fp4. To make it compatible with it,
+            # we bitcast quantized weights into uint4 before converting them into
+            # PyTorch tensor and bitcast it back into fp4 during inference time.
+            w13_weight = jax.lax.bitcast_convert_type(w13_weight, jnp.uint4)
+            w2_weight = jax.lax.bitcast_convert_type(w2_weight, jnp.uint4)
 
-        # Dim shared by both w13 and w2 weight (intermediate dim) may have been
-        # padded on w2 weight during subchannel quantization. We pad the dim on
-        # w13 as well to match the size.
-        # NOTE: hidden dim of w13 may have been padded as well. Because that
-        # dim is shared with activation, we handle it by padding activation
-        # during inference time.
-        padding_size = 2 * (intermediate_size - orig_intermediate_size)
-        w13_weight = jnp.pad(w13_weight, ((0, 0), (0, padding_size), (0, 0)))
-        w13_weight_scale = jnp.pad(w13_weight_scale,
-                                   ((0, 0), (0, padding_size), (0, 0)))
-        w13_bias = jnp.pad(w13_bias, ((0, 0), (0, padding_size)))
+            num_experts, hidden_size, intermediate_size = w2_weight.shape
 
-        if layer.activation == "swigluoai":
-            # When using swigluoai, vLLM splits gmm output in a interleaved way.
-            # However, interleaved split is not performant on TPU. Therefore,
-            # we preprocess the weight so that splitting gmm output by middle
-            # can still get the same result.
-            w1_weight = w13_weight[:, ::2, :]
-            w3_weight = w13_weight[:, 1::2, :]
-            w13_weight = jnp.concat([w1_weight, w3_weight], axis=1)
+            # Dim shared by both w13 and w2 weight (intermediate dim) may have been
+            # padded on w2 weight during subchannel quantization. We pad the dim on
+            # w13 as well to match the size.
+            # NOTE: hidden dim of w13 may have been padded as well. Because that
+            # dim is shared with activation, we handle it by padding activation
+            # during inference time.
+            padding_size = 2 * (intermediate_size - orig_intermediate_size)
+            w13_weight = jnp.pad(w13_weight,
+                                 ((0, 0), (0, padding_size), (0, 0)))
+            w13_weight_scale = jnp.pad(w13_weight_scale,
+                                       ((0, 0), (0, padding_size), (0, 0)))
+            w13_bias = jnp.pad(w13_bias, ((0, 0), (0, padding_size)))
 
-            w1_weight_scale = w13_weight_scale[:, ::2, :]
-            w3_weight_scale = w13_weight_scale[:, 1::2, :]
-            w13_weight_scale = jnp.concat([w1_weight_scale, w3_weight_scale],
-                                          axis=1)
+            if layer.activation == "swigluoai":
+                # When using swigluoai, vLLM splits gmm output in a interleaved way.
+                # However, interleaved split is not performant on TPU. Therefore,
+                # we preprocess the weight so that splitting gmm output by middle
+                # can still get the same result.
+                w1_weight = w13_weight[:, ::2, :]
+                w3_weight = w13_weight[:, 1::2, :]
+                w13_weight = jnp.concat([w1_weight, w3_weight], axis=1)
 
-            w1_bias = w13_bias[:, ::2]
-            w3_bias = w13_bias[:, 1::2]
-            w13_bias = jnp.concat([w1_bias, w3_bias], axis=1)
+                w1_weight_scale = w13_weight_scale[:, ::2, :]
+                w3_weight_scale = w13_weight_scale[:, 1::2, :]
+                w13_weight_scale = jnp.concat(
+                    [w1_weight_scale, w3_weight_scale], axis=1)
 
-        if self.use_kernel:
+                w1_bias = w13_bias[:, ::2]
+                w3_bias = w13_bias[:, 1::2]
+                w13_bias = jnp.concat([w1_bias, w3_bias], axis=1)
+
         if self.use_kernel:
             # Kernel expects:
             # w13: (num_experts, 2, hidden_size, intermediate_size)
@@ -241,92 +249,96 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
             # w13_weight: (num_experts, 2*intermediate_size, hidden_size)
             # w2_weight: (num_experts, hidden_size, intermediate_size)
 
-            w13_reshaped = w13_weight.reshape(num_experts, 2,
-                                              intermediate_size, hidden_size)
+                w13_reshaped = w13_weight.reshape(num_experts, 2,
+                                                  intermediate_size,
+                                                  hidden_size)
 
-            # Transpose non-constracting dim to right most dim
-            w13_weight_transposed = jnp.swapaxes(w13_reshaped, 2, 3)
-            w2_weight_transposed = jnp.transpose(w2_weight, 1, 2)
+                # Transpose non-constracting dim to right most dim
+                w13_weight_transposed = jnp.swapaxes(w13_reshaped, 2, 3)
+                w2_weight_transposed = jnp.transpose(w2_weight, 1, 2)
 
             # Apply EP sharding
             ep_sharding = NamedSharding(self.mesh, P("model"))
 
-            ep_sharding = NamedSharding(self.mesh, P("model"))
+                w13_weight = jax.device_put(
+                    w13_weight_transposed,
+                    Format(Layout((0, 1, 2, 3)), ep_sharding))
+                w2_weight = jax.device_put(
+                    w2_weight_transposed, Format(Layout((0, 1, 2)),
+                                                 ep_sharding))
 
-            w13_weight = jax.device_put(
-                w13_weight_transposed, Format(Layout((0, 1, 2, 3)),
-                                              ep_sharding))
-            w2_weight = jax.device_put(w2_weight_transposed,
-                                       Format(Layout((0, 1, 2)), ep_sharding))
+                w13_bias = w13_bias.reshape(num_experts, 2, intermediate_size)
+                w13_bias = jax.device_put(
+                    w13_bias, Format(Layout((0, 1, 2)), ep_sharding))
+                w2_bias = jax.device_put(w2_bias,
+                                         Format(Layout((0, 1)), ep_sharding))
 
-            w13_bias = w13_bias.reshape(num_experts, 2, intermediate_size)
-            w13_bias = jax.device_put(w13_bias,
-                                      Format(Layout((0, 1, 2)), ep_sharding))
-            w2_bias = jax.device_put(w2_bias,
-                                     Format(Layout((0, 1)), ep_sharding))
+            elif layer.use_ep:
+                ep_sharding = NamedSharding(mesh, P("model"))
+                w13_weight = jax.device_put(
+                    w13_weight, Format(Layout((0, 1, 2)), ep_sharding))
+                w2_weight = jax.device_put(
+                    w2_weight, Format(Layout((0, 1, 2)), ep_sharding))
 
-        elif layer.use_ep:
-            ep_sharding = NamedSharding(self.mesh, P("model"))
-            w13_weight = jax.device_put(w13_weight,
-                                        Format(Layout((0, 1, 2)), ep_sharding))
-            w2_weight = jax.device_put(w2_weight,
-                                       Format(Layout((0, 1, 2)), ep_sharding))
+                w13_bias = jax.device_put(w13_bias,
+                                          Format(Layout((0, 1)), ep_sharding))
+                w2_bias = jax.device_put(w2_bias,
+                                         Format(Layout((0, 1)), ep_sharding))
 
-            w13_bias = jax.device_put(w13_bias,
-                                      Format(Layout((0, 1)), ep_sharding))
-            w2_bias = jax.device_put(w2_bias,
-                                     Format(Layout((0, 1)), ep_sharding))
+            else:
+                output_sizes = [intermediate_size, intermediate_size]
+                n_shards = mesh.shape["model"]
+                assert intermediate_size % n_shards == 0
 
-        else:
-            output_sizes = [intermediate_size, intermediate_size]
-            n_shards = self.mesh.shape["model"]
-            assert intermediate_size % n_shards == 0
+                # Reorder w13 weights so that splitting between w1 and w3 output
+                # can happen locally without any collective operations.
+                w13_weight = reorder_concatenated_tensor_for_sharding(
+                    w13_weight,
+                    output_sizes,
+                    n_shards,
+                    dim=1,
+                )
+                w13_weight_scale = reorder_concatenated_tensor_for_sharding(
+                    w13_weight_scale,
+                    output_sizes,
+                    n_shards,
+                    dim=1,
+                )
+                w13_bias = reorder_concatenated_tensor_for_sharding(
+                    w13_bias,
+                    output_sizes,
+                    n_shards,
+                    dim=1,
+                )
 
-            # Reorder w13 weights so that splitting between w1 and w3 output
-            # can happen locally without any collective operations.
-            w13_weight = reorder_concatenated_tensor_for_sharding(
-                w13_weight,
-                output_sizes,
-                n_shards,
-                dim=1,
-            )
-            w13_weight_scale = reorder_concatenated_tensor_for_sharding(
-                w13_weight_scale,
-                output_sizes,
-                n_shards,
-                dim=1,
-            )
-            w13_bias = reorder_concatenated_tensor_for_sharding(
-                w13_bias,
-                output_sizes,
-                n_shards,
-                dim=1,
-            )
+                w13_weight = jax.device_put(
+                    w13_weight,
+                    Format(Layout((0, 1, 2)),
+                           NamedSharding(mesh, P(None, "model", None))))
+                w2_weight = jax.device_put(
+                    w2_weight,
+                    Format(Layout((0, 1, 2)),
+                           NamedSharding(mesh, P(None, None, "model"))))
+                w13_weight_scale = jax.device_put(
+                    w13_weight_scale,
+                    Format(Layout((0, 1, 2)),
+                           NamedSharding(mesh, P(None, "model", None))))
+                w2_weight_scale = jax.device_put(
+                    w2_weight_scale,
+                    Format(Layout((0, 1, 2)),
+                           NamedSharding(mesh, P(None, None, "model"))))
+                w13_bias = jax.device_put(
+                    w13_bias,
+                    Format(Layout((0, 1)),
+                           NamedSharding(mesh, P(None, "model"))))
+                w2_bias = jax.device_put(
+                    w2_bias,
+                    Format(Layout((0, 1)), NamedSharding(mesh, P(None, None))))
+            return w13_weight, w13_weight_scale, w13_bias, w2_weight, w2_weight_scale, w2_bias
 
-            w13_weight = jax.device_put(
-                w13_weight,
-                Format(Layout((0, 1, 2)),
-                       NamedSharding(self.mesh, P(None, "model", None))))
-            w2_weight = jax.device_put(
-                w2_weight,
-                Format(Layout((0, 1, 2)),
-                       NamedSharding(self.mesh, P(None, None, "model"))))
-            w13_weight_scale = jax.device_put(
-                w13_weight_scale,
-                Format(Layout((0, 1, 2)),
-                       NamedSharding(self.mesh, P(None, "model", None))))
-            w2_weight_scale = jax.device_put(
-                w2_weight_scale,
-                Format(Layout((0, 1, 2)),
-                       NamedSharding(self.mesh, P(None, None, "model"))))
-            w13_bias = jax.device_put(
-                w13_bias,
-                Format(Layout((0, 1)),
-                       NamedSharding(self.mesh, P(None, "model"))))
-            w2_bias = jax.device_put(
-                w2_bias,
-                Format(Layout((0, 1)), NamedSharding(self.mesh, P(None,
-                                                                  None))))
+        w13_weight, w13_weight_scale, w13_bias, w2_weight, w2_weight_scale, w2_bias = wrapper(
+            w13_weight, w13_weight_scale, w13_bias, w2_weight, w2_weight_scale,
+            w2_bias, self.mesh)
 
         layer.w13_weight = Parameter(torch_view(w13_weight),
                                      requires_grad=False)
