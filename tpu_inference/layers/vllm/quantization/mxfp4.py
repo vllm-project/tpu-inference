@@ -149,6 +149,7 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
 
         self.mesh = mesh
         self.use_kernel = envs.USE_MOE_EP_KERNEL and moe.use_ep
+        self.use_kernel = envs.USE_MOE_EP_KERNEL and moe.use_ep
         self.ep_axis_name = ep_axis_name
         # TODO: Use autotune table once we have it.
         self.block_size = {
@@ -404,6 +405,12 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
         w13_bias = jax_view(layer.w13_bias)
         w2_bias = jax_view(layer.w2_bias)
         gating_output = jax_view(router_logits)
+
+        assert w13_weight.dtype == jnp.uint4
+        assert w2_weight.dtype == jnp.uint4
+        w13_weight = jax.lax.bitcast_convert_type(w13_weight,
+                                                  jnp.float4_e2m1fn)
+        w2_weight = jax.lax.bitcast_convert_type(w2_weight, jnp.float4_e2m1fn)
 
         if self.use_kernel:
             actual_hidden_size = x.shape[-1]
