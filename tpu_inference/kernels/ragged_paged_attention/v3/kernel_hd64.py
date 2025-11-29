@@ -1442,7 +1442,7 @@ def ragged_paged_attention_hd64(
             pages_per_seq,
         )
 
-    bq_sz = 16
+    bq_sz = 8
     bkv_p = 16
     # if sliding_window is not None:
     #     bkv_p = 4
