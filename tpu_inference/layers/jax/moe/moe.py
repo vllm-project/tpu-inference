@@ -9,12 +9,14 @@ import contextlib
 import jax
 import jax.numpy as jnp
 from jax.experimental import xla_metadata, scheduling_groups
-from jax.experimental.pallas.ops.tpu.megablox.gmm import gmm as megablox_gmm
+#from jax.experimental.pallas.ops.tpu.megablox.gmm import gmm as megablox_gmm
+from tpu_inference.kernels.megablox.gmm import gmm as megablox_gmm
 from flax import nnx
 from flax.typing import Sharding
 from jax.sharding import PartitionSpec
 from jaxtyping import Float
 from qwix._src.core.ragged_dot import ragged_dot as qwix_ragged_dot
+from qwix._src.core.qarray import QArray
 from qwix._src.providers import ptq
 
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
@@ -247,15 +249,22 @@ class MoE(nnx.Module):
             weights_TX, indices_TX = self.router(x_TD)
 
             if self.use_sparse_moe:
+                if self.quantized_dtype:
+                    
+                    #gate_up_scale_channel_sharding = self.efd_sharding[2] if   else None
+                    gating_up_proj_spec = (PartitionSpec(*self.edf_sharding), PartitionSpec(self.edf_sharding[0], self.edf_sharding[1], self.edf_sharding[2]))
+                    down_proj_spec = (PartitionSpec(*self.efd_sharding), PartitionSpec(self.efd_sharding[0], None, self.efd_sharding[2]))
+                else:
+                    gating_up_proj_spec = PartitionSpec(*self.edf_sharding)
+                    down_proj_spec = PartitionSpec(*self.efd_sharding)
                 in_specs = (
                     PartitionSpec(),  # Replicated `self`
                     PartitionSpec(*self.activation_ffw_td),  # Sharded x_TD
                     PartitionSpec(),  # Replicated router_weights_TX
                     PartitionSpec(),  # Replicated selected_experts_TX
-                    PartitionSpec(*self.edf_sharding),  # Sharded gating kernel
-                    PartitionSpec(*self.edf_sharding),  # Sharded up-projection kernel
-                    PartitionSpec(
-                        *self.efd_sharding),  # Sharded down-projection kernel
+                    gating_up_proj_spec,  # Sharded gating kernel
+                    gating_up_proj_spec,  # Sharded up-projection kernel
+                    down_proj_spec,  # Sharded down-projection kernel
                 )
                 out_specs = PartitionSpec(*self.activation_ffw_td)
 
@@ -266,9 +275,9 @@ class MoE(nnx.Module):
                                         check_rep=False)(
                                             MoE._distributed_sparse_moe_fwd)
 
-                kernel_gating_EDF = self._process_weight_for_qwix(self.kernel_gating_EDF, channelwise_axes=[0, 2], tiled_axes={})
-                kernel_up_proj_EDF = self._process_weight_for_qwix(self.kernel_up_proj_EDF, channelwise_axes=[0, 2], tiled_axes={})
-                kernel_down_proj_EFD = self._process_weight_for_qwix(self.kernel_down_proj_EFD, channelwise_axes=[0, 2], tiled_axes={})
+                kernel_gating_EDF = self._process_weight_for_qwix('kernel_gating_EDF', self.kernel_gating_EDF, channelwise_axes=[0, 2], tiled_axes={1: 1792})
+                kernel_up_proj_EDF = self._process_weight_for_qwix('kernel_up_proj_EDF', self.kernel_up_proj_EDF, channelwise_axes=[0, 2], tiled_axes={1: 1792})
+                kernel_down_proj_EFD = self._process_weight_for_qwix('kernel_down_proj_EFD', self.kernel_down_proj_EFD, channelwise_axes=[0, 2], tiled_axes={1: 2048})
 
                 return mapped_moe_fwd(self, x_TD, weights_TX,
                                     indices_TX, kernel_gating_EDF,
@@ -612,15 +621,28 @@ class MoE(nnx.Module):
             inputs = jnp.pad(inputs, ((0, pad_amount), (0, 0)))
 
         if self.use_megablox:
-            m, g, k, n = inputs.shape[0], *kernel.shape
+            final_kernel = kernel
+
+            if self.quantized_dtype:
+                kernel_qvalue, kernel_scale = kernel
+                #kernel_qvalue = jnp.swapaxes(kernel_qvalue, 1, 2)
+                kernel_scale = jnp.expand_dims(kernel_scale, 2)
+            else:
+                #kernel_qvalue = jnp.swapaxes(kernel, 1, 2)
+                kernel_qvalue = kernel
+                kernel_scale = None
+
+            m, g, k, n = inputs.shape[0], *kernel_qvalue.shape
             tm = round_up_to_multiple_of_128_within_limit(m, 512)
             tk = round_up_to_multiple_of_128_within_limit(k, 2048)
             tn = round_up_to_multiple_of_128_within_limit(n, 2048)
 
             output = megablox_gmm(
                 lhs=inputs,
-                rhs=kernel,
+                rhs=kernel_qvalue,
+                rhs_scale=kernel_scale,
                 group_sizes=group_sizes,
+                #_rhs=True,
                 preferred_element_type=self.dtype,
                 tiling=(tm, tk, tn),
             )
@@ -842,7 +864,7 @@ class MoE(nnx.Module):
 
         return output_TD
 
-    def _process_weight_for_qwix(self, weight_param, channelwise_axes=[], tiled_axes={}):
+    def _process_weight_for_qwix(self, name, weight_param, channelwise_axes=[], tiled_axes={}):
         """
         Extracts weight value, applies quantization if needed, 
         and returns the underlying array.
@@ -852,12 +874,16 @@ class MoE(nnx.Module):
         if self.quantized_dtype:
             if not isinstance(weight, ptq.WithAux):
                 weight = manually_quantize_qwix_weight(
+                    name,
                     weight, 
                     self.quantized_dtype, 
                     channelwise_axes, 
                     tiled_axes, 
                     "absmax"
                 )
-            return weight.array
+
+            #TODO swap the scale per mgblx kernels
+            #return (weight.array.qvalue,jnp.swapaxes(weight.array.scale , 1, 2))
+            return (weight.array.qvalue, weight.array.scale)
         
         return weight

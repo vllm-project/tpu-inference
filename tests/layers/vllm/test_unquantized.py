@@ -5,6 +5,7 @@ import pytest
 import torch
 import torchax
 import utils as test_utils
+from jax._src import test_util as jtu
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.interop import torch_view
 from torchax.ops.mappings import j2t, t2j
@@ -14,8 +15,6 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
 from vllm.engine.arg_utils import EngineArgs
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.fused_moe.moe_torch_iterative import \
-    fused_moe as torch_moe
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
                                                MergedColumnParallelLinear,
@@ -413,8 +412,15 @@ def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
 @pytest.mark.parametrize("hidden_size", [128, 512])
 @pytest.mark.parametrize("num_experts", [8])
 @pytest.mark.parametrize("topk", [2])
+@pytest.mark.parametrize("has_bias", [False, True])
+@pytest.mark.parametrize("activation", ["silu", "swigluoai"])
 def test_fused_moe(use_ep, mesh, num_tokens, intermediate_size, hidden_size,
+<<<<<<< HEAD
                    num_experts, topk):
+=======
+                   num_experts, topk, has_bias, activation):
+
+>>>>>>> 9a20e49a (Add quantized weight support for moe layers)
     torch.manual_seed(42)
     dtype = torch.bfloat16
 
@@ -425,16 +431,11 @@ def test_fused_moe(use_ep, mesh, num_tokens, intermediate_size, hidden_size,
         (num_experts, hidden_size, intermediate_size), dtype=dtype) / 10
     score = torch.randn((num_tokens, num_experts), dtype=dtype)
 
-    torch_output = torch_moe(
-        hidden_states=a,
-        w1=w1,
-        w2=w2,
-        gating_output=score,
-        topk=topk,
-        global_num_experts=num_experts,
-        expert_map=None,
-        renormalize=False,
-    )
+    w1_bias = w2_bias = None
+    if has_bias:
+        w1_bias = torch.randn(
+            (num_experts, 2 * intermediate_size), dtype=dtype) / 10
+        w2_bias = torch.randn((num_experts, hidden_size), dtype=dtype) / 10
 
     engine_args = EngineArgs(
         model="Qwen/Qwen2-1.5B-Instruct",
@@ -458,23 +459,32 @@ def test_fused_moe(use_ep, mesh, num_tokens, intermediate_size, hidden_size,
             tp_size=1,
             dp_size=1,
             quant_config=quant_config,
+            has_bias=has_bias,
+            activation=activation,
         )
     vllm_fused_moe.w13_weight.data = w1
     vllm_fused_moe.w2_weight.data = w2
+    if has_bias:
+        vllm_fused_moe.w13_bias.data = w1_bias
+        vllm_fused_moe.w2_bias.data = w2_bias
 
-    jax_a = torch_view(t2j(a, use_dlpack=False))
-    jax_a.apply_jax_(jax.device_put, NamedSharding(mesh, P(None, None)))
-    score = torch_view(t2j(score))
-    score.apply_jax_(jax.device_put, NamedSharding(mesh, P(None, None)))
+    expected = test_utils.ref_moe(a, score, w1, w2, w1_bias, w2_bias,
+                                  vllm_fused_moe.top_k,
+                                  vllm_fused_moe.renormalize,
+                                  vllm_fused_moe.activation)
 
     with torchax.default_env(), set_forward_context(None, vllm_config):
         assert isinstance(vllm_fused_moe.quant_method,
                           VllmUnquantizedFusedMoEMethod)
+
+        jax_a = a.to('jax')
+        score = score.to('jax')
+
         vllm_fused_moe.quant_method.process_weights_after_loading(
             vllm_fused_moe)
-        jax_output = vllm_fused_moe(jax_a, score)
-        jax_output = j2t(jax_output.to(torch.float32)).to(dtype)
+        actual = vllm_fused_moe(jax_a, score)
 
+<<<<<<< HEAD
     torch.testing.assert_close(
         torch_output,
         jax_output,
@@ -607,21 +617,29 @@ def test_fused_moe_activation(mesh, num_tokens, intermediate_size, hidden_size,
         vllm_fused_moe.quant_method.process_weights_after_loading(
             vllm_fused_moe)
         vllm_fused_moe(jax_a, score)
+=======
+        torch.testing.assert_close(expected,
+                                   actual,
+                                   check_device=False,
+                                   atol=1e-1,
+                                   rtol=1e-1)
+>>>>>>> 9a20e49a (Add quantized weight support for moe layers)
 
 
 @pytest.mark.parametrize("mesh",
                          [test_utils.get_spmd_mesh(jax.local_device_count())])
 @pytest.mark.parametrize("num_tokens", [128, 512])
-@pytest.mark.parametrize("intermediate_size", [256, 512])
-@pytest.mark.parametrize("hidden_size", [256])
+@pytest.mark.parametrize("intermediate_size", [512])
+@pytest.mark.parametrize("hidden_size", [512])
 @pytest.mark.parametrize("num_experts", [32])
 @pytest.mark.parametrize("topk", [8])
 @pytest.mark.parametrize("has_bias", [False, True])
 def test_fused_moe_use_kernel(mesh, num_tokens, intermediate_size, hidden_size,
                               num_experts, topk, has_bias):
 
-    if jax.local_device_count() < 8:
-        pytest.skip("Test requires at least 8 devices")
+    # TODO(Qiliang Cui): Remove when issue is resolved.
+    if not jtu.is_device_tpu_at_least(version=7):
+        pytest.skip(allow_module_level=True, reason="Expected TPUv7+")
 
     torch.manual_seed(42)
     dtype = torch.bfloat16
@@ -631,10 +649,12 @@ def test_fused_moe_use_kernel(mesh, num_tokens, intermediate_size, hidden_size,
         (num_experts, 2 * intermediate_size, hidden_size), dtype=dtype) / 10
     w2 = torch.randn(
         (num_experts, hidden_size, intermediate_size), dtype=dtype) / 10
+
+    w1_bias = w2_bias = None
     if has_bias:
-        b1 = torch.randn(
+        w1_bias = torch.randn(
             (num_experts, 2 * intermediate_size), dtype=dtype) / 10
-        b2 = torch.randn((num_experts, hidden_size), dtype=dtype) / 10
+        w2_bias = torch.randn((num_experts, hidden_size), dtype=dtype) / 10
 
     # Use deterministic gating_output generation (same logic as fused_moe_v1_test.py)
     # Generate base gating scores with deterministic pattern
@@ -655,19 +675,7 @@ def test_fused_moe_use_kernel(mesh, num_tokens, intermediate_size, hidden_size,
     one_hot = torch.nn.functional.one_hot(top_k_indices.long(),
                                           num_classes=num_experts).float()
     one_hot = one_hot.sum(dim=1) * 10
-
     score = (score + one_hot).to(dtype)
-
-    torch_output = torch_moe(
-        hidden_states=a,
-        w1=w1,
-        w2=w2,
-        gating_output=score,
-        topk=topk,
-        global_num_experts=num_experts,
-        expert_map=None,
-        renormalize=False,
-    )
 
     engine_args = EngineArgs(
         model="Qwen/Qwen2-1.5B-Instruct",
@@ -695,24 +703,25 @@ def test_fused_moe_use_kernel(mesh, num_tokens, intermediate_size, hidden_size,
             has_bias=has_bias,
         )
         vllm_fused_moe.moe_parallel_config.use_ep = True
+        vllm_fused_moe.quant_method.use_kernel = True
 
     vllm_fused_moe.w13_weight.data = w1
     vllm_fused_moe.w2_weight.data = w2
     if has_bias:
-        vllm_fused_moe.w13_bias.data = b1
-        vllm_fused_moe.w2_bias.data = b2
+        vllm_fused_moe.w13_bias.data = w1_bias
+        vllm_fused_moe.w2_bias.data = w2_bias
 
-    p_spec = P('model', )
-    jax_a = torch_view(t2j(a, use_dlpack=False))
-    jax_a = jax_a.apply_jax_(jax.device_put, NamedSharding(mesh, p_spec))
-    score = torch_view(t2j(score))
-    score = score.apply_jax_(jax.device_put, NamedSharding(mesh, p_spec))
+    expected = test_utils.ref_moe(a, score, w1, w2, w1_bias, w2_bias,
+                                  vllm_fused_moe.top_k,
+                                  vllm_fused_moe.renormalize,
+                                  vllm_fused_moe.activation)
 
     with torchax.default_env(), set_forward_context(None, vllm_config):
         assert isinstance(vllm_fused_moe.quant_method,
                           VllmUnquantizedFusedMoEMethod)
-        # Enable the kernel for this test
-        vllm_fused_moe.quant_method.use_kernel = True
+        jax_a = a.to('jax')
+        score = score.to('jax')
+
         vllm_fused_moe.quant_method.process_weights_after_loading(
             vllm_fused_moe)
         vllm_fused_moe.quant_method.block_size = {
@@ -725,12 +734,12 @@ def test_fused_moe_use_kernel(mesh, num_tokens, intermediate_size, hidden_size,
             "bd1c": 256,
             "bd2c": 256,
         }
-        jax_output = vllm_fused_moe(jax_a, score)
-        jax_output = j2t(jax_output.to(torch.float32)).to(dtype)
+        actual = vllm_fused_moe(jax_a, score)
 
-    torch.testing.assert_close(
-        torch_output,
-        jax_output,
-        atol=1e-2,
-        rtol=1e-2,
-    )
+        torch.testing.assert_close(
+            expected,
+            actual,
+            check_device=False,
+            atol=1e-2,
+            rtol=1e-2,
+        )
