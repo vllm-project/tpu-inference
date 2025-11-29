@@ -1,4 +1,3 @@
-from functools import partial
 from typing import Callable, Optional, Union
 
 import jax
@@ -180,9 +179,9 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
         w2_weight_scale = t2j(layer.w2_weight_scale, use_dlpack=False)
         w2_bias = t2j(layer.w2_bias, use_dlpack=False)
 
-        @partial(jax.jit, static_argnames=("mesh"))
+        @jax.jit
         def wrapper(w13_weight, w13_weight_scale, w13_bias, w2_weight,
-                    w2_weight_scale, w2_bias, mesh):
+                    w2_weight_scale, w2_bias):
             w13_weight = u8_unpack_e2m1(w13_weight)
             w13_weight_scale = e8m0_to_fp32(w13_weight_scale)
             w2_weight = u8_unpack_e2m1(w2_weight)
@@ -257,7 +256,7 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
                 w2_weight_transposed = jnp.transpose(w2_weight, 1, 2)
 
                 # Apply EP sharding
-                ep_sharding = NamedSharding(mesh, P("model"))
+                ep_sharding = NamedSharding(self.mesh, P("model"))
 
                 w13_weight = jax.device_put(
                     w13_weight_transposed,
@@ -273,7 +272,7 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
                                          Format(Layout((0, 1)), ep_sharding))
 
             elif layer.use_ep:
-                ep_sharding = NamedSharding(mesh, P("model"))
+                ep_sharding = NamedSharding(self.mesh, P("model"))
                 w13_weight = jax.device_put(
                     w13_weight, Format(Layout((0, 1, 2)), ep_sharding))
                 w2_weight = jax.device_put(
@@ -286,7 +285,7 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
 
             else:
                 output_sizes = [intermediate_size, intermediate_size]
-                n_shards = mesh.shape["model"]
+                n_shards = self.mesh.shape["model"]
                 assert intermediate_size % n_shards == 0
 
                 # Reorder w13 weights so that splitting between w1 and w3 output
@@ -310,34 +309,27 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
                     dim=1,
                 )
 
-                w13_weight = jax.device_put(
-                    w13_weight,
-                    Format(Layout((0, 1, 2)),
-                           NamedSharding(mesh, P(None, "model", None))))
-                w2_weight = jax.device_put(
-                    w2_weight,
-                    Format(Layout((0, 1, 2)),
-                           NamedSharding(mesh, P(None, None, "model"))))
-                w13_weight_scale = jax.device_put(
+                w13_weight = jax.lax.with_sharding_constraint(
+                    w13_weight, NamedSharding(self.mesh,
+                                              P(None, "model", None)))
+                w2_weight = jax.lax.with_sharding_constraint(
+                    w2_weight, NamedSharding(self.mesh, P(None, None,
+                                                          "model")))
+                w13_weight_scale = jax.lax.with_sharding_constraint(
                     w13_weight_scale,
-                    Format(Layout((0, 1, 2)),
-                           NamedSharding(mesh, P(None, "model", None))))
-                w2_weight_scale = jax.device_put(
+                    NamedSharding(self.mesh, P(None, "model", None)))
+                w2_weight_scale = jax.lax.with_sharding_constraint(
                     w2_weight_scale,
-                    Format(Layout((0, 1, 2)),
-                           NamedSharding(mesh, P(None, None, "model"))))
-                w13_bias = jax.device_put(
-                    w13_bias,
-                    Format(Layout((0, 1)),
-                           NamedSharding(mesh, P(None, "model"))))
-                w2_bias = jax.device_put(
-                    w2_bias,
-                    Format(Layout((0, 1)), NamedSharding(mesh, P(None, None))))
+                    NamedSharding(self.mesh, P(None, None, "model")))
+                w13_bias = jax.lax.with_sharding_constraint(
+                    w13_bias, NamedSharding(self.mesh, P(None, "model")))
+                w2_bias = jax.lax.with_sharding_constraint(
+                    w2_bias, NamedSharding(self.mesh, P(None, None)))
             return w13_weight, w13_weight_scale, w13_bias, w2_weight, w2_weight_scale, w2_bias
 
         w13_weight, w13_weight_scale, w13_bias, w2_weight, w2_weight_scale, w2_bias = wrapper(
             w13_weight, w13_weight_scale, w13_bias, w2_weight, w2_weight_scale,
-            w2_bias, self.mesh)
+            w2_bias)
 
         layer.w13_weight = Parameter(torch_view(w13_weight),
                                      requires_grad=False)
