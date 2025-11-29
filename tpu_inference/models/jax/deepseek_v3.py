@@ -166,7 +166,7 @@ class DeepSeekV3(nnx.Module):
                     rd_sharding=()
                     ap_sharding=()
                 else:
-                    rd_sharding=(ShardingAxisName.MLP_TENSOR, None, None)
+                    rd_sharding=(ShardingAxisName.MLP_TENSOR, None)
                     ap_sharding=(None, ShardingAxisName.MLP_TENSOR)
             else:
                 query_tnh_spec=P(None, ShardingAxisName.MLP_TENSOR, None)
@@ -205,12 +205,11 @@ class DeepSeekV3(nnx.Module):
                 # TODO: bz branch is: q_da_sharding=('model', None),
                 # q_da_sharding=(None, ShardingAxisName.VOCAB),
                 q_da_sharding=(None, ShardingAxisName.MOE_TENSOR),
-                ap_sharding=(None, ShardingAxisName.MLP_TENSOR),
-                anh_sharding=anh_sharding,
+                ap_sharding=ap_sharding,
                 # TODO bz branch is kv_da_sharding=('model', None),
                 # kv_da_sharding=(None, ShardingAxisName.VOCAB),
                 kv_da_sharding=(None, ShardingAxisName.MOE_TENSOR),
-                rd_sharding=(ShardingAxisName.MOE_TENSOR, None))
+                rd_sharding=rd_sharding)
 
         for i in range(first_k_dense_replace):
             block = TransformerBlock(

@@ -120,6 +120,9 @@ def test_quant_override(model, mesh):
 
 
 @pytest.mark.parametrize("num_devices", [1, 2])
+# @pytest.mark.parametrize(
+#     "mesh", [test_utils.get_spmd_mesh(1),
+#              test_utils.get_spmd_mesh(2)])
 @pytest.mark.parametrize("num_tokens", [8])
 @pytest.mark.parametrize("intermediate_size", [1024])
 @pytest.mark.parametrize("hidden_size", [128])
@@ -207,6 +210,9 @@ def test_mxfp4_fused_moe(num_devices, num_tokens, intermediate_size,
 
 
 @pytest.mark.parametrize("num_devices", [1, 2])
+# @pytest.mark.parametrize(
+#     "mesh", [test_utils.get_spmd_mesh(1),
+#              test_utils.get_spmd_mesh(2)])
 @pytest.mark.parametrize("num_tokens", [8])
 @pytest.mark.parametrize("intermediate_size", [512])
 @pytest.mark.parametrize("hidden_size", [1024])
