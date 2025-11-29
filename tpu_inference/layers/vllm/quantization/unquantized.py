@@ -288,7 +288,6 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 w2_bias = jax.device_put(
                     w2_bias, Format(Layout((0, 1, 2)), ep_sharding))
         else:
-
             if layer.use_ep:
                 ep_sharding = NamedSharding(self.mesh, P("model"))
                 w13_weight = jax.device_put(
@@ -319,16 +318,22 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                            NamedSharding(self.mesh, P(None, None, "model"))))
 
                 if self.moe.has_bias:
+
                     w13_bias = reorder_concatenated_tensor_for_sharding(
                         w13_bias, output_sizes, n_shards, dim=1)
+
+                    w13_bias = jnp.expand_dims(w13_bias, 1)
+                    w2_bias = jnp.expand_dims(w2_bias, 1)
+
                     w13_bias = jax.device_put(
                         w13_bias,
-                        Format(Layout((0, 1)),
-                               NamedSharding(self.mesh, P(None, "model"))))
+                        Format(
+                            Layout((0, 1, 2)),
+                            NamedSharding(self.mesh, P(None, None, "model"))))
                     w2_bias = jax.device_put(
                         w2_bias,
-                        Format(Layout((0, 1)),
-                               NamedSharding(self.mesh, P(None, None))))
+                        Format(Layout((0, 1, 2)),
+                               NamedSharding(self.mesh, P(None, None, None))))
 
         layer.w13_weight = Parameter(torch_view(w13_weight),
                                      requires_grad=False)
@@ -384,6 +389,8 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 hidden_states=x,
                 w1=w13_weight,
                 w2=w2_weight,
+                w1_scale=None,
+                w2_scale=None,
                 w1_bias=w13_bias,
                 w2_bias=w2_bias,
                 gating_output=gating_output,
