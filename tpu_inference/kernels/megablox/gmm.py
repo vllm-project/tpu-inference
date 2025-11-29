@@ -447,6 +447,9 @@ def gmm(
 
             loaded_lhs = lhs[...]
             loaded_rhs = rhs[...]
+
+            if loaded_rhs.dtype == jnp.uint4:
+                loaded_rhs = pltpu.bitcast(loaded_rhs, jnp.float4_e2m1fn)
             if loaded_rhs.dtype == jnp.float4_e2m1fn:
                 loaded_rhs = loaded_rhs.astype(jnp.float8_e4m3fn)
 
