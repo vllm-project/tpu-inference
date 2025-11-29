@@ -175,6 +175,7 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
     def process_weights_after_loading(self, layer: torch.nn.Module):
         assert isinstance(layer, FusedMoE)
         assert layer.moe_config.has_bias, "mxfp4 quantization alwyas use bias."
+        print(f'kky {layer.layer_name=}')
 
         w13_weight = t2j(layer.w13_weight, use_dlpack=False)
         w13_weight_scale = t2j(layer.w13_weight_scale, use_dlpack=False)
