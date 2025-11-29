@@ -379,12 +379,6 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
         w2_bias = jax_view(layer.w2_bias)
         gating_output = jax_view(router_logits)
 
-        assert w13_weight.dtype == jnp.uint4
-        assert w2_weight.dtype == jnp.uint4
-        w13_weight = jax.lax.bitcast_convert_type(w13_weight,
-                                                  jnp.float4_e2m1fn)
-        w2_weight = jax.lax.bitcast_convert_type(w2_weight, jnp.float4_e2m1fn)
-
         if self.use_kernel:
             output = fused_ep_moe(
                 mesh=self.mesh,
