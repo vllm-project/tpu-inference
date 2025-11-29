@@ -3,12 +3,13 @@ import functools
 import jax
 from jax import numpy as jnp
 from jax import shard_map
-from jax.experimental.pallas.ops.tpu.megablox.gmm import gmm
-from jax.sharding import Mesh
-from jax.sharding import PartitionSpec as P
+from jax.sharding import Mesh, PartitionSpec
 
+from tpu_inference.kernels.megablox.gmm import gmm
 from tpu_inference.layers.vllm.linear_common import \
     slice_sharded_tensor_for_concatenation
+
+P = PartitionSpec
 
 
 def activation_fn(activation: str, x1: jax.Array, x2: jax.Array) -> jax.Array:
@@ -103,31 +104,39 @@ def _get_tiling_size_for_gmm_kernel(m: int, k: int, n: int,
 def tensor_sharded_gmm_merged_column_parallel(
     lhs: jax.Array,
     rhs: jax.Array,
+    rhs_scale: jax.Array | None,
     rhs_bias: jax.Array | None,
     group_sizes: jax.Array,
     mesh: Mesh,
-) -> tuple[jax.Array, jax.Array]:
+) -> list[jax.Array]:
 
-    def _gmm(lhs, rhs, group_sizes):
+    def _gmm(lhs, rhs, rhs_scale, group_sizes):
         m, g, n, k = lhs.shape[0], *rhs.shape
         tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
         return gmm(
             lhs,
             rhs,
             group_sizes,
+            rhs_scale=rhs_scale,
             preferred_element_type=lhs.dtype,
             tiling=(tm, tk, tn),
             transpose_rhs=True,
             group_offset=jnp.array(0),
         )
 
+    rhs_scale_spec = None if rhs_scale is None else P(None, "model", None)
     gmm_result = shard_map(
         _gmm,
         mesh=mesh,
-        in_specs=(P("data", None), P(None, "model", None), P("data")),
+        in_specs=(
+            P("data", None),
+            P(None, "model", None),
+            rhs_scale_spec,
+            P("data"),
+        ),
         out_specs=(P("data", "model")),
         check_vma=False,
-    )(lhs, rhs, group_sizes)
+    )(lhs, rhs, rhs_scale, group_sizes)
 
     if rhs_bias is not None:
 
@@ -136,7 +145,8 @@ def tensor_sharded_gmm_merged_column_parallel(
                 rhs_bias_local,
                 group_sizes_global,
                 0,
-                total_repeat_length=gmm_result_local.shape[0])
+                total_repeat_length=gmm_result_local.shape[0],
+            )
             return gmm_result_local + rhs_bias
 
         gmm_result = shard_map(
@@ -148,8 +158,7 @@ def tensor_sharded_gmm_merged_column_parallel(
     gmm_result = gmm_result.astype(lhs.dtype)
 
     tp_size = mesh.shape["model"]
-    intermediate_size = gmm_result.shape[-1] // 2
-    output_sizes = [intermediate_size, intermediate_size]
+    output_sizes = [gmm_result.shape[-1] // 2] * 2
     return slice_sharded_tensor_for_concatenation(gmm_result, output_sizes,
                                                   tp_size)
 
@@ -157,18 +166,20 @@ def tensor_sharded_gmm_merged_column_parallel(
 def tensor_sharded_gmm_row_parallel(
     lhs: jax.Array,
     rhs: jax.Array,
+    rhs_scale: jax.Array | None,
     rhs_bias: jax.Array | None,
     group_sizes: jax.Array,
     mesh: Mesh,
 ) -> jax.Array:
 
-    def _gmm_all_reduce(lhs, rhs, group_sizes):
+    def _gmm_all_reduce(lhs, rhs, rhs_scale, group_sizes):
         m, g, n, k = lhs.shape[0], *rhs.shape
         tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
         out = gmm(
             lhs,
             rhs,
             group_sizes,
+            rhs_scale=rhs_scale,
             preferred_element_type=lhs.dtype,
             tiling=(tm, tk, tn),
             transpose_rhs=True,
@@ -176,13 +187,19 @@ def tensor_sharded_gmm_row_parallel(
         )
         return jax.lax.psum(out, axis_name="model")
 
+    rhs_scale_spec = None if rhs_scale is None else P(None, None, "model")
     gmm_result = shard_map(
         _gmm_all_reduce,
         mesh=mesh,
-        in_specs=(P("data", "model"), P(None, None, "model"), P("data")),
+        in_specs=(
+            P("data", "model"),
+            P(None, None, "model"),
+            rhs_scale_spec,
+            P("data"),
+        ),
         out_specs=(P("data")),
         check_vma=False,
-    )(lhs, rhs, group_sizes)
+    )(lhs, rhs, rhs_scale, group_sizes)
 
     if rhs_bias is not None:
 
@@ -191,7 +208,8 @@ def tensor_sharded_gmm_row_parallel(
                 rhs_bias_local,
                 group_sizes_global,
                 0,
-                total_repeat_length=gmm_result_local.shape[0])
+                total_repeat_length=gmm_result_local.shape[0],
+            )
             return gmm_result_local + rhs_bias
 
         gmm_result = shard_map(
@@ -261,12 +279,8 @@ def expert_sharded_gmm(
     # i*num_experts_per_shard to (i+1)*num_experts_per_shard We sum them up to
     # get total rows in that shard, and that is the size for shard to send to
     # its peers. This is also the number of non-zero rows from the gmm results.
-    # In the working example, send_sizes would be [3, 2, 5, 4].
-
-    # group_sizes has shape of [num_tokens_per_shard * num_experts_per_shard].
-    # So reshaping to [num_tokens_per_shard, num_experts_per_shard] and applying
-    # sum(axis=1) will get desired send_sizes shaped [num_tokens_per_shard].
-    send_sizes = group_sizes.reshape(-1, num_experts_per_shard).sum(axis=1)
+    # In the working example, send_sizes would be [3, 2, 5, 4]
+    send_sizes = group_sizes.reshape(-1, num_experts_per_shard).sum()
     # In the working example, input_offsets would be [0, 3, 5, 10]
     input_offsets = jnp.concatenate((jnp.array([0]), send_sizes.cumsum()[:-1]))
     output_offsets = input_offsets
@@ -296,13 +310,15 @@ def expert_sharded_gmm(
         # send_sizes_of_shard          [3, 3, 3, 3]    [2, 2, 2, 2]    [5, 5, 5, 5]    [4, 4, 4, 4 ]
         # output_offsets_of_shard      [0, 0, 0, 0]    [0, 0, 0, 0]    [0, 0, 0, 0]    [10,10,10,10]
         # recv_sizes_of_shard          [3, 2, 5, 4]    [3, 2, 5, 4]    [3, 2, 5, 4]    [3, 2, 5, 4]
-        return jax.lax.ragged_all_to_all(operand,
-                                         output,
-                                         input_offsets_of_shard,
-                                         send_sizes_of_shard,
-                                         output_offsets_of_shard,
-                                         recv_sizes_of_shard,
-                                         axis_name="model")
+        return jax.lax.ragged_all_to_all(
+            operand,
+            output,
+            input_offsets_of_shard,
+            send_sizes_of_shard,
+            output_offsets_of_shard,
+            recv_sizes_of_shard,
+            axis_name="model",
+        )
 
     # Use ragged_all_to_all to send the result from gmm for each expert to all
     # the shards.  In the working example, the result would be:
@@ -342,9 +358,11 @@ def expert_sharded_gmm(
 )
 def fused_moe_func(
     hidden_states: jax.Array,
-    w1: jax.Array,
-    w2: jax.Array,
-    w1_bias: jax.Array | None,
+    w13_weight: jax.Array,
+    w2_weight: jax.Array,
+    w13_weight_scale: jax.Array | None,
+    w2_weight_scale: jax.Array | None,
+    w13_bias: jax.Array | None,
     w2_bias: jax.Array | None,
     gating_output: jax.Array,
     topk: int,
@@ -353,40 +371,32 @@ def fused_moe_func(
     use_ep: bool,
     activation: str,
 ) -> jax.Array:
-    """
-    Route tokens in hidden_states into each experts based on routing
-    information in gating_out and performs moe with w1 and w2 weights.
+    """Args:
 
-    Args:
-        hidden_states: [num_tokens, hidden_size]
-        w1: first moe weights [num_experts, intermediate_size * 2, hidden_size]
-        w2: second moe weights [num_experts, hidden_size, intermediate_size]
-        w1_bias: optional bias of w1 [num_experts, intermediate_size * 2]
-        w2_bias: optional bias of w2 [num_experts, hidden_size]
-        gating_output: routing information of tokens [num_tokens, num_experts]
-        topk: number of experts to choose per token.
-        renormalize: normalize gating_output.
-        mesh: mesh to perform moe.
-        use_ep: use expert parallelism.
-        activation: activation function to perform on the output of w1.
-
-    Returns:
-        Output of moe operation [num_tokens, hidden_size]
-    """
-    if use_ep and (w1_bias is not None or w2_bias is not None):
+  hidden_states: [num_tokens, hidden_size]
+  w13_weight: [num_experts, intermediate_size * 2, hidden_size]
+  w2_weight: [num_experts, hidden_size, intermediate_size]
+  w13_scale: [num_experts, intermediate_size * 2, num_blocks]
+  w2_scale: [num_experts, hidden_size, num_blocks]
+  w13_bias: [num_experts, intermediate_size * 2]
+  w2_bias: [num_experts, hidden_size]
+  gating_output: [num_tokens, num_experts]
+  topk: int
+  renormalize: bool
+  mesh: Mesh
+  use_ep: bool
+  activation: str
+  """
+    if use_ep and (w13_bias is not None or w2_bias is not None):
         raise NotImplementedError(
             "Bias is not supported when using expert parallelism.")
-
-    num_tokens = hidden_states.shape[0]
-    global_num_experts, hidden_size, intermediate_size = w2.shape
+    num_tokens, hidden_size = hidden_states.shape
+    global_num_experts, _, padded_hidden_size = w13_weight.shape
     dtype = hidden_states.dtype
 
     assert (num_tokens * topk) % 16 == 0, (
         "The kernel requires num_tokens * topk to be a multiple of "
         f"16 but got {num_tokens}*{topk}={num_tokens*topk}")
-    assert hidden_states.shape == (num_tokens, hidden_size)
-    assert gating_output.shape == (num_tokens, global_num_experts)
-    assert w1.shape == (global_num_experts, intermediate_size * 2, hidden_size)
 
     topk_weights = jax.nn.softmax(gating_output.astype(jnp.float32), axis=-1)
     topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
@@ -415,10 +425,12 @@ def fused_moe_func(
         out_specs=(P("data", None), P("data"), P("data")),
     )(hidden_states, topk_indices)
 
+    x = jnp.pad(x, ((0, 0), (0, padded_hidden_size - hidden_size)))
+
     if use_ep:
         x = expert_sharded_gmm(
             x,
-            w1,
+            w13_weight,
             group_sizes,
             mesh=mesh,
         )
@@ -428,15 +440,16 @@ def fused_moe_func(
 
         x = expert_sharded_gmm(
             x,
-            w2,
+            w2_weight,
             group_sizes,
             mesh=mesh,
         )
     else:
         x1, x2 = tensor_sharded_gmm_merged_column_parallel(
             x,
-            w1,
-            w1_bias,
+            w13_weight,
+            w13_weight_scale,
+            w13_bias,
             group_sizes,
             mesh=mesh,
         )
@@ -445,11 +458,14 @@ def fused_moe_func(
 
         x = tensor_sharded_gmm_row_parallel(
             x,
-            w2,
+            w2_weight,
+            w2_weight_scale,
             w2_bias,
             group_sizes,
             mesh=mesh,
         )
+
+    x = x[:, :hidden_size]
 
     def _finalize_output(x_local, topk_argsort_revert_indices_local,
                          topk_weights_local):
@@ -459,11 +475,9 @@ def fused_moe_func(
         x_local = x_local.sum(axis=-2)
         return x_local
 
-    x = shard_map(
+    return shard_map(
         _finalize_output,
         mesh=mesh,
         in_specs=(P("data", None), P("data"), P("data", None)),
         out_specs=(P("data", None)),
     )(x, topk_argsort_revert_indices, topk_weights)
-
-    return x[:num_tokens, :hidden_size]

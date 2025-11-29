@@ -277,17 +277,17 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                     Format(Layout((0, 1, 2)),
                            NamedSharding(self.mesh, P(None, None, "model"))))
 
-                if self.moe.has_bias:
-                    w13_bias = reorder_concatenated_tensor_for_sharding(
-                        w13_bias, output_sizes, n_shards, dim=1)
-                    w13_bias = jax.device_put(
-                        w13_bias,
-                        Format(Layout((0, 1)),
-                               NamedSharding(self.mesh, P(None, "model"))))
-                    w2_bias = jax.device_put(
-                        w2_bias,
-                        Format(Layout((0, 1)),
-                               NamedSharding(self.mesh, P(None, None))))
+            if self.moe.has_bias:
+                w13_bias = reorder_concatenated_tensor_for_sharding(
+                    w13_bias, output_sizes, n_shards, dim=1)
+                w13_bias = jax.device_put(
+                    w13_bias,
+                    Format(Layout((0, 1)),
+                           NamedSharding(self.mesh, P(None, "model"))))
+                w2_bias = jax.device_put(
+                    w2_bias,
+                    Format(Layout((0, 1)),
+                           NamedSharding(self.mesh, P(None, None))))
 
         layer.w13_weight = Parameter(torch_view(w13_weight),
                                      requires_grad=False)
