@@ -61,10 +61,8 @@ def env_with_choices(
             check_choices = actual_choices
 
         if check_value not in check_choices:
-            raise ValueError(
-                f"Invalid value '{value}' for {env_name}. "
-                f"Valid options: {actual_choices}."
-            )
+            raise ValueError(f"Invalid value '{value}' for {env_name}. "
+                             f"Valid options: {actual_choices}.")
 
         return value
 
