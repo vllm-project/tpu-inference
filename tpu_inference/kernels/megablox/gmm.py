@@ -301,6 +301,7 @@ def gmm(
     rhs: jnp.ndarray,
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype = jnp.float32,
+    rhs_bias: jnp.ndarray | None = None,
     rhs_scale: jnp.ndarray | None = None,
     tiling: tuple[int, int, int] | LutFn | None = (128, 128, 128),
     group_offset: jnp.ndarray | None = None,
@@ -381,6 +382,10 @@ def gmm(
 
     tiles_k //= num_blocks
 
+    print(
+        f"kky {tiles_k=} {num_blocks=} {block_size=} {tk=} {k_rem=} {input_dtype=}"
+    )
+
     # Create the metadata we need for computation.
     group_metadata, num_active_tiles = make_group_metadata(  # pylint: disable=unbalanced-tuple-unpacking
         group_sizes=group_sizes,
@@ -397,6 +402,7 @@ def gmm(
         lhs,
         rhs,
         rhs_scale,
+        rhs_bias,
         existing_out,
         out,
         acc_scratch,
@@ -407,6 +413,8 @@ def gmm(
         grid_id = pl.program_id(1)
         b_i = pl.program_id(2)
         k_i = pl.program_id(3)
+
+        print(f"kky {rhs_scale=}")
 
         @pl.when(k_i == 0)
         def _zero_acc():
@@ -467,6 +475,8 @@ def gmm(
                 loaded_out = out[...].astype(jnp.float32)
                 if not is_first_b_tile:
                     acc += loaded_out
+                elif rhs_bias is not None:
+                    acc += rhs_bias[...].astype(jnp.float32)
 
                 mask = _get_store_mask(
                     grid_id=grid_id,
@@ -517,6 +527,12 @@ def gmm(
         del group_offsets, m_tile_ids, k_i
         return group_ids[grid_id] - group_offset[0], b_i, 0, n_i
 
+    def rhs_bias_transform_indices(n_i, grid_id, b_i, k_i, group_metadata,
+                                   group_offset):
+        group_offsets, group_ids, m_tile_ids = group_metadata
+        del group_offsets, m_tile_ids, k_i, b_i
+        return group_ids[grid_id] - group_offset[0], 0, n_i
+
     def out_transform_indices(n_i, grid_id, b_i, k_i, group_metadata,
                               group_offset):
         # out is (m, n). Load the [tm, tn] matrix for this m-tile.
@@ -544,6 +560,13 @@ def gmm(
         rhs_scale_block_spec = pl.BlockSpec((None, None, 1, tn),
                                             rhs_scale_transform_indices)
 
+    if rhs_bias is None:
+        rhs_bias_block_spec = None
+    else:
+        rhs_bias = jnp.expand_dims(rhs_bias, 1)
+        rhs_bias_block_spec = pl.BlockSpec((None, 1, tn),
+                                           rhs_bias_transform_indices)
+
     lhs_bytes = lhs.size * lhs.itemsize
     rhs_bytes = (k * n) * rhs.itemsize  # We don't read all of rhs
     out_bytes = (m * n) * jnp.dtype(preferred_element_type).itemsize
@@ -563,6 +586,7 @@ def gmm(
                 lhs_block_spec,
                 rhs_block_spec,
                 rhs_scale_block_spec,
+                rhs_bias_block_spec,
                 in_out_block_spec,
             ],
             out_specs=out_block_spec,
@@ -586,6 +610,7 @@ def gmm(
         lhs,
         rhs,
         rhs_scale,
+        rhs_bias,
         existing_out,
     )
     if existing_out is None and num_current_groups < num_total_groups:

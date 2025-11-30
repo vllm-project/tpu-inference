@@ -110,7 +110,7 @@ def tensor_sharded_gmm_merged_column_parallel(
     mesh: Mesh,
 ) -> list[jax.Array]:
 
-    def _gmm(lhs, rhs, rhs_scale, group_sizes):
+    def _gmm(lhs, rhs, rhs_scale, rhs_bias, group_sizes):
         m, g, n, k = lhs.shape[0], *rhs.shape
         tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
         return gmm(
@@ -118,6 +118,7 @@ def tensor_sharded_gmm_merged_column_parallel(
             rhs,
             group_sizes,
             rhs_scale=rhs_scale,
+            rhs_bias=rhs_bias,
             preferred_element_type=lhs.dtype,
             tiling=(tm, tk, tn),
             transpose_rhs=True,
@@ -125,6 +126,8 @@ def tensor_sharded_gmm_merged_column_parallel(
         )
 
     rhs_scale_spec = None if rhs_scale is None else P(None, "model", None)
+    rhs_bias_spec = None if rhs_bias is None else P(None, "model")
+
     gmm_result = shard_map(
         _gmm,
         mesh=mesh,
@@ -132,30 +135,12 @@ def tensor_sharded_gmm_merged_column_parallel(
             P("data", None),
             P(None, "model", None),
             rhs_scale_spec,
+            rhs_bias_spec,
             P("data"),
         ),
         out_specs=(P("data", "model")),
         check_vma=False,
-    )(lhs, rhs, rhs_scale, group_sizes)
-
-    if rhs_bias is not None:
-
-        def _add_bias(gmm_result_local, rhs_bias_local, group_sizes_global):
-            rhs_bias = jnp.repeat(
-                rhs_bias_local,
-                group_sizes_global,
-                0,
-                total_repeat_length=gmm_result_local.shape[0],
-            )
-            return gmm_result_local + rhs_bias
-
-        gmm_result = shard_map(
-            _add_bias,
-            mesh=mesh,
-            in_specs=(P("data", "model"), P(None, "model"), P("data")),
-            out_specs=(P("data", "model")),
-        )(gmm_result, rhs_bias, group_sizes)
-    gmm_result = gmm_result.astype(lhs.dtype)
+    )(lhs, rhs, rhs_scale, rhs_bias, group_sizes)
 
     tp_size = mesh.shape["model"]
     output_sizes = [gmm_result.shape[-1] // 2] * 2
@@ -172,14 +157,17 @@ def tensor_sharded_gmm_row_parallel(
     mesh: Mesh,
 ) -> jax.Array:
 
-    def _gmm_all_reduce(lhs, rhs, rhs_scale, group_sizes):
+    def _gmm_all_reduce(lhs, rhs, rhs_scale, rhs_bias, group_sizes):
         m, g, n, k = lhs.shape[0], *rhs.shape
         tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
+        shard_id = jax.lax.axis_index("model")
+        rhs_bias = jnp.where(shard_id == 0, rhs_bias, 0)
         out = gmm(
             lhs,
             rhs,
             group_sizes,
             rhs_scale=rhs_scale,
+            rhs_bias=rhs_bias,
             preferred_element_type=lhs.dtype,
             tiling=(tm, tk, tn),
             transpose_rhs=True,
@@ -188,6 +176,7 @@ def tensor_sharded_gmm_row_parallel(
         return jax.lax.psum(out, axis_name="model")
 
     rhs_scale_spec = None if rhs_scale is None else P(None, None, "model")
+    rhs_bias_spec = None if rhs_bias is None else P(None, None)
     gmm_result = shard_map(
         _gmm_all_reduce,
         mesh=mesh,
@@ -195,29 +184,12 @@ def tensor_sharded_gmm_row_parallel(
             P("data", "model"),
             P(None, None, "model"),
             rhs_scale_spec,
+            rhs_bias_spec,
             P("data"),
         ),
         out_specs=(P("data")),
         check_vma=False,
-    )(lhs, rhs, rhs_scale, group_sizes)
-
-    if rhs_bias is not None:
-
-        def _add_bias(gmm_result_local, rhs_bias_local, group_sizes_global):
-            rhs_bias = jnp.repeat(
-                rhs_bias_local,
-                group_sizes_global,
-                0,
-                total_repeat_length=gmm_result_local.shape[0],
-            )
-            return gmm_result_local + rhs_bias
-
-        gmm_result = shard_map(
-            _add_bias,
-            mesh=mesh,
-            in_specs=(P("data"), P(), P("data")),
-            out_specs=(P("data")),
-        )(gmm_result, rhs_bias, group_sizes)
+    )(lhs, rhs, rhs_scale, rhs_bias, group_sizes)
 
     return gmm_result.astype(lhs.dtype)
 
