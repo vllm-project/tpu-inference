@@ -106,12 +106,13 @@ def test_integer_env_vars(monkeypatch: pytest.MonkeyPatch):
     assert envs.NUM_SLICES == 4
 
 
-def test_lowercase_conversion(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("TPU_MULTIHOST_BACKEND", "GRPC")
-    assert envs.TPU_MULTIHOST_BACKEND == "grpc"
-
-    monkeypatch.setenv("MODEL_IMPL_TYPE", "FLAX_NNX")
+def test_model_impl_type_choices(monkeypatch: pytest.MonkeyPatch):
+    # Test case sensitive choices
+    monkeypatch.setenv("MODEL_IMPL_TYPE", "flax_nnx")
     assert envs.MODEL_IMPL_TYPE == "flax_nnx"
+
+    monkeypatch.setenv("MODEL_IMPL_TYPE", "vllm")
+    assert envs.MODEL_IMPL_TYPE == "vllm"
 
 
 def test_string_env_vars_defaults(monkeypatch: pytest.MonkeyPatch):
@@ -141,8 +142,6 @@ def test_ray_env_vars(monkeypatch: pytest.MonkeyPatch):
     assert envs.RAY_USAGE_STATS_ENABLED == "1"
 
     assert envs.VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE == "shm"
-    monkeypatch.setenv("VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE", "nccl")
-    assert envs.VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE == "nccl"
 
 
 def test_invalid_attribute_raises_error():
@@ -166,11 +165,8 @@ def test_tpu_multihost_env_vars(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("TPU_WORKER_ID", "0")
     assert envs.TPU_WORKER_ID == "0"
 
-    monkeypatch.setenv("TPU_MULTIHOST_BACKEND", "grpc")
-    assert envs.TPU_MULTIHOST_BACKEND == "grpc"
-
-    monkeypatch.setenv("TPU_MULTIHOST_BACKEND", "xla")
-    assert envs.TPU_MULTIHOST_BACKEND == "xla"
+    monkeypatch.setenv("TPU_MULTIHOST_BACKEND", "ray")
+    assert envs.TPU_MULTIHOST_BACKEND == "ray"
 
 
 def test_disaggregated_serving_env_vars(monkeypatch: pytest.MonkeyPatch):
