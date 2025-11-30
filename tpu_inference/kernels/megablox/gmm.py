@@ -315,6 +315,7 @@ def gmm(
     rhs: jnp.ndarray,
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype = jnp.float32,
+    rhs_bias: jnp.ndarray | None = None,
     rhs_scale: jnp.ndarray | None = None,
     rhs_bias: jnp.ndarray | None = None,
     tiling: tuple[int, int, int] | LutFn | None = (128, 128, 128),
@@ -430,6 +431,8 @@ def gmm(
         grid_id = pl.program_id(1)
         b_i = pl.program_id(2)
         k_i = pl.program_id(3)
+
+        print(f"kky {rhs_scale=}")
 
         @pl.when(k_i == 0)
         def _zero_acc():
