@@ -1,7 +1,6 @@
 import copy
 import functools
 import random
-from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, cast
