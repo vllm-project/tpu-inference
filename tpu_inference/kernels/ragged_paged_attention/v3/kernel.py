@@ -319,7 +319,7 @@ def _ragged_paged_attention_kernel(
     debug_print("[RPA debug] q_len={}", q_len)
     debug_print("[RPA debug] kv_len={}", kv_len)
 
-    def flash_attention(
+    def flash_attention_step1_qk_softmax(
         q,  # [actual_bq_sz * num_q_heads_per_kv_head, head_dim]
         k,  # [bkv_sz, head_dim]
         v,  # [bkv_sz, head_dim]
@@ -335,7 +335,6 @@ def _ragged_paged_attention_kernel(
         assert k.dtype == v.dtype
         head_l_ref = l_ref.at[kv_head_idx, :q.shape[0]]
         head_m_ref = m_ref.at[kv_head_idx, :q.shape[0]]
-        head_acc_ref = acc_ref.at[kv_head_idx, :q.shape[0]]
 
         def load_with_init(ref, init_val):
             return jnp.where(bkv_idx == 0, jnp.full_like(ref, init_val),
@@ -376,15 +375,32 @@ def _ragged_paged_attention_kernel(
         head_m_ref[...] = m_curr
         p = jnp.exp(s - broadcast_minor(m_curr, s.shape))
 
-        pv = jnp.einsum("nm,md->nd", p, v, preferred_element_type=jnp.float32)
-        if v_scale is not None:
-            pv *= v_scale
-
         p_rowsum = jnp.sum(p, axis=1, keepdims=True)
         exp_m_diff = jnp.exp(m_prev - m_curr)
         l_prev = load_with_init(head_l_ref, 0.0)
         l_curr = exp_m_diff * l_prev + p_rowsum
         head_l_ref[...] = l_curr
+
+        return p, exp_m_diff
+
+    def flash_attention_step2_pv(
+        q_shape_0,
+        v,  # [bkv_sz, head_dim]
+        p,  # from step1
+        exp_m_diff,  # from step1
+        *,
+        bkv_idx,
+        kv_head_idx,
+    ):
+        head_acc_ref = acc_ref.at[kv_head_idx, :q_shape_0]
+
+        def load_with_init(ref, init_val):
+            return jnp.where(bkv_idx == 0, jnp.full_like(ref, init_val),
+                             ref[...])
+
+        pv = jnp.einsum("nm,md->nd", p, v, preferred_element_type=jnp.float32)
+        if v_scale is not None:
+            pv *= v_scale
         o_prev = load_with_init(head_acc_ref, 0.0)
         o_curr = broadcast_minor(exp_m_diff, o_prev.shape) * o_prev + pv
         head_acc_ref[...] = o_curr
@@ -839,6 +855,11 @@ def _ragged_paged_attention_kernel(
 
                 # Flash attention with cur bkv and bq
                 # NOTE: kv_packing is divided by 2 because k and v are packed together.
+                prev_bq_shape_0 = None
+                prev_kv_head_bv = None
+                prev_kv_head_idx = None
+                prev_kv_head_p = None
+                prev_kv_head_exp_m_diff = None
                 heads_per_load = max(1, kv_packing // 2)
                 for kv_head_start in range(0, actual_num_kv_heads,
                                            heads_per_load):
@@ -850,21 +871,53 @@ def _ragged_paged_attention_kernel(
                     )
                     assert len(bkv_lst) == heads_per_load
                     for i in range(heads_per_load):
-                        kv_head_idx = kv_head_start + i
-                        if kv_head_idx >= actual_num_kv_heads:
+                        cur_kv_head_idx = kv_head_start + i
+                        if cur_kv_head_idx >= actual_num_kv_heads:
                             break
-                        bq = load_bq(bq_sem_idx,
-                                     kv_head_idx,
-                                     actual_bq_sz=actual_bq_sz)
+
+                        cur_kv_head_bq = load_bq(bq_sem_idx,
+                                                 cur_kv_head_idx,
+                                                 actual_bq_sz=actual_bq_sz)
                         bk, bv = bkv_lst[i]
-                        flash_attention(
-                            bq,
-                            bk,
-                            bv,
-                            bq_idx=bq_idx,
-                            bkv_idx=bkv_idx,
-                            kv_head_idx=kv_head_idx,
-                        )
+                        # FlashAttention is divided into `flash_attention_step1_qk_softmax`
+                        # and `flash_attention_step2_pv` to pipeline the computation.
+                        # `step2_pv` for the previous KV head, which depends on the softmax
+                        # output, is overlapped with `step1_qk_softmax` for the current KV
+                        # head, reducing overall wait times.
+                        cur_kv_head_p, cur_kv_head_exp_m_diff = (
+                            flash_attention_step1_qk_softmax(
+                                cur_kv_head_bq,
+                                bk,
+                                bv,
+                                bq_idx=bq_idx,
+                                bkv_idx=bkv_idx,
+                                kv_head_idx=cur_kv_head_idx,
+                            ))
+                        if prev_bq_shape_0 is not None:
+                            flash_attention_step2_pv(
+                                prev_bq_shape_0,
+                                prev_kv_head_bv,
+                                prev_kv_head_p,
+                                prev_kv_head_exp_m_diff,
+                                bkv_idx=bkv_idx,
+                                kv_head_idx=prev_kv_head_idx,
+                            )
+                        prev_bq_shape_0 = cur_kv_head_bq.shape[0]
+                        prev_kv_head_bv = bv
+                        prev_kv_head_p = cur_kv_head_p
+                        prev_kv_head_exp_m_diff = cur_kv_head_exp_m_diff
+                        prev_kv_head_idx = cur_kv_head_idx
+
+                # Execute pv of last attention head.
+                assert prev_bq_shape_0 is not None
+                flash_attention_step2_pv(
+                    prev_bq_shape_0,
+                    prev_kv_head_bv,
+                    prev_kv_head_p,
+                    prev_kv_head_exp_m_diff,
+                    bkv_idx=bkv_idx,
+                    kv_head_idx=prev_kv_head_idx,
+                )
 
             lax.fori_loop(0, num_bkv, compute_with_bkv, None, unroll=False)
 
