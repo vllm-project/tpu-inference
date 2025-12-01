@@ -94,6 +94,7 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
     def tearDown(self):
         super().tearDown()
         cc.reset_cache()
+        jax.clear_caches()
 
     def create_mesh(self, axis_shapes, axis_names):
         """Creates a JAX device mesh with the default device order."""
