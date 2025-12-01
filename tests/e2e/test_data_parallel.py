@@ -249,7 +249,7 @@ def test_data_parallelism_correctness(
                     diff = abs(base_logprob_val - dp_logprob_val)
                     max_logprob_diff = max(max_logprob_diff, diff)
 
-                    # Allow small numerical differences 
+                    # Allow small numerical differences
                     if diff > 0.15:
                         logprob_mismatches += 1
                         print(
