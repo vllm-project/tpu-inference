@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
+from tpu_inference.layers.jax.sharding import ShardingAxisName
 from tpu_inference.runner.kv_cache import (create_kv_caches,
                                            get_kv_cache_shape_with_mesh)
 
@@ -59,3 +60,53 @@ def test_create_kv_caches(mesh: Mesh):
 
         # Ensure that separate array objects were created for each layer
         assert kv_caches[0] is not kv_caches[1]
+
+
+def test_create_kv_caches_mla(mesh: Mesh):
+    """
+    Tests that `create_kv_caches` correctly allocates and shards the KV caches
+    for all specified layers when `use_mla` is True.
+    """
+    num_blocks = 64
+    block_size = 16
+    num_kv_heads = 1  # Not used for MLA shape calculation
+    head_size = 512 + 64  # Combined dimension for MLA
+    layer_names = ["decoder.0", "decoder.1"]
+
+    # For MLA, sharding is by the 'model' axis.
+    # The mesh axes are ("data", "attn_dp", "model"), so the PartitionSpec is (None, None, "model").
+    expected_sharding = NamedSharding(
+        mesh, PartitionSpec(None, None, ShardingAxisName.MLP_TENSOR)
+    )
+    expected_dtype = jnp.bfloat16
+    expected_shape = get_kv_cache_shape_with_mesh(
+        mesh,
+        num_blocks,
+        block_size,
+        num_kv_heads,
+        head_size,
+        expected_dtype,
+        use_mla=True,
+    )
+
+    with patch("tpu_inference.logger.init_logger", return_value=MagicMock()), patch(
+        "tpu_inference.utils.hbm_usage_gb", return_value=[(0.0, 0.0), (0.0, 0.0)]
+    ):
+        kv_caches = create_kv_caches(
+            num_blocks=num_blocks,
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            mesh=mesh,
+            layer_names=layer_names,
+            use_mla=True,
+        )
+
+        assert isinstance(kv_caches, list)
+        assert len(kv_caches) == len(layer_names)
+
+        for cache_array in kv_caches:
+            assert isinstance(cache_array, jax.Array)
+            assert cache_array.shape == expected_shape
+            assert cache_array.dtype == expected_dtype
+            assert cache_array.sharding == expected_sharding

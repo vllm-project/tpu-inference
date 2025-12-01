@@ -272,8 +272,7 @@ class TestKVCacheManager:
     def test_get_kv_cache_spec_with_compilation_cfg_mla(self):
         # tests we create kv cache spec from compilation config with mla
         # Set config for use_mla to be true
-        self.runner.model_config.hf_config.model_type = "deepseek_v2"
-        self.runner.model_config.hf_config.kv_lora_rank = 64
+        self.runner.model_config.use_mla = True
 
         num_kv_heads = 16
         head_size = 128
@@ -292,28 +291,13 @@ class TestKVCacheManager:
         self.runner.vllm_config.compilation_config.static_forward_context = \
             static_forward_context
 
-        # The loop in get_kv_cache_spec uses 'i', which is not defined
-        # when iterating over a dict. Let's patch it to work for this test.
-        # The original code seems to have a bug here.
-        with patch.object(self.runner.kv_cache_manager,
-                          'get_kv_cache_spec') as mock_get_spec:
-
-            def side_effect():
-                spec = {}
-                spec['layer.0'] = MLAAttentionSpec(
-                    block_size=self.runner.cache_config.block_size,
-                    num_kv_heads=mock_attn_module.num_kv_heads,
-                    head_size=mock_attn_module.head_size,
-                    dtype=self.runner.kv_cache_dtype,
-                    cache_dtype_str=self.runner.vllm_config.cache_config.
-                    cache_dtype)
-                return spec
-
-            mock_get_spec.side_effect = side_effect
-            kv_cache_spec = self.runner.get_kv_cache_spec()
+        kv_cache_spec = self.runner.kv_cache_manager.get_kv_cache_spec()
 
         assert len(kv_cache_spec) == 1
-        assert isinstance(kv_cache_spec['layer.0'], MLAAttentionSpec)
+        spec = kv_cache_spec['layer.0']
+        assert isinstance(spec, MLAAttentionSpec)
+        assert spec.num_kv_heads == 1
+        assert spec.head_size == head_size
 
     def test_get_kv_cache_spec_without_compilation_cfg(self):
         # tests if there's no compilation config, we use full attention kv
@@ -341,28 +325,22 @@ class TestKVCacheManager:
     def test_get_kv_cache_spec_without_compilation_cfg_mla(self):
         # tests if there's no compilation config, we use mla spec
         # Set config for use_mla to be true
-        self.runner.model_config.hf_config.model_type = "deepseek_v2"
-        self.runner.model_config.hf_config.kv_lora_rank = 64
+        self.runner.model_config.use_mla = True
 
         model_config = self.runner.vllm_config.model_config
         parallel_config = self.runner.vllm_config.parallel_config
+        head_size = model_config.get_head_size()
         num_layers = model_config.get_num_layers(parallel_config)
 
         self.runner.vllm_config.compilation_config.static_forward_context = {}
-
-        # The original code has a bug where attn_module is not defined.
-        # We'll mock the behavior for the test.
-        with patch.object(self.runner.kv_cache_manager,
-                          'get_kv_cache_spec') as mock_get_spec:
-            mock_get_spec.return_value = {
-                f"layer.{i}": MagicMock(spec=MLAAttentionSpec)
-                for i in range(num_layers)
-            }
-            kv_cache_spec = self.runner.get_kv_cache_spec()
+        kv_cache_spec = self.runner.kv_cache_manager.get_kv_cache_spec()
 
         assert len(kv_cache_spec) == num_layers
         for i in range(num_layers):
-            assert isinstance(kv_cache_spec[f'layer.{i}'], MLAAttentionSpec)
+            spec = kv_cache_spec[f"layer.{i}"]
+            assert isinstance(spec, MLAAttentionSpec)
+            assert spec.num_kv_heads == 1
+            assert spec.head_size == common_utils.get_padded_head_dim(head_size)
 
     def test_initialize_kv_cache(self):
         # create a kv cache config with 10 layers full attention and 10 layers
