@@ -20,6 +20,8 @@ from tpu_inference.layers.jax.transformer_block import TransformerBlock
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.quantization.mxfp4_utils import (
     MXFP4_QUANT_METHOD, dequant_mxfp4_to_bf16, unpack_mxfp4_to_fp32)
+from tpu_inference.models.jax.utils.quantization.tpu_fp4_utils import (
+    TPU_FP4_QUANT_METHOD, dequant_tpu_fp4_to_bf16, unpack_tpu_fp4_to_fp32)
 from tpu_inference.models.jax.utils.weight_utils import (
     get_param, model_weights_generator, print_param_info)
 
@@ -204,8 +206,9 @@ class GptOss(nnx.Module):
         }
 
         # MXFP4 checkpoints swap last two dims for MoE to place packed dim at most minor
-        swap_mlp_transform = transforms[
-            "swap_last2"] if quant_method == MXFP4_QUANT_METHOD else None
+        swap_mlp_transform = (transforms["swap_last2"] if quant_method
+                              in (MXFP4_QUANT_METHOD,
+                                  TPU_FP4_QUANT_METHOD) else None)
 
         mappings = {
             # Embeddings, Norms, and LM Head
@@ -283,12 +286,16 @@ class GptOss(nnx.Module):
             download_dir=self.vllm_config.load_config.download_dir)
 
         # Build a pool of weights with MXFP4 experts combined if neededs
-        pool: dict[str, torch.Tensor | tuple] = (self._build_mxfp4_pool(
-            names_and_weights_generator,
-            mappings) if quant_method == MXFP4_QUANT_METHOD else {
+        pool: dict[str, torch.Tensor | tuple]
+        if quant_method in (MXFP4_QUANT_METHOD, TPU_FP4_QUANT_METHOD):
+            pool = self._build_packed_pool(names_and_weights_generator,
+                                           mappings,
+                                           quant_method=quant_method)
+        else:
+            pool = {
                 loaded_name: loaded_weight
                 for loaded_name, loaded_weight in names_and_weights_generator
-            })
+            }
 
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in pool.items():
@@ -312,13 +319,11 @@ class GptOss(nnx.Module):
 
                 prepared_weight = loaded_weight
                 if isinstance(loaded_weight, tuple):
-                    # Loaded weight is an MXFP4 tuple
-                    blocks_u8, scales_u8 = loaded_weight
-                    # Quantized param (QArray): set qvalue/scale directly and skip regular path
-                    if hasattr(model_weight, "array"):  # QArray check
-                        codes_fp32_t, scales_fp32_t = unpack_mxfp4_to_fp32(
-                            blocks_u8, scales_u8)
-                        self._load_mxfp4(
+                    blocks_u8, scales = loaded_weight
+                    if hasattr(model_weight, "array"):
+                        codes_fp32_t, scales_fp32_t = self._unpack_packed_fp4_to_fp32(
+                            blocks_u8, scales, quant_method)
+                        self._load_packed_quant(
                             model_weight=model_weight,
                             codes_fp32_t=codes_fp32_t,
                             scales_fp32_t=scales_fp32_t,
@@ -327,9 +332,8 @@ class GptOss(nnx.Module):
                         if is_verbose:
                             print_param_info(model_weight, loaded_name)
                         continue
-                    # Not a QArray: dequantize MXFP4 to BF16 full weights
-                    prepared_weight = dequant_mxfp4_to_bf16(
-                        blocks_u8, scales_u8)
+                    prepared_weight = self._dequant_packed_fp4_to_bf16(
+                        blocks_u8, scales, quant_method)
 
                 # Single regular-tensor load call (BF16 or dequantized MXFP4)
                 cast_type = model_weight.value.dtype
@@ -347,11 +351,12 @@ class GptOss(nnx.Module):
 
         nnx.update(self, model_params)
 
-    def _build_mxfp4_pool(self, names_and_weights_generator, mappings):
-        """Collect MXFP4 weights into a pool keeping tuples (blocks_u8, scales_u8).
+    def _build_packed_pool(self, names_and_weights_generator, mappings,
+                           quant_method: str):
+        """Collect packed FP4 weights into a pool keeping tuples (blocks_u8, scales).
 
-        Combines *_blocks and *_scales pairs and stores uint8 tensors together.
-        Non-expert tensors are kept as-is. Raises if any expert bundle is incomplete.
+        Combines *_blocks and *_scales pairs and stores tensors together.
+        Non-expert tensors are kept as-is. Raises if any bundle is incomplete.
         """
         pool: dict[str, torch.Tensor | tuple] = {}
         pending_experts: dict[str, dict[str, torch.Tensor]] = {}
@@ -372,7 +377,6 @@ class GptOss(nnx.Module):
                         raise ValueError(
                             f"No mapping found for expert tensor: {base}")
                     pool[base] = (entry["blocks"], entry["scales"])
-                    # Remove from pending to free memory
                     pending_experts.pop(base, None)
             else:
                 pool[loaded_name] = loaded_weight
@@ -386,16 +390,36 @@ class GptOss(nnx.Module):
                     f"{base} (missing: {', '.join(missing) if missing else 'unknown'})"
                 )
             raise RuntimeError(
-                "Incomplete MXFP4 expert bundle(s) encountered: " +
+                "Incomplete packed FP4 expert bundle(s) encountered: " +
                 ", ".join(details))
         return pool
 
-    def _load_mxfp4(self,
-                    model_weight,
-                    codes_fp32_t,
-                    scales_fp32_t,
-                    transform_fn=None):
-        """Assign decoded MXFP4 codes/scales into a QArray (qvalue/scale)."""
+    def _unpack_packed_fp4_to_fp32(
+            self, blocks_u8: torch.Tensor, scales: torch.Tensor,
+            quant_method: str) -> tuple[torch.Tensor, torch.Tensor]:
+        if quant_method == MXFP4_QUANT_METHOD:
+            return unpack_mxfp4_to_fp32(blocks_u8, scales)
+        if quant_method == TPU_FP4_QUANT_METHOD:
+            return unpack_tpu_fp4_to_fp32(blocks_u8, scales)
+        raise ValueError(
+            f"Unsupported packed quant method for unpack: {quant_method}")
+
+    def _dequant_packed_fp4_to_bf16(self, blocks_u8: torch.Tensor,
+                                    scales: torch.Tensor,
+                                    quant_method: str) -> torch.Tensor:
+        if quant_method == MXFP4_QUANT_METHOD:
+            return dequant_mxfp4_to_bf16(blocks_u8, scales)
+        if quant_method == TPU_FP4_QUANT_METHOD:
+            return dequant_tpu_fp4_to_bf16(blocks_u8, scales)
+        raise ValueError(
+            f"Unsupported packed quant method for dequant: {quant_method}")
+
+    def _load_packed_quant(self,
+                           model_weight,
+                           codes_fp32_t,
+                           scales_fp32_t,
+                           transform_fn=None):
+        """Assign decoded packed FP4 codes/scales into a QArray (qvalue/scale)."""
 
         qv = model_weight.array.qvalue
         sv = model_weight.array.scale

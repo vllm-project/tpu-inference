@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import TYPE_CHECKING, Any, Optional, Tuple, Union, cast
+import os
+from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
 
 import jax.numpy as jnp
-import torch
 import vllm.envs as vllm_envs
 from torchax.ops.mappings import j2t_dtype
 from tpu_info import device
@@ -12,7 +12,7 @@ from vllm.platforms.interface import Platform, PlatformEnum
 from vllm.sampling_params import SamplingParams, SamplingType
 
 from tpu_inference import envs
-from tpu_inference.layers.common.sharding import ShardingConfigManager
+from tpu_inference.layers.jax.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
 
 if TYPE_CHECKING:
@@ -54,11 +54,22 @@ class TpuPlatform(Platform):
     ]
 
     @classmethod
+    def pre_register_and_update(cls, parser=None) -> None:
+        """Hook for early platform-specific registration before ModelConfig init."""
+        try:
+            from tpu_inference.models.jax.utils.quantization.tpu_fp4_utils import \
+                ensure_tpu_fp4_registered
+
+            ensure_tpu_fp4_registered()
+        except Exception as exc:
+            logger.warning("Failed to pre-register TPU FP4 quantization: %s",
+                           exc)
+
+    @classmethod
     def get_attn_backend_cls(cls, selected_backend: "_Backend", head_size: int,
                              dtype: jnp.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
-                             has_sink: bool, use_sparse: bool,
-                             attn_type: Any) -> str:
+                             has_sink: bool, use_sparse: bool) -> str:
         from vllm.attention.backends.registry import _Backend
         if selected_backend != _Backend.PALLAS:
             logger.info("Cannot use %s backend on TPU.", selected_backend)
@@ -82,14 +93,6 @@ class TpuPlatform(Platform):
         except Exception as e:
             logger.warning(f"Error getting device name: {e}")
             return 'TPU'
-
-    @classmethod
-    def fp8_dtype(cls) -> torch.dtype:
-        if cls.get_device_name().lower() == "tpu v6e":
-            logger.info(
-                "Automatically using fp8_e5m2 for FP8 KV cache on TPU v6e.")
-            return torch.float8_e5m2
-        return torch.float8_e4m3fn
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
@@ -141,7 +144,6 @@ class TpuPlatform(Platform):
         # For v0, the default block size is 16.
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = cast(BlockSize, 16)
-
         compilation_config = vllm_config.compilation_config
 
         # TPU only supports DYNAMO_TRACE_ONCE compilation level
@@ -192,16 +194,10 @@ class TpuPlatform(Platform):
         parallel_config.worker_cls = \
                         "tpu_inference.worker.tpu_worker.TPUWorker"
 
-        multihost_backend = envs.TPU_MULTIHOST_BACKEND
+        multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "").lower()
         if not multihost_backend:  # Single host
-            if parallel_config.pipeline_parallel_size == 1:
-                logger.info("Force using UniProcExecutor for JAX on \
-                        single host without pipeline parallelism.")
-                parallel_config.distributed_executor_backend = "uni"
-            else:
-                logger.info("Force using MultiprocExecutor for JAX on \
-                        single host with pipeline parallelism.")
-                parallel_config.distributed_executor_backend = "mp"
+            logger.info("Force using UniProcExecutor for JAX on single host.")
+            parallel_config.distributed_executor_backend = "uni"
         elif multihost_backend == "ray":
             from tpu_inference.executors.ray_distributed_executor import \
                 RayDistributedExecutor
@@ -275,8 +271,4 @@ class TpuPlatform(Platform):
         """
         Returns if the current platform needs to sync weight loader.
         """
-        return True
-
-    @classmethod
-    def support_hybrid_kv_cache(cls) -> bool:
         return True

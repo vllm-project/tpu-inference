@@ -13,8 +13,9 @@ from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from qwix._src.core.qarray import QArray
-from qwix._src.providers import ptq
+from qwix.contrib import padded_qarray as ptq
+from qwix.contrib.padded_qarray import PaddedPtqProvider
+from qwix.contrib.padded_qarray import PaddedQArray as QArray
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -73,11 +74,30 @@ DEFAULT_LLAMA4_FP8_CONFIG = {
 
 # Default Qwix config for GPT-OSS MXFP4 checkpoints.
 # Notes:
-# - We quantize only the MoE expert weights by default (router stays in BF16).
-# - We use Qwix's abstract-model path so weights can be set directly into QArray
+# - Only the MoE expert weights by default (router stays in BF16).
+# - Use Qwix's abstract-model path so weights can be set directly into QArray
 #   fields during weight loading (similar to DeepSeek's flow).
 # - Activation quantization is not set but Qwix would pickup MoE sum if activated
-DEFAULT_GPT_OSS_FP4_CONFIG = {
+DEFAULT_GPT_OSS_MXFP4_CONFIG = {
+    "qwix": {
+        "use_abstract_model":
+        True,
+        "scale_dtype":
+        # MXFP4 uses E8M0 scales but for TPU these are cast to BF16
+        "bfloat16",
+        "rules": [
+            {
+                "module_path": ".*custom_module",
+                "weight_qtype": "float4_e2m1fn",
+                "act_qtype": None,
+                "tile_size": 32,
+            },
+        ],
+    }
+}
+
+# Default Qwix config for GPT-OSS TPU FP4 checkpoints
+DEFAULT_GPT_OSS_TPU_FP4_CONFIG = {
     "qwix": {
         "use_abstract_model":
         True,
@@ -88,7 +108,32 @@ DEFAULT_GPT_OSS_FP4_CONFIG = {
                 "module_path": ".*custom_module",
                 "weight_qtype": "float4_e2m1fn",
                 "act_qtype": None,
-                "tile_size": 32,
+                "tile_size": 256,
+            },
+        ],
+    }
+}
+
+# Default Qwix config for DeepSeek TPU FP4 checkpoints
+DEFAULT_DEEPSEEK_TPU_FP4_CONFIG = {
+    "qwix": {
+        "use_abstract_model":
+        True,
+        "scale_dtype":
+        "bfloat16",
+        "rules": [
+            {
+                # Rule to keep the router (mlp.gate) in BF16/unquantized
+                "module_path": ".*.custom_module.router.*",
+                "weight_qtype": None,
+            },
+            { # TODO: ATTENTION MIGHT BE KEPT TO FP8
+                # Rule to apply FP4 quantization to all other layers (MoE experts, DenseFFW, Attention, etc.)
+                "module_path": ".*",
+                "weight_qtype": "float4_e2m1fn",
+                "act_qtype": None,
+                # NOTE: Use the tile_size from GPT-OSS TPU FP4 config
+                "tile_size": 256,
             },
         ],
     }
@@ -221,7 +266,7 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
                           query_start_loc=query_start_loc,
                           request_distribution=request_distribution),
     }
-    model = qwix.quantize_model(model, qwix.PtqProvider(qwix_rules),
+    model = qwix.quantize_model(model, PaddedPtqProvider(qwix_rules),
                                 **model_input)
     return model
 
@@ -421,11 +466,15 @@ def get_default_qwix_quantization_config(
     # TODO (jacobplatin): remove this so that we can support various quantization types
     if model_type == "deepseek_v3" and quant_method == "fp8":
         return DEFAULT_DEEPSEEK_FP8_CONFIG
+    if model_type == "deepseek_v3" and quant_method == "tpu_fp4":
+        return DEFAULT_DEEPSEEK_TPU_FP4_CONFIG
     elif model_type == "llama4" and quant_method == "compressed-tensors":
         return DEFAULT_LLAMA4_FP8_CONFIG
     # MXFP4 (GPT-OSS): provide a default configuration to quantize MoE experts via Qwix
     elif model_type == "gpt_oss" and quant_method == "mxfp4":
-        return DEFAULT_GPT_OSS_FP4_CONFIG
+        return DEFAULT_GPT_OSS_MXFP4_CONFIG
+    elif model_type == "gpt_oss" and quant_method == "tpu_fp4":
+        return DEFAULT_GPT_OSS_TPU_FP4_CONFIG
 
 
 def update_vllm_config_for_qwix_quantization(vllm_config: "VllmConfig"):

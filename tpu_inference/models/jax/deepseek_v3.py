@@ -25,6 +25,8 @@ from tpu_inference.layers.jax.transformer_block import (
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.quantization.quantization_utils import \
     get_quant_dtype_from_qwix_config
+from tpu_inference.models.jax.utils.quantization.tpu_fp4_utils import (
+    TPU_FP4_QUANT_METHOD, unpack_tpu_fp4_to_fp32)
 from tpu_inference.models.jax.utils.weight_utils import (
     get_param, model_weights_generator, print_param_info, reshape_params)
 
@@ -455,7 +457,8 @@ class DeepSeekV3WeightLoader:
 
         # TODO (jacobplatin): we shouldn't hard-code this, but the logic to obtain the true quantized dtype
         # is non-trivial and the default checkpoints all use this dtype
-        self.quant_dtype = jnp.float8_e4m3fn
+        # self.quant_dtype = jnp.float8_e4m3fn
+        self.quant_dtype = jnp.float4_e2m1fn
 
         self.is_model_quantized = not vllm_config.additional_config.get(
             "skip_quantization", False)
@@ -463,7 +466,9 @@ class DeepSeekV3WeightLoader:
             # TODO (jacobplatin): expand support eventually
             quantization_type = vllm_config.model_config.hf_config.quantization_config[
                 "quant_method"]
-            assert quantization_type == "fp8", "DeepSeek only supports the fp8 quantization method for now"
+            assert quantization_type in (
+                "fp8", "tpu_fp4"
+            ), "DeepSeek only supports the fp8 and tpu_fp4 quantization methods for now"
             self.scale_dtype, self.quant_dtype = get_quant_dtype_from_qwix_config(
                 vllm_config)
 
@@ -574,6 +579,68 @@ class DeepSeekV3WeightLoader:
         """
         mapped_name = self.map_loaded_to_standardized_name(name)
         base_model_weight = get_param(model_params, mapped_name)
+
+        # Check if model_weight is a QArray (i.e., we are in the abstract flow)
+        is_qarray = hasattr(base_model_weight, "array")
+
+        # --- NEW LOGIC FOR QARRAY (TPU-FP4) ---
+        if is_qarray and scale is not None:
+            # This path handles the pre-unpacked FP32 codes (weight) and FP32 scales (scale)
+            # from the tpu_fp4 checkpoint. We convert them to JAX/NNX, apply transforms,
+            # and set the QArray values.
+
+            qv = base_model_weight.array.qvalue
+            sv = base_model_weight.array.scale
+            q_dtype = qv.value.dtype
+            s_dtype = sv.value.dtype
+
+            # Convert to numpy and cast to final dtype
+            codes_jnp = jnp.asarray(
+                weight.detach().cpu().numpy()).astype(q_dtype)
+            scales_jnp = jnp.asarray(
+                scale.detach().cpu().numpy()).astype(s_dtype)
+
+            # Apply transforms here if needed (e.g., transpose/reshape from DeepSeek logic)
+            # You need to define a method or helper function for this based on DeepSeek's original
+            # transpose/reshape logic, which is currently mixed with the torch/numpy conversion.
+
+            # For simplicity (assuming transformations are simple transposes for now)
+            codes_jnp = self._transpose_params(name, codes_jnp)
+            scales_jnp = self._transpose_params(name, scales_jnp)
+
+            # NOTE: We skip the detailed FP8 block-size checks and complex reshaping here
+            # and rely on the model abstract shape being correct.
+            # You should, however, perform shape checks:
+            if qv.value.shape != codes_jnp.shape:
+                raise ValueError(
+                    f"Loaded shape for {name} codes: {codes_jnp.shape} "
+                    f"does not match model shape for {mapped_name} codes: {qv.value.shape}!"
+                )
+            if sv.value.shape != scales_jnp.shape:
+                raise ValueError(
+                    f"Loaded shape for {name} scales: {scales_jnp.shape} "
+                    f"does not match model shape for {mapped_name} scales: {sv.value.shape}!"
+                )
+
+            def get_q_slice(index):
+                return codes_jnp[index]
+
+            def get_s_slice(index):
+                return scales_jnp[index]
+
+            q_sharded = jax.make_array_from_callback(
+                qv.value.shape, NamedSharding(model_mesh, P(*qv.sharding)),
+                get_q_slice)
+            s_sharded = jax.make_array_from_callback(
+                sv.value.shape, NamedSharding(model_mesh, P(*sv.sharding)),
+                get_s_slice)
+
+            base_model_weight.array.qvalue.value = q_sharded
+            base_model_weight.array.scale.value = s_sharded
+
+            # Return memory usage (simpler, as the original logic is verbose)
+            return qv.nbytes / 1e9 + sv.nbytes / 1e9, 0
+
         model_weight = base_model_weight.array.qvalue if hasattr(
             base_model_weight, "array") else base_model_weight
         sharding = base_model_weight.array.qvalue.sharding if hasattr(
@@ -731,6 +798,30 @@ class DeepSeekV3WeightLoader:
                         else:
                             quantized_weights[loaded_name] = loaded_weight
                             continue
+                    else:
+                        quantized_weights[loaded_name] = loaded_weight
+                        continue
+
+                # Check for TPU-FP4 packed case (packed weights are uint8)
+                is_packed_tpu_fp4 = (self.is_model_quantized
+                                     and self.quantization_type
+                                     == TPU_FP4_QUANT_METHOD
+                                     and loaded_weight.dtype == torch.uint8)
+
+                if is_packed_tpu_fp4:  # <--- New logic for TPU-FP4
+                    scale_name = loaded_name.replace(".weight",
+                                                     ".weight_scale_inv")
+                    if scale_name in quantized_scales:
+                        scale = quantized_scales[scale_name]
+                        del quantized_scales[scale_name]
+                        # Unpack the codes and scales to FP32, then cast to appropriate Qwix dtypes
+                        # Use the unpack function from gpt_oss.py's utilities
+                        unpacked_codes, unpacked_scales = unpack_tpu_fp4_to_fp32(
+                            loaded_weight, scale)
+
+                        # Replace loaded_weight and scale with the unpacked FP32 tensors
+                        loaded_weight = unpacked_codes
+                        scale = unpacked_scales
                     else:
                         quantized_weights[loaded_name] = loaded_weight
                         continue
