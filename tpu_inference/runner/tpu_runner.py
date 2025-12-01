@@ -4,7 +4,7 @@ import random
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple, cast
+from typing import Any, Callable, Dict, List, Optional, cast
 
 import jax
 import jax.numpy as jnp
@@ -12,46 +12,14 @@ import jaxtyping
 import numpy as np
 import torch
 import vllm.envs as vllm_envs
+import vllm.envs as envs
 from flax import nnx
 from jax.experimental import mesh_utils
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.ops.mappings import j2t_dtype
-
-import vllm.envs as envs
-from tpu_inference import utils as common_utils
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.jax.sample.rejection_sampler import RejectionSampler
-from tpu_inference.layers.jax.sample.sampling import (
-    compute_logprobs,
-    gather_logprobs,
-    sample,
-)
-from tpu_inference.layers.jax.sample.sampling_metadata import (
-    TPUSupportedSamplingMetadata,
-)
-from tpu_inference.layers.jax.sharding import ShardingAxisName, ShardingConfigManager
-from tpu_inference.logger import init_logger
-from tpu_inference.models.common.model_loader import get_model
-from tpu_inference.models.jax.utils.weight_utils import (
-    shard_put,
-    transfer_state_with_mappings,
-)
-from tpu_inference.runner import utils as runner_utils
-from tpu_inference.runner.compilation_manager import CompilationManager
-from tpu_inference.runner.input_batch_jax import CachedRequestState, InputBatch
-from tpu_inference.runner.kv_cache_manager import KVCacheManager
-from tpu_inference.runner.lora_utils import LoraUtils
-from tpu_inference.runner.multimodal_manager import MultiModalManager
-from tpu_inference.runner.persistent_batch_manager import PersistentBatchManager
-from tpu_inference.runner.speculative_decoding_manager import (
-    SpecDecodeMetadata,
-    SpeculativeDecodingManager,
-)
-from tpu_inference.runner.structured_decoding_manager import StructuredDecodingManager
-from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
-from tpu_inference.utils import device_array, make_optimized_mesh, time_function
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
@@ -64,7 +32,8 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              ModelRunnerOutput)
 from vllm.v1.request import Request
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
+from vllm.v1.worker.kv_connector_model_runner_mixin import \
+    KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 import tpu_inference.envs as envs
@@ -1637,10 +1606,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         query_start_loc_cpu = query_start_loc
         seq_lens_cpu = seq_lens
 
-        (input_ids, positions, query_start_loc, seq_lens,
-         logits_indices, request_distribution) = jax.make_array_from_process_local_data(
-             NamedSharding(self.mesh, PartitionSpec(None)), (input_ids, positions, query_start_loc, seq_lens,
-                         logits_indices, request_distribution))
+        (input_ids, positions, query_start_loc, seq_lens, logits_indices,
+         request_distribution) = jax.make_array_from_process_local_data(
+             NamedSharding(self.mesh, PartitionSpec(None)),
+             (input_ids, positions, query_start_loc, seq_lens, logits_indices,
+              request_distribution))
 
         attention_metadata_per_layer: Dict[str, AttentionMetadata] = {}
         uniform_attention_metadata: AttentionMetadata = None
@@ -1653,7 +1623,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 [:num_reqs])
             # Convert block_tables to 1D on cpu.
             block_tables = block_tables.reshape(-1)
-            block_tables = jax.make_array_from_process_local_data(NamedSharding(self.mesh, PartitionSpec(None)), (block_tables))
+            block_tables = jax.make_array_from_process_local_data(
+                NamedSharding(self.mesh, PartitionSpec(None)), (block_tables))
 
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
