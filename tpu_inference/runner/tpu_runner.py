@@ -3,7 +3,7 @@ import functools
 import random
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple, cast
+from typing import Any, Callable, Dict, List, Optional, cast
 
 import jax
 import jax.numpy as jnp
@@ -11,6 +11,7 @@ import jaxtyping
 import numpy as np
 import torch
 import vllm.envs as vllm_envs
+import vllm.envs as envs
 from flax import nnx
 from jax.experimental import mesh_utils
 from jax.sharding import NamedSharding, PartitionSpec
@@ -108,7 +109,7 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         next_tokens: jax.Array,
         num_reqs: int,
         discard_sampled_tokens_req_indices: list[int],
-        logits_indices_selector: Optional[List[int]] = None,
+        logits_indices_selector: list[int] | None = None,
     ):
         self._model_runner_output = model_runner_output
         self._next_tokens = next_tokens
@@ -136,7 +137,7 @@ class AsyncPreResults:
     request_seq_lens: list[tuple[int, CachedRequestState, int]]
     discard_sampled_tokens_req_indices: list[int]
     placeholder_req_id_to_index: dict[str, int]
-    logits_indices_selector: Optional[List[int]] = None
+    logits_indices_selector: list[int] | None = None
 
 
 @dataclass
@@ -146,7 +147,7 @@ class ExecuteModelState:
 
     scheduler_output: "VllmSchedulerOutput"
     attn_metadata: AttentionMetadata
-    input_ids: Optional[jax.Array]
+    input_ids: jax.Array | None
     hidden_states: jax.Array
     logits: jax.Array
     aux_hidden_states: Optional[jax.Array]
@@ -555,7 +556,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def execute_model(
         self,
         scheduler_output: "VllmSchedulerOutput",
-        intermediate_tensors: Optional[IntermediateTensors] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | None:
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called "
@@ -802,7 +803,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self,
         scheduler_output: "VllmSchedulerOutput",
         attn_metadata: AttentionMetadata,
-        input_ids: Optional[jax.Array],
+        input_ids: jax.Array | None,
         hidden_states: jax.Array,
         logits: jax.Array,
         aux_hidden_states: Optional[jax.Array],
@@ -1604,10 +1605,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         query_start_loc_cpu = query_start_loc
         seq_lens_cpu = seq_lens
 
-        (input_ids, positions, query_start_loc, seq_lens,
-         logits_indices, request_distribution) = device_array(
-             self.mesh, (input_ids, positions, query_start_loc, seq_lens,
-                         logits_indices, request_distribution))
+        (input_ids, positions, query_start_loc, seq_lens, logits_indices,
+         request_distribution) = jax.make_array_from_process_local_data(
+             NamedSharding(self.mesh, PartitionSpec(None)),
+             (input_ids, positions, query_start_loc, seq_lens, logits_indices,
+              request_distribution))
 
         attention_metadata_per_layer: Dict[str, AttentionMetadata] = {}
         uniform_attention_metadata: AttentionMetadata = None
@@ -1620,7 +1622,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 [:num_reqs])
             # Convert block_tables to 1D on cpu.
             block_tables = block_tables.reshape(-1)
-            block_tables = device_array(self.mesh, (block_tables))
+            block_tables = jax.make_array_from_process_local_data(
+                NamedSharding(self.mesh, PartitionSpec(None)), (block_tables))
 
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
@@ -1673,26 +1676,26 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         else:
             return input_ids, None
 
-    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+    def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.speculative_decoding_manager.take_draft_token_ids()
 
     ###### Local disagg utilities ######
 
     def get_kv_cache_for_block_ids(
         self,
-        block_ids: List[int],
-    ) -> List[jax.Array]:
+        block_ids: list[int],
+    ) -> list[jax.Array]:
         return self.kv_cache_manager.get_kv_cache_for_block_ids(block_ids)
 
     def transfer_kv_cache(self,
-                          kv_cache_slices: List[jax.Array]) -> List[jax.Array]:
+                          kv_cache_slices: list[jax.Array]) -> list[jax.Array]:
         return self.kv_cache_manager.transfer_kv_cache(kv_cache_slices)
 
     def insert_request_with_kv_cache(
         self,
         request: "Request",
-        kv_cache_slices: List[jax.Array],
-        block_ids: List[List[int]],
+        kv_cache_slices: list[jax.Array],
+        block_ids: list[list[int]],
     ):
         return self.kv_cache_manager.insert_request_with_kv_cache(
             request, kv_cache_slices, block_ids)
@@ -1702,8 +1705,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def _sync_weights(
         self,
         updated_weights: jaxtyping.PyTree,
-        mappings: Dict[str, Tuple[str, Tuple[str]]],
-        transpose_keys: Dict[str, Tuple[int]],
+        mappings: dict[str, tuple[str, tuple[str]]],
+        transpose_keys: dict[str, tuple[int]],
         reshard_fn: Callable[[jaxtyping.PyTree, jaxtyping.PyTree],
                              jaxtyping.PyTree] = None
     ) -> None:
