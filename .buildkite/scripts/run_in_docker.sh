@@ -32,7 +32,8 @@ fi
 IMAGE_NAME='vllm-tpu'
 # Source the environment setup script
 # shellcheck disable=SC1091
-source setup_docker_env.sh
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
+source "$SCRIPT_DIR/setup_docker_env.sh"
 setup_environment $IMAGE_NAME
 
 DOCKER_HF_HOME="/tmp/hf_home"
