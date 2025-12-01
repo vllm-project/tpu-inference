@@ -5,7 +5,7 @@ set -euo pipefail
 
 setup_environment() {
   local image_name_param=${1:-"vllm-tpu"}
-  export IMAGE_NAME="$image_name_param"
+  IMAGE_NAME="$image_name_param"
 
   if ! grep -q "^HF_TOKEN=" /etc/environment; then
     gcloud secrets versions access latest --secret=bm-agent-hf-token --quiet | \

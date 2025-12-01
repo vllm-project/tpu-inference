@@ -12,7 +12,7 @@ if [ "$#" -eq 0 ]; then
 fi
 
 # Environment variables for docker run
-export ENV_VARS=(
+ENV_VARS=(
   -e TEST_MODEL="${TEST_MODEL:-}"
   -e MINIMUM_ACCURACY_THRESHOLD="${MINIMUM_ACCURACY_THRESHOLD:-}"
   -e MINIMUM_THROUGHPUT_THRESHOLD="${MINIMUM_THROUGHPUT_THRESHOLD:-}"
@@ -26,22 +26,22 @@ export ENV_VARS=(
 )
 
 if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
-    export MODEL_IMPL_TYPE=flax_nnx
+    MODEL_IMPL_TYPE=flax_nnx
 fi
 
-export IMAGE_NAME='vllm-tpu'
+IMAGE_NAME='vllm-tpu'
 # Source the environment setup script
 # shellcheck disable=SC1091
 source setup_docker_env.sh
 setup_environment $IMAGE_NAME
 
-export DOCKER_HF_HOME="/tmp/hf_home"
+DOCKER_HF_HOME="/tmp/hf_home"
 
 # Try to cache HF models
 persist_cache_dir="/mnt/disks/persist/models"
 
 if ( mkdir -p "$persist_cache_dir" ); then
-  export LOCAL_HF_HOME="$persist_cache_dir"
+  LOCAL_HF_HOME="$persist_cache_dir"
 else
   echo "Error: Failed to create $persist_cache_dir"
   exit 1
