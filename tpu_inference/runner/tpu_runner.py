@@ -5,13 +5,14 @@ import random
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple, cast
+from typing import Any, Callable, Dict, List, Optional, cast
 
 import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
 import vllm.envs as vllm_envs
+import vllm.envs as envs
 from flax import nnx
 from jax.experimental import mesh_utils
 from jax.sharding import NamedSharding, PartitionSpec
@@ -31,7 +32,8 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              ModelRunnerOutput)
 from vllm.v1.request import Request
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
+from vllm.v1.worker.kv_connector_model_runner_mixin import \
+    KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 import tpu_inference.envs as envs
@@ -1602,10 +1604,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         query_start_loc_cpu = query_start_loc
         seq_lens_cpu = seq_lens
 
-        (input_ids, positions, query_start_loc, seq_lens,
-         logits_indices, request_distribution) = jax.make_array_from_process_local_data(
-             NamedSharding(self.mesh, PartitionSpec(None)), (input_ids, positions, query_start_loc, seq_lens,
-                         logits_indices, request_distribution))
+        (input_ids, positions, query_start_loc, seq_lens, logits_indices,
+         request_distribution) = jax.make_array_from_process_local_data(
+             NamedSharding(self.mesh, PartitionSpec(None)),
+             (input_ids, positions, query_start_loc, seq_lens, logits_indices,
+              request_distribution))
 
         attention_metadata_per_layer: Dict[str, AttentionMetadata] = {}
         uniform_attention_metadata: AttentionMetadata = None
@@ -1618,7 +1621,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 [:num_reqs])
             # Convert block_tables to 1D on cpu.
             block_tables = block_tables.reshape(-1)
-            block_tables = jax.make_array_from_process_local_data(NamedSharding(self.mesh, PartitionSpec(None)), (block_tables))
+            block_tables = jax.make_array_from_process_local_data(
+                NamedSharding(self.mesh, PartitionSpec(None)), (block_tables))
 
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
