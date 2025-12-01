@@ -30,9 +30,9 @@ if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
 fi
 
 IMAGE_NAME='vllm-tpu'
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 # Source the environment setup script
 # shellcheck disable=SC1091
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 source "$SCRIPT_DIR/setup_docker_env.sh"
 setup_environment $IMAGE_NAME
 
