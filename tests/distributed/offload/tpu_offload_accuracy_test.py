@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import itertools
 import os
 import time
 
@@ -49,12 +50,13 @@ def _test_kv_cache_cpu_offloading_accuracy(
     sampling_config: SamplingParams,
     kv_transfer_config: KVTransferConfig,
     swap_op_type: str,
+    skip_precompile: str,
     decode_save: str,
 ):
     with monkeypatch.context():
         os.environ['SKIP_JAX_PRECOMPILE'] = '1'
-        os.environ['TPU_OFFLOAD_SKIP_JAX_PRECOMPILE'] = '1'
         os.environ['TPU_OFFLOAD_SWAP_OP_TYPE'] = swap_op_type
+        os.environ['TPU_OFFLOAD_SKIP_JAX_PRECOMPILE'] = skip_precompile
         os.environ['TPU_OFFLOAD_DECODE_SAVE'] = decode_save
         llm = LLM(model="meta-llama/Llama-3.2-3B",
                   max_model_len=1024,
@@ -98,12 +100,14 @@ def test_kv_cache_cpu_offloading_accuracy(
 ):
     swap_op_types = ["pallas", "jax"]
     decode_saves = ["0", "1"]
-    for swap_op_type in swap_op_types:
-        for decode_save in decode_saves:
-            _test_kv_cache_cpu_offloading_accuracy(
-                monkeypatch,
-                sampling_config,
-                kv_transfer_config,
-                swap_op_type,
-                decode_save,
-            )
+    skip_precompile = ["0", "1"]
+    for swap_op_type, decode_save, _skip_precompile in itertools.product(
+            swap_op_types, decode_saves, skip_precompile):
+        _test_kv_cache_cpu_offloading_accuracy(
+            monkeypatch,
+            sampling_config,
+            kv_transfer_config,
+            swap_op_type,
+            _skip_precompile,
+            decode_save,
+        )
