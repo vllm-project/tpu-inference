@@ -32,7 +32,7 @@ fi
 export IMAGE_NAME='vllm-tpu'
 # Source the environment setup script
 # shellcheck disable=SC1091
-source /workspace/tpu-inference/.buildkite/scripts/setup_docker_env.sh
+source setup_docker_env.sh
 setup_environment $IMAGE_NAME
 
 export DOCKER_HF_HOME="/tmp/hf_home"
