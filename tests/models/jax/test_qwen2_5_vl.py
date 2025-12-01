@@ -90,6 +90,7 @@ class MockVllmConfig:
         self.device_config = MagicMock(spec=DeviceConfig)
         self.load_config = MagicMock()
         self.extra_configs = {}
+        self.additional_config = {}
 
 
 @pytest.fixture(scope="module")
@@ -345,8 +346,14 @@ class TestQwen2_5_VisionTransformer:
         expected_len = window_index_thw.shape[0] * sm * sm
         assert rotary_pos_emb_thw.shape == (expected_len, head_dim_rope)
 
-    def test_call(self, vision_transformer: Qwen2_5_VisionTransformer,
-                  rng: PRNGKey):
+    @pytest.mark.parametrize("enable_dynamic_image_sizes", [False, True])
+    def test_call(self, mock_vllm_config: MockVllmConfig, rngs: nnx.Rngs,
+                  mesh: Mesh, rng: PRNGKey, enable_dynamic_image_sizes: bool):
+        mock_vllm_config.additional_config = {
+            "enable_dynamic_image_sizes": enable_dynamic_image_sizes
+        }
+        vision_transformer = Qwen2_5_VisionTransformer(mock_vllm_config, rngs,
+                                                       mesh)
         # Mock the flash_attention call to avoid sharding errors in test environment
         for block in vision_transformer.blocks:
             # The mock should return a tensor of the same shape as the query 'q'
@@ -354,7 +361,7 @@ class TestQwen2_5_VisionTransformer:
                 side_effect=lambda q, k, v, seg: jnp.ones_like(q))
 
         vc = vision_transformer.config
-        t_pix, h_pix, w_pix = 2, 28, 28
+        t_pix, h_pix, w_pix = 2, 84, 28
 
         # The number of patches is calculated from the pixel dimensions of the image/video
         num_patches = (t_pix // vc.temporal_patch_size) * \

@@ -8,7 +8,10 @@ steps:
       queue: tpu_v6e_queue
     commands:
       - |
-        buildkite-agent meta-data set "out_of_tree_model_support_CorrectnessTest" "to be added"
+        .buildkite/scripts/run_in_docker.sh \
+          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_model_loader.py::test_register_model_success \
+          /workspace/tpu_inference/tests/e2e/test_model_loader.py::test_registered_model_passes_vllm_interface_check
+
   - label: "Record correctness test result for Out-of-tree model support"
     key: "record_out_of_tree_model_support_CorrectnessTest"
     depends_on: "out_of_tree_model_support_CorrectnessTest"
@@ -30,7 +33,9 @@ steps:
       queue: tpu_v6e_queue
     commands:
       - |
-        buildkite-agent meta-data set "out_of_tree_model_support_PerformanceTest" "to be added"
+        .buildkite/scripts/run_in_docker.sh \
+          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_model_loader.py::test_flax_nnx_vs_vllm_performance
+
   - label: "Record performance test result for Out-of-tree model support"
     key: "record_out_of_tree_model_support_PerformanceTest"
     depends_on: "out_of_tree_model_support_PerformanceTest"

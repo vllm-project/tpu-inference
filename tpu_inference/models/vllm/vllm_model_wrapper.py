@@ -9,6 +9,7 @@ import jax
 import torch
 import torch.nn
 import torchax
+import vllm.envs as vllm_envs
 from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
@@ -118,9 +119,16 @@ class VllmModelWrapper:
             "torch._sync",
             return_value=None) if use_random_weights else nullcontext()
 
+        # By default load weights to the CPU device first. If we are running
+        # under Pathways, this would cause weights to be loaded on a CPU-only
+        # node, so we'll need to remove this context.
+        jax_context = jax.default_device(
+            jax.devices("cpu")
+            [0]) if not vllm_envs.VLLM_TPU_USING_PATHWAYS else nullcontext()
+
         # Load the vLLM model and wrap it into a new model whose forward
         # function can calculate the hidden_state and logits.
-        with load_context, jax.default_device(jax.devices("cpu")[0]):
+        with load_context, jax_context:
             vllm_model = vllm_get_model(vllm_config=vllm_config_for_load)
         lora_manager = None
         if vllm_config_for_load.lora_config is not None:

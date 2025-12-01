@@ -10,8 +10,7 @@ steps:
       - |
         .buildkite/scripts/run_in_docker.sh \
           python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_ngram_correctness_greedy \
-          /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_ngram_correctness_random \
-          /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_eagle3_correctness
+          /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_ngram_correctness_random
   - label: "Record correctness test result for Speculative Decoding: Ngram"
     key: "record_Speculative_Decoding-_Ngram_CorrectnessTest"
     depends_on: "Speculative_Decoding-_Ngram_CorrectnessTest"
@@ -35,8 +34,7 @@ steps:
       - |
         .buildkite/scripts/run_in_docker.sh \
           python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_ngram_performance_greedy \
-          /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_ngram_performance_random \
-          /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_eagle3_performance
+          /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_ngram_performance_random
 
   - label: "Record performance test result for Speculative Decoding: Ngram"
     key: "record_Speculative_Decoding-_Ngram_PerformanceTest"

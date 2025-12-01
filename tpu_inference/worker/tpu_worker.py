@@ -357,7 +357,7 @@ class TPUWorker:
         if is_start:
             options = jax.profiler.ProfileOptions()
             # default: https://docs.jax.dev/en/latest/profiling.html#general-options
-            options.python_tracer_level = os.getenv("PYTHON_TRACER_LEVEL", 0)
+            options.python_tracer_level = envs.PYTHON_TRACER_LEVEL
             options.host_tracer_level = os.getenv("HOST_TRACER_LEVEL", 1)
             jax.profiler.start_trace(self.profile_dir,
                                      profiler_options=options)
@@ -402,7 +402,8 @@ class TPUWorker:
 
         # TODO(kyuyeunk): Instead of checking page_size_bytes here, introduce
         # feature that allows overriding page_size_bytes of KVCacheSpec.
-        vllm_page_size_bytes = get_uniform_page_size(kv_cache_specs)
+        vllm_page_size_bytes = get_uniform_page_size(
+            list(kv_cache_specs.values()))
         rpa_page_size_bytes = get_rpa_page_size_bytes(self.model_runner.mesh,
                                                       kv_cache_specs)
 

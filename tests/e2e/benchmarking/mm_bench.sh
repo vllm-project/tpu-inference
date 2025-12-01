@@ -90,53 +90,74 @@ checkThroughputAndRouge() {
     fi
 }
 
-echo "Spinning up the vLLM server..."
-(SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 vllm serve "$model_name" --max-model-len "$max_model_len" --max-num-seqs "$max_num_seqs" --disable-log-requests --max-num-batched-tokens "$max_batched_tokens" 2>&1 | tee -a "$LOG_FILE") &
+run_benchmark() {
+    local extra_flags="$1"
+    exit_code=0
+
+    echo "Spinning up the vLLM server...$extra_flags"
+    # shellcheck disable=SC2086
+    (SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 vllm serve "$model_name" \
+        --max-model-len "$max_model_len" \
+        --max-num-seqs "$max_num_seqs" \
+        --disable-log-requests \
+        --max-num-batched-tokens "$max_batched_tokens" \
+        $extra_flags \
+        2>&1 | tee -a "$LOG_FILE") &
 
 
-# Run a busy loop to block until the server is ready to receive requests
-did_find_ready_message=false
-start_time=$(date +%s)
-while true; do
-    current_time=$(date +%s)
-    elapsed_time=$((current_time - start_time))
+    # Run a busy loop to block until the server is ready to receive requests
+    did_find_ready_message=false
+    start_time=$(date +%s)
+    while true; do
+        current_time=$(date +%s)
+        elapsed_time=$((current_time - start_time))
 
-    sleep 5
+        sleep 5
 
-    # Check for timeout so we don't wait forever
-    if [[ "$elapsed_time" -ge "$TIMEOUT_SECONDS" ]]; then
-        echo "TIMEOUT: Waited $elapsed_time seconds (limit was $TIMEOUT_SECONDS). The string '$READY_MESSAGE' was NOT found."
-        cleanUp "$model_name"
-        exit 1
-    fi
+        # Check for timeout so we don't wait forever
+        if [[ "$elapsed_time" -ge "$TIMEOUT_SECONDS" ]]; then
+            echo "TIMEOUT: Waited $elapsed_time seconds (limit was $TIMEOUT_SECONDS). The string '$READY_MESSAGE' was NOT found."
+            cleanUp "$model_name"
+            exit 1
+        fi
 
-    if grep -q "$READY_MESSAGE" "$LOG_FILE" ; then
-        did_find_ready_message=true
-        break
-    fi
-done
+        if grep -q "$READY_MESSAGE" "$LOG_FILE" ; then
+            did_find_ready_message=true
+            break
+        fi
+    done
 
-if $did_find_ready_message; then
-    echo "Starting the benchmark for $model_name..."
-    echo "Current working directory: $(pwd)"
-    vllm bench serve \
-    --backend "openai-chat" \
-    --model "$model_name" \
-    --dataset-name "$dataset_name" \
-    --dataset-path "$dataset_path" \
-    --num-prompts "$num_prompts" \
-    --endpoint /v1/chat/completions 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
+    if $did_find_ready_message; then
+        echo "Starting the benchmark for $model_name..."
+        echo "Current working directory: $(pwd)"
+        vllm bench serve \
+        --backend "openai-chat" \
+        --model "$model_name" \
+        --dataset-name "$dataset_name" \
+        --dataset-path "$dataset_path" \
+        --num-prompts "$num_prompts" \
+        --endpoint /v1/chat/completions 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
 
 
-    checkThroughputAndRouge
-    if [ "$exit_code" -ne 0 ]; then
+        checkThroughputAndRouge
+
+    else
+        echo "vLLM server did not start successfully."
         exit_code=1
     fi
 
-else
-    echo "vLLM server did not start successfully."
-    exit_code=1
-fi
-cleanUp "$model_name"
+    cleanUp "$model_name"
+    return $exit_code
+}
 
-exit $exit_code
+run_benchmark ""
+result1=$?
+
+run_benchmark "--additional-config {\"enable_dynamic_image_sizes\":true}"
+result2=$?
+
+if [ $result1 -ne 0 ] || [ $result2 -ne 0 ]; then
+    exit 1
+fi
+
+exit 0

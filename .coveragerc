@@ -1,3 +1,5 @@
 [run]
 omit =
     tpu_inference/kernels/*
+    # Omit wip models
+    tpu_inference/models/jax/gpt_oss.py

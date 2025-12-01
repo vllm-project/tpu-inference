@@ -56,12 +56,25 @@ def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
+    # Ensure clean environment for boolean vars by setting to default "0"
+    monkeypatch.setenv("SKIP_JAX_PRECOMPILE", "0")
+    monkeypatch.setenv("VLLM_XLA_CHECK_RECOMPILATION", "0")
+    monkeypatch.setenv("NEW_MODEL_DESIGN", "0")
+    monkeypatch.setenv("USE_MOE_EP_KERNEL", "0")
+
     # Test SKIP_JAX_PRECOMPILE (default False)
     assert envs.SKIP_JAX_PRECOMPILE is False
     monkeypatch.setenv("SKIP_JAX_PRECOMPILE", "1")
     assert envs.SKIP_JAX_PRECOMPILE is True
     monkeypatch.setenv("SKIP_JAX_PRECOMPILE", "0")
     assert envs.SKIP_JAX_PRECOMPILE is False
+
+    # Test VLLM_XLA_CHECK_RECOMPILATION (default False)
+    assert envs.VLLM_XLA_CHECK_RECOMPILATION is False
+    monkeypatch.setenv("VLLM_XLA_CHECK_RECOMPILATION", "1")
+    assert envs.VLLM_XLA_CHECK_RECOMPILATION is True
+    monkeypatch.setenv("VLLM_XLA_CHECK_RECOMPILATION", "0")
+    assert envs.VLLM_XLA_CHECK_RECOMPILATION is False
 
     # Test NEW_MODEL_DESIGN (default False)
     assert envs.NEW_MODEL_DESIGN is False
@@ -75,11 +88,22 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_integer_env_vars(monkeypatch: pytest.MonkeyPatch):
+    # Ensure clean environment for integer vars by setting to defaults
+    monkeypatch.setenv("PYTHON_TRACER_LEVEL", "1")
+    monkeypatch.setenv("NUM_SLICES", "1")
+
     assert envs.PYTHON_TRACER_LEVEL == 1
     monkeypatch.setenv("PYTHON_TRACER_LEVEL", "3")
     assert envs.PYTHON_TRACER_LEVEL == 3
     monkeypatch.setenv("PYTHON_TRACER_LEVEL", "0")
     assert envs.PYTHON_TRACER_LEVEL == 0
+
+    # Test NUM_SLICES (default 1)
+    assert envs.NUM_SLICES == 1
+    monkeypatch.setenv("NUM_SLICES", "2")
+    assert envs.NUM_SLICES == 2
+    monkeypatch.setenv("NUM_SLICES", "4")
+    assert envs.NUM_SLICES == 4
 
 
 def test_lowercase_conversion(monkeypatch: pytest.MonkeyPatch):
@@ -134,6 +158,7 @@ def test_dir_returns_all_env_vars():
     assert "JAX_PLATFORMS" in env_vars
     assert "TPU_NAME" in env_vars
     assert "SKIP_JAX_PRECOMPILE" in env_vars
+    assert "VLLM_XLA_CHECK_RECOMPILATION" in env_vars
     assert "MODEL_IMPL_TYPE" in env_vars
 
 
