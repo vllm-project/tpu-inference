@@ -383,7 +383,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
             for pp_rank in range(self.parallel_config.pipeline_parallel_size):
                 self.pp_tp_workers.append([])
                 num_tp_workers = int(
-                    self.parallel_config.tensor_parallel_size * 8//
+                    self.parallel_config.tensor_parallel_size * 8 //
                     num_tpu_per_worker)
                 for tp_rank in range(num_tp_workers):
                     # PP=2, TP=4, num_tpu_per_worker=2
