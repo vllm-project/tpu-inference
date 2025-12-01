@@ -70,7 +70,7 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
         self.vllm_config = MockVllmConfig(block_size=_DEFAULT_BLOCK_SIZE)
         self.num_layers = 80
         self.num_blocks = 128
-        self.num_cpu_chunks = 24
+        self.num_cpu_chunks = 128
         self.block_size = self.vllm_config.cache_config.block_size
         self.num_heads = 8
         self.head_size = 128
@@ -205,37 +205,54 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
 
     @parameterized.named_parameters(
         dict(
-            testcase_name="_regular_single_block_save",
+            testcase_name="_single_block",
             num_blocks_to_save=1,
             num_requests=1,
         ),
         dict(
-            testcase_name="_regular_multi_requests_single_block_save",
-            num_blocks_to_save=2,
-            num_requests=4,
+            testcase_name="_multi_requests_single_block",
+            num_blocks_to_save=1,
+            num_requests=6,
         ),
         dict(
-            testcase_name="_regular_multi_block_save",
+            testcase_name="_multi_blocks",
             num_blocks_to_save=5,
             num_requests=1,
         ),
         dict(
-            testcase_name="_regular_multi_block_save_with_compile_jax",
+            testcase_name="_multi_requests_multi_blocks",
+            num_blocks_to_save=5,
+            num_requests=6,
+        ),
+        dict(
+            testcase_name="_multi_blocks_with_compile_jax",
             num_blocks_to_save=5,
             num_requests=1,
             use_precompiled_swap_ops=True,
         ),
         dict(
-            testcase_name=
-            "_regular_multi_request_single_block_save_with_compile_jax",
+            testcase_name="_multi_requests_single_block_with_compile_jax",
             num_blocks_to_save=1,
             num_requests=6,
             use_precompiled_swap_ops=True,
         ),
         dict(
-            testcase_name="_regular_multi_block_save_with_compile_pallas",
+            testcase_name="_multi_requests_multi_blocks_with_compile_jax",
+            num_blocks_to_save=5,
+            num_requests=6,
+            use_precompiled_swap_ops=True,
+        ),
+        dict(
+            testcase_name="_multi_blocks_with_compile_pallas",
             num_blocks_to_save=5,
             num_requests=1,
+            use_precompiled_swap_ops=True,
+            swap_op_type="pallas",
+        ),
+        dict(
+            testcase_name="_multi_requests_multi_blocks_with_compile_pallas",
+            num_blocks_to_save=5,
+            num_requests=6,
             use_precompiled_swap_ops=True,
             swap_op_type="pallas",
         ),
@@ -370,13 +387,13 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
 
     @parameterized.named_parameters(
         dict(
-            testcase_name="_single_block_",
+            testcase_name="_single_block",
             num_blocks_to_operate=1,
             num_requests=1,
         ),
         dict(
-            testcase_name="_multi_requests_",
-            num_blocks_to_operate=2,
+            testcase_name="_multi_requests_single_block",
+            num_blocks_to_operate=1,
             num_requests=4,
         ),
         dict(
@@ -387,9 +404,23 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
             swap_op_type="jax",
         ),
         dict(
-            testcase_name="_multi_blocks_compile_pallas",
+            testcase_name="_multi_requests_single_block_compile_jax",
+            num_blocks_to_operate=1,
+            num_requests=6,
+            use_precompiled_swap_ops=True,
+            swap_op_type="jax",
+        ),
+        dict(
+            testcase_name="_multi_requests_multi_blocks_compile_jax",
             num_blocks_to_operate=5,
-            num_requests=1,
+            num_requests=6,
+            use_precompiled_swap_ops=True,
+            swap_op_type="jax",
+        ),
+        dict(
+            testcase_name="_multi_requests_multi_blocks_compile_pallas",
+            num_blocks_to_operate=5,
+            num_requests=6,
             use_precompiled_swap_ops=True,
             swap_op_type="pallas",
         ),

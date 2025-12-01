@@ -118,7 +118,7 @@ from tpu_inference.distributed.offload.offload_manager import (
     LRUCacheManager, StagingBufferManager)
 from tpu_inference.distributed.offload.utils import (
     CPU_OFFLOADING_SWAP_OP_TYPE, CpuChunkId, KVCacheSwapFn, ReqId,
-    TokenProcessor, get_kv_cache_swap_fn, jitted_insert_kv_cache_slices)
+    get_kv_cache_swap_fn, jitted_insert_kv_cache_slices)
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.kv_cache_manager import KVCacheManager
 from tpu_inference.runner.tpu_runner import TPUModelRunner
@@ -496,8 +496,6 @@ class TPUOffloadConnectorScheduler():
         self._reqs_being_loaded = defaultdict[ReqId, set[CpuChunkId]](set)
 
         model_name = self.vllm_config.model_config.model
-        self.token_processor = TokenProcessor(model_name=model_name,
-                                              chunk_size=self.block_size)
 
         self.decode_save = envs.TPU_OFFLOAD_DECODE_SAVE
         # NOTE(jcgu): currently, let's make chunk_size == block_size
@@ -528,7 +526,7 @@ class TPUOffloadConnectorScheduler():
 
     def _get_request_block_hashes(self, req: "Request") -> list[BlockHash]:
         # request's original block_hashes do not include the last partial block
-        # TODO(jcgu): switch back to token_processor
+        # TODO(jcgu): add an option to use local token_processor
         return req.block_hashes
 
     def get_num_new_matched_tokens(
@@ -1160,19 +1158,14 @@ class TPUOffloadConnectorWorker:
 
         self.runner: Optional[TPUModelRunner] = None
         self.mesh: Optional[Mesh] = None
-        self.swap_op_type = envs.TPU_OFFLOAD_SWAP_OP_TYPE
-        assert self.swap_op_type in get_args(CPU_OFFLOADING_SWAP_OP_TYPE)
-        # TODO(jcgu): check libtpu compatibility for pallas dma kernel
-        logger.info(
-            f"(cpu offloading) swap operation type is {self.swap_op_type}")
-
-        self.use_bucketed_swap_ops = not envs.TPU_OFFLOAD_SKIP_JAX_PRECOMPILE
-        logger.info(
-            f"(cpu offloading) use_bucketed_swap_ops={self.use_bucketed_swap_ops}"
-        )
-
         self.swap_in_fn: KVCacheSwapFn = None
         self.swap_out_fn: KVCacheSwapFn = None
+        self.swap_op_type = envs.TPU_OFFLOAD_SWAP_OP_TYPE
+        # TODO(jcgu): check libtpu compatibility for pallas dma kernel
+        assert self.swap_op_type in get_args(CPU_OFFLOADING_SWAP_OP_TYPE)
+        self.use_bucketed_swap_ops = not envs.TPU_OFFLOAD_SKIP_JAX_PRECOMPILE
+        logger.info(f" swap operation type is {self.swap_op_type}, "
+                    f"use_bucketed_swap_ops={self.use_bucketed_swap_ops}.")
 
         # cpu cache
         self.num_cpu_chunks = envs.TPU_OFFLOAD_NUM_CPU_CHUNKS
@@ -1181,13 +1174,11 @@ class TPUOffloadConnectorWorker:
         model_name = self.vllm_config.model_config.model
         logger.info(
             f"Model name is {model_name}, KV block_size={self.block_size}")
-        self.token_processor = TokenProcessor(model_name=model_name,
-                                              chunk_size=self.block_size)
 
         self.cpu_chunk_size = self.block_size
         # Thread pool for asynchronous TPU->CPU copies
-        self.save_executor = ThreadPoolExecutor(max_workers=4,
-                                                thread_name_prefix="tpu_saver")
+        self.save_executor = ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="tpu_save_handler")
         self.finished_save_reqs: set[ReqId] = set()
         self.finished_load_reqs: set[ReqId] = set()
         # Tracks if wait_for_save has been called for the current step's metadata.
@@ -1298,10 +1289,11 @@ class TPUOffloadConnectorWorker:
 
                 # 3. Pre-compile CPU -> TPU transfer (used in load)
                 split_size_list = [self.block_size] * num_blocks
-                chunked_dummy_kv_cpu = [
-                    jax.lax.split(flat_layer_cache, split_size_list, axis=0)
-                    for flat_layer_cache in dummy_kv_cpu
-                ]
+                chunked_dummy_kv_cpu = jax.tree.map(
+                    lambda flat_layer_cache: jax.lax.split(
+                        flat_layer_cache, split_size_list, axis=0),
+                    dummy_kv_cpu)
+
                 chunked_dummy_kv_tpu = self.swap_in_fn(chunked_dummy_kv_cpu)
                 jax.block_until_ready(chunked_dummy_kv_tpu)
 
@@ -1374,13 +1366,13 @@ class TPUOffloadConnectorWorker:
 
         # Fast path: handle bucket-sized transfers
         if num_blocks in BLOCK_SIZE_BUCKETS:
+            split_size_list = [self.block_size] * num_blocks
             flat_kv_caches_cpu = self.swap_out_fn(flat_kv_caches_tpu)
             jax.block_until_ready(flat_kv_caches_cpu)
-            split_size_list = [self.block_size] * num_blocks
-            return [
-                jax.lax.split(flat_layer_cache, split_size_list, axis=0)
-                for flat_layer_cache in flat_kv_caches_cpu
-            ]
+            return jax.tree.map(
+                lambda flat_layer_cache: jax.lax.split(
+                    flat_layer_cache, split_size_list, axis=0),
+                flat_kv_caches_cpu)
 
         # Bucket decomposition path
         decomposed_block_sizes = self._decompose_into_buckets(num_blocks)
@@ -1580,12 +1572,10 @@ class TPUOffloadConnectorWorker:
                     # NOTE(jcgu): we keep cpu_chunk_size == block_size
                     split_size_list = [self.cpu_chunk_size
                                        ] * num_blocks_to_save
-                    chunks_on_cpu = [
-                        jax.lax.split(flat_layer_cache,
-                                      split_size_list,
-                                      axis=0)
-                        for flat_layer_cache in flat_kv_caches_cpu
-                    ]
+                    chunks_on_cpu = jax.tree.map(
+                        lambda flat_layer_cache: jax.lax.split(
+                            flat_layer_cache, split_size_list, axis=0),
+                        flat_kv_caches_cpu)
 
             if chunks_on_cpu and chunks_on_cpu[0]:
                 jax.block_until_ready(chunks_on_cpu)
