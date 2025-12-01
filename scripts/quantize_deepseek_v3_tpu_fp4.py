@@ -129,6 +129,11 @@ def _build_vllm_config(model_dir: Path) -> VllmConfig:
     model_config.hf_config = hf_config
 
     vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.cache_config.block_size = 2  #PATCH
+    vllm_config.cache_config.num_blocks = 1  #PATCH
+    LOGGER.info(
+        "PATCHED: Temporarily set cache_config to (1 block, 1 size) for HBM OOM avoidance."
+    )
     vllm_config.load_config.download_dir = str(model_dir)
     update_vllm_config_for_qwix_quantization(vllm_config)
 
@@ -167,9 +172,15 @@ def _apply_quantization(vllm_config: VllmConfig, mesh: Mesh,
     # NO MANUAL PATCHES NEEDED HERE. DeepSeekV3 handles its own config keys.
     rng = jax.random.PRNGKey(seed)
 
-    vllm_config.model_config.hf_config.num_hidden_layers = 4 
-    LOGGER.warning("DEBUG: Temporarily limiting model layers to 4 for compilation test.")
+    vllm_config.model_config.hf_config.num_hidden_layers = 4
+    LOGGER.warning(
+        "DEBUG: Temporarily limiting model layers to 4 for compilation test.")
 
+    # vllm_config.model_config.hf_config.num_key_value_heads = 16
+    # LOGGER.warning("DEBUG: Temporarily setting KV heads to 16 to match per-core shard size (128/8).")
+
+    # vllm_config.model_config.hf_config.num_key_value_heads = 32 # Assuming TP=4, this is 128 / 4
+    # LOGGER.warning("DEBUG: Temporarily setting KV heads to 32 to match expected kernel shard size.")
 
     # with jax.default_device(jax.devices('cpu')[0]):
     #     # Model creation (initializes weights as large BF16 buffers) happens on CPU RAM
@@ -185,12 +196,15 @@ def _apply_quantization(vllm_config: VllmConfig, mesh: Mesh,
 
     with mesh:
         #model.load_weights(rng)
-        model_factory = apply_qwix_quantization(vllm_config,
-                                        create_abstract_model, #model,
-                                        rng,
-                                        mesh,
-                                        apply_to_abstract_model=True) 
-        assert callable(model_factory), "Expected a model factory function from apply_qwix_quantization"
+        model_factory = apply_qwix_quantization(
+            vllm_config,
+            create_abstract_model,  #model,
+            rng,
+            mesh,
+            apply_to_abstract_model=True)
+        assert callable(
+            model_factory
+        ), "Expected a model factory function from apply_qwix_quantization"
         final_quantized_model = model_factory()
 
     return final_quantized_model
@@ -237,10 +251,12 @@ def _collect_packed_weights(
                 scales_tensor = scales_tensor.permute(0, 2, 1).contiguous()
             elif codes_tensor.dim() == 2:
                 # Skip permutation for 2D weights (like biases or small dense layers)
-                pass # Already correct for 2D packing
+                pass  # Already correct for 2D packing
             else:
                 # Handle unexpected dimensions if necessary
-                raise ValueError(f"Unexpected tensor dimension {codes_tensor.dim()} during packing.")
+                raise ValueError(
+                    f"Unexpected tensor dimension {codes_tensor.dim()} during packing."
+                )
 
             blocks_tensor = pack_tpu_fp4_from_fp32(codes_tensor).contiguous()
             replacements[hf_key] = (blocks_tensor, scales_tensor)
@@ -256,7 +272,7 @@ def _rewrite_safetensors(
         if st_path.stat().st_size == 0:
             # If the file is 0 bytes (our placeholder), treat tensors as empty and metadata as new.
             tensors = {}
-            metadata = {} 
+            metadata = {}
         else:
             # If the file exists and is not empty (e.g., if we were updating an existing checkpoint), read it normally.
             with safe_open(st_path, framework="pt") as handle:
@@ -286,7 +302,9 @@ def _rewrite_safetensors(
             new_tensors[f"{base_key}_blocks"] = blocks.cpu()
             new_tensors[f"{base_key}_scales"] = scales.cpu()
             pending.discard(base_key)
-        LOGGER.info(f"WRITING CHECKPOINT: {st_path.name}. Updates: {len(local_updates)}")
+        LOGGER.info(
+            f"WRITING CHECKPOINT: {st_path.name}. Updates: {len(local_updates)}"
+        )
         save_file(new_tensors, st_path, metadata=metadata)
         LOGGER.info("Updated %s", st_path)
     if pending:

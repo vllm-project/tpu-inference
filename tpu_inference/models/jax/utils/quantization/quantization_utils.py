@@ -352,18 +352,19 @@ def apply_qwix_quantization(
     num_kv_heads = utils.get_padded_num_heads(
         model_config.get_total_num_kv_heads(), mesh.shape["model"])
 
+    print("this is mesh.shape['model']: ", mesh.shape["model"])
 
     print("This is model_config: ", model_config)
 
     # Pad head_dim to multiple of 128
     head_size = model_config.get_head_size()
 
-    logger.info(f"DEBUG HEAD: Unpadded Model Head Dim (v_head_dim): {head_size}")
+    logger.info(
+        f"DEBUG HEAD: Unpadded Model Head Dim (v_head_dim): {head_size}")
 
     head_size = utils.get_padded_head_dim(head_size)
 
     logger.info(f"DEBUG HEAD: Padded Head Dim (from utils): {head_size}")
-
 
     kv_cache_dtype = vllm_config.cache_config.cache_dtype
 

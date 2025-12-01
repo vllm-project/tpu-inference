@@ -9,7 +9,6 @@ from torchax.ops.mappings import t2j_dtype
 
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
-from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
@@ -37,10 +36,10 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh, total_num_pages: int,
                               actual_num_kv_heads // model_cnt,
                               actual_head_dim, kv_dtype))
     from tpu_inference.kernels.ragged_paged_attention.v3.util import align_to
-    
+
     correct_aligned_head_dim = align_to(actual_head_dim, 128)
-    shape[4] = correct_aligned_head_dim 
-    
+    shape[4] = correct_aligned_head_dim
+
     shape[2] *= model_cnt
     return tuple(shape)
 
@@ -86,10 +85,7 @@ def create_kv_caches(
     #     PartitionSpec(ShardingAxisName.ATTN_DATA, None,
     #                   ShardingAxisName.ATTN_HEAD))
 
-    sharding = NamedSharding(
-        mesh,
-        PartitionSpec(None, None, None, None, None) 
-    )
+    sharding = NamedSharding(mesh, PartitionSpec(None, None, None, None, None))
 
     def _allocate() -> jax.Array:
         return jnp.empty(
@@ -99,8 +95,14 @@ def create_kv_caches(
 
     sharded_allocate = jax.jit(_allocate, out_shardings=sharding)
     kv_caches = []
+
+    print("These are layer_names: ", layer_names)
+
+    i = 0
     for _ in layer_names:
+        print("i = ", i)
         kv_caches.append(sharded_allocate())
+        i += 1
     return kv_caches
 
 
