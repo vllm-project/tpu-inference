@@ -20,7 +20,8 @@ from vllm.scalar_type import scalar_types
 
 from tpu_inference.layers.common.quant_methods import AWQ, get_tpu_quant_method
 from tpu_inference.layers.vllm.linear_common import (
-    slice_sharded_tensor_for_concatenation, torch_to_jax_param)
+    sharded_quantized_matmul, slice_sharded_tensor_for_concatenation,
+    torch_to_jax_param)
 from tpu_inference.layers.vllm.quantization.common import (
     JaxCommonConfig, JaxCommonLinearConfig)
 from tpu_inference.layers.vllm.quantization.unquantized import \
@@ -65,16 +66,16 @@ class VllmAWQLinearMethod(AWQLinearMethod):
         self.jax_config = jax_config
 
         out_sharding, in_sharding = self.jax_config.weight_sharding[:]
-        self.jax_config.weight_sharding = P(in_sharding, None, out_sharding)
+        self.jax_config.weight_sharding = P(in_sharding, out_sharding)
         self.jax_config.scale_sharding = P(in_sharding, out_sharding)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         qweight = layer.qweight
         qweight = unpack_awq_weight(qweight, qweight.packed_dim)
 
-        group_size = self.quant_config.group_size
+        #group_size = self.quant_config.group_size
         # Reshape so that each qweight[i] were quantized with same scales[i].
-        qweight = qweight.reshape((-1, group_size, layer.output_size))
+        #qweight = qweight.reshape((-1, group_size, layer.output_size))
         qweight = torch_to_jax_param(qweight,
                                      NamedSharding(
                                          self.jax_config.mesh,
@@ -82,7 +83,7 @@ class VllmAWQLinearMethod(AWQLinearMethod):
                                      self.jax_config.output_sizes,
                                      self.jax_config.n_shards,
                                      self.jax_config.fuse_matmuls,
-                                     dim=2,
+                                     dim=1,
                                      jax_dtype=jnp.uint4)
         delattr(layer, "qweight")
         layer.qweight = qweight
@@ -152,10 +153,14 @@ class VllmAWQLinearMethod(AWQLinearMethod):
 
         qweight = qweight.astype(jnp.int8)
         qzeros = qzeros.astype(jnp.int8)
+        #reshaped_qweight = qweight.reshape((-1, qweight.shape[-1]))
+        outs = sharded_quantized_matmul(x_jax, qweight, scales[0],
+                                        self.jax_config.mesh,
+                                        self.jax_config.weight_sharding)
 
-        weight = (qweight - qzeros) * scales
-        weight = weight.reshape((-1, weight.shape[-1]))
-        outs = jnp.einsum("bd,df->bf", x_jax, weight)
+        #weight = (qweight - qzeros) * scales
+        #weight = weight.reshape((-1, weight.shape[-1]))
+        #outs = jnp.einsum("bd,df->bf", x_jax, weight)
 
         if bias is not None and not layer.skip_bias_add:
             outs += bias.jax()
