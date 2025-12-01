@@ -359,10 +359,12 @@ class DPScheduler(SchedulerInterface):
             self,
             global_model_output: ModelRunnerOutput) -> List[ModelRunnerOutput]:
         """Split the model runner output by DP rank for individual scheduler updates."""
+        logger.info(f"global_model_output.req_id_to_index: {global_model_output.req_id_to_index}")
+        logger.info(f"global_model_output.req_ids: {global_model_output.req_ids}")
         outputs = [
             ModelRunnerOutput(
                 req_ids=[],
-                req_id_to_index={},
+                req_id_to_index=global_model_output.req_id_to_index,
                 sampled_token_ids=global_model_output.sampled_token_ids,
                 logprobs=global_model_output.logprobs,
                 prompt_logprobs_dict=global_model_output.prompt_logprobs_dict,
@@ -372,15 +374,9 @@ class DPScheduler(SchedulerInterface):
             ) for _ in range(self.dp_size)
         ]
 
-        # Distribute requests and build per-rank req_id_to_index mapping
         for req_id in global_model_output.req_ids:
             rank = self.assigned_dp_rank[req_id]
-            global_index = global_model_output.req_id_to_index[req_id]
-            
-            # Map req_id to its index within this rank's output
-            rank_local_index = len(outputs[rank].req_ids)
             outputs[rank].req_ids.append(req_id)
-            outputs[rank].req_id_to_index[req_id] = global_index
 
         return outputs
 
