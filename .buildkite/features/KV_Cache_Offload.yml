@@ -9,12 +9,7 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
-          python3 -m pytest -s -v /workspace/tpu_inference/tests/distributed/offload/tpu_offload_connector_scheduler_test.py \
-          /workspace/tpu_inference/tests/distributed/offload/tpu_offload_connector_worker_test.py \
-          /workspace/tpu_inference/tests/distributed/offload/tpu_offload_cpu_backend_test.py \
-          /workspace/tpu_inference/tests/distributed/offload/tpu_offload_manager_test.py \
-          /workspace/tpu_inference/tests/distributed/offload/tpu_offload_utils_test.py \
-          /workspace/tpu_inference/tests/distributed/offload/tpu_offload_accuracy_test.py
+          python3 -m pytest -s -v /workspace/tpu_inference/tests/distributed/offload/
   - label: "Record correctness test result for KV Cache Offload"
     key: "record_KV_Cache_Offload_CorrectnessTest"
     depends_on: "KV_Cache_Offload_CorrectnessTest"
