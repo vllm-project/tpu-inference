@@ -164,7 +164,6 @@ class DeepSeekV3(nnx.Module):
         logger.info("CHECKPOINT 1: Starting Dense Transformer Block initialization (Layers 0-2).")
 
         for i in range(first_k_dense_replace):
-            logger.info(f"CHECKPOINT 1.1: Assembling Layer {i} TransformerBlock.")
             block = TransformerBlock(
                 pre_attention_norm=RMSNorm(
                     dims=hidden_size,
@@ -194,10 +193,8 @@ class DeepSeekV3(nnx.Module):
 
             self.layers.append(block)
 
-        logger.info("CHECKPOINT 2: Starting MoE Transformer Block initialization (Layers 3-60).") 
         for i in range(first_k_dense_replace, num_layers):
             is_moe_layer = ((i + 1) % interleave_moe_layer_step == 0)
-            logger.info(f"CHECKPOINT 2.1: Initializing Layer {i} MoE Router.")
             router = DeepSeekV3Router(
                 random_init=self.random_init,
                 hidden_size=hidden_size,
@@ -212,7 +209,6 @@ class DeepSeekV3(nnx.Module):
                 activation_ffw_td=('data', None),
                 ed_sharding=('model', None),
                 e_sharding=('model', ))
-            logger.info(f"CHECKPOINT 2.2: Initializing Layer {i} MoE/SparseMoE module.")
             if self.sparse_matmul:
                 # TODO: orginize the SparseMoE and DenseMoE better given they share most interfaces
                 custom_module = SparseMoE(
@@ -293,7 +289,6 @@ class DeepSeekV3(nnx.Module):
                 dtype=dtype,
             )
 
-            logger.info(f"CHECKPOINT 2.3: Assembling Layer {i} SharedExpertsTransformerBlock.")
             block = SharedExpertsTransformerBlock(
                 custom_module=custom_module,
                 attn=_create_mla(),
@@ -374,7 +369,7 @@ class DeepSeekV3WeightLoader:
             download_dir=vllm_config.load_config.download_dir)
         self.is_verbose = vllm_config.additional_config.get(
             "is_verbose", None) is not None
-        self.is_verbose = True
+        self.is_verbose=True
         self.num_routed_experts = num_local_experts
         self.model_dtype = model_dtype
 

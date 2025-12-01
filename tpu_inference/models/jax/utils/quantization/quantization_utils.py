@@ -364,8 +364,6 @@ def apply_qwix_quantization(
 
     logger.info(f"DEBUG HEAD: Padded Head Dim (from utils): {head_size}")
 
-    #TODO: remove hardcode: 
-    head_size = 256
 
     kv_cache_dtype = vllm_config.cache_config.cache_dtype
 

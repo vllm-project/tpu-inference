@@ -171,23 +171,29 @@ def _apply_quantization(vllm_config: VllmConfig, mesh: Mesh,
     LOGGER.warning("DEBUG: Temporarily limiting model layers to 4 for compilation test.")
 
 
-    with jax.default_device(jax.devices('cpu')[0]):
-        # Model creation (initializes weights as large BF16 buffers) happens on CPU RAM
-        model = DeepSeekV3(vllm_config, rng, mesh)
+    # with jax.default_device(jax.devices('cpu')[0]):
+    #     # Model creation (initializes weights as large BF16 buffers) happens on CPU RAM
+    #     model = DeepSeekV3(vllm_config, rng, mesh)
 
-    #model.weight_loader.load_weights_metadata()
+    # # This must be done because we skipped model.load_weights(rng)
+    # model.initialize_cache()
 
-    # This must be done because we skipped model.load_weights(rng)
-    model.initialize_cache()
+    def create_abstract_model():
+        """Creates the initial DeepSeekV3 instance on CPU."""
+        with jax.default_device(jax.devices('cpu')[0]):
+            return DeepSeekV3(vllm_config, rng, mesh)
 
     with mesh:
         #model.load_weights(rng)
-        model = apply_qwix_quantization(vllm_config,
-                                        model,
+        model_factory = apply_qwix_quantization(vllm_config,
+                                        create_abstract_model, #model,
                                         rng,
                                         mesh,
-                                        apply_to_abstract_model=False) 
-    return model
+                                        apply_to_abstract_model=True) 
+        assert callable(model_factory), "Expected a model factory function from apply_qwix_quantization"
+        final_quantized_model = model_factory()
+
+    return final_quantized_model
 
 
 def _to_host_float32(array: jax.Array) -> np.ndarray:
@@ -198,13 +204,13 @@ def _to_host_float32(array: jax.Array) -> np.ndarray:
 def _collect_packed_weights(
         model: DeepSeekV3) -> Dict[str, Tuple[torch.Tensor, torch.Tensor]]:
     LOGGER.info(f"DEBUG: Model object reference: {model}")
-    import pdb; pdb.set_trace()
     params = nnx.state(model)
     replacements: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
     num_layers = model.vllm_config.model_config.hf_config.num_hidden_layers
+    first_k_dense_replace = model.vllm_config.model_config.hf_config.first_k_dense_replace
     for layer in range(num_layers):
 
-        if layer < 3:
+        if layer < first_k_dense_replace:
             # Dense layers (0, 1, 2) do not use the MoE paths defined in _PACK_TARGETS.
             # We skip them entirely.
             continue
@@ -225,9 +231,16 @@ def _collect_packed_weights(
             codes_tensor = torch.from_numpy(codes_fp32).to(torch.float32)
             scales_tensor = torch.from_numpy(scales_fp32).to(torch.bfloat16)
 
-            # Reorder to (experts, hidden, channels)
-            codes_tensor = codes_tensor.permute(0, 2, 1).contiguous()
-            scales_tensor = scales_tensor.permute(0, 2, 1).contiguous()
+            if codes_tensor.dim() == 3:
+                # Apply permutation only to the 3D expert weights (Experts x In x Out)
+                codes_tensor = codes_tensor.permute(0, 2, 1).contiguous()
+                scales_tensor = scales_tensor.permute(0, 2, 1).contiguous()
+            elif codes_tensor.dim() == 2:
+                # Skip permutation for 2D weights (like biases or small dense layers)
+                pass # Already correct for 2D packing
+            else:
+                # Handle unexpected dimensions if necessary
+                raise ValueError(f"Unexpected tensor dimension {codes_tensor.dim()} during packing.")
 
             blocks_tensor = pack_tpu_fp4_from_fp32(codes_tensor).contiguous()
             replacements[hf_key] = (blocks_tensor, scales_tensor)
@@ -239,10 +252,18 @@ def _rewrite_safetensors(
         replacements: Mapping[str, Tuple[torch.Tensor, torch.Tensor]]) -> None:
     pending = set(replacements.keys())
     for st_path in sorted(model_dir.glob("*.safetensors")):
-        with safe_open(st_path, framework="pt") as handle:
-            keys = list(handle.keys())
-            metadata = handle.metadata()
-            tensors = {name: handle.get_tensor(name) for name in keys}
+        # --- CRITICAL FIX: Handle 0-byte placeholder files ---
+        if st_path.stat().st_size == 0:
+            # If the file is 0 bytes (our placeholder), treat tensors as empty and metadata as new.
+            tensors = {}
+            metadata = {} 
+        else:
+            # If the file exists and is not empty (e.g., if we were updating an existing checkpoint), read it normally.
+            with safe_open(st_path, framework="pt") as handle:
+                keys = list(handle.keys())
+                metadata = handle.metadata()
+                tensors = {name: handle.get_tensor(name) for name in keys}
+        # --- END CRITICAL FIX ---
 
         local_updates: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
         new_tensors = {}
@@ -265,6 +286,7 @@ def _rewrite_safetensors(
             new_tensors[f"{base_key}_blocks"] = blocks.cpu()
             new_tensors[f"{base_key}_scales"] = scales.cpu()
             pending.discard(base_key)
+        LOGGER.info(f"WRITING CHECKPOINT: {st_path.name}. Updates: {len(local_updates)}")
         save_file(new_tensors, st_path, metadata=metadata)
         LOGGER.info("Updated %s", st_path)
     if pending:
