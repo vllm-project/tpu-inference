@@ -19,7 +19,7 @@ import random
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -1624,8 +1624,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         seq_lens_cpu = seq_lens
 
         (input_ids, positions, query_start_loc, seq_lens,
-         logits_indices, request_distribution) = device_array(
-             self.mesh, (input_ids, positions, query_start_loc, seq_lens,
+         logits_indices, request_distribution) = jax.make_array_from_process_local_data(
+             NamedSharding(self.mesh, PartitionSpec(None)), (input_ids, positions, query_start_loc, seq_lens,
                          logits_indices, request_distribution))
 
         attention_metadata_per_layer: Dict[str, AttentionMetadata] = {}
@@ -1639,7 +1639,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 [:num_reqs])
             # Convert block_tables to 1D on cpu.
             block_tables = block_tables.reshape(-1)
-            block_tables = device_array(self.mesh, (block_tables))
+            block_tables = jax.make_array_from_process_local_data(NamedSharding(self.mesh, PartitionSpec(None)), (block_tables))
 
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
