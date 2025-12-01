@@ -1,5 +1,5 @@
 import copy
-from collections import defaultdict, deque
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -27,10 +27,13 @@ logger = init_logger(__name__)
 class DPSchedulerOutput(SchedulerOutput):
     """Extended SchedulerOutput that includes DP rank assignments."""
     assigned_dp_rank: Optional[Dict[str, int]] = None
+    # Store the individual rank scheduler outputs for use in update_from_output
+    rank_scheduler_outputs: Optional[List[SchedulerOutput]] = None
 
-    def __init__(self, *args, assigned_dp_rank=None, **kwargs):
+    def __init__(self, *args, assigned_dp_rank=None, rank_scheduler_outputs=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.assigned_dp_rank = assigned_dp_rank or {}
+        self.rank_scheduler_outputs = rank_scheduler_outputs or []
 
 
 class DPScheduler(SchedulerInterface):
@@ -72,7 +75,6 @@ class DPScheduler(SchedulerInterface):
         # DP state
         self.dp_size = vllm_config.sharding_config.total_dp_size
         self.assigned_dp_rank: Dict[str, int] = {}  # req_id -> dp_rank
-        self.cached_schedulers_output = deque()
         self._create_per_rank_configs(kv_cache_config)
 
         # The original scheduler class could be Scheduler or AsyncScheduler
@@ -171,10 +173,7 @@ class DPScheduler(SchedulerInterface):
             output = scheduler.schedule()
             rank_outputs.append(output)
 
-        # Cache scheduler outputs to use in `update_from_output`
-        self.cached_schedulers_output.append(rank_outputs)
-
-        # Return combined scheduler outputs
+        # Return combined scheduler outputs with embedded rank outputs
         combined_output = self._combine_scheduler_outputs(rank_outputs)
 
         logger.debug(
@@ -236,6 +235,7 @@ class DPScheduler(SchedulerInterface):
             finished_req_ids=combined_finished_req_ids,
             free_encoder_mm_hashes=set(),
             assigned_dp_rank=assigned_dp_rank,
+            rank_scheduler_outputs=rank_outputs,
         )
 
     def _combine_cached_request_data(
@@ -281,12 +281,11 @@ class DPScheduler(SchedulerInterface):
         This method calls get_grammar_bitmask on each underlying scheduler and
         combines their outputs, similar to how other operations are handled.
         """
-        # Use the most recent cached outputs from the schedule() call
-        if not self.cached_schedulers_output:
+        # Use the rank outputs embedded in the scheduler_output
+        if not scheduler_output.rank_scheduler_outputs:
             return None
 
-        rank_scheduler_outputs = self.cached_schedulers_output[
-            -1]  # Get the most recent
+        rank_scheduler_outputs = scheduler_output.rank_scheduler_outputs
 
         combined_structured_output_request_ids = []
         combined_bitmasks = []
@@ -323,13 +322,24 @@ class DPScheduler(SchedulerInterface):
         We need to route the model runner output to the appropriate scheduler
         based on which rank each request belongs to.
         """
+        # Get the rank scheduler outputs that were embedded in the scheduler_output
+        rank_scheduler_outputs = scheduler_output.rank_scheduler_outputs
+        if not rank_scheduler_outputs:
+            raise RuntimeError(
+                "scheduler_output.rank_scheduler_outputs is empty. "
+                "This should not happen - ensure the same DPSchedulerOutput "
+                "from schedule() is passed to update_from_output()."
+            )
+        
         # Group model runner outputs by DP rank
         rank_model_outputs = self._split_model_output_by_rank(
             model_runner_output)
-        rank_scheduler_outputs = self.cached_schedulers_output.popleft()
         # Update each scheduler with its portion of the output
         combined_engine_outputs = defaultdict(list)
         for rank, scheduler in enumerate(self.schedulers):
+            logger.info(f"Updating scheduler for DP rank {rank}")
+            logger.info(f"rank_scheduler_outputs[{rank}].num_scheduled_tokens: {rank_scheduler_outputs[rank].num_scheduled_tokens}")
+            logger.info(f"rank_model_outputs[{rank}].req_id_to_index: {rank_model_outputs[rank].req_id_to_index}")
             rank_engine_outputs = scheduler.update_from_output(
                 rank_scheduler_outputs[rank], rank_model_outputs[rank])
             for client_idx, engine_output in rank_engine_outputs.items():

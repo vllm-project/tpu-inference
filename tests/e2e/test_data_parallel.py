@@ -11,8 +11,8 @@ from vllm import LLM, EngineArgs, SamplingParams
 
 @pytest.fixture(autouse=True)
 def setup_new_model_design():
-    """Automatically set NEW_MODEL_DESIGN=True for all tests."""
-    os.environ['NEW_MODEL_DESIGN'] = "1"
+    """Automatically set NEW_MODEL_DESIGN=1 for all tests."""
+    os.environ['NEW_MODEL_DESIGN'] = '1'
 
 
 @pytest.fixture
