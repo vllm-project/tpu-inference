@@ -298,7 +298,8 @@ class TPUWorker:
 
                 kv_cache_specs = self.model_runner.get_kv_cache_spec()
                 num_layers = len(kv_cache_specs)
-                vllm_page_size_bytes = get_uniform_page_size(kv_cache_specs)
+                vllm_page_size_bytes = get_uniform_page_size(
+                    list(kv_cache_specs.values()))
                 stage_buffer_size_bytes = staging_buffer_pages * num_layers * vllm_page_size_bytes
 
                 total_hbm_avail = total_hbm_avail - stage_buffer_size_bytes
