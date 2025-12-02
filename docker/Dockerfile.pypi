@@ -30,10 +30,8 @@ RUN export TPU_INFERENCE_VERSION=$(cat /tmp/tpu_inference_version) && \
     bash tools/vllm-tpu/build.sh ${TPU_INFERENCE_VERSION}
 
 # Install vllm-tpu from wheel
-WORKDIR /workspace/vllm/dist
-RUN ls -lah *.whl
 RUN echo "pip installing vllm-tpu" && \
-    pip install *.whl
+    pip install dist/*.whl
 # RUN export TPU_INFERENCE_VERSION=$(cat /tmp/tpu_inference_version) && \
   #   export PIP_VERSION=$(echo "$TPU_INFERENCE_VERSION" | sed 's/^v//') && \
     # echo "Installing vllm-tpu version: $PIP_VERSION" && \
