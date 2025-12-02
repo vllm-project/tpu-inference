@@ -12,6 +12,7 @@ from vllm.platforms.interface import Platform, PlatformEnum
 from tpu_inference import envs
 from tpu_inference.layers.common.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
+from tpu_inference.utils import to_jax_dtype, to_torch_dtype
 
 if TYPE_CHECKING:
     from vllm.attention.backends.registry import AttentionBackendEnum
@@ -143,7 +144,6 @@ class TpuPlatform(Platform):
 
         if compilation_config.backend == "":
             compilation_config.backend = "openxla"
-
         # TODO(cuiq): remove this dependency.
         if vllm_config.model_config:
             from vllm.v1.attention.backends.pallas import \
