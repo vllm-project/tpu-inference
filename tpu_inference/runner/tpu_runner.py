@@ -29,6 +29,7 @@ import vllm.envs as envs
 from flax import nnx
 from jax.experimental import mesh_utils
 from jax.sharding import NamedSharding, PartitionSpec
+from torchax.ops.mappings import t2j_dtype
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
