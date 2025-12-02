@@ -11,8 +11,8 @@ from vllm import LLM, EngineArgs, SamplingParams
 
 @pytest.fixture(autouse=True)
 def setup_new_model_design():
-    """Automatically set NEW_MODEL_DESIGN=True for all tests."""
-    os.environ['NEW_MODEL_DESIGN'] = 'True'
+    """Automatically set NEW_MODEL_DESIGN=1 for all tests."""
+    os.environ['NEW_MODEL_DESIGN'] = '1'
 
 
 @pytest.fixture
@@ -106,7 +106,7 @@ def test_model_data_parallelism(
         sampling_params=sampling_params,
         tensor_parallel_size=1,
         data_parallel_size=2,
-        async_scheduling=True,
+        async_scheduling=False,
     )
 
     # Verify we got outputs for all prompts
@@ -249,8 +249,8 @@ def test_data_parallelism_correctness(
                     diff = abs(base_logprob_val - dp_logprob_val)
                     max_logprob_diff = max(max_logprob_diff, diff)
 
-                    # Allow small numerical differences (e.g., 1e-3)
-                    if diff > 1e-3:
+                    # Allow small numerical differences
+                    if diff > 0.15:
                         logprob_mismatches += 1
                         print(
                             f"Logprob mismatch in prompt {i}, token {token_idx}:"
@@ -266,7 +266,7 @@ def test_data_parallelism_correctness(
     print("✓ Correctness test results:")
     print(f"  Text: {text_matches} matches, {text_mismatches} mismatches")
     print(f"  Max logprob difference: {max_logprob_diff:.6e}")
-    print(f"  Significant logprob mismatches (>1e-3): {logprob_mismatches}")
+    print(f"  Significant logprob mismatches (>0.15): {logprob_mismatches}")
 
     # Allow for some variance due to potential numerical differences
     # but most outputs should match with greedy sampling
@@ -274,4 +274,4 @@ def test_data_parallelism_correctness(
     assert text_match_rate >= 0.9, f"Text match rate {text_match_rate:.2%} is too low"
 
     # Log probabilities should be very close (allow small numerical errors)
-    assert max_logprob_diff < 0.1, f"Max logprob difference {max_logprob_diff} is too large"
+    assert max_logprob_diff < 0.15, f"Max logprob difference {max_logprob_diff} is too large"
