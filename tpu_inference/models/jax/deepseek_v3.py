@@ -54,7 +54,7 @@ class DeepSeekV3(nnx.Module):
         self.rng = nnx.Rngs(rng)
 
         # NOTE: the default is 61
-        num_layers: int = vllm_config.model_config.hf_config.num_hidden_layers
+        num_layers: int = 18  #vllm_config.model_config.hf_config.num_hidden_layers
         num_local_experts: int = 256
 
         vocab_size: int = 129280
@@ -365,6 +365,7 @@ class DeepSeekV3WeightLoader:
             download_dir=vllm_config.load_config.download_dir)
         self.is_verbose = vllm_config.additional_config.get(
             "is_verbose", None) is not None
+        self.is_verbose = True
         self.num_routed_experts = num_local_experts
         self.model_dtype = model_dtype
 
@@ -713,11 +714,6 @@ class DeepSeekV3WeightLoader:
 
         if scale is not None:
             maybe_sharded_scale = scale
-            # Since, by default, we'll use the same sharding as the weights, we might
-            # encounter an error where the smaller/different sharding dim isn't divisible
-            # by the parallel size
-            # NOTE: Qwix expert dangyi@ mentioned that we don't need to worry about accuracy
-            # impacts when sharing scales
             try:
                 maybe_sharded_scale = jax.make_array_from_callback(
                     scale.shape, NamedSharding(model_mesh, P(*sharding)),
@@ -815,6 +811,8 @@ class DeepSeekV3WeightLoader:
                 "Incomplete quantized weight bundles found! This may lead to crashes."
             )
 
+        print("This is pool: ", pool)
+
         # --- 2. LOAD WEIGHTS FROM POOL ---
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_data in pool.items():
@@ -889,54 +887,6 @@ class DeepSeekV3WeightLoader:
         # Final cleanup (already provided)
         # del mlp_experts_gate_proj_weights ...
         nnx.update(model_for_loading, model_params)
-
-    def _build_deepseek_pool(self, names_and_weights_generator,
-                             quant_method: str):
-        """Collects DeepSeek weights and scales into a pool keeping tuples (weight, scale).
-
-        For tpu_fp4, it combines *.weight and *.weight_scale_inv into a tuple for joint processing.
-        """
-        pool: dict[str, torch.Tensor | tuple] = {}
-        pending_tensors: dict[str, dict[str, torch.Tensor]] = {}
-
-        for loaded_name, loaded_weight in names_and_weights_generator:
-            is_quant_weight = loaded_name.endswith(
-                ".weight") and loaded_weight.dtype == torch.uint8
-            is_scale = loaded_name.endswith(".weight_scale_inv")
-
-            if quant_method != TPU_FP4_QUANT_METHOD or (not is_quant_weight
-                                                        and not is_scale):
-                # For BF16 or other non-quantized weights, or if using old FP8, pass them directly
-                pool[loaded_name] = loaded_weight
-                continue
-
-            base = loaded_name.replace(".weight",
-                                       "").replace(".weight_scale_inv", "")
-            entry = pending_tensors.setdefault(base, {})
-
-            if is_quant_weight:
-                entry["weight"] = loaded_weight
-            elif is_scale:
-                entry["scale"] = loaded_weight
-
-            # If we have both parts, place the raw pair into the main pool
-            if "weight" in entry and "scale" in entry:
-                # Store the weight and scale as a tuple
-                pool[base + ".weight"] = (entry["weight"], entry["scale"])
-                pending_tensors.pop(base, None)
-
-        # Optional: Enforce completeness of bundles (similar to the original)
-        if pending_tensors:
-            details = [
-                f"{base} (missing: {', '.join(k for k in ('weight', 'scale') if k not in entry)})"
-                for base, entry in pending_tensors.items()
-            ]
-            logger.warning(
-                "Incomplete quantized weight bundles encountered: " +
-                ", ".join(details))
-            # Raise an error or proceed, depending on strictness. Assuming we proceed but warn.
-
-        return pool
 
 
 def weights_dequant_cpu(x: torch.Tensor,
