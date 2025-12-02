@@ -1,11 +1,13 @@
 Feature,CorrectnessTest,PerformanceTest
 "Chunked Prefill",✅,✅
+"LoRA_Torch",✅,to be added
 "Multimodal Inputs",✅,✅
-"Optimized Runtime Sampling (top k, top p, temperature, logit output)",to be added,to be added
 "Out-of-tree model support",to be added,to be added
 "Prefix Caching",✅,✅
 "Single Program Multi Data",✅,✅
+"Speculative Decoding: Eagle3",✅,❌
 "Speculative Decoding: Ngram",✅,✅
-"Structured Decoding",✅,to be added
 "async scheduler",✅,✅
-"runai_model_streamer_loader",❌,N/A
+"runai_model_streamer_loader",✅,N/A
+"sampling_params",✅,N/A
+"structured_decoding",✅,N/A
