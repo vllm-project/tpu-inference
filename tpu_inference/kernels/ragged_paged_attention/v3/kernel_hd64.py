@@ -1463,6 +1463,12 @@ def ragged_paged_attention_hd64(
             max_num_tokens,
             pages_per_seq,
         )
+
+    bq_sz = 16
+    bkv_p = 16
+    # if sliding_window is not None:
+    #     bkv_p = 4
+
     bkv_sz = bkv_p * page_size
     if vmem_limit_bytes is None:
         # TODO (jevinjiang/jacobplatin): change this to use
