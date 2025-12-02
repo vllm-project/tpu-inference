@@ -8,7 +8,10 @@ steps:
       queue: tpu_v6e_queue
     commands:
       - |
-        buildkite-agent meta-data set "PP_CorrectnessTest" "to be added"
+        .buildkite/scripts/run_in_docker.sh \
+          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model \
+          /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_vllm_model \
+          /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model_correctness
   - label: "Record correctness test result for PP"
     key: "record_PP_CorrectnessTest"
     depends_on: "PP_CorrectnessTest"
@@ -30,7 +33,10 @@ steps:
       queue: tpu_v6e_queue
     commands:
       - |
-        buildkite-agent meta-data set "PP_PerformanceTest" "to be added"
+        .buildkite/scripts/run_in_docker.sh \
+          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model \
+          /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_vllm_model \
+          /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model_correctness
   - label: "Record performance test result for PP"
     key: "record_PP_PerformanceTest"
     depends_on: "PP_PerformanceTest"
