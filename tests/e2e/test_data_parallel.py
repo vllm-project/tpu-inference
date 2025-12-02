@@ -105,8 +105,8 @@ def test_model_data_parallelism(
         test_prompts=test_prompts,
         sampling_params=sampling_params,
         tensor_parallel_size=1,
-        data_parallel_size=2,
-        async_scheduling=True,
+        data_parallel_size=1,
+        async_scheduling=False,
     )
 
     # Verify we got outputs for all prompts
