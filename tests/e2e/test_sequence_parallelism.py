@@ -13,13 +13,15 @@ from vllm.config import CompilationConfig
 @pytest.fixture(autouse=True)
 def setup_new_model_design():
     os.environ['MODEL_IMPL_TYPE'] = 'vllm'
+    os.environ['SKIP_JAX_PRECOMPILE'] = '1'
 
 
 @pytest.fixture
 def test_prompts():
     """Simple test prompts for data parallelism testing."""
     return [
-        "Hello, my name is",
+        "Three Rings for the Elven-kings under the sky, Seven for the Dwarf-lords in their halls of stone, Nine for Mortal Men doomed to die, One for the Dark Lord on his dark throne In the Land of Mordor where the Shadows lie. One Ring to rule them all, One Ring to find them, One Ring to bring them all and in the darkness bind them In the Land of Mordor where the Shadows lie.",
+        # "Hello, my name is",
         # "The capital of France is",
         # "The colors of the rainbow are",
         # "The future of AI is",
@@ -59,7 +61,7 @@ def _run_inference_with_config(model_name: str,
     }, )
     engine_args = EngineArgs(
         model=model_name,
-        max_model_len=32,
+        max_model_len=128,
         compilation_config=compilation_config,
         tensor_parallel_size=tensor_parallel_size,
         gpu_memory_utilization=0.98,
