@@ -144,7 +144,7 @@ def test_model_data_parallelism_torchax(
         sampling_params=sampling_params,
         tensor_parallel_size=1,
         data_parallel_size=2,
-        async_scheduling=False,
+        async_scheduling=True,
     )
 
     # Verify we got outputs for all prompts
