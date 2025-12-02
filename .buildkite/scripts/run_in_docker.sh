@@ -29,7 +29,16 @@ if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
     MODEL_IMPL_TYPE=flax_nnx
 fi
 
-IMAGE_NAME='vllm-tpu'
+if [[ "${NIGHTLY:-}" == "1" ]]; then
+  echo "Use the latest nightly image which for tpu v6e from Docker Hub"
+  IMAGE_NAME="vllm/vllm-tpu"
+  IMAGE_TAG='nightly'
+else
+  echo "Use local build image"
+  IMAGE_NAME="vllm-tpu"
+  IMAGE_TAG="${BUILDKITE_COMMIT}"
+fi
+
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 # Source the environment setup script
 # shellcheck disable=SC1091
@@ -48,6 +57,8 @@ else
   exit 1
 fi
 
+# shellcheck disable=SC2093
+# Pull the docker image from Docker Hub or use local build image (Up to IMAGE_NAME)
 exec docker run \
   --privileged \
   --net host \
@@ -65,5 +76,5 @@ exec docker run \
   ${USE_V6E8_QUEUE:+-e USE_V6E8_QUEUE="$USE_V6E8_QUEUE"} \
   ${SKIP_ACCURACY_TESTS:+-e SKIP_ACCURACY_TESTS="$SKIP_ACCURACY_TESTS"} \
   ${VLLM_MLA_DISABLE:+-e VLLM_MLA_DISABLE="$VLLM_MLA_DISABLE"} \
-  "${IMAGE_NAME}:${BUILDKITE_COMMIT}" \
+  "${IMAGE_NAME}:${IMAGE_TAG}" \
   "$@" # Pass all script arguments as the command to run in the container

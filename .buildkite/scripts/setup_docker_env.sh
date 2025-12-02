@@ -24,31 +24,40 @@ setup_environment() {
     exit 1
   fi
 
-  # Cleanup of existing containers and images.
-  echo "Starting cleanup for ${IMAGE_NAME}..."
-  # Get all unique image IDs for the repository
-  old_images=$(docker images "${IMAGE_NAME}" -q | uniq)
-  total_containers=""
+  echo "Starting clean up existing containers and images..."
 
-  if [ -n "$old_images" ]; then
-      echo "Found old ${IMAGE_NAME} images. Checking for dependent containers..."
+  IMAGE_REPOS_TO_CLEAN=(
+    "vllm-tpu"
+    "vllm/vllm-tpu"
+    "${IMAGE_NAME}"
+  )
+
+  for REPO_NAME in "${IMAGE_REPOS_TO_CLEAN[@]}"; do
+    echo "Checking Repository: ${REPO_NAME}"
+
+    old_images=$(docker images "${REPO_NAME}" -q | uniq)
+    total_containers=""
+
+    if [ -n "$old_images" ]; then
+      echo "Found old ${REPO_NAME} images. Checking for dependent containers..."
+
       # Loop through each image ID and find any containers (running or not) using it.
-      for img_id in $old_images;
-      do
-          total_containers="$total_containers $(docker ps -a -q --filter "ancestor=$img_id")"
+      for img_id in $old_images; do
+        total_containers="$total_containers $(docker ps -a -q --filter "ancestor=$img_id")"
       done
 
       # Remove any found containers
       if [ -n "$total_containers" ]; then
-          echo "Removing leftover containers using ${IMAGE_NAME} image(s)..."
-          echo "$total_containers" | xargs -n1 | sort -u | xargs -r docker rm -f
+        echo "Removing leftover containers using ${REPO_NAME} image(s)..."
+        echo "$total_containers" | xargs -n1 | sort -u | xargs -r docker rm -f
       fi
 
-      echo "Removing old ${IMAGE_NAME} image(s)..."
+      echo "Removing old ${REPO_NAME} image(s)..."
       docker rmi -f "$old_images"
-  else
-      echo "No ${IMAGE_NAME} images found to clean up."
-  fi
+    else
+      echo "No ${REPO_NAME} images found to clean up."
+    fi
+  done
 
   echo "Pruning old Docker build cache..."
   docker builder prune -f
@@ -60,6 +69,13 @@ setup_environment() {
   echo "Python dependencies installed"
 
   VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH" --default "")
+
+  # Use the nightly image from Docker Hub if it's nightly run.
+  # No need to build the local image here.
+  if [[ "${NIGHTLY:-}" == "1" ]]; then
+    echo "Skip building local image"
+    return 0
+  fi
 
   docker build \
       --build-arg VLLM_COMMIT_HASH="${VLLM_COMMIT_HASH}" \

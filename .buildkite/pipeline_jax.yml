@@ -8,6 +8,16 @@ steps:
   # -----------------------------------------------------------------
   # TEST STEPS - Calling wrapper
   # -----------------------------------------------------------------
+   - label: "Wait for publishing nightly image finished"
+     if: build.env("NIGHTLY") == "1"
+     depends_on: publish_nightly_image_for_v6e
+     agents:
+       queue: cpu
+     commands:
+       - echo "Wait for publishing nightly image finished if it's nightly run"
+
+   - wait: ~
+
    - label: "E2E MLPerf tests for JAX models"
      key: test_0
      soft_fail: true
