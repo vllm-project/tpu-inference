@@ -7,6 +7,7 @@ from dataclasses import asdict
 
 import pytest
 from vllm import LLM, EngineArgs, SamplingParams
+from vllm.config import CompilationConfig
 
 
 @pytest.fixture(autouse=True)
@@ -53,9 +54,13 @@ def _run_inference_with_config(model_name: str,
     """Helper function to run inference with specified configuration."""
 
     # Create LLM args using parser-based approach similar to offline_inference.py
+    compilation_config = CompilationConfig(pass_config={
+        "enable_sequence_parallelism": True,
+    }, )
     engine_args = EngineArgs(
         model=model_name,
         max_model_len=32,
+        compilation_config=compilation_config,
         tensor_parallel_size=tensor_parallel_size,
         gpu_memory_utilization=0.98,
         max_num_batched_tokens=128,
