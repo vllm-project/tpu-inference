@@ -22,7 +22,7 @@ RUN export TPU_INFERENCE_VERSION=$(pip index versions tpu-inference --pre 2>/dev
 WORKDIR /workspace/vllm
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 RUN git clone $VLLM_REPO /workspace/vllm
-RUN RUN pip install build
+RUN pip install build
 RUN export TPU_INFERENCE_VERSION=$(cat /tmp/tpu_inference_version) && \
     echo "Using tpu-inference version: $TPU_INFERENCE_VERSION" && \
     sed -i "s/^tpu-inference==.*/tpu-inference==${TPU_INFERENCE_VERSION}/" requirements/tpu.txt && \
