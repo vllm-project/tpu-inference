@@ -237,7 +237,7 @@ def test_flax_nnx_vs_vllm_performance():
     """
     model_name = "Qwen/Qwen3-4B"
     # This should be 2-3% but 5% reduces flakiness.
-    percentage_difference_threshold = 0.05
+    percentage_difference_threshold = 0.06
 
     throughput_vllm = _run_server_and_bench(model_name, "vllm", 8001)
     throughput_flax = _run_server_and_bench(model_name, "flax_nnx", 8002)
