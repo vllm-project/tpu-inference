@@ -78,7 +78,7 @@ checkThroughput() {
 }
 
 echo "Spinning up the vLLM server..."
-(vllm serve "$model_name" --tensor-parallel-size 1 --pipeline-parallel-size 1 --dtype bfloat16 --gpu-memory-utilization 0.98 --max-model-len "$max_model_len" --limit-mm-per-prompt '{"image": 10, "video": 0}' --mm-processor-kwargs '{"max_pixels": 1003520}' --guided-decoding-backend "xgrammar" --disable-chunked-mm-input  2>&1 | tee -a "$LOG_FILE") &
+(vllm serve "$model_name" --tensor-parallel-size 1 --pipeline-parallel-size 1 --dtype bfloat16 --gpu-memory-utilization 0.98 --max-model-len "$max_model_len" --limit-mm-per-prompt '{"image": 10, "video": 0}' --mm-processor-kwargs '{"max_pixels": 1003520}' --disable-chunked-mm-input  2>&1 | tee -a "$LOG_FILE") &
 
 
 # Run a busy loop to block until the server is ready to receive requests
