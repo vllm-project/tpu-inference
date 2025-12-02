@@ -5,6 +5,8 @@ specifically designed for TPU and compatible with a wide range of model
 specifications. It supports mixed prefill and decoding, enhancing throughput
 during inference.
 """
+# xw32q: revisit the ref impl about writing to the kv cache.
+# xw32q: how does it overlap writing to the kv cache with the attention computation?
 import functools
 
 import jax
@@ -233,8 +235,11 @@ def _ragged_paged_attention_kernel(
     cu_q_lens_ref,  # [max_num_seqs + 1]
     # TODO(jevinjiang): merge these into one so we can save SMEM.
     distribution_ref,  # [3] (decode_end, prefill_end, mixed_end)
+    # xw32: bq_sem_idx, bkv_sem_idx, bo_sem_idx can be either 0 or 1. Used to index into the double buffer.
     sem_ids_ref,  # [3] (bq_sem_idx, bkv_sem_idx, bo_sem_idx)
+    # xw32: bo_ids_ref[0] maps bo_sem_0 to seq_idx, bo_ids_ref[1] maps bo_sem_1 to seq_idx, bo_ids_ref[2] maps bo_sem_0 to bo_idx, and so on.
     bo_ids_ref,  # [4] (bo_sem_0_seq_idx, bo_sem_1_seq_idx, bo_sem_0_bo_idx, bo_sem_1_bo_idx)
+    # xw32: bkv_update_ids_ref is similar to the above bo_ids_ref.
     bkv_update_ids_ref,  # [6] (bkv_sem_0_seq_idx, bkv_sem_1_seq_idx, bkv_sem_0_offset, bkv_sem_1_offset, bkv_sem_0_sz, bkv_sem_1_sz)
     # Input
     q_hbm_ref,  # [actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
@@ -247,6 +252,7 @@ def _ragged_paged_attention_kernel(
     bkv_x2_ref,  # [2, bkv_sz, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
     bq_x2_ref,  # [2, actual_num_kv_heads, bq_sz, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
     bo_x2_ref,  # [2, actual_num_kv_heads, bq_sz, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
+    # xw32: sems[0] is for fetching kv from kv cache. sems[1] is for fetching q blocks from hbm to vmem. sems[2] is for sending output from vmem to hbm. sems[3] is for copying kv from vmem to hbm (updating the kv cache).
     sems,  # [4, 2]
     l_ref,  # [actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, 128],
     m_ref,  # [actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, 128],
@@ -304,6 +310,12 @@ def _ragged_paged_attention_kernel(
     q_len = q_end - q_start
     kv_len = kv_lens_ref[seq_idx]
 
+    # xw32q: when we set debug_mode to True, do you also need to make changes such as
+    # compiled_kernel = (
+    #        jax.jit(kernel)
+    #        .lower(x)
+    #        .compile({'xla_tpu_enable_log_recorder': 'true'})
+    # )
     def debug_print(msg, *args):
         if debug_mode:
             pl.debug_print(msg, *args)
@@ -337,6 +349,10 @@ def _ragged_paged_attention_kernel(
         assert q.shape[1] == head_dim
         assert k.shape == v.shape == (bkv_sz, head_dim)
         assert k.dtype == v.dtype
+        # NB:
+        # l_ref,  # [actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, 128],
+        # m_ref,  # [actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, 128],
+        # acc_ref,  # [actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, head_dim],
         head_l_ref = l_ref.at[kv_head_idx, :q.shape[0]]
         head_m_ref = m_ref.at[kv_head_idx, :q.shape[0]]
         head_acc_ref = acc_ref.at[kv_head_idx, :q.shape[0]]
@@ -396,7 +412,7 @@ def _ragged_paged_attention_kernel(
     def _async_copy(src, dst, sem, wait):
         if debug_mode:
             # Skip DMA if debug mode is enabled.
-            # xw32q: why can we skip dma if debug mode is enabled?
+            # xw32q: why do we skip dma if debug mode is enabled?
             return
         cp = pltpu.make_async_copy(src, dst, sem)
         if wait:
@@ -405,6 +421,7 @@ def _ragged_paged_attention_kernel(
             cp.start()
 
     def _fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx, *, wait=False):
+        # NB: sems,  # [4, 2]
         sem = sems.at[0, bkv_sem_idx]
         vmem_ref = bkv_x2_ref.at[bkv_sem_idx]
 
@@ -625,6 +642,7 @@ def _ragged_paged_attention_kernel(
         return _fetch_bq(seq_idx, bq_idx, bq_sem_idx, wait=True)
 
     def start_send_bo(seq_idx, bo_idx, bo_sem_idx):
+        # NB bo_ids_ref,  # [4] (bo_sem_0_seq_idx, bo_sem_1_seq_idx, bo_sem_0_bo_idx, bo_sem_1_bo_idx)
         bo_ids_ref[bo_sem_idx] = seq_idx
         bo_ids_ref[bo_sem_idx + 2] = bo_idx
         _send_bo(seq_idx, bo_idx, bo_sem_idx)
@@ -790,6 +808,7 @@ def _ragged_paged_attention_kernel(
             return next_seq_idx, next_bq_idx, next_bkv_idx, next_bkv_sem_idx
 
         def compute_with_bq(bq_idx, _):
+            # NB sem_ids_ref,  # [3] (bq_sem_idx, bkv_sem_idx, bo_sem_idx)
             bq_sem_idx = sem_ids_ref[0]
             next_seq_idx, next_bq_idx, next_bq_sem_idx = get_next_bq_ids(
                 seq_idx, bq_idx, bq_sem_idx)
@@ -884,6 +903,7 @@ def _ragged_paged_attention_kernel(
                    (acc * pl.reciprocal(l, approx=True)).astype(q_dtype))
 
             # Wait for previous bo to be fully sent before storing new bo.
+            # NB sem_ids_ref,  # [3] (bq_sem_idx, bkv_sem_idx, bo_sem_idx)
             bo_sem_idx = sem_ids_ref[2]
             sem_ids_ref[2] = lax.select(bo_sem_idx == 0, 1, 0)
             wait_send_bo(bo_sem_idx)
@@ -1408,15 +1428,17 @@ def ragged_paged_attention(
         pl.BlockSpec(memory_space=pltpu.HBM),
     ]
 
+    # NB: kv_cache [total_num_pages, page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
     bkv_double_buf = pltpu.VMEM(
         (2, bkv_sz, *kv_cache.shape[2:]),
         kv_cache.dtype,
-    )
+    )  # [2, bkv_sz, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
 
+    # NB: q: [actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head_per_q_packing, q_packing, head_dim]
     bq_double_buf = pltpu.VMEM(
         (2, actual_num_kv_heads, bq_sz, *q.shape[2:]),
         q.dtype,
-    )
+    )  # [2, actual_num_kv_heads, bq_sz, num_q_heads_per_kv_head_per_q_packing, q_packing, head_dim]
 
     bo_double_buf = bq_double_buf
 
