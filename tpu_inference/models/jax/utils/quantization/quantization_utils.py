@@ -13,9 +13,11 @@ from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from qwix.contrib import padded_qarray as ptq
-from qwix.contrib.padded_qarray import PaddedPtqProvider
-from qwix.contrib.padded_qarray import PaddedQArray as QArray
+# from qwix.contrib import padded_qarray as ptq
+# from qwix.contrib.padded_qarray import PaddedPtqProvider
+# from qwix.contrib.padded_qarray import PaddedQArray as QArray
+from qwix._src.core.qarray import QArray
+from qwix._src.providers import ptq
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -114,7 +116,6 @@ DEFAULT_GPT_OSS_TPU_FP4_CONFIG = {
     }
 }
 
-# Default Qwix config for DeepSeek TPU FP4 checkpoints
 DEFAULT_DEEPSEEK_TPU_FP4_CONFIG = {
     "qwix": {
         "use_abstract_model":
@@ -123,18 +124,32 @@ DEFAULT_DEEPSEEK_TPU_FP4_CONFIG = {
         "bfloat16",
         "rules": [
             {
-                # Rule to keep the router (mlp.gate) in BF16/unquantized
+                # Rule 1: Keep the MoE Router/Gate in BF16/unquantized (this is usually a simple Dense/Linear layer)
                 "module_path": ".*.custom_module.router.*",
                 "weight_qtype": None,
             },
-            { # TODO: ATTENTION MIGHT BE KEPT TO FP8
-                # Rule to apply FP4 quantization to all other layers (MoE experts, DenseFFW, Attention, etc.)
-                "module_path": ".*",
+            {
+                # Rule 2: Quantize Attention layers (mla) to FP8 (float8_e4m3fn)
+                "module_path": ".*attn.*",
+                "weight_qtype": "float8_e4m3fn",
+                "act_qtype": None,
+                "tile_size": None,  #NOTE: Used to be 256
+            },
+            {
+                # Rule 3: Quantize MoE/MLP (custom_module: MoE or DenseFFW) to FP4 (float4_e2m1fn)
+                # NOTE: This rule is placed after the attention rule.
+                "module_path": ".*custom_module.*",
                 "weight_qtype": "float4_e2m1fn",
                 "act_qtype": None,
-                # NOTE: Use the tile_size from GPT-OSS TPU FP4 config
                 "tile_size": 256,
             },
+            # {
+            #     # Rule 4: Catch-all rule for all other layers (Embeddings, Norms, LM Head).
+            #     # Setting weight_qtype to None effectively keeps them in base model dtype (BF16).
+            #     # NOTE: not sure if this is actually needed. default weight_qtype might just be None
+            #     "module_path": ".*",
+            #     "weight_qtype": None,
+            # },
         ],
     }
 }
@@ -266,7 +281,7 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
                           query_start_loc=query_start_loc,
                           request_distribution=request_distribution),
     }
-    model = qwix.quantize_model(model, PaddedPtqProvider(qwix_rules),
+    model = qwix.quantize_model(model, qwix.PtqProvider(qwix_rules),
                                 **model_input)
     return model
 

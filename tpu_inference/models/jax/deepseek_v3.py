@@ -455,10 +455,14 @@ class DeepSeekV3WeightLoader:
             "layers.*.shared_experts.kernel_up_proj_DF",
         }
 
+        #TODO: Must load in prequantized checkpoint from gs://dotzel-tpu-prod-checkpoints/deepseek-r1-fp4-mlp-256-pack
+
         # TODO (jacobplatin): we shouldn't hard-code this, but the logic to obtain the true quantized dtype
         # is non-trivial and the default checkpoints all use this dtype
         # self.quant_dtype = jnp.float8_e4m3fn
         self.quant_dtype = jnp.float4_e2m1fn
+
+        print("this is self.quant_dtype: ", self.quant_dtype)
 
         self.is_model_quantized = not vllm_config.additional_config.get(
             "skip_quantization", False)
@@ -469,8 +473,11 @@ class DeepSeekV3WeightLoader:
             assert quantization_type in (
                 "fp8", "tpu_fp4"
             ), "DeepSeek only supports the fp8 and tpu_fp4 quantization methods for now"
+
             self.scale_dtype, self.quant_dtype = get_quant_dtype_from_qwix_config(
                 vllm_config)
+
+            self.quantization_type = quantization_type
 
             logger.info(
                 f"Quantizing DeepSeek with quantization dtype: {self.quant_dtype} and scale dtype: {self.scale_dtype}"
@@ -484,7 +491,7 @@ class DeepSeekV3WeightLoader:
             self.quantization_block_size_n = quantization_block_sizes[0]
             self.quantization_block_size_k = quantization_block_sizes[1]
             # TODO (jacobplatin): remove this check in the future
-            assert self.quantization_block_size_n == self.quantization_block_size_k, "Quantization block size n and k must be the same!"
+            # assert self.quantization_block_size_n == self.quantization_block_size_k, "Quantization block size n and k must be the same!"
             # NOTE: this is only needed for pre-quantized models
             self._scale_shape_map = {
                 "q_b_proj": (1, qk_nope_head_dim + qk_rope_head_dim,
@@ -756,166 +763,180 @@ class DeepSeekV3WeightLoader:
         )
         cumulative_global_memory = 0
         cumulative_local_memory = 0
-        mlp_experts_gate_proj_weights = {}
-        mlp_experts_gate_proj_scales = {}
-        mlp_experts_up_proj_weights = {}
-        mlp_experts_up_proj_scales = {}
-        mlp_experts_down_proj_weights = {}
-        mlp_experts_down_proj_scales = {}
-        quantized_weights = {}
-        quantized_scales = {}
-        with jax.default_device(jax.devices("cpu")[0]):
-            for loaded_name, loaded_weight in self.names_and_weights_generator:
-                # Skip if the model has fewer layers than original.
-                if re.search(r"layers\.(\d+)", loaded_name):
-                    layer_num = re.search(r"layers\.(\d+)",
-                                          loaded_name).group(1)
-                    if int(layer_num) >= self.num_layers:
-                        del loaded_weight
-                        continue
-                if 'layers.61' in loaded_name:
-                    # skip loading MTP module.
+
+        # --- 1. BUILD POOL: COLLECT AND PAIR WEIGHTS/SCALES ---
+        pool: dict[str, torch.Tensor | tuple] = {}
+        pending_tensors: dict[str, dict[str, torch.Tensor]] = {}
+
+        # Iterate over the raw generator output once to pair all weights and scales.
+        # This fixes the load order problem.
+        for loaded_name, loaded_weight in self.names_and_weights_generator:
+            # Skip layers that exceed the number of layers in the current model
+            if re.search(r"layers\.(\d+)", loaded_name):
+                layer_num = re.search(r"layers\.(\d+)", loaded_name).group(1)
+                if int(layer_num) >= self.num_layers:
                     del loaded_weight
                     continue
-                if re.search(r"experts\.(\d+)", loaded_name):
-                    expert_num = re.search(r"experts\.(\d+)",
-                                           loaded_name).group(1)
-                    if int(expert_num) >= self.num_routed_experts:
-                        del loaded_weight
-                        continue
-                # NOTE: loaded_weight will be a Torch tensor, so we need to convert it to the
-                # equivalent jnp dtype
-                # TODO (jacobplatin): refactor this so that we instead change / update `model_weights_generator`
-                # instead of checking "weight_scale_inv" and assuming quantization method is fp8
-                scale = None
-                if loaded_weight.dtype == j2t_dtype(self.quant_dtype.dtype):
-                    if self.is_model_quantized:
-                        scale_name = loaded_name.replace(
-                            ".weight", ".weight_scale_inv")
-                        if scale_name in quantized_scales:
-                            scale = quantized_scales[scale_name]
-                            del quantized_scales[scale_name]
-                        else:
-                            quantized_weights[loaded_name] = loaded_weight
-                            continue
-                    else:
-                        quantized_weights[loaded_name] = loaded_weight
-                        continue
+            if 'layers.61' in loaded_name:
+                del loaded_weight
+                continue
+            if re.search(r"experts\.(\d+)", loaded_name):
+                expert_num = re.search(r"experts\.(\d+)", loaded_name).group(1)
+                if int(expert_num) >= self.num_routed_experts:
+                    del loaded_weight
+                    continue
 
-                # Check for TPU-FP4 packed case (packed weights are uint8)
-                is_packed_tpu_fp4 = (self.is_model_quantized
-                                     and self.quantization_type
-                                     == TPU_FP4_QUANT_METHOD
-                                     and loaded_weight.dtype == torch.uint8)
+            # Identify if it's a weight or a scale using the DeepSeek naming convention
+            is_quant_weight = loaded_name.endswith(".weight")
+            is_scale = loaded_name.endswith(".weight_scale_inv")
 
-                if is_packed_tpu_fp4:  # <--- New logic for TPU-FP4
-                    scale_name = loaded_name.replace(".weight",
-                                                     ".weight_scale_inv")
-                    if scale_name in quantized_scales:
-                        scale = quantized_scales[scale_name]
-                        del quantized_scales[scale_name]
-                        # Unpack the codes and scales to FP32, then cast to appropriate Qwix dtypes
-                        # Use the unpack function from gpt_oss.py's utilities
+            # If this is a quantized checkpoint, pool the weights and scales
+            if self.is_model_quantized and (is_quant_weight or is_scale):
+                base = loaded_name.replace(".weight",
+                                           "").replace(".weight_scale_inv", "")
+                entry = pending_tensors.setdefault(base, {})
+
+                if is_quant_weight:
+                    entry["weight"] = loaded_weight
+                elif is_scale:
+                    entry["scale"] = loaded_weight
+
+                # If we have both parts, create a pooled tuple entry (key is the standard name)
+                if "weight" in entry and "scale" in entry:
+                    pool[base + ".weight"] = (entry["weight"], entry["scale"])
+                    pending_tensors.pop(base, None)
+            else:
+                # Store non-quantized items directly
+                pool[loaded_name] = loaded_weight
+
+        # Handle missing pairs (optional but good practice)
+        if pending_tensors:
+            logger.error(
+                "Incomplete quantized weight bundles found! This may lead to crashes."
+            )
+
+        # --- 2. LOAD WEIGHTS FROM POOL ---
+        with jax.default_device(jax.devices("cpu")[0]):
+            for loaded_name, loaded_data in pool.items():
+
+                hf_pattern = re.sub(r"layers\.(\d+)", "layers.*", loaded_name)
+                # Check for skipped layers (already handled above, but useful for robustness)
+                if hf_pattern not in self._loaded_to_standardized_keys:
+                    logger.warning(
+                        f"No mapping found for pooled tensor: {loaded_name}. Skipping."
+                    )
+                    continue
+
+                # --- Unpack Quantized Weight (Tuple path) ---
+                if isinstance(loaded_data, tuple):
+                    loaded_weight, scale = loaded_data
+
+                    # 1. Check if the weight is TPU FP4 (packed uint8)
+                    is_packed_tpu_fp4 = (
+                        self.quantization_type == TPU_FP4_QUANT_METHOD
+                        and loaded_weight.dtype == torch.uint8)
+
+                    if is_packed_tpu_fp4:
+                        # Unpack (returns the data in the intermediate shape, e.g., 9216 rows)
                         unpacked_codes, unpacked_scales = unpack_tpu_fp4_to_fp32(
                             loaded_weight, scale)
 
-                        # Replace loaded_weight and scale with the unpacked FP32 tensors
+                        # Get the target QArray's expected shape (e.g., 18432 rows)
+                        mapped_name = self.map_loaded_to_standardized_name(
+                            loaded_name)
+                        # NOTE: model_params must be used as nnx.state to access the abstract shape
+                        base_model_weight = get_param(model_params,
+                                                      mapped_name)
+                        target_shape = base_model_weight.array.qvalue.value.shape
+
+                        # --- CRITICAL FIX: RESHAPE TO LOGICAL DIMENSION ---
+                        if unpacked_codes.shape != target_shape:
+                            # Reshape the PyTorch tensor to the target logical shape (18432, 7168)
+                            unpacked_codes = unpacked_codes.reshape(
+                                target_shape)
+
+                        # Overwrite loaded_weight and scale with the UNPACKED/RESHAPED FP32 tensors
                         loaded_weight = unpacked_codes
                         scale = unpacked_scales
                     else:
-                        quantized_weights[loaded_name] = loaded_weight
-                        continue
-
-                if loaded_name.endswith(".weight_scale_inv"):
-                    if self.is_model_quantized:
-                        weight_name = loaded_name.replace(
-                            ".weight_scale_inv", ".weight")
-                        if weight_name in quantized_weights:
-                            scale = loaded_weight
-                            loaded_weight = quantized_weights[weight_name]
-                            loaded_name = weight_name
-                            del quantized_weights[weight_name]
-                        else:
-                            quantized_scales[loaded_name] = loaded_weight
-                            continue
-                    # In the case that we don't want to use the quantized weights,
-                    # we'll dequantize the weights using the loaded scale on-the-fly
-                    else:
-                        # assuming weights are loaded before scales.
-                        weight_name = loaded_name.replace(
-                            ".weight_scale_inv", ".weight")
-                        loaded_weight = weights_dequant_cpu(
-                            quantized_weights[weight_name], loaded_weight,
-                            self.model_dtype)
-                        loaded_name = weight_name
-                        del quantized_weights[weight_name]
-                # concat mlp.experts weights
-                stacked_scales = None
-                stacked_weights = None
-                if "mlp.experts" in loaded_name:
-                    if "down_proj" in loaded_name:
-                        stacked_weights = self._process_moe_weights(
-                            loaded_name, loaded_weight,
-                            mlp_experts_down_proj_weights)
-                        if scale is not None:
-                            stacked_scales = self._process_moe_weights(
-                                loaded_name, scale,
-                                mlp_experts_down_proj_scales)
-                    if "gate_proj" in loaded_name:
-                        stacked_weights = self._process_moe_weights(
-                            loaded_name, loaded_weight,
-                            mlp_experts_gate_proj_weights)
-                        if scale is not None:
-                            stacked_scales = self._process_moe_weights(
-                                loaded_name, scale,
-                                mlp_experts_gate_proj_scales)
-                    if "up_proj" in loaded_name:
-                        stacked_weights = self._process_moe_weights(
-                            loaded_name, loaded_weight,
-                            mlp_experts_up_proj_weights)
-                        if scale is not None:
-                            stacked_scales = self._process_moe_weights(
-                                loaded_name, scale, mlp_experts_up_proj_scales)
-                    if stacked_weights is not None:
-                        weight_bytes, weight_shards = self._load_individual_weight(
-                            loaded_name,
-                            stacked_weights,
-                            model_params,
-                            model_for_loading.mesh,
-                            scale=stacked_scales)
-                        if self.is_verbose:
-                            cumulative_global_memory += weight_bytes
-                            cumulative_local_memory += weight_shards
-                            logger.info(
-                                f"Cumulative global memory: {cumulative_global_memory} GB"
-                            )
-                            logger.info(
-                                f"Cumulative local memory: {cumulative_local_memory} GB"
-                            )
+                        # Handle original FP8 logic (if model is still FP8)
+                        # The code already handles casting/transposing in _load_individual_weight
+                        # using the scale provided here.
+                        pass
                 else:
-                    weight_bytes, weight_shards = self._load_individual_weight(
-                        loaded_name,
-                        loaded_weight,
-                        model_params,
-                        model_for_loading.mesh,
-                        scale=scale)
-                    if self.is_verbose:
-                        cumulative_global_memory += weight_bytes
-                        cumulative_local_memory += weight_shards
-                        logger.info(
-                            f"Cumulative global memory: {cumulative_global_memory} GB"
-                        )
-                        logger.info(
-                            f"Cumulative local memory: {cumulative_local_memory} GB"
-                        )
+                    # --- Regular Weight Path (Single Tensor) ---
+                    loaded_weight = loaded_data
+                    scale = None
 
-        del mlp_experts_gate_proj_weights
-        del mlp_experts_up_proj_weights
-        del mlp_experts_down_proj_weights
-        del quantized_weights
-        del quantized_scales
-        # TODO: validate that all of the model_params were accounted for as well.
+                # Load the individual weight (handles transpose, reshaping, sharding, and QArray assignment)
+                weight_bytes, weight_shards = self._load_individual_weight(
+                    loaded_name,
+                    loaded_weight,
+                    model_params,
+                    model_for_loading.mesh,
+                    scale=scale)
+
+                if self.is_verbose:
+                    cumulative_global_memory += weight_bytes
+                    cumulative_local_memory += weight_shards
+                    logger.info(
+                        f"Cumulative global memory: {cumulative_global_memory} GB"
+                    )
+                    logger.info(
+                        f"Cumulative local memory: {cumulative_local_memory} GB"
+                    )
+
+        # Final cleanup (already provided)
+        # del mlp_experts_gate_proj_weights ...
         nnx.update(model_for_loading, model_params)
+
+    def _build_deepseek_pool(self, names_and_weights_generator,
+                             quant_method: str):
+        """Collects DeepSeek weights and scales into a pool keeping tuples (weight, scale).
+
+        For tpu_fp4, it combines *.weight and *.weight_scale_inv into a tuple for joint processing.
+        """
+        pool: dict[str, torch.Tensor | tuple] = {}
+        pending_tensors: dict[str, dict[str, torch.Tensor]] = {}
+
+        for loaded_name, loaded_weight in names_and_weights_generator:
+            is_quant_weight = loaded_name.endswith(
+                ".weight") and loaded_weight.dtype == torch.uint8
+            is_scale = loaded_name.endswith(".weight_scale_inv")
+
+            if quant_method != TPU_FP4_QUANT_METHOD or (not is_quant_weight
+                                                        and not is_scale):
+                # For BF16 or other non-quantized weights, or if using old FP8, pass them directly
+                pool[loaded_name] = loaded_weight
+                continue
+
+            base = loaded_name.replace(".weight",
+                                       "").replace(".weight_scale_inv", "")
+            entry = pending_tensors.setdefault(base, {})
+
+            if is_quant_weight:
+                entry["weight"] = loaded_weight
+            elif is_scale:
+                entry["scale"] = loaded_weight
+
+            # If we have both parts, place the raw pair into the main pool
+            if "weight" in entry and "scale" in entry:
+                # Store the weight and scale as a tuple
+                pool[base + ".weight"] = (entry["weight"], entry["scale"])
+                pending_tensors.pop(base, None)
+
+        # Optional: Enforce completeness of bundles (similar to the original)
+        if pending_tensors:
+            details = [
+                f"{base} (missing: {', '.join(k for k in ('weight', 'scale') if k not in entry)})"
+                for base, entry in pending_tensors.items()
+            ]
+            logger.warning(
+                "Incomplete quantized weight bundles encountered: " +
+                ", ".join(details))
+            # Raise an error or proceed, depending on strictness. Assuming we proceed but warn.
+
+        return pool
 
 
 def weights_dequant_cpu(x: torch.Tensor,

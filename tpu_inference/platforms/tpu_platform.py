@@ -12,7 +12,7 @@ from vllm.platforms.interface import Platform, PlatformEnum
 from vllm.sampling_params import SamplingParams, SamplingType
 
 from tpu_inference import envs
-from tpu_inference.layers.jax.sharding import ShardingConfigManager
+from tpu_inference.layers.common.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
 
 if TYPE_CHECKING:
@@ -45,7 +45,12 @@ class TpuPlatform(Platform):
     simple_compile_backend: str = "openxla"
 
     supported_quantization: list[str] = [
-        "tpu_int8", "compressed-tensors", "awq", "fp8", "mxfp4"
+        "tpu_int8",
+        "compressed-tensors",
+        "awq",
+        "fp8",
+        "mxfp4",
+        "tpu_fp4",
     ]
 
     additional_env_vars: list[str] = [
