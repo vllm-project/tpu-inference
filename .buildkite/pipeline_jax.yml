@@ -36,7 +36,7 @@ steps:
      key: test_2
      soft_fail: true
      env:
-       NEW_MODEL_DESIGN: "True"
+       NEW_MODEL_DESIGN: "1"
      agents:
        queue: tpu_v6e_queue
      commands:
@@ -62,7 +62,7 @@ steps:
      key: test_4
      soft_fail: true
      env:
-       NEW_MODEL_DESIGN: "True"
+       NEW_MODEL_DESIGN: "1"
        USE_V6E8_QUEUE: "True"
      agents:
        queue: tpu_v6e_8_queue
@@ -193,7 +193,7 @@ steps:
      key: test_12
      soft_fail: true
      env:
-       NEW_MODEL_DESIGN: "True"
+       NEW_MODEL_DESIGN: "1"
        USE_V6E8_QUEUE: "True"
        SKIP_ACCURACY_TESTS: "True"
        VLLM_MLA_DISABLE: "1"
@@ -231,7 +231,7 @@ steps:
 #     key: test_14
 #     soft_fail: true
 #     env:
-#       NEW_MODEL_DESIGN: "True"
+#       NEW_MODEL_DESIGN: "1"
 #     agents:
 #       queue: tpu_v6e_8_queue
 #     commands:

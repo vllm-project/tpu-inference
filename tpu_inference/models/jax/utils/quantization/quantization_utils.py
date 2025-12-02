@@ -154,12 +154,9 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
     logger.info(f"Memory usage before applying quantization of params: "
                 f"hbm={utils.hbm_usage_gb(jax.local_devices())}Gb")
 
-    # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
-    kv_cache_jnp_dtype = utils.get_jax_dtype_from_str_dtype(kv_cache_dtype)
-
-    # Handle the case where kv_cache_dtype is "auto"
-    if kv_cache_jnp_dtype is None:
-        assert kv_cache_dtype == "auto", "kv_cache_dtype must be 'auto' if kv_cache_jnp_dtype is None"
+    if kv_cache_dtype != "auto":
+        kv_cache_jnp_dtype = utils.to_jax_dtype(kv_cache_dtype)
+    else:
         kv_cache_jnp_dtype = DEFAULT_KV_CACHE_DTYPE
 
     kv_caches = create_kv_caches(
