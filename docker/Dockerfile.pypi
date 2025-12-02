@@ -15,12 +15,14 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /workspace/tpu_inference
 COPY . .
 RUN export TPU_INFERENCE_VERSION=$(pip index versions tpu-inference --pre 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.dev[0-9]+" | head -n 1) && \
-    echo -n "TPU_INFERENCE_VERSION: $TPU_INFERENCE_VERSION" > /tmp/tpu_inference_version
+    echo -n "$TPU_INFERENCE_VERSION" > /tmp/tpu_inference_version && \
+    echo "Installing tpu-inference version: $TPU_INFERENCE_VERSION"
 
 # Clone vLLM
 WORKDIR /workspace/vllm
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 RUN git clone $VLLM_REPO /workspace/vllm
+RUN RUN pip install build
 RUN export TPU_INFERENCE_VERSION=$(cat /tmp/tpu_inference_version) && \
     echo "Using tpu-inference version: $TPU_INFERENCE_VERSION" && \
     sed -i "s/^tpu-inference==.*/tpu-inference==${TPU_INFERENCE_VERSION}/" requirements/tpu.txt && \
