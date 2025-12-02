@@ -1,7 +1,6 @@
 import torchax
 from jax.sharding import Mesh, PartitionSpec
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, FusedMoEConfig
 # yapf: disable
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -13,6 +12,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 
 from tpu_inference.layers.vllm.linear_common import \
     get_model_matmul_fusion_assignment
+from tpu_inference.logger import init_logger
 from tpu_inference.utils import TPU_SECOND_LAST_MINOR
 
 # yapf: enable
@@ -74,12 +74,12 @@ class JaxCommonLinearConfig:
             # NOTE(chengjiyao): make sure the sharded token_num is larger than TPU_SECOND_LAST_MINOR
             if token_num // self.mesh.shape["model"] >= TPU_SECOND_LAST_MINOR:
                 logger.info(
-                    f"SP is enabled, but token_num // self.mesh.shape[\"model\"] >= TPU_SECOND_LAST_MINOR, return input sharding {self.input_sharding}."
+                    f"SP is enabled, returning non-None input sharding {self.input_sharding}. token_num // self.mesh.shape[model] >= TPU_SECOND_LAST_MINOR. {token_num=}, {self.mesh.shape['model']=}, {TPU_SECOND_LAST_MINOR=}."
                 )
                 return self.input_sharding
             else:
                 logger.info(
-                    "SP is enabled, but token_num // self.mesh.shape[\"model\"] < TPU_SECOND_LAST_MINOR, return input sharding None."
+                    f"SP is enabled, returning input sharding None. token_num // self.mesh.shape[model] < TPU_SECOND_LAST_MINOR. {token_num=}, {self.mesh.shape['model']=}, {TPU_SECOND_LAST_MINOR=}."
                 )
                 return None
         return self.input_sharding
@@ -90,12 +90,12 @@ class JaxCommonLinearConfig:
             # NOTE(chengjiyao): make sure the sharded token_num is larger than TPU_SECOND_LAST_MINOR
             if token_num // self.mesh.shape["model"] >= TPU_SECOND_LAST_MINOR:
                 logger.info(
-                    f"SP is enabled, but token_num // self.mesh.shape[\"model\"] >= TPU_SECOND_LAST_MINOR, return output sharding {self.output_sharding}."
+                    f"SP is enabled, returning non-None output sharding {self.output_sharding}. token_num // self.mesh.shape[model] >= TPU_SECOND_LAST_MINOR. {token_num=}, {self.mesh.shape['model']=}, {TPU_SECOND_LAST_MINOR=}."
                 )
                 return self.output_sharding
             else:
                 logger.info(
-                    "SP is enabled, but token_num // self.mesh.shape[\"model\"] >= TPU_SECOND_LAST_MINOR, return output sharding None."
+                    f"SP is enabled, return output sharding None. token_num // self.mesh.shape[model] < TPU_SECOND_LAST_MINOR. {token_num=}, {self.mesh.shape['model']=}, {TPU_SECOND_LAST_MINOR=}."
                 )
                 return None
         return self.output_sharding
