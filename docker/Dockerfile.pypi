@@ -14,24 +14,28 @@ RUN apt-get update && apt-get install -y \
 # Install tpu_inference
 WORKDIR /workspace/tpu_inference
 COPY . .
-RUN export TARGET_TAG=$(git tag -l "v*" --sort=-v:refname | grep -E "^v[0-9]+\.[0-9]+\.[0-9]+$" | head -n 1) && \
-    echo "Found tpu_inference tag: $TARGET_TAG" && \
-    git checkout "$TARGET_TAG" && \
-    echo -n "$TARGET_TAG" > /tmp/target_version
+RUN export TPU_INFERENCE_VERSION=$(pip index versions tpu-inference --pre 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.dev[0-9]+" | head -n 1) && \
+    echo -n "TPU_INFERENCE_VERSION: $TPU_INFERENCE_VERSION" > /tmp/tpu_inference_version
 
 # Clone vLLM
 WORKDIR /workspace/vllm
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 RUN git clone $VLLM_REPO /workspace/vllm
-RUN export TARGET_TAG=$(cat /tmp/target_version) && \
-    echo "Syncing vLLM to match tpu_inference tag: $TARGET_TAG" && \
-    git checkout "$TARGET_TAG"
+RUN export TPU_INFERENCE_VERSION=$(cat /tmp/tpu_inference_version) && \
+    echo "Using tpu-inference version: $TPU_INFERENCE_VERSION" && \
+    sed -i "s/^tpu-inference==.*/tpu-inference==${TPU_INFERENCE_VERSION}/" requirements/tpu.txt && \
+    echo "Starting build.sh" && \
+    bash tools/vllm-tpu/build.sh ${TPU_INFERENCE_VERSION}
 
-# Install vllm-tpu from PyPI
-RUN export TARGET_TAG=$(cat /tmp/target_version) && \
-    export PIP_VERSION=$(echo "$TARGET_TAG" | sed 's/^v//') && \
-    echo "Installing vllm-tpu version: $PIP_VERSION" && \
-    python3 -m pip install -v --no-cache-dir "vllm-tpu==$PIP_VERSION"
+# Install vllm-tpu from wheel
+WORKDIR /workspace/vllm/dist
+RUN ls -lah *.whl
+RUN echo "pip installing vllm-tpu" && \
+    pip install *.whl
+# RUN export TPU_INFERENCE_VERSION=$(cat /tmp/tpu_inference_version) && \
+  #   export PIP_VERSION=$(echo "$TPU_INFERENCE_VERSION" | sed 's/^v//') && \
+    # echo "Installing vllm-tpu version: $PIP_VERSION" && \
+    # python3 -m pip install -v --no-cache-dir "vllm-tpu==$PIP_VERSION"
 
 # Install test dependencies
 RUN python3 -m pip install -e tests/vllm_test_utils

@@ -2,7 +2,7 @@ steps:
   # -----------------------------------------------------------------
   # TEST STEPS - Calling wrapper
   # -----------------------------------------------------------------
-   - label: "E2E MLPerf tests for JAX models"
+   - label: "wheel E2E MLPerf tests for JAX models"
      key: test_0
      soft_fail: true
      agents:
@@ -10,7 +10,7 @@ steps:
      commands:
        - .buildkite/scripts/run_with_pypi.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
 
-   - label: "E2E multi modality test"
+   - label: "wheel E2E multi modality test"
      key: test_5
      soft_fail: true
      agents:
@@ -21,7 +21,7 @@ steps:
            bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_multi_modal_inference.py && \
             bash /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench.sh'
 
-   - label: "E2E speculative decoding test"
+   - label: "wheel E2E speculative decoding test"
      key: test_6
      soft_fail: true
      agents:
@@ -31,7 +31,7 @@ steps:
          .buildkite/scripts/run_with_pypi.sh \
            bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py'
 
-   - label: "JAX unit tests"
+   - label: "wheel JAX unit tests"
      key: test_7
      soft_fail: true
      agents:
@@ -46,7 +46,7 @@ steps:
            --ignore=/workspace/tpu_inference/tpu_inference/mock \
            --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference --cov-report term-missing --cov-fail-under=69
 
-   - label: "JAX unit tests - kernels"
+   - label: "wheel JAX unit tests - kernels"
      key: test_8
      soft_fail: true
      agents:
@@ -59,7 +59,7 @@ steps:
            --ignore=/workspace/tpu_inference/tests/kernels/ragged_kv_cache_update_v2_test.py \
            --ignore=/workspace/tpu_inference/tests/kernels/collectives
 
-   - label: "JAX unit tests - collective kernels"
+   - label: "wheel JAX unit tests - collective kernels"
      key: test_9
      soft_fail: true
      agents:
@@ -69,7 +69,7 @@ steps:
          .buildkite/scripts/run_with_pypi.sh \
            python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels/collectives
 
-   - label: "lora tests for JAX + vLLM models"
+   - label: "wheel lora tests for JAX + vLLM models"
      key: test_10
      soft_fail: true
      agents:
@@ -79,7 +79,7 @@ steps:
          .buildkite/scripts/run_with_pypi.sh \
            bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py'
 
-   - label: "E2E MLperf tests for DeepSeek-R1 (no accuracy, 12-decoder layers only)"
+   - label: "wheel E2E MLperf tests for DeepSeek-R1 (no accuracy, 12-decoder layers only)"
      key: test_12
      soft_fail: true
      env:
@@ -95,7 +95,7 @@ steps:
 
 
 
-   - label: "TPU Test 0: test_perf.py"
+   - label: "wheel TPU Test 0: test_perf.py"
      key: tpu_test_0
      soft_fail: true
      agents:
@@ -103,7 +103,7 @@ steps:
      commands:
        - .buildkite/scripts/run_with_pypi.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_perf.py
 
-   - label: "TPU Test 1: test_compilation.py"
+   - label: "wheel TPU Test 1: test_compilation.py"
      key: tpu_test_1
      soft_fail: true
      agents:
@@ -111,7 +111,7 @@ steps:
      commands:
        - .buildkite/scripts/run_with_pypi.sh python3 -m pytest -s -v /workspace/vllm/tests/tpu/test_compilation.py
 
-   - label: "TPU Test 2: test_basic.py"
+   - label: "wheel TPU Test 2: test_basic.py"
      key: tpu_test_2
      soft_fail: true
      agents:
@@ -119,7 +119,7 @@ steps:
      commands:
        - .buildkite/scripts/run_with_pypi.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_basic.py
 
-   - label: "TPU Test 3: test_accuracy.py (v1)"
+   - label: "wheel TPU Test 3: test_accuracy.py (v1)"
      key: tpu_test_3
      soft_fail: true
      agents:
@@ -127,7 +127,7 @@ steps:
      commands:
        - .buildkite/scripts/run_with_pypi.sh python3 -m pytest -s -v /workspace/vllm/tests/entrypoints/llm/test_accuracy.py::test_lm_eval_accuracy_v1_engine
 
-   - label: "TPU Test 4: test_quantization_accuracy.py"
+   - label: "wheel TPU Test 4: test_quantization_accuracy.py"
      key: tpu_test_4
      soft_fail: true
      agents:
@@ -135,7 +135,7 @@ steps:
      commands:
        - .buildkite/scripts/run_with_pypi.sh python3 -m pytest -s -v /workspace/vllm/tests/tpu/test_quantization_accuracy.py
 
-   - label: "TPU Test 5: examples/offline_inference/tpu.py"
+   - label: "wheel TPU Test 5: examples/offline_inference/tpu.py"
      key: tpu_test_5
      soft_fail: true
      agents:
@@ -143,7 +143,7 @@ steps:
      commands:
        - .buildkite/scripts/run_with_pypi.sh python3 /workspace/vllm/examples/offline_inference/tpu.py
 
-   - label: "TPU Test 6: test_tpu_model_runner.py"
+   - label: "wheel TPU Test 6: test_tpu_model_runner.py"
      key: tpu_test_6
      soft_fail: true
      agents:
@@ -151,7 +151,7 @@ steps:
      commands:
        - .buildkite/scripts/run_with_pypi.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/worker/test_tpu_model_runner.py
 
-   - label: "TPU Test 7: test_sampler.py"
+   - label: "wheel TPU Test 7: test_sampler.py"
      key: tpu_test_7
      soft_fail: true
      agents:
@@ -159,7 +159,7 @@ steps:
      commands:
        - .buildkite/scripts/run_with_pypi.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_sampler.py
 
-   - label: "TPU Test 8: test_topk_topp_sampler.py"
+   - label: "wheel TPU Test 8: test_topk_topp_sampler.py"
      key: tpu_test_8
      soft_fail: true
      agents:
@@ -167,7 +167,7 @@ steps:
      commands:
        - .buildkite/scripts/run_with_pypi.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_topk_topp_sampler.py
 
-   - label: "TPU Test 9: test_multimodal.py"
+   - label: "wheel TPU Test 9: test_multimodal.py"
      key: tpu_test_9
      soft_fail: true
      agents:
@@ -175,7 +175,7 @@ steps:
      commands:
        - .buildkite/scripts/run_with_pypi.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_multimodal.py
 
-   - label: "TPU Test 10: test_pallas.py"
+   - label: "wheel TPU Test 10: test_pallas.py"
      key: tpu_test_10
      soft_fail: true
      agents:
@@ -183,7 +183,7 @@ steps:
      commands:
        - .buildkite/scripts/run_with_pypi.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_pallas.py
 
-   - label: "TPU Test 11: test_struct_output_generate.py"
+   - label: "wheel TPU Test 11: test_struct_output_generate.py"
      key: tpu_test_11
      soft_fail: true
      agents:
@@ -191,7 +191,7 @@ steps:
      commands:
        - .buildkite/scripts/run_with_pypi.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/entrypoints/llm/test_struct_output_generate.py
 
-   - label: "TPU Test 12: test_moe_pallas.py"
+   - label: "wheel TPU Test 12: test_moe_pallas.py"
      key: tpu_test_12
      soft_fail: true
      agents:
@@ -199,7 +199,7 @@ steps:
      commands:
       - .buildkite/scripts/run_with_pypi.sh python3 -m pytest -s -v /workspace/vllm/tests/tpu/test_moe_pallas.py
 
-   - label: "TPU Test 13: ragged_paged_attention_test.py"
+   - label: "wheel TPU Test 13: ragged_paged_attention_test.py"
      key: tpu_test_13
      soft_fail: true
      agents:
@@ -210,7 +210,7 @@ steps:
   # -----------------------------------------------------------------
   # NOTIFICATION STEP
   # -----------------------------------------------------------------
-   - label: "TPU V1 Test Notification"
+   - label: "wheel TPU V1 Test Notification"
      depends_on:
        - tpu_test_0
        - tpu_test_1
