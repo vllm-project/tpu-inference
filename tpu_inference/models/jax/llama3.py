@@ -356,6 +356,7 @@ class LlamaForCausalLM(nnx.Module):
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
         _input_embeds,
+        _input_positions,
         _layer_name_to_kv_cache,
         _lora_metadata,
         intermediate_tensors: JaxIntermediateTensors,

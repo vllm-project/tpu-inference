@@ -337,10 +337,11 @@ def _load_and_shard_weight(vllm_config,
                 f"Skip loading {hf_key} as it's not used in eagle-3 for now")
             return
         model_key = name_map.get(hf_key, hf_key)
-    
-    if pp_missing_layers and _is_pp_missing_layer(hf_key,pp_missing_layers):
-        logger.warning(f"Skip loading {hf_key} as it doesn't belong to this PP stage.")
-        return 
+
+    if pp_missing_layers and _is_pp_missing_layer(hf_key, pp_missing_layers):
+        logger.warning(
+            f"Skip loading {hf_key} as it doesn't belong to this PP stage.")
+        return
     model_weight, model_sharding = get_param_and_sharding(
         params, shardings, model_key)
 
@@ -403,12 +404,14 @@ def _load_and_shard_weight(vllm_config,
         model_weight.sharding, NamedSharding) else model_weight.sharding
     model_weight.value = shard(hf_weight, spec)
 
+
 def _is_pp_missing_layer(hf_key: str, pp_missing_layers: list[str]) -> bool:
     has_digit = any(char.isdigit() for char in hf_key)
     # add the suffix after digits to avoid it matches "layers.10" with "layers.1"
     suffix = "." if has_digit else ""
     return any(f'{pp_missing_layer}{suffix}' in hf_key
-                for pp_missing_layer in pp_missing_layers)
+               for pp_missing_layer in pp_missing_layers)
+
 
 def _load_hf_weights_on_thread(
     vllm_config: VllmConfig,
