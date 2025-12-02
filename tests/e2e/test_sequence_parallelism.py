@@ -13,24 +13,25 @@ from vllm.config import CompilationConfig
 @pytest.fixture(autouse=True)
 def setup_new_model_design():
     os.environ['MODEL_IMPL_TYPE'] = 'vllm'
-    os.environ['SKIP_JAX_PRECOMPILE'] = '1'
+    # os.environ['SKIP_JAX_PRECOMPILE'] = '1'
 
 
 @pytest.fixture
 def test_prompts():
     """Simple test prompts for data parallelism testing."""
     return [
+        # having a long prompt to trigger a edge case.
         "Three Rings for the Elven-kings under the sky, Seven for the Dwarf-lords in their halls of stone, Nine for Mortal Men doomed to die, One for the Dark Lord on his dark throne In the Land of Mordor where the Shadows lie. One Ring to rule them all, One Ring to find them, One Ring to bring them all and in the darkness bind them In the Land of Mordor where the Shadows lie.",
-        # "Hello, my name is",
-        # "The capital of France is",
-        # "The colors of the rainbow are",
-        # "The future of AI is",
-        # "The president of the United States is",
-        # "How many players are on a standard soccer team?",
-        # "In Greek mythology, who is the god of the sea?",
-        # "What is the capital of Australia?",
-        # "What is the largest planet in our solar system?",
-        # "Who developed the theory of general relativity?",
+        "Hello, my name is",
+        "The capital of France is",
+        "The colors of the rainbow are",
+        "The future of AI is",
+        "The president of the United States is",
+        "How many players are on a standard soccer team?",
+        "In Greek mythology, who is the god of the sea?",
+        "What is the capital of Australia?",
+        "What is the largest planet in our solar system?",
+        "Who developed the theory of general relativity?",
     ]
 
 
