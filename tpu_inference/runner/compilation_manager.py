@@ -286,7 +286,9 @@ class CompilationManager:
                                                   dp_sharding)
             is_first_rank = self.runner.is_first_rank
             is_last_rank = self.runner.is_last_rank
-            if not is_first_rank:
+            if is_first_rank:
+                intermediate_tensors = None
+            else:
                 hidden_states = self._create_dummy_tensor(
                     (num_tokens, hidden_size), jnp.bfloat16)
                 residual = self._create_dummy_tensor((num_tokens, hidden_size),
@@ -296,8 +298,6 @@ class CompilationManager:
                         "hidden_states": hidden_states,
                         "residual": residual
                     })
-            else:
-                intermediate_tensors = None
             self._precompile_backbone_helper(
                 f"worker{self.runner.rank} backbone",
                 input_ids=input_ids,

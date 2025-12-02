@@ -91,7 +91,7 @@ def test_pipeline_parallelism_jax_model(
     Equivalent to:
     python examples/offline_inference.py --tensor_parallel_size=1 --pipeline_parallel_size=2
     """
-    # Test with data parallelism enabled
+    # Test with pipeline parallelism enabled
     outputs = _run_inference_with_config(
         model_name=model_name,
         test_prompts=test_prompts,
@@ -124,7 +124,7 @@ def test_pipeline_parallelism_vllm_model(
     with tensor parallelism.
 
     Equivalent to:
-    MODEL_IMPL_TYPE=vllm python examples/offline_inference.py --tensor_parallel_size=2 --pipeline_parallel_size=2
+    MODEL_IMPL_TYPE=vllm python examples/offline_inference.py --tensor_parallel_size=1 --pipeline_parallel_size=2
     """
 
     os.environ['MODEL_IMPL_TYPE'] = 'vllm'
