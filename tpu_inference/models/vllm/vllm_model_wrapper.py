@@ -263,7 +263,6 @@ def load_lora_model(model: torch.nn.Module, vllm_config: VllmConfig,
         vllm_config,
         device,
         model.embedding_modules,
-        model.embedding_padding_modules,
     )
     return lora_manager, lora_manager.create_lora_manager(model)
 
