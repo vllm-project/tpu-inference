@@ -1342,7 +1342,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             for req_id in req_ids_dp[dp_rank]:
                 if scheduler_output.num_scheduled_tokens[req_id] == 1:
                     num_decode_in_dp_rank += 1
-            _request_distribution.append([num_decode_in_dp_rank, num_decode_in_dp_rank, _num_reqs])
+            _request_distribution.append(
+                [num_decode_in_dp_rank, num_decode_in_dp_rank, _num_reqs])
         request_distribution = np.array(_request_distribution).ravel()
 
         use_spec_decode = len(
