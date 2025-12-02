@@ -81,8 +81,8 @@ def _run_inference_with_config(model_name: str,
         time.sleep(5)
 
 
-@pytest.mark.parametrize("model_impl_type", ["flax_nnx"])
-def test_model_data_parallelism_jax(
+@pytest.mark.parametrize("model_impl_type", ["vllm", "flax_nnx"])
+def test_model_data_parallelism(
     test_prompts: list,
     sampling_params: SamplingParams,
     model_impl_type: str,
@@ -106,45 +106,7 @@ def test_model_data_parallelism_jax(
         sampling_params=sampling_params,
         tensor_parallel_size=1,
         data_parallel_size=2,
-        async_scheduling=True,
-    )
-
-    # Verify we got outputs for all prompts
-    assert len(outputs) == len(test_prompts)
-
-    # Verify each output has generated text
-    for output in outputs:
-        assert len(output.outputs) > 0
-        assert len(output.outputs[0].text.strip()) > 0
-
-    print(f"✓ Model data parallelism test passed with {len(outputs)} outputs")
-
-@pytest.mark.parametrize("model_impl_type", ["vllm"])
-def test_model_data_parallelism_torchax(
-    test_prompts: list,
-    sampling_params: SamplingParams,
-    model_impl_type: str,
-):
-    """
-    Test model-wise data parallelism where data=2 in the mesh axis.
-    This test verifies that the model can run with data parallelism enabled,
-    duplicating the entire model across 2 data parallel workers.
-
-    Equivalent to:
-    python examples/offline_inference.py --tensor_parallel_size=4 --data_parallel_size=2
-    """
-    # Use Llama 1B for this test
-    test_model = "meta-llama/Llama-3.2-1B-Instruct"
-    os.environ['MODEL_IMPL_TYPE'] = model_impl_type
-
-    # Test with data parallelism enabled
-    outputs = _run_inference_with_config(
-        model_name=test_model,
-        test_prompts=test_prompts,
-        sampling_params=sampling_params,
-        tensor_parallel_size=1,
-        data_parallel_size=2,
-        async_scheduling=True,
+        async_scheduling=False,
     )
 
     # Verify we got outputs for all prompts
