@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any, Optional, Tuple, Union, cast
 import jax.numpy as jnp
 import torch
 import vllm.envs as vllm_envs
-from torchax.ops.mappings import j2t_dtype
 from tpu_info import device
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.platforms.interface import Platform, PlatformEnum
@@ -14,6 +13,7 @@ from vllm.sampling_params import SamplingParams, SamplingType
 from tpu_inference import envs
 from tpu_inference.layers.common.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
+from tpu_inference.utils import to_jax_dtype, to_torch_dtype
 
 if TYPE_CHECKING:
     from vllm.attention.backends.registry import _Backend
@@ -27,12 +27,6 @@ else:
     _Backend = None
 
 logger = init_logger(__name__)
-
-_DTYPE: dict[str, jnp.dtype] = {
-    "bfloat16": jnp.bfloat16,
-    "float": jnp.float32,
-    "float32": jnp.float32,
-}
 
 
 class TpuPlatform(Platform):
@@ -159,20 +153,19 @@ class TpuPlatform(Platform):
         # NOTE(xiang): convert dtype to jnp.dtype
         # NOTE(wenlong): skip this logic for mm model preprocessing
         # For mm model preprocessors, it may need the output dtype to be torch.
-        # In order to avoid a PR to vLLM, we postpone the dtype checking during tpu_worker initialization
+        # In order to avoid a PR to vLLM, we postpone the dtype checking during
+        # tpu_worker initialization
         if not vllm_config.scheduler_config.is_multimodal_model or impl == "vllm":
-            if not isinstance(vllm_config.model_config.dtype, str):
-                logger.warning(
-                    "The model dtype is not properly set for JAX backend. "
-                    "Overwriting it to jnp.bfloat16")
-                vllm_config.model_config.dtype = jnp.bfloat16
-            else:
-                vllm_config.model_config.dtype = _DTYPE.get(
-                    vllm_config.model_config.dtype, jnp.bfloat16)
-
-        if impl == "vllm":
-            vllm_config.model_config.dtype = j2t_dtype(
-                vllm_config.model_config.dtype.dtype)
+            model_dtype = vllm_config.model_config.dtype
+            try:
+                dtype = to_jax_dtype(model_dtype)
+            except ValueError:
+                logger.warning(f"{model_dtype=} is not supported. "
+                               "Falling back to jnp.bfloat16")
+                dtype = jnp.bfloat16
+            if impl == "vllm":
+                dtype = to_torch_dtype(dtype)
+            vllm_config.model_config.dtype = dtype
 
         # TODO(cuiq): remove this dependency.
         from vllm.v1.attention.backends.pallas import PallasAttentionBackend

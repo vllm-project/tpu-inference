@@ -9,13 +9,11 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
-import torch
 import vllm.envs as vllm_envs
 import vllm.envs as envs
 from flax import nnx
 from jax.experimental import mesh_utils
 from jax.sharding import NamedSharding, PartitionSpec
-from torchax.ops.mappings import j2t_dtype
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
@@ -65,7 +63,7 @@ from tpu_inference.runner.structured_decoding_manager import \
     StructuredDecodingManager
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
 from tpu_inference.utils import (device_array, make_optimized_mesh,
-                                 time_function)
+                                 time_function, to_torch_dtype)
 
 logger = init_logger(__name__)
 
@@ -78,17 +76,6 @@ DUMMY_METADATA = AttentionMetadata(
     block_tables=[],
     request_distribution=[0, 0, 0],
 )
-
-TPU_STR_DTYPE_TO_TORCH_DTYPE = {
-    "half": torch.half,
-    "bfloat16": torch.bfloat16,
-    "float": torch.float,
-    "fp8": torch.float8_e4m3fn,
-    "fp8_e4m3": torch.float8_e4m3fn,
-    "fp8_e5m2": torch.float8_e5m2,
-    "int8": torch.int8,
-    "uint8": torch.uint8,
-}
 
 
 class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
@@ -263,22 +250,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.uses_mrope, self.model_config)
         self.lora_utils = LoraUtils(self)
 
-        cache_config = self.cache_config
-        if cache_config.cache_dtype == "auto":
-            model_dtype = self.dtype
-            if isinstance(model_dtype, str):
-                self.kv_cache_dtype = TPU_STR_DTYPE_TO_TORCH_DTYPE[model_dtype]
-            elif isinstance(getattr(model_dtype, 'dtype', None), jnp.dtype):
-                self.kv_cache_dtype = j2t_dtype(model_dtype.dtype)
-            elif isinstance(model_dtype, torch.dtype):
-                self.kv_cache_dtype = model_dtype
-            else:
-                raise ValueError(
-                    "KV cache is unsupported for model_dtype of %s",
-                    model_dtype)
-        else:
-            self.kv_cache_dtype = TPU_STR_DTYPE_TO_TORCH_DTYPE[
-                cache_config.cache_dtype]
+        cache_dtype = self.cache_config.cache_dtype
+        if cache_dtype == "auto":
+            cache_dtype = self.dtype
+        self.kv_cache_dtype = to_torch_dtype(cache_dtype)
 
         self._pre_async_results: AsyncPreResults | None = None
         self._substitute_placeholder_token_fn = _substitute_placeholder_token
