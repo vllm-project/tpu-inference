@@ -331,7 +331,6 @@ class TestTPUConnectorWorker(unittest.TestCase):
         self.vllm_config.kv_transfer_config.is_kv_producer = True
         worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
 
-        self.all_mocks["start_transfer_server"].assert_called_once()
         self.all_mocks["zmq"].Context.assert_called_once()
         self.all_mocks["threading"].Thread.assert_called_once()
         self.all_mocks["threading"].Event.assert_called()
@@ -343,7 +342,6 @@ class TestTPUConnectorWorker(unittest.TestCase):
         self.vllm_config.kv_transfer_config.is_kv_producer = False
         worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
 
-        self.all_mocks["start_transfer_server"].assert_called_once()
         self.all_mocks["zmq"].Context.assert_called_once()
         self.all_mocks["threading"].Thread.assert_not_called()
         self.all_mocks["ThreadPoolExecutor"].assert_called_once_with(
@@ -365,6 +363,7 @@ class TestTPUConnectorWorker(unittest.TestCase):
 
         worker.register_runner(mock_runner)
 
+        self.all_mocks["start_transfer_server"].assert_called_once()
         self.assertEqual(worker.runner, mock_runner)
         self.assertEqual(worker.mesh, 'mesh')
         self.assertEqual(worker.num_layers, 5)
