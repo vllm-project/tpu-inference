@@ -73,12 +73,12 @@ class JaxCommonLinearConfig:
             token_num = x.shape[0]
             # NOTE(chengjiyao): make sure the sharded token_num is larger than TPU_SECOND_LAST_MINOR
             if token_num // self.mesh.shape["model"] >= TPU_SECOND_LAST_MINOR:
-                logger.info(
+                logger.debug(
                     f"SP is enabled, returning non-None input sharding {self.input_sharding}. token_num // self.mesh.shape[model] >= TPU_SECOND_LAST_MINOR. {token_num=}, {self.mesh.shape['model']=}, {TPU_SECOND_LAST_MINOR=}."
                 )
                 return self.input_sharding
             else:
-                logger.info(
+                logger.debug(
                     f"SP is enabled, returning input sharding None. token_num // self.mesh.shape[model] < TPU_SECOND_LAST_MINOR. {token_num=}, {self.mesh.shape['model']=}, {TPU_SECOND_LAST_MINOR=}."
                 )
                 return None
@@ -89,12 +89,12 @@ class JaxCommonLinearConfig:
             token_num = x.shape[0]
             # NOTE(chengjiyao): make sure the sharded token_num is larger than TPU_SECOND_LAST_MINOR
             if token_num // self.mesh.shape["model"] >= TPU_SECOND_LAST_MINOR:
-                logger.info(
+                logger.debug(
                     f"SP is enabled, returning non-None output sharding {self.output_sharding}. token_num // self.mesh.shape[model] >= TPU_SECOND_LAST_MINOR. {token_num=}, {self.mesh.shape['model']=}, {TPU_SECOND_LAST_MINOR=}."
                 )
                 return self.output_sharding
             else:
-                logger.info(
+                logger.debug(
                     f"SP is enabled, return output sharding None. token_num // self.mesh.shape[model] < TPU_SECOND_LAST_MINOR. {token_num=}, {self.mesh.shape['model']=}, {TPU_SECOND_LAST_MINOR=}."
                 )
                 return None
