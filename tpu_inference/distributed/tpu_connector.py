@@ -457,7 +457,6 @@ class TPUConnectorWorker:
         self.side_channel_port = get_side_channel_port()
 
         self.kv_transfer_server = None
-        self._maybe_start_p2p_server()
         self.zmq_cxt = zmq.Context()
         if self.is_producer:
             ready_event = threading.Event()
@@ -499,6 +498,7 @@ class TPUConnectorWorker:
         self.shape = list(kv_layer.shape)
         self.dtype = kv_layer.dtype
         self.sharding = kv_layer.sharding
+        self._maybe_start_p2p_server()
 
     def _maybe_start_p2p_server(self):
         if self.kv_transfer_server is not None:

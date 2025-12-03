@@ -136,10 +136,14 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
 
         pp_size = self.parallel_config.pipeline_parallel_size
         placement_group_specs: List[Dict[str, float]] = []
+
+        ray_nodes = ray.nodes()
+        logger.info(f"RayDistributedExecutor | ray_nodes={ray_nodes}")
+
         if pp_size == 1:
             placement_group_specs = [{
                 device_str: node['Resources'][device_str]
-            } for node in ray.nodes()]
+            } for node in ray_nodes]
         else:
             num_devices_per_pp_rank = self.vllm_config.sharding_config.total_devices
             placement_group_specs = [{

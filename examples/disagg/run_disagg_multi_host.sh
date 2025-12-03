@@ -12,14 +12,14 @@ if [ -n "$CONTAINERS" ]; then
   docker rm -f $CONTAINERS
 fi
 
-# NOTE: Strange ray race condition between dock build and ray start in single machine
-# if you find error, comments these line and rerun this .sh file
-#  _wait_until_pg_ready(current_placement_group)
-# tpu-inference/tpu_inference/executors/ray_distributed_executor.py
+# update the BUILDKITE_COMMIT to the right commit hash
+# organize the docker_image in this way, which can share
+# the image for benchmark and buildkite code
+BUILDKITE_COMMIT='000'
+DOCKER_IMAGE="vllm-tpu:${BUILDKITE_COMMIT}"
 
 docker image prune -f
-docker build -f docker/Dockerfile -t ullm:test .
-DOCKER_IMAGE="ullm:test"
+docker build -f docker/Dockerfile -t ${DOCKER_IMAGE} .
 
 HOST_HF_HOME="/mnt/disks/data/hf-docker"
 NUM_HOSTS_PER_INSTANCE=4
@@ -117,7 +117,7 @@ for ((i=0; i<NUM_HOSTS_PER_INSTANCE; i++)); do
     tpu_index=$((i + NUM_HOSTS_PER_INSTANCE))
 
     if [[ i -eq 0 ]]; then
-        DOCKER_CMD="ray start --block --head --port=${DECODE_RAY_PORT}"
+        DOCKER_CMD="ray start --block --head --port=${DECODE_RAY_PORT} --min-worker-port=20000 --max-worker-port=29999"
     else
         DOCKER_CMD="ray start --block --address=127.0.0.1:${DECODE_RAY_PORT}"
     fi
@@ -171,3 +171,28 @@ docker exec node-20 /bin/bash -c \
     --kv-transfer-config '{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\"}' \
     > /root/logs/decode.txt 2>&1 &"
 set +x
+
+
+# Start proxy server
+python $HOME/tpu-inference/examples/disagg/toy_proxy_server.py \
+--host localhost \
+--port 8000 \
+> $HOME/logs/proxy.txt 2>&1 &
+
+
+cat <<'EOF'
+The proxy server has been launched on: 127.0.0.1:8000
+
+>> Send example request:
+
+curl -X POST \
+http://127.0.0.1:8000/v1/completions \
+-H "Content-Type: application/json" \
+-d '{"prompt": "We hold these truths to be self-evident, that all men are created equal, that they are endowed by their Creator with certain unalienable Rights, that among these are Life, Liberty and the pursuit of Happiness.--That to secure these rights, Governments are instituted among Men, deriving their just powers from the consent of the governed,  ", "max_tokens": 10}'
+
+>> Stop the proxy server and all prefill/decode instances:
+
+docker stop $(docker ps -a --filter "name=node*" -q)
+docker rm -f $(docker ps -a --filter "name=node*" -q)
+pkill -f "toy_proxy_server" && pkill -f "run_disagg_multi_host"
+EOF
