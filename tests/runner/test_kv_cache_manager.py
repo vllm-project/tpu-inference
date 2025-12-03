@@ -38,6 +38,8 @@ class TestKVCacheManager:
 
         with patch('jax.devices', return_value=self.mock_devices), \
              patch('jax.make_mesh', return_value=self.mock_mesh), \
+             patch('jax.experimental.mesh_utils.create_device_mesh', return_value=self.mock_mesh), \
+             patch('tpu_inference.runner.tpu_runner.TPUModelRunner._create_new_model_mesh', return_value=self.mock_mesh), \
              patch('jax.random.key', return_value=self.mock_rng_key), \
              patch('tpu_inference.runner.tpu_runner.get_model', return_value=MagicMock()):
 
@@ -278,8 +280,15 @@ class TestKVCacheManager:
         # tests we create kv cache spec from compilation config with mla
         self.runner.kv_cache_manager.use_mla = True
 
+        # Mock hf_text_config to have kv_lora_rank and qk_rope_head_dim
+        mock_hf_text_config = MagicMock()
+        mock_hf_text_config.kv_lora_rank = 400
+        mock_hf_text_config.qk_rope_head_dim = 40
+        self.runner.model_config.hf_text_config = mock_hf_text_config
+
         num_kv_heads = 16
-        head_size = 128
+        head_size = 512 # Aggregated padding amount may be passed to the model instead.
+        expected_head_size = 640 # 640 = align(512, 128) + alignto(40, 128)
         attn_type = AttentionType.DECODER
         static_forward_context = {}
         # Mock one layer, as the logic is the same for all
@@ -302,7 +311,7 @@ class TestKVCacheManager:
         spec = kv_cache_spec['layer.0']
         assert isinstance(spec, MLAAttentionSpec)
         assert spec.num_kv_heads == 1
-        assert spec.head_size == head_size
+        assert spec.head_size == expected_head_size
 
     def test_get_kv_cache_spec_without_compilation_cfg(self):
         # tests if there's no compilation config, we use full attention kv
@@ -331,19 +340,25 @@ class TestKVCacheManager:
         self.runner.kv_cache_manager.use_mla = True
         model_config = self.runner.vllm_config.model_config
         parallel_config = self.runner.vllm_config.parallel_config
-        head_size = model_config.get_head_size()
         num_layers = model_config.get_num_layers(parallel_config)
+        
+        mock_hf_text_config = MagicMock()
+        mock_hf_text_config.kv_lora_rank = 400
+        mock_hf_text_config.qk_rope_head_dim = 40
+        self.runner.model_config.hf_text_config = mock_hf_text_config
+        expected_head_size = 640 # 640 = align(512, 128) + alignto(40, 128)
 
         self.runner.vllm_config.compilation_config.static_forward_context = {}
-        kv_cache_spec = self.runner.get_kv_cache_spec()
+        with patch('vllm.config.ModelConfig.get_num_layers', return_value=num_layers):
+            kv_cache_spec = self.runner.get_kv_cache_spec()
+
 
         assert len(kv_cache_spec) == num_layers
         for i in range(num_layers):
             spec = kv_cache_spec[f"layer.{i}"]
             assert isinstance(spec, MLAAttentionSpec)
             assert spec.num_kv_heads == 1
-            assert spec.head_size == common_utils.get_padded_head_dim(
-                head_size)
+            assert spec.head_size == expected_head_size
 
     def test_initialize_kv_cache(self):
         # create a kv cache config with 10 layers full attention and 10 layers
@@ -440,6 +455,12 @@ class TestKVCacheManager:
         mock_hf_config.num_key_value_heads = 4
         mock_hf_config.hidden_size = 1024
         mock_hf_config.num_attention_heads = 8
+        mock_hf_config.num_layers = 16
+        model_layers = 1
+        mock_hf_text_config = MagicMock()
+        mock_hf_text_config.kv_lora_rank = 400
+        mock_hf_text_config.qk_rope_head_dim = 40
+        self.runner.model_config.hf_text_config = mock_hf_text_config
         mock_draft_model_config.hf_config = mock_hf_config
         mock_speculative_config.draft_model_config = mock_draft_model_config
         self.runner.speculative_config = mock_speculative_config
@@ -448,15 +469,13 @@ class TestKVCacheManager:
 
         # Without compilation context, it will create specs for the main model layers
         # as well as the draft model layer.
-        num_main_layers = self.runner.model_config.get_num_layers(
-            self.runner.parallel_config)
-        assert len(kv_cache_spec) > num_main_layers
+        assert len(kv_cache_spec) > model_layers
 
         assert "draft_layer.0" in kv_cache_spec
         draft_spec = kv_cache_spec["draft_layer.0"]
         assert isinstance(draft_spec, FullAttentionSpec)
 
-        for i in range(num_main_layers):
+        for i in range(model_layers):
             assert f"layer.{i}" in kv_cache_spec
             spec = kv_cache_spec[f"layer.{i}"]
             assert isinstance(spec, MLAAttentionSpec)

@@ -49,32 +49,32 @@ class KVCacheManager:
         # attention into compilation config.
         # Use FullAttentionSpec for each layer
         # TODO(pooyam): Is it possible to merge the logic for vllm and non-vllm models?
+        model_config = self.runner.model_config
+        if self.use_mla:
+            # Individually pad the RopE and latents
+            qk_rope_head_dim = getattr(model_config.hf_text_config,
+                                        "qk_rope_head_dim", 0)
+            padded_kv_lora_rank = common_utils.align_to(
+                model_config.hf_text_config.kv_lora_rank, 128)
+            padded_qk_rope_head_dim = common_utils.align_to(
+                qk_rope_head_dim, 128)
+            mla_head_size = padded_kv_lora_rank+ padded_qk_rope_head_dim
+
         if len(self.runner.vllm_config.compilation_config.
                static_forward_context) == 0:
-            model_config = self.runner.model_config
             parallel_config = self.runner.parallel_config
             # Pad num_kv_heads to multiple of TP size.
             num_kv_heads = common_utils.get_padded_num_heads(
                 model_config.get_total_num_kv_heads(),
                 self.runner.mesh.shape["model"])
-            if self.use_mla:
-                # Individually pad the RopE and latents
-                qk_rope_head_dim = getattr(model_config.hf_text_config,
-                                           "qk_rope_head_dim", 0)
-                padded_kv_lora_rank = common_utils.align_to(
-                    model_config.hf_text_config.kv_lora_rank, 128)
-                padded_qk_rope_head_dim = common_utils.align_to(
-                    qk_rope_head_dim, 128)
-                head_size = padded_kv_lora_rank+ padded_qk_rope_head_dim
-            else:
-                head_size = common_utils.get_padded_head_dim(
+            head_size = common_utils.get_padded_head_dim(
                     model_config.get_head_size())
             for i in range(model_config.get_num_layers(parallel_config)):
                 if self.use_mla:
                     kv_cache_spec[f"layer.{i}"] = MLAAttentionSpec(
                         block_size=block_size,
                         num_kv_heads=1,
-                        head_size=head_size,
+                        head_size=mla_head_size,
                         dtype=self.runner.kv_cache_dtype,
                         cache_dtype_str=self.runner.vllm_config.cache_config.
                         cache_dtype)
@@ -92,14 +92,13 @@ class KVCacheManager:
                     self.runner.mesh.shape["model"])
                 head_size = common_utils.get_padded_head_dim(
                     hf_config.hidden_size // hf_config.num_attention_heads)
-
                 # Eagle3 has only 1 layer
                 for i in range(1):
                     if self.use_mla:
                         kv_cache_spec[f"draft_layer.{i}"] = MLAAttentionSpec(
                             block_size=block_size,
                             num_kv_heads=1,
-                            head_size=head_size,
+                            head_size=mla_head_size,
                             dtype=self.runner.kv_cache_dtype,
                             cache_dtype_str=self.runner.vllm_config.
                             cache_config.cache_dtype)
@@ -113,6 +112,7 @@ class KVCacheManager:
             # Else propagate attention modules from compilation config.
             layers = get_layers_from_vllm_config(self.runner.vllm_config,
                                                  Attention)
+            logger.warning(f"Compilation num_layers = {len(layers.items())}")
             for layer_name, attn_module in layers.items():
                 if (kv_tgt_layer :=
                         attn_module.kv_sharing_target_layer_name) is not None:
@@ -140,7 +140,7 @@ class KVCacheManager:
                         kv_cache_spec[layer_name] = MLAAttentionSpec(
                             block_size=block_size,
                             num_kv_heads=1,
-                            head_size=attn_module.head_size,
+                            head_size=mla_head_size,
                             dtype=self.runner.kv_cache_dtype,
                             cache_dtype_str=self.runner.vllm_config.
                             cache_config.cache_dtype)
