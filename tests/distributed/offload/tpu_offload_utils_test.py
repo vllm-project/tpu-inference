@@ -17,7 +17,8 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
         """Set up common parameters for the tests."""
         self.num_layers = 2
         self.num_tokens = 256
-        self.num_kv_heads = 8
+        num_devices = len(list(jax.devices()))
+        self.num_kv_heads = num_devices
         self.head_dim = 128
         self.block_size = 16
         self.num_blocks = self.num_tokens // self.block_size
@@ -37,7 +38,7 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
 
         self.cache_dtype = jnp.bfloat16
 
-        self.mesh = self.create_mesh((1, 8), ("data", "model"))
+        self.mesh = self.create_mesh((1, num_devices), ("data", "model"))
         partition_spec = PartitionSpec(None, None, "model")
         self.device_sharding = NamedSharding(self.mesh,
                                              partition_spec,
