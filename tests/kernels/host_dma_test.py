@@ -6,7 +6,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from absl.testing import absltest, parameterized
-from jax._src import compilation_cache as cc
 from jax._src import test_util as jtu
 from jax.sharding import NamedSharding, PartitionSpec
 
@@ -15,7 +14,6 @@ from tpu_inference.kernels.dma.host_dma import d2h_dma, h2d_dma
 DATA_LOCATION = Literal["device", "host"]
 
 
-# TODO(jcgu): add into CI tests
 @jtu.with_config(jax_numpy_dtype_promotion='strict')
 class HostHbmDmaTest(jtu.JaxTestCase):
 
@@ -27,9 +25,7 @@ class HostHbmDmaTest(jtu.JaxTestCase):
 
     def tearDown(self):
         super().tearDown()
-        # Reset the cache after each test.
-        # This can also be achieved by running with JAX_TEST_WITH_PERSISTENT_COMPILATION_CACHE=True
-        cc.reset_cache()
+        jax.clear_caches()
 
     def create_mesh(self, axis_shapes, axis_names):
         """Creates a JAX device mesh with the default device order."""
