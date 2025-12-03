@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import io
+import logging
 import os
 import time
 from dataclasses import asdict
@@ -13,7 +15,7 @@ from vllm.config import CompilationConfig
 @pytest.fixture(autouse=True)
 def setup_new_model_design():
     os.environ['MODEL_IMPL_TYPE'] = 'vllm'
-    # os.environ['SKIP_JAX_PRECOMPILE'] = '1'
+    os.environ['SKIP_JAX_PRECOMPILE'] = '1'
 
 
 @pytest.fixture
@@ -87,30 +89,51 @@ def _run_inference_with_config(model_name: str,
 
 
 def test_model_sequence_parallelism(
+    caplog: pytest.LogCaptureFixture,
     test_prompts: list,
     sampling_params: SamplingParams,
 ):
-    # Use Llama 1B for this test
+    logger_name = "vllm.tpu_inference.layers.vllm.quantization.common"
+    logger = logging.getLogger(logger_name)
+    original_level = logger.level
+    original_propagate = logger.propagate
+
+    # Create an in-memory stream to capture log output
+    log_capture_string = io.StringIO()
+    # Create a handler that writes to our in-memory stream
+    capture_handler = logging.StreamHandler(log_capture_string)
+
     test_model = "Qwen/Qwen2.5-32B"
 
-    # Test with data parallelism enabled
-    outputs = _run_inference_with_config(
-        model_name=test_model,
-        test_prompts=test_prompts,
-        sampling_params=sampling_params,
-        tensor_parallel_size=8,
-        async_scheduling=True,
-    )
+    try:
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
+        logger.addHandler(capture_handler)
 
-    # Verify we got outputs for all prompts
-    assert len(outputs) == len(test_prompts)
+        outputs = _run_inference_with_config(
+            model_name=test_model,
+            test_prompts=test_prompts,
+            sampling_params=sampling_params,
+            tensor_parallel_size=8,
+            async_scheduling=True,
+        )
 
-    # Verify each output has generated text
-    for output in outputs:
-        assert len(output.outputs) > 0
-        assert len(output.outputs[0].text.strip()) > 0
-        print(f"Output: {output.outputs[0].text.strip()}")
+        # Verify we got outputs for all prompts
+        assert len(outputs) == len(test_prompts)
 
-    print(
-        f"✓ Model sequence parallelism test passed with {len(outputs)} outputs"
-    )
+        # Verify each output has generated text
+        for output in outputs:
+            assert len(output.outputs) > 0
+            assert len(output.outputs[0].text.strip()) > 0
+            print(f"Output: {output.outputs[0].text.strip()}")
+
+        log_contents = log_capture_string.getvalue()
+        print(f'xw32 {log_contents=}')
+        print(
+            f"✓ Model sequence parallelism test passed with {len(outputs)} outputs"
+        )
+    finally:
+        # --- IMPORTANT: Clean up and restore the logger's original state ---
+        logger.setLevel(original_level)
+        logger.propagate = original_propagate
+        logger.removeHandler(capture_handler)
