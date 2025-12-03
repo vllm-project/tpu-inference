@@ -72,9 +72,10 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
         self.num_blocks = 128
         self.num_cpu_chunks = 128
         self.block_size = self.vllm_config.cache_config.block_size
-        self.num_heads = 8
+        num_devices = len(list(jax.devices()))
+        self.num_heads = num_devices
         self.head_size = 128
-        self.mesh = self.create_mesh((1, 8), ("data", "model"))
+        self.mesh = self.create_mesh((1, num_devices), ("data", "model"))
         if self.mesh is None:
             self.skipTest("Cannot create mesh. Must be run on a TPU node.")
             return
