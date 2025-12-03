@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import io
 import logging
 import os
 import time
@@ -88,28 +87,38 @@ def _run_inference_with_config(model_name: str,
         time.sleep(5)
 
 
+@pytest.fixture()
+def temporary_enable_log_propagate():
+    import logging
+
+    logger = logging.getLogger("vllm")
+    logger.propagate = True
+    yield
+    logger.propagate = False
+
+
+@pytest.fixture()
+def caplog_vllm(temporary_enable_log_propagate, caplog):
+    # To capture vllm log, we should enable propagate=True temporarily
+    # because caplog depends on logs propagated to the root logger.
+    yield caplog
+
+
 def test_model_sequence_parallelism(
-    caplog: pytest.LogCaptureFixture,
+    caplog_vllm: pytest.LogCaptureFixture,
     test_prompts: list,
     sampling_params: SamplingParams,
 ):
-    logger_name = "vllm.tpu_inference.layers.vllm.quantization.common"
-    logger = logging.getLogger(logger_name)
-    original_level = logger.level
-    original_propagate = logger.propagate
-
-    # Create an in-memory stream to capture log output
-    log_capture_string = io.StringIO()
-    # Create a handler that writes to our in-memory stream
-    capture_handler = logging.StreamHandler(log_capture_string)
-
+    # Use Llama 1B for this test
     test_model = "Qwen/Qwen2.5-32B"
+    caplog_vllm.clear()
 
-    try:
-        logger.setLevel(logging.DEBUG)
-        logger.propagate = False
-        logger.addHandler(capture_handler)
+    # Set the logging level for the test
+    with caplog_vllm.at_level(
+            logging.INFO,
+            logger="vllm.tpu_inference.layers.vllm.quantization.common"):
 
+        # Test with data parallelism enabled
         outputs = _run_inference_with_config(
             model_name=test_model,
             test_prompts=test_prompts,
@@ -127,13 +136,8 @@ def test_model_sequence_parallelism(
             assert len(output.outputs[0].text.strip()) > 0
             print(f"Output: {output.outputs[0].text.strip()}")
 
-        log_contents = log_capture_string.getvalue()
-        print(f'xw32 {log_contents=}')
+        # caplog.text contains all the captured log output
+        print(f'xw32  {caplog_vllm.records[0].getMessage()}')
         print(
             f"✓ Model sequence parallelism test passed with {len(outputs)} outputs"
         )
-    finally:
-        # --- IMPORTANT: Clean up and restore the logger's original state ---
-        logger.setLevel(original_level)
-        logger.propagate = original_propagate
-        logger.removeHandler(capture_handler)
