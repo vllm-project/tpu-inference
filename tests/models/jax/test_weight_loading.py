@@ -31,7 +31,7 @@ class SourceModel(nnx.Module):
 
     def __init__(self, rngs):
         self.src_lm_head = nnx.Param(jax.random.normal(rngs(), (2, 4)))
-        self.layers = {0: SourceLayer(rngs)}
+        self.layers = nnx.List({0: SourceLayer(rngs)})
 
 
 class TargetLinear(nnx.Module):

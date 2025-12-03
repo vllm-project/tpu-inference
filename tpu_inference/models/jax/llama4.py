@@ -216,6 +216,9 @@ class Llama4ForCausalLM(nnx.Module):
                 use_attention_rope=use_attention_rope)
             self.layers.append(block)
 
+        # For Flax 0.12.0 compatibility.
+        self.layers = nnx.List(self.layers)
+
         self.final_norm = RMSNorm(
             dims=self.hidden_size,
             epsilon=self.rms_norm_eps,

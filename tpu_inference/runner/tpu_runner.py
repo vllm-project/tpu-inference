@@ -6,6 +6,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
+import flax
 import jax
 import jax.numpy as jnp
 import jaxtyping
@@ -266,6 +267,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self._pre_async_results: AsyncPreResults | None = None
         self._substitute_placeholder_token_fn = _substitute_placeholder_token
         self.execute_model_state: ExecuteModelState | None = None
+
+        # TODO (jacobplatin): eventually, we'll want to use eager sharding in Flax
+        # but as a hotfix to upgrade to Flax 0.12.0, we'll disable it
+        flax.config.update('flax_always_shard_variable', False)
 
     def _init_random(self):
         if self.model_config.seed is None:

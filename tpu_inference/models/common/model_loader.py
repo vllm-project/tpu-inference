@@ -96,7 +96,9 @@ def _get_nnx_model(
             The jitted model.
         """
         state = nnx.state(model)
-        nnx.update(model, state)
+        pspecs = nnx.get_partition_spec(state)
+        sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
+        nnx.update(model, sharded_state)
         if not use_qwix_on_abstract_model:
             # NOTE: if Qwix is not configured, this will be a no-op
             model = apply_qwix_quantization(vllm_config,
@@ -127,7 +129,7 @@ def _get_nnx_model(
                 "quantization_config") else {}
             load_random_weights_into_qwix_abstract_model(
                 rng, model, mesh, quantization_config)
-            with mesh:
+            with jax.set_mesh(mesh):
                 jit_model = create_jit_model(model,
                                              use_qwix_on_abstract_model=True)
             return jit_model
@@ -142,7 +144,7 @@ def _get_nnx_model(
             # NOTE: we don't support quantization for the old Qwen2ForCausalLM implementation
             return model
 
-        with mesh:
+        with jax.set_mesh(mesh):
             jit_model = create_sharded_model()
             # In this case, we are applying Qwix quantization to the true, concrete model
             jit_model = apply_qwix_quantization(vllm_config,
@@ -179,7 +181,7 @@ def _get_nnx_model(
         # Although the created model can already work, we still need to jit
         # the model creation again, otherwise the model forward will have
         # non-trivial overhead in PjitFunction.
-        with mesh:
+        with jax.set_mesh(mesh):
             loader = get_model_loader(vllm_config.load_config)
             if isinstance(loader, RunaiModelStreamerLoader):
                 model_weights = vllm_config.model_config.model
