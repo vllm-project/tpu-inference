@@ -760,119 +760,119 @@ class DeepSeekV3WeightLoader:
         cumulative_global_memory = 0
         cumulative_local_memory = 0
 
-        # --- 1. BUILD POOL: COLLECT AND PAIR WEIGHTS/SCALES ---
-        pool: dict[str, torch.Tensor | tuple] = {}
-        pending_tensors: dict[str, dict[str, torch.Tensor]] = {}
+        # --- FIX 1: DEFINE POOLING DICTIONARIES (Used for Expert Stacking) ---
+        mlp_experts_gate_proj_weights = {}
+        mlp_experts_gate_proj_scales = {}
+        mlp_experts_up_proj_weights = {}
+        mlp_experts_up_proj_scales = {}
+        mlp_experts_down_proj_weights = {}
+        mlp_experts_down_proj_scales = {}
+        quantized_weights = {
+        }  # Holds temporary non-paired weights (should be minimized)
+        quantized_scales = {
+        }  # Holds temporary non-paired scales (should be minimized)
+        # ----------------------------------------------------------------------
 
-        # Iterate over the raw generator output once to pair all weights and scales.
-        # This fixes the load order problem.
-        for loaded_name, loaded_weight in self.names_and_weights_generator:
-            # Skip layers that exceed the number of layers in the current model
-            if re.search(r"layers\.(\d+)", loaded_name):
-                layer_num = re.search(r"layers\.(\d+)", loaded_name).group(1)
-                if int(layer_num) >= self.num_layers:
-                    del loaded_weight
-                    continue
-            if 'layers.61' in loaded_name:
-                del loaded_weight
-                continue
-            if re.search(r"experts\.(\d+)", loaded_name):
-                expert_num = re.search(r"experts\.(\d+)", loaded_name).group(1)
-                if int(expert_num) >= self.num_routed_experts:
-                    del loaded_weight
-                    continue
+        # --- 1. BUILD POOL: COLLECT ALL FILES AND PAIR WEIGHTS/SCALES ---
+        # This replaces the messy sequential file handling from the original DeepSeek code.
+        # NOTE: Your _build_deepseek_pool function iterates over the raw generator here,
+        # handling pruning and pairing (weights/scales) or passing singles (LM Head, Norms, Biases).
+        pool: dict[str, torch.Tensor | tuple] = self._build_deepseek_pool(
+            self.names_and_weights_generator)
 
-            # Identify if it's a weight or a scale using the DeepSeek naming convention
-            is_quant_weight = loaded_name.endswith(".weight")
-            is_scale = loaded_name.endswith(".weight_scale_inv")
-
-            # If this is a quantized checkpoint, pool the weights and scales
-            if self.is_model_quantized and (is_quant_weight or is_scale):
-                base = loaded_name.replace(".weight",
-                                           "").replace(".weight_scale_inv", "")
-                entry = pending_tensors.setdefault(base, {})
-
-                if is_quant_weight:
-                    entry["weight"] = loaded_weight
-                elif is_scale:
-                    entry["scale"] = loaded_weight
-
-                # If we have both parts, create a pooled tuple entry (key is the standard name)
-                if "weight" in entry and "scale" in entry:
-                    pool[base + ".weight"] = (entry["weight"], entry["scale"])
-                    pending_tensors.pop(base, None)
-            else:
-                # Store non-quantized items directly
-                pool[loaded_name] = loaded_weight
-
-        # Handle missing pairs (optional but good practice)
-        if pending_tensors:
-            logger.error(
-                "Incomplete quantized weight bundles found! This may lead to crashes."
-            )
-
-        print("This is pool: ", pool)
-
-        # --- 2. LOAD WEIGHTS FROM POOL ---
+        # --- 2. ITERATE OVER POOL, UNPACK, STACK, AND LOAD ---
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_data in pool.items():
 
-                hf_pattern = re.sub(r"layers\.(\d+)", "layers.*", loaded_name)
-                # Check for skipped layers (already handled above, but useful for robustness)
-                if hf_pattern not in self._loaded_to_standardized_keys:
-                    logger.warning(
-                        f"No mapping found for pooled tensor: {loaded_name}. Skipping."
-                    )
+                # A. PRUNING/SKIPPING LOGIC (If the pool didn't already skip it)
+                if re.search(r"layers\.(\d+)", loaded_name):
+                    layer_num = re.search(r"layers\.(\d+)",
+                                          loaded_name).group(1)
+                    if int(layer_num) >= self.num_layers:
+                        continue
+                if 'layers.61' in loaded_name:
                     continue
 
-                # --- Unpack Quantized Weight (Tuple path) ---
+                loaded_weight = loaded_data
+                scale = None
+                stacked_scales = None
+                stacked_weights = None
+
+                # --- B. UNPACK QUANTIZED TUPLE ---
                 if isinstance(loaded_data, tuple):
                     loaded_weight, scale = loaded_data
 
-                    # 1. Check if the weight is TPU FP4 (packed uint8)
                     is_packed_tpu_fp4 = (
                         self.quantization_type == TPU_FP4_QUANT_METHOD
                         and loaded_weight.dtype == torch.uint8)
 
                     if is_packed_tpu_fp4:
-                        # Unpack (returns the data in the intermediate shape, e.g., 9216 rows)
                         unpacked_codes, unpacked_scales = unpack_tpu_fp4_to_fp32(
                             loaded_weight, scale)
 
-                        # Get the target QArray's expected shape (e.g., 18432 rows)
                         mapped_name = self.map_loaded_to_standardized_name(
                             loaded_name)
-                        # NOTE: model_params must be used as nnx.state to access the abstract shape
                         base_model_weight = get_param(model_params,
                                                       mapped_name)
                         target_shape = base_model_weight.array.qvalue.value.shape
 
-                        # --- CRITICAL FIX: RESHAPE TO LOGICAL DIMENSION ---
                         if unpacked_codes.shape != target_shape:
-                            # Reshape the PyTorch tensor to the target logical shape (18432, 7168)
-                            unpacked_codes = unpacked_codes.reshape(
+                            # FIX: Reshape to match logical dimension (18432 from 9216)
+                            loaded_weight = unpacked_codes.reshape(
                                 target_shape)
-
-                        # Overwrite loaded_weight and scale with the UNPACKED/RESHAPED FP32 tensors
-                        loaded_weight = unpacked_codes
+                        else:
+                            loaded_weight = unpacked_codes
                         scale = unpacked_scales
-                    else:
-                        # Handle original FP8 logic (if model is still FP8)
-                        # The code already handles casting/transposing in _load_individual_weight
-                        # using the scale provided here.
-                        pass
-                else:
-                    # --- Regular Weight Path (Single Tensor) ---
-                    loaded_weight = loaded_data
-                    scale = None
 
-                # Load the individual weight (handles transpose, reshaping, sharding, and QArray assignment)
-                weight_bytes, weight_shards = self._load_individual_weight(
-                    loaded_name,
-                    loaded_weight,
-                    model_params,
-                    model_for_loading.mesh,
-                    scale=scale)
+                    # NOTE: loaded_weight is now the UNPACKED (potentially reshaped) tensor
+
+                # --- C. STACK MOE EXPERTS (Using original helper) ---
+                if "mlp.experts" in loaded_name:
+                    if "down_proj" in loaded_name:
+                        stacked_weights = self._process_moe_weights(
+                            loaded_name, loaded_weight,
+                            mlp_experts_down_proj_weights)
+                        if scale is not None:
+                            stacked_scales = self._process_moe_weights(
+                                loaded_name, scale,
+                                mlp_experts_down_proj_scales)
+                    elif "gate_proj" in loaded_name:  # Use elif to prevent double counting
+                        stacked_weights = self._process_moe_weights(
+                            loaded_name, loaded_weight,
+                            mlp_experts_gate_proj_weights)
+                        if scale is not None:
+                            stacked_scales = self._process_moe_weights(
+                                loaded_name, scale,
+                                mlp_experts_gate_proj_scales)
+                    elif "up_proj" in loaded_name:
+                        stacked_weights = self._process_moe_weights(
+                            loaded_name, loaded_weight,
+                            mlp_experts_up_proj_weights)
+                        if scale is not None:
+                            stacked_scales = self._process_moe_weights(
+                                loaded_name, scale, mlp_experts_up_proj_scales)
+
+                    # If stacking is complete for this layer, proceed to load
+                    if stacked_weights is not None:
+                        weight_bytes, weight_shards = self._load_individual_weight(
+                            loaded_name,
+                            stacked_weights,
+                            model_params,
+                            model_for_loading.mesh,
+                            scale=stacked_scales)
+
+                    # If stacked_weights is None, we continue the loop, waiting for the rest of the experts.
+                    else:
+                        continue
+
+                else:
+                    # D. LOAD NON-MOE, NON-STACKED WEIGHTS (Embeddings, LM Head, Attn, Norms, Dense FFW)
+                    weight_bytes, weight_shards = self._load_individual_weight(
+                        loaded_name,
+                        loaded_weight,
+                        model_params,
+                        model_for_loading.mesh,
+                        scale=scale)
 
                 if self.is_verbose:
                     cumulative_global_memory += weight_bytes
@@ -884,9 +884,68 @@ class DeepSeekV3WeightLoader:
                         f"Cumulative local memory: {cumulative_local_memory} GB"
                     )
 
-        # Final cleanup (already provided)
-        # del mlp_experts_gate_proj_weights ...
+        # Final cleanup and model update
+        # FIX: These variables were used for expert stacking, the del statements are now valid.
+        del mlp_experts_gate_proj_weights
+        del mlp_experts_up_proj_weights
+        del mlp_experts_down_proj_weights
+        del quantized_weights
+        del quantized_scales
         nnx.update(model_for_loading, model_params)
+
+    def _build_deepseek_pool(self, names_and_weights_generator):
+        """Collects DeepSeek weights and scales into a pool keeping tuples (weight, scale)."""
+        pool: dict[str, torch.Tensor | tuple] = {}
+        pending_tensors: dict[str, dict[str, torch.Tensor]] = {}
+
+        for loaded_name, loaded_weight in names_and_weights_generator:
+            # Skip MTP layers first
+            if 'layers.61' in loaded_name:
+                continue
+
+            is_quant_weight = loaded_name.endswith(".weight")
+            is_scale = loaded_name.endswith(".weight_scale_inv")
+
+            # Check if this is a paired item (quantized weight or scale)
+            if is_quant_weight or is_scale:
+                # Base is the name without .weight or .weight_scale_inv
+                base = loaded_name.replace(".weight",
+                                           "").replace(".weight_scale_inv", "")
+
+                # Biases and certain non-quantized weights (Embeddings, LM Head)
+                # are also named *.weight but will not have a scale partner.
+                # If the item is NOT a scale, but is NOT the Embedding/LM Head,
+                # we treat it as potentially quantized.
+
+                # Check for standard model parts that MUST be single BF16 tensors
+                if loaded_name in ("model.embed_tokens.weight",
+                                   "lm_head.weight", "model.norm.weight"):
+                    pool[loaded_name] = loaded_weight
+                    continue
+
+                entry = pending_tensors.setdefault(base, {})
+
+                if is_quant_weight:
+                    entry["weight"] = loaded_weight
+                elif is_scale:
+                    entry["scale"] = loaded_weight
+
+                # If we have both parts, create a pooled tuple entry
+                if "weight" in entry and "scale" in entry:
+                    pool[base + ".weight"] = (entry["weight"], entry["scale"])
+                    pending_tensors.pop(base, None)
+            else:
+                # Store all other items (like layer norm weights, which end in .weight) directly
+                pool[loaded_name] = loaded_weight
+
+        # Check for stranded halves (e.g., if one scale file was missing)
+        if pending_tensors:
+            logger.error(
+                "Incomplete quantized weight bundles found! This means files are missing partners: %s",
+                pending_tensors.keys())
+            # We proceed, but the stranded weights are lost or uninitialized.
+
+        return pool
 
 
 def weights_dequant_cpu(x: torch.Tensor,
