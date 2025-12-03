@@ -4,8 +4,11 @@ steps:
   - label: "Correctness tests for KV Cache Offload"
     key: "KV_Cache_Offload_CorrectnessTest"
     soft_fail: true
+    env:
+      USE_V6E8_QUEUE: "True"
+      VLLM_LOG_LEVEL: "INFO"
     agents:
-      queue: tpu_v6e_queue
+      queue: tpu_v6e_8_queue
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
