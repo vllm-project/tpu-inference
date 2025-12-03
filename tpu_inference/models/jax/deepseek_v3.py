@@ -25,6 +25,7 @@ from tpu_inference.layers.jax.transformer_block import (
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.quantization.quantization_utils import \
     get_quant_dtype_from_qwix_config
+# Importing the TPU-FP4 utilities needed for unpacking
 from tpu_inference.models.jax.utils.quantization.tpu_fp4_utils import (
     TPU_FP4_QUANT_METHOD, unpack_tpu_fp4_to_fp32)
 from tpu_inference.models.jax.utils.weight_utils import (
@@ -35,6 +36,8 @@ logger = init_logger(__name__)
 # A map from JAX dtype to the corresponding PyTorch integer dtype for raw memory viewing.
 DTYPE_VIEW_MAP = {
     jnp.dtype(jnp.float8_e4m3fn): torch.uint8,
+    jnp.dtype(jnp.float4_e2m1fn):
+    torch.uint8,  # ADDED: Map custom FP4 to uin8 for raw view compatibility
     jnp.dtype(jnp.bfloat16): torch.uint16,
     jnp.dtype(jnp.float32): torch.uint32,
 }
@@ -54,7 +57,7 @@ class DeepSeekV3(nnx.Module):
         self.rng = nnx.Rngs(rng)
 
         # NOTE: the default is 61
-        num_layers: int = 18  #vllm_config.model_config.hf_config.num_hidden_layers
+        num_layers: int = vllm_config.model_config.hf_config.num_hidden_layers
         num_local_experts: int = 256
 
         vocab_size: int = 129280
@@ -365,9 +368,12 @@ class DeepSeekV3WeightLoader:
             download_dir=vllm_config.load_config.download_dir)
         self.is_verbose = vllm_config.additional_config.get(
             "is_verbose", None) is not None
-        self.is_verbose = True
         self.num_routed_experts = num_local_experts
         self.model_dtype = model_dtype
+
+        # Determine quantization method from HF config (config.json)
+        self.quant_method = vllm_config.model_config.hf_config.quantization_config.get(
+            "quant_method", None)
 
         self._transpose_map = {
             # dense mlp
@@ -456,14 +462,9 @@ class DeepSeekV3WeightLoader:
             "layers.*.shared_experts.kernel_up_proj_DF",
         }
 
-        #TODO: Must load in prequantized checkpoint from gs://dotzel-tpu-prod-checkpoints/deepseek-r1-fp4-mlp-256-pack
-
         # TODO (jacobplatin): we shouldn't hard-code this, but the logic to obtain the true quantized dtype
         # is non-trivial and the default checkpoints all use this dtype
-        # self.quant_dtype = jnp.float8_e4m3fn
-        self.quant_dtype = jnp.float4_e2m1fn
-
-        print("this is self.quant_dtype: ", self.quant_dtype)
+        self.quant_dtype = jnp.float8_e4m3fn
 
         self.is_model_quantized = not vllm_config.additional_config.get(
             "skip_quantization", False)
@@ -472,13 +473,10 @@ class DeepSeekV3WeightLoader:
             quantization_type = vllm_config.model_config.hf_config.quantization_config[
                 "quant_method"]
             assert quantization_type in (
-                "fp8", "tpu_fp4"
-            ), "DeepSeek only supports the fp8 and tpu_fp4 quantization methods for now"
-
+                "fp8", TPU_FP4_QUANT_METHOD
+            ), "DeepSeek only supports fp8 or tpu_fp4 quantization methods for now"
             self.scale_dtype, self.quant_dtype = get_quant_dtype_from_qwix_config(
                 vllm_config)
-
-            self.quantization_type = quantization_type
 
             logger.info(
                 f"Quantizing DeepSeek with quantization dtype: {self.quant_dtype} and scale dtype: {self.scale_dtype}"
@@ -561,12 +559,22 @@ class DeepSeekV3WeightLoader:
             return stacked_weights
         return None
 
+    def _unpack_packed_fp4_to_fp32(
+            self, blocks_u8: torch.Tensor,
+            scales: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Unpacks packed FP4 weights and scales to FP32 tensors using TPU FP4 logic."""
+        if self.quant_method == TPU_FP4_QUANT_METHOD:
+            return unpack_tpu_fp4_to_fp32(blocks_u8, scales)
+        # Should not be reached if called conditionally
+        raise ValueError(
+            f"Unsupported packed quant method for unpack: {self.quant_method}")
+
     def _load_individual_weight(self,
                                 name,
-                                weight,
+                                weight: torch.Tensor,
                                 model_params,
                                 model_mesh,
-                                scale=None) -> Tuple[int, int]:
+                                scale: torch.Tensor = None) -> Tuple[int, int]:
         """
         Loads a single weight into the model.
 
@@ -587,68 +595,6 @@ class DeepSeekV3WeightLoader:
         """
         mapped_name = self.map_loaded_to_standardized_name(name)
         base_model_weight = get_param(model_params, mapped_name)
-
-        # Check if model_weight is a QArray (i.e., we are in the abstract flow)
-        is_qarray = hasattr(base_model_weight, "array")
-
-        # --- NEW LOGIC FOR QARRAY (TPU-FP4) ---
-        if is_qarray and scale is not None:
-            # This path handles the pre-unpacked FP32 codes (weight) and FP32 scales (scale)
-            # from the tpu_fp4 checkpoint. We convert them to JAX/NNX, apply transforms,
-            # and set the QArray values.
-
-            qv = base_model_weight.array.qvalue
-            sv = base_model_weight.array.scale
-            q_dtype = qv.value.dtype
-            s_dtype = sv.value.dtype
-
-            # Convert to numpy and cast to final dtype
-            codes_jnp = jnp.asarray(
-                weight.detach().cpu().numpy()).astype(q_dtype)
-            scales_jnp = jnp.asarray(
-                scale.detach().cpu().numpy()).astype(s_dtype)
-
-            # Apply transforms here if needed (e.g., transpose/reshape from DeepSeek logic)
-            # You need to define a method or helper function for this based on DeepSeek's original
-            # transpose/reshape logic, which is currently mixed with the torch/numpy conversion.
-
-            # For simplicity (assuming transformations are simple transposes for now)
-            codes_jnp = self._transpose_params(name, codes_jnp)
-            scales_jnp = self._transpose_params(name, scales_jnp)
-
-            # NOTE: We skip the detailed FP8 block-size checks and complex reshaping here
-            # and rely on the model abstract shape being correct.
-            # You should, however, perform shape checks:
-            if qv.value.shape != codes_jnp.shape:
-                raise ValueError(
-                    f"Loaded shape for {name} codes: {codes_jnp.shape} "
-                    f"does not match model shape for {mapped_name} codes: {qv.value.shape}!"
-                )
-            if sv.value.shape != scales_jnp.shape:
-                raise ValueError(
-                    f"Loaded shape for {name} scales: {scales_jnp.shape} "
-                    f"does not match model shape for {mapped_name} scales: {sv.value.shape}!"
-                )
-
-            def get_q_slice(index):
-                return codes_jnp[index]
-
-            def get_s_slice(index):
-                return scales_jnp[index]
-
-            q_sharded = jax.make_array_from_callback(
-                qv.value.shape, NamedSharding(model_mesh, P(*qv.sharding)),
-                get_q_slice)
-            s_sharded = jax.make_array_from_callback(
-                sv.value.shape, NamedSharding(model_mesh, P(*sv.sharding)),
-                get_s_slice)
-
-            base_model_weight.array.qvalue.value = q_sharded
-            base_model_weight.array.scale.value = s_sharded
-
-            # Return memory usage (simpler, as the original logic is verbose)
-            return qv.nbytes / 1e9 + sv.nbytes / 1e9, 0
-
         model_weight = base_model_weight.array.qvalue if hasattr(
             base_model_weight, "array") else base_model_weight
         sharding = base_model_weight.array.qvalue.sharding if hasattr(
@@ -657,18 +603,30 @@ class DeepSeekV3WeightLoader:
         # Convert weights from torch into numpy
         cast_type = model_weight.value.dtype
 
+        # --- MODIFIED BLOCK FOR TENSOR CONVERSION ---
         torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
 
-        if torch_view_type:
+        if self.is_model_quantized and (jnp.dtype(cast_type)
+                                        == self.quant_dtype) and (
+                                            weight.dtype == torch.float32):
+            # This path is hit when loading unpacked FP4 (float32 codes) or
+            # dequantized FP8 (if not using view map) into a QArray (FP8/FP4 quant_dtype).
+            # The FP32 data must be cast to the target JAX/FP4 type.
+            weight_np = jnp.array(weight.numpy()).astype(cast_type)
+        elif torch_view_type:
+            # Original logic for standard types (BF16, FP8/FP4 native views from safetensors)
             # Avoid unnecessary upcasting and mem copy by viewing the tensor's
             # raw data as integers before converting to a JAX array.
             weight_np = jnp.array(
                 weight.view(torch_view_type).numpy()).view(cast_type)
         else:
+            # This is the line that caused the error. It's now avoided by the update to DTYPE_VIEW_MAP.
             raise ValueError(
                 f"Unsupported dtype for tensor conversion: {cast_type}")
+        # --- END MODIFIED BLOCK ---
 
         if scale is not None:
+            # Ensure scale is converted from torch to numpy with the target scale dtype
             scale = scale.to(torch.float32).numpy().astype(self.scale_dtype)
 
         # Reshape and transpose weights if necessary.
@@ -714,6 +672,11 @@ class DeepSeekV3WeightLoader:
 
         if scale is not None:
             maybe_sharded_scale = scale
+            # Since, by default, we'll use the same sharding as the weights, we might
+            # encounter an error where the smaller/different sharding dim isn't divisible
+            # by the parallel size
+            # NOTE: Qwix expert dangyi@ mentioned that we don't need to worry about accuracy
+            # impacts when sharing scales
             try:
                 maybe_sharded_scale = jax.make_array_from_callback(
                     scale.shape, NamedSharding(model_mesh, P(*sharding)),
@@ -724,8 +687,8 @@ class DeepSeekV3WeightLoader:
                 )
             # NOTE: Despite the fact that scale has the name `scale_inv` in it, we don't need to
             # inverse it
-            assert base_model_weight.array.scale.value.dtype == maybe_sharded_scale.dtype, "Expected dtype for model weight scale with name {mapped_name} and dtype ({base_model_weight.array.scale.value.dtype}) to match that of the incoming weight scale ({maybe_sharded_scale.dtype})"
-            assert base_model_weight.array.qvalue.value.dtype == sharded_array.dtype, "Expected dtype for model weight with name {mapped_name} and dtype ({base_model_weight.array.qvalue.value.dtype}) to match that of the incoming weight ({sharded_array.dtype})"
+            assert base_model_weight.array.scale.value.dtype == maybe_sharded_scale.dtype, f"Expected dtype for model weight scale with name {mapped_name} and dtype ({base_model_weight.array.scale.value.dtype}) to match that of the incoming weight scale ({maybe_sharded_scale.dtype})"
+            assert base_model_weight.array.qvalue.value.dtype == sharded_array.dtype, f"Expected dtype for model weight with name {mapped_name} and dtype ({base_model_weight.array.qvalue.value.dtype}) to match that of the incoming weight ({sharded_array.dtype})"
             base_model_weight.array.scale.value = maybe_sharded_scale
             base_model_weight.array.qvalue.value = sharded_array
         else:
@@ -759,74 +722,98 @@ class DeepSeekV3WeightLoader:
         )
         cumulative_global_memory = 0
         cumulative_local_memory = 0
-
-        # --- FIX 1: DEFINE POOLING DICTIONARIES (Used for Expert Stacking) ---
         mlp_experts_gate_proj_weights = {}
         mlp_experts_gate_proj_scales = {}
         mlp_experts_up_proj_weights = {}
         mlp_experts_up_proj_scales = {}
         mlp_experts_down_proj_weights = {}
         mlp_experts_down_proj_scales = {}
-        quantized_weights = {
-        }  # Holds temporary non-paired weights (should be minimized)
-        quantized_scales = {
-        }  # Holds temporary non-paired scales (should be minimized)
-        # ----------------------------------------------------------------------
-
-        # --- 1. BUILD POOL: COLLECT ALL FILES AND PAIR WEIGHTS/SCALES ---
-        # This replaces the messy sequential file handling from the original DeepSeek code.
-        # NOTE: Your _build_deepseek_pool function iterates over the raw generator here,
-        # handling pruning and pairing (weights/scales) or passing singles (LM Head, Norms, Biases).
-        pool: dict[str, torch.Tensor | tuple] = self._build_deepseek_pool(
-            self.names_and_weights_generator)
-
-        # --- 2. ITERATE OVER POOL, UNPACK, STACK, AND LOAD ---
+        quantized_weights = {}
+        quantized_scales = {}
         with jax.default_device(jax.devices("cpu")[0]):
-            for loaded_name, loaded_data in pool.items():
-
-                # A. PRUNING/SKIPPING LOGIC (If the pool didn't already skip it)
+            for loaded_name, loaded_weight in self.names_and_weights_generator:
+                # Skip if the model has fewer layers than original.
                 if re.search(r"layers\.(\d+)", loaded_name):
                     layer_num = re.search(r"layers\.(\d+)",
                                           loaded_name).group(1)
                     if int(layer_num) >= self.num_layers:
+                        del loaded_weight
                         continue
                 if 'layers.61' in loaded_name:
+                    # skip loading MTP module.
+                    del loaded_weight
+                    continue
+                if re.search(r"experts\.(\d+)", loaded_name):
+                    expert_num = re.search(r"experts\.(\d+)",
+                                           loaded_name).group(1)
+                    if int(expert_num) >= self.num_routed_experts:
+                        del loaded_weight
+                        continue
+
+                scale = None
+
+                # Check for weight (.weight) that requires pairing with a scale
+                if loaded_name.endswith(".weight") and self.is_model_quantized:
+                    # For quantized models, we assume any ".weight" file is a quantized tensor (FP8 or FP4 blocks)
+                    # and must be paired with its scale.
+                    scale_name = loaded_name.replace(".weight",
+                                                     ".weight_scale_inv")
+                    if scale_name in quantized_scales:
+                        scale = quantized_scales[scale_name]
+                        del quantized_scales[scale_name]
+                    else:
+                        quantized_weights[loaded_name] = loaded_weight
+                        continue
+                elif loaded_name.endswith(
+                        ".weight") and not self.is_model_quantized:
+                    # Non-quantized path where we store weight and wait for scale/dequantization
+                    quantized_weights[loaded_name] = loaded_weight
                     continue
 
-                loaded_weight = loaded_data
-                scale = None
+                # Check for scale (.weight_scale_inv)
+                if loaded_name.endswith(".weight_scale_inv"):
+                    weight_name = loaded_name.replace(".weight_scale_inv",
+                                                      ".weight")
+                    if weight_name in quantized_weights:
+                        scale = loaded_weight
+                        loaded_weight = quantized_weights[weight_name]
+                        loaded_name = weight_name
+                        del quantized_weights[weight_name]
+                    else:
+                        quantized_scales[loaded_name] = loaded_weight
+                        continue
+
+                # --- FP4 PACKED UNPACKING LOGIC ---
+                is_packed_fp4 = (self.quant_method == TPU_FP4_QUANT_METHOD
+                                 and scale is not None
+                                 and re.search(r"mlp|gate", loaded_name))
+
+                if is_packed_fp4:
+                    # loaded_weight is the FP4 block (codes), scale is the original scale tensor
+
+                    # Unpack the FP4 codes and scales to FP32 torch Tensors
+                    codes_fp32_t, scales_fp32_t = self._unpack_packed_fp4_to_fp32(
+                        blocks_u8=loaded_weight, scales=scale)
+
+                    # Update loaded_weight/scale to use the unpacked FP32 tensors for the rest of the flow
+                    loaded_weight = codes_fp32_t
+                    scale = scales_fp32_t
+
+                # --- END FP4 PACKED UNPACKING LOGIC ---
+
+                # Handle on-the-fly dequantization for non-packed FP8 weights if quantization is skipped
+                if loaded_name.endswith(
+                        ".weight"
+                ) and not self.is_model_quantized and scale is not None:
+                    # assuming weights are loaded before scales.
+                    loaded_weight = weights_dequant_cpu(
+                        loaded_weight, scale, self.model_dtype)
+                    # After dequantization, the scale is no longer needed for a regular BF16 load
+                    scale = None
+
+                # concat mlp.experts weights
                 stacked_scales = None
                 stacked_weights = None
-
-                # --- B. UNPACK QUANTIZED TUPLE ---
-                if isinstance(loaded_data, tuple):
-                    loaded_weight, scale = loaded_data
-
-                    is_packed_tpu_fp4 = (
-                        self.quantization_type == TPU_FP4_QUANT_METHOD
-                        and loaded_weight.dtype == torch.uint8)
-
-                    if is_packed_tpu_fp4:
-                        unpacked_codes, unpacked_scales = unpack_tpu_fp4_to_fp32(
-                            loaded_weight, scale)
-
-                        mapped_name = self.map_loaded_to_standardized_name(
-                            loaded_name)
-                        base_model_weight = get_param(model_params,
-                                                      mapped_name)
-                        target_shape = base_model_weight.array.qvalue.value.shape
-
-                        if unpacked_codes.shape != target_shape:
-                            # FIX: Reshape to match logical dimension (18432 from 9216)
-                            loaded_weight = unpacked_codes.reshape(
-                                target_shape)
-                        else:
-                            loaded_weight = unpacked_codes
-                        scale = unpacked_scales
-
-                    # NOTE: loaded_weight is now the UNPACKED (potentially reshaped) tensor
-
-                # --- C. STACK MOE EXPERTS (Using original helper) ---
                 if "mlp.experts" in loaded_name:
                     if "down_proj" in loaded_name:
                         stacked_weights = self._process_moe_weights(
@@ -836,7 +823,7 @@ class DeepSeekV3WeightLoader:
                             stacked_scales = self._process_moe_weights(
                                 loaded_name, scale,
                                 mlp_experts_down_proj_scales)
-                    elif "gate_proj" in loaded_name:  # Use elif to prevent double counting
+                    if "gate_proj" in loaded_name:
                         stacked_weights = self._process_moe_weights(
                             loaded_name, loaded_weight,
                             mlp_experts_gate_proj_weights)
@@ -844,15 +831,13 @@ class DeepSeekV3WeightLoader:
                             stacked_scales = self._process_moe_weights(
                                 loaded_name, scale,
                                 mlp_experts_gate_proj_scales)
-                    elif "up_proj" in loaded_name:
+                    if "up_proj" in loaded_name:
                         stacked_weights = self._process_moe_weights(
                             loaded_name, loaded_weight,
                             mlp_experts_up_proj_weights)
                         if scale is not None:
                             stacked_scales = self._process_moe_weights(
                                 loaded_name, scale, mlp_experts_up_proj_scales)
-
-                    # If stacking is complete for this layer, proceed to load
                     if stacked_weights is not None:
                         weight_bytes, weight_shards = self._load_individual_weight(
                             loaded_name,
@@ -860,92 +845,47 @@ class DeepSeekV3WeightLoader:
                             model_params,
                             model_for_loading.mesh,
                             scale=stacked_scales)
-
-                    # If stacked_weights is None, we continue the loop, waiting for the rest of the experts.
-                    else:
-                        continue
-
-                else:
-                    # D. LOAD NON-MOE, NON-STACKED WEIGHTS (Embeddings, LM Head, Attn, Norms, Dense FFW)
+                        if self.is_verbose:
+                            cumulative_global_memory += weight_bytes
+                            cumulative_local_memory += weight_shards
+                            logger.info(
+                                f"Cumulative global memory: {cumulative_global_memory} GB"
+                            )
+                            logger.info(
+                                f"Cumulative local memory: {cumulative_local_memory} GB"
+                            )
+                elif loaded_name.endswith(
+                        ".weight"
+                ) or "norm" in loaded_name or "bias" in loaded_name:
+                    # Load all other non-expert and non-stacking weights/biases
                     weight_bytes, weight_shards = self._load_individual_weight(
                         loaded_name,
                         loaded_weight,
                         model_params,
                         model_for_loading.mesh,
                         scale=scale)
+                    if self.is_verbose:
+                        cumulative_global_memory += weight_bytes
+                        cumulative_local_memory += weight_shards
+                        logger.info(
+                            f"Cumulative global memory: {cumulative_global_memory} GB"
+                        )
+                        logger.info(
+                            f"Cumulative local memory: {cumulative_local_memory} GB"
+                        )
 
-                if self.is_verbose:
-                    cumulative_global_memory += weight_bytes
-                    cumulative_local_memory += weight_shards
-                    logger.info(
-                        f"Cumulative global memory: {cumulative_global_memory} GB"
-                    )
-                    logger.info(
-                        f"Cumulative local memory: {cumulative_local_memory} GB"
-                    )
+        # Clear remaining weights/scales that weren't processed (should be empty if all matched)
+        if quantized_weights or quantized_scales:
+            logger.warning(f"Unprocessed weights: {quantized_weights.keys()}")
+            logger.warning(f"Unprocessed scales: {quantized_scales.keys()}")
 
-        # Final cleanup and model update
-        # FIX: These variables were used for expert stacking, the del statements are now valid.
         del mlp_experts_gate_proj_weights
         del mlp_experts_up_proj_weights
         del mlp_experts_down_proj_weights
         del quantized_weights
         del quantized_scales
+        # TODO: validate that all of the model_params were accounted for as well.
         nnx.update(model_for_loading, model_params)
-
-    def _build_deepseek_pool(self, names_and_weights_generator):
-        """Collects DeepSeek weights and scales into a pool keeping tuples (weight, scale)."""
-        pool: dict[str, torch.Tensor | tuple] = {}
-        pending_tensors: dict[str, dict[str, torch.Tensor]] = {}
-
-        for loaded_name, loaded_weight in names_and_weights_generator:
-            # Skip MTP layers first
-            if 'layers.61' in loaded_name:
-                continue
-
-            is_quant_weight = loaded_name.endswith(".weight")
-            is_scale = loaded_name.endswith(".weight_scale_inv")
-
-            # Check if this is a paired item (quantized weight or scale)
-            if is_quant_weight or is_scale:
-                # Base is the name without .weight or .weight_scale_inv
-                base = loaded_name.replace(".weight",
-                                           "").replace(".weight_scale_inv", "")
-
-                # Biases and certain non-quantized weights (Embeddings, LM Head)
-                # are also named *.weight but will not have a scale partner.
-                # If the item is NOT a scale, but is NOT the Embedding/LM Head,
-                # we treat it as potentially quantized.
-
-                # Check for standard model parts that MUST be single BF16 tensors
-                if loaded_name in ("model.embed_tokens.weight",
-                                   "lm_head.weight", "model.norm.weight"):
-                    pool[loaded_name] = loaded_weight
-                    continue
-
-                entry = pending_tensors.setdefault(base, {})
-
-                if is_quant_weight:
-                    entry["weight"] = loaded_weight
-                elif is_scale:
-                    entry["scale"] = loaded_weight
-
-                # If we have both parts, create a pooled tuple entry
-                if "weight" in entry and "scale" in entry:
-                    pool[base + ".weight"] = (entry["weight"], entry["scale"])
-                    pending_tensors.pop(base, None)
-            else:
-                # Store all other items (like layer norm weights, which end in .weight) directly
-                pool[loaded_name] = loaded_weight
-
-        # Check for stranded halves (e.g., if one scale file was missing)
-        if pending_tensors:
-            logger.error(
-                "Incomplete quantized weight bundles found! This means files are missing partners: %s",
-                pending_tensors.keys())
-            # We proceed, but the stranded weights are lost or uninitialized.
-
-        return pool
 
 
 def weights_dequant_cpu(x: torch.Tensor,
