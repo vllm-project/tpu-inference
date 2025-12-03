@@ -60,7 +60,6 @@ def _test_kv_cache_cpu_offloading_accuracy(
         os.environ['TPU_OFFLOAD_DECODE_SAVE'] = decode_save
         llm = LLM(model="meta-llama/Llama-3.2-3B",
                   max_model_len=1024,
-                  tensor_parallel_size=8,
                   task="generate",
                   kv_transfer_config=kv_transfer_config)
 
