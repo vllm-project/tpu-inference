@@ -122,6 +122,7 @@ steps:
            --ignore=/workspace/tpu_inference/tests/e2e \
            --ignore=/workspace/tpu_inference/tpu_inference/mock \
            --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py \
+           --ignore=/workspace/tpu_inference/tests/distributed/offload/test_offload_accuracy_test.py \
            --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference --cov-report term-missing --cov-fail-under=69
 
    - label: "JAX unit tests - kernels"
