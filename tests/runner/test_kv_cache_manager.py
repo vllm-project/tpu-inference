@@ -40,6 +40,7 @@ class TestKVCacheManager:
              patch('jax.make_mesh', return_value=self.mock_mesh), \
              patch('jax.experimental.mesh_utils.create_device_mesh', return_value=self.mock_mesh), \
              patch('tpu_inference.runner.tpu_runner.TPUModelRunner._create_new_model_mesh', return_value=self.mock_mesh), \
+             patch('tpu_inference.runner.tpu_runner.TPUModelRunner._init_mesh', return_value=self.mock_mesh), \
              patch('jax.random.key', return_value=self.mock_rng_key), \
              patch('tpu_inference.runner.tpu_runner.get_model', return_value=MagicMock()):
 
@@ -72,6 +73,7 @@ class TestKVCacheManager:
             )
             self.runner = TPUModelRunner(vllm_config,
                                          devices=self.mock_devices)
+            self.runner.mesh = self.mock_mesh
 
     def setup_method(self):
         self._setup_runner(use_mla=False)

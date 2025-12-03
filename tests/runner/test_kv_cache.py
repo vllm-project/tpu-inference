@@ -8,7 +8,7 @@ import torch
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from jax._src import dtypes
 
-from tpu_inference.layers.jax.sharding import ShardingAxisName
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.runner.kv_cache import (
     create_kv_caches,
     get_attention_page_size_bytes,

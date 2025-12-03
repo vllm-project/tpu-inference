@@ -13,7 +13,6 @@ from jax.sharding import PartitionSpec as P
 from tpu_inference import utils
 from tpu_inference.kernels.mla.v1.kernel import \
     mla_ragged_paged_attention
-from tpu_inference.kernels.ragged_paged_attention.v3.util import get_tpu_version
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import ragged_paged_attention
 from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import get_tuned_block_sizes
     
@@ -21,7 +20,7 @@ from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import RMSNorm
 from tpu_inference.layers.jax.rope import DeepseekScalingRotaryEmbedding
-from tpu_inference.layers.jax.sharding import ShardingAxisName
+from tpu_inference.layers.common.sharding import ShardingAxisName
 
 KVCache = Tuple[jax.Array, jax.Array]
 
@@ -462,8 +461,6 @@ class MLA(nnx.Module):
             def _initialize_block_sizes():
                 # Set reasonable starting estimates for block sizes. (TODO(gpolovets): update this to use tuned sizes)
                 # Referring to get_tuned_block_sizes() in kernels/ragged_paged_attention/v3/tuned_block_sizes.py: 'TPU v7'/128/'q_bfloat16_kv_bfloat16/q_head-128_kv_head-1_head-128'/4096
-                tpu_version = get_tpu_version()
-                assert tpu_version == 7, "MLA kernel is currently only supported on Ironwood!"
                 max_num_tokens = q.shape[0]
                 max_num_seqs = md.seq_lens.shape[0]
                 num_page_indices = md.block_tables.shape[0]

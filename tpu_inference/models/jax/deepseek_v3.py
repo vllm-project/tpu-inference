@@ -15,7 +15,7 @@ from vllm.config import VllmConfig
 from tpu_inference import utils
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
 from tpu_inference.layers.jax.attention.deepseek_v3_attention import MLA
-from tpu_inference.layers.jax.sharding import ShardingAxisName
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
 from tpu_inference.layers.jax.moe.deepseek_v3_moe import (DeepSeekV3Router,
