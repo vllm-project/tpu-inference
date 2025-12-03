@@ -225,7 +225,7 @@ class MLA(nnx.Module):
             else:
                 # Concatenate the nope and rope queries.
                 q_TNH = jnp.concatenate([q_nope_TNH, q_rope_TNH], axis=-1)
-                # Multiple the query by scaling factor
+                # Multiply the query by scaling factor
                 q_TNH = nnx.with_sharding_constraint(q_TNH, self.query_tnh)
 
         with jax.named_scope("kv_proj"):
@@ -278,7 +278,8 @@ class MLA(nnx.Module):
             
             q_scale = k_scale = v_scale = None
 
-            if not self.use_mla_kernel: # MLA does not currently support quantized KV!   
+            # TODO(gpolovets): MLA does not currently support quantized KV!   
+            if not self.use_mla_kernel: 
                 if self.kv_cache_quantized_dtype: 
                     # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
                     k_scale = self._k_scale
@@ -410,8 +411,8 @@ class MLA(nnx.Module):
         kv_cache: KVCache,
         q_TNA: jax.Array,
         q_rope_TNH: jax.Array,
-        k_SKA: jax.Array,
-        k_rope_SNH: jax.Array,
+        k_SA: jax.Array,
+        k_rope_SH: jax.Array,
         attention_metadata: AttentionMetadata,
         mesh: Mesh,
     ) -> Tuple[KVCache, jax.Array]:
@@ -424,9 +425,10 @@ class MLA(nnx.Module):
 
         Args:
             kv_cache: The key-value cache to be updated and used.
-            q_TNH: Query tensor of shape `(query_seq, num_attention_heads, head_dim)`.
-            k_SKH: Key tensor of shape `(kv_seq, num_key_value_heads, head_dim)`.
-            v_SKH: Value tensor of shape `(kv_seq, num_key_value_heads, head_dim)`.
+            q_TNA: Query tensor of shape `(query_seq, num_attention_heads, lkv_dim)`.
+            q_rope_TNH: Query rope tensor of shape `(query_seq, num_attention_heads, rope_dim)`.
+            k_SA: Key tensor of shape `(kv_seq, lkv_dim)`.
+            k_rope_SH: Key rope tensor of shape `(kv_seq, rope_dim)`.
             attention_metadata: Metadata containing sequence lengths.
             mesh: The JAX device mesh (unused in this specific function but
                 kept for potential future use or API consistency).
@@ -457,9 +459,8 @@ class MLA(nnx.Module):
                      P(ShardingAxisName.MLP_TENSOR))
 
         def _mla_ragged_paged_attention(q, q_rope, k, k_rope, kv_cache, *args):
-            # TODO: should this be run/potentially recompiled forward pass?
             def _initialize_block_sizes():
-                # Set reasonable starting estimates for block sizes. (TODO: update this to use tuned sizes)
+                # Set reasonable starting estimates for block sizes. (TODO(gpolovets): update this to use tuned sizes)
                 # Referring to get_tuned_block_sizes() in kernels/ragged_paged_attention/v3/tuned_block_sizes.py: 'TPU v7'/128/'q_bfloat16_kv_bfloat16/q_head-128_kv_head-1_head-128'/4096
                 tpu_version = get_tpu_version()
                 assert tpu_version == 7, "MLA kernel is currently only supported on Ironwood!"
@@ -502,13 +503,11 @@ class MLA(nnx.Module):
                 out_specs=out_specs,
                 check_rep=False,
                 ),
-                # TODO: Confirm if you need this since kernel.py already donates.
-                donate_argnums=(4,)
             )(
                 q_TNA,
                 q_rope_TNH,
-                k_SKA,
-                k_rope_SNH,
+                k_SA,
+                k_rope_SH,
                 kv_cache,
                 md.seq_lens,
                 md.block_tables,

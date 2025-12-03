@@ -18,7 +18,7 @@ DEFAULT_VMEM_LIMIT_BYTES = 100 * 1024 * 1024
 def get_kv_cache_shape(
     total_num_pages,
     page_size,
-    lkv_dim,
+    kv_dim,
     kv_dtype,
 ):
     kv_packing = get_dtype_packing(kv_dtype)
@@ -26,7 +26,7 @@ def get_kv_cache_shape(
         total_num_pages,
         align_to(page_size, kv_packing) // kv_packing,
         kv_packing,
-        align_to(lkv_dim, 128),
+        align_to(kv_dim, 128),
     )
 
 @functools.partial(
@@ -467,9 +467,6 @@ def _mla_ragged_paged_attention_kernel(
     o_hbm_ref,  # [max_num_tokens, num_q_heads_per_q_packing, q_packing, lkv_dim]
     updated_cache_kv_hbm_ref,  # [total_num_pages, page_size_per_kv_packing, kv_packing, align_to(lkv_dim + r_dim, 128)]
     # Scratch
-    # NOTE: since we are performing pipelining *_x2_ref represent the blocks of the KV cache loaded in VMEM.
-    # This is traditionally handled for us by the compiler when we do input = input_ref[...] but now we have to manually allocate a 
-    # VMEM buffer to support pipelining.
     bkvc_x2_ref,  # [2, bkv_sz_per_kv_packing, kv_packing, lkv_dim]. 
     bkpe_x2_ref,  # [2, bkv_sz_per_kv_packing, kv_packing, r_dim]
     bq_nope_x2_ref,  # [2, bq_sz, num_q_heads_per_q_packing, q_packing, lkv_dim]
@@ -1074,6 +1071,7 @@ def mla_ragged_paged_attention(
     q_pe: jax.Array,  # [max_num_tokens, actual_num_q_heads, actual_r_dim]
     new_kv_c: jax.Array,  # [max_num_tokens, actual_lkv_dim]
     new_k_pe: jax.Array,  # [max_num_tokens, actual_r_dim]
+    # TODO(gpolovets): Explore separating out into lkv & pe KV caches.
     cache_kv: jax.
     Array,  # [total_num_pages, page_size_per_kv_packing, kv_packing, align_to(lkv_dim, 128)]
     kv_lens: jax.Array,  # i32[max_num_seqs]

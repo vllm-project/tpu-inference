@@ -49,6 +49,8 @@ class MetadataMap:
 
 
 def print_param_info(param: nnx.Param, name: str):
+    logger.warning(f"Global shape for {name}: {param.value.shape}")
+    logger.warning(f"Sharding for {name}: {param.sharding}")
 
     logger.warning(
         f"Shape of {name} on a single device: {param.value.addressable_shards[0].data.shape}"
@@ -66,6 +68,7 @@ def reshape_params(param_key: str, param_tensor: jax.Array, shape_map):
     for key, new_shape in shape_map.items():
         if key in param_key:
             try:
+                #TODO:(gpolovets) Add validation on whether reshape preserves data layout.
                 return jnp.reshape(param_tensor, new_shape)
             except:
                 raise ValueError(f"Cannot reshape for key={key}, new_shape={new_shape}, param_shape={param_tensor.shape}")

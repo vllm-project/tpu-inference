@@ -132,7 +132,7 @@ class DeepSeekV3(nnx.Module):
         def _create_mla() -> MLA:
             if self.use_mla_kernel:
                 query_tnh_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
-                keyvalue_skh_spec=P(ShardingAxisName.MLP_TENSOR, None) # misnomer should be something like keyvalue_sa
+                keyvalue_skh_spec=P(ShardingAxisName.MLP_TENSOR, None)
                 attn_o_tnh_spec=P(ShardingAxisName.MLP_TENSOR, None, None)
                 
             else:
@@ -167,10 +167,8 @@ class DeepSeekV3(nnx.Module):
                 activation_attention_out_td=(None, None),
                 attn_o_tnh=attn_o_tnh_spec,
                 q_da_sharding=(None, ShardingAxisName.VOCAB),
-                # q_da_sharding=(None, ShardingAxisName.MLP_TENSOR),
                 anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None),
                 kv_da_sharding=(None, ShardingAxisName.VOCAB),
-                # kv_da_sharding=(None, ShardingAxisName.MLP_TENSOR),
                 nhd_sharding=(ShardingAxisName.MLP_TENSOR, None, None))
 
         for i in range(first_k_dense_replace):
@@ -614,9 +612,7 @@ class DeepSeekV3WeightLoader:
                                 weight,
                                 model_params,
                                 model_mesh,
-                                scale=None,
-                                weight_slice: slice = None,
-                                scale_slice: slice = None) -> Tuple[int, int]:
+                                scale=None) -> Tuple[int, int]:
         """
         Loads a single weight into the model.
 
@@ -635,8 +631,6 @@ class DeepSeekV3WeightLoader:
             Tuple[int, int]: The size (in bytes) for the given layer overall and per shard.
                 NOTE: if using the pre-quantized model (with Qwix), we'll include the scale size as well.
         """
-        if weight_slice is not None:
-            weight = weight[*weight_slice]
         mapped_name = self.map_loaded_to_standardized_name(name)
         base_model_weight = get_param(model_params, mapped_name)
         model_weight = base_model_weight.array.qvalue if hasattr(
@@ -660,8 +654,6 @@ class DeepSeekV3WeightLoader:
 
         if scale is not None:
             scale = scale.to(torch.float32).numpy().astype(self.scale_dtype)
-        if scale_slice is not None:
-            scale = scale[*scale_slice]
 
         # Reshape and transpose weights if necessary.
         weight_np = reshape_params(name, weight_np, self._weight_shape_map)
@@ -891,17 +883,13 @@ class DeepSeekV3WeightLoader:
                             v_scale = scale_reshaped[:, self.qk_nope_head_dim // bn:, :].reshape(-1, self.kv_lora_rank // bk)
                             scales_list = [k_scale, v_scale]
 
-                        load_weight_slices = [None, None]
-                        load_scale_slices = [None, None]
                     else:
                         loaded_weights_list = [loaded_weight]
                         loaded_names = [loaded_name]
-                        load_weight_slices = [None]
                         scales_list = [scale]
-                        load_scale_slices = [None]
 
-                    for loaded_name, loaded_weight, scale, load_weight_slice, load_scale_slice in zip(
-                            loaded_names, loaded_weights_list, scales_list, load_weight_slices, load_scale_slices
+                    for loaded_name, loaded_weight, scale in zip(
+                            loaded_names, loaded_weights_list, scales_list
                             ):
 
                         weight_bytes, weight_shards = self._load_individual_weight(
@@ -909,9 +897,7 @@ class DeepSeekV3WeightLoader:
                             loaded_weight,
                             model_params,
                             model_for_loading.mesh,
-                            scale=scale,
-                            weight_slice=load_weight_slice,
-                            scale_slice=load_scale_slice)
+                            scale=scale)
                         if self.is_verbose:
                             cumulative_global_memory += weight_bytes
                             cumulative_local_memory += weight_shards

@@ -32,7 +32,6 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh, total_num_pages: int,
     # model-specific adjustments.
     if use_mla:
         get_kv_cache_shape_fn = mla.get_kv_cache_shape
-        # During decode this is [1, 128, 2, 640]
         shape = list(
             get_kv_cache_shape_fn(total_num_pages, page_size,
                                   actual_head_dim, kv_dtype))
