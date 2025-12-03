@@ -326,6 +326,13 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
                     w13_bias, NamedSharding(self.mesh, P(None, "model")))
                 w2_bias = jax.lax.with_sharding_constraint(
                     w2_bias, NamedSharding(self.mesh, P(None, None)))
+
+                w13_bias = jnp.expand_dims(w13_bias, 1)
+                w2_bias = jnp.expand_dims(w2_bias, 1)
+                w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
+                w13_weight_scale = jnp.expand_dims(w13_weight_scale, 2)
+                w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
+                w2_weight_scale = jnp.expand_dims(w2_weight_scale, 2)
             return w13_weight, w13_weight_scale, w13_bias, w2_weight, w2_weight_scale, w2_bias
 
         w13_weight, w13_weight_scale, w13_bias, w2_weight, w2_weight_scale, w2_bias = wrapper(

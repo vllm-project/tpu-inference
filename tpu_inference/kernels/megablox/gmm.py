@@ -368,7 +368,7 @@ def gmm(
     if rhs_scale is not None:
         assert isinstance(rhs_scale, jax.Array)
         assert rhs_scale.shape[0] == num_current_groups
-        num_blocks = rhs_scale.shape[-1]
+        num_blocks = rhs_scale.shape[1]
     else:
         num_blocks = 1
     block_size = k // num_blocks
@@ -555,15 +555,15 @@ def gmm(
         rhs_scale_block_spec = None
     else:
 
-        rhs_scale = jnp.swapaxes(rhs_scale, 1, 2)
-        rhs_scale = jnp.expand_dims(rhs_scale, 2)
+        # rhs_scale = jnp.swapaxes(rhs_scale, 1, 3)
+        # rhs_scale = jnp.expand_dims(rhs_scale, 2)
         rhs_scale_block_spec = pl.BlockSpec((None, None, 1, tn),
                                             rhs_scale_transform_indices)
 
     if rhs_bias is None:
         rhs_bias_block_spec = None
     else:
-        rhs_bias = jnp.expand_dims(rhs_bias, 1)
+        # rhs_bias = jnp.expand_dims(rhs_bias, 1)
         rhs_bias_block_spec = pl.BlockSpec((None, 1, tn),
                                            rhs_bias_transform_indices)
 

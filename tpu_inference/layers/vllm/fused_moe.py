@@ -125,8 +125,9 @@ def tensor_sharded_gmm_merged_column_parallel(
             group_offset=jnp.array(0),
         )
 
-    rhs_scale_spec = None if rhs_scale is None else P(None, "model", None)
-    rhs_bias_spec = None if rhs_bias is None else P(None, "model")
+    rhs_scale_spec = None if rhs_scale is None else P(None, None, None,
+                                                      "model")
+    rhs_bias_spec = None if rhs_bias is None else P(None, None, "model")
 
     gmm_result = shard_map(
         _gmm,
@@ -175,8 +176,9 @@ def tensor_sharded_gmm_row_parallel(
         )
         return jax.lax.psum(out, axis_name="model")
 
-    rhs_scale_spec = None if rhs_scale is None else P(None, None, "model")
-    rhs_bias_spec = None if rhs_bias is None else P(None, None)
+    rhs_scale_spec = None if rhs_scale is None else P(None, "model", None,
+                                                      None)
+    rhs_bias_spec = None if rhs_bias is None else P(None, None, None)
     gmm_result = shard_map(
         _gmm_all_reduce,
         mesh=mesh,
