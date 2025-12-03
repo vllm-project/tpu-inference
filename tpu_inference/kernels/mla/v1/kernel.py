@@ -93,10 +93,8 @@ def ref_mla_ragged_paged_attention(
     q_pe: jax.Array,  # [num_tokens, actual_num_q_heads, actual_r_dim]
     new_kv_c: jax.Array,  # [num_tokens, actual_lkv_dim]
     new_k_pe: jax.Array,  # [num_tokens, actual_r_dim]
-    cache_kv_c: jax.
+    cache_kv: jax.
     Array,  # [total_num_pages, page_size_per_kv_packing, kv_packing, lkv_dim]
-    cache_k_pe: jax.
-    Array,  # [total_num_pages, page_size_per_kv_packing, kv_packing, r_dim]
     kv_lens: jax.Array,  # i32[max_num_seqs]
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
@@ -116,8 +114,7 @@ def ref_mla_ragged_paged_attention(
         q_pe,
         new_kv_c,
         new_k_pe,
-        cache_kv_c,
-        cache_k_pe,
+        cache_kv,
         kv_lens,
         page_indices,
         cu_q_lens,
@@ -128,11 +125,10 @@ def ref_mla_ragged_paged_attention(
         mask_value=mask_value,
     )
 
-    cache_kv_c, cache_k_pe = update_kv_cache(
+    updated_cache_kv = update_kv_cache(
         new_kv_c,
         new_k_pe,
-        cache_kv_c,
-        cache_k_pe,
+        cache_kv,
         kv_lens,
         page_indices,
         cu_q_lens,
@@ -159,13 +155,15 @@ def ref_mla_ragged_paged_attention(
     assert num_page_indices % max_num_seqs == 0
     pages_per_seq = num_page_indices // max_num_seqs
 
-    total_num_pages, page_size_per_kv_packing, kv_packing, _ = cache_kv_c.shape
+    total_num_pages, page_size_per_kv_packing, kv_packing, _ = updated_cache_kv.shape
     page_size = page_size_per_kv_packing * kv_packing
     assert lkv_dim == ql_nope.shape[-1]
     assert r_dim == q_pe.shape[-1]
+    assert lkv_dim + r_dim == updated_cache_kv.shape[-1]
 
-    kv_c_cache = cache_kv_c.reshape(total_num_pages, page_size, lkv_dim)
-    k_pe_cache = cache_k_pe.reshape(total_num_pages, page_size, r_dim)
+
+    kv_c_cache = updated_cache_kv[..., :lkv_dim].reshape(total_num_pages, page_size, lkv_dim)
+    k_pe_cache = updated_cache_kv[..., lkv_dim:].reshape(total_num_pages, page_size, r_dim)
 
     outputs = []
 
@@ -226,8 +224,7 @@ def ref_mla_ragged_paged_attention(
 
     return (
         jnp.concatenate(outputs, axis=0),
-        cache_kv_c,
-        cache_k_pe,
+        updated_cache_kv,
     )
 
 
@@ -238,7 +235,7 @@ def dynamic_validate_inputs(
     new_kv_c: jax.Array,  # [max_num_tokens, actual_lkv_dim]
     new_k_pe: jax.Array,  # [max_num_tokens, actual_r_dim]
     cache_kv: jax.
-    Array,  # [total_num_pages, page_size_per_kv_packing, kv_packing, lkv_dim + r_dim]
+    Array,  # [total_num_pages, page_size_per_kv_packing, kv_packing, lkv_dim]
     kv_lens: jax.Array,  # i32[max_num_seqs]
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
@@ -315,7 +312,6 @@ def dynamic_validate_inputs(
                     f"Require 0 <= {page_idx=} < {total_num_pages=} at sequence"
                     f" {seq_idx} where {kv_len=} and {page_size=}.")
 
-
 # Expect to run this validation during compile time.
 def static_validate_inputs(
     ql_nope: jax.Array,  # [max_num_tokens, actual_num_q_heads, actual_lkv_dim]
@@ -373,27 +369,37 @@ def static_validate_inputs(
 
     actual_lkv_dim = ql_nope.shape[2]
     actual_r_dim = q_pe.shape[2]
+    lkv_dim = align_to(actual_lkv_dim, 128)
+    r_dim = align_to(actual_r_dim, 128)
+
     (
         _,
         page_size_per_kv_packing,
         kv_packing,
         kv_dim,
     ) = cache_kv.shape
-    lkv_dim = align_to(actual_lkv_dim, 128)
-    r_dim = align_to(actual_r_dim, 128)
-    if kv_dim != lkv_dim + r_dim:
+
+    if lkv_dim + r_dim != kv_dim:
         raise ValueError(
-            f"Expected {kv_dim=} is equal to {align_to(actual_lkv_dim + actual_r_dim, 128)=}")
-    if not (cache_kv.dtype == new_kv_c.dtype == new_k_pe.dtype):
+            f"Expected {lkv_dim=} + {r_dim=} to be equal to {kv_dim=}"
+        )
+
+    if not (cache_kv.dtype == new_kv_c.dtype):
         raise ValueError(
             f"Expected {cache_kv.dtype=} to be equal to {new_kv_c.dtype=}.")
+    if not (cache_kv.dtype == new_k_pe.dtype):
+        raise ValueError(
+            f"Expected {cache_kv.dtype=} to be equal to {new_k_pe.dtype=}.")
+
     # Integer kv quantization is currently not supported.
     if not jnp.issubdtype(cache_kv.dtype, jnp.floating):
         raise ValueError(
             f"Expected {cache_kv.dtype=} to be a floating point.")
+
     if kv_packing != get_dtype_packing(cache_kv.dtype):
         raise ValueError(
             f"{kv_packing=} does not match with {cache_kv.dtype=}")
+
     if not (jnp.int32 == kv_lens.dtype == page_indices.dtype == cu_q_lens.dtype
             == distribution.dtype):
         raise ValueError(
@@ -440,7 +446,6 @@ def static_validate_inputs(
     del sm_scale
     del mask_value
     del debug_mode
-
 
 def _mla_ragged_paged_attention_kernel(
     # Prefetch

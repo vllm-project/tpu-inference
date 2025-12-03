@@ -86,7 +86,7 @@ class KVCacheManager:
                 # Eagle3 has only 1 layer
                 for i in range(1):
                     if self.use_mla:
-                        kv_cache_spec[f"layer.{i}"] = MLAAttentionSpec(
+                        kv_cache_spec[f"draft_layer.{i}"] = MLAAttentionSpec(
                             block_size=block_size,
                             num_kv_heads=1,
                             head_size=head_size,
@@ -127,7 +127,7 @@ class KVCacheManager:
                             dtype=self.runner.kv_cache_dtype,
                             sliding_window=attn_module.sliding_window)
                     elif self.use_mla:
-                        kv_cache_spec[f"layer.{i}"] = MLAAttentionSpec(
+                        kv_cache_spec[layer_name] = MLAAttentionSpec(
                             block_size=block_size,
                             num_kv_heads=1,
                             head_size=attn_module.head_size,

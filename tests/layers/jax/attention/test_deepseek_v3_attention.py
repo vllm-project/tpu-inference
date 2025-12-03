@@ -1,26 +1,27 @@
+import os
+os.environ["NEW_MODEL_DESIGN"] = "True"
 import unittest
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import nnx
-from jax.sharding import Mesh
+from jax.sharding import Mesh, PartitionSpec
 from parameterized import parameterized
 
 from tpu_inference.layers.common.attention_interface import get_kv_cache_shape
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.attention.deepseek_v3_attention import MLA
+from tpu_inference.layers.common.sharding import ShardingAxisName
+import tpu_inference.kernels.mla.v1.kernel as mla
 
 
 class TestMLA(unittest.TestCase):
 
     def setUp(self):
         self.mesh = Mesh(
-            np.array(jax.devices("tpu")[:1]).reshape(1, -1),
-            axis_names=(
-                "expert",
-                "model",
-            ),
+            np.array(jax.devices("tpu")[:1]).reshape(1, 1, 1, 1),
+            axis_names=("data", "attn_dp", "expert", "model"),
         )
 
     @parameterized.expand([["auto"], ["fp8"]])
@@ -32,7 +33,11 @@ class TestMLA(unittest.TestCase):
         qk_rope_head_dim = 32
 
         with jax.set_mesh(self.mesh):
-            mla = MLA(
+            query_tnh_spec = PartitionSpec(None, ShardingAxisName.MLP_TENSOR, None)
+            keyvalue_skh_spec = PartitionSpec(None, ShardingAxisName.MLP_TENSOR, None)
+            attn_o_tnh_spec = PartitionSpec(None, ShardingAxisName.MLP_TENSOR, None)
+
+            mla_layer = MLA(
                 hidden_size=hidden_size,
                 num_attention_heads=32,
                 num_key_value_heads=num_key_value_heads,
@@ -60,7 +65,13 @@ class TestMLA(unittest.TestCase):
                 mesh=self.mesh,
                 random_init=True,
                 kv_cache_dtype=kv_cache_str,
-                # Provide all required sharding objects
+                query_tnh=query_tnh_spec,
+                keyvalue_skh=keyvalue_skh_spec,
+                attn_o_tnh=attn_o_tnh_spec,
+                q_da_sharding=(None, ShardingAxisName.VOCAB),
+                anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None),
+                kv_da_sharding=(None, ShardingAxisName.VOCAB),
+                nhd_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
             )
 
             # Create input tensor
@@ -68,8 +79,6 @@ class TestMLA(unittest.TestCase):
             x = jnp.ones((seq_len, hidden_size), dtype=jnp.bfloat16)
 
             # Create KV cache
-            # TODO(wenxindongwork): test with unpadded head dimension once
-            # MLA kv cache implementation is added.
             qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
             block_size = 16
             num_blocks = 8
@@ -82,17 +91,17 @@ class TestMLA(unittest.TestCase):
             # Create attention metadata
             attention_metadata = AttentionMetadata(
                 input_positions=jnp.arange(seq_len, dtype=jnp.int32),
-                block_tables=jnp.zeros((8, ), dtype=jnp.int32),
+                block_tables=jnp.zeros((8,), dtype=jnp.int32),
                 seq_lens=jnp.ones((1, ), dtype=jnp.int32) * seq_len,
                 query_start_loc=jnp.array(
                     [0, seq_len], dtype=jnp.int32),  # This is cu_q_lens
                 request_distribution=jnp.array([0, 0, 1], dtype=jnp.int32),
             )
 
-            mla.rope.initialize_cache(self.mesh)
+            mla_layer.rope.initialize_cache(self.mesh)
 
             # Run forward pass
-            new_kv_cache, output = mla(x,
+            new_kv_cache, output = mla_layer(x,
                                        is_prefill=True,
                                        kv_cache=kv_cache,
                                        attention_metadata=attention_metadata)
@@ -102,7 +111,7 @@ class TestMLA(unittest.TestCase):
             self.assertEqual(new_kv_cache.shape, kv_cache.shape)
 
 
-    @parameterized.expand([["auto"], ["fp8"]])
+    @parameterized.expand([["auto"]])  # MLA kernel does not support fp8 yet
     def test_mla_kernel_forward_pass(self, kv_cache_str):
         hidden_size = 256
 
@@ -113,7 +122,11 @@ class TestMLA(unittest.TestCase):
         kv_lora_rank = 512
 
         with jax.set_mesh(self.mesh):
-            mla = MLA(
+            query_tnh_spec = PartitionSpec(ShardingAxisName.MLP_TENSOR, None, None)
+            keyvalue_skh_spec = PartitionSpec(ShardingAxisName.MLP_TENSOR, None)
+            attn_o_tnh_spec = PartitionSpec(ShardingAxisName.MLP_TENSOR, None, None)
+
+            mla_layer = MLA(
                 hidden_size=hidden_size,
                 num_attention_heads=32,
                 num_key_value_heads=num_key_value_heads,
@@ -139,7 +152,14 @@ class TestMLA(unittest.TestCase):
                 mesh=self.mesh,
                 random_init=True,
                 kv_cache_dtype=kv_cache_str,
-                use_mla_kernel=True,
+                use_mla_kernel=True, # Set to true, in order to trigger MLA kernel.
+                query_tnh=query_tnh_spec,
+                keyvalue_skh=keyvalue_skh_spec,
+                attn_o_tnh=attn_o_tnh_spec,
+                q_da_sharding=(None, ShardingAxisName.VOCAB),
+                anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None),
+                kv_da_sharding=(None, ShardingAxisName.VOCAB),
+                nhd_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
             )
 
             # Create input tensor
@@ -167,10 +187,10 @@ class TestMLA(unittest.TestCase):
                 request_distribution=jnp.array([0, 0, 1], dtype=jnp.int32),
             )
 
-            mla.rope.initialize_cache()
+            mla_layer.rope.initialize_cache(self.mesh)
 
             # Run forward pass
-            new_kv_cache, output = mla(
+            new_kv_cache, output = mla_layer(
                 x,
                 is_prefill=True,
                 kv_cache=kv_cache,
