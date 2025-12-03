@@ -175,79 +175,131 @@ TUNED_BLOCK_SIZES = {
         },
     },
     'TPU v7': {
-        128: {
-            'q_bfloat16_kv_bfloat16': {
-                'q_head-8_kv_head-2_head-64': {
-                    4096: (32, 16),
-                    8192: (32, 64),
-                    128: (1, 16),
-                    256: (2, 64),
-                    512: (4, 16),
-                    1024: (8, 32),
-                    2048: (16, 32),
-                },
-                'q_head-64_kv_head-8_head-64': {
-                    128: (1, 16),
-                    4096: (32, 8),
-                    1024: (8, 16),
-                    256: (2, 16),
-                    8192: (32, 16),
-                    2048: (16, 16),
-                    512: (4, 16),
-                },
-                'q_head-32_kv_head-4_head-64': {
-                    256: (2, 8),
-                    512: (4, 16),
-                    1024: (8, 16),
-                    2048: (16, 32),
-                    4096: (32, 64),
-                    8192: (32, 16),
-                    128: (1, 16),
-                },
-                'q_head-16_kv_head-2_head-64': {
-                    128: (1, 64),
-                    256: (2, 8),
-                    512: (4, 8),
-                    1024: (8, 16),
-                    2048: (16, 16),
-                    4096: (32, 32),
-                    8192: (32, 32),
-                },
-            }
-        },
         256: {
             'q_bfloat16_kv_bfloat16': {
                 'q_head-16_kv_head-2_head-64': {
-                    1024: (4, 32),
-                    2048: (8, 16),
-                    4096: (16, 8),
-                    8192: (16, 16),
-                    256: (1, 64),
-                    512: (2, 32),
+                    'max_model_len-2048-sliding_window-None': (8, 32),
+                    'max_model_len-2048-sliding_window-128': (1, 32),
+                    'max_model_len-4096-sliding_window-None': (16, 32),
+                    'max_model_len-4096-sliding_window-128': (1, 32),
+                    'max_model_len-8192-sliding_window-None': (16, 32),
+                    'max_model_len-8192-sliding_window-128': (1, 64),
+                    'max_model_len-256-sliding_window-None': (1, 64),
+                    'max_model_len-256-sliding_window-128': (1, 32),
+                    'max_model_len-512-sliding_window-None': (2, 32),
+                    'max_model_len-512-sliding_window-128': (1, 64),
+                    'max_model_len-1024-sliding_window-None': (4, 32),
+                    'max_model_len-1024-sliding_window-128': (1, 32),
                 },
                 'q_head-64_kv_head-8_head-64': {
-                    256: (1, 8),
-                    512: (2, 16),
-                    1024: (4, 32),
-                    2048: (8, 16),
-                    4096: (16, 16),
-                    8192: (16, 16),
-                },
-                'q_head-8_kv_head-2_head-64': {
-                    256: (1, 256),
-                    512: (2, 16),
-                    1024: (4, 16),
-                    2048: (8, 16),
-                    4096: (16, 32),
-                    8192: (16, 16),
+                    'max_model_len-8192-sliding_window-128': (1, 16),
+                    'max_model_len-512-sliding_window-None': (2, 16),
+                    'max_model_len-256-sliding_window-None': (1, 16),
+                    'max_model_len-256-sliding_window-128': (1, 16),
+                    'max_model_len-512-sliding_window-128': (1, 16),
+                    'max_model_len-1024-sliding_window-None': (4, 16),
+                    'max_model_len-1024-sliding_window-128': (1, 16),
+                    'max_model_len-2048-sliding_window-None': (8, 32),
+                    'max_model_len-2048-sliding_window-128': (1, 16),
+                    'max_model_len-4096-sliding_window-None': (16, 16),
+                    'max_model_len-4096-sliding_window-128': (1, 16),
+                    'max_model_len-8192-sliding_window-None': (16, 16),
                 },
                 'q_head-32_kv_head-4_head-64': {
-                    256: (1, 64),
-                    512: (2, 32),
-                    1024: (4, 8),
-                    2048: (8, 8),
-                    4096: (16, 32),
-                    8192: (16, 32),
+                    'max_model_len-256-sliding_window-None': (1, 32),
+                    'max_model_len-256-sliding_window-128': (1, 32),
+                    'max_model_len-512-sliding_window-None': (2, 32),
+                    'max_model_len-512-sliding_window-128': (1, 32),
+                    'max_model_len-4096-sliding_window-None': (16, 32),
+                    'max_model_len-1024-sliding_window-None': (4, 32),
+                    'max_model_len-1024-sliding_window-128': (1, 32),
+                    'max_model_len-2048-sliding_window-None': (8, 32),
+                    'max_model_len-2048-sliding_window-128': (1, 32),
+                    'max_model_len-4096-sliding_window-128': (1, 32),
+                    'max_model_len-8192-sliding_window-None': (16, 32),
+                    'max_model_len-8192-sliding_window-128': (1, 32),
+                },
+                'q_head-8_kv_head-2_head-64': {
+                    'max_model_len-256-sliding_window-None': (1, 128),
+                    'max_model_len-256-sliding_window-128': (1, 64),
+                    'max_model_len-512-sliding_window-None': (2, 64),
+                    'max_model_len-512-sliding_window-128': (1, 128),
+                    'max_model_len-1024-sliding_window-None': (4, 64),
+                    'max_model_len-1024-sliding_window-128': (1, 64),
+                    'max_model_len-2048-sliding_window-None': (8, 32),
+                    'max_model_len-2048-sliding_window-128': (1, 32),
+                    'max_model_len-4096-sliding_window-None': (16, 32),
+                    'max_model_len-4096-sliding_window-128': (1, 64),
+                    'max_model_len-8192-sliding_window-None': (16, 32),
+                    'max_model_len-8192-sliding_window-128': (1, 64),
+                },
+            }
+        },
+        128: {
+            'q_bfloat16_kv_bfloat16': {
+                'q_head-64_kv_head-8_head-64': {
+                    'max_model_len-4096-sliding_window-128': (2, 16),
+                    'max_model_len-8192-sliding_window-None': (32, 16),
+                    'max_model_len-1024-sliding_window-None': (8, 16),
+                    'max_model_len-8192-sliding_window-128': (2, 16),
+                    'max_model_len-512-sliding_window-None': (4, 16),
+                    'max_model_len-2048-sliding_window-128': (2, 16),
+                    'max_model_len-256-sliding_window-None': (2, 16),
+                    'max_model_len-128-sliding_window-None': (1, 32),
+                    'max_model_len-4096-sliding_window-None': (32, 16),
+                    'max_model_len-1024-sliding_window-128': (2, 16),
+                    'max_model_len-512-sliding_window-128': (2, 16),
+                    'max_model_len-256-sliding_window-128': (2, 16),
+                    'max_model_len-2048-sliding_window-None': (16, 32),
+                    'max_model_len-128-sliding_window-128': (1, 32),
+                },
+                'q_head-16_kv_head-2_head-64': {
+                    'max_model_len-128-sliding_window-128': (1, 64),
+                    'max_model_len-256-sliding_window-None': (2, 32),
+                    'max_model_len-256-sliding_window-128': (2, 32),
+                    'max_model_len-512-sliding_window-None': (4, 32),
+                    'max_model_len-512-sliding_window-128': (2, 64),
+                    'max_model_len-1024-sliding_window-None': (8, 32),
+                    'max_model_len-1024-sliding_window-128': (2, 64),
+                    'max_model_len-2048-sliding_window-None': (16, 32),
+                    'max_model_len-2048-sliding_window-128': (2, 64),
+                    'max_model_len-4096-sliding_window-None': (32, 32),
+                    'max_model_len-4096-sliding_window-128': (2, 8),
+                    'max_model_len-8192-sliding_window-None': (32, 32),
+                    'max_model_len-8192-sliding_window-128': (2, 32),
+                    'max_model_len-128-sliding_window-None': (1, 64),
+                },
+                'q_head-8_kv_head-2_head-64': {
+                    'max_model_len-1024-sliding_window-128': (2, 64),
+                    'max_model_len-2048-sliding_window-None': (16, 32),
+                    'max_model_len-2048-sliding_window-128': (2, 64),
+                    'max_model_len-4096-sliding_window-None': (32, 32),
+                    'max_model_len-4096-sliding_window-128': (2, 64),
+                    'max_model_len-8192-sliding_window-None': (32, 32),
+                    'max_model_len-8192-sliding_window-128': (2, 64),
+                    'max_model_len-128-sliding_window-None': (1, 64),
+                    'max_model_len-128-sliding_window-128': (1, 64),
+                    'max_model_len-256-sliding_window-None': (2, 64),
+                    'max_model_len-256-sliding_window-128': (2, 64),
+                    'max_model_len-512-sliding_window-None': (4, 64),
+                    'max_model_len-512-sliding_window-128': (2, 64),
+                    'max_model_len-1024-sliding_window-None': (8, 32),
+                },
+                'q_head-32_kv_head-4_head-64': {
+                    'max_model_len-128-sliding_window-None': (1, 32),
+                    'max_model_len-128-sliding_window-128': (1, 32),
+                    'max_model_len-256-sliding_window-None': (2, 32),
+                    'max_model_len-256-sliding_window-128': (2, 32),
+                    'max_model_len-2048-sliding_window-128': (1, 64),
+                    'max_model_len-512-sliding_window-None': (4, 32),
+                    'max_model_len-512-sliding_window-128': (2, 32),
+                    'max_model_len-1024-sliding_window-None': (8, 32),
+                    'max_model_len-1024-sliding_window-128': (2, 32),
+                    'max_model_len-2048-sliding_window-None': (16, 32),
+                    'max_model_len-4096-sliding_window-None': (32, 32),
+                    'max_model_len-4096-sliding_window-128': (2, 32),
+                    'max_model_len-8192-sliding_window-None': (32, 32),
+                    'max_model_len-8192-sliding_window-128': (2, 32),
                 },
             }
         },
@@ -264,6 +316,7 @@ def get_tuned_block_sizes(
     page_size,
     max_num_tokens,
     pages_per_seq,
+    sliding_window,
 ) -> tuple[int, int]:
     """Search tuned values for (num_kv_pages_per_blk, num_queries_per_blk)."""
 
@@ -288,12 +341,13 @@ def get_tuned_block_sizes(
         actual_num_kv_heads,
         head_dim,
         page_size * pages_per_seq,
+        sliding_window,
     )
-    device, page_size, dtypes, head_dims, max_model_len = keys
+    device, page_size, dtypes, head_dims, extra = keys
+    print('xw32 Looking for tuned sizes for the RPA v3 kernel with %s', keys)
 
     try:
-        bkv_p, bq = TUNED_BLOCK_SIZES[device][page_size][dtypes][head_dims][
-            max_model_len]
+        bkv_p, bq = TUNED_BLOCK_SIZES[device][page_size][dtypes][head_dims][extra]
     except KeyError:
         print('Couldn`t find tuned sizes for the RPA v3 kernel with %s', keys)
 
@@ -308,6 +362,7 @@ def get_lookup_keys(
     num_kv_heads,
     head_dim,
     max_model_len,
+    sliding_window,
 ):
     """Get the lookup keys for tuned block sizes."""
     (
@@ -318,6 +373,7 @@ def get_lookup_keys(
         num_kv_heads,
         head_dim,
         max_model_len,
+        sliding_window,
     ) = get_simplified_raw_key(
         page_size,
         q_dtype,
@@ -326,6 +382,7 @@ def get_lookup_keys(
         num_kv_heads,
         head_dim,
         max_model_len,
+        sliding_window,
     )
 
     return (
@@ -333,7 +390,7 @@ def get_lookup_keys(
         next_power_of_2(page_size),
         f'q_{q_dtype_name}_kv_{kv_dtype_name}',
         f'q_head-{num_q_heads}_kv_head-{num_kv_heads}_head-{head_dim}',
-        next_power_of_2(max_model_len),
+        f'max_model_len-{next_power_of_2(max_model_len)}-sliding_window-{sliding_window}',
     )
 
 
@@ -345,6 +402,7 @@ def get_simplified_raw_key(
     actual_num_kv_heads,
     head_dim,
     max_model_len,
+    sliding_window,
 ):
     """Get the simplified key."""
     assert head_dim == 64
@@ -364,4 +422,8 @@ def get_simplified_raw_key(
         next_power_of_2(num_kv_heads),
         head_dim,
         next_power_of_2(max_model_len),
+        sliding_window,
     )
+
+def get_kernel_scope_name(prefix, bq_size, bkv_p, page_size):
+  return f"{prefix}-bq_{bq_size}-bkvp_{bkv_p}-p_{page_size}-"

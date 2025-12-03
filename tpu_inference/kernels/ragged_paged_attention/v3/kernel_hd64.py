@@ -12,7 +12,7 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes_hd64 import \
-    get_tuned_block_sizes
+    get_tuned_block_sizes, get_kernel_scope_name
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (
     align_to, cdiv, get_dtype_packing)
 
@@ -1462,6 +1462,7 @@ def ragged_paged_attention_hd64(
             page_size,
             max_num_tokens,
             pages_per_seq,
+            sliding_window,
         )
     bkv_sz = bkv_p * page_size
     if vmem_limit_bytes is None:
@@ -1532,7 +1533,7 @@ def ragged_paged_attention_hd64(
         jnp.full((6, ), -1, jnp.int32),
     )
 
-    scope_name = f"RPA-HD_64-bq_{bq_sz}-bkvp_{bkv_p}-p_{page_size}"
+    scope_name = get_kernel_scope_name("RPA-HD_64", bq_sz, bkv_p, page_size)
     kernel = jax.named_scope(scope_name)(
         pl.pallas_call(
             functools.partial(
