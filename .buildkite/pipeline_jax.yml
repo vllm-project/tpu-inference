@@ -118,6 +118,7 @@ steps:
          .buildkite/scripts/run_in_docker.sh \
            python3 -m pytest -s -v -x /workspace/tpu_inference/tests/ \
            --ignore=/workspace/tpu_inference/tests/kernels \
+           --ignore=/workspace/tpu_inference/tests/lora \
            --ignore=/workspace/tpu_inference/tests/e2e \
            --ignore=/workspace/tpu_inference/tpu_inference/mock \
            --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py \
@@ -133,7 +134,6 @@ steps:
          if [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels|tests/kernels|requirements\.txt)'; then
            .buildkite/scripts/run_in_docker.sh \
              python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels \
-             --ignore=/workspace/tpu_inference/tests/lora/test_lora.py \
              --ignore=/workspace/tpu_inference/tests/kernels/ragged_paged_attention_kernel_v2_test.py \
              --ignore=/workspace/tpu_inference/tests/kernels/ragged_kv_cache_update_v2_test.py \
              --ignore=/workspace/tpu_inference/tests/kernels/collectives \
@@ -226,6 +226,18 @@ steps:
            exit 0
          fi
 
+
+   - label: "lora unit tests on single chip"
+     key: test_15
+     soft_fail: true
+     agents:
+       queue: tpu_v6e_queue
+     commands:
+       - |
+         .buildkite/scripts/run_in_docker.sh \
+           bash -c ' python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_bgmv.py && \
+           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_layers.py'
+
    - label: "lora unit tests on multi chips"
      key: test_16
      soft_fail: true
@@ -263,10 +275,11 @@ steps:
        - test_11
        - test_12
        - test_13
+       - test_15
        - test_16
      agents:
        queue: cpu
      commands:
        - |
          .buildkite/scripts/check_results.sh \
-           "TPU JAX Tests Failed" test_0 test_1 test_2 test_3 test_4 test_5 test_6 test_7 test_8 test_9 test_10 test_11 test_12 test_13 test_16
+           "TPU JAX Tests Failed" test_0 test_1 test_2 test_3 test_4 test_5 test_6 test_7 test_8 test_9 test_10 test_11 test_12 test_13 test_15 test_16
