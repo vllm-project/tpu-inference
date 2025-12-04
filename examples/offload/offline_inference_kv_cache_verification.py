@@ -38,12 +38,6 @@ def create_parser():
     parser.set_defaults(model="meta-llama/Llama-3.1-8B")
     parser.set_defaults(max_model_len=1024)
 
-    # Add sampling params
-    sampling_group = parser.add_argument_group("Sampling parameters")
-    sampling_group.add_argument("--max-tokens", type=int)
-    sampling_group.add_argument("--temperature", type=float)
-    sampling_group.add_argument("--top-p", type=float)
-    sampling_group.add_argument("--top-k", type=int)
     return parser
 
 
@@ -52,25 +46,14 @@ def setup_llm(llm_args: dict) -> Tuple[LLM, SamplingParams]:
     Initializes a vLLM engine and sampling parameters from the given args.
     """
     args_copy = copy.deepcopy(llm_args)
-    # Pop arguments not used by LLM
-    max_tokens = args_copy.pop("max_tokens")
-    temperature = args_copy.pop("temperature")
-    top_p = args_copy.pop("top_p")
-    top_k = args_copy.pop("top_k")
-
     # Create an LLM. The --seed argument is passed in via **args.
     llm = LLM(**args_copy)
 
-    # Create a sampling params object
-    sampling_params = llm.get_default_sampling_params()
-    if max_tokens is not None:
-        sampling_params.max_tokens = max_tokens
-    if temperature is not None:
-        sampling_params.temperature = temperature
-    if top_p is not None:
-        sampling_params.top_p = top_p
-    if top_k is not None:
-        sampling_params.top_k = top_k
+    # Create a sampling params
+    sampling_params = SamplingParams(temperature=0,
+                                     max_tokens=20,
+                                     seed=42,
+                                     ignore_eos=True)
 
     return llm, sampling_params
 
