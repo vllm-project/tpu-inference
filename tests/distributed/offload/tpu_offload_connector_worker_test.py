@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import functools
+import gc
 import os
 import random
 from typing import List
@@ -94,8 +95,16 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
 
     def tearDown(self):
         super().tearDown()
+        # Destroy references explicitly
+        if hasattr(self, 'connector'):
+             del self.connector
+
+        # Force JAX to release memory
         cc.reset_cache()
         jax.clear_caches()
+
+        # Force Python GC
+        gc.collect()
 
     def create_mesh(self, axis_shapes, axis_names):
         """Creates a JAX device mesh with the default device order."""
