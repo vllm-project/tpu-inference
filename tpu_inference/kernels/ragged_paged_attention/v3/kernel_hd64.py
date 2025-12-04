@@ -267,7 +267,6 @@ def _ragged_paged_attention_kernel(
     *,
     sm_scale: float,
     sliding_window: int | None = None,
-    strict_sliding_window: bool = True,
     soft_cap: float | None = None,
     mask_value: float = DEFAULT_MASK_VALUE,
     q_scale: float | None = None,
@@ -324,14 +323,12 @@ def _ragged_paged_attention_kernel(
         bkv_idx_start = jnp.maximum(kv_len - q_len - sliding_window,
                                     0) // bkv_sz
 
-        def get_next_bkv_idx_start():
-            next_kv_len = kv_lens_ref[seq_idx + 1]
-            next_q_len = cu_q_lens_ref[seq_idx + 2] - q_end
-            return jnp.maximum(next_kv_len - next_q_len - sliding_window,
-                               0) // bkv_sz
-
-        next_seq_bkv_idx_start = lax.cond(seq_idx + 1 < num_seqs,
-                                          get_next_bkv_idx_start, lambda: 0)
+        next_seq_idx = jnp.minimum(seq_idx + 1, num_seqs - 1)
+        next_kv_len = kv_lens_ref[next_seq_idx]
+        next_q_len = cu_q_lens_ref[next_seq_idx + 1] - q_end
+        next_seq_bkv_idx_start = (
+            jnp.maximum(next_kv_len - next_q_len - sliding_window, 0) //
+            bkv_sz)
 
     def debug_print(msg, *args):
         if debug_mode:
@@ -396,7 +393,7 @@ def _ragged_paged_attention_kernel(
         k_span = bkv_idx * bkv_sz + lax.broadcasted_iota(jnp.int32, s.shape, 1)
         mask = k_span <= q_span
 
-        if sliding_window is not None and strict_sliding_window:
+        if sliding_window is not None:
             mask = jnp.logical_and(mask, q_span - sliding_window < k_span)
 
         s = jnp.where(mask, s, mask_value)
@@ -723,7 +720,7 @@ def _ragged_paged_attention_kernel(
         vec = ref[start::step]
         return vec
 
-    def strided_load_bkv(bkv_sem_idx, start, step, *, bkv_mask):
+    def strided_load_bkv(bkv_sem_idx, start, step):
         assert start % kv_packing == 0
         assert step % kv_packing == 0
         start //= kv_packing
@@ -732,7 +729,6 @@ def _ragged_paged_attention_kernel(
             bkv_sz * step, actual_head_dim_x2))
 
         kv = strided_load(kv_ref, start, step)
-        kv = lax.select(bkv_mask, kv, jnp.zeros_like(kv))
         bitwidth = 32 // kv_packing
         repack_ty = jnp.dtype(f"uint{bitwidth}")
         lst = []
@@ -806,10 +802,6 @@ def _ragged_paged_attention_kernel(
             def compute_with_bkv(bkv_idx, _):
                 # Create bitmask for KV.
                 assert bkv_sz % kv_packing == 0
-                actual_bkv_sz = jnp.minimum(bkv_sz, kv_len - bkv_idx * bkv_sz)
-                bkv_shape = (bkv_sz, actual_head_dim_x2)
-                bkv_mask = lax.broadcasted_iota(jnp.int32, bkv_shape,
-                                                0) < actual_bkv_sz
 
                 # Get next bkv ids.
                 bkv_sem_idx = sem_ids_ref[1]
@@ -859,7 +851,6 @@ def _ragged_paged_attention_kernel(
                         bkv_sem_idx,
                         kv_head_start,
                         num_kv_heads,
-                        bkv_mask=bkv_mask,
                     )
                     assert len(bkv_lst) == kv_packing
                     for i in range(kv_packing):
@@ -943,7 +934,16 @@ def _ragged_paged_attention_kernel(
     @pl.when(seq_idx == 0)
     def prologue():
         start_fetch_bq(0, 0, 0)
+
+        # Initialize bkv_x2_ref to zeros to avoid NaN issues from accessing
+        # uninitialized memory.
+        bkv_x2_ref_int32 = bkv_x2_ref.bitcast(jnp.int32).reshape(
+            (2, -1, 8, 128))
+        zeros = jnp.zeros(bkv_x2_ref_int32.shape[1:], jnp.int32)
+
+        bkv_x2_ref_int32[0] = zeros
         start_fetch_bkv(0, bkv_idx_start, 0)
+        bkv_x2_ref_int32[1] = zeros
 
     @pl.when(seq_idx < decode_end)
     def process_decode():
@@ -1308,7 +1308,6 @@ def static_validate_inputs(
     static_argnames=(
         "sm_scale",
         "sliding_window",
-        "strict_sliding_window",
         "soft_cap",
         "mask_value",
         "q_scale",
@@ -1338,7 +1337,6 @@ def ragged_paged_attention_hd64(
     *,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
-    strict_sliding_window: bool = True,
     soft_cap: float | None = None,
     mask_value: float | None = DEFAULT_MASK_VALUE,
     q_scale: float | None = None,
@@ -1370,7 +1368,6 @@ def ragged_paged_attention_hd64(
     attention_sink: optional attention sink for each q head.
     sm_scale: the softmax scale which will be applied to the Q@K^T.
     sliding_window: the sliding window size for the attention.
-    strict_sliding_window: compute tokens that are strictly within the window.
     soft_cap: the logit soft cap for the attention.
     mask_value: mask value for causal mask.
     q_scale: the scale for the query.
@@ -1445,6 +1442,12 @@ def ragged_paged_attention_hd64(
             max_num_tokens,
             pages_per_seq,
         )
+
+    bq_sz = 8
+    bkv_p = 16
+    if sliding_window is not None:
+        bkv_p = 4
+
     bkv_sz = bkv_p * page_size
     if vmem_limit_bytes is None:
         # TODO (jevinjiang/jacobplatin): change this to use
@@ -1521,7 +1524,6 @@ def ragged_paged_attention_hd64(
                 _ragged_paged_attention_kernel,
                 sm_scale=sm_scale,
                 sliding_window=sliding_window,
-                strict_sliding_window=strict_sliding_window,
                 soft_cap=soft_cap,
                 mask_value=mask_value,
                 q_scale=q_scale,
