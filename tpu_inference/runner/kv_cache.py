@@ -82,7 +82,7 @@ def create_kv_caches(
                       ShardingAxisName.ATTN_HEAD))
 
     def _allocate() -> jax.Array:
-        return jnp.zeros(
+        return jnp.empty(
             shape=cache_shape,
             dtype=cache_dtype,
         )
