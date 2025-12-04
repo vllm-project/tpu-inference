@@ -444,7 +444,6 @@ def test_fused_moe(use_ep, mesh, num_tokens, intermediate_size, hidden_size,
     )
     vllm_config = engine_args.create_engine_config()
     vllm_config.model_config.dtype = dtype
-    vllm_config.parallel_config = ParallelConfig(enable_expert_paralle=use_ep)
 
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
     with set_current_vllm_config(vllm_config):
@@ -459,6 +458,7 @@ def test_fused_moe(use_ep, mesh, num_tokens, intermediate_size, hidden_size,
             dp_size=1,
             quant_config=quant_config,
         )
+        vllm_fused_moe.moe_parallel_config.use_ep = use_ep
     vllm_fused_moe.w13_weight.data = w1
     vllm_fused_moe.w2_weight.data = w2
 
@@ -678,7 +678,7 @@ def test_fused_moe_use_kernel(mesh, num_tokens, intermediate_size, hidden_size,
     vllm_config = engine_args.create_engine_config()
     vllm_config.model_config.dtype = dtype
     vllm_config.parallel_config = ParallelConfig(
-        tensor_parallel_size=mesh.devices.size, enable_expert_paralle=True)
+        tensor_parallel_size=mesh.devices.size)
 
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
     with set_current_vllm_config(vllm_config):

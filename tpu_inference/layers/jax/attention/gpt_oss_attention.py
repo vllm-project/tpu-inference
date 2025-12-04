@@ -158,17 +158,17 @@ class GptOssAttention(nnx.Module):
     ) -> Tuple[KVCache, jax.Array]:
         """Performs scaled dot-product attention by calling the ragged_paged_attention kernel."""
         md = attention_metadata
-        kv_cache_spec = P(None, None, "model")
+        kv_cache_spec = P("data", None, "model")
 
         in_specs = (
             self.query_tnh,  # q
             self.keyvalue_skh,  # k
             self.keyvalue_skh,  # v
             kv_cache_spec,  # kv_cache
-            P(),  # md.seq_lens: Replicated
-            P(),  # page_indices_flat: Replicated
-            P(),  # query_start_loc: Replicated
-            P(),  # distribution: Replicated
+            P("data"),  # md.seq_lens
+            P("data"),  # page_indices_flat
+            P("data"),  # query_start_loc
+            P("data"),  # distribution
             P(('model')),  # sinks
         )
         out_specs = (self.attn_o_tnh, kv_cache_spec)
