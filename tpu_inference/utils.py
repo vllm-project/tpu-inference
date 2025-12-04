@@ -59,8 +59,10 @@ def to_torch_dtype(dtype: str | jnp.dtype | torch.dtype) -> torch.dtype:
 _megacore = False
 logger = init_logger(__name__)
 
+
 def align_to(unpadded_dim, pad_multiple):
     return (unpadded_dim + pad_multiple - 1) // pad_multiple * pad_multiple
+
 
 def enable_megacore() -> None:
     global _megacore

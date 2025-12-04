@@ -466,7 +466,8 @@ class CompilationManager:
         for num_reqs in self.runner.num_reqs_paddings:
             logits_sharding = NamedSharding(
                 self.runner.mesh,
-                PartitionSpec(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR))
+                PartitionSpec(ShardingAxisName.MLP_DATA,
+                              ShardingAxisName.MLP_TENSOR))
             dp_size = self.runner.vllm_config.sharding_config.total_dp_size
             sampling_metadata_sharding = NamedSharding(
                 self.runner.mesh, PartitionSpec(

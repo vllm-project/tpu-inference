@@ -1,4 +1,5 @@
 import os
+
 os.environ["NEW_MODEL_DESIGN"] = "True"
 import unittest
 
@@ -9,11 +10,11 @@ from flax import nnx
 from jax.sharding import Mesh, PartitionSpec
 from parameterized import parameterized
 
+import tpu_inference.kernels.mla.v1.kernel as mla
 from tpu_inference.layers.common.attention_interface import get_kv_cache_shape
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.jax.attention.deepseek_v3_attention import MLA
 from tpu_inference.layers.common.sharding import ShardingAxisName
-import tpu_inference.kernels.mla.v1.kernel as mla
+from tpu_inference.layers.jax.attention.deepseek_v3_attention import MLA
 
 
 class TestMLA(unittest.TestCase):
@@ -33,9 +34,13 @@ class TestMLA(unittest.TestCase):
         qk_rope_head_dim = 32
 
         with jax.set_mesh(self.mesh):
-            query_tnh_spec = PartitionSpec(None, ShardingAxisName.MLP_TENSOR, None)
-            keyvalue_skh_spec = PartitionSpec(None, ShardingAxisName.MLP_TENSOR, None)
-            attn_o_tnh_spec = PartitionSpec(None, ShardingAxisName.MLP_TENSOR, None)
+            query_tnh_spec = PartitionSpec(None, ShardingAxisName.MLP_TENSOR,
+                                           None)
+            keyvalue_skh_spec = PartitionSpec(None,
+                                              ShardingAxisName.MLP_TENSOR,
+                                              None)
+            attn_o_tnh_spec = PartitionSpec(None, ShardingAxisName.MLP_TENSOR,
+                                            None)
 
             mla_layer = MLA(
                 hidden_size=hidden_size,
@@ -91,7 +96,7 @@ class TestMLA(unittest.TestCase):
             # Create attention metadata
             attention_metadata = AttentionMetadata(
                 input_positions=jnp.arange(seq_len, dtype=jnp.int32),
-                block_tables=jnp.zeros((8,), dtype=jnp.int32),
+                block_tables=jnp.zeros((8, ), dtype=jnp.int32),
                 seq_lens=jnp.ones((1, ), dtype=jnp.int32) * seq_len,
                 query_start_loc=jnp.array(
                     [0, seq_len], dtype=jnp.int32),  # This is cu_q_lens
@@ -101,15 +106,15 @@ class TestMLA(unittest.TestCase):
             mla_layer.rope.initialize_cache(self.mesh)
 
             # Run forward pass
-            new_kv_cache, output = mla_layer(x,
-                                       is_prefill=True,
-                                       kv_cache=kv_cache,
-                                       attention_metadata=attention_metadata)
+            new_kv_cache, output = mla_layer(
+                x,
+                is_prefill=True,
+                kv_cache=kv_cache,
+                attention_metadata=attention_metadata)
 
             # Verify output shapes
             self.assertEqual(output.shape, (seq_len, hidden_size))
             self.assertEqual(new_kv_cache.shape, kv_cache.shape)
-
 
     @parameterized.expand([["auto"]])  # MLA kernel does not support fp8 yet
     def test_mla_kernel_forward_pass(self, kv_cache_str):
@@ -122,9 +127,12 @@ class TestMLA(unittest.TestCase):
         kv_lora_rank = 512
 
         with jax.set_mesh(self.mesh):
-            query_tnh_spec = PartitionSpec(ShardingAxisName.MLP_TENSOR, None, None)
-            keyvalue_skh_spec = PartitionSpec(ShardingAxisName.MLP_TENSOR, None)
-            attn_o_tnh_spec = PartitionSpec(ShardingAxisName.MLP_TENSOR, None, None)
+            query_tnh_spec = PartitionSpec(ShardingAxisName.MLP_TENSOR, None,
+                                           None)
+            keyvalue_skh_spec = PartitionSpec(ShardingAxisName.MLP_TENSOR,
+                                              None)
+            attn_o_tnh_spec = PartitionSpec(ShardingAxisName.MLP_TENSOR, None,
+                                            None)
 
             mla_layer = MLA(
                 hidden_size=hidden_size,
@@ -152,7 +160,8 @@ class TestMLA(unittest.TestCase):
                 mesh=self.mesh,
                 random_init=True,
                 kv_cache_dtype=kv_cache_str,
-                use_mla_kernel=True, # Set to true, in order to trigger MLA kernel.
+                use_mla_kernel=
+                True,  # Set to true, in order to trigger MLA kernel.
                 query_tnh=query_tnh_spec,
                 keyvalue_skh=keyvalue_skh_spec,
                 attn_o_tnh=attn_o_tnh_spec,
@@ -170,19 +179,19 @@ class TestMLA(unittest.TestCase):
             block_size = 16
             num_blocks = 8
             kv_dtype = jnp.float8_e4m3fn if kv_cache_str == "fp8" else jnp.bfloat16
-            
+
             # For the MLA kernel, the head dimension is the sum of qk_nope_head_dim and v_head_dim
             # and lora rank
             cache_shape = mla.get_kv_cache_shape(
-                num_blocks, block_size, kv_lora_rank + qk_rope_head_dim, kv_dtype
-            )
+                num_blocks, block_size, kv_lora_rank + qk_rope_head_dim,
+                kv_dtype)
             kv_cache = jnp.zeros(cache_shape, dtype=kv_dtype)
 
             # Create attention metadata
             attention_metadata = AttentionMetadata(
                 input_positions=jnp.arange(seq_len, dtype=jnp.int32),
-                block_tables=jnp.zeros((8,), dtype=jnp.int32),
-                seq_lens=jnp.ones((1,), dtype=jnp.int32) * seq_len,
+                block_tables=jnp.zeros((8, ), dtype=jnp.int32),
+                seq_lens=jnp.ones((1, ), dtype=jnp.int32) * seq_len,
                 query_start_loc=jnp.array([0, seq_len], dtype=jnp.int32),
                 request_distribution=jnp.array([0, 0, 1], dtype=jnp.int32),
             )
@@ -194,8 +203,7 @@ class TestMLA(unittest.TestCase):
                 x,
                 is_prefill=True,
                 kv_cache=kv_cache,
-                attention_metadata=attention_metadata
-            )
+                attention_metadata=attention_metadata)
 
             # Verify output shapes
             self.assertEqual(output.shape, (seq_len, hidden_size))

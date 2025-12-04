@@ -6,16 +6,13 @@ import numpy as np
 import pytest
 import torch
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from jax._src import dtypes
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
 
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.runner.kv_cache import (
-    create_kv_caches,
-    get_attention_page_size_bytes,
-    get_kv_cache_shape_with_mesh,
-)
+from tpu_inference.runner.kv_cache import (create_kv_caches,
+                                           get_attention_page_size_bytes,
+                                           get_kv_cache_shape_with_mesh)
 from tpu_inference.utils import get_dtype_packing
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
 
 
 @pytest.fixture
@@ -37,16 +34,16 @@ def test_create_kv_caches(mesh: Mesh):
     layer_names = ["decoder.0", "decoder.1", "decoder.2"]  # Test with 3 layers
 
     expected_sharding = NamedSharding(
-        mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None, "model")
-    )
+        mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None, "model"))
     expected_dtype = jnp.bfloat16
-    expected_shape = get_kv_cache_shape_with_mesh(
-        mesh, num_blocks, block_size, num_kv_heads, head_size, expected_dtype
-    )
+    expected_shape = get_kv_cache_shape_with_mesh(mesh, num_blocks, block_size,
+                                                  num_kv_heads, head_size,
+                                                  expected_dtype)
 
-    with patch("tpu_inference.logger.init_logger", return_value=MagicMock()), patch(
-        "tpu_inference.utils.hbm_usage_gb", return_value=[(0.0, 0.0), (0.0, 0.0)]
-    ):
+    with patch("tpu_inference.logger.init_logger",
+               return_value=MagicMock()), patch(
+                   "tpu_inference.utils.hbm_usage_gb",
+                   return_value=[(0.0, 0.0), (0.0, 0.0)]):
         kv_caches = create_kv_caches(
             num_blocks=num_blocks,
             block_size=block_size,
@@ -81,7 +78,8 @@ def test_create_kv_caches_mla(mesh: Mesh):
     layer_names = ["decoder.0", "decoder.1"]
 
     # For MLA, sharding is by the 'model' axis on the token dimension.
-    expected_sharding = NamedSharding(mesh, PartitionSpec(ShardingAxisName.MLP_TENSOR))
+    expected_sharding = NamedSharding(
+        mesh, PartitionSpec(ShardingAxisName.MLP_TENSOR))
     expected_dtype = jnp.bfloat16
     expected_shape = get_kv_cache_shape_with_mesh(
         mesh,
@@ -93,9 +91,10 @@ def test_create_kv_caches_mla(mesh: Mesh):
         use_mla=True,
     )
 
-    with patch("tpu_inference.logger.init_logger", return_value=MagicMock()), patch(
-        "tpu_inference.utils.hbm_usage_gb", return_value=[(0.0, 0.0), (0.0, 0.0)]
-    ):
+    with patch("tpu_inference.logger.init_logger",
+               return_value=MagicMock()), patch(
+                   "tpu_inference.utils.hbm_usage_gb",
+                   return_value=[(0.0, 0.0), (0.0, 0.0)]):
         kv_caches = create_kv_caches(
             num_blocks=num_blocks,
             block_size=block_size,
@@ -156,18 +155,19 @@ def test_get_attention_page_size_bytes(mesh: Mesh):
     head_size = 128
     dtype = torch.bfloat16
 
-    full_attn_spec = FullAttentionSpec(
-        block_size=block_size, num_kv_heads=num_kv_heads, head_size=head_size, dtype=dtype
-    )
+    full_attn_spec = FullAttentionSpec(block_size=block_size,
+                                       num_kv_heads=num_kv_heads,
+                                       head_size=head_size,
+                                       dtype=dtype)
 
     kv_cache_specs = {"layer.0": full_attn_spec}
 
     page_size_bytes = get_attention_page_size_bytes(mesh, kv_cache_specs)
 
-    shape = get_kv_cache_shape_with_mesh(
-        mesh, 1, block_size, num_kv_heads, head_size, jnp.bfloat16
-    )
-    expected_page_size = ((32 // get_dtype_packing(jnp.bfloat16)) * np.prod(shape)) // 8
+    shape = get_kv_cache_shape_with_mesh(mesh, 1, block_size, num_kv_heads,
+                                         head_size, jnp.bfloat16)
+    expected_page_size = (
+        (32 // get_dtype_packing(jnp.bfloat16)) * np.prod(shape)) // 8
 
     assert page_size_bytes == expected_page_size
 
@@ -193,9 +193,14 @@ def test_get_attention_page_size_bytes_mla(mesh: Mesh):
 
     page_size_bytes = get_attention_page_size_bytes(mesh, kv_cache_specs)
 
-    shape = get_kv_cache_shape_with_mesh(
-        mesh, 1, block_size, num_kv_heads, head_size, jnp.bfloat16, use_mla=True
-    )
-    expected_page_size = ((32 // get_dtype_packing(jnp.bfloat16)) * np.prod(shape)) // 8
+    shape = get_kv_cache_shape_with_mesh(mesh,
+                                         1,
+                                         block_size,
+                                         num_kv_heads,
+                                         head_size,
+                                         jnp.bfloat16,
+                                         use_mla=True)
+    expected_page_size = (
+        (32 // get_dtype_packing(jnp.bfloat16)) * np.prod(shape)) // 8
 
     assert page_size_bytes == expected_page_size

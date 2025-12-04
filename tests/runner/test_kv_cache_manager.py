@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import jax
 import jax.numpy as jnp
@@ -289,8 +289,8 @@ class TestKVCacheManager:
         self.runner.model_config.hf_text_config = mock_hf_text_config
 
         num_kv_heads = 16
-        head_size = 512 # Aggregated padding amount may be passed to the model instead.
-        expected_head_size = 640 # 640 = align(512, 128) + alignto(40, 128)
+        head_size = 512  # Aggregated padding amount may be passed to the model instead.
+        expected_head_size = 640  # 640 = align(512, 128) + alignto(40, 128)
         attn_type = AttentionType.DECODER
         static_forward_context = {}
         # Mock one layer, as the logic is the same for all
@@ -343,17 +343,17 @@ class TestKVCacheManager:
         model_config = self.runner.vllm_config.model_config
         parallel_config = self.runner.vllm_config.parallel_config
         num_layers = model_config.get_num_layers(parallel_config)
-        
+
         mock_hf_text_config = MagicMock()
         mock_hf_text_config.kv_lora_rank = 400
         mock_hf_text_config.qk_rope_head_dim = 40
         self.runner.model_config.hf_text_config = mock_hf_text_config
-        expected_head_size = 640 # 640 = align(512, 128) + alignto(40, 128)
+        expected_head_size = 640  # 640 = align(512, 128) + alignto(40, 128)
 
         self.runner.vllm_config.compilation_config.static_forward_context = {}
-        with patch('vllm.config.ModelConfig.get_num_layers', return_value=num_layers):
+        with patch('vllm.config.ModelConfig.get_num_layers',
+                   return_value=num_layers):
             kv_cache_spec = self.runner.get_kv_cache_spec()
-
 
         assert len(kv_cache_spec) == num_layers
         for i in range(num_layers):

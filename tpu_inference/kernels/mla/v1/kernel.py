@@ -15,6 +15,7 @@ DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
 
 DEFAULT_VMEM_LIMIT_BYTES = 100 * 1024 * 1024
 
+
 def get_kv_cache_shape(
     total_num_pages,
     page_size,
@@ -29,6 +30,7 @@ def get_kv_cache_shape(
         align_to(kv_dim, 128),
     )
 
+
 @functools.partial(
     jax.jit,
     donate_argnames=("cache_kv"),
@@ -36,7 +38,8 @@ def get_kv_cache_shape(
 def update_kv_cache(
         new_kv_c: jax.Array,  # [num_tokens, actual_lkv_dim]
         new_k_pe: jax.Array,  # [num_tokens, actual_r_dim]
-        cache_kv: jax.Array,  # [total_num_pages, page_size_per_kv_packing, kv_packing, lkv_dim+r_dim]
+        cache_kv: jax.
+    Array,  # [total_num_pages, page_size_per_kv_packing, kv_packing, lkv_dim+r_dim]
         kv_lens: jax.Array,  # i32[max_num_seqs]
         page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
         cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
@@ -75,18 +78,18 @@ def update_kv_cache(
             row = (token_idx_in_seq % page_size) // kv_packing
             col = (token_idx_in_seq % page_size) % kv_packing
 
-            cache_kv_ = cache_kv_.at[page_idx, row,
-                                         col, ..., :lkv_dim].set(new_kv_c[q_start + j])
-            cache_kv_ = cache_kv_.at[page_idx, row,
-                                         col, ..., lkv_dim:].set(new_k_pe[q_start + j])
+            cache_kv_ = cache_kv_.at[page_idx, row, col,
+                                     ..., :lkv_dim].set(new_kv_c[q_start + j])
+            cache_kv_ = cache_kv_.at[page_idx, row, col, ...,
+                                     lkv_dim:].set(new_k_pe[q_start + j])
             return cache_kv_
 
-        return lax.fori_loop(0, q_len, token_loop_body,
-                            cache_kv)
-    cache_kv = lax.fori_loop(0, distribution[-1], seq_loop_body,
-                                           cache_kv)
+        return lax.fori_loop(0, q_len, token_loop_body, cache_kv)
+
+    cache_kv = lax.fori_loop(0, distribution[-1], seq_loop_body, cache_kv)
 
     return cache_kv
+
 
 def ref_mla_ragged_paged_attention(
     ql_nope: jax.Array,  # [num_tokens, actual_num_q_heads, actual_lkv_dim]
@@ -161,9 +164,11 @@ def ref_mla_ragged_paged_attention(
     assert r_dim == q_pe.shape[-1]
     assert lkv_dim + r_dim == updated_cache_kv.shape[-1]
 
-
-    kv_c_cache = updated_cache_kv[..., :lkv_dim].reshape(total_num_pages, page_size, lkv_dim)
-    k_pe_cache = updated_cache_kv[..., lkv_dim:].reshape(total_num_pages, page_size, r_dim)
+    kv_c_cache = updated_cache_kv[..., :lkv_dim].reshape(
+        total_num_pages, page_size, lkv_dim)
+    k_pe_cache = updated_cache_kv[...,
+                                  lkv_dim:].reshape(total_num_pages, page_size,
+                                                    r_dim)
 
     outputs = []
 
@@ -312,6 +317,7 @@ def dynamic_validate_inputs(
                     f"Require 0 <= {page_idx=} < {total_num_pages=} at sequence"
                     f" {seq_idx} where {kv_len=} and {page_size=}.")
 
+
 # Expect to run this validation during compile time.
 def static_validate_inputs(
     ql_nope: jax.Array,  # [max_num_tokens, actual_num_q_heads, actual_lkv_dim]
@@ -381,8 +387,7 @@ def static_validate_inputs(
 
     if lkv_dim + r_dim != kv_dim:
         raise ValueError(
-            f"Expected {lkv_dim=} + {r_dim=} to be equal to {kv_dim=}"
-        )
+            f"Expected {lkv_dim=} + {r_dim=} to be equal to {kv_dim=}")
 
     if not (cache_kv.dtype == new_kv_c.dtype):
         raise ValueError(
@@ -393,8 +398,7 @@ def static_validate_inputs(
 
     # Integer kv quantization is currently not supported.
     if not jnp.issubdtype(cache_kv.dtype, jnp.floating):
-        raise ValueError(
-            f"Expected {cache_kv.dtype=} to be a floating point.")
+        raise ValueError(f"Expected {cache_kv.dtype=} to be a floating point.")
 
     if kv_packing != get_dtype_packing(cache_kv.dtype):
         raise ValueError(
@@ -447,6 +451,7 @@ def static_validate_inputs(
     del mask_value
     del debug_mode
 
+
 def _mla_ragged_paged_attention_kernel(
     # Prefetch
     kv_lens_ref,  # [max_num_seqs]
@@ -467,7 +472,7 @@ def _mla_ragged_paged_attention_kernel(
     o_hbm_ref,  # [max_num_tokens, num_q_heads_per_q_packing, q_packing, lkv_dim]
     updated_cache_kv_hbm_ref,  # [total_num_pages, page_size_per_kv_packing, kv_packing, align_to(lkv_dim + r_dim, 128)]
     # Scratch
-    bkvc_x2_ref,  # [2, bkv_sz_per_kv_packing, kv_packing, lkv_dim]. 
+    bkvc_x2_ref,  # [2, bkv_sz_per_kv_packing, kv_packing, lkv_dim].
     bkpe_x2_ref,  # [2, bkv_sz_per_kv_packing, kv_packing, r_dim]
     bq_nope_x2_ref,  # [2, bq_sz, num_q_heads_per_q_packing, q_packing, lkv_dim]
     bq_rope_x2_ref,  # [2, bq_sz, num_q_heads_per_q_packing, q_packing, r_dim]
@@ -494,7 +499,7 @@ def _mla_ragged_paged_attention_kernel(
     nope_dim = ql_nope_hbm_ref.shape[-1]
     pe_dim = q_pe_hbm_ref.shape[-1]
     assert nope_dim + pe_dim == cache_kv_hbm_ref.shape[-1]
-    
+
     _, num_q_heads_per_q_packing, q_packing, lkv_dim = ql_nope_hbm_ref.shape
     r_dim = q_pe_hbm_ref.shape[-1]
     num_q_heads = num_q_heads_per_q_packing * q_packing
@@ -939,6 +944,7 @@ def _mla_ragged_paged_attention_kernel(
                     bq_idx=bq_idx,
                     bkv_idx=bkv_idx,
                 )
+
             lax.fori_loop(0, num_bkv, compute_with_bkv, None, unroll=False)
 
             # Load acc and calculate final output.

@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+
 class KVCacheManager:
 
     def __init__(self, runner: "TPUModelRunner"):
@@ -53,12 +54,12 @@ class KVCacheManager:
         if self.use_mla:
             # Individually pad the RopE and latents
             qk_rope_head_dim = getattr(model_config.hf_text_config,
-                                        "qk_rope_head_dim", 0)
+                                       "qk_rope_head_dim", 0)
             padded_kv_lora_rank = common_utils.align_to(
                 model_config.hf_text_config.kv_lora_rank, 128)
             padded_qk_rope_head_dim = common_utils.align_to(
                 qk_rope_head_dim, 128)
-            mla_head_size = padded_kv_lora_rank+ padded_qk_rope_head_dim
+            mla_head_size = padded_kv_lora_rank + padded_qk_rope_head_dim
 
         if len(self.runner.vllm_config.compilation_config.
                static_forward_context) == 0:
@@ -68,7 +69,7 @@ class KVCacheManager:
                 model_config.get_total_num_kv_heads(),
                 self.runner.mesh.shape["model"])
             head_size = common_utils.get_padded_head_dim(
-                    model_config.get_head_size())
+                model_config.get_head_size())
             for i in range(model_config.get_num_layers(parallel_config)):
                 if self.use_mla:
                     kv_cache_spec[f"layer.{i}"] = MLAAttentionSpec(

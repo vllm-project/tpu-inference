@@ -119,7 +119,8 @@ class ShardingConfigManager:
                                                     False)
         if enable_dp_attention:
             # Replicate attention layer when num_kv_heads < TP
-            num_kv_heads = 1 if vllm_config.model_config.use_mla else vllm_config.model_config.get_total_num_kv_heads()
+            num_kv_heads = 1 if vllm_config.model_config.use_mla else vllm_config.model_config.get_total_num_kv_heads(
+            )
             cache_dtype = vllm_config.cache_config.cache_dtype
             if cache_dtype == 'auto':
                 cache_dtype = vllm_config.model_config.dtype

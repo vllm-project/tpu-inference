@@ -167,7 +167,8 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
         mesh=mesh,
         layer_names=[f"layer.{i}" for i in range(num_hidden_layers)],
         cache_dtype=kv_cache_jnp_dtype,
-        use_mla=model.vllm_config.model_config.use_mla,)
+        use_mla=model.vllm_config.model_config.use_mla,
+    )
 
     dp_size = model.vllm_config.sharding_config.total_dp_size
 
