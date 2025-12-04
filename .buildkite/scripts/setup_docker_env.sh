@@ -57,9 +57,10 @@ setup_environment() {
   python3 -m pip install --progress-bar off buildkite-test-collector==0.1.9
   echo "Python dependencies installed"
   if [ -z "${BUILDKITE_COMMIT:-}" ]; then
-      VLLM_COMMIT_HASH="28097d5638cc695f4644c411edac8eb05a03b39b"
+      VLLM_COMMIT_HASH=""
   else
-      VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH" --default "")
+      VLLM_COMMIT_HASH="28097d5638cc695f4644c411edac8eb05a03b39b"
+      #VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH" --default "")
   fi
 
   docker build \
