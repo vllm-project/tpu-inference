@@ -81,7 +81,7 @@ def create_kv_caches(
         PartitionSpec(ShardingAxisName.ATTN_DATA, None, ('model', 'expert')))
 
     def _allocate() -> jax.Array:
-        return jnp.empty(
+        return jnp.zeros(
             shape=cache_shape,
             dtype=cache_dtype,
         )
