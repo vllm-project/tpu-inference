@@ -1,0 +1,4 @@
+TPU Generations,Natively Supported FP4/FP8
+v5,"fp8_e4m3b11, fp8_e5m2"
+v6,"fp8_e4m3b11, fp8_e5m2"
+v7,"fp8_e4m3fn, fp8_e5m2, fp4"

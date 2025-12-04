@@ -12,7 +12,7 @@ mapfile -t model_list < <(buildkite-agent meta-data get "${MODEL_LIST_KEY}" --de
 mapfile -t metadata_feature_list < <(buildkite-agent meta-data get "${FEATURE_LIST_KEY}" --default "")
 MODEL_STAGES=("UnitTest" "IntegrationTest" "Benchmark")
 FEATURE_STAGES=("CorrectnessTest" "PerformanceTest")
-FEATURE_STAGES_QUANTIZATION=("RecommendedTPUGenerations" "CorrectnessTest" "PerformanceTest")
+FEATURE_STAGES_QUANTIZATION=("QuantizationMethods" "RecommendedTPUGenerations" "CorrectnessTest" "PerformanceTest")
 
 declare -A TPU_GENERATIONS=(
     ["INT8 W8A8"]="\"v5, v6\""
@@ -21,6 +21,14 @@ declare -A TPU_GENERATIONS=(
     ["FP8 W8A16"]="v7"
     ["FP4 W4A16"]="v7"
     ["AWQ INT4"]="\"v5, v6\""
+)
+declare -A QUANTIZATION_METHODS=(
+    ["INT8 W8A8"]="compressed-tensor"
+    ["INT4 W4A16"]="awq"
+    ["FP8 W8A8"]="compressed-tensor"
+    ["FP8 W8A16"]="compressed-tensor"
+    ["FP4 W4A16"]="mxfp4"
+    ["AWQ INT4"]=""
 )
 declare -a model_csv_files=()
 declare -a feature_csv_files=()
@@ -110,7 +118,7 @@ process_features() {
         if [ "$category" == "quantization support matrix" ]; then
             is_quantization_matrix=true
             stages_to_use=("${FEATURE_STAGES_QUANTIZATION[@]}")
-            header="Feature,Recommended TPU Generations,CorrectnessTest,PerformanceTest"
+            header="Quantization dtype,Quantization methods,Recommended TPU Generations,CorrectnessTest,PerformanceTest"
         fi
 
         if [ ! -f "$category_csv" ]; then
@@ -127,7 +135,8 @@ process_features() {
             if [ "$is_quantization_matrix" = true ] && [ "$stage" == "RecommendedTPUGenerations" ]; then
                 # If it's the quantization matrix, hardcode the TPU generation
                 result="${TPU_GENERATIONS["$feature"]:-N/A}"
-
+            elif [ "$is_quantization_matrix" = true ] && [ "$stage" == "QuantizationMethods" ]; then
+                result="${QUANTIZATION_METHODS["$feature"]:-N/A}"
             elif [[ "$mode" == "DEFAULT" ]]; then
                 result="✅"
             else
@@ -136,8 +145,8 @@ process_features() {
 
             row="$row,$result"
 
-            # Check for failure (exclude the hardcoded TPU generation column)
-            if [ "$stage" != "RecommendedTPUGenerations" ] && [ "${result}" != "✅" ] && [ "${result}" != "N/A" ] && [ "${result}" != "to be added" ]; then
+            # Check for failure (exclude the hardcoded TPU generation column and Quantization Methods column)
+            if [ "$stage" != "QuantizationMethods" ] && [ "$stage" != "RecommendedTPUGenerations" ] && [ "${result}" != "✅" ] && [ "${result}" != "N/A" ] && [ "${result}" != "to be added" ]; then
                 ANY_FAILED=true
             fi
 
