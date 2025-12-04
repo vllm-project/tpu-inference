@@ -5,8 +5,9 @@ import pytest
 import requests
 
 from tpu_inference.tpu_info import (get_node_name, get_node_worker_id,
-                                    get_num_chips, get_num_cores_per_chip,
-                                    get_tpu_metadata, get_tpu_type)
+                                    get_num_chips, get_num_chiplets_per_chip,
+                                    get_num_cores_per_chip, get_tpu_metadata,
+                                    get_tpu_type)
 
 
 # Mock requests.get for get_tpu_metadata tests
@@ -118,3 +119,25 @@ def test_get_num_chips_from_vfio(mock_listdir, mock_glob):
 def test_get_num_chips_not_found(mock_listdir, mock_glob, caplog):
     """Test get_num_chips when neither files nor directory are found."""
     assert get_num_chips() == 0
+
+
+@patch("tpu_inference.tpu_info.get_tpu_type", return_value="tpu7x-8")
+@patch("tpu_inference.tpu_info.glob.glob",
+       return_value=["/dev/accel0", "/dev/accel1", "/dev/accel2", "/dev/accel3",
+                     "/dev/accel4", "/dev/accel5", "/dev/accel6", "/dev/accel7"])
+def test_get_num_chips_v7(mock_glob, mock_get_tpu_type):
+    """Test get_num_chips for TPU v7 - 8 devices should return 4 chips."""
+    assert get_num_chips() == 4
+
+
+# Test get_num_chiplets_per_chip
+@patch("tpu_inference.tpu_info.get_tpu_type", return_value="tpu7x-8")
+def test_get_num_chiplets_per_chip_v7(mock_get_tpu_type):
+    """Test get_num_chiplets_per_chip for TPU v7."""
+    assert get_num_chiplets_per_chip() == 2
+
+
+@patch("tpu_inference.tpu_info.get_tpu_type", return_value="v4-8")
+def test_get_num_chiplets_per_chip_non_v7(mock_get_tpu_type):
+    """Test get_num_chiplets_per_chip for non-v7 TPU."""
+    assert get_num_chiplets_per_chip() == "-"

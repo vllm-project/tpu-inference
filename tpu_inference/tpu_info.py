@@ -66,13 +66,27 @@ def get_num_cores_per_chip() -> int:
 def get_num_chips() -> int:
     accel_files = glob.glob("/dev/accel*")
     if accel_files:
-        return len(accel_files)
-    try:
-        vfio_entries = os.listdir("/dev/vfio")
-        numeric_entries = [
-            int(entry) for entry in vfio_entries if entry.isdigit()
-        ]
-        return len(numeric_entries)
-    except FileNotFoundError as e:
-        logger.error("Failed to detect number of TPUs: %s", e)
-        return 0
+        num_devices = len(accel_files)
+    else:
+        try:
+            vfio_entries = os.listdir("/dev/vfio")
+            numeric_entries = [
+                int(entry) for entry in vfio_entries if entry.isdigit()
+            ]
+            num_devices = len(numeric_entries)
+        except FileNotFoundError as e:
+            logger.error("Failed to detect number of TPUs: %s", e)
+            return 0
+    
+    # TPU v7 has 2 chiplets per chip
+    tpu_type = get_tpu_type()
+    if tpu_type and tpu_type.lower().startswith("tpu7"):
+        return num_devices // 2
+    return num_devices
+
+
+def get_num_chiplets_per_chip() -> int | str:
+    tpu_type = get_tpu_type()
+    if tpu_type and tpu_type.lower().startswith("tpu7"):
+        return 2
+    return "-"

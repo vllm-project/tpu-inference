@@ -46,6 +46,7 @@ else:
                     f"tpu_type={ti.get_tpu_type()} | "
                     f"worker_id={ti.get_node_worker_id()} | "
                     f"num_chips={ti.get_num_chips()} | "
+                    f"num_chiplets_per_chip={ti.get_num_chiplets_per_chip()} | "
                     f"num_cores_per_chip={ti.get_num_cores_per_chip()}")
     except Exception as e:
         logger.error(
