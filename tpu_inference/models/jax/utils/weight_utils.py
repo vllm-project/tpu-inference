@@ -70,8 +70,8 @@ def reshape_params(param_key: str, param_tensor: jax.Array, shape_map):
             try:
                 #TODO:(gpolovets) Add validation on whether reshape preserves data layout.
                 return jnp.reshape(param_tensor, new_shape)
-            except:
-                raise ValueError(f"Cannot reshape for key={key}, new_shape={new_shape}, param_shape={param_tensor.shape}")
+            except TypeError:
+                raise TypeError(f"Cannot reshape for key={key}, new_shape={new_shape}, param_shape={param_tensor.shape}")
     return param_tensor  # Base case / no-op
 
 

@@ -144,7 +144,6 @@ class MlaRaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         )
         total_num_pages = 2
         page_size = 4
-        kv_packing = get_dtype_packing(kv_dtype)
         cache_kv_shape = mla.get_kv_cache_shape(
             total_num_pages,
             page_size,

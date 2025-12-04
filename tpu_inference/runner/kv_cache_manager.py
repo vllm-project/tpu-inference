@@ -216,7 +216,7 @@ class KVCacheManager:
                 num_blocks=num_blocks,
                 block_size=representative_spec.block_size,
                 num_kv_heads=representative_spec.num_kv_heads,
-                head_size=representative_spec.head_size,
+                head_size=head_size,
                 mesh=self.runner.mesh,
                 layer_names=[f'kv_cache_tensor.{i}'],
                 cache_dtype=t2j_dtype(representative_spec.dtype),
