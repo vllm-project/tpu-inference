@@ -113,7 +113,7 @@ class RaggedPagedAttentionHeadDim64KernelTest(jtu.JaxTestCase):
                     (0, 0),
                     (0, 0),
                 ),
-                constant_values=jnp.nan,
+                constant_values=0,
             ).reshape(
                 -1,
                 page_size,
@@ -136,7 +136,7 @@ class RaggedPagedAttentionHeadDim64KernelTest(jtu.JaxTestCase):
             kv_cache,
             ((0, num_pages - kv_cache.shape[0]), (0, 0), (0, 0), (0, 0),
              (0, 0)),
-            constant_values=jnp.nan,
+            constant_values=0,
         )
         page_indices = jnp.stack(page_indices_list, axis=0)
         page_indices = jnp.pad(
