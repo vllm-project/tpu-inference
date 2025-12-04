@@ -72,7 +72,7 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         padded_head_dim = align_to(head_dim, 128)
         num_kv_heads_x2 = align_to(num_kv_heads * 2, kv_packing)
         for kv_len in kv_lens:
-            kv = gen_random((
+            kv = gen_random((  # xw32: kv here is used to assemble the kv_cache later.
                 kv_len,
                 num_kv_heads_x2 // kv_packing,
                 kv_packing,
@@ -91,7 +91,7 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
                 ),
                 constant_values=jnp.nan,
             ).reshape(
-                -1,
+                -1, # cdiv(kv_len, page_size)
                 page_size,
                 num_kv_heads_x2 // kv_packing,
                 kv_packing,
@@ -107,14 +107,16 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             page_cnt += kv.shape[0]
             kv_pages_list.append(kv)
 
-        kv_cache = jnp.concatenate(kv_pages_list, axis=0)
+        # xw32: In the basic test, kv_lens=[328, 180, 255]. So len(kv_pages_list)=3.
+        # kv_pages_list[0].shape=[cdiv(kv_len, page_size), page_size, num_kv_heads_x2//kv_packing, kv_packing, padded_head_dim]
+        kv_cache = jnp.concatenate(kv_pages_list, axis=0) # xw32: what is the shape of kv_cache here?  Answer: [sum(cdiv(kv_len[i], page_size)), page_size, num_kv_heads_x2//kv_packing, kv_packing, padded_head_dim]
         kv_cache = jnp.pad(
             kv_cache,
             ((0, num_pages - kv_cache.shape[0]), (0, 0), (0, 0), (0, 0),
              (0, 0)),
             constant_values=jnp.nan,
-        )
-        page_indices = jnp.stack(page_indices_list, axis=0)
+        )  # [num_pages, page_size, num_kv_heads_x2//kv_packing, kv_packing, padded_head_dim]
+        page_indices = jnp.stack(page_indices_list, axis=0) # xw32: what is the shape of page_indices here? Answer: [num_seqs, pages_per_seq]
         page_indices = jnp.pad(
             page_indices,
             ((0, max_num_seq - page_indices.shape[0]), (0, 0)),
@@ -148,6 +150,7 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             "v_scale": v_scale,
         }
 
+        # xw32: how does the ref impl calculate the expected_kv_cache?
         expected, expected_kv_cache = ref_ragged_paged_attention(
             *args,
             **kwargs,

@@ -68,7 +68,7 @@ def ref_ragged_paged_attention(
     actual_head_dim = queries.shape[2]
     actual_num_q_heads = queries.shape[1]
     actual_num_kv_heads = keys.shape[1]
-    merged_kv = merge_kv(keys, values)
+    merged_kv = merge_kv(keys, values) # [max_num_tokens, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
     assert merged_kv.shape[-3:] == kv_cache.shape[-3:]
 
     _, page_size, num_kv_heads_x2_per_kv_packing, kv_packing, head_dim = (
@@ -86,7 +86,7 @@ def ref_ragged_paged_attention(
     pages_per_seq = num_page_indices // max_num_seqs
     outputs = []
 
-    for i in range(distribution[-1]):
+    for i in range(distribution[-1]): # distribution[-1] is the num_seqs.
         q_start = cu_q_lens[i]
         q_end = cu_q_lens[i + 1]
         q_len = q_end - q_start
@@ -100,21 +100,23 @@ def ref_ragged_paged_attention(
         # Update the kv cache.
         assert kv_len - q_len >= 0
         gathered_kv = kv_cache[
-            indices]  # [(indices_end-indices_start), page_size, num_kv_heads_x2_per_kv_packing, kv_packing, head_dim]
+            indices]  # [len(indices), page_size, num_kv_heads_x2_per_kv_packing, kv_packing, head_dim]
+        # xw32: gathered_kv is the part of the kv_cache corresponding to the current sequence.
         gathered_shape = gathered_kv.shape
         gathered_kv = gathered_kv.reshape(
             -1, *gathered_shape[-3:]
-        )  # [(indices_end-indices_start)*page_size, num_kv_heads_x2_per_kv_packing, kv_packing, head_dim]
+        )  # [len(indices)*page_size, num_kv_heads_x2_per_kv_packing, kv_packing, head_dim]
+        # merge_kv has shape [max_num_tokens, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
         gathered_kv = gathered_kv.at[kv_len - q_len:kv_len].set(
-            merged_kv[q_start:q_end])
+            merged_kv[q_start:q_end]) # xw32: important. Here we update the kv_cache for the current sequence. Notice that merged_kv comes from k and v. The position we update in the kv_cache is [kv_len-q_len:kv_len]
         kv_cache = kv_cache.at[indices].set(
-            gathered_kv.reshape(gathered_shape))
+            gathered_kv.reshape(gathered_shape)) # xw32: then here we update the overall kv_cache with the current sequence's kv_cache.
 
         kv = gathered_kv.reshape(
             -1, num_kv_heads_x2, head_dim
         )[:, :actual_num_kv_heads * 2, :].reshape(
             -1, actual_num_kv_heads, head_dim * 2
-        )  # [(indices_end-indices_start)*page_size, actual_num_kv_heads, head_dim*2]
+        )  # [len(indices)*page_size, actual_num_kv_heads, head_dim*2]
         k = kv[:kv_len, :, :head_dim][:, :, :actual_head_dim]
         v = kv[:kv_len, :, head_dim:][:, :, :actual_head_dim]
         k = jnp.repeat(k, actual_num_q_heads_per_kv_head, axis=1)
@@ -317,6 +319,8 @@ def _ragged_paged_attention_kernel(
     #        .compile({'xla_tpu_enable_log_recorder': 'true'})
     # )
     # Answer: not really. Just do `blaze test //test  --test_arg=--xla_tpu_enable_log_recorder`. No need to change above.
+    # So I tried. Before enabling the debug_mode, here is the output: https://gist.github.com/vanbasten23/abc3b2db22748e1f16aa0e92c6b91404
+    # After enabling the debug_mode, the test fails as expected because we skipping all the dma. Here is the output: https://gist.github.com/vanbasten23/eede797acb41cb5b7055624c6cb60b1d
     def debug_print(msg, *args):
         if debug_mode:
             pl.debug_print(msg, *args)
@@ -960,6 +964,7 @@ def merge_kv(
         v: jax.
     Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim],
 ):
+    """Return a merged kv of shape [max_num_tokens, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]"""
     assert k.shape == v.shape
     assert k.dtype == v.dtype
     max_num_tokens, actual_num_kv_heads, actual_head_dim = k.shape
