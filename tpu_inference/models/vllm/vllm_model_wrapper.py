@@ -221,7 +221,7 @@ class VllmModelWrapper:
         @functools.partial(
             jax.jit,
             out_shardings=(NamedSharding(self.mesh,
-                                         PartitionSpec(None, "model"))),
+                                         PartitionSpec("data", "model"))),
         )
         def compute_logits_func(
             params_and_buffers: Any,
@@ -263,7 +263,6 @@ def load_lora_model(model: torch.nn.Module, vllm_config: VllmConfig,
         vllm_config,
         device,
         model.embedding_modules,
-        model.embedding_padding_modules,
     )
     return lora_manager, lora_manager.create_lora_manager(model)
 
