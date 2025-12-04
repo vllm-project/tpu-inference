@@ -739,6 +739,7 @@ def _ragged_paged_attention_kernel(
         for i in range(0, kv_packing):
             cur_kv = pltpu.bitcast((kv >> (i * bitwidth)).astype(repack_ty),
                                    kv_dtype)
+            # cur_kv = jnp.nan_to_num(cur_kv)
             lst.append(cur_kv)
         return lst
 
@@ -942,6 +943,7 @@ def _ragged_paged_attention_kernel(
 
     @pl.when(seq_idx == 0)
     def prologue():
+        bkv_x2_ref[...] = jnp.zeros(bkv_x2_ref.shape, bkv_x2_ref.dtype)
         start_fetch_bq(0, 0, 0)
         start_fetch_bkv(0, bkv_idx_start, 0)
 
@@ -1445,6 +1447,12 @@ def ragged_paged_attention_hd64(
             max_num_tokens,
             pages_per_seq,
         )
+
+    bq_sz = 8
+    bkv_p = 16
+    if sliding_window is not None:
+        bkv_p = 4
+
     bkv_sz = bkv_p * page_size
     if vmem_limit_bytes is None:
         # TODO (jevinjiang/jacobplatin): change this to use
