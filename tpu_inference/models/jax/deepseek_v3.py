@@ -583,19 +583,42 @@ class DeepSeekV3WeightLoader:
         base_model_weight = get_param(model_params, mapped_name)
         model_weight = base_model_weight.array.qvalue if hasattr(
             base_model_weight, "array") else base_model_weight
+        if name == "model.layers.0.mlp.down_proj.weight":
+            print(
+                "this is model_weight shape: ", model_weight.shape
+            )  #SHAPE IS STILL CORRECT HERE (NEEDS TO BE TRANSPOSED THOUGH)
         sharding = base_model_weight.array.qvalue.sharding if hasattr(
             base_model_weight, "array") else base_model_weight.sharding
 
         # Convert weights from torch into numpy
         cast_type = model_weight.value.dtype
 
+        if name == "model.layers.0.mlp.down_proj.weight":
+            print("This is cast_type: ", cast_type)
+
         torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+
+        if name == "model.layers.0.mlp.down_proj.weight":
+            print("This is torch_view_type: ", torch_view_type)
+            print(
+                "this is weight (input arg) shape BEFORE jnp.array conversion: ",
+                weight.shape
+            )  #SHAPE IS STILL CORRECT HERE (NEEDS TO BE TRANSPOSED THOUGH)
 
         if torch_view_type:
             # Avoid unnecessary upcasting and mem copy by viewing the tensor's
             # raw data as integers before converting to a JAX array.
-            weight_np = jnp.array(
-                weight.view(torch_view_type).numpy()).view(cast_type)
+            if ("mlp.experts" in name or "mlp.shared" in name
+                    or "mlp.gate_proj" in name or "mlp.up_proj" in name
+                    or "mlp.down_proj" in name):
+                weight_np = jnp.array(weight.numpy()).astype(cast_type)
+            else:
+                weight_np = jnp.array(
+                    weight.view(torch_view_type).numpy()).view(cast_type)
+            if name == "model.layers.0.mlp.down_proj.weight":
+                print(
+                    "this is weight (input arg) shape AFTER jnp.array conversion: ",
+                    weight_np.shape)
         else:
             raise ValueError(
                 f"Unsupported dtype for tensor conversion: {cast_type}")
@@ -603,9 +626,18 @@ class DeepSeekV3WeightLoader:
         if scale is not None:
             scale = scale.to(torch.float32).numpy().astype(self.scale_dtype)
 
+        if name == "model.layers.0.mlp.down_proj.weight":
+            print("this is weight_np BEFORE reshape: ", weight_np.shape)
+
         # Reshape and transpose weights if necessary.
         weight_np = reshape_params(name, weight_np, self._weight_shape_map)
+
+        if name == "model.layers.0.mlp.down_proj.weight":
+            print("this is weight_np AFTER reshape: ", weight_np.shape)
+
         if scale is not None:
+            print("this is scale shape: ", scale.shape)
+            print("this is scale name: ", name)
             scale = reshape_params(name, scale, self._scale_shape_map)
         weight_np = self._transpose_params(name, weight_np)
         if scale is not None:
@@ -731,41 +763,51 @@ class DeepSeekV3WeightLoader:
                 # TODO (jacobplatin): refactor this so that we instead change / update `model_weights_generator`
                 # instead of checking "weight_scale_inv" and assuming quantization method is fp8
 
-                hf_pattern = re.sub(r"layers\.(\d+)", "layers.*", loaded_name)
-
-                if hf_pattern not in self._loaded_to_standardized_keys:
-                    raise ValueError(
-                        f"No mapping found for checkpoint tensor: {loaded_name}. Skipping."
-                    )
-
-                jax_path_template = self._loaded_to_standardized_keys[
-                    hf_pattern]
-                jax_path = jax_path_template
-
-                layer_num_match = re.search(r"layers\.(\d+)", loaded_name)
-
-                if layer_num_match:
-                    jax_path = jax_path_template.replace(
-                        "*", layer_num_match.group(1))
-
-                model_weight = get_param(model_params, jax_path)
-
                 scale = None
 
                 if isinstance(
                         loaded_weight, tuple
                 ):  # GPT_OSS LOGIC FOR PACKED WEIGHTS (WE NEED TO ENSURE THAT THE IF STATEMENT IN _build_packed_pool CAPTURES THE APPROPRIATE WEIGHTS FROM https://docs.google.com/spreadsheets/d/1MMS_jirZT-J-JIEvGud6XqaB8lPZXWMbw2_V5DNPhRg/edit?resourcekey=0-L8JUfg7MR5lpZRGnSnaN_g&gid=1441289540#gid=1441289540 )
+                    hf_pattern = re.sub(r"layers\.(\d+)", "layers.*",
+                                        loaded_name)
+
+                    if hf_pattern not in self._loaded_to_standardized_keys:
+                        raise ValueError(
+                            f"No mapping found for checkpoint tensor: {loaded_name}. Skipping."
+                        )
+
+                    jax_path_template = self._loaded_to_standardized_keys[
+                        hf_pattern]
+                    jax_path = jax_path_template
+
+                    layer_num_match = re.search(r"layers\.(\d+)", loaded_name)
+
+                    if layer_num_match:
+                        jax_path = jax_path_template.replace(
+                            "*", layer_num_match.group(1))
+
+                    model_weight = get_param(model_params, jax_path)
+
                     blocks_u8, scales = loaded_weight
-                    if hasattr(model_weight,
-                               "array"):  #TODO: I might have to remove this
-                        codes_fp32_t, scales_fp32_t = unpack_tpu_fp4_to_fp32(
-                            blocks_u8, scales)
 
-                        loaded_weight = codes_fp32_t
-                        scale = scales_fp32_t
+                    if loaded_name == "model.layers.0.mlp.down_proj.weight":
+                        print(
+                            f"this is loaded weight shape BEFORE unpacking for {loaded_name}: ",
+                            blocks_u8.shape)
 
-                        if self.is_verbose:
-                            print_param_info(model_weight, loaded_name)
+                    codes_fp32_t, scales_fp32_t = unpack_tpu_fp4_to_fp32(
+                        blocks_u8, scales)
+
+                    loaded_weight = codes_fp32_t
+                    scale = scales_fp32_t
+
+                    if loaded_name == "model.layers.0.mlp.down_proj.weight":
+                        print(
+                            f"this is loaded weight shape AFTER unpacking for {loaded_name}: ",
+                            loaded_weight.shape)
+
+                    if self.is_verbose:
+                        print_param_info(model_weight, loaded_name)
                 else:  #REGULAR LOGIC FOR NON PACKED WEIGHTS
                     self.quant_dtype = jnp.float8_e4m3fn
                     if loaded_weight.dtype == j2t_dtype(
@@ -784,6 +826,8 @@ class DeepSeekV3WeightLoader:
                             continue
 
                     if loaded_name.endswith(".weight_scale_inv"):
+                        print("this is is_model_quantized: ",
+                              self.is_model_quantized)
                         if self.is_model_quantized:
                             weight_name = loaded_name.replace(
                                 ".weight_scale_inv", ".weight")
@@ -850,6 +894,11 @@ class DeepSeekV3WeightLoader:
                                 f"Cumulative local memory: {cumulative_local_memory} GB"
                             )
                 else:
+                    if loaded_name == "model.layers.0.mlp.down_proj.weight":
+                        print(
+                            f"this is loaded weight right before _load_individual_weight call for {loaded_name}: ",
+                            loaded_weight.shape)
+
                     weight_bytes, weight_shards = self._load_individual_weight(  #both packed and non packed get loaded the same way
                         loaded_name,
                         loaded_weight,
