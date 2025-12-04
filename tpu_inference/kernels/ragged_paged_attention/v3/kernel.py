@@ -6,7 +6,6 @@ specifications. It supports mixed prefill and decoding, enhancing throughput
 during inference.
 """
 # xw32q: revisit the ref impl about writing to the kv cache.
-# xw32q: how does it overlap writing to the kv cache with the attention computation?
 import functools
 
 import jax
@@ -242,6 +241,7 @@ def _ragged_paged_attention_kernel(
     # xw32: bkv_update_ids_ref is similar to the above bo_ids_ref.
     bkv_update_ids_ref,  # [6] (bkv_sem_0_seq_idx, bkv_sem_1_seq_idx, bkv_sem_0_offset, bkv_sem_1_offset, bkv_sem_0_sz, bkv_sem_1_sz)
     # Input
+    # xw32: has something to do with swap.
     q_hbm_ref,  # [actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
     kv_hbm_ref,  # [max_num_tokens, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
     kv_cache_hbm_ref,  # [total_num_pages, page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
@@ -266,8 +266,8 @@ def _ragged_paged_attention_kernel(
     k_scale: float | None = None,
     v_scale: float | None = None,
     chunk_prefill_size: int | None = None,
-    bkv_p,
-    bq_sz,
+    bkv_p,  # aka num_kv_pages_per_block
+    bq_sz,  # aka num_queries_per_block
     debug_mode: bool = False,
 ):
     assert q_hbm_ref.shape == o_hbm_ref.shape
@@ -310,12 +310,13 @@ def _ragged_paged_attention_kernel(
     q_len = q_end - q_start
     kv_len = kv_lens_ref[seq_idx]
 
-    # xw32q: when we set debug_mode to True, do you also need to make changes such as
+    # xw32: when we set debug_mode to True, do you also need to make changes such as
     # compiled_kernel = (
     #        jax.jit(kernel)
     #        .lower(x)
     #        .compile({'xla_tpu_enable_log_recorder': 'true'})
     # )
+    # Answer: not really. Just do `blaze test //test  --test_arg=--xla_tpu_enable_log_recorder`. No need to change above.
     def debug_print(msg, *args):
         if debug_mode:
             pl.debug_print(msg, *args)
@@ -412,7 +413,9 @@ def _ragged_paged_attention_kernel(
     def _async_copy(src, dst, sem, wait):
         if debug_mode:
             # Skip DMA if debug mode is enabled.
-            # xw32q: why do we skip dma if debug mode is enabled?
+            # xw32: why do we skip dma if debug mode is enabled?
+            # Answer: the debug_mode is used to debug hanging issues and pipeline logic.
+            # TODO(xw32): Jevin suggest to try it out with the basic test with debug_mode=True.
             return
         cp = pltpu.make_async_copy(src, dst, sem)
         if wait:
@@ -421,13 +424,15 @@ def _ragged_paged_attention_kernel(
             cp.start()
 
     def _fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx, *, wait=False):
-        # NB: sems,  # [4, 2]
+        # NB: sems,  # [4, 2]. sems[0] is for fetching kv from kv cache.
         sem = sems.at[0, bkv_sem_idx]
         vmem_ref = bkv_x2_ref.at[bkv_sem_idx]
 
+        # NB: kv_cache_hbm_ref: [total_num_pages, page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
         cache_hbm_shape = kv_cache_hbm_ref.shape
         cache_hbm_ref = kv_cache_hbm_ref.reshape(
             cache_hbm_shape[0] * cache_hbm_shape[1], *cache_hbm_shape[2:])
+        # xw32: cache_hbm_ref: [total_num_pages*page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
         kv_len = kv_lens_ref[seq_idx]
         kv_len_start = bkv_idx * bkv_sz
         kv_p_start = bkv_idx * bkv_p
@@ -850,7 +855,8 @@ def _ragged_paged_attention_kernel(
 
                 # Start updating bkv to kv cache if applicable.
                 # Only needed in first bq loop.
-                # xw32q: why do we only need to update kv_cache in the first bq loop?
+                # xw32: why do we only need to update kv_cache in the first bq loop?
+                # Answer: because bq is the outer loop and bkv is inner loop, kv is the same for bq_idx=0 and bq_idx=1. At bq_idx>0, we have already updated the kv cache. So no need to update the same again.
                 @pl.when(jnp.logical_and(update_sz > 0, bq_idx == 0))
                 def update_cur_bkv_to_cache():
                     start_update_kv_cache(seq_idx, bkv_sem_idx, offset,
@@ -1018,7 +1024,11 @@ def prepare_inputs(
             head_dim,
         )
         # TODO(jevinjiang): Explore fusing swapping non-tiling axis to DMA.
-        .swapaxes(0, 1))  # xw32q: why swap axes?
+        .swapaxes(0, 1))  # xw32: why swap axes?
+    # answer: after the swap, we have q_hbm_ref: [actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
+    # Because iterate one kv head at a time in the kernel
+    # iter0 [0, max_num_tokens, ...]. Then when we process bq by bq, [0, bq, ...] is contiguous in memory.
+    # However, if we don't swap axes here, then q_hbm_ref: [max_num_tokens, actual_num_kv_heads, ...]. Then when we process bq by bq, [bq, 0, ...] will fetch q in a non-contiguous way.
     # TODO(kyuyeunk, chengjiyao): Add kv quantization here.
     kv = merge_kv(k, v)
     return q, kv
