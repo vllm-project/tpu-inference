@@ -26,7 +26,7 @@ from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 logger = init_logger(__name__)
 
-_DEFAULT_BLOCK_SIZE = 256
+_DEFAULT_BLOCK_SIZE = 64
 
 
 class MockTPUModelRunner(TPUModelRunner):
@@ -97,7 +97,7 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
         super().tearDown()
         # Destroy references explicitly
         if hasattr(self, 'connector'):
-             del self.connector
+            del self.connector
 
         # Force JAX to release memory
         cc.reset_cache()
