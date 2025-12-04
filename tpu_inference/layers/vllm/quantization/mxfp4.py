@@ -146,8 +146,7 @@ class VllmMxfp4Config(Mxfp4Config, JaxCommonConfig):
                 "UnquantizedLinearMethod.")
             return VllmUnquantizedLinearMethod(linear_config)
         elif isinstance(layer, FusedMoE):
-            moe_config = self.get_moe_config(layer)
-            return VllmMxfp4MoEMethod(moe_config, self.mesh)
+            return VllmMxfp4MoEMethod(layer.moe_config, self.mesh)
         elif isinstance(layer, Attention):
             logger.warning_once("MXFP4 attention layer is not implemented. "
                                 "Skipping quantization for this layer.")
