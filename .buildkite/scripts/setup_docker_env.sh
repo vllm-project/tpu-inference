@@ -18,11 +18,9 @@ setup_environment() {
   # shellcheck disable=1091
   source /etc/environment
 
-  if [ -z "${BUILDKITE_COMMIT:-}" ]; then
-    echo "ERROR: BUILDKITE_COMMIT environment variable is not set." >&2
-    echo "This script expects BUILDKITE_COMMIT to tag the Docker image." >&2
-    exit 1
-  fi
+  # If the script run on the buildkite agent, will use $BUILDKITE_COMMIT as a tag.
+  # Otherwise, if run on local vm, just use "tmp" as a tag.
+  image_tag="${BUILDKITE_COMMIT:-tmp}"
 
   # Cleanup of existing containers and images.
   echo "Starting cleanup for ${IMAGE_NAME}..."
@@ -58,10 +56,13 @@ setup_environment() {
   echo "Installing Python dependencies"
   python3 -m pip install --progress-bar off buildkite-test-collector==0.1.9
   echo "Python dependencies installed"
-
-  VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH" --default "")
+  if [ -z "${BUILDKITE_COMMIT:-}" ]; then
+      VLLM_COMMIT_HASH=""
+  else
+      VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH" --default "")
+  fi
 
   docker build \
       --build-arg VLLM_COMMIT_HASH="${VLLM_COMMIT_HASH}" \
-      --no-cache -f docker/Dockerfile -t "${IMAGE_NAME}:${BUILDKITE_COMMIT}" .
+      --no-cache -f docker/Dockerfile -t "${IMAGE_NAME}:${image_tag}" .
 }

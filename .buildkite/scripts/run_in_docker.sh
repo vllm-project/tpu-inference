@@ -48,6 +48,12 @@ else
   exit 1
 fi
 
+if [ -z "${BUILDKITE_COMMIT:-}" ]; then
+    COMMIT="tmp"
+else
+    COMMIT="$BUILDKITE_COMMIT"
+fi
+
 exec docker run \
   --privileged \
   --net host \
@@ -65,5 +71,5 @@ exec docker run \
   ${USE_V6E8_QUEUE:+-e USE_V6E8_QUEUE="$USE_V6E8_QUEUE"} \
   ${SKIP_ACCURACY_TESTS:+-e SKIP_ACCURACY_TESTS="$SKIP_ACCURACY_TESTS"} \
   ${VLLM_MLA_DISABLE:+-e VLLM_MLA_DISABLE="$VLLM_MLA_DISABLE"} \
-  "${IMAGE_NAME}:${BUILDKITE_COMMIT}" \
+  "${IMAGE_NAME}:${COMMIT}" \
   "$@" # Pass all script arguments as the command to run in the container
