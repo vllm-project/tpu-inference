@@ -126,6 +126,7 @@ process_features() {
         elif [ "$category" == "kernel_support_matrix_(microbenchmarks)" ]; then
             is_kernel_microbenchmarks=true
             stages_to_use=("${FEATURE_STAGES_MICROBENCHMARKS[@]}")
+            header="kernels CorrectnessTest" "PerformanceTest","TPU Versions"
         fi
 
         if [ ! -f "$category_csv" ]; then
