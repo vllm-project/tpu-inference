@@ -18,19 +18,16 @@ RUN export TPU_INFERENCE_VERSION=$(pip index versions tpu-inference --pre 2>/dev
     echo -n "${TPU_INFERENCE_VERSION}" > /tmp/tpu_inference_version
 
 # Clone vLLM
-WORKDIR /workspace/vllm
-ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-RUN git clone $VLLM_REPO /workspace/vllm
-RUN pip install build
-RUN export TPU_INFERENCE_VERSION=$(cat /tmp/tpu_inference_version) && \
-    sed -i "s/^tpu-inference==.*/tpu-inference==${TPU_INFERENCE_VERSION}/" requirements/tpu.txt && \
-    bash tools/vllm-tpu/build.sh ${TPU_INFERENCE_VERSION}
+WORKDIR /workspace
+RUN export VLLM_TPU_VERSION=$(cat /tmp/tpu_inference_version) && \
+    bash tpu_inference/.buildkite/scripts/build_vllm_tpu.sh ${VLLM_TPU_VERSION} ${VLLM_TPU_VERSION}
 
-# Install vllm-tpu from wheel
+# Install vllm-tpu from whl
+WORKDIR /workspace/vllm
 RUN pip install --no-cache-dir dist/*.whl
 
 # Install test dependencies
-RUN python3 -m pip install -e tests/vllm_test_utils
+RUN python3 -m pip install tests/vllm_test_utils
 RUN python3 -m pip install --no-cache-dir \
     git+https://github.com/thuml/depyf.git \
     pytest-asyncio \
@@ -38,7 +35,8 @@ RUN python3 -m pip install --no-cache-dir \
     pytest-cov \
     tblib
 
-# Set environment variable to use site-packages
-ENV FORCE_USE_SITE_PACKAGES=1
+# Remove repository
+WORKDIR /workspace
+RUN rm -rf /workspace/vllm /workspace/tpu_inference
 
 CMD ["/bin/bash"]
