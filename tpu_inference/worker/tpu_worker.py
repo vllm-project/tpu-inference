@@ -32,7 +32,7 @@ from tpu_inference.layers.common.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
-from tpu_inference.runner.kv_cache import get_rpa_page_size_bytes
+from tpu_inference.runner.kv_cache import get_attention_page_size_bytes
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 logger = init_logger(__name__)
@@ -404,20 +404,20 @@ class TPUWorker:
         # feature that allows overriding page_size_bytes of KVCacheSpec.
         vllm_page_size_bytes = get_uniform_page_size(
             list(kv_cache_specs.values()))
-        rpa_page_size_bytes = get_rpa_page_size_bytes(self.model_runner.mesh,
-                                                      kv_cache_specs)
+        attention_page_size_bytes = get_attention_page_size_bytes(
+            self.model_runner.mesh, kv_cache_specs)
 
-        if vllm_page_size_bytes != rpa_page_size_bytes:
+        if vllm_page_size_bytes != attention_page_size_bytes:
             logger.info(
                 f"KV cache page size calculated by vLLM "
                 f"({vllm_page_size_bytes} Bytes) does not match with actual "
-                f"page size used by RPA kernel ({rpa_page_size_bytes} Bytes). "
+                f"page size used by Attention kernel ({attention_page_size_bytes} Bytes). "
                 f"Recalculating number of KV blocks using actual page size.")
 
             available_memory = self.determine_available_memory()
             num_blocks = get_num_blocks(self.vllm_config, len(kv_cache_specs),
-                                        available_memory, rpa_page_size_bytes)
-
+                                        available_memory,
+                                        attention_page_size_bytes)
             cache_config = self.vllm_config.cache_config
             cache_config.num_gpu_blocks_override = num_blocks
 
