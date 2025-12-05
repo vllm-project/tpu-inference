@@ -703,6 +703,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logits_indices_selector,
             padded_num_reqs,
         ) = self._prepare_inputs(scheduler_output)
+
         is_llama_guard_4 = (
             hasattr(
                 self.model_config.hf_config, "architectures"

@@ -1,6 +1,4 @@
 import os
-
-os.environ["NEW_MODEL_DESIGN"] = "True"
 import unittest
 
 import jax
@@ -20,6 +18,7 @@ from tpu_inference.layers.jax.attention.deepseek_v3_attention import MLA
 class TestMLA(unittest.TestCase):
 
     def setUp(self):
+        os.environ["NEW_MODEL_DESIGN"] = "1"
         self.mesh = Mesh(
             np.array(jax.devices("tpu")[:1]).reshape(1, 1, 1, 1),
             axis_names=("data", "attn_dp", "expert", "model"),
@@ -212,3 +211,7 @@ class TestMLA(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def tearDownModule():
+    del os.environ["NEW_MODEL_DESIGN"]
