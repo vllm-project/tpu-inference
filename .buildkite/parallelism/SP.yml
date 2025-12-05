@@ -8,7 +8,8 @@ steps:
       queue: tpu_v6e_queue
     commands:
       - |
-        buildkite-agent meta-data set "SP_CorrectnessTest" "to be added"
+        .buildkite/scripts/run_in_docker.sh \
+          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_sequence_parallelism.py
   - label: "Record correctness test result for SP"
     key: "record_SP_CorrectnessTest"
     depends_on: "SP_CorrectnessTest"
