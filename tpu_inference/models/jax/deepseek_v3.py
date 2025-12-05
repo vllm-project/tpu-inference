@@ -1,3 +1,4 @@
+import os
 import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
@@ -324,21 +325,22 @@ class DeepSeekV3(nnx.Module):
                               dv_sharding=(None, ShardingAxisName.MLP_TENSOR),
                               random_init=self.random_init)
 
-        self._print_model_architecture()
+        if os.environ.get("VLLM_LOGGING_LEVEL", "").upper() == "DEBUG":
+            self._print_model_architecture()
 
     def _print_model_architecture(self):
         num_display_layers = 5
 
-        logger.info("### Embedding ###")
+        logger.debug("### Embedding ###")
         nnx.display(self.embedder)
 
-        logger.info(f"\n### First {num_display_layers} Layers ###")
+        logger.debug(f"\n### First {num_display_layers} Layers ###")
         # Loop through the slice and display each layer
         for i, layer in enumerate(self.layers[:num_display_layers]):
-            logger.info(f"\n--- Layer {i} ---")
+            logger.debug(f"\n--- Layer {i} ---")
             nnx.display(layer)
 
-        logger.info("\n### LM Head ###")
+        logger.debug("\n### LM Head ###")
         nnx.display(self.lm_head)
 
     # For compatibility with flax.
