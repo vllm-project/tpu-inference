@@ -56,6 +56,8 @@ class DeepSeekV3(nnx.Module):
         self.vllm_config = vllm_config
         self.rng = nnx.Rngs(rng)
 
+        print("this is hf_config: ", vllm_config.model_config.hf_config)
+
         # NOTE: the default is 61
         num_layers: int = vllm_config.model_config.hf_config.num_hidden_layers
         num_local_experts: int = 256
@@ -483,20 +485,24 @@ class DeepSeekV3WeightLoader:
             assert len(
                 quantization_block_sizes
             ) == 2, f"Expected only 2 quantization block sizes but got {quantization_block_sizes}"
-            self.quantization_block_size_n = quantization_block_sizes[0]
+            self.quantization_block_size_n = quantization_block_sizes[
+                0]  #16 helped me get past first error, but resulted in another shape mismatch down the line (for q_b_proj)
             self.quantization_block_size_k = quantization_block_sizes[1]
+            print("this is self.quantization_block_size_n: ",
+                  self.quantization_block_size_n)  #the value is 1
+            print("this is self.quantization_block_size_k: ",
+                  self.quantization_block_size_k)  #the value is 256
             # TODO (jacobplatin): remove this check in the future
             # assert self.quantization_block_size_n == self.quantization_block_size_k, "Quantization block size n and k must be the same!"
-            # NOTE: this is only needed for pre-quantized models
+            # NOTE: this is only needed for pre-quantized model
             self._scale_shape_map = {
-                "q_b_proj": (1, qk_nope_head_dim + qk_rope_head_dim,
-                             q_lora_rank // self.quantization_block_size_n),
+                "q_b_proj":
+                (1, qk_nope_head_dim + qk_rope_head_dim, q_lora_rank // 2),
                 "kv_b_proj": (attn_heads, (qk_nope_head_dim + v_head_dim) //
                               self.quantization_block_size_n,
-                              kv_lora_rank // self.quantization_block_size_n),
-                "o_proj":
-                (hidden_size // self.quantization_block_size_n, attn_heads,
-                 v_head_dim // self.quantization_block_size_n),
+                              kv_lora_rank // self.quantization_block_size_k),
+                "o_proj": (hidden_size // self.quantization_block_size_n,
+                           attn_heads // 4, v_head_dim // 64),
             }
             # NOTE: this is only needed for pre-quantized models when doing random weight loading
             # TODO (jacobplatin): remove or clean this up
@@ -770,6 +776,8 @@ class DeepSeekV3WeightLoader:
                 ):  # GPT_OSS LOGIC FOR PACKED WEIGHTS (WE NEED TO ENSURE THAT THE IF STATEMENT IN _build_packed_pool CAPTURES THE APPROPRIATE WEIGHTS FROM https://docs.google.com/spreadsheets/d/1MMS_jirZT-J-JIEvGud6XqaB8lPZXWMbw2_V5DNPhRg/edit?resourcekey=0-L8JUfg7MR5lpZRGnSnaN_g&gid=1441289540#gid=1441289540 )
                     hf_pattern = re.sub(r"layers\.(\d+)", "layers.*",
                                         loaded_name)
+                    hf_pattern = re.sub(r"experts\.(\d+)", "experts.*",
+                                        hf_pattern)
 
                     if hf_pattern not in self._loaded_to_standardized_keys:
                         raise ValueError(
