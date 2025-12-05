@@ -276,11 +276,11 @@ def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:
 
 def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:
     """
-    A wrapper function of vllm.utils.get_hash_fn_by_name to support builtin
+    A wrapper function of vllm.utils.hashing.get_hash_fn_by_name to support builtin
     """
     if hash_fn_name == "builtin":
         return hash
-    return utils.get_hash_fn_by_name(hash_fn_name)
+    return utils.hashing.get_hash_fn_by_name(hash_fn_name)
 
 
 def quantize_kv(key: jax.Array, value: jax.Array,
