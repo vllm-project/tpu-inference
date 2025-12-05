@@ -9,7 +9,6 @@ from tpu_info import device
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.platforms.interface import Platform, PlatformEnum
 
-
 from tpu_inference import envs
 from tpu_inference.layers.common.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
@@ -28,7 +27,6 @@ else:
     AttentionBackendEnum = None
     SamplingParams = None
     SamplingType = None
-
 
 logger = init_logger(__name__)
 
