@@ -2,7 +2,7 @@
 
 BUILDKITE_DIR=".buildkite"
 # TARGET_FOLDERS="models kernel_microbenchmarks/all_gather_matmul features parallelism quantization"
-TARGET_FOLDERS="kernel_microbenchmarks/all_gather_matmul quantization"
+TARGET_FOLDERS="kernel_microbenchmarks/all_gather_matmul kernel_microbenchmarks/attention_kernels quantization"
 MODEL_LIST_KEY="model-list"
 FEATURE_LIST_KEY="feature-list"
 
@@ -48,6 +48,9 @@ for folder_path in $TARGET_FOLDERS; do
           feature_list+=("${subject_name}")
           ;;
         "kernel_microbenchmarks/all_gather_matmul")
+          feature_list+=("${subject_name}")
+          ;;
+        "kernel_microbenchmarks/attention_kernels")
           feature_list+=("${subject_name}")
           ;;
       esac

@@ -218,7 +218,6 @@ for csv_file in "${feature_csv_files[@]}"; do
             echo "$header" > "$csv_file"
             echo "$sorted_content" >> "$csv_file"
         fi
-        # --- END NEW LOGIC ---
 
         cat "$csv_file"
         buildkite-agent artifact upload "$csv_file"
