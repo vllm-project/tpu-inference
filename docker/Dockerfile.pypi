@@ -17,26 +17,14 @@ COPY . .
 RUN export TPU_INFERENCE_VERSION=$(pip index versions tpu-inference --pre 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.dev[0-9]+" | head -n 1) && \
     echo -n "${TPU_INFERENCE_VERSION}" > /tmp/tpu_inference_version
 
-# Clone vLLM
+# Build vllm-tpu wheel
 WORKDIR /workspace
 RUN export VLLM_TPU_VERSION=$(cat /tmp/tpu_inference_version) && \
     bash tpu_inference/.buildkite/scripts/build_vllm_tpu.sh ${VLLM_TPU_VERSION} ${VLLM_TPU_VERSION}
 
-# Install vllm-tpu from whl
+# Install vllm-tpu wheel
 WORKDIR /workspace/vllm
 RUN pip install --no-cache-dir dist/*.whl
 
-# Install test dependencies
-RUN python3 -m pip install tests/vllm_test_utils
-RUN python3 -m pip install --no-cache-dir \
-    git+https://github.com/thuml/depyf.git \
-    pytest-asyncio \
-    git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d#egg=lm-eval[api] \
-    pytest-cov \
-    tblib
-
-# Remove repository
-WORKDIR /workspace
-RUN rm -rf /workspace/vllm /workspace/tpu_inference
 
 CMD ["/bin/bash"]
