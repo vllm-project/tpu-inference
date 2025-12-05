@@ -18,9 +18,6 @@ setup_environment() {
   # shellcheck disable=1091
   source /etc/environment
 
-  # If the script run on the buildkite agent, will use $BUILDKITE_COMMIT as a tag.
-  # Otherwise, if run on local vm, just use "tmp" as a tag.
-
   # Cleanup of existing containers and images.
   echo "Starting cleanup for ${IMAGE_NAME}..."
   # Get all unique image IDs for the repository
@@ -57,7 +54,7 @@ setup_environment() {
   echo "Python dependencies installed"
   if [ -z "${BUILDKITE:-}" ]; then
       VLLM_COMMIT_HASH=""
-      BUILDKITE_COMMIT="tmp"
+      BUILDKITE_COMMIT=$(git log -n 1 --pretty="%H")
   else
       VLLM_COMMIT_HASH="28097d5638cc695f4644c411edac8eb05a03b39b"
       #VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH" --default "")
