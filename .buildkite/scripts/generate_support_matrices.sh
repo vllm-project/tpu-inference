@@ -135,7 +135,12 @@ process_features() {
         fi
 
         # Build Row
-        local row="\"$feature\""
+        local display_feature="$feature"
+        if [ "$is_kernel_microbenchmarks" = true ]; then
+            display_feature="${feature%-*}"
+        fi
+        local row="\"$display_feature\""
+        
         local stage_index=0
         for stage in "${stages_to_use[@]}"; do
             local result
