@@ -13,7 +13,7 @@ mapfile -t metadata_feature_list < <(buildkite-agent meta-data get "${FEATURE_LI
 MODEL_STAGES=("UnitTest" "IntegrationTest" "Benchmark")
 FEATURE_STAGES=("CorrectnessTest" "PerformanceTest")
 FEATURE_STAGES_QUANTIZATION=("QuantizationMethods" "RecommendedTPUGenerations" "CorrectnessTest" "PerformanceTest")
-FEATURE_STAGES_MICROBENCHMARKS=("CorrectnessTest" "PerformanceTest","TPU Versions")
+FEATURE_STAGES_MICROBENCHMARKS=("CorrectnessTest" "PerformanceTest" "TPU Versions")
 
 declare -A TPU_GENERATIONS=(
     ["INT8 W8A8"]="\"v5, v6\""
