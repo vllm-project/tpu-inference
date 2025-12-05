@@ -20,7 +20,6 @@ setup_environment() {
 
   # If the script run on the buildkite agent, will use $BUILDKITE_COMMIT as a tag.
   # Otherwise, if run on local vm, just use "tmp" as a tag.
-  image_tag="${BUILDKITE_COMMIT:-tmp}"
 
   # Cleanup of existing containers and images.
   echo "Starting cleanup for ${IMAGE_NAME}..."
@@ -56,8 +55,9 @@ setup_environment() {
   echo "Installing Python dependencies"
   python3 -m pip install --progress-bar off buildkite-test-collector==0.1.9
   echo "Python dependencies installed"
-  if [ -z "${BUILDKITE_COMMIT:-}" ]; then
+  if [ -z "${BUILDKITE:-}" ]; then
       VLLM_COMMIT_HASH=""
+      BUILDKITE_COMMIT="tmp"
   else
       VLLM_COMMIT_HASH="28097d5638cc695f4644c411edac8eb05a03b39b"
       #VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH" --default "")
@@ -65,5 +65,5 @@ setup_environment() {
 
   docker build \
       --build-arg VLLM_COMMIT_HASH="${VLLM_COMMIT_HASH}" \
-      --no-cache -f docker/Dockerfile -t "${IMAGE_NAME}:${image_tag}" .
+      --no-cache -f docker/Dockerfile -t "${IMAGE_NAME}:${BUILDKITE_COMMIT}" .
 }
