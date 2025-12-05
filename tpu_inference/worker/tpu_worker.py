@@ -250,11 +250,20 @@ class TPUWorker:
             need_pp=self.parallel_config.pipeline_parallel_size > 1)
 
         ensure_kv_transfer_initialized(self.vllm_config)
-        self.model_runner = TPUModelRunner(
-            self.vllm_config, self.devices, self.rank, self.rank == 0,
-            self.rank == self.pp_config.pp_world_size - 1)
+
+        is_first_rank = True
+        is_last_rank = True
+        if self.parallel_config.pipeline_parallel_size > 1:
+            is_first_rank = self.rank == 0
+            is_last_rank = self.rank == self.pp_config.pp_world_size - 1
+
+        self.model_runner = TPUModelRunner(self.vllm_config, self.devices,
+                                           self.rank, is_first_rank,
+                                           is_last_rank)
         logger.info(f"Init worker | "
                     f"rank={self.rank} | "
+                    f"is_first_rank={is_first_rank} | "
+                    f"is_last_rank={is_last_rank} | "
                     f"node_id={get_node_id()} | "
                     f"is_driver_worker={self.is_driver_worker} | "
                     f"hbm={utils.hbm_usage_gb(self.devices)}GiB")
