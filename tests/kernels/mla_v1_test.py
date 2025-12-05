@@ -42,6 +42,7 @@ class MlaRaggedPagedAttentionKernelTest(jtu.JaxTestCase):
 
         padded_r_dim = align_to(r_dim, 128)
         padded_lkv_dim = align_to(lkv_dim, 128)
+        padded_kv_dim = padded_lkv_dim + padded_r_dim
         packing = get_dtype_packing(kv_dtype)
         q_lens = [s[0] for s in seq_lens]
         kv_lens_list = [s[1] for s in seq_lens]
@@ -69,13 +70,10 @@ class MlaRaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         new_kv_c = gen_random((total_q_len, lkv_dim), kv_dtype)
         new_k_pe = gen_random((total_q_len, r_dim), kv_dtype)
 
-        cache_kv_c = gen_random(
-            (total_num_pages, page_size // packing, packing, padded_lkv_dim),
+        cache_kv = gen_random(
+            (total_num_pages, page_size // packing, packing, padded_kv_dim),
             kv_dtype,
         )
-        cache_k_pe = gen_random(
-            (total_num_pages, page_size // packing, packing, padded_r_dim),
-            kv_dtype)
         kv_lens = jnp.array(kv_lens_list, dtype=jnp.int32)
         page_indices = jnp.array(page_indices_list, dtype=jnp.int32)
         cu_q_lens = jnp.array(cu_q_lens_list, dtype=jnp.int32)
@@ -84,14 +82,13 @@ class MlaRaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         ql_nope_for_kernel = ql_nope.copy()
         q_pe_for_kernel = q_pe.copy()
 
-        expected_out, expected_updated_kv_c, expeceted_updated_k_pe = (
+        expected_out, expected_updated_kv = (
             mla.ref_mla_ragged_paged_attention(
                 ql_nope,
                 q_pe,
                 new_kv_c,
                 new_k_pe,
-                cache_kv_c.copy(),
-                cache_k_pe.copy(),
+                cache_kv.copy(),
                 kv_lens,
                 page_indices,
                 cu_q_lens,
@@ -101,49 +98,140 @@ class MlaRaggedPagedAttentionKernelTest(jtu.JaxTestCase):
                 soft_cap=soft_cap,
             ))
 
-        kernel_out, kernel_updated_kv_c, kernel_updated_k_pe = (
-            mla.mla_ragged_paged_attention(
-                ql_nope_for_kernel,
-                q_pe_for_kernel,
-                new_kv_c,
-                new_k_pe,
-                cache_kv_c.copy(),
-                cache_k_pe.copy(),
-                kv_lens,
-                page_indices,
-                cu_q_lens,
-                distribution,
-                sm_scale=sm_scale,
-                sliding_window=sliding_window,
-                soft_cap=soft_cap,
-                num_kv_pages_per_block=num_kv_pages_per_block,
-                num_queries_per_block=num_queries_per_block,
-                vmem_limit_bytes=vmem_limit_bytes,
-            ))
+        kernel_out, kernel_updated_kv = (mla.mla_ragged_paged_attention(
+            ql_nope_for_kernel,
+            q_pe_for_kernel,
+            new_kv_c,
+            new_k_pe,
+            cache_kv.copy(),
+            kv_lens,
+            page_indices,
+            cu_q_lens,
+            distribution,
+            sm_scale=sm_scale,
+            sliding_window=sliding_window,
+            soft_cap=soft_cap,
+            num_kv_pages_per_block=num_kv_pages_per_block,
+            num_queries_per_block=num_queries_per_block,
+            vmem_limit_bytes=vmem_limit_bytes,
+        ))
 
         self.assertEqual(expected_out.shape,
                          (total_q_len, num_heads, padded_lkv_dim))
         self.assertEqual(
-            expected_updated_kv_c.shape,
-            (total_num_pages, page_size // packing, packing, padded_lkv_dim),
-        )
-        self.assertEqual(
-            expeceted_updated_k_pe.shape,
-            (total_num_pages, page_size // packing, packing, padded_r_dim),
+            expected_updated_kv.shape,
+            (total_num_pages, page_size // packing, packing, padded_kv_dim),
         )
         self.assertEqual(expected_out.dtype, kv_dtype)
-        self.assertEqual(expected_updated_kv_c.dtype, kv_dtype)
-        self.assertEqual(expeceted_updated_k_pe.dtype, kv_dtype)
+        self.assertEqual(expected_updated_kv.dtype, kv_dtype)
 
         self.assertAllClose(expected_out, kernel_out, atol=0.2, rtol=0.2)
-        self.assertAllClose(expected_updated_kv_c,
-                            kernel_updated_kv_c,
+        self.assertAllClose(expected_updated_kv,
+                            kernel_updated_kv,
                             atol=0.2,
                             rtol=0.2)
-        self.assertAllClose(expeceted_updated_k_pe,
-                            kernel_updated_k_pe,
-                            atol=0.2,
-                            rtol=0.2)
+
+    def test_update_kv_cache(self):
+        lkv_dim = 4
+        r_dim = 4
+        padded_lkv_dim = align_to(lkv_dim, 128)
+        padded_r_dim = align_to(r_dim, 128)
+        kv_dtype = jnp.bfloat16
+        new_kv_c = jnp.arange(16, dtype=kv_dtype).reshape((4, lkv_dim))
+        new_k_pe = (jnp.arange(16, dtype=kv_dtype).reshape((4, r_dim)) + 100)
+        total_num_pages = 2
+        page_size = 4
+        cache_kv_shape = mla.get_kv_cache_shape(
+            total_num_pages,
+            page_size,
+            padded_lkv_dim + padded_r_dim,
+            kv_dtype,
+        )
+        cache_kv = jnp.zeros(cache_kv_shape, dtype=kv_dtype)
+
+        # two sequences, first with 3 tokens, second with 1 token
+        kv_lens = jnp.array([3, 1], dtype=jnp.int32)
+        # first seq uses page 0, second uses page 1
+        page_indices = jnp.array([0, -1, 1, -1], dtype=jnp.int32)
+        # three tokens for first seq, one for second
+        cu_q_lens = jnp.array([0, 3, 4], dtype=jnp.int32)
+        distribution = jnp.array([0, 0, 2], dtype=jnp.int32)
+
+        # manually compute the expected cache
+        padded_new_kv_c = jnp.pad(new_kv_c,
+                                  ((0, 0), (0, padded_lkv_dim - lkv_dim)),
+                                  constant_values=0)
+        padded_new_k_pe = jnp.pad(new_k_pe,
+                                  ((0, 0), (0, padded_r_dim - r_dim)),
+                                  constant_values=0)
+
+        expected_cache = cache_kv
+        # First sequence
+        # token 0
+        page_idx, row, col = 0, 0, 0
+        expected_cache = expected_cache.at[page_idx, row,
+                                           col, :padded_lkv_dim].set(
+                                               padded_new_kv_c[0])
+        expected_cache = expected_cache.at[page_idx, row, col,
+                                           padded_lkv_dim:padded_lkv_dim +
+                                           padded_r_dim].set(
+                                               padded_new_k_pe[0])
+        # token 1
+        page_idx, row, col = 0, 0, 1
+        expected_cache = expected_cache.at[page_idx, row,
+                                           col, :padded_lkv_dim].set(
+                                               padded_new_kv_c[1])
+        expected_cache = expected_cache.at[page_idx, row, col,
+                                           padded_lkv_dim:padded_lkv_dim +
+                                           padded_r_dim].set(
+                                               padded_new_k_pe[1])
+        # token 2
+        page_idx, row, col = 0, 1, 0
+        expected_cache = expected_cache.at[page_idx, row,
+                                           col, :padded_lkv_dim].set(
+                                               padded_new_kv_c[2])
+        expected_cache = expected_cache.at[page_idx, row, col,
+                                           padded_lkv_dim:padded_lkv_dim +
+                                           padded_r_dim].set(
+                                               padded_new_k_pe[2])
+
+        # Second sequence
+        # token 0
+        page_idx, row, col = 1, 0, 0
+        expected_cache = expected_cache.at[page_idx, row,
+                                           col, :padded_lkv_dim].set(
+                                               padded_new_kv_c[3])
+        expected_cache = expected_cache.at[page_idx, row, col,
+                                           padded_lkv_dim:padded_lkv_dim +
+                                           padded_r_dim].set(
+                                               padded_new_k_pe[3])
+
+        updated_cache = mla.update_kv_cache(
+            new_kv_c,
+            new_k_pe,
+            cache_kv,
+            kv_lens,
+            page_indices,
+            cu_q_lens,
+            distribution,
+        )
+
+        self.assertAllClose(updated_cache, expected_cache)
+
+    def test_get_kv_cache_shape(self):
+        total_num_pages = 10
+        page_size = 16
+        lkv_dim = 128
+        kv_dtype = jnp.bfloat16
+        # The calculation for the expected shape is as follows:
+        # kv_packing is determined by the dtype, which is 2 for bfloat16.
+        # The second dimension is page_size / kv_packing = 16 / 2 = 8
+        # The third dimension is kv_packing = 2
+        # The fourth dimension is lkv_dim aligned to 128, which is 128
+        expected_shape = (10, 8, 2, 128)
+        self.assertEqual(
+            mla.get_kv_cache_shape(total_num_pages, page_size, lkv_dim,
+                                   kv_dtype), expected_shape)
 
     def test_ragged_paged_attention_basic(self):
         dtype = jnp.bfloat16
