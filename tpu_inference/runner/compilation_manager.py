@@ -32,6 +32,7 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.utils import device_array
+import os
 
 if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
@@ -48,6 +49,7 @@ class CompilationManager:
         self.runner = runner
         self._sampling_precompiled = False
         self._gather_logprobs_precompiled = False
+        os.environ["XLA_FLAGS"] = "--xla_dump_to=/workspace/tmp"
         if not vllm_envs.VLLM_DISABLE_COMPILE_CACHE:
             logger.info("Enabling JAX compile cache.")
             jax.config.update("jax_compilation_cache_dir",
