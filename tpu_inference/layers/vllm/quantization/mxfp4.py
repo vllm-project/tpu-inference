@@ -203,8 +203,10 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
             # PyTorch does not have support for fp4. To make it compatible with it,
             # we bitcast quantized weights into uint4 before converting them into
             # PyTorch tensor and bitcast it back into fp4 during inference time.
-            w13_weight = jax.lax.bitcast_convert_type(w13_weight, jnp.uint4)
-            w2_weight = jax.lax.bitcast_convert_type(w2_weight, jnp.uint4)
+
+            # Not needed anymore after https://github.com/vllm-project/tpu-inference/pull/1257
+            # w13_weight = jax.lax.bitcast_convert_type(w13_weight, jnp.uint4)
+            # w2_weight = jax.lax.bitcast_convert_type(w2_weight, jnp.uint4)
 
             num_experts, hidden_size, intermediate_size = w2_weight.shape
 
