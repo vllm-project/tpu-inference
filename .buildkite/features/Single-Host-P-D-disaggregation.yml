@@ -1,0 +1,25 @@
+# Single-Host-P-D-disaggregation
+# features support matrix
+steps:
+  - label: "Correctness tests for Single-Host P-D disaggregation"
+    key: "SingleHostPDDisaggregation_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        .buildkite/scripts/run_in_docker.sh \
+          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_local_disagg.py::test_disaggregated_serving \
+          /workspace/tpu_inference/tests/e2e/test_local_disagg.py::test_disaggregated_serving_correctness
+  - label: "Record correctness test result for Single-Host P-D disaggregation"
+    key: "record_SingleHostPDDisaggregation_CorrectnessTest"
+    depends_on: "SingleHostPDDisaggregation_CorrectnessTest"
+    env:
+      CI_TARGET: "SingleHostPDDisaggregation"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "features support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh SingleHostPDDisaggregation_CorrectnessTest
