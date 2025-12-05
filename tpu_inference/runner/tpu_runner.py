@@ -1396,7 +1396,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 block_tables[
                     req_offset:req_offset + _num_reqs, :self.
                     max_num_blocks_per_req] = self.input_batch.block_table[
-                        0].get_cpu_tensor()[req_indices_dp[dp_rank]]
+                        kv_cache_gid].get_cpu_tensor()[req_indices_dp[dp_rank]]
             # Convert block_tables to 1D on cpu.
             block_tables = block_tables.reshape(-1)
             block_tables = device_array(
