@@ -34,6 +34,12 @@ spec:
           value: "4096"
         - name: TPU_OFFLOAD_NUM_STAGING_BLOCKS
           value: "256"
+        # config the pre-mapped CPU buffer for TPUs
+        # https://docs.cloud.google.com/tpu/docs/performance-guide#tpu_model_performance
+        - name: TPU_PREMAPPED_BUFFER_SIZE
+          value: "68719476736"  # 64 GB
+        - name: TPU_PREMAPPED_BUFFER_TRANSFER_THRESHOLD_BYTES
+          value: "68719476736"  # 64 GB
         ports:
         - containerPort: 8000
         resources:
