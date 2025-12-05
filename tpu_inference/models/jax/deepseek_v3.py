@@ -58,7 +58,7 @@ class DeepSeekV3(nnx.Module):
         print("this is hf_config: ", vllm_config.model_config.hf_config)
 
         # NOTE: the default is 61
-        num_layers: int = vllm_config.model_config.hf_config.num_hidden_layers
+        num_layers: int = 5  #vllm_config.model_config.hf_config.num_hidden_layers
         num_local_experts: int = 256
 
         vocab_size: int = 129280
@@ -314,7 +314,26 @@ class DeepSeekV3(nnx.Module):
                               dv_sharding=(None, ('data', 'expert', 'model')),
                               random_init=self.random_init)
 
-    # For compatibility with flax.
+        #self._print_model_architecture()
+
+    def _print_model_architecture(self):
+        num_display_layers = 5
+
+        logger.debug("### Embedding ###")
+        nnx.display(self.embedder)
+
+        logger.debug(f"\n### First {num_display_layers} Layers ###")
+        # Loop through the slice and display each layer
+        for i, layer in enumerate(self.layers[:num_display_layers]):
+            logger.debug(f"\n--- Layer {i} ---")
+            nnx.display(layer)
+
+        logger.debug("\n### LM Head ###")
+        nnx.display(self.lm_head)
+
+
+# For compatibility with flax.
+
     def apply(self, variables, *args, **kwargs):
         return self.__call__(*args, **kwargs)
 
@@ -490,6 +509,24 @@ class DeepSeekV3WeightLoader:
             # assert self.quantization_block_size_n == self.quantization_block_size_k, "Quantization block size n and k must be the same!"
             # NOTE: this is only needed for pre-quantized model
             self._scale_shape_map = {
+                # (attn_heads, qk_nope_head_dim + qk_rope_head_dim, q_lora_rank)
+                # 100 x 100 weight, blocks of 4 x 4
+                # for ea 4x4 block, quantize, to return you need to calculate scale to map back to original precision
+                # within the 4x4 block, find the min and max values in that block.
+                # some calculation about no higher than a*max and b*min where a, b are .....
+                # original range -128, 128.  -128 * x, 128 * y (new, smaller range)
+                # let's say actual numbers are between -10 and 10, 10 mapped 128, -10 mapped -127
+                #  sequence of events: # between -10 and 10, quantize in a range betwen -127 and 128
+                #  scale helps you get the values back to -10 and 10.
+                #
+                # trying to calculate shape of scale tensor now
+                # original weight tensor 100 x 100
+                # need a scale for each 4x4 block, each has their own max and min, thus needs diff scale value to map back
+                # to original range. How many 25 * 25 = 625 scales. (100// 4, 100// 4) => (25, 25) dim tensor
+                # this is the # of scales needed
+
+                # reshape 100 x 100 to 100 x 10 x 10, this would break the groups (scales values would overlap different groups)
+                # play around with quantizing something like np.arange(1, 12).reshape(3, 4)
                 "q_b_proj":
                 (1, qk_nope_head_dim + qk_rope_head_dim, q_lora_rank // 2),
                 "kv_b_proj": (attn_heads, (qk_nope_head_dim + v_head_dim) //
@@ -498,28 +535,28 @@ class DeepSeekV3WeightLoader:
                 "o_proj": (hidden_size // self.quantization_block_size_n,
                            attn_heads // 4, v_head_dim // 64),
 
-                # FFW weights are D->F, and F->D:
-                "mlp.down_proj":
-                (18432 // self.quantization_block_size_k,
-                 hidden_size),  # Target Scale Shape: (72, 7168)
-                "mlp.gate_proj":
-                (hidden_size, 18432 // self.quantization_block_size_k
-                 ),  # Target Scale Shape: (7168, 72)
-                "mlp.up_proj":
-                (hidden_size, 18432 // self.quantization_block_size_k
-                 ),  # Target Scale Shape: (7168, 72)
+                # # FFW weights are D->F, and F->D:
+                # "mlp.down_proj":
+                # (18432 // self.quantization_block_size_k,
+                #  hidden_size),  # Target Scale Shape: (72, 7168)
+                # "mlp.gate_proj":
+                # (hidden_size, 18432 // self.quantization_block_size_k
+                #  ),  # Target Scale Shape: (7168, 72)
+                # "mlp.up_proj":
+                # (hidden_size, 18432 // self.quantization_block_size_k
+                #  ),  # Target Scale Shape: (7168, 72)
 
-                # Shared Experts (MoE experts have D_E=2048, F=7168)
-                # The dimensions here must be correct based on the D/F logic applied by the underlying layer.
-                "mlp.shared_experts.down_proj":
-                (2048 // self.quantization_block_size_k,
-                 hidden_size),  # Target Scale Shape: (8, 7168)
-                "mlp.shared_experts.gate_proj":
-                (hidden_size, 2048 // self.quantization_block_size_k
-                 ),  # Target Scale Shape: (7168, 8)
-                "mlp.shared_experts.up_proj":
-                (hidden_size, 2048 // self.quantization_block_size_k
-                 ),  # Target Scale Shape: (7168, 8)
+                # # Shared Experts (MoE experts have D_E=2048, F=7168)
+                # # The dimensions here must be correct based on the D/F logic applied by the underlying layer.
+                # "mlp.shared_experts.down_proj":
+                # (2048 // self.quantization_block_size_k,
+                #  hidden_size),  # Target Scale Shape: (8, 7168)
+                # "mlp.shared_experts.gate_proj":
+                # (hidden_size, 2048 // self.quantization_block_size_k
+                #  ),  # Target Scale Shape: (7168, 8)
+                # "mlp.shared_experts.up_proj":
+                # (hidden_size, 2048 // self.quantization_block_size_k
+                #  ),  # Target Scale Shape: (7168, 8)
             }
             # NOTE: this is only needed for pre-quantized models when doing random weight loading
             # TODO (jacobplatin): remove or clean this up
@@ -615,7 +652,11 @@ class DeepSeekV3WeightLoader:
                 f"Unsupported dtype for tensor conversion: {cast_type}")
 
         if scale is not None:
+            logger.info(
+                f"--- RAW SCALE SHAPE before .to() call for {name}: {scale.shape}"
+            )
             scale = scale.to(torch.float32).numpy().astype(self.scale_dtype)
+            logger.info(f"--- RAW SCALE SHAPE for {name}: {scale.shape}")
 
         # Reshape weights if necessary (applies to 3D LORA weights for correct element count)
         weight_np = reshape_params(name, weight_np, self._weight_shape_map)
@@ -625,25 +666,33 @@ class DeepSeekV3WeightLoader:
             scale = reshape_params(name, scale, self._scale_shape_map)
 
         # ----------------------------------------------------------------------
-        # FIX: Conditional Transposition based on weight type (MLA vs FFW/Shared Expert)
+        # FINAL TACTICAL FIX: FFW Transposition Logic
         # ----------------------------------------------------------------------
-        is_ffw_or_shared = re.search(
-            r"mlp\.(gate|up|down)\_proj|shared\_experts\.(gate|up|down)\_proj",
-            name)
+        is_ffw_gate_or_up = re.search(
+            r"mlp\.(gate|up)\_proj|shared\_experts\.(gate|up)\_proj", name)
+        is_ffw_down = re.search(r"mlp\.down\_proj|shared\_experts\.down\_proj",
+                                name)
 
-        if is_ffw_or_shared:
-            # FFW/Shared Expert weights are loaded (F, D) and need (D, F) for JAX Einsum.
-            # 1. Transpose the Weight: (F, D) -> (D, F)
-            weight_np = jnp.transpose(weight_np, (1, 0))
+        if is_ffw_gate_or_up:
+            # Gate/Up Projections (DF): Transpose on Weight, Transpose on Scale
+            # Goal: W(F, D) -> W(D, F) & S(F, D_comp) -> S(D_comp, F)
+            weight_np = jnp.transpose(weight_np,
+                                      (1, 0))  # Apply weight transpose
+            if scale is not None:
+                scale = jnp.transpose(scale, (1, 0))  # Apply scale transpose
 
-            # 2. Scale: The scale tensor is often structured (D_comp, F_comp) OR (F_comp, D_comp).
-            #    Based on the repeated broadcast error after transpose, the scale must be correctly
-            #    oriented before this block, and transposing it here is what caused the final error.
-            #    We only transpose the weight.
-            pass  # Scale transpose removed to rely on correct loading/reshape.
+        elif is_ffw_down:
+            # Down Projection (FD): NO transpose on Weight, Transpose on Scale
+            # Goal: W(F, D) -> W(F, D) & S(D, F_comp) -> S(F_comp, D)
+            # The loaded weight (F, D) matches model expectation (FD). Skip weight transpose.
+            weight_np = jnp.transpose(weight_np,
+                                      (1, 0))  # Apply weight transpose
+            if scale is not None:
+                # Transpose the scale axis (D, F_comp) -> (F_comp, D)
+                scale = jnp.transpose(scale, (1, 0))
 
         else:
-            # MLA/Attention weights (not FFW) use the complex/multi-axis transpose.
+            # MLA/Attention and MoE Experts (3D): Use the pre-defined _transpose_params for both.
             weight_np = self._transpose_params(name, weight_np)
             if scale is not None:
                 scale = self._transpose_params(name, scale)
@@ -652,23 +701,25 @@ class DeepSeekV3WeightLoader:
         # ----------------------------------------------------------------------
 
         if scale is not None:
+            logger.info(f"--- FINAL SCALE SHAPE for {name}: {scale.shape}")
+
             weight_shape = weight_np.shape
             scale_shape = scale.shape
             assert len(weight_shape) == len(scale_shape)
-            for idx, (weight_dim,
-                      scale_dim) in enumerate(zip(weight_shape, scale_shape)):
-                if weight_dim // self.quantization_block_size_n != scale_dim and weight_dim // scale_dim != 1:
-                    old_scale_shape = scale.shape
+            # for idx, (weight_dim,
+            #           scale_dim) in enumerate(zip(weight_shape, scale_shape)):
+            #     if weight_dim // self.quantization_block_size_n != scale_dim and weight_dim // scale_dim != 1:
+            #         old_scale_shape = scale.shape
 
-                    scale = scale.repeat(self.quantization_block_size_n,
-                                         axis=idx)[:, :weight_dim]
-                    logger.warning(
-                        f"Got a weight with shape {weight_shape} and scale with shape {old_scale_shape} "
-                        f"where the scale_dim {scale_dim} does not match the weight_dim {weight_dim} "
-                        f"multiplied by the quantization block size {self.quantization_block_size_n}. "
-                        f"Repeating the scale to new shape {scale.shape} along axis {idx} with repeat size {self.quantization_block_size_n}."
-                    )
-                    break
+            #         scale = scale.repeat(self.quantization_block_size_n,
+            #                              axis=idx)[:, :weight_dim]
+            #         logger.warning(
+            #             f"Got a weight with shape {weight_shape} and scale with shape {old_scale_shape} "
+            #             f"where the scale_dim {scale_dim} does not match the weight_dim {weight_dim} "
+            #             f"multiplied by the quantization block size {self.quantization_block_size_n}. "
+            #             f"Repeating the scale to new shape {scale.shape} along axis {idx} with repeat size {self.quantization_block_size_n}."
+            #         )
+            #         break
 
         if model_weight.value.shape != weight_np.shape:
             raise ValueError(

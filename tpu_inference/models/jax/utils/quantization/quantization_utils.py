@@ -124,32 +124,32 @@ DEFAULT_DEEPSEEK_TPU_FP4_CONFIG = {
         "bfloat16",
         "rules": [
             {
-                # Rule 1: Keep the MoE Router/Gate in BF16/unquantized (this is usually a simple Dense/Linear layer)
+                # Rule 1: MoE Router/Gate (BF16)
                 "module_path": ".*.custom_module.router.*",
                 "weight_qtype": None,
             },
             {
-                # Rule 2: Quantize Attention layers (mla) to FP8 (float8_e4m3fn)
+                # Rule 2: Attention (FP8)
                 "module_path": ".*attn.*",
                 "weight_qtype": "float8_e4m3fn",
                 "act_qtype": None,
-                "tile_size": None,  #NOTE: Used to be 256
+                "tile_size": None,
             },
             {
-                # Rule 3: Quantize MoE/MLP (custom_module: MoE or DenseFFW) to FP4 (float4_e2m1fn)
-                # NOTE: This rule is placed after the attention rule.
+                # Rule 3: MoE/MLP FFW (FP4)
                 "module_path": ".*custom_module.*",
                 "weight_qtype": "float4_e2m1fn",
                 "act_qtype": None,
                 "tile_size": 256,
             },
-            # {
-            #     # Rule 4: Catch-all rule for all other layers (Embeddings, Norms, LM Head).
-            #     # Setting weight_qtype to None effectively keeps them in base model dtype (BF16).
-            #     # NOTE: not sure if this is actually needed. default weight_qtype might just be None
-            #     "module_path": ".*",
-            #     "weight_qtype": None,
-            # },
+            # 💡 ADD THIS NEW RULE (Rule 4)
+            {
+                # Rule 4: Shared Experts (FP4)
+                "module_path": ".*shared_experts.*",
+                "weight_qtype": "float4_e2m1fn",
+                "act_qtype": None,
+                "tile_size": 256,
+            },
         ],
     }
 }
