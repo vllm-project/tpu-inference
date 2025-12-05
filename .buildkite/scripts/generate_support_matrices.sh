@@ -96,6 +96,8 @@ process_models() {
 }
 
 # Process Features (Split by Category)
+# buildkite-agent meta-data set "${CI_TARGET}_category" "${CI_CATEGORY}"
+# buildkite-agent meta-data set "${CI_TARGET}:${CI_STAGE}" "${message}"
 process_features() {
     local mode="$1"
     shift # Shift $1 so $@ now contains only the feature list
@@ -114,11 +116,14 @@ process_features() {
         local stages_to_use=("${FEATURE_STAGES[@]}")
         local header="Feature,CorrectnessTest,PerformanceTest"
         local is_quantization_matrix=false
+        local is_kernel_microbenchmarks=false
 
         if [ "$category" == "quantization support matrix" ]; then
             is_quantization_matrix=true
             stages_to_use=("${FEATURE_STAGES_QUANTIZATION[@]}")
             header="Quantization dtype,Quantization methods,Recommended TPU Generations,CorrectnessTest,PerformanceTest"
+        elif [ "$category" == "kernel support matrix (microbenchmarks)" ]; then
+            is_kernel_microbenchmarks=true
         fi
 
         if [ ! -f "$category_csv" ]; then
