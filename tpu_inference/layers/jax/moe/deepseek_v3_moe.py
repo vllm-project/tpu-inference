@@ -4,12 +4,14 @@ from functools import partial
 from typing import Optional, Tuple
 
 import jax
+from jax.experimental import scheduling_groups
 import jax.numpy as jnp
 from flax import nnx
 from flax.typing import Sharding
 from jax.sharding import PartitionSpec
 from jaxtyping import Float
 from qwix._src.core.ragged_dot import ragged_dot as qwix_ragged_dot
+from qwix._src.core.qarray import QArray
 from qwix._src.providers import ptq
 
 from tpu_inference.layers.jax.base import create_param
@@ -20,6 +22,20 @@ from tpu_inference.models.jax.utils.quantization.quantization_utils import (
 
 modeling_flax_utils = FlaxUtils()
 jax.config.update("jax_ragged_dot_use_ragged_dot_instruction", True),
+
+xla_metadata_call = scheduling_groups.xla_metadata_call
+
+
+def mosaic_fusion_group(group_id: str):
+  """Groups operations for Mosaic fusion.
+
+  Args:
+    group_id: A string identifier for the fusion group.
+
+  Returns:
+    A call to `xla_metadata_call` with the specified group_id.
+  """
+  return xla_metadata_call(mosaic_fusion_group=group_id)
 
 @dataclass
 class DeepSeekV3Router(nnx.Module):
@@ -341,7 +357,7 @@ class SparseMoE(MoE):
             )
 
         return output_TD.astype(self.dtype)
-
+    @mosaic_fusion_group("qwix_quant")    
     def _gmm(self, inputs, kernel, group_sizes):
         """Performs Grouped Matrix Multiply."""
         num_rows = inputs.shape[0]
@@ -359,9 +375,20 @@ class SparseMoE(MoE):
                 inputs, "ragged_dot", jnp.float8_e4m3fn, [0], {},
                 "absmax") if self.quantized_dtype else inputs
             ragged_dot_func = qwix_ragged_dot if self.quantized_dtype else jax.lax.ragged_dot
+            final_kernel = kernel
+
+            if self.quantized_dtype:
+                kernel_qvalue, kernel_scale = kernel
+
+                final_kernel = QArray(
+                    qvalue=kernel_qvalue, 
+                    scale=kernel_scale, 
+                    qtype=self.quantized_dtype
+                )
+                
             output = ragged_dot_func(
                 lhs=inputs,
-                rhs=kernel,
+                rhs=final_kernel,
                 group_sizes=group_sizes,
                 preferred_element_type=self.dtype,
             )
@@ -563,16 +590,20 @@ class SparseMoE(MoE):
         x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
         router_weights_TX, selected_experts_TX = self.router(x_TD)
-
+        if self.quantized_dtype:
+            gating_up_proj_spec = (PartitionSpec(*self.edf_sharding), PartitionSpec())
+            down_proj_spec = (PartitionSpec(*self.efd_sharding), PartitionSpec())
+        else:
+            gating_up_proj_spec = PartitionSpec(*self.edf_sharding)
+            down_proj_spec = PartitionSpec(*self.efd_sharding)
         in_specs = (
             PartitionSpec(),  # Replicated `self`
             PartitionSpec(*self.activation_ffw_td),  # Sharded x_TD
             PartitionSpec(),  # Replicated router_weights_TX
             PartitionSpec(),  # Replicated selected_experts_TX
-            PartitionSpec(*self.edf_sharding),  # Sharded gating kernel
-            PartitionSpec(*self.edf_sharding),  # Sharded up-projection kernel
-            PartitionSpec(
-                *self.efd_sharding),  # Sharded down-projection kernel
+            gating_up_proj_spec,  # Sharded gating kernel
+            gating_up_proj_spec,  # Sharded up-projection kernel
+            down_proj_spec,  # Sharded down-projection kernel
         )
         out_specs = PartitionSpec(*self.activation_ffw_td)
 
@@ -590,19 +621,24 @@ class SparseMoE(MoE):
         if self.quantized_dtype:
             if not isinstance(kernel_gating_EDF, ptq.WithAux):
                 kernel_gating_EDF = manually_quantize_qwix_weight(
-                    kernel_gating_EDF, self.quantized_dtype, [0, 2], {},
+                    'kernel_gating_EDF', kernel_gating_EDF, self.quantized_dtype, [], {},
                     "absmax")
             if not isinstance(kernel_up_proj_EDF, ptq.WithAux):
                 kernel_up_proj_EDF = manually_quantize_qwix_weight(
-                    kernel_up_proj_EDF, self.quantized_dtype, [0, 2], {},
+                    'kernel_up_proj_EDF', kernel_up_proj_EDF, self.quantized_dtype, [], {},
                     "absmax")
             if not isinstance(kernel_down_proj_EFD, ptq.WithAux):
                 kernel_down_proj_EFD = manually_quantize_qwix_weight(
-                    kernel_down_proj_EFD, self.quantized_dtype, [0, 1], {},
+                    'kernel_down_proj_EFD', kernel_down_proj_EFD, self.quantized_dtype, [], {},
                     "absmax")
-            kernel_gating_EDF = kernel_gating_EDF.array
-            kernel_up_proj_EDF = kernel_up_proj_EDF.array
-            kernel_down_proj_EFD = kernel_down_proj_EFD.array
+            kernel_gating_EDF = (kernel_gating_EDF.array.qvalue, 
+                                 kernel_gating_EDF.array.scale)
+            # Up-Projection Kernel:
+            kernel_up_proj_EDF = (kernel_up_proj_EDF.array.qvalue, 
+                                  kernel_up_proj_EDF.array.scale)
+            # Down-Projection Kernel:
+            kernel_down_proj_EFD = (kernel_down_proj_EFD.array.qvalue, 
+                                    kernel_down_proj_EFD.array.scale)
 
         return mapped_moe_fwd(self, x_TD, router_weights_TX,
                               selected_experts_TX, kernel_gating_EDF,
