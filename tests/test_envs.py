@@ -256,7 +256,7 @@ def test_disaggregated_serving_env_vars(monkeypatch: pytest.MonkeyPatch):
 
 def test_model_impl_type_default(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("MODEL_IMPL_TYPE", raising=False)
-    assert envs.MODEL_IMPL_TYPE == "flax_nnx"
+    assert envs.MODEL_IMPL_TYPE == "auto"
 
 
 def test_cache_preserves_values_across_env_changes(

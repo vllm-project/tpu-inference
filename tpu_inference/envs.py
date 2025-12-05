@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     DECODE_SLICES: str = ""
     SKIP_JAX_PRECOMPILE: bool = False
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
-    MODEL_IMPL_TYPE: str = "flax_nnx"
+    MODEL_IMPL_TYPE: str = "auto"
     NEW_MODEL_DESIGN: bool = False
     PHASED_PROFILING_DIR: str = ""
     PYTHON_TRACER_LEVEL: int = 1
@@ -128,8 +128,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("VLLM_XLA_CHECK_RECOMPILATION", default=False),
     # Model implementation type (e.g., "flax_nnx")
     "MODEL_IMPL_TYPE":
-    env_with_choices("MODEL_IMPL_TYPE", "flax_nnx",
-                     ["vllm", "flax_nnx", "jetpack"]),
+    env_with_choices("MODEL_IMPL_TYPE", "auto",
+                     ["auto", "vllm", "flax_nnx", "jetpack"]),
     # Enable new experimental model design
     "NEW_MODEL_DESIGN":
     env_bool("NEW_MODEL_DESIGN", default=False),
