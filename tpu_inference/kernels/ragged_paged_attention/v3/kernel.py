@@ -289,6 +289,7 @@ def _ragged_paged_attention_kernel(
         _,
     ) = kv_cache_hbm_ref.shape
     max_num_seqs = kv_lens_ref.shape[0]
+    # NB page_indices_ref,  # [max_num_seqs * pages_per_seq]
     num_page_indices = page_indices_ref.shape[0]
     assert num_page_indices % max_num_seqs == 0
     pages_per_seq = num_page_indices // max_num_seqs
@@ -389,6 +390,7 @@ def _ragged_paged_attention_kernel(
         k_span = bkv_idx * bkv_sz + lax.broadcasted_iota(jnp.int32, s.shape, 1)
         mask = q_span < k_span
         # TODO(jevinjiang, xiowei): reduce pages_per_seq based on sliding_window.
+        # xw32q: need to check with jevin on this TODO.
         if sliding_window is not None:
             mask = jnp.logical_or(mask, q_span - sliding_window >= k_span)
 
@@ -419,7 +421,7 @@ def _ragged_paged_attention_kernel(
             # Skip DMA if debug mode is enabled.
             # xw32: why do we skip dma if debug mode is enabled?
             # Answer: the debug_mode is used to debug hanging issues and pipeline logic.
-            # TODO(xw32): Jevin suggest to try it out with the basic test with debug_mode=True.
+            # Search "debug_mode" then you can find the print statements as an example.
             return
         cp = pltpu.make_async_copy(src, dst, sem)
         if wait:
@@ -427,10 +429,12 @@ def _ragged_paged_attention_kernel(
         else:
             cp.start()
 
+    # xw32: read
     def _fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx, *, wait=False):
+        # xw32: dma from either kv_cache or kv in hbm to the vmem bkv buffer(aka bkv_x2_ref).
         # NB: sems,  # [4, 2]. sems[0] is for fetching kv from kv cache.
         sem = sems.at[0, bkv_sem_idx]
-        vmem_ref = bkv_x2_ref.at[bkv_sem_idx]
+        vmem_ref = bkv_x2_ref.at[bkv_sem_idx] # [bkv_sz, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
 
         # NB: kv_cache_hbm_ref: [total_num_pages, page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
         cache_hbm_shape = kv_cache_hbm_ref.shape
@@ -474,6 +478,9 @@ def _ragged_paged_attention_kernel(
         if not wait:
             # Fetch effective kv from kv cache.
             def loop_body(i, offset):
+                # vmem_ref: [bkv_sz, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
+                # NB, the tuning parameters are (bkv_p = num_kv_pages_per_block, bq_sz = num_queries_per_block), bkv_sz=bkv_p*page_size
+                # xw32: cache_hbm_ref: [total_num_pages*page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
                 sz = jnp.minimum(page_size, kv_left_frm_cache - i * page_size)
                 _async_copy(
                     cache_hbm_ref.at[pl.ds(
@@ -510,6 +517,8 @@ def _ragged_paged_attention_kernel(
 
             return kv_len_start + offset, bkv_sz_frm_new
         else:
+            # xw32: why the src and dst are the same here?
+            # 这个是因为pallas的那个API在wait=true的时候压根不会用src传过来的东西，他只会检查dst里面需要的size是不是被传完了
             offset = jnp.minimum(kv_left_frm_cache, page_size * bkv_p)
             dst = vmem_ref.at[pl.ds(0, offset + bkv_sz_frm_new)]
             _async_copy(
@@ -590,9 +599,11 @@ def _ragged_paged_attention_kernel(
                 wait=True,
             )
 
+    # xw32: read.
     def _fetch_bq(seq_idx, bq_idx, bq_sem_idx, *, wait=False):
         sem = sems.at[1, bq_sem_idx]
-        vmem_ref = bq_x2_ref.at[bq_sem_idx]
+        # [2, actual_num_kv_heads, bq_sz, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
+        vmem_ref = bq_x2_ref.at[bq_sem_idx] # [actual_num_kv_heads, bq_sz, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
         q_len_start = cu_q_lens_ref[seq_idx] + bq_idx * bq_sz
         q_end = cu_q_lens_ref[seq_idx + 1]
         sz = jnp.minimum(bq_sz, q_end - q_len_start)
@@ -614,9 +625,12 @@ def _ragged_paged_attention_kernel(
             wait,
         )
 
+    # xw32: read.
     def _send_bo(seq_idx, bo_idx, bo_sem_idx, *, wait=False):
+        # Write sz = jnp.minimum(bq_sz, q_end - q_len_start) of bo_x2_ref in vmem to o_hbm_ref.
         sem = sems.at[2, bo_sem_idx]
-        vmem_ref = bo_x2_ref.at[bo_sem_idx]
+        # NB bo_x2_ref,  # [2, actual_num_kv_heads, bq_sz, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
+        vmem_ref = bo_x2_ref.at[bo_sem_idx] # [actual_num_kv_heads, bq_sz, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
         q_len_start = cu_q_lens_ref[seq_idx] + bo_idx * bq_sz
         q_end = cu_q_lens_ref[seq_idx + 1]
         sz = jnp.minimum(bq_sz, q_end - q_len_start)
@@ -631,6 +645,7 @@ def _ragged_paged_attention_kernel(
         debug_print("[RPA debug] q_end={}", q_end)
         debug_print("[RPA debug] sz={}", sz)
 
+        # NB. o_hbm_ref,  # [actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
         _async_copy(
             vmem_ref.at[:, pl.ds(0, sz)],
             o_hbm_ref.at[:, pl.ds(q_len_start, sz)],
@@ -665,6 +680,7 @@ def _ragged_paged_attention_kernel(
             _send_bo(old_seq_idx, old_bo_idx, bo_sem_idx, wait=True)
 
     def start_update_kv_cache(seq_idx, bkv_sem_idx, offset, update_sz):
+        # NB. bkv_update_ids_ref,  # [6] (bkv_sem_0_seq_idx, bkv_sem_1_seq_idx, bkv_sem_0_offset, bkv_sem_1_offset, bkv_sem_0_sz, bkv_sem_1_sz)
         bkv_update_ids_ref[bkv_sem_idx] = seq_idx
         bkv_update_ids_ref[bkv_sem_idx + 2] = offset
         bkv_update_ids_ref[bkv_sem_idx + 4] = update_sz
@@ -685,6 +701,8 @@ def _ragged_paged_attention_kernel(
                              wait=True)
 
     def load_bq(bq_sem_idx, kv_head_idx, *, actual_bq_sz=bq_sz):
+        # NB bq_x2_ref,  # [2, actual_num_kv_heads, bq_sz, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
+        # xw32q: why do we bitcast bq_x2_ref to uint32 and then bitcast back to q_dtype? 
         q_ref = (bq_x2_ref.bitcast(
             jnp.uint32).at[bq_sem_idx, kv_head_idx].reshape(
                 bq_sz * num_q_heads_per_kv_head_per_packing, head_dim))
