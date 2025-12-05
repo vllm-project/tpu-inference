@@ -4,7 +4,7 @@ from functools import partial
 from typing import Optional, Tuple
 
 import jax
-from jax.experimental import scheduling_groups
+from jax.experimental import scheduling_groups, xla_metadata
 import jax.numpy as jnp
 from flax import nnx
 from flax.typing import Sharding
@@ -24,6 +24,7 @@ modeling_flax_utils = FlaxUtils()
 jax.config.update("jax_ragged_dot_use_ragged_dot_instruction", True),
 
 xla_metadata_call = scheduling_groups.xla_metadata_call
+set_xla_metadata = xla_metadata.set_xla_metadata
 
 
 def mosaic_fusion_group(group_id: str):
@@ -385,13 +386,20 @@ class SparseMoE(MoE):
                     scale=kernel_scale, 
                     qtype=self.quantized_dtype
                 )
-                
-            output = ragged_dot_func(
-                lhs=inputs,
-                rhs=final_kernel,
-                group_sizes=group_sizes,
-                preferred_element_type=self.dtype,
-            )
+                m = inputs.qvalue.shape[0]
+                k, n = final_kernel.qvalue.shape[1], final_kernel.qvalue.shape[2]
+            else:
+                m = inputs.shape[0]
+                k, n = final_kernel.shape[1], final_kernel.shape[2]
+
+            tiling = (min(m, 512), k, n)
+            with set_xla_metadata(ragged_dot_tiling=",".join([str(t) for t in tiling])):
+                output = ragged_dot_func(
+                    lhs=inputs,
+                    rhs=final_kernel,
+                    group_sizes=group_sizes,
+                    preferred_element_type=self.dtype,
+                )
 
         if pad_amount > 0:
             output = output[:num_rows, :]
