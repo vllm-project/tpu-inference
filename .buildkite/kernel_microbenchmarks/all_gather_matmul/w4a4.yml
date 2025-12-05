@@ -1,5 +1,5 @@
 # all_gather_matmul-w4a4
-# kernel support matrix (microbenchmarks)
+# kernel support matrix microbenchmarks
 steps:
   - label: "Correctness tests for w4a4"
     key: "all_gather_matmul-w4a4_CorrectnessTest"
@@ -15,7 +15,7 @@ steps:
     env:
       CI_TARGET: "all_gather_matmul-w4a4"
       CI_STAGE: "CorrectnessTest"
-      CI_CATEGORY: "kernel support matrix (microbenchmarks)"
+      CI_CATEGORY: "kernel support matrix microbenchmarks"
     agents:
       queue: cpu
     commands:
@@ -37,7 +37,7 @@ steps:
     env:
       CI_TARGET: "all_gather_matmul-w4a4"
       CI_STAGE: "PerformanceTest"
-      CI_CATEGORY: "kernel support matrix (microbenchmarks)"
+      CI_CATEGORY: "kernel support matrix microbenchmarks"
     agents:
       queue: cpu
     commands:
