@@ -255,6 +255,7 @@ class DeepSeekV3(nnx.Module):
                 rngs=self.rng,
                 routed_scaling_factor=2.5,
                 dtype=dtype,
+                # use_moe_kernel=(self.use_fused_moe_kernel or self.use_vllm_moe_kernel),
                 activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
                 # TODO: bz branch is ed_sharding=(None, None)
                 ed_sharding=(ShardingAxisName.MLP_TENSOR, None),
@@ -894,6 +895,11 @@ class DeepSeekV3WeightLoader:
                                                    qk_nope_head_dim, :]
                         v_weight = weight_reshaped[:,
                                                    self.qk_nope_head_dim:, :]
+#                                                    qk_nope_head_dim, :].reshape(
+#                                                        -1, self.kv_lora_rank)
+#                         v_weight = weight_reshaped[:, self.
+#                                                    qk_nope_head_dim:, :].reshape(
+#                                                        -1, self.kv_lora_rank)
 
                         loaded_weights_list = [k_weight, v_weight]
                         loaded_names = [
@@ -916,6 +922,25 @@ class DeepSeekV3WeightLoader:
                                                      qk_nope_head_dim, :]
                             v_scale = scale_reshaped[:,
                                                      self.qk_nope_head_dim:, :]
+                            # bn = self.quantization_block_size_n
+                            # bk = self.quantization_block_size_k
+                            # scale_reshaped = scale.view(
+                            #     self.attn_heads,
+                            #     (self.qk_nope_head_dim + self.v_head_dim) //
+                            #     bn, self.kv_lora_rank // bk)
+
+                            # k_scale = scale_reshaped[:, :self.
+                            #                          qk_nope_head_dim //
+                            #                          bn, :].reshape(
+                            #                              -1,
+                            #                              self.kv_lora_rank //
+                            #                              bk)
+                            # v_scale = scale_reshaped[:,
+                            #                          self.qk_nope_head_dim //
+                            #                          bn:, :].reshape(
+                            #                              -1,
+                            #                              self.kv_lora_rank //
+                            #                              bk)
                             scales_list = [k_scale, v_scale]
 
                     else:

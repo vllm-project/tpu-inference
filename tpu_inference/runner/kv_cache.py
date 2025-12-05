@@ -110,6 +110,7 @@ def create_kv_caches(
             mesh,
             PartitionSpec(ShardingAxisName.ATTN_DATA, None,
                           ShardingAxisName.ATTN_HEAD))
+                          ShardingAxisName.MLP_TENSOR))
 
     def _allocate() -> jax.Array:
         return jnp.zeros(
@@ -148,7 +149,6 @@ def get_attention_page_size_bytes(mesh: Mesh,
         bits = (dtypes.bit_width(dtype) if hasattr(dtypes, "bit_width") else
                 dtypes.itemsize_bits(dtype))
         use_mla = isinstance(kv_cache_spec, MLAAttentionSpec)
-
         kv_cache_shape = get_kv_cache_shape_with_mesh(
             mesh=mesh,
             total_num_pages=1,  # Pass 1 to get shape of a single page.

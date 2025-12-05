@@ -88,7 +88,7 @@ class TestMLA(unittest.TestCase):
                 attn_o_tnh=attn_o_tnh_spec,
                 q_da_sharding=(None, ShardingAxisName.VOCAB),
                 anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None),
-                ap_sharding=(None, ShardingAxisName.MLP_TENSOR),
+                ap_sharding=(None, ShardingAxisName.MOE_TENSOR),
                 kv_da_sharding=(None, ShardingAxisName.VOCAB),
                 rd_sharding=(ShardingAxisName.MLP_TENSOR, None),
             )
