@@ -130,13 +130,26 @@ process_features() {
         fi
 
         if [ ! -f "$category_csv" ]; then
-            echo "$header" > "$category_csv"
+            
+            # --- CUSTOM LINE LOGIC START ---
+            if [ "$is_kernel_microbenchmarks" = true ]; then
+                # Insert the custom line BEFORE the header
+                echo "w16a16,w16a16,w16a16,w16a16," > "$category_csv"
+                # Append the real header
+                echo "$header" >> "$category_csv"
+            else
+                # For all other matrices, just write the header
+                echo "$header" > "$category_csv"
+            fi
+            # --- CUSTOM LINE LOGIC END ---
+            
             feature_csv_files+=("$category_csv")
         fi
 
         # Build Row
         local display_feature="$feature"
         if [ "$is_kernel_microbenchmarks" = true ]; then
+            # Strip the suffix (e.g., "-w4a4" or "-w16a16") for the display name
             display_feature="${feature%-*}"
         fi
         local row="\"$display_feature\""
@@ -145,14 +158,12 @@ process_features() {
         for stage in "${stages_to_use[@]}"; do
             local result
 
+            # ... (Existing logic for result retrieval) ...
             if [ "$is_quantization_matrix" = true ] && [ "$stage" == "RecommendedTPUGenerations" ]; then
-                # If it's the quantization matrix, hardcode the TPU generation
                 result="${TPU_GENERATIONS["$feature"]:-N/A}"
             elif [ "$is_quantization_matrix" = true ] && [ "$stage" == "QuantizationMethods" ]; then
-                # If it's the quantization matrix, hardcode the quantization methods
                 result="${QUANTIZATION_METHODS["$feature"]:-N/A}"
             elif [ "$is_kernel_microbenchmarks" = true ] && [ "$stage" == "TPU Versions" ]; then
-                # If it's kernel microbenchmarks matrix, hardcode the tpu version
                 result="0.1.1"
             elif [[ "$mode" == "DEFAULT" ]]; then
                 result="✅"
@@ -162,7 +173,7 @@ process_features() {
 
             row="$row,$result"
 
-            # Check for failure (exclude the hardcoded TPU generation column and Quantization Methods column)
+            # Check for failure (excluding hardcoded columns)
             if [ "$stage" != "TPU Versions" ] && [ "$stage" != "QuantizationMethods" ] && [ "$stage" != "RecommendedTPUGenerations" ] && [ "${result}" != "✅" ] && [ "${result}" != "N/A" ] && [ "${result}" != "to be added" ]; then
                 ANY_FAILED=true
             fi
@@ -200,10 +211,14 @@ done
 for csv_file in "${feature_csv_files[@]}"; do
     if [[ -f "$csv_file" ]]; then
         echo "--- $csv_file ---"
-        sorted_content=$(tail -n +2 "$csv_file" | sort -V)
-        header=$(head -n 1 "$csv_file")
-        echo "$header" > "$csv_file"
-        echo "$sorted_content" >> "$csv_file"
+        
+        if [[ "$csv_file" != "kernel_support_matrix_microbenchmarks.csv" ]]; then
+            sorted_content=$(tail -n +2 "$csv_file" | sort -V)
+            header=$(head -n 1 "$csv_file")
+            echo "$header" > "$csv_file"
+            echo "$sorted_content" >> "$csv_file"
+        fi
+        # --- END NEW LOGIC ---
 
         cat "$csv_file"
         buildkite-agent artifact upload "$csv_file"
