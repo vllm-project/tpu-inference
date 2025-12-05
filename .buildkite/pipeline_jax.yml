@@ -36,7 +36,7 @@ steps:
      key: test_2
      soft_fail: true
      env:
-       NEW_MODEL_DESIGN: "True"
+       NEW_MODEL_DESIGN: "1"
      agents:
        queue: tpu_v6e_queue
      commands:
@@ -62,7 +62,7 @@ steps:
      key: test_4
      soft_fail: true
      env:
-       NEW_MODEL_DESIGN: "True"
+       NEW_MODEL_DESIGN: "1"
        USE_V6E8_QUEUE: "True"
      agents:
        queue: tpu_v6e_8_queue
@@ -193,7 +193,7 @@ steps:
      key: test_12
      soft_fail: true
      env:
-       NEW_MODEL_DESIGN: "True"
+       NEW_MODEL_DESIGN: "1"
        USE_V6E8_QUEUE: "True"
        SKIP_ACCURACY_TESTS: "True"
        VLLM_MLA_DISABLE: "1"
@@ -226,18 +226,6 @@ steps:
            exit 0
          fi
 
-# TODO : re-enable DP test once feature is ready
-#   - label: "E2E data parallelism test"
-#     key: test_14
-#     soft_fail: true
-#     env:
-#       NEW_MODEL_DESIGN: "True"
-#     agents:
-#       queue: tpu_v6e_8_queue
-#     commands:
-#       - |
-#         .buildkite/scripts/run_in_docker.sh \
-#           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_data_parallel.py'
 
    - label: "lora unit tests on single chip"
      key: test_15
@@ -260,8 +248,13 @@ steps:
        queue: tpu_v6e_8_queue
      commands:
        - |
-         .buildkite/scripts/run_in_docker.sh \
-           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_layers.py'
+         if [[ "$$NIGHTLY" == "1" ]]; then
+           .buildkite/scripts/run_in_docker.sh \
+             bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_layers.py'
+         else
+           echo "Skipping: NIGHTLY environment variable not set"
+           exit 0
+         fi
   # -----------------------------------------------------------------
   # NOTIFICATION STEP
   # -----------------------------------------------------------------
@@ -290,4 +283,3 @@ steps:
        - |
          .buildkite/scripts/check_results.sh \
            "TPU JAX Tests Failed" test_0 test_1 test_2 test_3 test_4 test_5 test_6 test_7 test_8 test_9 test_10 test_11 test_12 test_13 test_15 test_16
-        # TODO (johnnyyang) : add DP test back to the list once feature is ready

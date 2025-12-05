@@ -289,13 +289,8 @@ class KVCacheManager:
 
         def _update_layer(cache, slices):
             """The function to apply to each layer's cache and slices."""
-            reshaped_slices = slices.reshape(-1, 1, block_size,
-                                             *slices.shape[1:])
-            for (i, block_idx) in enumerate(block_numbers):
-                cache = jax.lax.dynamic_update_slice_in_dim(cache,
-                                                            reshaped_slices[i],
-                                                            block_idx,
-                                                            axis=0)
+            reshaped_slices = slices.reshape(-1, block_size, *slices.shape[1:])
+            cache.at[block_numbers].set(reshaped_slices)
             return cache
 
         return jax.tree.map(_update_layer, kv_caches, kv_cache_slices)
@@ -348,16 +343,12 @@ class KVCacheManager:
         """
         if block_ids == list(range(block_ids[0],
                                    block_ids[0] + len(block_ids))):
-            with runner_utils.LatencyTracker(
-                    "BatchedGatherKVSlices-for-blocks"):
-                batched_kv_cache_per_layer = self._jitted_gather_continuous_kv_cache(
-                    self.runner.kv_caches, block_ids[0], len(block_ids))
+            batched_kv_cache_per_layer = self._jitted_gather_continuous_kv_cache(
+                self.runner.kv_caches, block_ids[0], len(block_ids))
 
         else:
-            with runner_utils.LatencyTracker(
-                    "BatchedGatherKVSlices-for-blocks"):
-                batched_kv_cache_per_layer = self._jitted_gather_kv_cache(
-                    self.runner.kv_caches, jnp.array(block_ids))
+            batched_kv_cache_per_layer = self._jitted_gather_kv_cache(
+                self.runner.kv_caches, jnp.array(block_ids))
         return batched_kv_cache_per_layer
 
     def transfer_kv_cache(self,
@@ -446,6 +437,7 @@ class KVCacheManager:
                     kv_cache_slices,
                     start_block,
                 )
+                jax.block_until_ready(self.runner.kv_caches)
         else:
             with runner_utils.LatencyTracker(
                     f"JittedInsertKVCache-b{len(block_numbers)}"):
@@ -457,6 +449,7 @@ class KVCacheManager:
                     kv_cache_slices,
                     jnp.array(block_numbers),
                 )
+                jax.block_until_ready(self.runner.kv_caches)
 
         logger.debug(
             f"Updated kv cache entries cnt={len(self.runner.kv_caches)}")
