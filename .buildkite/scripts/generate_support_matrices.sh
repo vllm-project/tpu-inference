@@ -13,6 +13,7 @@ mapfile -t metadata_feature_list < <(buildkite-agent meta-data get "${FEATURE_LI
 MODEL_STAGES=("UnitTest" "IntegrationTest" "Benchmark")
 FEATURE_STAGES=("CorrectnessTest" "PerformanceTest")
 FEATURE_STAGES_QUANTIZATION=("QuantizationMethods" "RecommendedTPUGenerations" "CorrectnessTest" "PerformanceTest")
+FEATURE_STAGES_MICROBENCHMARKS=("CorrectnessTest" "PerformanceTest","TPU Versions")
 
 declare -A TPU_GENERATIONS=(
     ["INT8 W8A8"]="\"v5, v6\""
@@ -124,6 +125,7 @@ process_features() {
             header="Quantization dtype,Quantization methods,Recommended TPU Generations,CorrectnessTest,PerformanceTest"
         elif [ "$category" == "kernel support matrix (microbenchmarks)" ]; then
             is_kernel_microbenchmarks=true
+            stages_to_use=("${FEATURE_STAGES_MICROBENCHMARKS[@]}")
         fi
 
         if [ ! -f "$category_csv" ]; then
@@ -141,7 +143,11 @@ process_features() {
                 # If it's the quantization matrix, hardcode the TPU generation
                 result="${TPU_GENERATIONS["$feature"]:-N/A}"
             elif [ "$is_quantization_matrix" = true ] && [ "$stage" == "QuantizationMethods" ]; then
+                # If it's the quantization matrix, hardcode the quantization methods
                 result="${QUANTIZATION_METHODS["$feature"]:-N/A}"
+            elif [ "$is_kernel_microbenchmarks" = true ] && [ "$stage" == "TPU Versions" ]; then
+                # If it's kernel microbenchmarks matrix, hardcode the tpu version
+                result="0.1.1"
             elif [[ "$mode" == "DEFAULT" ]]; then
                 result="✅"
             else
@@ -151,7 +157,7 @@ process_features() {
             row="$row,$result"
 
             # Check for failure (exclude the hardcoded TPU generation column and Quantization Methods column)
-            if [ "$stage" != "QuantizationMethods" ] && [ "$stage" != "RecommendedTPUGenerations" ] && [ "${result}" != "✅" ] && [ "${result}" != "N/A" ] && [ "${result}" != "to be added" ]; then
+            if [ "$stage" != "TPU Versions" ] && [ "$stage" != "QuantizationMethods" ] && [ "$stage" != "RecommendedTPUGenerations" ] && [ "${result}" != "✅" ] && [ "${result}" != "N/A" ] && [ "${result}" != "to be added" ]; then
                 ANY_FAILED=true
             fi
 
