@@ -16,7 +16,7 @@ from tpu_inference.logger import init_logger
 from tpu_inference.utils import to_jax_dtype, to_torch_dtype
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.registry import _Backend
+    from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config import BlockSize, ModelConfig, VllmConfig
     from vllm.pooling_params import PoolingParams
 else:
@@ -24,7 +24,7 @@ else:
     ModelConfig = None
     VllmConfig = None
     PoolingParams = None
-    _Backend = None
+    AttentionBackendEnum = None
 
 logger = init_logger(__name__)
 
@@ -44,17 +44,18 @@ class TpuPlatform(Platform):
 
     additional_env_vars: list[str] = [
         "PHASED_PROFILING_DIR", "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS",
-        "TPU_MULTIHOST_BACKEND", "VLLM_MLA_DISABLE", "TPU_BACKEND_TYPE"
+        "TPU_MULTIHOST_BACKEND", "VLLM_MLA_DISABLE", "TPU_BACKEND_TYPE",
+        "NEW_MODEL_DESIGN"
     ]
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: "_Backend", head_size: int,
-                             dtype: jnp.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool, use_mla: bool,
-                             has_sink: bool, use_sparse: bool,
-                             attn_type: Any) -> str:
-        from vllm.attention.backends.registry import _Backend
-        if selected_backend != _Backend.PALLAS:
+    def get_attn_backend_cls(cls, selected_backend: "AttentionBackendEnum",
+                             head_size: int, dtype: jnp.dtype,
+                             kv_cache_dtype: Optional[str], block_size: int,
+                             use_v1: bool, use_mla: bool, has_sink: bool,
+                             use_sparse: bool, attn_type: Any) -> str:
+        from vllm.attention.backends.registry import AttentionBackendEnum
+        if selected_backend != AttentionBackendEnum.PALLAS:
             logger.info("Cannot use %s backend on TPU.", selected_backend)
 
         if use_v1:

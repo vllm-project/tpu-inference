@@ -4,13 +4,13 @@ Feature,CorrectnessTest,PerformanceTest
 "KV cache host offloading",🚧,🚧
 "Llama 4 Maverick",🚧,🚧
 "LoRA_Torch",❌,N/A
-"Multimodal Inputs",❌,N/A
+"Multimodal Inputs",✅,❌
 "Out-of-tree model support",✅,❌
 "Prefix Caching",✅,✅
 "Single Program Multi Data",✅,✅
-"Speculative Decoding: Eagle3",✅,❌
-"Speculative Decoding: Ngram",✅,✅
+"Speculative Decoding: Eagle3",❌,N/A
+"Speculative Decoding: Ngram",❌,N/A
 "async scheduler",❌,N/A
-"runai_model_streamer_loader",✅,N/A
-"sampling_params",✅,N/A
+"runai_model_streamer_loader",❌,N/A
+"sampling_params",❌,N/A
 "structured_decoding",❌,N/A
