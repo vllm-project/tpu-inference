@@ -658,16 +658,16 @@ class DeepSeekV3WeightLoader:
             for idx, (weight_dim,
                       scale_dim) in enumerate(zip(weight_shape, scale_shape)):
                 if weight_dim // self.quantization_block_size_n != scale_dim and weight_dim // scale_dim != 1:
-                    #old_scale_shape = scale.shape
+                    old_scale_shape = scale.shape
 
-                    # 💡 FIX: Simplified repetition logic.
-                    # This branch is for repeating the scale when the sharding/grouping does not align with the model size.
                     scale = scale.repeat(self.quantization_block_size_n,
                                          axis=idx)[:, :weight_dim]
                     logger.warning(
-                        f"Scale dimension mismatch for {name} on axis {idx}. "
-                        f"Weight dim: {weight_dim}, Scale dim: {scale_dim}. "
-                        f"Repeating scale to new shape {scale.shape}.")
+                        f"Got a weight with shape {weight_shape} and scale with shape {old_scale_shape} "
+                        f"where the scale_dim {scale_dim} does not match the weight_dim {weight_dim} "
+                        f"multiplied by the quantization block size {self.quantization_block_size_n}. "
+                        f"Repeating the scale to new shape {scale.shape} along axis {idx} with repeat size {self.quantization_block_size_n}."
+                    )
                     break
 
         if model_weight.value.shape != weight_np.shape:
