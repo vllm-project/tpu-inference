@@ -488,8 +488,3 @@ class TPUWorker:
 
     def shutdown(self) -> None:
         return
-
-    # Ray executor do not need handshake metadata
-    # as we pass the kv_parameters through proxy server
-    def get_kv_connector_handshake_metadata(self) -> None:
-        pass
