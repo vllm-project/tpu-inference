@@ -20,18 +20,29 @@ else
   echo "Code files changed. Proceeding with pipeline upload."
 fi
 
+upload_pre_merge_pipeline() {
+    buildkite-agent pipeline upload .buildkite/pipeline_pre_merge.yml
+}
+
 upload_pipeline() {
-    VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
-    buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
-    echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
     # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
     buildkite-agent pipeline upload .buildkite/main.yml
     buildkite-agent pipeline upload .buildkite/nightly_releases.yml
+    upload_pre_merge_pipeline
+}
+
+fetch_latest_upstream_vllm_commit() {
+    # To help with debugging (when needed), perform setup to:
+    #    1. Use the same upstream vllm commit for all jobs in this CI run for consistency
+    #    2. Record which upstream commit this CI run is using
+    VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
+    buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
+    echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
 }
 
 echo "--- Starting Buildkite Bootstrap ---"
-
+fetch_latest_upstream_vllm_commit
 # Check if the current build is a pull request
 if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
   echo "This is a Pull Request build."
@@ -42,8 +53,8 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     echo "Found 'ready' label on PR. Uploading main pipeline..."
     upload_pipeline
   else
-    echo "No 'ready' label found on PR. Skipping main pipeline upload."
-    exit 0 # Exit with 0 to indicate success (no error, just skipped)
+    echo "No 'ready' label found on PR. Uploading fast check pipeline"
+    upload_pre_merge_pipeline
   fi
 else
   # If it's NOT a Pull Request (e.g., branch push, tag, manual build)

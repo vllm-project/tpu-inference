@@ -1,0 +1,39 @@
+steps:
+  - label: "JAX unit tests"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        .buildkite/scripts/run_in_docker.sh \
+          python3 -m pytest -s -v -x /workspace/tpu_inference/tests/ \
+          --ignore=/workspace/tpu_inference/tests/kernels \
+          --ignore=/workspace/tpu_inference/tests/lora \
+          --ignore=/workspace/tpu_inference/tests/e2e \
+          --ignore=/workspace/tpu_inference/tpu_inference/mock \
+          --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference --cov-report term-missing --cov-fail-under=69
+
+  - label: "Upload modified feature(s)/model(s) introduced in this PR"
+    soft_fail: true
+    # nightly run automatically uploads all features & models, so the next line is needed to dedup
+    if: build.env("NIGHTLY") != "1"
+    agents:
+      queue: cpu
+    command: |
+      git fetch origin $BUILDKITE_PULL_REQUEST_BASE_BRANCH
+      BASE_REF="$BUILDKITE_PULL_REQUEST_BASE_BRANCH"
+      HEAD_REF="$BUILDKITE_COMMIT"
+
+      # Get newly added or modified yml files in '.buildkite/models/' OR '.buildkite/features/'
+      MODIFIED_YML_PATHS=$(git diff --name-only --diff-filter=AM "$BASE_REF" "$HEAD_REF" | grep -E '^\.buildkite\/(models|features)\/.*\.yml$' | tr '\n' ' ')
+
+      if [ -n "$MODIFIED_YML_PATHS" ]; then
+        echo "Detected new models/features yml files: $MODIFIED_YML_PATHS"
+        for FILE_PATH in $MODIFIED_YML_PATHS; do
+          echo "Processing and uploading pipeline: ${FILE_PATH}"
+          buildkite-agent pipeline upload "${FILE_PATH}"
+          echo "Successfully uploaded ${FILE_PATH}"
+        done
+      else
+        echo "No new models/features yml files detected"
+      fi
