@@ -312,7 +312,7 @@ def sharded_ragged_paged_attention(
     func = ragged_paged_attention
     if use_hd64:
         func = functools.partial(ragged_paged_attention_hd64,
-                                 strict_sliding_window=False)
+                                 strict_sliding_window=True)
     else:
         func = ragged_paged_attention
 
