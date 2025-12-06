@@ -463,19 +463,16 @@ def _ragged_paged_attention_kernel(
                 unroll=False,
             )
 
-            # Fetch kv directly from new kv.
-            @pl.when(bkv_sz_frm_new > 0)
-            def _fetch_bkv_from_new_kv():
-                new_kv_len_start = q_end - kv_left_frm_new
-                debug_print("[RPA debug] new_kv_len_start={}",
-                            new_kv_len_start)
-                debug_print("[RPA debug] offset_in_bkv={}", offset)
-                _async_copy(
-                    kv_hbm_ref.at[pl.ds(new_kv_len_start, bkv_sz_frm_new)],
-                    vmem_ref.at[pl.ds(offset, bkv_sz_frm_new)],
-                    sem,
-                    wait,
-                )
+            size = lax.select(bkv_sz_frm_new > 0, bkv_sz_frm_new, 0)
+            new_kv_len_start = q_end - kv_left_frm_new
+            debug_print("[RPA debug] new_kv_len_start={}", new_kv_len_start)
+            debug_print("[RPA debug] offset_in_bkv={}", offset)
+            _async_copy(
+                kv_hbm_ref.at[pl.ds(new_kv_len_start, size)],
+                vmem_ref.at[pl.ds(offset, size)],
+                sem,
+                wait,
+            )
 
             return kv_len_start + offset, bkv_sz_frm_new
         else:
