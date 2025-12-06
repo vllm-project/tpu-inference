@@ -333,6 +333,12 @@ def get_vllm_model(
     return jit_model, compute_logits_fn, combine_hidden_states_fn, None, params, lora_manager, model
 
 
+# Architectures that require "vllm" implementation type when MODEL_IMPL_TYPE is "auto".
+# These architectures are listed here because they have better performance with the
+# vLLM PyTorch backend compared to the flax_nnx JAX backend for now.
+_VLLM_REQUIRED_ARCHITECTURES: frozenset[str] = frozenset({"GptOssForCausalLM"})
+
+
 def get_model(
     vllm_config: VllmConfig,
     rng: jax.Array,
@@ -342,24 +348,37 @@ def get_model(
     impl = envs.MODEL_IMPL_TYPE
     logger.info(f"Loading model with MODEL_IMPL_TYPE={impl}")
 
-    if impl == "flax_nnx":
-        try:
-            # Try to load the flax model first
-            return get_flax_model(vllm_config, rng, mesh, is_draft_model)
-        except UnsupportedArchitectureError as e:
-            # Convert the error message to a string to check its contents
-            error_msg = str(e)
+    if impl == "auto":
+        # Resolve "auto" based on architecture
+        architectures = getattr(vllm_config.model_config.hf_config,
+                                "architectures", [])
+        for arch in architectures:
+            if arch in _VLLM_REQUIRED_ARCHITECTURES:
+                impl = "vllm"
+                break
+        else:
+            impl = "flax_nnx"
+        logger.info(f"Resolved MODEL_IMPL_TYPE 'auto' to '{impl}'")
 
-            logger.warning(error_msg)
+    match impl:
+        case "flax_nnx":
+            try:
+                # Try to load the flax model first
+                return get_flax_model(vllm_config, rng, mesh, is_draft_model)
+            except UnsupportedArchitectureError as e:
+                # Convert the error message to a string to check its contents
+                error_msg = str(e)
 
-            # Fall back to the vLLM model and updating the dtype accordingly
-            vllm_config.model_config.dtype = j2t_dtype(
-                vllm_config.model_config.dtype.dtype)
+                logger.warning(error_msg)
+
+                # Fall back to the vLLM model and updating the dtype accordingly
+                vllm_config.model_config.dtype = j2t_dtype(
+                    vllm_config.model_config.dtype.dtype)
+                return get_vllm_model(vllm_config, rng, mesh)
+        case "vllm":
             return get_vllm_model(vllm_config, rng, mesh)
-    elif impl == "vllm":
-        return get_vllm_model(vllm_config, rng, mesh)
-    else:
-        raise NotImplementedError("Unsupported MODEL_IMPL_TYPE")
+        case _:
+            raise NotImplementedError(f"Unsupported MODEL_IMPL_TYPE: {impl}")
 
 
 def _validate_model_interface(model: Any) -> None:
