@@ -509,8 +509,3 @@ class TPUWorker(WorkerBase):
 
     def reinitialize_kv_cache(self) -> None:
         self.model_runner.reinitialize_kv_cache()
-
-    # Ray executor do not need handshake metadata
-    # as we pass the kv_parameters through proxy server
-    def get_kv_connector_handshake_metadata(self) -> None:
-        pass
