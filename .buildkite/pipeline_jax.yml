@@ -122,6 +122,7 @@ steps:
            --ignore=/workspace/tpu_inference/tests/e2e \
            --ignore=/workspace/tpu_inference/tpu_inference/mock \
            --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py \
+           --ignore=/workspace/tpu_inference/tests/distributed/offload \
            --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference --cov-report term-missing --cov-fail-under=69
 
    - label: "JAX unit tests - kernels"
@@ -137,6 +138,7 @@ steps:
              --ignore=/workspace/tpu_inference/tests/kernels/ragged_paged_attention_kernel_v2_test.py \
              --ignore=/workspace/tpu_inference/tests/kernels/ragged_kv_cache_update_v2_test.py \
              --ignore=/workspace/tpu_inference/tests/kernels/collectives \
+             --ignore=/workspace/tpu_inference/tests/kernels/host_dma_test.py \
              --ignore=/workspace/tpu_inference/tests/kernels/fused_moe_v1_test.py
          else
            echo "Skipping: no changes detected in kernels, tests/kernels, or requirements.txt"
@@ -255,6 +257,21 @@ steps:
            echo "Skipping: NIGHTLY environment variable not set"
            exit 0
          fi
+
+   - label: "kv cache offload tests on multi chips"
+     key: test_17
+     soft_fail: true
+     env:
+       USE_V6E8_QUEUE: "True"
+       VLLM_LOG_LEVEL: "INFO"
+     agents:
+       queue: tpu_v6e_8_queue
+     commands:
+       - |
+         .buildkite/scripts/run_in_docker.sh \
+           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/distributed/offload/ \
+           /workspace/tpu_inference/tests/kernels/host_dma_test.py \
+           --ignore=/workspace/tpu_inference/tests/distributed/offload/tpu_offload_accuracy_test.py
   # -----------------------------------------------------------------
   # NOTIFICATION STEP
   # -----------------------------------------------------------------
@@ -277,9 +294,10 @@ steps:
        - test_13
        - test_15
        - test_16
+       - test_17
      agents:
        queue: cpu
      commands:
        - |
          .buildkite/scripts/check_results.sh \
-           "TPU JAX Tests Failed" test_0 test_1 test_2 test_3 test_4 test_5 test_6 test_7 test_8 test_9 test_10 test_11 test_12 test_13 test_15 test_16
+           "TPU JAX Tests Failed" test_0 test_1 test_2 test_3 test_4 test_5 test_6 test_7 test_8 test_9 test_10 test_11 test_12 test_13 test_15 test_16 test_17

@@ -1,0 +1,49 @@
+# KV Cache Offload
+# feature support matrix
+steps:
+  - label: "Correctness tests for KV Cache Offload"
+    key: "KV_Cache_Offload_CorrectnessTest"
+    soft_fail: true
+    env:
+      USE_V6E8_QUEUE: "True"
+      VLLM_LOG_LEVEL: "INFO"
+    agents:
+      queue: tpu_v6e_8_queue
+    commands:
+      - |
+        .buildkite/scripts/run_in_docker.sh \
+          python3 -m pytest -s -v /workspace/tpu_inference/tests/distributed/offload/tpu_offload_accuracy_test.py
+  - label: "Record correctness test result for KV Cache Offload"
+    key: "record_KV_Cache_Offload_CorrectnessTest"
+    depends_on: "KV_Cache_Offload_CorrectnessTest"
+    env:
+      CI_TARGET: "KV Cache Offload"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh KV_Cache_Offload_CorrectnessTest
+
+  - label: "Performance tests for KV Cache Offload"
+    key: "KV_Cache_Offload_PerformanceTest"
+    depends_on: "record_KV_Cache_Offload_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "KV_Cache_Offload_PerformanceTest" "to be added"
+  - label: "Record performance test result for KV Cache Offload"
+    key: "record_KV_Cache_Offload_PerformanceTest"
+    depends_on: "KV_Cache_Offload_PerformanceTest"
+    env:
+      CI_TARGET: "KV Cache Offload"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh KV_Cache_Offload_PerformanceTest
