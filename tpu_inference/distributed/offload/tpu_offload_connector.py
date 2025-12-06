@@ -98,11 +98,12 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+    KVConnectorBase_V1, KVConnectorHandshakeMetadata, KVConnectorMetadata,
+    KVConnectorRole)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import \
     KVConnectorStats
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.core.kv_cache_utils import BlockHash, get_uniform_page_size
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
@@ -137,6 +138,15 @@ BLOCK_SIZE_BUCKETS = [1, 2, 4, 8, 16]
 # 2. pad: pad to a full block
 # 3. dynamic: keep the partial block as is.
 PARTIAL_BLOCK_SAVE_BEHAVIOR = Literal["drop"]
+
+
+@dataclass
+class OffloadMetadata(KVConnectorHandshakeMetadata):
+    block_size: int
+    block_size_in_bytes: int
+    num_layers: int
+    kv_cache_layout: str
+    num_devices: int
 
 
 @dataclass
@@ -466,6 +476,28 @@ class TPUOffloadConnector(KVConnectorBase_V1):
             return None
         return self.connector_worker.get_kv_connector_stats()
 
+    def set_xfer_handshake_metadata(
+            self, metadata: dict[int, KVConnectorHandshakeMetadata]) -> None:
+        """
+        Set offload metata from worker
+
+        Args:
+            metadata (dict): the handshake metadata to set.
+        """
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.set_offload_metadata(metadata)
+
+    def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
+        """
+        Get worker's offload metadata
+
+        Returns:
+            KVConnectorHandshakeMetadata: the handshake metadata.
+            None if no handshake metadata is available.
+        """
+        assert self.connector_worker is not None
+        return self.connector_worker.offload_metadata
+
 
 class TPUOffloadConnectorScheduler():
 
@@ -474,10 +506,17 @@ class TPUOffloadConnectorScheduler():
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
 
-        # offloading manager
-        self.num_cpu_chunks = envs.TPU_OFFLOAD_NUM_CPU_CHUNKS
-        self.offload_manager = LRUCacheManager(
-            num_cpu_chunks=self.num_cpu_chunks)
+        self.offload_metadata: OffloadMetadata | None = None
+        self.cpu_buffer_size_in_bytes = int(envs.TPU_OFFLOAD_CPU_BUF_SIZE_GB *
+                                            (1024**3))
+        self.staging_buffer_size_in_bytes = int(
+            envs.TPU_OFFLOAD_STAGING_BUF_SIZE_GB * (1024**3))
+        # offloading manager & staging buffer manager
+        # initialize them after getting offload_metadata
+        self.num_cpu_chunks = -1
+        self.offload_manager = None
+        self.num_staging_blocks = -1
+        self.staging_buffer_manager = None
 
         self._request_trackers: dict[ReqId, RequestTracker] = {}
         # This dictionary holds the full vLLM Request object for all requests
@@ -507,22 +546,49 @@ class TPUOffloadConnectorScheduler():
 
         self.partial_block_save_behavior: PARTIAL_BLOCK_SAVE_BEHAVIOR = "drop"
 
-        # config staging buffer
-        # NOTE(jcgu): Need to find a way to grab page_size_bytes in scheduler
-        # otherwise, we can only use # of blocks as input, instead of buffer size in GB
-        self.num_staging_blocks = envs.TPU_OFFLOAD_NUM_STAGING_BLOCKS
-        self.staging_buffer_manager = StagingBufferManager(
-            num_blocks=self.num_staging_blocks)
-
         logger.info(
             f"TPUOffloadConnectorScheduler initialized with: "
             f"block_size={self.block_size}, "
             f"cpu_chunk_size={self.cpu_chunk_size}, "
-            f"num_cpu_chunks={self.num_cpu_chunks}, "
+            f"cpu_buffer_size ={self.cpu_buffer_size_in_bytes} Bytes, "
+            f"staging_buffer_size ={self.staging_buffer_size_in_bytes} Bytes, "
             f"model_name={model_name}, "
             f"decode_save={self.decode_save}, "
             f"partial_block_save_behavior={self.partial_block_save_behavior}, "
             f"num_staging_blocks={self.num_staging_blocks}.")
+
+    def set_offload_metadata(
+            self, metadata: dict[int, KVConnectorHandshakeMetadata]) -> None:
+        """
+        Set offload metadata for this connector scheduler,
+        figure out is cpu cache and staging buffer capacity,
+        and initialize its offload manager and staging buffer manager.
+
+        Args:
+            metadata (dict): the handshake metadata to set.
+        """
+        # NOTE(jcgu): single host only
+        assert len(metadata) == 1
+        offload_metadata = metadata.values()[0]
+        assert isinstance(offload_metadata, OffloadMetadata)
+        self.offload_metadata = offload_metadata
+        logger.info(f" received offload metadata: {offload_metadata}")
+
+        self.num_cpu_chunks = self.cpu_buffer_size_in_bytes // self.offload_metadata.block_size_in_bytes
+        self.num_staging_blocks = self.staging_buffer_size_in_bytes // self.offload_metadata.block_size_in_bytes
+        if self.num_cpu_chunks > 0 and self.num_staging_blocks > 0:
+            self.offload_manager = LRUCacheManager(
+                num_cpu_chunks=self.num_cpu_chunks)
+            self.staging_buffer_manager = StagingBufferManager(
+                num_blocks=self.num_staging_blocks)
+
+            logger.info(
+                f" init offload scheduler with {self.num_cpu_chunks} cpu_chunks and {self.num_staging_blocks} staging blocks."
+            )
+        else:
+            raise ValueError(
+                f" get invalid num_cpu_chunks ({self.num_cpu_chunks}) or num_staging_blocks ({self.num_staging_blocks}). Both must be > 0."
+            )
 
     def _get_request_block_hashes(self, req: "Request") -> list[BlockHash]:
         # request's original block_hashes do not include the last partial block
@@ -537,6 +603,7 @@ class TPUOffloadConnectorScheduler():
         """
         Checks for external KV cache hit against the local CPU backend.
         """
+        assert self.offload_manager and self.staging_buffer_manager
         assert num_computed_tokens % self.block_size == 0, f"{num_computed_tokens} % {self.block_size} != 0"
         # get block_hash
         block_hashes = self._get_request_block_hashes(request)
@@ -649,6 +716,7 @@ class TPUOffloadConnectorScheduler():
         This hook is not used for the save logic.
         Update the dst_blocks in the load_spec
         """
+        assert self.offload_manager and self.staging_buffer_manager
         logger.info(
             f"TPUOffloadConnectorScheduler: Entering update_state_after_alloc Request {request.request_id}: Scheduler allocated "
             f"{num_external_tokens} external tokens.")
@@ -859,6 +927,7 @@ class TPUOffloadConnectorScheduler():
     def build_connector_meta(
             self,
             scheduler_output: SchedulerOutput) -> TPUOffloadConnectorMetadata:
+        assert self.offload_manager and self.staging_buffer_manager
         metadata = TPUOffloadConnectorMetadata()
 
         # Phase 1: Handle and clean up finished requests
@@ -1167,6 +1236,8 @@ class TPUOffloadConnectorWorker:
         logger.info(f" swap operation type is {self.swap_op_type}, "
                     f"use_bucketed_swap_ops={self.use_bucketed_swap_ops}.")
 
+        # metadata for kv cache offload (e.g., page_size_in_bytes)
+        self.offload_metadata: OffloadMetadata | None = None
         # cpu cache
         self.num_cpu_chunks = envs.TPU_OFFLOAD_NUM_CPU_CHUNKS
         self.cpu_backend = LocalCPUBackend(num_cpu_chunks=self.num_cpu_chunks)
@@ -1222,6 +1293,19 @@ class TPUOffloadConnectorWorker:
                 host_sharding=self.flatten_host_sharding,
                 device_sharding=self.flatten_device_sharding)
 
+            kv_cache_specs = runner.get_kv_cache_spec()
+            # TODO(jcgu): the block_size is per layer or all layers?
+            self.block_size_in_bytes = get_uniform_page_size(
+                list(kv_cache_specs.values()))
+
+            self.offload_metadata = OffloadMetadata(
+                block_size=self.block_size,
+                block_size_in_bytes=self.block_size_in_bytes,
+                num_layers=self.num_layers,
+                kv_cache_layout=self.kv_cache_layout,
+                num_devices=len(self.devices),
+            )
+
             logger.info(
                 "KV Cache details registered in TPUOffloadConnectorWorker:")
             logger.info(f"  - Num layers: {self.num_layers}")
@@ -1231,6 +1315,7 @@ class TPUOffloadConnectorWorker:
             logger.info(
                 f"  - Flatten Device sharding: {self.flatten_device_sharding}")
             logger.info(f"  - Layout: {self.kv_cache_layout}")
+            logger.info(f"  - Block size in bytes: {self.block_size_in_bytes}")
         else:
             raise ValueError(
                 "TPUOffloadConnectorWorker registered with no KV caches.")
