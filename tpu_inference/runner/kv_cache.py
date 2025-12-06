@@ -113,7 +113,7 @@ def create_kv_caches(
                           ShardingAxisName.MLP_TENSOR))
 
     def _allocate() -> jax.Array:
-        return jnp.zeros(
+        return jnp.empty(
             shape=cache_shape,
             dtype=cache_dtype,
         )
