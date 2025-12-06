@@ -36,6 +36,10 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
+def align_to(a, b):
+    return (a + b - 1) // b * b
+
+
 @register_quantization_config(get_tpu_quant_method(UNQUANTIZED))
 class VllmUnquantizedConfig(QuantizationConfig, JaxCommonConfig):
 
@@ -223,29 +227,66 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             # Current format:
             # w13_weight: (num_experts, 2*intermediate_size, hidden_size)
             # w2_weight: (num_experts, hidden_size, intermediate_size)
+            num_experts = w13_weight.shape[0]
+            intermediate_size = w13_weight.shape[1] // 2
+            hidden_size = w13_weight.shape[2]
 
-            w13_reshaped = w13_weight.reshape(num_experts, 2,
-                                              intermediate_size, hidden_size)
+            padded_intermediate_size = align_to(intermediate_size, 256)
+            padded_hidden_size = align_to(hidden_size, 256)
 
-            # Transpose non-constracting dim to right most dim
-            w13_weight_transposed = jnp.swapaxes(w13_reshaped, 2, 3)
-            w2_weight_transposed = jnp.swapaxes(w2_weight, 1, 2)
+            w13_weight = w13_weight.reshape(num_experts, 2, intermediate_size,
+                                            hidden_size)
+            w13_weight = jnp.transpose(w13_weight, (0, 1, 3, 2))
+
+            # Transpose w2_weight to (num_experts, intermediate_size, hidden_size)
+            w2_weight = jnp.transpose(w2_weight, (0, 2, 1))
+
+            w13_weight = jnp.pad(
+                w13_weight,
+                ((0, 0), (0, 0), (0, padded_hidden_size - hidden_size),
+                 (0, padded_intermediate_size - intermediate_size)),
+                constant_values=0)
+
+            w2_weight = jnp.pad(
+                w2_weight,
+                ((0, 0), (0, padded_intermediate_size - intermediate_size),
+                 (0, padded_hidden_size - hidden_size)),
+                constant_values=0)
 
             # Apply EP sharding
             ep_sharding = NamedSharding(self.mesh, P("model"))
 
             w13_weight = jax.device_put(
-                w13_weight_transposed, Format(Layout((0, 1, 2, 3)),
-                                              ep_sharding))
-            w2_weight = jax.device_put(w2_weight_transposed,
-                                       Format(Layout((0, 1, 2)), ep_sharding))
+                w13_weight,
+                Format(Layout((0, 1, 2, 3)),
+                       NamedSharding(self.mesh, P("model", None, None, None))))
+            w2_weight = jax.device_put(
+                w2_weight,
+                Format(Layout((0, 1, 2)),
+                       NamedSharding(self.mesh, P("model", None, None))))
 
             if self.moe.has_bias:
-                w13_bias = w13_bias.reshape(num_experts, 2, intermediate_size)
+                w13_bias = w13_bias.astype(jnp.float32).reshape(
+                    num_experts, 2, 1, intermediate_size)
+                w2_bias = w2_bias.astype(jnp.float32).reshape(
+                    num_experts, 1, hidden_size)
+
+                w13_bias = jnp.pad(
+                    w13_bias,
+                    ((0, 0), (0, 0), (0, 0),
+                     (0, padded_intermediate_size - intermediate_size)),
+                    constant_values=0)
+
+                w2_bias = jnp.pad(w2_bias,
+                                  ((0, 0), (0, 0),
+                                   (0, padded_hidden_size - hidden_size)),
+                                  constant_values=0)
+
+                # Apply EP sharding
                 w13_bias = jax.device_put(
-                    w13_bias, Format(Layout((0, 1, 2)), ep_sharding))
-                w2_bias = jax.device_put(w2_bias,
-                                         Format(Layout((0, 1)), ep_sharding))
+                    w13_bias, Format(Layout((0, 1, 2, 3)), ep_sharding))
+                w2_bias = jax.device_put(
+                    w2_bias, Format(Layout((0, 1, 2)), ep_sharding))
         else:
 
             if layer.use_ep:
@@ -319,6 +360,11 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         gating_output = jax_view(router_logits)
 
         if self.use_kernel:
+            actual_hidden_size = x.shape[-1]
+            padded_hidden_size = align_to(actual_hidden_size, 256)
+            x = jnp.pad(x,
+                        ((0, 0), (0, padded_hidden_size - actual_hidden_size)),
+                        constant_values=0)
             output = fused_ep_moe(
                 mesh=self.mesh,
                 tokens=x,
@@ -332,7 +378,7 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 renormalize_topk_logits=layer.renormalize,
                 act_fn=layer.activation,
                 **self.block_size,
-            )
+            )[:, :actual_hidden_size]
         else:
             output = fused_moe_func(
                 hidden_states=x,
