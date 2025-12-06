@@ -15,13 +15,21 @@ spec:
       nodeSelector:
         cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
         cloud.google.com/gke-tpu-topology: 2x4 # Specify the physical topology for the TPU slice.
+      initContainers:
+        - name: increase-vm-max-map-count
+          image: busybox
+          # WARNING: This changes the HOST memory settings (vm.max_map_count), not just the container.
+          # Required to prevent vLLM crashes due to memory mapping limits.
+          command: ["sysctl", "-w", "vm.max_map_count=1048576"]
+          securityContext:
+            privileged: true
       containers:
       - name: tpu-job
         image: <your-tpu-inference-container-image>
         imagePullPolicy: Always
         command: ["/bin/sh", "-c"]
         args:
-        - "vllm serve meta-llama/Llama-3.3-70B-Instruct --kv-transfer-config '{\"kv_connector\":\"TPUOffloadConnector\",\"kv_role\":\"kv_both\",\"kv_connector_module_path\":\"tpu_inference.distributed.offload.tpu_offload_connector\"}' --port 8000 --max_num_batched_tokens 2048 --enable-chunked-prefill --tensor-parallel-size 8 --seed 42 --enable_prefix_caching --gpu-memory-utilization 0.9"
+        - "vllm serve meta-llama/Llama-3.3-70B-Instruct --kv-transfer-config '{\"kv_connector\":\"TPUOffloadConnector\",\"kv_role\":\"kv_both\",\"kv_connector_module_path\":\"tpu_inference.distributed.offload.tpu_offload_connector\"}' --port 8000 --enable-chunked-prefill --tensor-parallel-size 8 --seed 42 --enable_prefix_caching --gpu-memory-utilization 0.9"
         env:
         - name: HUGGING_FACE_HUB_TOKEN
           valueFrom:
