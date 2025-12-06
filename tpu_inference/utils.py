@@ -28,9 +28,9 @@ TPU_SECOND_LAST_MINOR = 8
 
 # Map vllm dtype string that doesn't exactly match jax dtype string name.
 _VLLM_DTYPE_STR_TO_JAX_DTYPE = {
-    "fp8": jnp.float8_e4m3fn,
-    "fp8_e4m3": jnp.float8_e4m3fn,
-    "fp8_e5m2": jnp.float8_e5m2,
+    "fp8": jnp.float8_e4m3fn.dtype,
+    "fp8_e4m3": jnp.float8_e4m3fn.dtype,
+    "fp8_e5m2": jnp.float8_e5m2.dtype,
 }
 
 
