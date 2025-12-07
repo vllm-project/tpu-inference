@@ -15,6 +15,28 @@ from tpu_inference.kernels.quantized_matmul.util import (get_kernel_name,
                                                          next_multiple,
                                                          unfold_args)
 
+E4M3_MAX = jnp.iinfo(jnp.int4).max
+E4M3_MIN = jnp.iinfo(jnp.int4).min
+MXU_SIZE = 256
+
+
+def _quantize_block(data, axis, target_dtype, use_mxfp8: bool):
+    """Calculates scale and quantizes a block of data."""
+    abs_max = jnp.max(
+        jnp.abs(data),
+        axis=axis,
+        keepdims=True,
+    )
+    scale = abs_max / E4M3_MAX
+
+    if use_mxfp8:
+        # MXFP8 requires scales to be powers of 2
+        scale = jnp.exp2(jnp.ceil(jnp.log2(scale)))
+
+    data_q = (data / scale)  #.clip(E4M3_MIN, E4M3_MAX).astype(target_dtype)
+    data_q = jnp.round(data_q).astype(target_dtype)
+    return data_q, scale
+
 
 def quantize_array(
     x: jax.Array,  # [bs_block_size, in_block_size]
@@ -224,7 +246,7 @@ def matmul_kernel(
         'tuned_value',
     ],
 )
-def quantized_matmul_kernel(
+def quantized_matmul_kernel_original(
     x: jax.Array,  # [bs, n_in]
     w_q: jax.Array,  # [n_in, n_out]
     w_scale: jax.Array,  # [n_blocks, n_out]
@@ -386,3 +408,185 @@ def quantized_matmul_kernel(
         out = kernel(x, w_q, w_scale, x_abs_max)
 
     return out[:orig_n_batch, :orig_n_out]
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=[
+        "block_m",
+        "block_n",
+        "block_k",
+        "sc_size",
+        "use_mxfp8",
+        "dtype_lhs",
+        "dtype_out",
+        "use_bf16_acc",
+    ],
+)
+def quantized_matmul_kernel(
+    lhs: jax.Array,
+    rhs: jax.Array,
+    w_scales: jax.Array | None = None,
+    *,
+    block_m: int = 256,
+    block_n: int = 256,
+    block_k: int = 256,
+    sc_size: int = 128,
+    use_mxfp8: bool = False,
+    dtype_lhs: jnp.dtype = jnp.int4,
+    dtype_out: jnp.dtype = jnp.bfloat16,
+    use_bf16_acc: bool = True,
+) -> jax.Array:
+    """Optimized Pallas kernel for Block-wise Quantized Matrix Multiplication.
+
+  Performs on-the-fly quantization of high-precision inputs.
+
+  Args:
+    lhs: The left-hand side operand.
+    rhs: The right-hand side operand.
+    w_scales: Optional offline quantized scales for the RHS weights.
+    block_m: Block size along the M dimension.
+    block_n: Block size along the N dimension.
+    block_k: Block size along the K dimension.
+    sc_size: Sub-channel size for quantization.
+    use_mxfp8: Whether to use MXFP8 quantization rules (power-of-2 scales).
+    dtype_lhs: The target dtype for the quantized LHS.
+    dtype_out: The dtype of the output array.
+    use_bf16_acc: Whether to use bfloat16 for the accumulator scratchpad.
+
+  Returns:
+    The result of the quantized matrix multiplication.
+  """
+    m, k_dim = lhs.shape
+    k_dim_rhs, n = rhs.shape
+    tuned_value = get_tuned_block_sizes(
+        n_batch=m,
+        n_out=n,
+        n_in=k_dim,
+        x_q_dtype=jnp.dtype(dtype_lhs).name,
+        w_q_dtype=jnp.dtype(rhs.dtype).name,
+    )
+    #print("Printing tuned_value:", tuned_value)
+    block_m = tuned_value.batch_block_size
+    block_n = tuned_value.out_block_size
+    block_k = tuned_value.in_block_size
+
+    assert k_dim == k_dim_rhs, "Contracting dimensions must match"
+    assert m % block_m == 0, f"M ({m}) must be divisible by block_m ({block_m})"
+    assert n % block_n == 0, f"N ({n}) must be divisible by block_n ({block_n})"
+    assert (
+        k_dim %
+        block_k == 0), f"K ({k_dim}) must be divisible by block_k ({block_k})"
+    assert block_k % sc_size == 0, "Block K must be divisible by sub-channel size"
+    steps_k = block_k // sc_size
+    steps_n = block_n // MXU_SIZE
+
+    def _kernel(lhs_ref, rhs_ref, w_scales_ref, out_ref, acc_scratch):
+        pid_k = pl.program_id(2)
+        is_first_step = pid_k == 0
+        is_last_step = pid_k == (k_dim // block_k - 1)
+
+        @pl.when(is_first_step)
+        def _init():
+            acc_scratch[...] = jnp.zeros_like(acc_scratch)
+
+        # Outer Loop: Iterate through K-dimension sub-channels
+        acc_dtype = jnp.bfloat16 if use_bf16_acc else jnp.float32
+
+        # Pre-calculate all quantized blocks for this tile. Relieves register
+        # pressure during the compute phase.
+        lhs_q_list = []
+        lhs_scale_list = []
+        rhs_q_list = []
+        rhs_scale_list = []
+
+        for i in range(steps_k):
+            k_start, k_end = i * sc_size, (i + 1) * sc_size
+
+            lhs_sub = lhs_ref[:, k_start:k_end].astype(jnp.float32)
+            l_q, l_s = _quantize_block(lhs_sub, 1, dtype_lhs, use_mxfp8)
+            lhs_q_list.append(l_q)
+            # cast scale to acc_dtype IMMEDIATELY to save register space
+            lhs_scale_list.append(l_s.astype(acc_dtype))
+
+            if w_scales_ref is None:
+                rhs_sub = rhs_ref[k_start:k_end, :].astype(jnp.float32)
+                r_q, r_s = _quantize_block(rhs_sub, 0, dtype_lhs, use_mxfp8)
+                rhs_q_list.append(r_q)
+                rhs_scale_list.append(r_s.astype(acc_dtype))
+            else:
+                rhs_q_list.append(rhs_ref[k_start:k_end, :])
+                rhs_scale_list.append(w_scales_ref[i, :, :].astype(acc_dtype))
+
+        accumulators = [
+            jnp.zeros((block_m, MXU_SIZE), dtype=acc_dtype)
+            for _ in range(steps_n)
+        ]
+        for i in range(steps_k):
+            lhs_q = lhs_q_list[i]
+            lhs_scale = lhs_scale_list[i]
+            rhs_q_full = rhs_q_list[i]
+            rhs_scale_full = rhs_scale_list[i]
+
+            # Inner Loop: stripmine the N dimension to respect MXU_SIZE constraints
+            for j in range(steps_n):
+                n_start, n_end = j * MXU_SIZE, (j + 1) * MXU_SIZE
+
+                rhs_q_slice = rhs_q_full[:, n_start:n_end]
+                rhs_scale_slice = rhs_scale_full[:, n_start:n_end]
+
+                dot_res = jnp.dot(lhs_q,
+                                  rhs_q_slice,
+                                  preferred_element_type=jnp.int32)
+                res = dot_res.astype(acc_dtype)
+                # Broadcast multiply LHS scale (M, 1) -> (M, N)
+                # This keeps the scale in a small register footprint
+                res = res * lhs_scale
+                # Broadcast multiply RHS scale (1, N) -> (M, N)
+                res = res * rhs_scale_slice
+
+                accumulators[j] += res
+        acc_block = jnp.concatenate(accumulators, axis=1)
+        acc_scratch[...] += acc_block
+
+        @pl.when(is_last_step)
+        def _write():
+            out_ref[...] = acc_scratch[...].astype(out_ref.dtype)
+
+    grid = (m // block_m, n // block_n, k_dim // block_k)
+
+    block_spec_lhs = pl.BlockSpec((block_m, block_k),
+                                  lambda i, j, k: (i, k),
+                                  memory_space=pltpu.VMEM)
+    block_spec_rhs = pl.BlockSpec((block_k, block_n),
+                                  lambda i, j, k: (k, j),
+                                  memory_space=pltpu.VMEM)
+    block_spec_w_scales = None
+    if w_scales is not None:
+        block_spec_w_scales = pl.BlockSpec(
+            (steps_k, 1, block_n),
+            lambda _, j, k: (k, 0, j),
+            memory_space=pltpu.VMEM,
+        )
+
+    block_spec_out = pl.BlockSpec((block_m, block_n), lambda i, j, k: (i, j))
+
+    scratch_shape = pltpu.VMEM((block_m, block_n), jnp.bfloat16)
+
+    # lhs = pltpu.with_memory_space_constraint(lhs, pltpu.VMEM)
+    # rhs = pltpu.with_memory_space_constraint(rhs, pltpu.VMEM)
+    # TODO(amandaliang): Currnelty forcing VMEM is not working properly as
+    # buffers are full.
+    return pl.pallas_call(
+        _kernel,
+        out_shape=jax.ShapeDtypeStruct((m, n), dtype_out),
+        grid_spec=pltpu.PrefetchScalarGridSpec(
+            num_scalar_prefetch=0,
+            in_specs=[block_spec_lhs, block_spec_rhs, block_spec_w_scales],
+            out_specs=block_spec_out,
+            grid=grid,
+            scratch_shapes=[scratch_shape],
+        ),
+        compiler_params=pltpu.CompilerParams(
+            dimension_semantics=("parallel", "parallel", "arbitrary")),
+    )(lhs, rhs, w_scales)
