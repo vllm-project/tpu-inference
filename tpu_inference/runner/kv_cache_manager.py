@@ -39,20 +39,30 @@ class KVCacheManager:
         # means this layer will perform attention using the keys and values
         # from the KV cache of `shared_kv_cache_layers[layer_name]`.
         self.shared_kv_cache_layers: dict[str, str] = {}
+        self.use_mla = self.runner.model_config.use_mla
 
     def get_kv_cache_spec(self):
         # TODO(xiang): this hack tricks engine core to init successfully
         block_size = self.runner.cache_config.block_size
-        use_mla = self.runner.model_config.use_mla
         kv_cache_spec: dict[str, KVCacheSpec] = {}
 
         # If use pure jax (MODEL_IMPL_TYPE=flax_nnx), we don't register
         # attention into compilation config.
         # Use FullAttentionSpec for each layer
         # TODO(pooyam): Is it possible to merge the logic for vllm and non-vllm models?
+        model_config = self.runner.model_config
+        if self.use_mla:
+            # Individually pad the RopE and latents
+            qk_rope_head_dim = getattr(model_config.hf_text_config,
+                                       "qk_rope_head_dim", 0)
+            padded_kv_lora_rank = common_utils.align_to(
+                model_config.hf_text_config.kv_lora_rank, 128)
+            padded_qk_rope_head_dim = common_utils.align_to(
+                qk_rope_head_dim, 128)
+            mla_head_size = padded_kv_lora_rank + padded_qk_rope_head_dim
+
         if len(self.runner.vllm_config.compilation_config.
                static_forward_context) == 0:
-            model_config = self.runner.model_config
             parallel_config = self.runner.parallel_config
             # Pad num_kv_heads to multiple of TP size.
             num_kv_heads = common_utils.get_padded_num_heads(
@@ -61,11 +71,11 @@ class KVCacheManager:
             head_size = common_utils.get_padded_head_dim(
                 model_config.get_head_size())
             for i in range(model_config.get_num_layers(parallel_config)):
-                if use_mla:
+                if self.use_mla:
                     kv_cache_spec[f"layer.{i}"] = MLAAttentionSpec(
                         block_size=block_size,
-                        num_kv_heads=num_kv_heads,
-                        head_size=head_size,
+                        num_kv_heads=1,
+                        head_size=mla_head_size,
                         dtype=self.runner.kv_cache_dtype,
                         cache_dtype_str=self.runner.vllm_config.cache_config.
                         cache_dtype)
@@ -83,14 +93,13 @@ class KVCacheManager:
                     self.runner.mesh.shape["model"])
                 head_size = common_utils.get_padded_head_dim(
                     hf_config.hidden_size // hf_config.num_attention_heads)
-
                 # Eagle3 has only 1 layer
                 for i in range(1):
-                    if use_mla:
-                        kv_cache_spec[f"layer.{i}"] = MLAAttentionSpec(
+                    if self.use_mla:
+                        kv_cache_spec[f"draft_layer.{i}"] = MLAAttentionSpec(
                             block_size=block_size,
-                            num_kv_heads=num_kv_heads,
-                            head_size=head_size,
+                            num_kv_heads=1,
+                            head_size=mla_head_size,
                             dtype=self.runner.kv_cache_dtype,
                             cache_dtype_str=self.runner.vllm_config.
                             cache_config.cache_dtype)
@@ -104,6 +113,7 @@ class KVCacheManager:
             # Else propagate attention modules from compilation config.
             layers = get_layers_from_vllm_config(self.runner.vllm_config,
                                                  Attention)
+            logger.warning(f"Compilation num_layers = {len(layers.items())}")
             for layer_name, attn_module in layers.items():
                 if (kv_tgt_layer :=
                         attn_module.kv_sharing_target_layer_name) is not None:
@@ -127,11 +137,11 @@ class KVCacheManager:
                                 attn_module.head_size),
                             dtype=self.runner.kv_cache_dtype,
                             sliding_window=attn_module.sliding_window)
-                    elif use_mla:
-                        kv_cache_spec[f"layer.{i}"] = MLAAttentionSpec(
+                    elif self.use_mla:
+                        kv_cache_spec[layer_name] = MLAAttentionSpec(
                             block_size=block_size,
-                            num_kv_heads=attn_module.num_kv_heads,
-                            head_size=attn_module.head_size,
+                            num_kv_heads=1,
+                            head_size=mla_head_size,
                             dtype=self.runner.kv_cache_dtype,
                             cache_dtype_str=self.runner.vllm_config.
                             cache_config.cache_dtype)
@@ -198,14 +208,20 @@ class KVCacheManager:
             # num_blocks must be a multiple of dp_size
             num_blocks = (num_blocks // dp_size) * dp_size
             # NOTE: we'll multiply the num_kv_heads by 2 in the function
+            if self.use_mla:
+                head_size = self.runner.model_config.hf_config.kv_lora_rank + \
+                    self.runner.model_config.hf_config.qk_rope_head_dim
+            else:
+                head_size = representative_spec.head_size
             kv_cache = create_kv_caches(
                 num_blocks=num_blocks,
                 block_size=representative_spec.block_size,
                 num_kv_heads=representative_spec.num_kv_heads,
-                head_size=representative_spec.head_size,
+                head_size=head_size,
                 mesh=self.runner.mesh,
                 layer_names=[f'kv_cache_tensor.{i}'],
                 cache_dtype=t2j_dtype(representative_spec.dtype),
+                use_mla=self.use_mla,
             )[0]
             kv_caches.append(kv_cache)
             num_blocks_list.append(num_blocks)
@@ -289,13 +305,8 @@ class KVCacheManager:
 
         def _update_layer(cache, slices):
             """The function to apply to each layer's cache and slices."""
-            reshaped_slices = slices.reshape(-1, 1, block_size,
-                                             *slices.shape[1:])
-            for (i, block_idx) in enumerate(block_numbers):
-                cache = jax.lax.dynamic_update_slice_in_dim(cache,
-                                                            reshaped_slices[i],
-                                                            block_idx,
-                                                            axis=0)
+            reshaped_slices = slices.reshape(-1, block_size, *slices.shape[1:])
+            cache.at[block_numbers].set(reshaped_slices)
             return cache
 
         return jax.tree.map(_update_layer, kv_caches, kv_cache_slices)
@@ -348,16 +359,12 @@ class KVCacheManager:
         """
         if block_ids == list(range(block_ids[0],
                                    block_ids[0] + len(block_ids))):
-            with runner_utils.LatencyTracker(
-                    "BatchedGatherKVSlices-for-blocks"):
-                batched_kv_cache_per_layer = self._jitted_gather_continuous_kv_cache(
-                    self.runner.kv_caches, block_ids[0], len(block_ids))
+            batched_kv_cache_per_layer = self._jitted_gather_continuous_kv_cache(
+                self.runner.kv_caches, block_ids[0], len(block_ids))
 
         else:
-            with runner_utils.LatencyTracker(
-                    "BatchedGatherKVSlices-for-blocks"):
-                batched_kv_cache_per_layer = self._jitted_gather_kv_cache(
-                    self.runner.kv_caches, jnp.array(block_ids))
+            batched_kv_cache_per_layer = self._jitted_gather_kv_cache(
+                self.runner.kv_caches, jnp.array(block_ids))
         return batched_kv_cache_per_layer
 
     def transfer_kv_cache(self,
@@ -446,6 +453,7 @@ class KVCacheManager:
                     kv_cache_slices,
                     start_block,
                 )
+                jax.block_until_ready(self.runner.kv_caches)
         else:
             with runner_utils.LatencyTracker(
                     f"JittedInsertKVCache-b{len(block_numbers)}"):
@@ -457,6 +465,7 @@ class KVCacheManager:
                     kv_cache_slices,
                     jnp.array(block_numbers),
                 )
+                jax.block_until_ready(self.runner.kv_caches)
 
         logger.debug(
             f"Updated kv cache entries cnt={len(self.runner.kv_caches)}")

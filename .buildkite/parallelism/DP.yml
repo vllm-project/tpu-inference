@@ -4,11 +4,14 @@ steps:
   - label: "Correctness tests for DP"
     key: "DP_CorrectnessTest"
     soft_fail: true
+    env:
+      NEW_MODEL_DESIGN: "1"
     agents:
-      queue: tpu_v6e_queue
+      queue: tpu_v6e_8_queue
     commands:
       - |
-        buildkite-agent meta-data set "DP_CorrectnessTest" "to be added"
+        .buildkite/scripts/run_in_docker.sh \
+          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_data_parallel.py'
   - label: "Record correctness test result for DP"
     key: "record_DP_CorrectnessTest"
     depends_on: "DP_CorrectnessTest"

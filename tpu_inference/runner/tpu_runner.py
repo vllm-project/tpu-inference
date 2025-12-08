@@ -10,17 +10,16 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
-import torch
-import vllm.envs as envs
+import vllm.envs as vllm_envs
 from flax import nnx
 from jax.experimental import mesh_utils
 from jax.sharding import NamedSharding, PartitionSpec
-from torchax.ops.mappings import j2t_dtype
+from torchax.ops.mappings import t2j_dtype
 from vllm.config import VllmConfig
+from vllm.distributed import get_pp_group
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
-from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import GrammarOutput
@@ -35,6 +34,7 @@ from vllm.v1.worker.kv_connector_model_runner_mixin import \
     KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
+import tpu_inference.envs as envs
 from tpu_inference import utils as common_utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
@@ -48,6 +48,8 @@ from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import get_model
+from tpu_inference.models.jax.jax_intermediate_tensor import \
+    JaxIntermediateTensors
 from tpu_inference.models.jax.utils.weight_utils import (
     shard_put, transfer_state_with_mappings)
 from tpu_inference.runner import utils as runner_utils
@@ -64,7 +66,7 @@ from tpu_inference.runner.structured_decoding_manager import \
     StructuredDecodingManager
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
 from tpu_inference.utils import (device_array, make_optimized_mesh,
-                                 time_function)
+                                 time_function, to_torch_dtype)
 
 logger = init_logger(__name__)
 
@@ -77,17 +79,6 @@ DUMMY_METADATA = AttentionMetadata(
     block_tables=[],
     request_distribution=[0, 0, 0],
 )
-
-TPU_STR_DTYPE_TO_TORCH_DTYPE = {
-    "half": torch.half,
-    "bfloat16": torch.bfloat16,
-    "float": torch.float,
-    "fp8": torch.float8_e4m3fn,
-    "fp8_e4m3": torch.float8_e4m3fn,
-    "fp8_e5m2": torch.float8_e5m2,
-    "int8": torch.int8,
-    "uint8": torch.uint8,
-}
 
 
 class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
@@ -243,6 +234,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.maybe_forbid_compile = runner_utils.ForbidCompile(
         ) if envs.VLLM_XLA_CHECK_RECOMPILATION else nullcontext()
         self.dp_size = self.vllm_config.sharding_config.total_dp_size
+        self.rank = rank
+        self.is_first_rank = is_first_rank
+        self.is_last_rank = is_last_rank
 
         self._init_random()
         self._init_mesh()
@@ -253,31 +247,21 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Delegate functions to specific manager classes.
         self.compilation_manager = CompilationManager(self)
-        self.speculative_decoding_manager = SpeculativeDecodingManager(self)
-        self.structured_decoding_manager = StructuredDecodingManager(self)
+        if self.is_last_rank:
+            self.speculative_decoding_manager = SpeculativeDecodingManager(
+                self)
+            self.structured_decoding_manager = StructuredDecodingManager(self)
         self.kv_cache_manager = KVCacheManager(self)
         self.mm_manager = MultiModalManager(self)
         self.persistent_batch_manager = PersistentBatchManager(
             self.requests, self.input_batch, self.encoder_cache,
-            self.uses_mrope, self.model_config)
+            self.uses_mrope, self.model_config, self.is_last_rank)
         self.lora_utils = LoraUtils(self)
 
-        cache_config = self.cache_config
-        if cache_config.cache_dtype == "auto":
-            model_dtype = self.dtype
-            if isinstance(model_dtype, str):
-                self.kv_cache_dtype = TPU_STR_DTYPE_TO_TORCH_DTYPE[model_dtype]
-            elif isinstance(getattr(model_dtype, 'dtype', None), jnp.dtype):
-                self.kv_cache_dtype = j2t_dtype(model_dtype.dtype)
-            elif isinstance(model_dtype, torch.dtype):
-                self.kv_cache_dtype = model_dtype
-            else:
-                raise ValueError(
-                    "KV cache is unsupported for model_dtype of %s",
-                    model_dtype)
-        else:
-            self.kv_cache_dtype = TPU_STR_DTYPE_TO_TORCH_DTYPE[
-                cache_config.cache_dtype]
+        cache_dtype = self.cache_config.cache_dtype
+        if cache_dtype == "auto":
+            cache_dtype = self.dtype
+        self.kv_cache_dtype = to_torch_dtype(cache_dtype)
 
         self._pre_async_results: AsyncPreResults | None = None
         self._substitute_placeholder_token_fn = _substitute_placeholder_token
@@ -291,7 +275,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.rng_key = jax.random.key(self.model_config.seed)
 
     def _init_mesh(self) -> None:
-        if os.getenv("NEW_MODEL_DESIGN", False):
+        if envs.NEW_MODEL_DESIGN:
             self.mesh = self._create_new_model_mesh()
         else:
             # NOTE(wenxindongwork): The new MoE kernel expects a 2D mesh, so we need
@@ -302,7 +286,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         logger.info(f"Init mesh | mesh={self.mesh}")
 
     def _create_new_model_mesh(self) -> jax.sharding.Mesh:
-        num_slices = int(os.environ.get('NUM_SLICES', 1))
+        num_slices = envs.NUM_SLICES
 
         logger.info(f"Creating new model mesh | devices={len(self.devices)}, "
                     f"num_slices={num_slices}")
@@ -371,7 +355,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                        devices=self.devices)
 
     def _init_phased_profiling(self) -> None:
-        self.phased_profiling_dir = os.getenv("PHASED_PROFILING_DIR", "")
+        self.phased_profiling_dir = envs.PHASED_PROFILING_DIR
         self.phase_based_profiler = None
         if self.phased_profiling_dir:
             self.phase_based_profiler = runner_utils.PhasedBasedProfiler(
@@ -413,7 +397,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             min_token_size=max(16, self.dp_size),
             max_token_size=scheduler_config.max_num_batched_tokens *
             self.dp_size,
-            padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
+            padding_gap=vllm_envs.VLLM_TPU_BUCKET_PADDING_GAP)
         self.num_tokens_paddings_per_dp = [
             padding // self.dp_size for padding in self.num_tokens_paddings
         ]
@@ -555,12 +539,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def execute_model(
         self,
         scheduler_output: "VllmSchedulerOutput",
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> ModelRunnerOutput | None:
+        intermediate_tensors: Optional[JaxIntermediateTensors] = None,
+    ) -> ModelRunnerOutput | JaxIntermediateTensors | None:
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called "
                                "after execute_model() returns None.")
-        _, output = self._execute_model(scheduler_output)
+        _, output = self._execute_model(scheduler_output, intermediate_tensors)
         return output
 
     def sample_tokens(
@@ -686,7 +670,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def _execute_model(
         self,
         scheduler_output: "VllmSchedulerOutput",
-    ) -> tuple[AttentionMetadata, ModelRunnerOutput | None]:
+        intermediate_tensors: Optional[JaxIntermediateTensors] = None,
+    ) -> tuple[AttentionMetadata, JaxIntermediateTensors | ModelRunnerOutput
+               | None]:
         self.persistent_batch_manager.update_states(
             scheduler_output, self.get_mrope_input_positions_fn)
         if not scheduler_output.total_num_scheduled_tokens:
@@ -764,7 +750,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     scheduler_output) as kv_connector_output:
                 # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
                 # but one of them would be `None`
-
                 (self.kv_caches, hidden_states,
                  aux_hidden_states) = self.model_fn(
                      self.state,
@@ -775,8 +760,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      input_positions,
                      tuple(self.layer_name_to_kvcache_index.items()),
                      lora_metadata,
+                     intermediate_tensors,
+                     self.is_first_rank,
+                     self.is_last_rank,
                  )
-
+            if not get_pp_group().is_last_rank:
+                assert isinstance(hidden_states, JaxIntermediateTensors)
+                hidden_states.kv_connector_output = kv_connector_output
+                return attn_metadata, hidden_states
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
             logits = self.compute_logits_fn(
@@ -1345,7 +1336,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         _request_distribution = []
         for dp_rank in range(dp_size):
             _num_reqs = num_req_per_dp_rank[dp_rank]
-            _request_distribution.append([0, 0, _num_reqs])
+            # The batch has been reordered by _reorder_batch so decode requests come first
+            # Count decode requests (those with num_scheduled_tokens == 1) in this DP rank
+            num_decode_in_dp_rank = 0
+            for req_id in req_ids_dp[dp_rank]:
+                if scheduler_output.num_scheduled_tokens[req_id] == 1:
+                    num_decode_in_dp_rank += 1
+            _request_distribution.append(
+                [num_decode_in_dp_rank, num_decode_in_dp_rank, _num_reqs])
         request_distribution = np.array(_request_distribution).ravel()
 
         use_spec_decode = len(
@@ -1404,7 +1402,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 block_tables[
                     req_offset:req_offset + _num_reqs, :self.
                     max_num_blocks_per_req] = self.input_batch.block_table[
-                        0].get_cpu_tensor()[req_indices_dp[dp_rank]]
+                        kv_cache_gid].get_cpu_tensor()[req_indices_dp[dp_rank]]
             # Convert block_tables to 1D on cpu.
             block_tables = block_tables.reshape(-1)
             block_tables = device_array(
@@ -1719,3 +1717,35 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             mappings=mappings,
             transpose_keys=transpose_keys,
             shard=shard)
+
+    def get_intermediate_tensor_spec(self, num_tokens: int):
+        impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
+        jax_dtype = t2j_dtype(self.dtype) if impl == "vllm" else self.dtype
+        num_padded_tokens = runner_utils.get_padded_token_len(
+            self.num_tokens_paddings, num_tokens)
+        sharding = NamedSharding(self.mesh, PartitionSpec())
+        hidden_size = self.model_config.get_hidden_size()
+        spec = jax.ShapeDtypeStruct(shape=(num_padded_tokens, hidden_size),
+                                    dtype=jax_dtype,
+                                    sharding=sharding)
+        tensor_spec = {"hidden_states": spec, "residual": spec}
+        return tensor_spec
+
+    def get_uuid_for_jax_transfer(self,
+                                  scheduler_output: "VllmSchedulerOutput",
+                                  rank: int, step: int) -> int:
+        '''
+        Get a uuid for jax.transfer, here we use the hash of
+        scheduler_output + counter_step + sender's rank
+        '''
+        scheduler_output_str = ""
+        if not scheduler_output.num_scheduled_tokens:
+            scheduler_output_str = "empty_batch"
+        else:
+            scheduler_output_str = str(
+                sorted(scheduler_output.num_scheduled_tokens.items()))
+        unique_str = f'{scheduler_output_str} {step} {rank}'
+        import hashlib
+        hasher = hashlib.sha1()
+        hasher.update(unique_str.encode('utf-8'))
+        return int.from_bytes(hasher.digest()[:8], 'big')

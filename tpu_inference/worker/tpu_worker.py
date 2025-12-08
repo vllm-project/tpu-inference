@@ -32,7 +32,7 @@ from tpu_inference.layers.common.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
-from tpu_inference.runner.kv_cache import get_rpa_page_size_bytes
+from tpu_inference.runner.kv_cache import get_attention_page_size_bytes
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 logger = init_logger(__name__)
@@ -108,7 +108,7 @@ class TPUWorker:
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
-            from vllm.utils import init_cached_hf_modules
+            from vllm.utils.import_utils import init_cached_hf_modules
 
             init_cached_hf_modules()
 
@@ -250,11 +250,20 @@ class TPUWorker:
             need_pp=self.parallel_config.pipeline_parallel_size > 1)
 
         ensure_kv_transfer_initialized(self.vllm_config)
-        self.model_runner = TPUModelRunner(
-            self.vllm_config, self.devices, self.rank, self.rank == 0,
-            self.rank == self.pp_config.pp_world_size - 1)
+
+        is_first_rank = True
+        is_last_rank = True
+        if self.parallel_config.pipeline_parallel_size > 1:
+            is_first_rank = self.rank == 0
+            is_last_rank = self.rank == self.pp_config.pp_world_size - 1
+
+        self.model_runner = TPUModelRunner(self.vllm_config, self.devices,
+                                           self.rank, is_first_rank,
+                                           is_last_rank)
         logger.info(f"Init worker | "
                     f"rank={self.rank} | "
+                    f"is_first_rank={is_first_rank} | "
+                    f"is_last_rank={is_last_rank} | "
                     f"node_id={get_node_id()} | "
                     f"is_driver_worker={self.is_driver_worker} | "
                     f"hbm={utils.hbm_usage_gb(self.devices)}GiB")
@@ -357,7 +366,7 @@ class TPUWorker:
         if is_start:
             options = jax.profiler.ProfileOptions()
             # default: https://docs.jax.dev/en/latest/profiling.html#general-options
-            options.python_tracer_level = os.getenv("PYTHON_TRACER_LEVEL", 0)
+            options.python_tracer_level = envs.PYTHON_TRACER_LEVEL
             options.host_tracer_level = os.getenv("HOST_TRACER_LEVEL", 1)
             jax.profiler.start_trace(self.profile_dir,
                                      profiler_options=options)
@@ -404,20 +413,20 @@ class TPUWorker:
         # feature that allows overriding page_size_bytes of KVCacheSpec.
         vllm_page_size_bytes = get_uniform_page_size(
             list(kv_cache_specs.values()))
-        rpa_page_size_bytes = get_rpa_page_size_bytes(self.model_runner.mesh,
-                                                      kv_cache_specs)
+        attention_page_size_bytes = get_attention_page_size_bytes(
+            self.model_runner.mesh, kv_cache_specs)
 
-        if vllm_page_size_bytes != rpa_page_size_bytes:
+        if vllm_page_size_bytes != attention_page_size_bytes:
             logger.info(
                 f"KV cache page size calculated by vLLM "
                 f"({vllm_page_size_bytes} Bytes) does not match with actual "
-                f"page size used by RPA kernel ({rpa_page_size_bytes} Bytes). "
+                f"page size used by Attention kernel ({attention_page_size_bytes} Bytes). "
                 f"Recalculating number of KV blocks using actual page size.")
 
             available_memory = self.determine_available_memory()
             num_blocks = get_num_blocks(self.vllm_config, len(kv_cache_specs),
-                                        available_memory, rpa_page_size_bytes)
-
+                                        available_memory,
+                                        attention_page_size_bytes)
             cache_config = self.vllm_config.cache_config
             cache_config.num_gpu_blocks_override = num_blocks
 
@@ -456,3 +465,8 @@ class TPUWorker:
 
     def shutdown(self) -> None:
         return
+
+    # Ray executor do not need handshake metadata
+    # as we pass the kv_parameters through proxy server
+    def get_kv_connector_handshake_metadata(self) -> None:
+        pass

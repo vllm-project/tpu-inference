@@ -42,7 +42,9 @@ class TestMultiModalManager:
                 swap_space=4,
                 cache_dtype="auto",
             )
-            scheduler_config = SchedulerConfig(max_num_seqs=16, )
+            scheduler_config = SchedulerConfig(max_num_seqs=16,
+                                               max_model_len=1024,
+                                               is_encoder_decoder=False)
             parallel_config = ParallelConfig(
                 pipeline_parallel_size=1,
                 tensor_parallel_size=1,
@@ -142,8 +144,8 @@ class TestMultiModalManager:
         assert passed_pixel_values.dtype == jnp.bfloat16
 
         # Convert torch tensor for comparison
-        expected_pixel_values = dummy_pixel_values.unsqueeze(0).unsqueeze(
-            0).to(torch.float32).numpy().astype(jnp.bfloat16)
+        expected_pixel_values = dummy_pixel_values.unsqueeze(0).to(
+            torch.float32).numpy().astype(jnp.bfloat16)
         np.testing.assert_array_equal(np.asarray(passed_pixel_values),
                                       expected_pixel_values)
 
@@ -247,11 +249,10 @@ class TestMultiModalManager:
         assert "pixel_values" in kwargs_arg
 
         passed_pixel_values = kwargs_arg['pixel_values']
-        assert passed_pixel_values.shape == (2, 1, 3, 224, 224)
+        assert passed_pixel_values.shape == (2, 3, 224, 224)
 
-        expected_pixel_values = torch.stack(
-            [px_1, px_2],
-            dim=0).unsqueeze(1).to(torch.float32).numpy().astype(jnp.bfloat16)
+        expected_pixel_values = torch.stack([px_1, px_2], dim=0).to(
+            torch.float32).numpy().astype(jnp.bfloat16)
         np.testing.assert_array_equal(np.asarray(passed_pixel_values),
                                       expected_pixel_values)
 

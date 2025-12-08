@@ -35,6 +35,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     # would cause JAX init failure when using multi hosts with Ray.
 
     from tpu_inference.models.jax.deepseek_v3 import DeepSeekV3
+    from tpu_inference.models.jax.gpt_oss import GptOss
     from tpu_inference.models.jax.llama3 import LlamaForCausalLM
     from tpu_inference.models.jax.llama4 import Llama4ForCausalLM
     from tpu_inference.models.jax.llama_eagle3 import EagleLlama3ForCausalLM
@@ -50,9 +51,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     _MODEL_REGISTRY[
         "Qwen2_5_VLForConditionalGeneration"] = Qwen2_5_VLForConditionalGeneration
     _MODEL_REGISTRY["Eagle3LlamaForCausalLM"] = EagleLlama3ForCausalLM
-    # TODO: Re-enable JAX implementation of Gpt-oss when it's performant.
-    # from tpu_inference.models.jax.gpt_oss import GptOss
-    # _MODEL_REGISTRY["GptOssForCausalLM"] = GptOss
+    _MODEL_REGISTRY["GptOssForCausalLM"] = GptOss
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
@@ -219,7 +218,9 @@ def get_flax_model(
             vllm_config.model_config.hf_config)
     jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
     kv_cache_sharding = NamedSharding(
-        mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None, "model"))
+        mesh,
+        PartitionSpec(ShardingAxisName.ATTN_DATA, None,
+                      ShardingAxisName.ATTN_HEAD))
     hidden_states_sharding = NamedSharding(mesh,
                                            PartitionSpec(
                                                ShardingAxisName.ATTN_DATA,
@@ -237,14 +238,17 @@ def get_flax_model(
             hidden_states_sharding,  # aux hidden states
         ),
         donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
-        static_argnums=7,  #7 is layer_name_to_kvcache_index
+        static_argnums=(
+            7, 10, 11
+        ),  #7 is layer_name_to_kvcache_index, 10 is is_first_rank, 11 is is_last_rank
     )
     def run_model(graphdef, state, *args):
         model = nnx.merge(graphdef, state)
         return model(*args)
 
     logits_sharding = NamedSharding(
-        mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, "model"))
+        mesh,
+        PartitionSpec(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR))
 
     @functools.partial(
         jax.jit,

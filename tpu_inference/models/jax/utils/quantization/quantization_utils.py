@@ -154,12 +154,9 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
     logger.info(f"Memory usage before applying quantization of params: "
                 f"hbm={utils.hbm_usage_gb(jax.local_devices())}Gb")
 
-    # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
-    kv_cache_jnp_dtype = utils.get_jax_dtype_from_str_dtype(kv_cache_dtype)
-
-    # Handle the case where kv_cache_dtype is "auto"
-    if kv_cache_jnp_dtype is None:
-        assert kv_cache_dtype == "auto", "kv_cache_dtype must be 'auto' if kv_cache_jnp_dtype is None"
+    if kv_cache_dtype != "auto":
+        kv_cache_jnp_dtype = utils.to_jax_dtype(kv_cache_dtype)
+    else:
         kv_cache_jnp_dtype = DEFAULT_KV_CACHE_DTYPE
 
     kv_caches = create_kv_caches(
@@ -169,9 +166,11 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
         head_size=kv_cache_head_size,
         mesh=mesh,
         layer_names=[f"layer.{i}" for i in range(num_hidden_layers)],
-        cache_dtype=kv_cache_jnp_dtype)
+        cache_dtype=kv_cache_jnp_dtype,
+        use_mla=model.vllm_config.model_config.use_mla,
+    )
 
-    dp_size = mesh.shape.get("data", 1) * mesh.shape.get("attn", 1)
+    dp_size = model.vllm_config.sharding_config.total_dp_size
 
     # NOTE: the inputs don't need to match the actual ones, as long as the consumed weights are the same
     input_ids = jax.random.randint(rng,

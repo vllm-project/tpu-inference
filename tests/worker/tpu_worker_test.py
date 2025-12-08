@@ -294,7 +294,7 @@ class TestTPUWorker:
         args, kwargs = mock_jax.profiler.start_trace.call_args
         assert args[0] == "/tmp/profile_dir"
         # Verify options from env var were used
-        assert kwargs['profiler_options'].python_tracer_level == '1'
+        assert kwargs['profiler_options'].python_tracer_level == 1
 
     @patch('tpu_inference.worker.tpu_worker.jax')
     def test_profile_stop(self, mock_jax, mock_vllm_config):

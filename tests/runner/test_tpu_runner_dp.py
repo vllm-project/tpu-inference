@@ -569,6 +569,131 @@ class TestTPUJaxRunnerDPInputsLightweight:
     @patch('tpu_inference.runner.tpu_runner.device_array',
            side_effect=lambda mesh, tensors, **kwargs: tensors)
     @patch('tpu_inference.runner.tpu_runner.TPUSupportedSamplingMetadata')
+    def test_prepare_inputs_dp_with_decode_requests(self,
+                                                    mock_sampling_metadata,
+                                                    mock_device_array,
+                                                    mock_runner_utils,
+                                                    mock_named_sharding):
+        """Test _prepare_inputs_dp with decode requests (1 token each) to verify request_distribution."""
+
+        # Setup mocking
+        def mock_get_padded_token_len(paddings_list, val):
+            if val <= 2:
+                return 4  # For request padding
+            elif val <= 4:
+                return 8  # For token padding
+            else:
+                return 16
+
+        mock_runner_utils.get_padded_token_len.side_effect = mock_get_padded_token_len
+        mock_sampling_instance = MagicMock()
+        mock_sampling_metadata.from_input_batch.return_value = mock_sampling_instance
+        mock_named_sharding.return_value = MagicMock()
+
+        # Setup test data with decode requests (1 token) and prefill requests (>1 token)
+        # req1: decode (1 token), req2: decode (1 token), req3: prefill (3 tokens), req4: decode (1 token)
+        num_scheduled_tokens = {"req1": 1, "req2": 1, "req3": 3, "req4": 1}
+        assigned_dp_ranks = {"req1": 0, "req2": 0, "req3": 1, "req4": 1}
+
+        self.runner.input_batch.num_reqs = 4
+        self.runner.input_batch.req_ids = ["req1", "req2", "req3", "req4"]
+        self.runner.input_batch.num_computed_tokens_cpu = np.array(
+            [5, 6, 7, 8])
+        self.runner.input_batch.token_ids_cpu = np.zeros((8, 64),
+                                                         dtype=np.int32)
+
+        scheduler_output = self._create_mock_scheduler_output(
+            num_scheduled_tokens, assigned_dp_ranks)
+
+        # Setup required attributes
+        self.runner.uses_mrope = False
+        self.runner.phase_based_profiler = None
+        self.runner.lora_config = None
+        self.runner.mesh = MagicMock()
+        self.runner.data_parallel_sharding = MagicMock()
+        self.runner.data_parallel_attn_sharding = MagicMock()
+        self.runner.mm_manager = MagicMock()
+        self.runner.speculative_decoding_manager = MagicMock()
+        self.runner.lora_utils = MagicMock()
+
+        # Execute the method
+        result = self.runner._prepare_inputs_dp(scheduler_output)
+        input_ids, positions, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs = result
+
+        # Verify request_distribution
+        # DP rank 0: req1 (decode), req2 (decode) -> [2, 2, 2]
+        # DP rank 1: req3 (prefill), req4 (decode) -> [1, 1, 2]
+        expected_distribution = np.array([[2, 2, 2], [1, 1, 2]]).flatten()
+        np.testing.assert_array_equal(attention_metadata.request_distribution,
+                                      expected_distribution)
+
+    @patch('tpu_inference.runner.tpu_runner.NamedSharding')
+    @patch('tpu_inference.runner.tpu_runner.runner_utils')
+    @patch('tpu_inference.runner.tpu_runner.device_array',
+           side_effect=lambda mesh, tensors, **kwargs: tensors)
+    @patch('tpu_inference.runner.tpu_runner.TPUSupportedSamplingMetadata')
+    def test_prepare_inputs_dp_all_decode_requests(self,
+                                                   mock_sampling_metadata,
+                                                   mock_device_array,
+                                                   mock_runner_utils,
+                                                   mock_named_sharding):
+        """Test _prepare_inputs_dp with all decode requests."""
+
+        # Setup mocking
+        def mock_get_padded_token_len(paddings_list, val):
+            if val <= 2:
+                return 4
+            elif val <= 4:
+                return 8
+            else:
+                return 16
+
+        mock_runner_utils.get_padded_token_len.side_effect = mock_get_padded_token_len
+        mock_sampling_instance = MagicMock()
+        mock_sampling_metadata.from_input_batch.return_value = mock_sampling_instance
+        mock_named_sharding.return_value = MagicMock()
+
+        # All requests are decode (1 token each)
+        num_scheduled_tokens = {"req1": 1, "req2": 1}
+        assigned_dp_ranks = {"req1": 0, "req2": 1}
+
+        self.runner.input_batch.num_reqs = 2
+        self.runner.input_batch.req_ids = ["req1", "req2"]
+        self.runner.input_batch.num_computed_tokens_cpu = np.array([5, 6])
+        self.runner.input_batch.token_ids_cpu = np.zeros((8, 64),
+                                                         dtype=np.int32)
+
+        scheduler_output = self._create_mock_scheduler_output(
+            num_scheduled_tokens, assigned_dp_ranks)
+
+        # Setup required attributes
+        self.runner.uses_mrope = False
+        self.runner.phase_based_profiler = None
+        self.runner.lora_config = None
+        self.runner.mesh = MagicMock()
+        self.runner.data_parallel_sharding = MagicMock()
+        self.runner.data_parallel_attn_sharding = MagicMock()
+        self.runner.mm_manager = MagicMock()
+        self.runner.speculative_decoding_manager = MagicMock()
+        self.runner.lora_utils = MagicMock()
+
+        # Execute the method
+        result = self.runner._prepare_inputs_dp(scheduler_output)
+        input_ids, positions, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs = result
+
+        # Verify request_distribution
+        # Both ranks have only decode requests
+        # DP rank 0: req1 (decode) -> [1, 1, 1]
+        # DP rank 1: req2 (decode) -> [1, 1, 1]
+        expected_distribution = np.array([[1, 1, 1], [1, 1, 1]]).flatten()
+        np.testing.assert_array_equal(attention_metadata.request_distribution,
+                                      expected_distribution)
+
+    @patch('tpu_inference.runner.tpu_runner.NamedSharding')
+    @patch('tpu_inference.runner.tpu_runner.runner_utils')
+    @patch('tpu_inference.runner.tpu_runner.device_array',
+           side_effect=lambda mesh, tensors, **kwargs: tensors)
+    @patch('tpu_inference.runner.tpu_runner.TPUSupportedSamplingMetadata')
     def test_prepare_async_token_substitution_indices_dp(
             self, mock_sampling_metadata, mock_device_array, mock_runner_utils,
             mock_named_sharding):

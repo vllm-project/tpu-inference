@@ -15,13 +15,59 @@ if TYPE_CHECKING:
     PREFILL_SLICES: str = ""
     DECODE_SLICES: str = ""
     SKIP_JAX_PRECOMPILE: bool = False
+    VLLM_XLA_CHECK_RECOMPILATION: bool = False
     MODEL_IMPL_TYPE: str = "flax_nnx"
     NEW_MODEL_DESIGN: bool = False
     PHASED_PROFILING_DIR: str = ""
     PYTHON_TRACER_LEVEL: int = 1
     USE_MOE_EP_KERNEL: bool = False
+    NUM_SLICES: int = 1
     RAY_USAGE_STATS_ENABLED: str = "0"
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: str = "shm"
+
+
+def env_with_choices(
+    env_name: str,
+    default: str | None,
+    choices: list[str] | Callable[[], list[str]],
+    case_sensitive: bool = True,
+) -> Callable[[], str | None]:
+    """
+    Create a lambda that validates environment variable against allowed choices
+
+    Args:
+        env_name: Name of the environment variable
+        default: Default value if not set (can be None)
+        choices: List of valid string options or callable that returns list
+        case_sensitive: Whether validation should be case sensitive
+
+    Returns:
+        Lambda function for environment_variables dict
+    """
+
+    def _get_validated_env() -> str | None:
+        value = os.getenv(env_name)
+        if value is None:
+            return default
+
+        # Resolve choices if it's a callable (for lazy loading)
+        actual_choices = choices() if callable(choices) else choices
+
+        if not case_sensitive:
+            check_value = value.lower()
+            check_choices = [choice.lower() for choice in actual_choices]
+        else:
+            check_value = value
+            check_choices = actual_choices
+
+        if check_value not in check_choices:
+            raise ValueError(f"Invalid value '{value}' for {env_name}. "
+                             f"Valid options: {actual_choices}.")
+
+        return value
+
+    return _get_validated_env
+
 
 environment_variables: dict[str, Callable[[], Any]] = {
     # JAX platform selection (e.g., "tpu", "cpu", "proxy")
@@ -38,7 +84,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("TPU_WORKER_ID", None),
     # Backend for multi-host communication on TPU
     "TPU_MULTIHOST_BACKEND":
-    lambda: os.getenv("TPU_MULTIHOST_BACKEND", "").lower(),
+    env_with_choices("TPU_MULTIHOST_BACKEND", "", ["ray"]),
     # Slice configuration for disaggregated prefill workers
     "PREFILL_SLICES":
     lambda: os.getenv("PREFILL_SLICES", ""),
@@ -47,28 +93,35 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("DECODE_SLICES", ""),
     # Skip JAX precompilation step during initialization
     "SKIP_JAX_PRECOMPILE":
-    lambda: bool(int(os.getenv("SKIP_JAX_PRECOMPILE", "0"))),
+    lambda: bool(int(os.getenv("SKIP_JAX_PRECOMPILE") or "0")),
+    # Check for XLA recompilation during execution
+    "VLLM_XLA_CHECK_RECOMPILATION":
+    lambda: bool(int(os.getenv("VLLM_XLA_CHECK_RECOMPILATION") or "0")),
     # Model implementation type (e.g., "flax_nnx")
     "MODEL_IMPL_TYPE":
-    lambda: os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower(),
+    env_with_choices("MODEL_IMPL_TYPE", "flax_nnx",
+                     ["vllm", "flax_nnx", "jetpack"]),
     # Enable new experimental model design
     "NEW_MODEL_DESIGN":
-    lambda: bool(int(os.getenv("NEW_MODEL_DESIGN", "0"))),
+    lambda: bool(int(os.getenv("NEW_MODEL_DESIGN") or "0")),
     # Directory to store phased profiling output
     "PHASED_PROFILING_DIR":
     lambda: os.getenv("PHASED_PROFILING_DIR", ""),
     # Python tracer level for profiling
     "PYTHON_TRACER_LEVEL":
-    lambda: int(os.getenv("PYTHON_TRACER_LEVEL", "1")),
+    lambda: int(os.getenv("PYTHON_TRACER_LEVEL") or "1"),
     # Use custom expert-parallel kernel for MoE (Mixture of Experts)
     "USE_MOE_EP_KERNEL":
-    lambda: bool(int(os.getenv("USE_MOE_EP_KERNEL", "0"))),
+    lambda: bool(int(os.getenv("USE_MOE_EP_KERNEL") or "0")),
+    # Number of TPU slices for multi-slice mesh
+    "NUM_SLICES":
+    lambda: int(os.getenv("NUM_SLICES") or "1"),
     # Enable/disable Ray usage statistics collection
     "RAY_USAGE_STATS_ENABLED":
     lambda: os.getenv("RAY_USAGE_STATS_ENABLED", "0"),
     # Ray compiled DAG channel type for TPU
     "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE":
-    lambda: os.getenv("VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE", "shm"),
+    env_with_choices("VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE", "shm", ["shm"]),
 }
 
 

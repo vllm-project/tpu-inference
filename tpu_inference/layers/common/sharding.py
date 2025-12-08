@@ -1,6 +1,5 @@
 import json
 import math
-import os
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, List, Optional
 
@@ -8,7 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import Mesh
 
-from tpu_inference import utils
+from tpu_inference import envs, utils
 
 if TYPE_CHECKING:
     from vllm.v1.configs.vllm_config import VllmConfig
@@ -48,7 +47,7 @@ class ShardingAxisName2D:
 
 
 try:
-    _use_base_sharding = os.getenv("NEW_MODEL_DESIGN", False)
+    _use_base_sharding = envs.NEW_MODEL_DESIGN
     if _use_base_sharding:
         ShardingAxisName = ShardingAxisNameBase
     else:
@@ -120,9 +119,13 @@ class ShardingConfigManager:
                                                     False)
         if enable_dp_attention:
             # Replicate attention layer when num_kv_heads < TP
-            num_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
+            num_kv_heads = 1 if vllm_config.model_config.use_mla else vllm_config.model_config.get_total_num_kv_heads(
+            )
+            cache_dtype = vllm_config.cache_config.cache_dtype
+            if cache_dtype == 'auto':
+                cache_dtype = vllm_config.model_config.dtype
             kv_dtype = utils.get_jax_dtype_from_str_dtype(
-                vllm_config.cache_config.cache_dtype) or jnp.bfloat16
+                cache_dtype) or jnp.bfloat16
             packing = 4 // jnp.dtype(kv_dtype).itemsize
             # When num_kv_heads * 2 / packing < TP, tensor parallelism would
             # duplicate KV heads across devices, wasting kv cache memory.
@@ -167,7 +170,7 @@ class ShardingConfigManager:
                     f"(DP size: {total_dp_size}). Please disable LoRA or "
                     f"set data parallelism to 1.")
         if sharding_strategy.attention_data_parallelism > 1:
-            if not os.environ.get("NEW_MODEL_DESIGN", False):
+            if not envs.NEW_MODEL_DESIGN:
                 raise ValueError(
                     "Must run Attention DP with NEW_MODEL_DESIGN enabled. Please set the "
                     "NEW_MODEL_DESIGN=True.")

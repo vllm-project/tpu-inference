@@ -15,11 +15,39 @@ steps:
     env:
       CI_STAGE: "UnitTest"
       CI_TARGET: meta-llama/Llama-Guard-4-12B
+      CI_CATEGORY: "text-only"
     agents:
       queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh meta-llama_Llama-Guard-4-12B_UnitTest
+
+  - label: "Performance benchmarks for meta-llama/Llama-Guard-4-12B"
+    key: "meta-llama_Llama-Guard-4-12B_Benchmark"
+    depends_on: "record_meta-llama_Llama-Guard-4-12B_IntegrationTest"
+    soft_fail: true
+    env:
+      TEST_MODEL: meta-llama/Llama-Guard-4-12B
+      TENSOR_PARALLEL_SIZE: 1
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/safety_model_benchmark.sh --mode performance
+
+  - label: "Record performance benchmark result for meta-llama/Llama-Guard-4-12B"
+    key: "record_meta-llama_Llama-Guard-4-12B_Benchmark"
+    depends_on: "meta-llama_Llama-Guard-4-12B_Benchmark"
+    env:
+      CI_TARGET: meta-llama/Llama-Guard-4-12B
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "text-only"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh meta-llama_Llama-Guard-4-12B_Benchmark
+
 
   - label: "Integration tests for meta-llama/Llama-Guard-4-12B"
     key: "meta-llama_Llama-Guard-4-12B_IntegrationTest"
@@ -40,30 +68,9 @@ steps:
     env:
       CI_TARGET: meta-llama/Llama-Guard-4-12B
       CI_STAGE: "IntegrationTest"
+      CI_CATEGORY: "text-only"
     agents:
       queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh meta-llama_Llama-Guard-4-12B_IntegrationTest
-
-  - label: "Performance benchmarks for meta-llama/Llama-Guard-4-12B"
-    key: "meta-llama_Llama-Guard-4-12B_Benchmark"
-    depends_on: "record_meta-llama_Llama-Guard-4-12B_IntegrationTest"
-    soft_fail: true
-    agents:
-      queue: tpu_v6e_queue
-    commands:
-      - |
-        .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/safety_model_benchmark.sh --mode performance
-
-  - label: "Record performance benchmark result for meta-llama/Llama-Guard-4-12B"
-    key: "record_meta-llama_Llama-Guard-4-12B_Benchmark"
-    depends_on: "meta-llama_Llama-Guard-4-12B_Benchmark"
-    env:
-      CI_TARGET: meta-llama/Llama-Guard-4-12B
-      CI_STAGE: "Benchmark"
-    agents:
-      queue: cpu
-    commands:
-      - |
-        .buildkite/scripts/record_step_result.sh meta-llama_Llama-Guard-4-12B_Benchmark

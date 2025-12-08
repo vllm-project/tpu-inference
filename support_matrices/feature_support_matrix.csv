@@ -1,11 +1,16 @@
 Feature,CorrectnessTest,PerformanceTest
-"Collective Communication Matmul",✅,N/A
-"Prefix Caching",✅,✅
-"Multimodal Inputs",✅,✅
-"Quantized Matmul Attention and KV Cache",✅,✅
 "Chunked Prefill",✅,✅
-"JAX-Path Qxix Quantization",✅,✅
+"DCN-based P/D disaggregation",to be added,to be added
+"KV cache host offloading",to be added,to be added
+"Llama 4 Maverick",to be added,to be added
+"LoRA_Torch",✅,to be added
+"Multimodal Inputs",✅,✅
+"Out-of-tree model support",✅,✅
+"Prefix Caching",✅,✅
 "Single Program Multi Data",✅,✅
+"Speculative Decoding: Eagle3",✅,✅
 "Speculative Decoding: Ngram",✅,✅
-"Structured Decoding",✅,N/A
-"Ragged Paged Attention V3",✅,✅
+"async scheduler",✅,✅
+"runai_model_streamer_loader",✅,N/A
+"sampling_params",✅,N/A
+"structured_decoding",✅,N/A

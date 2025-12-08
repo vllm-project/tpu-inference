@@ -12,7 +12,16 @@ mapfile -t model_list < <(buildkite-agent meta-data get "${MODEL_LIST_KEY}" --de
 mapfile -t metadata_feature_list < <(buildkite-agent meta-data get "${FEATURE_LIST_KEY}" --default "")
 MODEL_STAGES=("UnitTest" "IntegrationTest" "Benchmark")
 FEATURE_STAGES=("CorrectnessTest" "PerformanceTest")
+FEATURE_STAGES_QUANTIZATION=("RecommendedTPUGenerations" "CorrectnessTest" "PerformanceTest")
 
+declare -A TPU_GENERATIONS=(
+    ["INT8 W8A8"]="\"v5, v6\""
+    ["INT4 W4A16"]="\"v5, v6\""
+    ["FP8 W8A8"]="v7"
+    ["FP8 W8A16"]="v7"
+    ["FP4 W4A16"]="v7"
+    ["AWQ INT4"]="\"v5, v6\""
+)
 declare -a model_csv_files=()
 declare -a feature_csv_files=()
 declare -a default_feature_names=()
@@ -93,24 +102,46 @@ process_features() {
         local category_filename=${category// /_}
         local category_csv="${category_filename}.csv"
 
+        # Determine which stages array and header to use
+        local stages_to_use=("${FEATURE_STAGES[@]}")
+        local header="Feature,CorrectnessTest,PerformanceTest"
+        local is_quantization_matrix=false
+
+        if [ "$category" == "quantization support matrix" ]; then
+            is_quantization_matrix=true
+            stages_to_use=("${FEATURE_STAGES_QUANTIZATION[@]}")
+            header="Feature,Recommended TPU Generations,CorrectnessTest,PerformanceTest"
+        fi
+
         if [ ! -f "$category_csv" ]; then
-            echo "Feature,CorrectnessTest,PerformanceTest" > "$category_csv"
+            echo "$header" > "$category_csv"
             feature_csv_files+=("$category_csv")
         fi
 
         # Build Row
         local row="\"$feature\""
-        for stage in "${FEATURE_STAGES[@]}"; do
+        local stage_index=0
+        for stage in "${stages_to_use[@]}"; do
             local result
-            if [[ "$mode" == "DEFAULT" ]]; then
+
+            if [ "$is_quantization_matrix" = true ] && [ "$stage" == "RecommendedTPUGenerations" ]; then
+                # If it's the quantization matrix, hardcode the TPU generation
+                result="${TPU_GENERATIONS["$feature"]:-N/A}"
+
+            elif [[ "$mode" == "DEFAULT" ]]; then
                 result="✅"
             else
                 result=$(buildkite-agent meta-data get "${feature}:${stage}" --default "N/A")
             fi
+
             row="$row,$result"
-            if [ "${result}" != "✅" ] && [ "${result}" != "N/A" ] && [ "${result}" != "to be added" ]; then
+
+            # Check for failure (exclude the hardcoded TPU generation column)
+            if [ "$stage" != "RecommendedTPUGenerations" ] && [ "${result}" != "✅" ] && [ "${result}" != "N/A" ] && [ "${result}" != "to be added" ]; then
                 ANY_FAILED=true
             fi
+
+            stage_index=$((stage_index + 1))
         done
         echo "$row" >> "$category_csv"
     done
