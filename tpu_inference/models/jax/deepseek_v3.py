@@ -393,9 +393,9 @@ class DeepSeekV3WeightLoader:
 
         self._transpose_map = {
             # dense mlp
-            # r"mlp\.down_proj": (1, 0),
-            # r"mlp\.gate_proj": (1, 0),
-            # r"mlp\.up_proj": (1, 0),
+            r"mlp\.down_proj": (1, 0),
+            r"mlp\.gate_proj": (1, 0),
+            r"mlp\.up_proj": (1, 0),
             # mla
             r"q_a_proj": (1, 0),
             r"q_b_proj": (2, 0, 1),
@@ -407,9 +407,9 @@ class DeepSeekV3WeightLoader:
             r"mlp\.experts\.\d+\.gate_proj": (0, 2, 1),
             r"mlp\.experts\.\d+\.down_proj": (0, 2, 1),
             r"mlp\.experts\.\d+\.up_proj": (0, 2, 1),
-            # r"mlp\.shared_experts\.down_proj": (1, 0),
-            # r"mlp\.shared_experts\.gate_proj": (1, 0),
-            # r"mlp\.shared_experts\.up_proj": (1, 0),
+            r"mlp\.shared_experts\.down_proj": (1, 0),
+            r"mlp\.shared_experts\.gate_proj": (1, 0),
+            r"mlp\.shared_experts\.up_proj": (1, 0),
             # lm_head
             r"lm_head\.weight": (1, 0)
         }
@@ -527,13 +527,11 @@ class DeepSeekV3WeightLoader:
 
                 # reshape 100 x 100 to 100 x 10 x 10, this would break the groups (scales values would overlap different groups)
                 # play around with quantizing something like np.arange(1, 12).reshape(3, 4)
-                "q_b_proj":
-                (1, qk_nope_head_dim + qk_rope_head_dim, q_lora_rank // 2),
-                "kv_b_proj": (attn_heads, (qk_nope_head_dim + v_head_dim) //
-                              self.quantization_block_size_n,
-                              kv_lora_rank // self.quantization_block_size_k),
-                "o_proj": (hidden_size // self.quantization_block_size_n,
-                           attn_heads // 4, v_head_dim // 64),
+                "q_b_proj": (attn_heads, qk_nope_head_dim + qk_rope_head_dim,
+                             q_lora_rank // 256),
+                "kv_b_proj": (attn_heads, qk_nope_head_dim + v_head_dim,
+                              kv_lora_rank // 256),
+                "o_proj": (hidden_size, attn_heads, v_head_dim // 256)
 
                 # # FFW weights are D->F, and F->D:
                 # "mlp.down_proj":
@@ -663,42 +661,13 @@ class DeepSeekV3WeightLoader:
 
         if scale is not None:
             # Reshape scale if necessary (applies to 3D LORA scales and now FFW 2D scales)
+            print("scale name: ", name)
+            print("scale shape: ", scale.shape)
             scale = reshape_params(name, scale, self._scale_shape_map)
 
-        # ----------------------------------------------------------------------
-        # FINAL TACTICAL FIX: FFW Transposition Logic
-        # ----------------------------------------------------------------------
-        is_ffw_gate_or_up = re.search(
-            r"mlp\.(gate|up)\_proj|shared\_experts\.(gate|up)\_proj", name)
-        is_ffw_down = re.search(r"mlp\.down\_proj|shared\_experts\.down\_proj",
-                                name)
-
-        if is_ffw_gate_or_up:
-            # Gate/Up Projections (DF): Transpose on Weight, Transpose on Scale
-            # Goal: W(F, D) -> W(D, F) & S(F, D_comp) -> S(D_comp, F)
-            weight_np = jnp.transpose(weight_np,
-                                      (1, 0))  # Apply weight transpose
-            if scale is not None:
-                scale = jnp.transpose(scale, (1, 0))  # Apply scale transpose
-
-        elif is_ffw_down:
-            # Down Projection (FD): NO transpose on Weight, Transpose on Scale
-            # Goal: W(F, D) -> W(F, D) & S(D, F_comp) -> S(F_comp, D)
-            # The loaded weight (F, D) matches model expectation (FD). Skip weight transpose.
-            weight_np = jnp.transpose(weight_np,
-                                      (1, 0))  # Apply weight transpose
-            if scale is not None:
-                # Transpose the scale axis (D, F_comp) -> (F_comp, D)
-                scale = jnp.transpose(scale, (1, 0))
-
-        else:
-            # MLA/Attention and MoE Experts (3D): Use the pre-defined _transpose_params for both.
-            weight_np = self._transpose_params(name, weight_np)
-            if scale is not None:
-                scale = self._transpose_params(name, scale)
-        # ----------------------------------------------------------------------
-        # End of Transposition Logic
-        # ----------------------------------------------------------------------
+        weight_np = self._transpose_params(name, weight_np)
+        if scale is not None:
+            scale = self._transpose_params(name, scale)
 
         if scale is not None:
             logger.info(f"--- FINAL SCALE SHAPE for {name}: {scale.shape}")
