@@ -14,17 +14,21 @@ RUN apt-get update && apt-get install -y \
 # Install tpu_inference
 WORKDIR /workspace/tpu_inference
 COPY . .
-RUN export TPU_INFERENCE_VERSION=$(pip index versions tpu-inference --pre 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.dev[0-9]+" | head -n 1) && \
+# RUN export TPU_INFERENCE_VERSION=$(pip index versions tpu-inference --pre 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.dev[0-9]+" | head -n 1) && \
+# echo -n "${TPU_INFERENCE_VERSION}" > /tmp/tpu_inference_version
+RUN export LATEST_STABLE_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1) && \
+    export BASE_VERSION=${LATEST_STABLE_TAG#v} && \
+    DATETIME_STR=$(date -u "yesterday" +%Y%m%d) && \
+    TPU_INFERENCE_VERSION="${BASE_VERSION}.dev${DATETIME_STR}" && \
     echo -n "${TPU_INFERENCE_VERSION}" > /tmp/tpu_inference_version
 
 # Build vllm-tpu wheel
 WORKDIR /workspace
 RUN export VLLM_TPU_VERSION=$(cat /tmp/tpu_inference_version) && \
-    bash tpu_inference/.buildkite/scripts/build_vllm_tpu.sh ${VLLM_TPU_VERSION} ${VLLM_TPU_VERSION}
+    bash tpu_inference/.buildkite/scripts/build_vllm_tpu.sh 0.12.0 ${VLLM_TPU_VERSION}
 
 # Install vllm-tpu wheel
-WORKDIR /workspace/vllm
-RUN pip install --no-cache-dir dist/*.whl
+RUN pip install --no-cache-dir vllm/dist/*.whl
 
 
 CMD ["/bin/bash"]
