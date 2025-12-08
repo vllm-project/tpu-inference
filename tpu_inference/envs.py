@@ -69,6 +69,39 @@ def env_with_choices(
     return _get_validated_env
 
 
+def env_bool(env_name: str, default: bool = False) -> Callable[[], bool]:
+    """
+    Create a lambda that parses environment variable as boolean.
+
+    Accepts both numeric strings ("0", "1") and boolean strings
+    ("true", "false", "True", "False").
+
+    Args:
+        env_name: Name of the environment variable
+        default: Default boolean value if not set
+
+    Returns:
+        Lambda function for environment_variables dict
+    """
+
+    def _get_bool_env() -> bool:
+        value = os.getenv(env_name)
+        if value is None or value == "":
+            return default
+
+        value_lower = value.lower()
+        if value_lower in ("true", "1"):
+            return True
+        elif value_lower in ("false", "0"):
+            return False
+        else:
+            raise ValueError(
+                f"Invalid boolean value '{value}' for {env_name}. "
+                f"Valid options: '0', '1', 'true', 'false', 'True', 'False'.")
+
+    return _get_bool_env
+
+
 environment_variables: dict[str, Callable[[], Any]] = {
     # JAX platform selection (e.g., "tpu", "cpu", "proxy")
     "JAX_PLATFORMS":
@@ -93,17 +126,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("DECODE_SLICES", ""),
     # Skip JAX precompilation step during initialization
     "SKIP_JAX_PRECOMPILE":
-    lambda: bool(int(os.getenv("SKIP_JAX_PRECOMPILE") or "0")),
+    env_bool("SKIP_JAX_PRECOMPILE", default=False),
     # Check for XLA recompilation during execution
     "VLLM_XLA_CHECK_RECOMPILATION":
-    lambda: bool(int(os.getenv("VLLM_XLA_CHECK_RECOMPILATION") or "0")),
+    env_bool("VLLM_XLA_CHECK_RECOMPILATION", default=False),
     # Model implementation type (e.g., "flax_nnx")
     "MODEL_IMPL_TYPE":
     env_with_choices("MODEL_IMPL_TYPE", "flax_nnx",
                      ["vllm", "flax_nnx", "jetpack"]),
     # Enable new experimental model design
     "NEW_MODEL_DESIGN":
-    lambda: bool(int(os.getenv("NEW_MODEL_DESIGN") or "0")),
+    env_bool("NEW_MODEL_DESIGN", default=False),
     # Directory to store phased profiling output
     "PHASED_PROFILING_DIR":
     lambda: os.getenv("PHASED_PROFILING_DIR", ""),
@@ -112,7 +145,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("PYTHON_TRACER_LEVEL") or "1"),
     # Use custom expert-parallel kernel for MoE (Mixture of Experts)
     "USE_MOE_EP_KERNEL":
-    lambda: bool(int(os.getenv("USE_MOE_EP_KERNEL") or "0")),
+    env_bool("USE_MOE_EP_KERNEL", default=False),
     # Number of TPU slices for multi-slice mesh
     "NUM_SLICES":
     lambda: int(os.getenv("NUM_SLICES") or "1"),
