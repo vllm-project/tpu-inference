@@ -6,7 +6,7 @@ import os
 import random
 import time
 from typing import List
-from unittest import mock
+from unittest.mock import patch
 
 import jax
 import jax.numpy as jnp
@@ -16,6 +16,7 @@ from jax._src import compilation_cache as cc
 from jax._src import test_util as jtu
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from tpu_inference.logger import init_logger
 from tpu_inference.offload.tpu_offload_connector import LoadSpec, SaveSpec
@@ -42,6 +43,16 @@ class MockTPUModelRunner(TPUModelRunner):
 
     def get_kv_cache_layout(self):
         return "NHD"
+
+    def get_kv_cache_spec(self):
+        # return a dummy spec
+        return {
+            "dummy_layer":
+            AttentionSpec(block_size=_DEFAULT_BLOCK_SIZE,
+                          num_kv_heads=8,
+                          head_size=128,
+                          dtype=jnp.bfloat16)
+        }
 
 
 class MockVllmConfig:
@@ -127,7 +138,7 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
         os.environ["TPU_OFFLOAD_SWAP_OP_TYPE"] = swap_op_type
         os.environ[
             "TPU_OFFLOAD_SKIP_JAX_PRECOMPILE"] = "0" if use_precompiled_swap_ops else "1"
-        os.environ["TPU_OFFLOAD_NUM_CPU_CHUNKS"] = str(self.num_cpu_chunks)
+        os.environ["TPU_OFFLOAD_CPU_BUF_SIZE_GB"] = "16"
 
         connector = CPUOffloadingConnector(self.vllm_config,
                                            KVConnectorRole.WORKER)
@@ -147,7 +158,12 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
 
         mock_runner = MockTPUModelRunner(kv_caches=source_kv_cache,
                                          mesh=self.mesh)
-        worker.register_runner(mock_runner)
+        with patch(
+                'tpu_inference.distributed.offload.tpu_offload_connector.get_uniform_page_size'
+        ) as mock_get_page_size:
+            _block_size_in_bytes = self.block_size * self.num_heads * 2 * self.head_size * 2
+            mock_get_page_size.return_value = _block_size_in_bytes
+            worker.register_runner(mock_runner)
         return connector
 
     @parameterized.named_parameters(
