@@ -68,7 +68,7 @@ class DeepSeekV3(nnx.Module):
         self.rng = nnx.Rngs(rng)
 
         # NOTE: the default is 61
-        num_layers: int = vllm_config.model_config.hf_config.num_hidden_layers
+        num_layers: int = 20
         num_local_experts: int = 256
 
         vocab_size: int = 129280
@@ -508,6 +508,8 @@ class DeepSeekV3WeightLoader:
             "layers.*.custom_module.kernel_down_proj_EFD",
             "model.layers.*.mlp.experts.*.up_proj.weight":
             "layers.*.custom_module.kernel_up_proj_EDF",
+            "model.layers.*.mlp.experts.*.gate_upproj_fused.weight":
+            "layers.*.custom_module.kernel_gating_upproj_E2DF",
             # MOE(shared experts)
             "model.layers.*.mlp.shared_experts.down_proj.weight":
             "layers.*.shared_experts.kernel_down_proj_FD",
@@ -791,6 +793,7 @@ class DeepSeekV3WeightLoader:
         mlp_experts_up_proj_scales = {}
         mlp_experts_down_proj_weights = {}
         mlp_experts_down_proj_scales = {}
+        stacked_tensors = {}
         quantized_weights = {}
         quantized_scales = {}
         with jax.default_device(jax.devices("cpu")[0]):
@@ -863,6 +866,7 @@ class DeepSeekV3WeightLoader:
                 stacked_weights = None
                 if "mlp.experts" in loaded_name:
                     if "down_proj" in loaded_name:
+                        proj_type = "down_proj"
                         stacked_weights = self._process_moe_weights(
                             loaded_name, loaded_weight,
                             mlp_experts_down_proj_weights)
@@ -871,6 +875,7 @@ class DeepSeekV3WeightLoader:
                                 loaded_name, scale,
                                 mlp_experts_down_proj_scales)
                     if "gate_proj" in loaded_name:
+                        proj_type = "gate_proj"
                         stacked_weights = self._process_moe_weights(
                             loaded_name, loaded_weight,
                             mlp_experts_gate_proj_weights)
@@ -879,6 +884,7 @@ class DeepSeekV3WeightLoader:
                                 loaded_name, scale,
                                 mlp_experts_gate_proj_scales)
                     if "up_proj" in loaded_name:
+                        proj_type = "up_proj"
                         stacked_weights = self._process_moe_weights(
                             loaded_name, loaded_weight,
                             mlp_experts_up_proj_weights)
@@ -886,6 +892,45 @@ class DeepSeekV3WeightLoader:
                             stacked_scales = self._process_moe_weights(
                                 loaded_name, scale, mlp_experts_up_proj_scales)
                     if stacked_weights is not None:
+                        stacked_tensors[layer_num + proj_type] = (stacked_weights, stacked_scales)
+                        if all(f"{layer_num}{p}" in stacked_tensors 
+                               for p in ["gate_proj", "up_proj", "down_proj"]):
+                            
+                            gate_w, gate_s = stacked_tensors.pop(layer_num + "gate_proj")
+                            up_w, up_s = stacked_tensors.pop(layer_num + "up_proj")
+                            down_w, down_s = stacked_tensors.pop(layer_num + "down_proj")
+                            
+                            is_moe_kernel = model_for_loading.use_moe_kernel
+                            
+                            if is_moe_kernel:
+                                # (E, D, F) -> (E, 2, D, F)
+                                fused_w = torch.stack([gate_w, up_w], dim=1)
+                                fused_s = torch.stack([gate_s, up_s], dim=1) if gate_s is not None and up_s is not None else None
+                                
+                                fused_name = f"model.layers.{layer_num}.mlp.experts.0.gate_upproj_fused.weight"
+                                w_bytes, w_shards = self._load_individual_weight(
+                                    fused_name, fused_w, model_params, model_for_loading.mesh, scale=fused_s)
+                                
+                                w_bytes_down, w_shards_down = self._load_individual_weight(
+                                    loaded_name, down_w, model_params, model_for_loading.mesh, scale=down_s)
+                                
+                                # Update cumulative memory
+                                w_bytes += w_bytes_down
+                                w_shards += w_shards_down
+                                
+                            else:
+                                w_bytes, w_shards = self._load_individual_weight(
+                                    loaded_name, gate_w, model_params, model_for_loading.mesh, scale=gate_s)
+                                
+                                w_bytes_up, w_shards_up = self._load_individual_weight(
+                                    loaded_name, up_w, model_params, model_for_loading.mesh, scale=up_s)
+                                w_bytes += w_bytes_up
+                                w_shards += w_shards_up
+                                
+                                w_bytes_down, w_shards_down = self._load_individual_weight(
+                                    loaded_name, down_w, model_params, model_for_loading.mesh, scale=down_s)
+                                w_bytes += w_bytes_down
+                                w_shards += w_shards_down
                         weight_bytes, weight_shards = self._load_individual_weight(
                             loaded_name,
                             stacked_weights,
