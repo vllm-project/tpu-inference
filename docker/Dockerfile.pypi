@@ -18,7 +18,7 @@ COPY . .
 # echo -n "${TPU_INFERENCE_VERSION}" > /tmp/tpu_inference_version
 RUN export LATEST_STABLE_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1) && \
     export BASE_VERSION=${LATEST_STABLE_TAG#v} && \
-    DATETIME_STR=$(date -u "yesterday" +%Y%m%d) && \
+    DATETIME_STR=$(date -d 'yesterday' +%Y%m%d) && \
     TPU_INFERENCE_VERSION="${BASE_VERSION}.dev${DATETIME_STR}" && \
     echo -n "${TPU_INFERENCE_VERSION}" > /tmp/tpu_inference_version
 
