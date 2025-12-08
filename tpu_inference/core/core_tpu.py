@@ -29,15 +29,11 @@ from vllm.v1.request import Request, RequestStatus
 
 from tpu_inference import utils as common_utils
 from tpu_inference.core import disagg_executor, disagg_utils
+from tpu_inference.runner.tpu_runner import AsyncTPUModelRunnerOutput
 # ======================================================================================
 # Imports for _DisaggOrchestrator (decoupled from vLLM)
 # ======================================================================================
-from tpu_inference.interfaces.config import IConfig
-from tpu_inference.interfaces.engine import IEngineCore
-from tpu_inference.interfaces.request import IRequest
 from tpu_inference.runner.utils import LatencyTracker
-
-from .adapters import VllmConfigAdapter, VllmEngineAdapter, VllmRequestAdapter
 
 # This file contains two classes:
 # 1. _DisaggOrchestrator: The clean, decoupled core orchestration logic.
@@ -75,10 +71,10 @@ class _DisaggOrchestrator:
 
     def __init__(
         self,
-        config: IConfig,
+        config: VllmConfig,
         output_queue: queue.Queue,
-        prefill_engines: list[IEngineCore],
-        decode_engines: list[IEngineCore],
+        prefill_engines: list[vLLMEngineCore],
+        decode_engines: list[vLLMEngineCore],
         prefill_slice_sizes: tuple[int, ...],
         decode_slice_sizes: tuple[int, ...],
     ):
@@ -88,7 +84,7 @@ class _DisaggOrchestrator:
         self._decode_engines = decode_engines
 
         # Keep track of active requests.
-        self._requests: dict[str, IRequest] = {}
+        self._requests: dict[str, Request] = {}
 
         # Hack device config to pass in the subslice of TPUs.
         slice_sizes = list(prefill_slice_sizes)
@@ -156,7 +152,7 @@ class _DisaggOrchestrator:
         for t in self._all_threads:
             t.start()
 
-    def add_request(self, request: IRequest):
+    def add_request(self, request: Request):
         """
         Adds a new request to the orchestrator.
 
@@ -164,15 +160,12 @@ class _DisaggOrchestrator:
         internal state tracking and hands it off to the first stage of the
         processing pipeline (the prefill scheduler).
         """
-        # Hand off the request to the prefill scheduler to be batched for
-        # execution. Note: We are calling add_request on our IScheduler
-        # interface. The VllmSchedulerAdapter will handle unwrapping the
-        # IRequest before passing it to the real vllm scheduler.
+        # Hand off the request to the prefill scheduler to be batched for execution.
         self._prefill_engines[0].scheduler.add_request(request)
 
         # Add to internal state for tracking by other threads.
-        # The key is the request_id, the value is the adapted request object.
-        self._requests[request.vllm_request.request_id] = request
+        # The key is the request_id, the value is the request object.
+        self._requests[request.request_id] = request
 
     def _prefill(self, idx: int):
         prefill_engine = self._prefill_engines[idx]
@@ -185,9 +178,17 @@ class _DisaggOrchestrator:
 
             scheduler_output = prefill_engine.scheduler.schedule()
             with LatencyTracker(f"prefill-{idx}"):
-                model_output = prefill_engine.execute_model_with_error_logging(
-                    prefill_engine.model_executor.execute_model,
+                future = prefill_engine.model_executor.execute_model(
+                    scheduler_output, non_block=True)
+                grammar_output = prefill_engine.scheduler.get_grammar_bitmask(
                     scheduler_output)
+                with prefill_engine.log_error_detail(scheduler_output):
+                    model_output = future.result()
+                    if model_output is None:
+                        model_output = prefill_engine.model_executor.sample_tokens(
+                            grammar_output)
+                    if isinstance(model_output, AsyncTPUModelRunnerOutput):
+                        model_output = model_output.get_output()
 
             if scheduler_output.total_num_scheduled_tokens > 0:
                 logger.debug(f"Prefill result: {model_output}")
@@ -212,7 +213,7 @@ class _DisaggOrchestrator:
 
                 for req_id, idx in model_output.req_id_to_index.items():
                     if len(model_output.sampled_token_ids[idx]) > 0:
-                        request = self._requests[req_id].vllm_request
+                        request = self._requests[req_id]
                         logger.debug(
                             f"request block_hashes at prefill: {request.block_hashes}"
                         )
@@ -220,15 +221,16 @@ class _DisaggOrchestrator:
                             f"request-{req_id}: tokens={request.all_token_ids} after prefill"
                         )
                         # Remove request from the prefill engine.
+                        if req_id in prefill_engine.scheduler.requests:
+                            request = prefill_engine.scheduler.requests[req_id]
+                            prefill_engine.scheduler.running.remove(request)
+                            prefill_engine.scheduler.encoder_cache_manager.free(
+                                request)
 
-                        request = prefill_engine.scheduler.requests[req_id]
-                        prefill_engine.scheduler.running.remove(request)
-                        prefill_engine.scheduler.encoder_cache_manager.free(
-                            request)
+                            prefill_engine.scheduler.kv_cache_manager.free(
+                                request)
 
-                        prefill_engine.scheduler.kv_cache_manager.free(request)
-
-                        prefill_engine.scheduler.requests.pop(req_id)
+                            prefill_engine.scheduler.requests.pop(req_id)
 
                 for output in (engine_core_outputs.items()
                                if engine_core_outputs else ()):
@@ -320,7 +322,7 @@ class _DisaggOrchestrator:
 
                 # Insert the request to the decoder.
                 req_id = prefill_output["req_id"]
-                vllm_request = self._requests[req_id].vllm_request
+                vllm_request = self._requests[req_id]
                 # Caching num_computed_tokens. The tokens in kv manager allocate blocks
                 # is computed as num_computed_tokens + num_new_tokens, so without caching
                 # the token number would double.
@@ -337,8 +339,10 @@ class _DisaggOrchestrator:
                 new_block_ids = kv_cache_manager.get_block_ids(req_id)
                 logger.debug(
                     f"inserting {req_id} new_block_ids {new_block_ids}")
-                assert (len(new_block_ids[0]) == math.ceil(
-                    prompt_tokens / self._config.cache_config.block_size))
+                if len(new_block_ids[0]) != math.ceil(
+                        prompt_tokens / self._config.cache_config.block_size):
+                    logger.warning("Running out of blocks in decode engine! ")
+                    break
 
                 decode_engine.model_executor.driver_worker.model_runner.insert_request_with_kv_cache(
                     vllm_request, kv_cache, new_block_ids)
@@ -359,9 +363,18 @@ class _DisaggOrchestrator:
                          )
 
             with LatencyTracker(f"decode-{idx}"):
-                model_output = decode_engine.execute_model_with_error_logging(
-                    decode_engine.model_executor.execute_model,
+                future = decode_engine.model_executor.execute_model(
+                    scheduler_output, non_block=True)
+                grammar_output = decode_engine.scheduler.get_grammar_bitmask(
                     scheduler_output)
+                with decode_engine.log_error_detail(scheduler_output):
+                    model_output = future.result()
+                    if model_output is None:
+                        model_output = decode_engine.model_executor.sample_tokens(
+                            grammar_output)
+                    if isinstance(model_output, AsyncTPUModelRunnerOutput):
+                        model_output = model_output.get_output()
+
             if scheduler_output.total_num_scheduled_tokens > 0:
                 logger.debug(f"Decode result: {model_output}")
 
@@ -441,13 +454,15 @@ class DisaggEngineCore(vLLMEngineCore):
         executor_fail_callback: Optional[Callable] = None,
     ):
         self.vllm_config = vllm_config
-        self.vllm_config.cache_config.gpu_memory_utilization = (
-            self.vllm_config.cache_config.gpu_memory_utilization - 0.1)
 
         self.output_queue = queue.Queue[Union[tuple[int, EngineCoreOutputs],
                                               bytes]]()
 
         self.devices = jax.devices()
+        device_kind = self.devices[0].device_kind
+        if device_kind != 'TPU7x':
+            self.vllm_config.cache_config.gpu_memory_utilization = (
+                self.vllm_config.cache_config.gpu_memory_utilization - 0.1)
         prefill_slice_sizes, decode_slice_sizes, slice_sizes = _get_slice_sizes(
             self.devices)
 
@@ -500,14 +515,10 @@ class DisaggEngineCore(vLLMEngineCore):
 
         self.mm_receiver_cache = None
         self._orchestrator = _DisaggOrchestrator(
-            config=VllmConfigAdapter(vllm_config),
+            config=vllm_config,
             output_queue=self.output_queue,
-            prefill_engines=[
-                VllmEngineAdapter(e) for e in self._prefill_engines
-            ],
-            decode_engines=[
-                VllmEngineAdapter(e) for e in self._decode_engines
-            ],
+            prefill_engines=self._prefill_engines,
+            decode_engines=self._decode_engines,
             prefill_slice_sizes=prefill_slice_sizes,
             decode_slice_sizes=decode_slice_sizes,
         )
@@ -537,7 +548,7 @@ class DisaggEngineCore(vLLMEngineCore):
             logger.warning("Got kv_transfer_params, but no KVConnector found. "
                            "Disabling KVTransfer for this request.")
 
-        self._orchestrator.add_request(VllmRequestAdapter(request))
+        self._orchestrator.add_request(request)
 
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         client_idx, output = self.output_queue.get()
@@ -596,7 +607,6 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
         # engine core to be executed, instead we create other instance of
         # engine cores and let them do the work.
         self.vllm_config = vllm_config
-        self.vllm_config.cache_config.gpu_memory_utilization = self.vllm_config.cache_config.gpu_memory_utilization - 0.1
 
         # We should be taking the input from the client, the code below is forked from
         # vllm.v1.engine.core.EngineCoreProc.
@@ -609,6 +619,10 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
         self.engines_running = False
 
         self.devices = jax.devices()
+        device_kind = self.devices[0].device_kind
+        if device_kind != 'TPU7x':
+            self.vllm_config.cache_config.gpu_memory_utilization = (
+                self.vllm_config.cache_config.gpu_memory_utilization - 0.1)
         prefill_slice_sizes, decode_slice_sizes, slice_sizes = _get_slice_sizes(
             self.devices)
 
@@ -701,14 +715,10 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
 
         self.mm_receiver_cache = None
         self._orchestrator = _DisaggOrchestrator(
-            config=VllmConfigAdapter(vllm_config),
+            config=vllm_config,
             output_queue=self.output_queue,
-            prefill_engines=[
-                VllmEngineAdapter(e) for e in self._prefill_engines
-            ],
-            decode_engines=[
-                VllmEngineAdapter(e) for e in self._decode_engines
-            ],
+            prefill_engines=self._prefill_engines,
+            decode_engines=self._decode_engines,
             prefill_slice_sizes=prefill_slice_sizes,
             decode_slice_sizes=decode_slice_sizes,
         )
@@ -728,7 +738,7 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
                 raise ValueError(f"Unsupported task: {pooling_params.task!r} "
                                  f"Supported tasks: {supported_pooling_tasks}")
 
-        self._orchestrator.add_request(VllmRequestAdapter(request))
+        self._orchestrator.add_request(request)
 
     def _handle_client_request(self, request_type: EngineCoreRequestType,
                                request: Any) -> None:

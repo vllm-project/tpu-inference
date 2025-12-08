@@ -16,12 +16,11 @@ from vllm.config import (CacheConfig, DeviceConfig, MultiModalConfig,
 # Import the module itself to allow patching
 # Corrected imports for the code under test
 from tpu_inference.models.jax.qwen2_5_vl import (
-    AttentionMetadata, MultiModalEmbeddings, Qwen2_5_VisionAttention,
-    Qwen2_5_VisionBlock, Qwen2_5_VisionMLP, Qwen2_5_VisionPatchEmbed,
-    Qwen2_5_VisionPatchMerger, Qwen2_5_VisionRotaryEmbedding,
-    Qwen2_5_VisionTransformer, Qwen2_5_VLForConditionalGeneration,
-    Qwen2_5_VLImagePixelInputs, SegmentIds, apply_rotary_pos_emb_vision,
-    generate_window_segment_ids)
+    AttentionMetadata, Qwen2_5_VisionAttention, Qwen2_5_VisionBlock,
+    Qwen2_5_VisionMLP, Qwen2_5_VisionPatchEmbed, Qwen2_5_VisionPatchMerger,
+    Qwen2_5_VisionRotaryEmbedding, Qwen2_5_VisionTransformer,
+    Qwen2_5_VLForConditionalGeneration, Qwen2_5_VLImagePixelInputs, SegmentIds,
+    apply_rotary_pos_emb_vision, generate_window_segment_ids)
 
 
 # --- Configuration Mocking ---
@@ -91,6 +90,7 @@ class MockVllmConfig:
         self.device_config = MagicMock(spec=DeviceConfig)
         self.load_config = MagicMock()
         self.extra_configs = {}
+        self.additional_config = {}
 
 
 @pytest.fixture(scope="module")
@@ -99,8 +99,8 @@ def mesh():
     if not jax.devices():
         pytest.skip("No JAX devices available for mesh creation.")
     devices = np.array(jax.local_devices())
-    return Mesh(devices.reshape((len(devices), 1)),
-                axis_names=('data', 'model'))
+    return Mesh(devices.reshape((len(devices), 1, 1)),
+                axis_names=('data', 'attn_dp', 'model'))
 
 
 @pytest.fixture
@@ -346,8 +346,14 @@ class TestQwen2_5_VisionTransformer:
         expected_len = window_index_thw.shape[0] * sm * sm
         assert rotary_pos_emb_thw.shape == (expected_len, head_dim_rope)
 
-    def test_call(self, vision_transformer: Qwen2_5_VisionTransformer,
-                  rng: PRNGKey):
+    @pytest.mark.parametrize("enable_dynamic_image_sizes", [False, True])
+    def test_call(self, mock_vllm_config: MockVllmConfig, rngs: nnx.Rngs,
+                  mesh: Mesh, rng: PRNGKey, enable_dynamic_image_sizes: bool):
+        mock_vllm_config.additional_config = {
+            "enable_dynamic_image_sizes": enable_dynamic_image_sizes
+        }
+        vision_transformer = Qwen2_5_VisionTransformer(mock_vllm_config, rngs,
+                                                       mesh)
         # Mock the flash_attention call to avoid sharding errors in test environment
         for block in vision_transformer.blocks:
             # The mock should return a tensor of the same shape as the query 'q'
@@ -355,7 +361,7 @@ class TestQwen2_5_VisionTransformer:
                 side_effect=lambda q, k, v, seg: jnp.ones_like(q))
 
         vc = vision_transformer.config
-        t_pix, h_pix, w_pix = 2, 28, 28
+        t_pix, h_pix, w_pix = 2, 84, 28
 
         # The number of patches is calculated from the pixel dimensions of the image/video
         num_patches = (t_pix // vc.temporal_patch_size) * \
@@ -508,12 +514,12 @@ class TestQwen2_5_VLForConditionalGeneration:
         np.testing.assert_array_equal(embeds, mock_text_embeds)
         mock_merge_embeddings.assert_not_called()
 
-        embeds_empty_mm = model.get_input_embeddings(input_ids, tuple())
+        empty_mm = jnp.ones((0, model.config.hidden_size), )
+        embeds_empty_mm = model.get_input_embeddings(input_ids, empty_mm)
         np.testing.assert_array_equal(embeds_empty_mm, mock_text_embeds)
         mock_merge_embeddings.assert_not_called()
 
-        mm_embeds: MultiModalEmbeddings = (jnp.ones(
-            (5, model.config.hidden_size)), )
+        mm_embeds = jnp.ones((5, model.config.hidden_size))
         mock_merged = jnp.ones((1, 15, model.config.hidden_size))
         mock_merge_embeddings.return_value = mock_merged
 

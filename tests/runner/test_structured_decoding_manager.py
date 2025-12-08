@@ -1,27 +1,33 @@
 from unittest.mock import MagicMock, patch
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
 from vllm.sampling_params import SamplingType
 
-from tpu_inference.runner.input_batch_jax import CachedRequestState
-from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
+from tpu_inference.runner.input_batch import CachedRequestState
+from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
 class TestStructuredDecodingManager:
 
     def setup_method(self):
         # Mock JAX dependencies
-        self.mock_devices = [MagicMock(coords=i) for i in range(4)]
-        self.mock_mesh = MagicMock()
         self.mock_rng_key = MagicMock()
+        self.mock_devices = [MagicMock(coords=i) for i in range(1)]
+        device_array = np.array(jax.devices()[:1]).reshape(1, 1, 1, 1)
+        self.mock_mesh = jax.make_mesh(device_array.shape,
+                                       ('data', 'attn_dp', 'expert', 'model'))
+        self.mock_rng_key = MagicMock()
+
 
         with patch('jax.devices', return_value=self.mock_devices), \
              patch('jax.make_mesh', return_value=self.mock_mesh), \
              patch('jax.random.key', return_value=self.mock_rng_key), \
-             patch('tpu_inference.runner.tpu_jax_runner.get_model', return_value=MagicMock()):
+             patch('tpu_inference.runner.tpu_runner.get_model', return_value=MagicMock()), \
+             patch('tpu_inference.runner.tpu_runner.make_optimized_mesh', return_value=self.mock_mesh):
 
             model_config = ModelConfig(tokenizer_mode="auto",
                                        trust_remote_code=False,
@@ -33,7 +39,9 @@ class TestStructuredDecodingManager:
                 swap_space=4,
                 cache_dtype="auto",
             )
-            scheduler_config = SchedulerConfig(max_num_seqs=16, )
+            scheduler_config = SchedulerConfig(max_num_seqs=16,
+                                               max_model_len=1024,
+                                               is_encoder_decoder=False)
             parallel_config = ParallelConfig(
                 pipeline_parallel_size=1,
                 tensor_parallel_size=1,
@@ -50,7 +58,7 @@ class TestStructuredDecodingManager:
                 scheduler_config=scheduler_config,
                 parallel_config=parallel_config,
                 speculative_config=speculative_config,
-                observability_config=None,
+                observability_config={},
                 additional_config={},
             )
 

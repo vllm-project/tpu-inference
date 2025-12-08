@@ -15,6 +15,9 @@ class MockVllmConfig:
         self.parallel_config.placement_group = None
         self.parallel_config.max_parallel_loading_workers = None
 
+        self.sharding_config = MagicMock()
+        self.sharding_config.total_devices = 2
+
         self.model_config = MagicMock()
         self.cache_config = MagicMock()
         self.lora_config = MagicMock()
@@ -24,6 +27,7 @@ class MockVllmConfig:
         self.prompt_adapter_config = MagicMock()
         self.observability_config = MagicMock()
         self.device_config = MagicMock()
+        self.ec_transfer_config = MagicMock()
 
 
 @patch(
@@ -61,7 +65,6 @@ class TestTpuRayDistributedExecutor(unittest.TestCase):
         # --- Setup mocks ---
         mock_envs.VLLM_USE_RAY_COMPILED_DAG = True
         mock_envs.VLLM_USE_RAY_SPMD_WORKER = True
-        mock_envs.VLLM_USE_V1 = True
         mock_envs.VLLM_RAY_BUNDLE_INDICES = ""
 
         mock_platform.ray_device_key = "TPU"
@@ -128,6 +131,8 @@ class TestTpuRayDistributedExecutor(unittest.TestCase):
         }
 
         executor = self.RayDistributedExecutor(self.vllm_config)
+        executor.vllm_config = self.vllm_config
+        executor.parallel_config = self.vllm_config.parallel_config
 
         # --- Test and Assert ---
         with self.assertRaisesRegex(ValueError,

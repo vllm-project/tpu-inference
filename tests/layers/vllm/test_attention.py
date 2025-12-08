@@ -30,9 +30,7 @@ NUM_HEADS = 8
 # Number of attention heads (Key/Value) - for Grouped-Query Attention
 NUM_KV_HEADS = 4
 # Dimension of each attention head
-HEAD_DIM = 64
-# Padded head dimension
-PADDED_HEAD_DIM = 64
+HEAD_DIM = 128
 # Total number of blocks in the KV cache
 NUM_BLOCKS = 32
 # Number of tokens per block
@@ -41,31 +39,42 @@ BLOCK_SIZE = 16
 MAX_BLOCKS_PER_SEQ = 8
 
 
-def create_inputs(mesh: Mesh,
-                  q_dtype: jnp.dtype = jnp.bfloat16,
-                  kv_dtype: jnp.dtype = jnp.bfloat16):
+def create_inputs(
+    mesh: Mesh,
+    q_dtype: jnp.dtype = jnp.bfloat16,
+    kv_dtype: jnp.dtype = jnp.bfloat16,
+    total_tokens: int = TOTAL_TOKENS,
+    num_seqs: int = NUM_SEQS,
+    max_num_seqs: int = MAX_NUM_SEQS,
+    num_heads: int = NUM_HEADS,
+    num_kv_heads: int = NUM_KV_HEADS,
+    head_dim: int = HEAD_DIM,
+    num_blocks: int = NUM_BLOCKS,
+    block_size: int = BLOCK_SIZE,
+    max_blocks_per_seq: int = MAX_BLOCKS_PER_SEQ,
+):
     key = jax.random.key(0)
-    q = jax.random.uniform(key, (TOTAL_TOKENS, NUM_HEADS * HEAD_DIM),
+    q = jax.random.uniform(key, (total_tokens, num_heads * head_dim),
                            dtype=q_dtype)
-    k = jax.random.uniform(key, (TOTAL_TOKENS, NUM_KV_HEADS * HEAD_DIM),
+    k = jax.random.uniform(key, (total_tokens, num_kv_heads * head_dim),
                            dtype=q_dtype)
-    v = jax.random.uniform(key, (TOTAL_TOKENS, NUM_KV_HEADS * HEAD_DIM),
+    v = jax.random.uniform(key, (total_tokens, num_kv_heads * head_dim),
                            dtype=q_dtype)
     q = torch_view(q)
     k = torch_view(k)
     v = torch_view(v)
 
-    kv_cache_shape = get_kv_cache_shape_with_mesh(mesh, NUM_BLOCKS, BLOCK_SIZE,
-                                                  NUM_KV_HEADS, HEAD_DIM,
+    kv_cache_shape = get_kv_cache_shape_with_mesh(mesh, num_blocks, block_size,
+                                                  num_kv_heads, head_dim,
                                                   kv_dtype)
     kv_cache = jax.random.normal(key, kv_cache_shape, dtype=kv_dtype)
 
-    positions = jnp.ones((TOTAL_TOKENS, ), dtype=jnp.int32)
-    block_tables = jnp.zeros((MAX_NUM_SEQS * MAX_BLOCKS_PER_SEQ),
+    positions = jnp.ones((total_tokens, ), dtype=jnp.int32)
+    block_tables = jnp.zeros((max_num_seqs * max_blocks_per_seq),
                              dtype=jnp.int32).reshape(-1)
     seq_lens = jnp.array([5, 5, 0, 0], dtype=jnp.int32)
     query_start_loc = jnp.array([0, 5, 10, 10, 10], dtype=jnp.int32)
-    request_distribution = jnp.array([0, 0, NUM_SEQS], dtype=jnp.int32)
+    request_distribution = jnp.array([0, 0, num_seqs], dtype=jnp.int32)
 
     metadata = AttentionMetadata(
         input_positions=positions,
@@ -83,11 +92,11 @@ def mesh():
     """Provides a mock 1D JAX mesh for testing."""
     # Create a mesh with available devices, useful for running on CPU/GPU/TPU
     # For this test, it will likely be a single CPU device.
-    devices = np.array(jax.local_devices())
+    devices = np.array(jax.local_devices())[0:1]
     if not devices.any():
         # Add a mock device if no devices are present (e.g., in a CI environment)
         devices = np.array([jax.devices("cpu")[0]])
-    return Mesh(devices.reshape((-1, 1)), ("data", "model"))
+    return Mesh(devices.reshape((-1, 1, 1)), ("data", "attn_dp", "model"))
 
 
 class TestPallasAttentionBackend:
@@ -278,3 +287,63 @@ class TestPallasAttentionBackendImpl:
                          torch.tensor([]),
                          metadata,
                          output_scale=output_scale)
+
+    def test_forward_with_attention_sink(self, mesh):
+        head_dim = 64
+        sinks = torch.rand([NUM_HEADS], dtype=torch.float32)
+
+        impl = PallasAttentionBackendImpl(num_heads=NUM_HEADS,
+                                          head_size=head_dim,
+                                          scale=0.088,
+                                          num_kv_heads=NUM_KV_HEADS,
+                                          alibi_slopes=None,
+                                          sliding_window=None,
+                                          kv_cache_dtype="auto",
+                                          attn_type=AttentionType.DECODER,
+                                          sinks=sinks)
+        impl.process_weights_after_loading(torch.bfloat16)
+
+        layer = MagicMock()
+        layer.layer_name = "0"
+
+        query, key, value, kv_cache, metadata = create_inputs(
+            mesh, head_dim=head_dim)
+
+        with torchax.default_env(), set_vllm_model_wrapper_context(
+                kv_caches=[kv_cache],
+                mesh=mesh,
+                layer_name_to_kvcache_index={'0': 0}):
+            assert impl.sinks is not None
+            impl.forward(layer, query, key, value, torch.tensor([]), metadata)
+
+    def test_forward_with_attention_sink_head_dim_128_raises_error(self, mesh):
+        head_dim = 128
+        sinks = torch.rand([NUM_HEADS], dtype=torch.float32)
+
+        impl = PallasAttentionBackendImpl(num_heads=NUM_HEADS,
+                                          head_size=head_dim,
+                                          scale=0.088,
+                                          num_kv_heads=NUM_KV_HEADS,
+                                          alibi_slopes=None,
+                                          sliding_window=None,
+                                          kv_cache_dtype="auto",
+                                          attn_type=AttentionType.DECODER,
+                                          sinks=sinks)
+        impl.process_weights_after_loading(torch.bfloat16)
+
+        layer = MagicMock()
+        layer.layer_name = "0"
+
+        query, key, value, kv_cache, metadata = create_inputs(
+            mesh, head_dim=head_dim)
+
+        with torchax.default_env(), set_vllm_model_wrapper_context(
+                kv_caches=[kv_cache],
+                mesh=mesh,
+                layer_name_to_kvcache_index={'0': 0}
+        ), pytest.raises(
+                NotImplementedError,
+                match=
+                "Attention sink support is only available when head_dim==64"):
+            assert impl.sinks is not None
+            impl.forward(layer, query, key, value, torch.tensor([]), metadata)

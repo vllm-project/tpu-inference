@@ -10,7 +10,15 @@ STEP_KEY="$1"
 
 echo "--- Checking ${STEP_KEY} Outcome"
 
-OUTCOME=$(buildkite-agent step get "outcome" --step "${STEP_KEY}" || echo "skipped")
+# Try to get the custom string you saved
+CUSTOM_STATUS=$(buildkite-agent meta-data get "${STEP_KEY}" --default "")
+
+if [ -n "$CUSTOM_STATUS" ]; then
+    OUTCOME="$CUSTOM_STATUS"
+else
+    OUTCOME=$(buildkite-agent step get "outcome" --step "${STEP_KEY}" || echo "skipped")
+fi
+
 echo "Step ${STEP_KEY} outcome: ${OUTCOME}"
 message=""
 
@@ -21,13 +29,17 @@ case $OUTCOME in
   "skipped")
     message="N/A"
     ;;
+  "to be added")
+    message="to be added"
+    ;;
   *)
     message="❌"
     ;;
 esac
 
+buildkite-agent meta-data set "${CI_TARGET}_category" "${CI_CATEGORY}"
 buildkite-agent meta-data set "${CI_TARGET}:${CI_STAGE}" "${message}"
 
-if [ "${OUTCOME}" != "passed" ] && [ "${OUTCOME}" != "skipped" ] ; then
+if [ "${OUTCOME}" != "passed" ] && [ "${OUTCOME}" != "skipped" ] && [ "${OUTCOME}" != "to be added" ]; then
     exit 1
 fi

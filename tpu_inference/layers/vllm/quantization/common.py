@@ -61,7 +61,12 @@ class JaxCommonLinearConfig:
                 " bad performance.", type(layer))
 
         self.bias_sharding = P(self.weight_sharding[0])
-        self.n_shards = self.mesh.shape.get(self.weight_sharding[0], 1)
+        if isinstance(self.weight_sharding[0], tuple):
+            self.n_shards = 1
+            for axis in self.weight_sharding[0]:
+                self.n_shards *= self.mesh.shape.get(axis, 1)
+        else:
+            self.n_shards = self.mesh.shape.get(self.weight_sharding[0], 1)
 
     def get_input_sharding(self, x: torchax.tensor.Tensor):
         if self.enable_sequence_parallelism:

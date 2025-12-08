@@ -7,10 +7,9 @@ import jax.numpy as jnp
 from tpu_inference.utils import device_array
 
 if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import \
-        SchedulerOutput as VllmSchedulerOutput
+    from vllm.v1.core.sched.output import GrammarOutput
 
-    from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
+    from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
 class StructuredDecodingManager:
@@ -51,9 +50,9 @@ class StructuredDecodingManager:
         return jnp.where(require_struct_decoding, masked_logits, logits)
 
     def prepare_structured_decoding_input(
-        self, logits: jax.Array, scheduler_output: "VllmSchedulerOutput"
+        self, logits: jax.Array, grammar_output: "GrammarOutput"
     ) -> Tuple[jax.Array, jax.Array, jax.Array]:
-        grammar_bitmask = scheduler_output.grammar_bitmask
+        grammar_bitmask = grammar_output.grammar_bitmask
         assert grammar_bitmask is not None
         num_reqs, _ = logits.shape
 
@@ -62,11 +61,10 @@ class StructuredDecodingManager:
         self.runner.require_structured_out_cpu.fill(0)
 
         sorted_struct_requests = sorted(
-            scheduler_output.structured_output_request_ids.items(),
-            key=lambda item: item[1])
+            grammar_output.structured_output_request_ids)
 
         cumulative_mask_idx = 0
-        for req_id, _ in sorted_struct_requests:
+        for req_id in sorted_struct_requests:
             if req_id not in self.runner.input_batch.req_id_to_index:
                 continue
             batch_index = self.runner.input_batch.req_id_to_index[req_id]

@@ -8,8 +8,8 @@ from transformers import Qwen2Config, modeling_flax_utils
 from vllm.config import VllmConfig
 
 from tpu_inference import utils
+from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.jax.attention_interface import attention
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (get_default_maps,
@@ -368,7 +368,8 @@ class Qwen2ForCausalLM(nnx.Module):
                 "lm_head": "model.lm_head",
             })
 
-        metadata_map = get_default_maps(self.vllm_config, self.mesh, mappings)
+        metadata_map = get_default_maps(self.vllm_config.model_config,
+                                        self.mesh, mappings)
         load_hf_weights(vllm_config=self.vllm_config,
                         model=self,
                         metadata_map=metadata_map,

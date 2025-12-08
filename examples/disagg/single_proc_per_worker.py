@@ -74,7 +74,11 @@ def get_uuid() -> int:
 
 def get_mesh() -> Mesh:
     sharding_size = jax.device_count()
-    return jax.make_mesh((sharding_size, ), ("model", ))
+    return jax.make_mesh(
+        (sharding_size, ),
+        ("model", ),
+        axis_types=(jax.sharding.AxisType.Auto, ) * len(("model", )),
+    )
 
 
 def get_kv_spec(mesh: Mesh) -> list[int]:

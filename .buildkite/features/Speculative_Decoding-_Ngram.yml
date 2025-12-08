@@ -1,4 +1,5 @@
 # Speculative Decoding: Ngram
+# feature support matrix
 steps:
   - label: "Correctness tests for Speculative Decoding: Ngram"
     key: "Speculative_Decoding-_Ngram_CorrectnessTest"
@@ -6,15 +7,19 @@ steps:
     agents:
       queue: tpu_v6e_queue
     commands:
-      - echo "covered by performance test"
+      - |
+        .buildkite/scripts/run_in_docker.sh \
+          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_ngram_correctness_greedy \
+          /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_ngram_correctness_random
   - label: "Record correctness test result for Speculative Decoding: Ngram"
     key: "record_Speculative_Decoding-_Ngram_CorrectnessTest"
     depends_on: "Speculative_Decoding-_Ngram_CorrectnessTest"
     env:
       CI_TARGET: "Speculative Decoding: Ngram"
       CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh Speculative_Decoding-_Ngram_CorrectnessTest
@@ -26,15 +31,20 @@ steps:
     agents:
       queue: tpu_v6e_queue
     commands:
-      - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py
+      - |
+        .buildkite/scripts/run_in_docker.sh \
+          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_ngram_performance_greedy \
+          /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_ngram_performance_random
+
   - label: "Record performance test result for Speculative Decoding: Ngram"
     key: "record_Speculative_Decoding-_Ngram_PerformanceTest"
     depends_on: "Speculative_Decoding-_Ngram_PerformanceTest"
     env:
       CI_TARGET: "Speculative Decoding: Ngram"
       CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "feature support matrix"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh Speculative_Decoding-_Ngram_PerformanceTest

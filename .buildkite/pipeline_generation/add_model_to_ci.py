@@ -14,14 +14,19 @@ class ModelType(str, Enum):
     VLLM_NATIVE = "vllm-native"
 
 
+class ModelCategory(str, Enum):
+    TEXT_ONLY = "text-only"
+    MULTIMODAL = "multimodal"
+
+
 MODEL_TYPE_TO_TEMPLATE = {
     ModelType.TPU_OPTIMIZED.value: "tpu_optimized_model_template.yml",
     ModelType.VLLM_NATIVE.value: "vllm_native_model_template.yml",
 }
 
 
-def generate_from_template(model_name: str, queue: str,
-                           model_type: str) -> None:
+def generate_from_template(model_name: str, queue: str, model_type: str,
+                           model_category: str) -> None:
     """
     Generates a buildkite yml file from model template.
     Args:
@@ -64,6 +69,7 @@ def generate_from_template(model_name: str, queue: str,
     try:
         generated_content = template_content.format(
             MODEL_NAME=model_name,
+            CATEGORY=model_category,
             SANITIZED_MODEL_NAME=sanitized_model_name,
             QUEUE=queue,
             TENSOR_PARALLEL_SIZE=QUEUE_TO_TENSOR_PARALLEL_SIZE_MAP[queue],
@@ -113,11 +119,21 @@ def main():
         help=
         '[OPTIONAL] Type of model. Must be tpu-optimized or vllm-native. (Default: tpu-optimized)'
     )
+    parser.add_argument(
+        '--category',
+        choices=[
+            ModelCategory.TEXT_ONLY.value, ModelCategory.MULTIMODAL.value
+        ],
+        default='text-only',
+        help=
+        '[OPTIONAL] Category of model. Must be "text-only" or "multimodal". (Default: text-only)'
+    )
 
     args = parser.parse_args()
     generate_from_template(model_name=args.model_name,
                            queue=args.queue,
-                           model_type=args.type)
+                           model_type=args.type,
+                           model_category=args.category)
 
 
 if __name__ == "__main__":

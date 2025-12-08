@@ -1,0 +1,45 @@
+# Quantized Attention
+# kernel support matrix
+steps:
+  - label: "Correctness tests for Quantized Attention"
+    key: "Quantized_Attention_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "Quantized_Attention_CorrectnessTest" "to be added"
+  - label: "Record correctness test result for Quantized Attention"
+    key: "record_Quantized_Attention_CorrectnessTest"
+    depends_on: "Quantized_Attention_CorrectnessTest"
+    env:
+      CI_TARGET: "Quantized Attention"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "kernel support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh Quantized_Attention_CorrectnessTest
+
+  - label: "Performance tests for Quantized Attention"
+    key: "Quantized_Attention_PerformanceTest"
+    depends_on: "record_Quantized_Attention_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "Quantized_Attention_PerformanceTest" "to be added"
+  - label: "Record performance test result for Quantized Attention"
+    key: "record_Quantized_Attention_PerformanceTest"
+    depends_on: "Quantized_Attention_PerformanceTest"
+    env:
+      CI_TARGET: "Quantized Attention"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "kernel support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh Quantized_Attention_PerformanceTest

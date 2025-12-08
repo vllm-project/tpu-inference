@@ -1,0 +1,7 @@
+Feature,Recommended TPU Generations,CorrectnessTest,PerformanceTest
+"AWQ INT4","v5, v6",to be added,to be added
+"FP4 W4A16",v7,to be added,to be added
+"FP8 W8A8",v7,to be added,to be added
+"FP8 W8A16",v7,to be added,to be added
+"INT4 W4A16","v5, v6",to be added,to be added
+"INT8 W8A8","v5, v6",to be added,to be added

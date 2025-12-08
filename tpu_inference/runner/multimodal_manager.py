@@ -9,11 +9,11 @@ from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.worker.utils import (gather_mm_placeholders,
                                   scatter_mm_placeholders)
 
-from tpu_inference.models.jax.utils.multi_modal_utils import \
-    sanity_check_mm_encoder_outputs
+from tpu_inference.models.jax.utils.multi_modal_utils import (
+    flatten_embeddings, sanity_check_mm_encoder_outputs)
 
 if TYPE_CHECKING:
-    from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
+    from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
 class MultiModalManager:
@@ -158,10 +158,8 @@ class MultiModalManager:
                 is_embed=pos_info.is_embed,
             )
 
-    def gather_mm_embeddings(
-        self,
-        scheduler_output: "VllmSchedulerOutput",
-    ) -> list[jax.Array]:
+    def gather_mm_embeddings(self, scheduler_output: "VllmSchedulerOutput",
+                             target_pad_len: int) -> list[jax.Array]:
         mm_embeds: list[jax.Array] = []
         for req_id in self.runner.input_batch.req_ids:
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
@@ -205,4 +203,15 @@ class MultiModalManager:
                     is_embed=is_embed,
                 )
                 mm_embeds.append(mm_embeds_item)
-        return mm_embeds
+        if not mm_embeds:
+            return None
+        flattened_embeds = flatten_embeddings(mm_embeds)
+        if flattened_embeds.shape[0] == 0:
+            return None
+
+        padding = jnp.zeros((target_pad_len - flattened_embeds.shape[0],
+                             flattened_embeds.shape[1]),
+                            dtype=flattened_embeds.dtype)
+        flattened_embeds = jnp.concatenate([flattened_embeds, padding], axis=0)
+
+        return flattened_embeds

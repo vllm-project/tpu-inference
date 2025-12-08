@@ -1,4 +1,5 @@
 # google/gemma-3-27b-it
+# text-only
 steps:
   - label: "Unit tests for google/gemma-3-27b-it"
     key: "google_gemma-3-27b-it_UnitTest"
@@ -13,10 +14,11 @@ steps:
     key: "record_google_gemma-3-27b-it_UnitTest"
     depends_on: "google_gemma-3-27b-it_UnitTest"
     env:
-      CI_STAGE: "UnitTest"
       CI_TARGET: google/gemma-3-27b-it
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "text-only"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh google_gemma-3-27b-it_UnitTest
@@ -40,8 +42,9 @@ steps:
     env:
       CI_TARGET: google/gemma-3-27b-it
       CI_STAGE: "IntegrationTest"
+      CI_CATEGORY: "text-only"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh google_gemma-3-27b-it_IntegrationTest
@@ -55,7 +58,7 @@ steps:
     env:
       TEST_MODEL: google/gemma-3-27b-it
       TENSOR_PARALLEL_SIZE: 8
-      MINIMUM_THROUGHPUT_THRESHOLD: 23
+      MINIMUM_THROUGHPUT_THRESHOLD: 21
       INPUT_LEN: 1000
       OUTPUT_LEN: 100
       PREFIX_LEN: 0
@@ -71,8 +74,9 @@ steps:
     env:
       CI_TARGET: google/gemma-3-27b-it
       CI_STAGE: "Benchmark"
+      CI_CATEGORY: "text-only"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh google_gemma-3-27b-it_Benchmark

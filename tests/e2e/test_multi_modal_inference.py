@@ -7,6 +7,7 @@
 import os
 from dataclasses import asdict
 
+import pytest
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.multimodal.image import convert_image_mode
@@ -20,7 +21,8 @@ EXPECTED_TEXT = (
 
 
 # NOTE: Could be extended to more mm models/configs as needed
-def test_multi_modal_inference(monkeypatch):
+@pytest.mark.parametrize("enable_dynamic_image_sizes", [False, True])
+def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes):
     """
     Runs multi-modal inference and verifies the output.
     """
@@ -67,6 +69,11 @@ def test_multi_modal_inference(monkeypatch):
         limit_mm_per_prompt={modality: 1},
     )
     engine_args = asdict(engine_args)
+    if engine_args.get("additional_config") is None:
+        engine_args["additional_config"] = {}
+
+    engine_args["additional_config"][
+        "enable_dynamic_image_sizes"] = enable_dynamic_image_sizes
     llm = LLM(**engine_args)
 
     sampling_params = SamplingParams(

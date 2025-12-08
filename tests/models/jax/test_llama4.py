@@ -1,4 +1,6 @@
+from dataclasses import field
 from types import SimpleNamespace
+from typing import Any, Tuple
 from unittest.mock import MagicMock, patch
 
 import jax
@@ -16,15 +18,21 @@ from tpu_inference.models.jax.llama4 import (Llama4ForCausalLM,
 
 class MockParamLlama4:
     """A mock for a parameter used in the Llama4 model."""
+    shape: Tuple[int, ...]
+    dtype: jnp.dtype = jnp.bfloat16
+    sharding_spec: Tuple[str | None, ...] | None = None
+    value: Any = field(init=False)
+    sharding: Any = field(init=False)
 
     def __init__(self, shape=(32, 128)):
-        self.value = SimpleNamespace(shape=shape)
+        self.shape = shape
+        self.value = jnp.zeros(self.shape, dtype=self.dtype)
         # The sharding spec is accessed during weight loading
-        self.sharding = SimpleNamespace(spec=None)
+        self.sharding = SimpleNamespace(spec=self.sharding_spec)
 
     # Allow the mock parameter's value to be updated
     def __setattr__(self, name, value):
-        if name == "value":
+        if name in ['value', 'shape', 'dtype', 'sharding', 'sharding_spec']:
             self.__dict__[name] = value
         else:
             super().__setattr__(name, value)
@@ -81,9 +89,10 @@ def mesh():
     # Reshape devices into a 3D array to name 3 axes: data, model, and expert.
     # The 'model' and 'expert' axes will have a size of 1.
     num_devices = len(devices)
-    device_mesh = devices.reshape((num_devices, 1, 1))
+    device_mesh = devices.reshape((num_devices, 1, 1, 1))
 
-    with Mesh(device_mesh, axis_names=('data', 'model', 'expert')) as m:
+    with Mesh(device_mesh,
+              axis_names=('data', 'attn_dp', 'model', 'expert')) as m:
         yield m
 
 
@@ -171,6 +180,20 @@ class TestLlama4WeightLoader:
     def test_get_layer_num(self, weight_loader, hf_key, expected_num):
         """Tests the private _get_layer_num utility function."""
         assert weight_loader._get_layer_num(hf_key) == expected_num
+
+    @pytest.mark.parametrize("hf_key, expected_num", [
+        ("language_model.model.layers.10.feed_forward.experts.4.down_proj.weight",
+         4),
+        ("language_model.model.layers.0.feed_forward.experts.0.gate_proj.weight_scale",
+         0),
+        ("language_model.model.layers.5.feed_forward.experts.128.up_proj.weight",
+         128),
+        ("language_model.model.norm.weight", None),
+        ("language_model.model.layers.15.self_attn.q_proj.weight", None),
+    ])
+    def test_get_expert_num(self, weight_loader, hf_key, expected_num):
+        """Tests the private _get_expert_num utility function to extract the expert index."""
+        assert weight_loader._get_expert_num(hf_key) == expected_num
 
     @pytest.mark.parametrize("hf_key, expected", [
         ("language_model.model.layers.15.self_attn.q_proj.weight",

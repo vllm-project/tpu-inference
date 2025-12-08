@@ -28,5 +28,20 @@ We choose to follow a similar directory structure as vLLM:
   * `jax` contains model implementations/functionalities that are only used by JAX models
   * `vllm` contains model implementations/functionalities that are only used by vLLM models
 
+## Testing
+When checking in a new feature, we expect that you you add relevant unit tests as well as CI tests.  You can read more about the latter [here](https://github.com/vllm-project/tpu-inference/tree/main/.buildkite#adding-a-new-feature-to-ci).
+
+## Setting up linting, formatting, and static type checking
+
+```
+pip install pre-commit
+
+# Linting, formatting and static type checking
+pre-commit install --hook-type pre-commit --hook-type commit-msg
+
+# You can manually run pre-commit with
+pre-commit run --all-files
+```
+
 ## Thank You!
 We wanted to thank you for taking the time to read these guidelines and for your interest in contributing to TPU Inference. All of your contributions help make TPU Infernece a great tool and community for everyone!

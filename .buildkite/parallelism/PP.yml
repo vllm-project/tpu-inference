@@ -1,0 +1,51 @@
+# PP
+# parallelism support matrix
+steps:
+  - label: "Correctness tests for PP"
+    key: "PP_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        .buildkite/scripts/run_in_docker.sh \
+          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model \
+          /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_vllm_model \
+          /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model_correctness
+  - label: "Record correctness test result for PP"
+    key: "record_PP_CorrectnessTest"
+    depends_on: "PP_CorrectnessTest"
+    env:
+      CI_TARGET: "PP"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "parallelism support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh PP_CorrectnessTest
+
+  - label: "Performance tests for PP"
+    key: "PP_PerformanceTest"
+    depends_on: "record_PP_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        .buildkite/scripts/run_in_docker.sh \
+          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model \
+          /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_vllm_model \
+          /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model_correctness
+  - label: "Record performance test result for PP"
+    key: "record_PP_PerformanceTest"
+    depends_on: "PP_PerformanceTest"
+    env:
+      CI_TARGET: "PP"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "parallelism support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh PP_PerformanceTest

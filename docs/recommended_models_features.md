@@ -9,12 +9,36 @@ If you’d like us to prioritize something specific, please submit a GitHub feat
 
 ## Recommended Models
 
-This table shows the models currently tested for accuracy and performance.
+These tables show the models currently tested for accuracy and performance.
 
-{{ read_csv('../support_matrices/model_support_matrix.csv', keep_default_na=False) }}
+### Text-Only Models
+
+{{ read_csv('../support_matrices/text_only_model_support_matrix.csv', keep_default_na=False) }}
+
+### Multimodal Models
+
+{{ read_csv('../support_matrices/multimodal_model_support_matrix.csv', keep_default_na=False) }}
 
 ## Recommended Features
 
 This table shows the features currently tested for accuracy and performance.
 
 {{ read_csv('../support_matrices/feature_support_matrix.csv', keep_default_na=False) }}
+
+## Kernel Support
+
+This table shows the current kernel support status.
+
+{{ read_csv('../support_matrices/kernel_support_matrix.csv', keep_default_na=False) }}
+
+## Parallelism Support
+
+This table shows the current parallelism support status.
+
+{{ read_csv('../support_matrices/parallelism_support_matrix.csv', keep_default_na=False) }}
+
+## Quantization Support
+
+This table shows the current quantization support status.
+
+{{ read_csv('../support_matrices/quantization_support_matrix.csv', keep_default_na=False) }}

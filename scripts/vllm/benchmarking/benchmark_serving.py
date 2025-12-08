@@ -47,7 +47,7 @@ except ImportError:
     from backend_request_func import get_tokenizer
 
 try:
-    from vllm.utils import FlexibleArgumentParser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
@@ -585,7 +585,8 @@ def main(args: argparse.Namespace):
             lambda: MMLUDataset(random_seed=args.seed,
                                 dataset_path=args.dataset_path,
                                 num_shots=args.mmlu_num_shots,
-                                mmlu_method=args.mmlu_method).sample(
+                                mmlu_method=args.mmlu_method,
+                                use_chat_template=args.mmlu_use_chat_template).sample(
                                     tokenizer=tokenizer,
                                     num_requests=args.num_prompts,
                                     input_len=args.mmlu_input_len,
@@ -867,6 +868,11 @@ if __name__ == "__main__":
         default="HELM",
         choices=["HELM", "Harness", ""],
         help="mmlu method/format to generate shots",
+    )
+    mmlu_group.add_argument(
+        "--mmlu-use-chat-template",
+        action="store_true",
+        help="Whether to format MMLU prompts using the tokenizer's chat template.",
     )
 
     mlperf_group = parser.add_argument_group("mlperf dataset options")

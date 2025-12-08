@@ -6,12 +6,18 @@ from typing import Any, Optional
 import jax
 import jax.numpy as jnp
 import numpy as np
+from flax import nnx
+from jax import lax
+from jax.sharding import NamedSharding, PartitionSpec
 from vllm.config import VllmConfig
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import get_model
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.utils import device_array
+
+logger = init_logger(__name__)
 
 
 class Eagle3Proposer:
@@ -49,10 +55,24 @@ class Eagle3Proposer:
 
     def load_model(self, target_model: Any) -> None:
         """Loads the draft model."""
-        self.model_fn, self.compute_logits_fn, self.combine_hidden_states_fn, _, _, _, self.state, _, _ = get_model(
+        self.model_fn, self.compute_logits_fn, self.combine_hidden_states_fn, _, self.state, _, _ = get_model(
             self.vllm_config, self.rng_key, self.mesh, is_draft_model=True)
-        del self.state.model['embed_tokens']
-        self.state.model.embed_tokens = target_model.model.embed
+
+        draft_embed_tokens = getattr(self.state.model, 'embed_tokens', None)
+        if draft_embed_tokens is None or ~jnp.any(
+                draft_embed_tokens.embedding):
+            logger.info(
+                "Draft model does not have embedding. Setting draft model's embed_tokens to target model's embed"
+            )
+            self.state.model.embed_tokens = target_model.model.embed
+        elif jnp.array_equal(draft_embed_tokens.embedding,
+                             target_model.model.embed.embedding):
+            logger.info(
+                "Draft model's embed_tokens is identical to target model's embed. Sharing the embedding."
+            )
+            self.state.model.embed_tokens = target_model.model.embed
+        else:
+            logger.info("Draft model has its own embed_tokens.")
 
     @functools.partial(jax.jit, static_argnums=(0, ))
     def _prepare_input_ids(
@@ -110,6 +130,17 @@ class Eagle3Proposer:
                                            max_num_blocks_per_req)
         new_block_tables = jnp.where(expanded_exceeds_mask, -1, block_tables)
 
+        positions = lax.with_sharding_constraint(
+            positions, NamedSharding(self.mesh, PartitionSpec(None, )))
+        clamped_positions = lax.with_sharding_constraint(
+            clamped_positions, NamedSharding(self.mesh, PartitionSpec(None, )))
+        new_seq_lens = lax.with_sharding_constraint(
+            new_seq_lens, NamedSharding(self.mesh, PartitionSpec(None, )))
+        query_start_loc = lax.with_sharding_constraint(
+            query_start_loc, NamedSharding(self.mesh, PartitionSpec()))
+        new_block_tables = lax.with_sharding_constraint(
+            new_block_tables, NamedSharding(self.mesh, PartitionSpec(None, )))
+
         return positions, clamped_positions, new_seq_lens, query_start_loc, new_block_tables
 
     @functools.partial(jax.jit, static_argnums=(0, ))
@@ -121,6 +152,7 @@ class Eagle3Proposer:
     @functools.partial(jax.jit, static_argnums=(0, ))
     def _prepare_hidden_states_and_input_ids(
         self,
+        state: nnx.State,
         aux_hidden_states: tuple[jax.Array, ...],
         query_start_loc: jax.Array,
         target_token_ids: jax.Array,
@@ -129,7 +161,7 @@ class Eagle3Proposer:
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
         target_hidden_states = jnp.concatenate(aux_hidden_states, axis=-1)
         target_hidden_states = self.combine_hidden_states_fn(
-            self.state, target_hidden_states)
+            state, target_hidden_states)
 
         input_ids, last_token_indices = self._prepare_input_ids(
             query_start_loc, target_token_ids, next_token_ids, num_reqs)
@@ -176,8 +208,8 @@ class Eagle3Proposer:
                                     block_tables=device_array(
                                         self.mesh, block_tables))
             target_hidden_states, input_ids, last_token_indices = self._prepare_hidden_states_and_input_ids(
-                aux_hidden_states, attn_metadata.query_start_loc, input_ids,
-                next_token_ids, num_reqs)
+                self.state, aux_hidden_states, attn_metadata.query_start_loc,
+                input_ids, next_token_ids, num_reqs)
             return target_hidden_states, input_ids, last_token_indices, attn_metadata
 
         # Host copies from the metadata prepared by the runner.
@@ -241,12 +273,13 @@ class Eagle3Proposer:
 
         attn_metadata = replace(attn_metadata, block_tables=block_tables)
         return self._filter_token_and_prepare_initial_inputs(
-            token_indices, query_start_loc, seq_lens, input_ids,
+            self.state, token_indices, query_start_loc, seq_lens, input_ids,
             aux_hidden_states, attn_metadata, next_token_ids, num_reqs)
 
     @functools.partial(jax.jit, static_argnums=(0, ))
     def _filter_token_and_prepare_initial_inputs(
         self,
+        state: nnx.State,
         token_indices: jax.Array,
         query_start_loc: jax.Array,
         seq_lens: jax.Array,
@@ -274,35 +307,51 @@ class Eagle3Proposer:
         )
 
         target_hidden_states, input_ids, last_token_indices = self._prepare_hidden_states_and_input_ids(
-            [h[token_indices] for h in aux_hidden_states], query_start_loc,
-            target_token_ids, next_token_ids, num_reqs)
+            state, [h[token_indices] for h in aux_hidden_states],
+            query_start_loc, target_token_ids, next_token_ids, num_reqs)
 
         return target_hidden_states, input_ids, last_token_indices, attn_metadata
 
     @functools.partial(jax.jit, static_argnums=(0, ))
     def _select_draft_token_ids(
         self,
+        state: nnx.State,
         hidden_states: jax.Array,
         last_token_indices: jax.Array,
     ) -> jax.Array:
         sample_hidden_states = hidden_states[last_token_indices]
-        return self._get_draft_token_ids(sample_hidden_states)
+        sample_hidden_states = lax.with_sharding_constraint(
+            sample_hidden_states,
+            NamedSharding(self.mesh, PartitionSpec(None, None)))
+        return self._get_draft_token_ids(state, sample_hidden_states)
 
     @functools.partial(jax.jit, static_argnums=(0, ))
-    def _get_draft_token_ids(self, hidden_states: jax.Array) -> jax.Array:
+    def _get_draft_token_ids(self, state: nnx.State,
+                             hidden_states: jax.Array) -> jax.Array:
         lora_metadata = None
-        logits = self.compute_logits_fn(self.state, hidden_states,
-                                        lora_metadata)
-        return jnp.argmax(logits, axis=-1)
+        logits = self.compute_logits_fn(state, hidden_states, lora_metadata)
+        draft_token_ids = jnp.argmax(logits, axis=-1)
+        return lax.with_sharding_constraint(
+            draft_token_ids, NamedSharding(self.mesh, PartitionSpec()))
 
     @functools.partial(jax.jit, static_argnums=(0, ))
     def _select_inputs_for_loop_speculation(
-            self, positions: jax.Array, residual: jax.Array,
+            self, state: nnx.State, positions: jax.Array, residual: jax.Array,
             hidden_states: jax.Array,
             last_token_indices: jax.Array) -> tuple[jax.Array, jax.Array]:
-        return positions[last_token_indices], residual[
-            last_token_indices], self._select_draft_token_ids(
-                hidden_states, last_token_indices)
+        positions = positions[last_token_indices]
+        residual = residual[last_token_indices]
+        draft_token_ids = self._select_draft_token_ids(state, hidden_states,
+                                                       last_token_indices)
+
+        positions = lax.with_sharding_constraint(
+            positions, NamedSharding(self.mesh, PartitionSpec(None, )))
+        residual = lax.with_sharding_constraint(
+            residual, NamedSharding(self.mesh, PartitionSpec(None, None)))
+        draft_token_ids = lax.with_sharding_constraint(
+            draft_token_ids, NamedSharding(self.mesh, PartitionSpec()))
+
+        return positions, residual, draft_token_ids
 
     def propose(
         self,
@@ -329,11 +378,11 @@ class Eagle3Proposer:
 
         if self.num_speculative_tokens == 1:
             return kv_caches, self._select_draft_token_ids(
-                hidden_states, last_token_indices)
+                self.state, hidden_states, last_token_indices)
 
         positions, hidden_states, draft_token_ids = self._select_inputs_for_loop_speculation(
-            attn_metadata.input_positions, residual[0], hidden_states,
-            last_token_indices)
+            self.state, attn_metadata.input_positions, residual[0],
+            hidden_states, last_token_indices)
 
         draft_token_ids_list = [draft_token_ids]
 
@@ -358,7 +407,8 @@ class Eagle3Proposer:
                 attn_metadata,
             )
             hidden_states = residual[0]
-            draft_token_ids = self._get_draft_token_ids(new_hidden_states)
+            draft_token_ids = self._get_draft_token_ids(
+                self.state, new_hidden_states)
             draft_token_ids_list.append(draft_token_ids)
 
         # [batch_size, num_speculative_tokens]

@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from tpu_inference.models.jax.utils.multi_modal_utils import (
-    MultiModalEmbeddings, NestedTensors, _flatten_embeddings,
+    MultiModalEmbeddings, NestedTensors, flatten_embeddings,
     merge_multimodal_embeddings, sanity_check_mm_encoder_outputs)
 
 # --- Tests for sanity_check_mm_encoder_outputs ---
@@ -65,37 +65,37 @@ def test_sanity_check_wrong_dimensions_in_list():
         sanity_check_mm_encoder_outputs(embeddings, 1)
 
 
-# --- Tests for _flatten_embeddings ---
+# --- Tests for flatten_embeddings ---
 
 
 def test_flatten_single_array():
-    """Tests _flatten_embeddings with a single 2D array."""
+    """Tests flatten_embeddings with a single 2D array."""
     emb: NestedTensors = jnp.arange(12).reshape((3, 4))
-    result = _flatten_embeddings(emb)
+    result = flatten_embeddings(emb)
     np.testing.assert_array_equal(result, emb)
 
 
 def test_flatten_single_3d_array():
-    """Tests _flatten_embeddings with a single 3D array."""
+    """Tests flatten_embeddings with a single 3D array."""
     emb: NestedTensors = jnp.arange(24).reshape((2, 3, 4))
-    result = _flatten_embeddings(emb)
+    result = flatten_embeddings(emb)
     expected = jnp.arange(24).reshape((6, 4))
     np.testing.assert_array_equal(result, expected)
 
 
 def test_flatten_list_of_arrays():
-    """Tests _flatten_embeddings with a list of 2D arrays."""
+    """Tests flatten_embeddings with a list of 2D arrays."""
     emb: NestedTensors = [
         jnp.arange(12).reshape((3, 4)),
         jnp.arange(12, 20).reshape((2, 4))
     ]
-    result = _flatten_embeddings(emb)
+    result = flatten_embeddings(emb)
     expected = jnp.arange(20).reshape((5, 4))
     np.testing.assert_array_equal(result, expected)
 
 
 def test_flatten_nested_list():
-    """Tests _flatten_embeddings with a nested list of arrays."""
+    """Tests flatten_embeddings with a nested list of arrays."""
     emb: NestedTensors = [
         jnp.arange(6).reshape((2, 3)),
         [
@@ -103,7 +103,7 @@ def test_flatten_nested_list():
             jnp.arange(12, 15).reshape((1, 3))
         ]
     ]
-    result = _flatten_embeddings(emb)
+    result = flatten_embeddings(emb)
     expected = jnp.arange(15).reshape((5, 3))
     np.testing.assert_array_equal(result, expected)
 
@@ -191,7 +191,7 @@ def test_merge_mm_embeds_count_too_many_no_raise(placeholder_id, base_embeds):
         # Check that the first 2 embeddings from mm_embeds_too_many were used.
         expected = np.array(inputs_embeds)
         is_mm = np.isin(input_ids, np.array(placeholder_id))
-        expected[is_mm] = _flatten_embeddings(mm_embeds_too_many)[:2]
+        expected[is_mm] = flatten_embeddings(mm_embeds_too_many)[:2]
         np.testing.assert_array_equal(result, expected)
     except Exception as e:
         pytest.fail(

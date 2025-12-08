@@ -1,0 +1,45 @@
+# MLA
+# kernel support matrix
+steps:
+  - label: "Correctness tests for MLA"
+    key: "MLA_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "MLA_CorrectnessTest" "to be added"
+  - label: "Record correctness test result for MLA"
+    key: "record_MLA_CorrectnessTest"
+    depends_on: "MLA_CorrectnessTest"
+    env:
+      CI_TARGET: "MLA"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "kernel support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh MLA_CorrectnessTest
+
+  - label: "Performance tests for MLA"
+    key: "MLA_PerformanceTest"
+    depends_on: "record_MLA_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "MLA_PerformanceTest" "to be added"
+  - label: "Record performance test result for MLA"
+    key: "record_MLA_PerformanceTest"
+    depends_on: "MLA_PerformanceTest"
+    env:
+      CI_TARGET: "MLA"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "kernel support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh MLA_PerformanceTest

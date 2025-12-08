@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock, patch
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
@@ -11,22 +12,25 @@ from vllm.multimodal.inputs import (MultiModalBatchedField,
 from vllm.sampling_params import SamplingType
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
-from tpu_inference.runner.input_batch_jax import CachedRequestState
-from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
+from tpu_inference.runner.input_batch import CachedRequestState
+from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
 class TestMultiModalManager:
 
     def setup_method(self):
         # Mock JAX dependencies
-        self.mock_devices = [MagicMock(coords=i) for i in range(4)]
-        self.mock_mesh = MagicMock()
+        self.mock_devices = [MagicMock(coords=i) for i in range(1)]
+        device_array = np.array(jax.devices()[:1]).reshape(1, 1, 1, 1)
+        self.mock_mesh = jax.make_mesh(device_array.shape,
+                                       ('data', 'attn_dp', 'expert', 'model'))
         self.mock_rng_key = MagicMock()
 
         with patch('jax.devices', return_value=self.mock_devices), \
              patch('jax.make_mesh', return_value=self.mock_mesh), \
              patch('jax.random.key', return_value=self.mock_rng_key), \
-             patch('tpu_inference.runner.tpu_jax_runner.get_model', return_value=MagicMock()):
+             patch('tpu_inference.runner.tpu_runner.get_model', return_value=MagicMock()), \
+             patch('tpu_inference.runner.tpu_runner.make_optimized_mesh', return_value=self.mock_mesh):
 
             model_config = ModelConfig(tokenizer_mode="auto",
                                        trust_remote_code=False,
@@ -38,7 +42,9 @@ class TestMultiModalManager:
                 swap_space=4,
                 cache_dtype="auto",
             )
-            scheduler_config = SchedulerConfig(max_num_seqs=16, )
+            scheduler_config = SchedulerConfig(max_num_seqs=16,
+                                               max_model_len=1024,
+                                               is_encoder_decoder=False)
             parallel_config = ParallelConfig(
                 pipeline_parallel_size=1,
                 tensor_parallel_size=1,
@@ -55,7 +61,7 @@ class TestMultiModalManager:
                 scheduler_config=scheduler_config,
                 parallel_config=parallel_config,
                 speculative_config=speculative_config,
-                observability_config=None,
+                observability_config={},
                 additional_config={},
             )
 
@@ -138,8 +144,8 @@ class TestMultiModalManager:
         assert passed_pixel_values.dtype == jnp.bfloat16
 
         # Convert torch tensor for comparison
-        expected_pixel_values = dummy_pixel_values.unsqueeze(0).unsqueeze(
-            0).to(torch.float32).numpy().astype(jnp.bfloat16)
+        expected_pixel_values = dummy_pixel_values.unsqueeze(0).to(
+            torch.float32).numpy().astype(jnp.bfloat16)
         np.testing.assert_array_equal(np.asarray(passed_pixel_values),
                                       expected_pixel_values)
 
@@ -243,11 +249,10 @@ class TestMultiModalManager:
         assert "pixel_values" in kwargs_arg
 
         passed_pixel_values = kwargs_arg['pixel_values']
-        assert passed_pixel_values.shape == (2, 1, 3, 224, 224)
+        assert passed_pixel_values.shape == (2, 3, 224, 224)
 
-        expected_pixel_values = torch.stack(
-            [px_1, px_2],
-            dim=0).unsqueeze(1).to(torch.float32).numpy().astype(jnp.bfloat16)
+        expected_pixel_values = torch.stack([px_1, px_2], dim=0).to(
+            torch.float32).numpy().astype(jnp.bfloat16)
         np.testing.assert_array_equal(np.asarray(passed_pixel_values),
                                       expected_pixel_values)
 
@@ -304,11 +309,11 @@ class TestMultiModalManager:
         mock_scheduler_output_1.num_scheduled_tokens = {req_id: 20}
 
         gathered_embeds_1 = self.runner.mm_manager.gather_mm_embeddings(
-            mock_scheduler_output_1)
+            mock_scheduler_output_1, target_pad_len=10)
 
-        assert len(gathered_embeds_1) == 1
         expected_embeds_1 = encoder_embedding[0:10]
-        np.testing.assert_array_equal(np.asarray(gathered_embeds_1[0]),
+        assert gathered_embeds_1.shape == expected_embeds_1.shape
+        np.testing.assert_array_equal(np.asarray(gathered_embeds_1),
                                       np.asarray(expected_embeds_1))
 
         # ----- Step 2: Middle chunk of prefill -----
@@ -317,11 +322,11 @@ class TestMultiModalManager:
         mock_scheduler_output_2.num_scheduled_tokens = {req_id: 30}
 
         gathered_embeds_2 = self.runner.mm_manager.gather_mm_embeddings(
-            mock_scheduler_output_2)
+            mock_scheduler_output_2, target_pad_len=30)
 
-        assert len(gathered_embeds_2) == 1
         expected_embeds_2 = encoder_embedding[10:40]
-        np.testing.assert_array_equal(np.asarray(gathered_embeds_2[0]),
+        assert gathered_embeds_2.shape == expected_embeds_2.shape
+        np.testing.assert_array_equal(np.asarray(gathered_embeds_2),
                                       np.asarray(expected_embeds_2))
 
         # ----- Step 3: Last chunk of prefill -----
@@ -330,11 +335,11 @@ class TestMultiModalManager:
         mock_scheduler_output_3.num_scheduled_tokens = {req_id: 30}
 
         gathered_embeds_3 = self.runner.mm_manager.gather_mm_embeddings(
-            mock_scheduler_output_3)
+            mock_scheduler_output_3, target_pad_len=16)
 
-        assert len(gathered_embeds_3) == 1
         expected_embeds_3 = encoder_embedding[40:56]
-        np.testing.assert_array_equal(np.asarray(gathered_embeds_3[0]),
+        assert gathered_embeds_3.shape == expected_embeds_3.shape
+        np.testing.assert_array_equal(np.asarray(gathered_embeds_3),
                                       np.asarray(expected_embeds_3))
 
     def test_calc_mrope_positions(self):

@@ -18,6 +18,8 @@ from tpu_inference.layers.jax.layers import Embedder, LMhead, RMSNorm
 from tpu_inference.layers.jax.moe.gpt_oss_moe import GptOssMoE, GptOssRouter
 from tpu_inference.layers.jax.transformer_block import TransformerBlock
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.utils.quantization.mxfp4_utils import (
+    MXFP4_QUANT_METHOD, dequant_mxfp4_to_bf16, unpack_mxfp4_to_fp32)
 from tpu_inference.models.jax.utils.weight_utils import (
     get_param, model_weights_generator, print_param_info)
 
@@ -80,7 +82,7 @@ class GptOss(nnx.Module):
             hidden_size=hidden_size,
             dtype=dtype,
             rngs=self.rng,
-            vd_sharding=(('data', 'model'), None),
+            vd_sharding=P(('data', 'model'), None),
             random_init=self.random_init,
         )
 
@@ -92,6 +94,7 @@ class GptOss(nnx.Module):
                 num_key_value_heads=num_key_value_heads,
                 head_dim=head_dim,
                 dtype=dtype,
+                kv_cache_dtype=vllm_config.cache_config.cache_dtype,
                 rope_theta=rope_theta,
                 initial_context_length=initial_context_length,
                 rope_scaling_factor=rope_scaling_factor,
@@ -99,12 +102,12 @@ class GptOss(nnx.Module):
                 rope_ntk_beta=rope_ntk_beta,
                 rngs=self.rng,
                 random_init=self.random_init,
-                query_tnh=P(None, 'model', None),
-                keyvalue_skh=P(None, 'model', None),
-                attn_o_tnh=P(None, 'model', None),
-                dnh_sharding=(None, 'model', None),
-                dkh_sharding=(None, 'model', None),
-                nhd_sharding=('model', None, None),
+                query_tnh=P("data", 'model', None),
+                keyvalue_skh=P("data", 'model', None),
+                attn_o_tnh=P("data", 'model', None),
+                dnh_sharding=P(None, 'model', None),
+                dkh_sharding=P(None, 'model', None),
+                nhd_sharding=P('model', None, None),
                 mesh=self.mesh,
             )
 
@@ -117,9 +120,9 @@ class GptOss(nnx.Module):
                 dtype=dtype,
                 router_act='softmax',
                 random_init=self.random_init,
-                activation_ffw_td=('data', None),
-                ed_sharding=('model', None),
-                e_sharding=('model', ),
+                activation_ffw_td=P('data', None),
+                ed_sharding=P('model', None),
+                e_sharding=P('model'),
             )
 
             moe_mlp = GptOssMoE(
@@ -132,10 +135,10 @@ class GptOss(nnx.Module):
                 router=router,
                 swiglu_limit=swiglu_limit,
                 # Sharding configuration
-                activation_ffw_td=('data', None),
-                edf_sharding=('model', None, None),
-                efd_sharding=('model', None, None),
-                ed_sharding=('model', None),
+                activation_ffw_td=P('data', None),
+                edf_sharding=P('model', None, None),
+                efd_sharding=P('model', None, None),
+                ed_sharding=P('model', None),
             )
 
             block = TransformerBlock(
@@ -145,6 +148,7 @@ class GptOss(nnx.Module):
                     epsilon=rms_norm_eps,
                     dtype=dtype,
                     rngs=self.rng,
+                    activation_ffw_td=P('data', None),
                 ),
                 pre_mlp_norm=RMSNorm(
                     dims=hidden_size,
@@ -152,6 +156,7 @@ class GptOss(nnx.Module):
                     epsilon=rms_norm_eps,
                     dtype=dtype,
                     rngs=self.rng,
+                    activation_ffw_td=P('data', None),
                 ),
                 attn=attn,
                 custom_module=moe_mlp,
@@ -164,6 +169,7 @@ class GptOss(nnx.Module):
             random_init=self.random_init,
             epsilon=rms_norm_eps,
             dtype=dtype,
+            activation_ffw_td=P('data', None),
         )
 
         self.lm_head = LMhead(
@@ -171,8 +177,8 @@ class GptOss(nnx.Module):
             hidden_size=hidden_size,
             dtype=dtype,
             rngs=self.rng,
-            vd_sharding=(('data', 'model'), None),
-            dv_sharding=(None, ('data', 'model')),
+            vd_sharding=P(('data', 'model'), None),
+            dv_sharding=P(None, ('data', 'model')),
             random_init=self.random_init,
         )
 
@@ -184,12 +190,22 @@ class GptOss(nnx.Module):
         """Loads and transforms all weights from a checkpoint"""
         self.rng = nnx.Rngs(rng)
 
+        # Determine quantization method from HF config (config.json)
+        quant_method = (self.hf_config.quantization_config["quant_method"]
+                        if hasattr(self.hf_config, "quantization_config") else
+                        None)
+
         # Format: 'hf_key': ('jax_model_path', transform_function, target_shape)
         transforms = {
             "transpose_reshape": lambda w, shape: w.T.reshape(shape),
             "reshape": lambda b, shape: b.reshape(shape),
             "transpose": lambda w, _: w.T,
+            "swap_last2": lambda w, _: w.swapaxes(-1, -2),
         }
+
+        # MXFP4 checkpoints swap last two dims for MoE to place packed dim at most minor
+        swap_mlp_transform = transforms[
+            "swap_last2"] if quant_method == MXFP4_QUANT_METHOD else None
 
         mappings = {
             # Embeddings, Norms, and LM Head
@@ -246,11 +262,13 @@ class GptOss(nnx.Module):
             "model.layers.*.mlp.router.bias":
             ("layers.*.custom_module.router.bias_E", None, None),
             "model.layers.*.mlp.experts.gate_up_proj":
-            ("layers.*.custom_module.mlp1_weight_EDF2", None, None),
+            ("layers.*.custom_module.mlp1_weight_EDF2", swap_mlp_transform,
+             None),
             "model.layers.*.mlp.experts.gate_up_proj_bias":
             ("layers.*.custom_module.mlp1_bias_EF2", None, None),
             "model.layers.*.mlp.experts.down_proj":
-            ("layers.*.custom_module.mlp2_weight_EFD", None, None),
+            ("layers.*.custom_module.mlp2_weight_EFD", swap_mlp_transform,
+             None),
             "model.layers.*.mlp.experts.down_proj_bias":
             ("layers.*.custom_module.mlp2_bias_ED", None, None),
         }
@@ -264,8 +282,16 @@ class GptOss(nnx.Module):
             framework="pt",
             download_dir=self.vllm_config.load_config.download_dir)
 
+        # Build a pool of weights with MXFP4 experts combined if neededs
+        pool: dict[str, torch.Tensor | tuple] = (self._build_mxfp4_pool(
+            names_and_weights_generator,
+            mappings) if quant_method == MXFP4_QUANT_METHOD else {
+                loaded_name: loaded_weight
+                for loaded_name, loaded_weight in names_and_weights_generator
+            })
+
         with jax.default_device(jax.devices("cpu")[0]):
-            for loaded_name, loaded_weight in names_and_weights_generator:
+            for loaded_name, loaded_weight in pool.items():
                 hf_pattern = re.sub(r"layers\.(\d+)", "layers.*", loaded_name)
                 if hf_pattern not in mappings:
                     logger.warning(
@@ -283,48 +309,162 @@ class GptOss(nnx.Module):
                         "*", layer_num_match.group(1))
 
                 model_weight = get_param(model_params, jax_path)
-                cast_type = model_weight.value.dtype
 
-                if jax_path_template == "layers.*.attn.sinks_N":
-                    # Checkpoint is bf16, but we have to upcast sinks to f32, as required by RPA_v3 kernel
-                    weight_np = jnp.array(
-                        loaded_weight.to(torch.float32).numpy())
-                else:
-                    torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
-                    if torch_view_type:
-                        # Avoid unnecessary upcasting and mem copy by viewing the tensor's
-                        # raw data as integers before converting to a JAX array.
-                        weight_np = jnp.array(
-                            loaded_weight.view(torch_view_type).numpy()).view(
-                                cast_type)
-                    else:
-                        raise ValueError(
-                            f"Unsupported dtype for tensor conversion: {cast_type}"
+                prepared_weight = loaded_weight
+                if isinstance(loaded_weight, tuple):
+                    # Loaded weight is an MXFP4 tuple
+                    blocks_u8, scales_u8 = loaded_weight
+                    # Quantized param (QArray): set qvalue/scale directly and skip regular path
+                    if hasattr(model_weight, "array"):  # QArray check
+                        codes_fp32_t, scales_fp32_t = unpack_mxfp4_to_fp32(
+                            blocks_u8, scales_u8)
+                        self._load_mxfp4(
+                            model_weight=model_weight,
+                            codes_fp32_t=codes_fp32_t,
+                            scales_fp32_t=scales_fp32_t,
+                            transform_fn=transform_fn,
                         )
+                        if is_verbose:
+                            print_param_info(model_weight, loaded_name)
+                        continue
+                    # Not a QArray: dequantize MXFP4 to BF16 full weights
+                    prepared_weight = dequant_mxfp4_to_bf16(
+                        blocks_u8, scales_u8)
 
-                if transform_fn:
-                    transformed_weight = transform_fn(weight_np, target_shape)
-                else:
-                    transformed_weight = weight_np
-
-                if model_weight.value.shape != transformed_weight.shape:
-                    raise ValueError(
-                        f"Shape mismatch for '{jax_path}': Model expects {model_weight.value.shape}, but got {transformed_weight.shape} after transformation."
-                    )
-
-                def get_slice(index):
-                    return transformed_weight[index]
-
-                sharded_array = jax.make_array_from_callback(
-                    transformed_weight.shape,
-                    NamedSharding(self.mesh, P(*model_weight.sharding)),
-                    get_slice)
-                model_weight.value = sharded_array
+                # Single regular-tensor load call (BF16 or dequantized MXFP4)
+                cast_type = model_weight.value.dtype
+                self._load_regular_param(
+                    model_weight=model_weight,
+                    loaded_weight=prepared_weight,
+                    cast_type=cast_type,
+                    transform_fn=transform_fn,
+                    target_shape=target_shape,
+                    jax_path_template=jax_path_template,
+                )
 
                 if is_verbose:
                     print_param_info(model_weight, loaded_name)
 
         nnx.update(self, model_params)
+
+    def _build_mxfp4_pool(self, names_and_weights_generator, mappings):
+        """Collect MXFP4 weights into a pool keeping tuples (blocks_u8, scales_u8).
+
+        Combines *_blocks and *_scales pairs and stores uint8 tensors together.
+        Non-expert tensors are kept as-is. Raises if any expert bundle is incomplete.
+        """
+        pool: dict[str, torch.Tensor | tuple] = {}
+        pending_experts: dict[str, dict[str, torch.Tensor]] = {}
+        for loaded_name, loaded_weight in names_and_weights_generator:
+            if loaded_name.endswith("_blocks") or loaded_name.endswith(
+                    "_scales"):
+                base = loaded_name[:-7]
+                entry = pending_experts.setdefault(base, {})
+                if loaded_name.endswith("_blocks"):
+                    entry["blocks"] = loaded_weight
+                else:
+                    entry["scales"] = loaded_weight
+
+                # If we have both parts, place raw pair into the main pool
+                if "blocks" in entry and "scales" in entry:
+                    hf_pattern = re.sub(r"layers\.(\d+)", "layers.*", base)
+                    if hf_pattern not in mappings:
+                        raise ValueError(
+                            f"No mapping found for expert tensor: {base}")
+                    pool[base] = (entry["blocks"], entry["scales"])
+                    # Remove from pending to free memory
+                    pending_experts.pop(base, None)
+            else:
+                pool[loaded_name] = loaded_weight
+
+        # Enforce completeness of expert bundles
+        if pending_experts:
+            details = []
+            for base, entry in pending_experts.items():
+                missing = [k for k in ("blocks", "scales") if k not in entry]
+                details.append(
+                    f"{base} (missing: {', '.join(missing) if missing else 'unknown'})"
+                )
+            raise RuntimeError(
+                "Incomplete MXFP4 expert bundle(s) encountered: " +
+                ", ".join(details))
+        return pool
+
+    def _load_mxfp4(self,
+                    model_weight,
+                    codes_fp32_t,
+                    scales_fp32_t,
+                    transform_fn=None):
+        """Assign decoded MXFP4 codes/scales into a QArray (qvalue/scale)."""
+
+        qv = model_weight.array.qvalue
+        sv = model_weight.array.scale
+        q_dtype = qv.value.dtype
+        s_dtype = sv.value.dtype
+
+        exp_q_shape = tuple(qv.value.shape)
+        exp_s_shape = tuple(sv.value.shape)
+
+        # Apply optional transform (e.g., swap last two dims) before conversion
+        if transform_fn is not None:
+            codes_fp32_t = transform_fn(codes_fp32_t, None)
+            scales_fp32_t = transform_fn(scales_fp32_t, None)
+
+        # Convert from torch.Tensor to numpy before creating JAX arrays
+        codes_fp32_t = codes_fp32_t.detach().cpu().numpy()
+        scales_fp32_t = scales_fp32_t.detach().cpu().numpy()
+
+        codes_jnp = jnp.asarray(codes_fp32_t).astype(q_dtype)
+        scales_jnp = jnp.asarray(scales_fp32_t).astype(s_dtype)
+
+        def get_q_slice(index):
+            return codes_jnp[index]
+
+        def get_s_slice(index):
+            return scales_jnp[index]
+
+        q_sharded = jax.make_array_from_callback(
+            exp_q_shape, NamedSharding(self.mesh, P(*qv.sharding)),
+            get_q_slice)
+        s_sharded = jax.make_array_from_callback(
+            exp_s_shape, NamedSharding(self.mesh, P(*sv.sharding)),
+            get_s_slice)
+
+        model_weight.array.qvalue.value = q_sharded
+        model_weight.array.scale.value = s_sharded
+
+    def _load_regular_param(self, model_weight, loaded_weight: torch.Tensor,
+                            cast_type, transform_fn, target_shape,
+                            jax_path_template: str):
+        """Assign a regular tensor (non-MXFP4) into the model param with transform applied."""
+        if jax_path_template == "layers.*.attn.sinks_N":
+            # Checkpoint is bf16, but we have to upcast sinks to f32, as required by RPA_v3 kernel
+            weight_np = jnp.array(loaded_weight.to(torch.float32).numpy())
+        else:
+            torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+            if torch_view_type:
+                weight_np = jnp.array(
+                    loaded_weight.view(torch_view_type).numpy()).view(
+                        cast_type)
+            else:
+                raise ValueError(
+                    f"Unsupported dtype for tensor conversion: {cast_type}")
+
+        transformed_weight = transform_fn(
+            weight_np, target_shape) if transform_fn else weight_np
+
+        if model_weight.value.shape != transformed_weight.shape:
+            raise ValueError(
+                f"Shape mismatch: model expects {model_weight.value.shape}, but got {transformed_weight.shape} after transform."
+            )
+
+        def get_slice(index):
+            return transformed_weight[index]
+
+        sharded_array = jax.make_array_from_callback(
+            transformed_weight.shape,
+            NamedSharding(self.mesh, P(*model_weight.sharding)), get_slice)
+        model_weight.value = sharded_array
 
     def __call__(
         self,

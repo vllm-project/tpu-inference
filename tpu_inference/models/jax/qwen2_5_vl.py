@@ -14,9 +14,9 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
 from vllm.config import VllmConfig
 
 from tpu_inference import utils as utils
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.jax.attention_interface import \
+from tpu_inference.layers.common.attention_interface import \
     sharded_flash_attention
+from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.qwen2 import Qwen2ForCausalLM
 # from vllm.model_executor.models.interfaces import MultiModalEmbeddings
@@ -486,6 +486,11 @@ class Qwen2_5_VisionTransformer(nnx.Module):
             dtype=dtype,
             rngs=rngs)
 
+        additional_config = getattr(vllm_config, "additional_config",
+                                    None) or {}
+        self.enable_dynamic_image_sizes = additional_config.get(
+            "enable_dynamic_image_sizes", False)
+
     def rotary_pos_emb_thw(self, t, h, w):
         hpos_ids, wpos_ids = jnp.indices((h, w))
         hpos_ids = hpos_ids.reshape(
@@ -579,21 +584,7 @@ class Qwen2_5_VisionTransformer(nnx.Module):
         seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
         return max_seqlen, seqlens
 
-    def __call__(self, x: jax.Array, grid_thw: tuple[tuple[int, int,
-                                                           int]]) -> jax.Array:
-        # x: pixel_values: jax.Array
-        # """Shape:
-        # `(num_patches, num_channels * patch_size * patch_size)`
-        # """
-
-        # grid_thw: image_grid_thw: jax.Array
-        # """Shape: `(num_images, 3)`
-        # This should be in `(grid_t, grid_h, grid_w)` format.
-        # """
-        hidden_states = self.patch_embed(x)
-
-        # num of patches
-        seq_len = x.shape[0]
+    def compute_aux_arrays(self, grid_thw: tuple[tuple[int, int, int]]):
         # num of images/videoes
         num_grids = len(grid_thw)
 
@@ -638,6 +629,42 @@ class Qwen2_5_VisionTransformer(nnx.Module):
         cu_seqlens = jnp.pad(cu_seqlens, ((1, 0), ),
                              mode='constant',
                              constant_values=0)
+        return window_index, rotary_pos_emb, cu_seqlens, cu_window_seqlens
+
+    def pad_inputs(self, x, window_index, rotary_pos_emb, cu_seqlens,
+                   cu_window_seqlens):
+        # padding
+        num_patches = int(rotary_pos_emb.shape[0])
+        bucket_num_patches = 1 << (num_patches - 1).bit_length()
+        num_tokens = window_index.shape[0]
+        bucket_num_tokens = bucket_num_patches // self.spatial_merge_unit
+        vit_merger_window_size = (self.window_size //
+                                  self.spatial_merge_size // self.patch_size)
+        max_windows = (bucket_num_tokens // vit_merger_window_size) + 2
+
+        rotary_pos_emb = jnp.pad(rotary_pos_emb,
+                                 ((0, bucket_num_patches - num_patches),
+                                  (0, 0)))
+        window_index = jnp.concatenate([
+            window_index,
+            jnp.arange(num_tokens, bucket_num_tokens, dtype=jnp.int32)
+        ])
+        cu_window_seqlens = jnp.append(cu_window_seqlens, bucket_num_patches)
+        pad_w = max(0, max_windows + 1 - cu_window_seqlens.shape[0])
+        cu_window_seqlens = jnp.pad(cu_window_seqlens, (0, pad_w), mode='edge')
+        cu_seqlens = jnp.append(cu_seqlens, bucket_num_patches)
+
+        x_padded = jnp.pad(x, ((0, bucket_num_patches - x.shape[0]), (0, 0)))
+
+        return x_padded, window_index, rotary_pos_emb, cu_seqlens, cu_window_seqlens, num_tokens
+
+    def compute_hidden_states(self, x: jax.Array, window_index: jax.Array,
+                              rotary_pos_emb: jax.Array, cu_seqlens: jax.Array,
+                              cu_window_seqlens: jax.Array) -> jax.Array:
+        hidden_states = self.patch_embed(x)
+
+        # num of patches
+        seq_len = x.shape[0]
 
         hidden_states = hidden_states.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
@@ -663,6 +690,48 @@ class Qwen2_5_VisionTransformer(nnx.Module):
         reverse_indices = jnp.argsort(window_index)
         hidden_states = hidden_states[reverse_indices, :]
         return hidden_states
+
+    @jax.jit
+    def encode_padded_jit(self, x_padded, window_index, rotary_pos_emb,
+                          cu_seqlens, cu_window_seqlens):
+        return self.compute_hidden_states(x_padded, window_index,
+                                          rotary_pos_emb, cu_seqlens,
+                                          cu_window_seqlens)
+
+    @partial(
+        jax.jit,
+        static_argnames=("grid_thw", ),
+    )
+    def encode_jit(self, x, grid_thw):
+        window_index, rotary_pos_emb, cu_seqlens, cu_window_seqlens = self.compute_aux_arrays(
+            grid_thw)
+        return self.compute_hidden_states(x, window_index, rotary_pos_emb,
+                                          cu_seqlens, cu_window_seqlens)
+
+    def __call__(self, x: jax.Array, grid_thw: tuple[tuple[int, int,
+                                                           int]]) -> jax.Array:
+        # x: pixel_values: jax.Array
+        # """Shape:
+        # `(num_patches, num_channels * patch_size * patch_size)`
+        # """
+
+        # grid_thw: image_grid_thw: jax.Array
+        # """Shape: `(num_images, 3)`
+        # This should be in `(grid_t, grid_h, grid_w)` format.
+        # """
+        if self.enable_dynamic_image_sizes:
+            window_index, rotary_pos_emb, cu_seqlens, cu_window_seqlens = self.compute_aux_arrays(
+                grid_thw)
+            x_padded, window_index, rotary_pos_emb, cu_seqlens, cu_window_seqlens, num_tokens = self.pad_inputs(
+                x, window_index, rotary_pos_emb, cu_seqlens, cu_window_seqlens)
+
+            hidden_states = self.encode_padded_jit(x_padded, window_index,
+                                                   rotary_pos_emb, cu_seqlens,
+                                                   cu_window_seqlens)
+            return hidden_states[:num_tokens]
+
+        else:
+            return self.encode_jit(x, grid_thw)
 
 
 class Qwen2_5_VLForConditionalGeneration(nnx.Module):
@@ -888,10 +957,6 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             #         "video"] = self._parse_and_validate_video_input(**kwargs)
         return mm_input_by_modality
 
-    @partial(
-        jax.jit,
-        static_argnames=("image_grid_thw", ),
-    )
     def get_single_image_embedding(self, image_pixel_values, image_grid_thw):
         return self.visual(image_pixel_values, (image_grid_thw, ))
 
@@ -959,14 +1024,13 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
 
     def get_input_embeddings(
             self, input_ids: jax.Array,
-            multimodal_embeddings: Optional[MultiModalEmbeddings]
-    ) -> jax.Array:
+            multimodal_embeddings: Optional[jax.Array]) -> jax.Array:
 
         inputs_embeds = self.language_model.model.embed(input_ids)
 
 
         if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
+            and multimodal_embeddings.shape[0] != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
                 [self.config.image_token_id, self.config.video_token_id])
@@ -1062,8 +1126,93 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
                 "lm_head": "language_model.model.lm_head",
             })
 
-        metadata_map = get_default_maps(self.vllm_config, self.mesh, mappings)
+        metadata_map = get_default_maps(self.vllm_config.model_config,
+                                        self.mesh, mappings)
         load_hf_weights(vllm_config=self.vllm_config,
                         model=self,
                         metadata_map=metadata_map,
                         mesh=self.mesh)
+
+    def precompile_vision_encoder(
+        self,
+        run_compilation_fn: Callable,
+    ) -> None:
+        vc = self.vllm_config.model_config.hf_config.vision_config
+        patch_input_dim = vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size
+        if self.visual.enable_dynamic_image_sizes:
+            spatial_merge_unit = vc.spatial_merge_size**2
+            max_num_batched_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
+            mm_kwargs = self.vllm_config.model_config.multimodal_config.mm_processor_kwargs or {}
+            limit_pixels = float(mm_kwargs.get("max_pixels", float('inf')))
+
+            max_patches = int(
+                min(max_num_batched_tokens * spatial_merge_unit,
+                    limit_pixels / (vc.patch_size**2)))
+
+            num_patches_paddings = [
+                1 << i for i in range(4, (max_patches - 1).bit_length() + 1)
+            ]
+            rotary_dim = vc.hidden_size // vc.num_heads // 2
+            vit_merger_window_size = (vc.window_size //
+                                      vc.spatial_merge_size // vc.patch_size)
+
+            for num_patches in num_patches_paddings:
+                dummy_x_padded = jnp.ones(
+                    (num_patches, patch_input_dim),
+                    dtype=self.vllm_config.model_config.dtype)
+
+                num_tokens = num_patches // spatial_merge_unit
+                dummy_window_index = jnp.arange(num_tokens, dtype=jnp.int32)
+
+                dummy_rotary_pos_emb = jnp.ones(
+                    (num_patches, rotary_dim),
+                    dtype=self.vllm_config.model_config.dtype)
+
+                dummy_cu_seqlens = jnp.array([0, num_patches, num_patches],
+                                             dtype=jnp.int32)
+
+                max_windows = (num_tokens // vit_merger_window_size) + 2
+                patches_per_window = (vit_merger_window_size**
+                                      2) * spatial_merge_unit
+                dummy_cu_window_seqlens = jnp.arange(
+                    max_windows + 1, dtype=jnp.int32) * patches_per_window
+                dummy_cu_window_seqlens = jnp.minimum(dummy_cu_window_seqlens,
+                                                      num_patches)
+
+                run_compilation_fn("vision_encoder_padded",
+                                   self.visual.encode_padded_jit,
+                                   dummy_x_padded,
+                                   dummy_window_index,
+                                   dummy_rotary_pos_emb,
+                                   dummy_cu_seqlens,
+                                   dummy_cu_window_seqlens,
+                                   num_patches=num_patches)
+        else:
+            image_shapes = []
+            if (warmup_config := self.vllm_config.additional_config.get(
+                    "vision_warmup_config")):
+                image_shapes = warmup_config.get("image_shapes")
+
+            factor = vc.patch_size * vc.spatial_merge_size
+            for input_hw in image_shapes:
+                if not isinstance(input_hw, list) or len(input_hw) != 2:
+                    logger.warning(f"Skipping invalid shape {input_hw}.")
+                    continue
+                h_input, w_input = input_hw
+                h_processed = round(h_input / factor) * factor
+                w_processed = round(w_input / factor) * factor
+                t, h, w = 1, h_processed // vc.patch_size, w_processed // vc.patch_size
+                grid_thw = (t, h, w)
+                num_patches = t * h * w
+
+                dummy_pixel_values = jnp.ones(
+                    (num_patches, patch_input_dim),
+                    self.vllm_config.model_config.dtype,
+                )
+                dummy_grid_thw = (grid_thw, )
+
+                run_compilation_fn("vision_encoder",
+                                   self.visual.encode_jit,
+                                   dummy_pixel_values,
+                                   dummy_grid_thw,
+                                   image_shape=input_hw)

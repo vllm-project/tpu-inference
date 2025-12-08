@@ -50,7 +50,7 @@ def sanity_check_mm_encoder_outputs(
         "of the model's `get_multimodal_embeddings` method.")
 
 
-def _flatten_embeddings(embeddings: NestedTensors) -> jax.Array:
+def flatten_embeddings(embeddings: NestedTensors) -> jax.Array:
     """
     Recursively flattens and concatenates NestedTensors on all but the last
     dimension.
@@ -59,8 +59,7 @@ def _flatten_embeddings(embeddings: NestedTensors) -> jax.Array:
     if isinstance(embeddings, jax.Array):
         return embeddings.reshape(-1, embeddings.shape[-1])
 
-    return jnp.concatenate([_flatten_embeddings(t) for t in embeddings],
-                           axis=0)
+    return jnp.concatenate([flatten_embeddings(t) for t in embeddings], axis=0)
 
 
 def _embedding_count_expression(embeddings: NestedTensors) -> str:
@@ -79,7 +78,7 @@ def _embedding_count_expression(embeddings: NestedTensors) -> str:
 def _merge_multimodal_embeddings(
     inputs_embeds: jax.Array,
     is_multimodal: jax.Array,
-    multimodal_embeddings: NestedTensors,
+    multimodal_embeddings: jax.Array,
 ) -> jax.Array:
     """
     Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the
@@ -89,7 +88,6 @@ def _merge_multimodal_embeddings(
     Note:
         This returns a new array with the updated values.
     """
-    flattened = _flatten_embeddings(multimodal_embeddings)
     # The check for matching number of tokens is removed as it is not
     # JIT-compatible. If the shapes mismatch, JAX will raise an error
     # during execution anyway. The user-friendly error message is
@@ -99,10 +97,11 @@ def _merge_multimodal_embeddings(
     # NonConcreteBooleanIndexError.
     # Create a dummy row to handle indices for non-multimodal tokens.
     # The content of the dummy row does not matter as it will be masked out.
-    dummy_row = jnp.zeros_like(flattened[0:1])
+    dummy_row = jnp.zeros_like(multimodal_embeddings[0:1])
 
     # Prepend the dummy row to the flattened embeddings.
-    flattened_padded = jnp.concatenate([dummy_row, flattened], axis=0)
+    flattened_padded = jnp.concatenate([dummy_row, multimodal_embeddings],
+                                       axis=0)
 
     # Create gather indices. For each token in the input sequence, this gives
     # the index into `flattened_padded`.
@@ -121,7 +120,7 @@ def _merge_multimodal_embeddings(
 def merge_multimodal_embeddings(
     input_ids: jax.Array,
     inputs_embeds: jax.Array,
-    multimodal_embeddings: NestedTensors,
+    multimodal_embeddings: jax.Array,
     placeholder_token_id: Union[int, list[int]],
 ) -> jax.Array:
     """

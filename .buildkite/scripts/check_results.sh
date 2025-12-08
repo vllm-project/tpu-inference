@@ -23,11 +23,11 @@ done
 
 if [ "${ANY_FAILED}" = "true" ] ; then
     cat <<- YAML | buildkite-agent pipeline upload
-    steps:
-    - label: "${FAILURE_LABEL}"
-        agents:
-        queue: tpu_v6_queue
-        command: echo "${FAILURE_LABEL}"
+steps:
+   - label: "${FAILURE_LABEL}"
+     agents:
+       queue: cpu
+     command: echo "${FAILURE_LABEL}"
 YAML
     exit 1
 else

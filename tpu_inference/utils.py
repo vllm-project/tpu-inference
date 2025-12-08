@@ -1,38 +1,67 @@
 # SPDX-License-Identifier: Apache-2.0
-import os
+import time
 from collections import defaultdict
 from collections.abc import Sequence
+from functools import wraps
 from typing import Any, Callable, List, Tuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import torch
 from jax._src import dtypes
 from jax._src import mesh as mesh_lib
 from jax._src import xla_bridge as xb
 from jax._src.lib import xla_client as xc
+from jax._src.numpy.scalar_types import _ScalarMeta
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from vllm import envs, utils
+from torchax.ops.mappings import j2t_dtype, t2j_dtype
+from vllm import envs as vllm_envs
+from vllm import utils
 
+from tpu_inference import envs
 from tpu_inference.logger import init_logger
 
 GBYTES = 1024 * 1024 * 1024
 TPU_HEAD_SIZE_ALIGNMENT = 128
 TPU_SECOND_LAST_MINOR = 8
 
-# This is used to translate from a string name for a dtype
-# to formal jax.numpy DType.  One use case for this is
-# converting the `--kv_cache_dtype` flag to a dtype.
-TPU_STR_DTYPE_TO_JAX_DTYPE = {
-    "bfloat16": jnp.bfloat16,
-    "fp8": jnp.float8_e4m3fn,
-    "fp8_e4m3": jnp.float8_e4m3,
-    "fp8_e5m2": jnp.float8_e5m2,
-    "int8": jnp.int8,
+# Map vllm dtype string that doesn't exactly match jax dtype string name.
+_VLLM_DTYPE_STR_TO_JAX_DTYPE = {
+    "fp8": jnp.float8_e4m3fn.dtype,
+    "fp8_e4m3": jnp.float8_e4m3fn.dtype,
+    "fp8_e5m2": jnp.float8_e5m2.dtype,
 }
+
+
+def to_jax_dtype(dtype: str | jnp.dtype | torch.dtype) -> jnp.dtype:
+    if isinstance(dtype, str):
+        if dict_dtype := _VLLM_DTYPE_STR_TO_JAX_DTYPE.get(dtype, None):
+            return dict_dtype
+        return jnp.dtype(dtype)
+    elif isinstance(dtype, torch.dtype):
+        return t2j_dtype(dtype)
+    elif isinstance(dtype, jnp.dtype):
+        return dtype
+    elif isinstance(dtype, _ScalarMeta):
+        return dtype.dtype
+    else:
+        raise ValueError(f"Argument is unsupported data type {type(dtype)}")
+
+
+def to_torch_dtype(dtype: str | jnp.dtype | torch.dtype) -> torch.dtype:
+    # Use jax dtype as an intermediate dtype which we'll be used to convert it
+    # into torch dtype.
+    dtype = to_jax_dtype(dtype)
+    return j2t_dtype(dtype)
+
 
 _megacore = False
 logger = init_logger(__name__)
+
+
+def align_to(unpadded_dim, pad_multiple):
+    return (unpadded_dim + pad_multiple - 1) // pad_multiple * pad_multiple
 
 
 def enable_megacore() -> None:
@@ -55,10 +84,10 @@ def get_num_kv_heads_by_tp(num_kv_heads: int, tp_size: int) -> int:
 
 def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
     usage = []
-    if envs.VLLM_TPU_USING_PATHWAYS:
+    if vllm_envs.VLLM_TPU_USING_PATHWAYS:
         return pathways_hbm_usage_gb(devices)
 
-    multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "").lower()
+    multihost_backend = envs.TPU_MULTIHOST_BACKEND
     if multihost_backend == "ray":
         # MemoryStats is only supported for addressable PjRt devices.
         # Assume all the devices have similar memory usage for now.
@@ -130,12 +159,8 @@ def pathways_hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
     hbm_used = defaultdict(int)
     hbm_limit = get_device_hbm_limit()
     for array in live_arrays:
-        assert hasattr(array, 'sharding') and hasattr(
-            array.sharding, 'device_set'
-        ), "This function must not be called within jax tracer (e.g. jit, vmap, grad)"
-        for device in array.sharding.device_set:
-            hbm_used[device] += array.dtype.itemsize * array.size // len(
-                array.sharding.device_set)
+        for buffer in array.addressable_shards:
+            hbm_used[buffer.data.device] += buffer.data.nbytes
     return [(hbm_used[device], hbm_limit) for device in devices]
 
 
@@ -148,6 +173,10 @@ def hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
 
 def get_padded_head_dim(head_dim: int) -> int:
     """Pads head_dim up to the nearest multiple of 128 for kernel performance."""
+    # When head_dim == 64, we use kernel specificly optimized for it which does
+    # not require any padding.
+    if head_dim == 64:
+        return 64
     return (head_dim + 127) // 128 * 128
 
 
@@ -246,11 +275,11 @@ def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:
 
 def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:
     """
-    A wrapper function of vllm.utils.get_hash_fn_by_name to support builtin
+    A wrapper function of vllm.utils.hashing.get_hash_fn_by_name to support builtin
     """
     if hash_fn_name == "builtin":
         return hash
-    return utils.get_hash_fn_by_name(hash_fn_name)
+    return utils.hashing.get_hash_fn_by_name(hash_fn_name)
 
 
 def quantize_kv(key: jax.Array, value: jax.Array,
@@ -292,5 +321,24 @@ def get_jax_dtype_from_str_dtype(str_dtype: str) -> jnp.dtype:
     Returns:
         jnp.dtype: The JAX dtype.
     """
-    str_dtype = str_dtype.lower().strip()
-    return TPU_STR_DTYPE_TO_JAX_DTYPE.get(str_dtype)
+    # TODO(kyuyeunk): Replace all reference of this function into TpuDtype.
+    return to_jax_dtype(str_dtype)
+
+
+def time_function(func):
+    """
+    A decorator to measure the execution time of a function.
+    """
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.perf_counter()
+        result = func(*args, **kwargs)
+        end_time = time.perf_counter()
+        execution_time = end_time - start_time
+        logger.debug(
+            f"Function '{func.__name__}' executed in {execution_time:.4f} seconds."
+        )
+        return result
+
+    return wrapper

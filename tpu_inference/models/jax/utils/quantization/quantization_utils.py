@@ -54,6 +54,46 @@ DEFAULT_DEEPSEEK_FP8_CONFIG = {
     }
 }
 
+DEFAULT_LLAMA4_FP8_CONFIG = {
+    "qwix": {
+        "use_abstract_model":
+        True,
+        "scale_dtype":
+        "bfloat16",
+        "rules": [
+            {
+                "module_path": "layers.*.moe_ffw",
+                "op_names": "einsum",
+                "weight_qtype": "float8_e4m3fn",
+                "act_qtype": "float8_e4m3fn",
+            },
+        ],
+    }
+}
+
+# Default Qwix config for GPT-OSS MXFP4 checkpoints.
+# Notes:
+# - We quantize only the MoE expert weights by default (router stays in BF16).
+# - We use Qwix's abstract-model path so weights can be set directly into QArray
+#   fields during weight loading (similar to DeepSeek's flow).
+# - Activation quantization is not set but Qwix would pickup MoE sum if activated
+DEFAULT_GPT_OSS_FP4_CONFIG = {
+    "qwix": {
+        "use_abstract_model":
+        True,
+        "scale_dtype":
+        "bfloat16",
+        "rules": [
+            {
+                "module_path": ".*custom_module",
+                "weight_qtype": "float4_e2m1fn",
+                "act_qtype": None,
+                "tile_size": 32,
+            },
+        ],
+    }
+}
+
 
 def parse_qwix_config_to_rules(
         qwix_config: List[dict]) -> List[qwix.QuantizationRule]:
@@ -114,12 +154,9 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
     logger.info(f"Memory usage before applying quantization of params: "
                 f"hbm={utils.hbm_usage_gb(jax.local_devices())}Gb")
 
-    # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
-    kv_cache_jnp_dtype = utils.get_jax_dtype_from_str_dtype(kv_cache_dtype)
-
-    # Handle the case where kv_cache_dtype is "auto"
-    if kv_cache_jnp_dtype is None:
-        assert kv_cache_dtype == "auto", "kv_cache_dtype must be 'auto' if kv_cache_jnp_dtype is None"
+    if kv_cache_dtype != "auto":
+        kv_cache_jnp_dtype = utils.to_jax_dtype(kv_cache_dtype)
+    else:
         kv_cache_jnp_dtype = DEFAULT_KV_CACHE_DTYPE
 
     kv_caches = create_kv_caches(
@@ -129,7 +166,11 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
         head_size=kv_cache_head_size,
         mesh=mesh,
         layer_names=[f"layer.{i}" for i in range(num_hidden_layers)],
-        cache_dtype=kv_cache_jnp_dtype)
+        cache_dtype=kv_cache_jnp_dtype,
+        use_mla=model.vllm_config.model_config.use_mla,
+    )
+
+    dp_size = model.vllm_config.sharding_config.total_dp_size
 
     # NOTE: the inputs don't need to match the actual ones, as long as the consumed weights are the same
     input_ids = jax.random.randint(rng,
@@ -149,7 +190,7 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
                                       100,
                                       dtype=jnp.int32)
     query_start_loc = jax.random.randint(
-        rng, (DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS + 1, ),
+        rng, (DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS + dp_size, ),
         0,
         100,
         dtype=jnp.int32)
@@ -159,7 +200,8 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
                                   100,
                                   dtype=jnp.int32)
     num_seqs = jax.random.randint(rng, (1, ), 0, 100, dtype=jnp.int32)
-    request_distribution = jnp.array([0, 0, num_seqs[0]], dtype=jnp.int32)
+    request_distribution = jnp.array([0, 0, num_seqs[0]] * dp_size,
+                                     dtype=jnp.int32)
 
     (input_ids, positions, block_tables,
      query_start_loc, seq_lens, request_distribution) = device_array(
@@ -301,11 +343,28 @@ def apply_qwix_quantization(
 
         return model_or_model_fn
 
+    hf_config = vllm_config.model_config.hf_config
+    if hasattr(hf_config, "text_config") and hasattr(hf_config.text_config,
+                                                     "num_hidden_layers"):
+        num_hidden_layers = hf_config.text_config.num_hidden_layers
+        logger.info(
+            f"Using num_hidden_layers from hf_config.text_config: {num_hidden_layers}"
+        )
+    elif hasattr(hf_config, "num_hidden_layers"):
+        num_hidden_layers = hf_config.num_hidden_layers
+        logger.info(
+            f"Using num_hidden_layers directly from hf_config: {num_hidden_layers}"
+        )
+    else:
+        raise AttributeError(
+            "Could not find 'num_hidden_layers' in hf_config or hf_config.text_config."
+        )
+
     qwix_quantize_fn_for_eval = functools.partial(
         qwix_quantize_nnx_model,
         qwix_config=qwix_config,
         mesh=mesh,
-        num_hidden_layers=vllm_config.model_config.hf_config.num_hidden_layers,
+        num_hidden_layers=num_hidden_layers,
         kv_cache_block_size=block_size,
         kv_cache_num_kv_heads=num_kv_heads,
         kv_cache_head_size=head_size,
@@ -361,6 +420,11 @@ def get_default_qwix_quantization_config(
     # TODO (jacobplatin): remove this so that we can support various quantization types
     if model_type == "deepseek_v3" and quant_method == "fp8":
         return DEFAULT_DEEPSEEK_FP8_CONFIG
+    elif model_type == "llama4" and quant_method == "compressed-tensors":
+        return DEFAULT_LLAMA4_FP8_CONFIG
+    # MXFP4 (GPT-OSS): provide a default configuration to quantize MoE experts via Qwix
+    elif model_type == "gpt_oss" and quant_method == "mxfp4":
+        return DEFAULT_GPT_OSS_FP4_CONFIG
 
 
 def update_vllm_config_for_qwix_quantization(vllm_config: "VllmConfig"):

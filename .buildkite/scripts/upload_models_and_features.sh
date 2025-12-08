@@ -1,7 +1,7 @@
 #!/bin/bash
 
 BUILDKITE_DIR=".buildkite"
-TARGET_FOLDERS="models features"
+TARGET_FOLDERS="models features parallelism quantization"
 MODEL_LIST_KEY="model-list"
 FEATURE_LIST_KEY="feature-list"
 
@@ -40,6 +40,12 @@ for folder_path in $TARGET_FOLDERS; do
         "features")
           feature_list+=("${subject_name}")
           ;;
+        "parallelism")
+          feature_list+=("${subject_name}")
+          ;;
+        "quantization")
+          feature_list+=("${subject_name}")
+          ;;
       esac
     fi
 
@@ -48,7 +54,7 @@ for folder_path in $TARGET_FOLDERS; do
 - label: "Upload: ${yml_file}"
   command: "buildkite-agent pipeline upload ${yml_file}"
   agents:
-    queue: tpu_v6e_queue
+    queue: cpu
 EOF
 )
 

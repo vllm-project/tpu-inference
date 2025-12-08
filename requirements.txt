@@ -1,17 +1,18 @@
-tpu-info==0.4.0  # pinning to 0.4.0 as newer version leads to segmentation fault on TPU https://github.com/vllm-project/vllm/pull/23135
+tpu-info==0.7.1
 yapf==0.43.0
 pytest
 pytest-mock
 absl-py
 numpy
 google-cloud-storage
-jax==0.7.2
-jaxlib==0.7.2
-libtpu==0.0.23
+jax[tpu]==0.8.0
+jaxlib==0.8.0
 jaxtyping
 flax==0.11.1
-torchax==0.0.7
+torchax==0.0.10
 qwix==0.1.1
-torchvision==0.23.0
+torchvision==0.24.0
 pathwaysutils
 parameterized
+numba==0.62.1
+runai-model-streamer[s3,gcs]==0.15.0

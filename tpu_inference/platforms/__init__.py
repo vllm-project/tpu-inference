@@ -1,2 +1,2 @@
 # ruff: noqa
-from tpu_inference.platforms.tpu_jax import TpuPlatform
+from tpu_inference.platforms.tpu_platform import TpuPlatform

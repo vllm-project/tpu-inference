@@ -12,18 +12,27 @@ from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
+import torch
+import torchax
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from safetensors import safe_open
+from vllm.config import VllmConfig
 
-from tpu_inference import utils
+from tpu_inference import envs, utils
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils import file_utils
 
 logger = init_logger(__name__)
 
 HF_WEIGHTS_FORMAT = "*.safetensors"
+
+DTYPE_VIEW_MAP = {
+    jnp.dtype(jnp.float8_e4m3fn): torch.uint8,
+    jnp.dtype(jnp.bfloat16): torch.uint16,
+    jnp.dtype(jnp.float32): torch.uint32,
+}
 
 
 @dataclass
@@ -58,7 +67,13 @@ def transpose_params(param_key: str, param_tensor: jax.Array, transpose_map):
 def reshape_params(param_key: str, param_tensor: jax.Array, shape_map):
     for key, new_shape in shape_map.items():
         if key in param_key:
-            return jnp.reshape(param_tensor, new_shape)
+            try:
+                #TODO:(gpolovets) Add validation on whether reshape preserves data layout.
+                return jnp.reshape(param_tensor, new_shape)
+            except TypeError:
+                raise TypeError(
+                    f"Cannot reshape for key={key}, new_shape={new_shape}, param_shape={param_tensor.shape}"
+                )
     return param_tensor  # Base case / no-op
 
 
@@ -80,6 +95,18 @@ def model_weights_generator(
         for name, weight_tensor in model_weights_single_file_generator(
                 st_file, framework, filter_regex):
             yield name, weight_tensor
+
+
+def convert_torch_to_jax_with_view(loaded_weight: torch.Tensor,
+                                   cast_type: jnp.dtype) -> jax.Array:
+    """
+    Converts a PyTorch tensor to a JAX array by reinterpreting its
+    bit representation using a dtype view map.
+    """
+    torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+    loaded_weight = jnp.array(
+        loaded_weight.view(torch_view_type).numpy()).view(cast_type)
+    return loaded_weight
 
 
 ############ END Used by llama4, deepseek only for now END ############
@@ -178,12 +205,11 @@ def shard_put(x: jax.Array, shardings, mesh: jax.sharding.Mesh) -> jax.Array:
         return jax.device_put(x, shardings)
 
 
-def get_default_maps(vllm_config, mesh: Mesh,
+def get_default_maps(model_config, mesh: Mesh,
                      name_map: dict[str, str]) -> MetadataMap:
     """Load weights from one model weights file to the model, run on single thread."""
     sharding_size = mesh.shape["model"]
 
-    model_config = vllm_config.model_config
     hf_config = model_config.hf_config
 
     num_heads = hf_config.num_attention_heads
@@ -247,14 +273,15 @@ def get_default_maps(vllm_config, mesh: Mesh,
                        bias_pad_map=bias_pad_keys)
 
 
-def _load_hf_weights_on_thread(vllm_config,
-                               params: nnx.State,
-                               metadata_map: MetadataMap,
-                               mesh: Mesh,
-                               weights_file: str,
-                               filter_regex: str | None = None,
-                               keep_original_dtype_keys_regex: list[str]
-                               | None = None):
+def _load_and_shard_weight(vllm_config,
+                           params: nnx.State,
+                           shardings: Any,
+                           metadata_map: MetadataMap,
+                           mesh: Mesh,
+                           hf_key: str,
+                           hf_weight: jax.Array,
+                           keep_original_dtype_keys_regex: list[str]
+                           | None = None):
     name_map = metadata_map.name_map
     reshape_keys = metadata_map.reshape_map
     bias_reshape_keys = metadata_map.bias_reshape_map
@@ -271,6 +298,118 @@ def _load_hf_weights_on_thread(vllm_config,
     head_dim = utils.get_padded_head_dim(head_dim_original)
     head_dim_pad = head_dim - head_dim_original
 
+    # Check if the key should retain its original dtype
+    keep_original_dtype = False
+    if keep_original_dtype_keys_regex:
+        for pattern in keep_original_dtype_keys_regex:
+            if re.match(pattern, hf_key):
+                keep_original_dtype = True
+                break
+
+    # Converting to config's dtype
+    if not keep_original_dtype and hf_weight.dtype != model_config.dtype:
+        logger.warning(
+            f"Converting dtype for {hf_key} from {hf_weight.dtype} to {model_config.dtype}"
+        )
+        hf_weight = hf_weight.astype(model_config.dtype)
+
+    if hf_key.endswith(".weight"):
+        hf_key = hf_key.removesuffix(".weight")
+
+    # Find the corresponding model key using the HF key
+    if "layers" in hf_key:
+        layer_num = re.search(r"layers\.(\d+)", hf_key).group(1)
+        layer_key = re.sub(r"layers\.\d+", "layers.*", hf_key)
+        model_key = name_map[layer_key]
+        model_key = re.sub(r"layers\.\*", f"layers.{layer_num}", model_key)
+    elif "blocks" in hf_key:
+        layer_num = re.search(r"blocks\.(\d+)", hf_key).group(1)
+        layer_key = re.sub(r"blocks\.\d+", "blocks.*", hf_key)
+        model_key = name_map[layer_key]
+        model_key = re.sub(r"blocks\.\*", f"blocks.{layer_num}", model_key)
+    else:
+        if hf_key not in name_map and hf_key == "lm_head":
+            logger.warning(f"Skip loading {hf_key} due to tie_word_embeddings")
+            return
+        if hf_key not in name_map and "t2d" in hf_key:
+            logger.warning(
+                f"Skip loading {hf_key} as it's not used in eagle-3 for now")
+            return
+        model_key = name_map.get(hf_key, hf_key)
+
+    model_weight, model_sharding = get_param_and_sharding(
+        params, shardings, model_key)
+
+    logger.debug(
+        "before transform | "
+        f"{hf_key}: {hf_weight.shape} --> {model_key}: {model_weight.value.shape} {model_sharding}"
+    )
+
+    if hf_key.endswith(".bias"):
+        for key in bias_reshape_keys:
+            if key in hf_key:
+                hf_weight = jnp.reshape(hf_weight, bias_reshape_keys[key])
+                if head_dim_pad > 0:
+                    hf_weight = jnp.pad(hf_weight, ((0, 0), (0, head_dim_pad)))
+                break
+    else:
+        for key in reshape_keys:
+            if key in hf_key:
+                hf_weight = jnp.reshape(hf_weight, reshape_keys[key])
+                if head_dim_pad > 0:
+                    if "o_proj" in key:
+                        hf_weight = jnp.pad(hf_weight, ((0, 0), (0, 0),
+                                                        (0, head_dim_pad)))
+                    else:
+                        hf_weight = jnp.pad(hf_weight,
+                                            ((0, 0), (0, head_dim_pad),
+                                             (0, 0)))
+                break
+        for key in transpose_keys:
+            if key in hf_key:
+                hf_weight = jnp.transpose(hf_weight, transpose_keys[key])
+                break
+
+    # Pad num-kv-heads
+    if hf_key.endswith(".bias"):
+        for key, value in bias_pad_keys.items():
+            dim = value[0]
+            dim_size = value[1]
+            if key in hf_key and dim_size != 0:
+                hf_weight = jnp.repeat(hf_weight, dim_size, axis=dim)
+                break
+    else:
+        for key, value in pad_keys.items():
+            dim = value[0]
+            dim_size = value[1]
+            if key in hf_key and dim_size != 0:
+                hf_weight = jnp.repeat(hf_weight, dim_size, axis=dim)
+                break
+
+    logger.debug(
+        "after transform | "
+        f"{hf_key}: {hf_weight.shape} --> {model_key}: {model_weight.value.shape} {model_sharding}"
+    )
+
+    if head_dim_pad == 0:
+        assert model_weight.value.shape == hf_weight.shape, f"{hf_key}: {model_weight.value.shape} != {hf_weight.shape}"
+
+    # Update the model weight
+    spec = model_weight.sharding.spec if isinstance(
+        model_weight.sharding, NamedSharding) else model_weight.sharding
+    model_weight.value = shard(hf_weight, spec)
+
+
+def _load_hf_weights_on_thread(
+    vllm_config: VllmConfig,
+    params: nnx.State,
+    metadata_map: "MetadataMap",
+    mesh: Mesh,
+    weights_file: str,
+    filter_regex: Optional[str] = None,
+    keep_original_dtype_keys_regex: Optional[list[str]] = None,
+):
+    """Loads weights from a single weights file."""
     try:
         shardings = nnx.get_named_sharding(params, mesh)
     except TypeError:
@@ -278,147 +417,88 @@ def _load_hf_weights_on_thread(vllm_config,
 
     for hf_key, hf_weight in model_weights_single_file_generator(
             weights_file, framework="flax", filter_regex=filter_regex):
-
-        # Check if the key should retain its original dtype
-        keep_original_dtype = False
-        if keep_original_dtype_keys_regex:
-            for pattern in keep_original_dtype_keys_regex:
-                if re.match(pattern, hf_key):
-                    keep_original_dtype = True
-                    break
-
-        # Converting to config's dtype
-        if not keep_original_dtype and hf_weight.dtype != model_config.dtype:
-            logger.warning(
-                f"Converting dtype for {hf_key} from {hf_weight.dtype} to {model_config.dtype}"
-            )
-            hf_weight = hf_weight.astype(model_config.dtype)
-
-        if hf_key.endswith(".weight"):
-            hf_key = hf_key.removesuffix(".weight")
-
-        # Find the corresponding model key using the HF key
-        if "layers" in hf_key:
-            layer_num = re.search(r"layers\.(\d+)", hf_key).group(1)
-            layer_key = re.sub(r"layers\.\d+", "layers.*", hf_key)
-            model_key = name_map[layer_key]
-            model_key = re.sub(r"layers\.\*", f"layers.{layer_num}", model_key)
-        elif "blocks" in hf_key:
-            layer_num = re.search(r"blocks\.(\d+)", hf_key).group(1)
-            layer_key = re.sub(r"blocks\.\d+", "blocks.*", hf_key)
-            model_key = name_map[layer_key]
-            model_key = re.sub(r"blocks\.\*", f"blocks.{layer_num}", model_key)
-        else:
-            if hf_key not in name_map and hf_key == "lm_head":
-                logger.warning(
-                    f"Skip loading {hf_key} due to tie_word_embeddings")
-                continue
-            if hf_key not in name_map and "t2d" in hf_key:
-                logger.warning(
-                    f"Skip loading {hf_key} as it's not used in eagle-3 for now"
-                )
-                continue
-            model_key = name_map.get(hf_key, hf_key)
-        model_weight, model_sharding = get_param_and_sharding(
-            params, shardings, model_key)
-
-        logger.debug(
-            "before transform | "
-            f"{hf_key}: {hf_weight.shape}  -->  {model_key}: {model_weight.value.shape} {model_sharding}"
+        _load_and_shard_weight(
+            vllm_config,
+            params,
+            shardings,
+            metadata_map,
+            mesh,
+            hf_key,
+            hf_weight,
+            keep_original_dtype_keys_regex,
         )
 
-        if hf_key.endswith(".bias"):
-            for key in bias_reshape_keys:
-                if key in hf_key:
-                    hf_weight = jnp.reshape(hf_weight, bias_reshape_keys[key])
-                    if head_dim_pad > 0:
-                        hf_weight = jnp.pad(hf_weight,
-                                            ((0, 0), (0, head_dim_pad)))
-                    break
-        else:
-            for key in reshape_keys:
-                if key in hf_key:
-                    hf_weight = jnp.reshape(hf_weight, reshape_keys[key])
-                    if head_dim_pad > 0:
-                        if "o_proj" in key:
-                            hf_weight = jnp.pad(hf_weight, ((0, 0), (0, 0),
-                                                            (0, head_dim_pad)))
-                        else:
-                            hf_weight = jnp.pad(hf_weight,
-                                                ((0, 0), (0, head_dim_pad),
-                                                 (0, 0)))
-                    break
-            for key in transpose_keys:
-                if key in hf_key:
-                    hf_weight = jnp.transpose(hf_weight, transpose_keys[key])
-                    break
 
-        # Pad num-kv-heads
-        if hf_key.endswith(".bias"):
-            for key, value in bias_pad_keys.items():
-                dim = value[0]
-                dim_size = value[1]
-                if key in hf_key and dim_size != 0:
-                    hf_weight = jnp.repeat(hf_weight, dim_size, axis=dim)
-                    break
-        else:
-            for key, value in pad_keys.items():
-                dim = value[0]
-                dim_size = value[1]
-                if key in hf_key and dim_size != 0:
-                    hf_weight = jnp.repeat(hf_weight, dim_size, axis=dim)
-                    break
-
-        logger.debug(
-            "after transform | "
-            f"{hf_key}: {hf_weight.shape}  -->  {model_key}: {model_weight.value.shape} {model_sharding}"
-        )
-
-        if head_dim_pad == 0:
-            assert model_weight.value.shape == hf_weight.shape, f"{hf_key}: {model_weight.value.shape} != {hf_weight.shape}"
-
-        # Update the model weight
-        spec = model_weight.sharding.spec if isinstance(
-            model_weight.sharding, NamedSharding) else model_weight.sharding
-        model_weight.value = shard(hf_weight, spec)
-
-
-def load_hf_weights(vllm_config,
-                    model: nnx.Module,
-                    metadata_map: MetadataMap,
-                    mesh: Mesh,
-                    filter_regex: str | None = None,
-                    is_draft_model: bool = False,
-                    keep_original_dtype_keys_regex: list[str] | None = None):
-    """Load weights from all model weights files to the model, run in multi threads."""
-    if is_draft_model:
-        model_path = vllm_config.speculative_config.draft_model_config.model
-    else:
-        model_path = vllm_config.model_config.model
-    weights_files = get_model_weights_files(
-        model_path, vllm_config.load_config.download_dir)
+def load_hf_weights(
+    vllm_config: VllmConfig,
+    model: nnx.Module,
+    metadata_map: "MetadataMap",
+    mesh: Mesh,
+    filter_regex: Optional[str] = None,
+    is_draft_model: bool = False,
+    keep_original_dtype_keys_regex: Optional[list[str]] = None,
+):
+    """Load weights into a JAX model from either an iterator or files."""
     params = nnx.state(model)
-    max_workers = min(64, len(weights_files))
-    # NOTE(xiang): Disable multi-threading mode if running on multi-host.
-    # Because multi-threading would cause different JAX processes to load
-    # different weights at the same time.
-    if os.environ.get("TPU_MULTIHOST_BACKEND", "").lower() == "ray":
-        max_workers = 1
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [
-            executor.submit(
-                _load_hf_weights_on_thread,
+    try:
+        shardings = nnx.get_named_sharding(params, mesh)
+    except TypeError:
+        shardings = params
+    weights_iterator = None
+    if hasattr(vllm_config.model_config, "model_weights_iterator"):
+        weights_iterator = vllm_config.model_config.model_weights_iterator
+    env = torchax.default_env()
+    # The weights_iterator is used in RunAI model streamer integration.
+    if weights_iterator is not None:
+        for hf_key, hf_weight in weights_iterator:
+            if filter_regex and not re.match(filter_regex, hf_key):
+                continue
+
+            # Since the weights_iterator yields Pytorch tensors (torch.Tensor),
+            # we need to convert them to JAX arrays (jax.Array).
+            hf_weight_jax = env.t2j_copy(hf_weight)
+
+            _load_and_shard_weight(
                 vllm_config,
                 params,
+                shardings,
                 metadata_map,
                 mesh,
-                weights_file,
-                filter_regex=filter_regex,
-                keep_original_dtype_keys_regex=keep_original_dtype_keys_regex)
-            for weights_file in weights_files
-        ]
-        for future in futures:
-            future.result()
+                hf_key,
+                hf_weight_jax,
+                keep_original_dtype_keys_regex,
+            )
+    else:
+        # File-based path (multi-threaded)
+        if is_draft_model:
+            model_path = vllm_config.speculative_config.draft_model_config.model
+        else:
+            model_path = vllm_config.model_config.model
+        weights_files = get_model_weights_files(
+            model_path, vllm_config.load_config.download_dir)
+        max_workers = min(64, len(weights_files))
+        # NOTE(xiang): Disable multi-threading mode if running on multi-host.
+        # Because multi-threading would cause different JAX processes to load
+        # different weights at the same time.
+        if envs.TPU_MULTIHOST_BACKEND == "ray":
+            max_workers = 1
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(
+                    _load_hf_weights_on_thread,
+                    vllm_config,
+                    params,
+                    metadata_map,
+                    mesh,
+                    weights_file,
+                    filter_regex=filter_regex,
+                    keep_original_dtype_keys_regex=
+                    keep_original_dtype_keys_regex,
+                ) for weights_file in weights_files
+            ]
+            for future in futures:
+                future.result()
+
     check_all_loaded(params)
     nnx.update(model, params)
 

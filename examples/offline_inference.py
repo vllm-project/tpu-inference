@@ -3,9 +3,9 @@
 
 import os
 
-import vllm.envs as envs
+import vllm.envs as vllm_envs
 from vllm import LLM, EngineArgs
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from tpu_inference.core import disagg_utils
 
@@ -87,10 +87,10 @@ def main(args: dict):
         'Who wrote the novel "Pride and Prejudice"?',
     ]
 
-    if envs.VLLM_TORCH_PROFILER_DIR is not None:
+    if vllm_envs.VLLM_TORCH_PROFILER_DIR is not None:
         llm.start_profile()
     outputs = llm.generate(prompts, sampling_params)
-    if envs.VLLM_TORCH_PROFILER_DIR is not None:
+    if vllm_envs.VLLM_TORCH_PROFILER_DIR is not None:
         llm.stop_profile()
 
     # Print the outputs.

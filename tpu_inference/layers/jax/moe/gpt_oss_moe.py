@@ -17,7 +17,7 @@ modeling_flax_utils = FlaxUtils()
 class GptOssRouter(Router):
     """Router module for Mixture-of-Experts (MoE) layers.
 
-    This module determines which experts each token should be routed to based on the input.
+    This module determines which experts each token should be routed.
 
     """
     e_sharding: Sharding = ()
@@ -68,6 +68,34 @@ def _swiglu(x: Float, alpha: Float, limit: Float) -> Float:
 
 
 @dataclass(kw_only=True)
+class CombineExperts(nnx.Module):
+    """Module for combining expert outputs with weighted sum."""
+    dtype: jnp.dtype
+
+    def __call__(self, down_proj_TED: Float, weights_TX: Float,
+                 indices_TX: jax.Array) -> Float:
+        """Combines expert outputs using weighted sum.
+
+        Args:
+            down_proj_TED: Expert outputs, shape (tokens, experts, hidden_dim)
+            weights_TX: Router weights, shape (tokens, experts_per_token)
+            indices_TX: Selected expert indices, shape (tokens, experts_per_token)
+
+        Returns:
+            Combined output, shape (tokens, hidden_dim)
+        """
+        with jax.named_scope("combine_experts"):
+            indices_for_gather = indices_TX[..., None]
+            gathered_down_proj_TED = jnp.take_along_axis(down_proj_TED,
+                                                         indices_for_gather,
+                                                         axis=1)
+            output_TD = jnp.einsum('TXD,TX -> TD', gathered_down_proj_TED,
+                                   weights_TX)
+
+        return output_TD.astype(self.dtype)
+
+
+@dataclass(kw_only=True)
 class GptOssMoE(nnx.Module):
     """
     JAX implementation of the GPT-OSS Mixture-of-Experts MLP block.
@@ -97,12 +125,6 @@ class GptOssMoE(nnx.Module):
 
         weights_TX, indices_TX = self.router(x_TD)
 
-        one_hot_mask_TXE = jax.nn.one_hot(indices_TX,
-                                          num_classes=self.num_local_experts,
-                                          dtype=self.dtype)
-        combined_weights_TE = jnp.sum(one_hot_mask_TXE * weights_TX[..., None],
-                                      axis=1)
-
         # First MLP layer (up-projection)
         with jax.named_scope("MLP #1"):
             up_proj_TEF2 = jnp.einsum('TD,EDF -> TEF', x_TD,
@@ -120,15 +142,15 @@ class GptOssMoE(nnx.Module):
             down_proj_TED += self.mlp2_bias_ED.value
 
         # Weighted sum of expert outputs
-        with jax.named_scope("sum"):
-            output_TD = jnp.einsum('TED,TE -> TD', down_proj_TED,
-                                   combined_weights_TE)
+        output_TD = self.combine_experts(down_proj_TED, weights_TX, indices_TX)
 
-        return output_TD.astype(self.dtype)
+        return output_TD
 
     def __post_init__(self, rngs: nnx.Rngs):
         """Initializes all weights and biases for the MoE block."""
         D, F, E = self.hidden_size, self.intermediate_size_moe, self.num_local_experts
+
+        self.combine_experts = CombineExperts(dtype=self.dtype)
 
         # MLP #1 Weights (Combined Gate and Up-projection) and Bias
         self.mlp1_weight_EDF2 = create_param(

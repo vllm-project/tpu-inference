@@ -15,8 +15,9 @@ import jax
 from jax._src.interpreters import pxla
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
+from tpu_inference import envs
 from tpu_inference.logger import init_logger
-from tpu_inference.runner.input_batch_jax import InputBatch
+from tpu_inference.runner.input_batch import InputBatch
 
 MIN_NUM_SEQS = 8
 
@@ -306,8 +307,7 @@ class PhasedBasedProfiler:
             InferencePhase.BALANCED: False
         }
         self.default_profiling_options = jax.profiler.ProfileOptions()
-        self.default_profiling_options.python_tracer_level = os.getenv(
-            "PYTHON_TRACER_LEVEL", 0)
+        self.default_profiling_options.python_tracer_level = envs.PYTHON_TRACER_LEVEL
 
         self.current_phase: str = ""
 

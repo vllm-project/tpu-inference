@@ -9,8 +9,9 @@ from jax.experimental import shard_map
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
-from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
-    ragged_paged_attention
+from tpu_inference import utils
+from tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 import \
+    ragged_paged_attention_hd64
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.rope import GptOssRotaryEmbedding
@@ -35,6 +36,7 @@ class GptOssAttention(nnx.Module):
     rope_scaling_factor: float = 32.0
     rope_ntk_alpha: float = 1.0
     rope_ntk_beta: float = 32.0
+    kv_cache_dtype: str
 
     query_tnh: P = P()
     keyvalue_skh: P = P()
@@ -49,6 +51,11 @@ class GptOssAttention(nnx.Module):
 
     random_init: bool = False
     mesh: Mesh
+
+    _q_scale: float = 1.0
+    _k_scale: float = 1.0
+    _v_scale: float = 1.0
+    kv_cache_quantized_dtype = None
 
     def __post_init__(self, rngs: nnx.Rngs):
         """Initializes weights, biases, and RoPE module."""
@@ -132,6 +139,10 @@ class GptOssAttention(nnx.Module):
             rope_ntk_alpha=self.rope_ntk_alpha,
             rope_ntk_beta=self.rope_ntk_beta)
 
+        if self.kv_cache_dtype != "auto":
+            self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
+                self.kv_cache_dtype)
+
     def attention(
         self,
         kv_cache: KVCache,
@@ -141,30 +152,36 @@ class GptOssAttention(nnx.Module):
         sinks: jax.Array,
         attention_metadata: AttentionMetadata,
         mesh: Mesh,
+        q_scale: float | None = None,
+        k_scale: float | None = None,
+        v_scale: float | None = None,
     ) -> Tuple[KVCache, jax.Array]:
         """Performs scaled dot-product attention by calling the ragged_paged_attention kernel."""
         md = attention_metadata
-        kv_cache_spec = P(None, None, "model")
+        kv_cache_spec = P("data", None, "model")
 
         in_specs = (
             self.query_tnh,  # q
             self.keyvalue_skh,  # k
             self.keyvalue_skh,  # v
             kv_cache_spec,  # kv_cache
-            P(),  # md.seq_lens: Replicated
-            P(),  # page_indices_flat: Replicated
-            P(),  # query_start_loc: Replicated
-            P(),  # distribution: Replicated
-            #P(('model')),  # sinks
+            P("data"),  # md.seq_lens
+            P("data"),  # page_indices_flat
+            P("data"),  # query_start_loc
+            P("data"),  # distribution
+            P(('model')),  # sinks
         )
         out_specs = (self.attn_o_tnh, kv_cache_spec)
 
         def _ragged_paged_attention_wrapper(*args):
             # Pass the GPT-OSS specific parameters to the kernel
-            return ragged_paged_attention(
+            return ragged_paged_attention_hd64(
                 *args,
                 sm_scale=self.sm_scale,
                 sliding_window=md.sliding_window,
+                q_scale=q_scale,
+                k_scale=k_scale,
+                v_scale=v_scale,
             )
 
         output_TNH, kv_cache = jax.jit(
@@ -183,7 +200,7 @@ class GptOssAttention(nnx.Module):
                 md.block_tables,
                 md.query_start_loc,
                 md.request_distribution,
-                #sinks,
+                sinks,
             )
         return kv_cache, output_TNH
 
@@ -212,18 +229,29 @@ class GptOssAttention(nnx.Module):
         if use_attention_rope:
             q_TNH, k_TKH = self.rope(q_TNH, k_TKH, md.input_positions)
 
+        q_scale = k_scale = v_scale = None
+        if self.kv_cache_quantized_dtype:
+            # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
+            # q_scale = self._q_scale
+            k_scale = self._k_scale
+            v_scale = self._v_scale
+            k_TKH, v_TKH = utils.quantize_kv(k_TKH, v_TKH,
+                                             self.kv_cache_quantized_dtype,
+                                             k_scale, v_scale)
+
         with jax.named_scope("attn_op"):
-            # Padding H dim of q,k,v to be the multiple of 128
-            multiple_of_128 = ((self.head_dim - 1) // 128 + 1) * 128
-            q_TNH = jnp.pad(q_TNH, ((0, 0), (0, 0),
-                                    (0, multiple_of_128 - self.head_dim)))
-            k_TKH = jnp.pad(k_TKH, ((0, 0), (0, 0),
-                                    (0, multiple_of_128 - self.head_dim)))
-            v_TKH = jnp.pad(v_TKH, ((0, 0), (0, 0),
-                                    (0, multiple_of_128 - self.head_dim)))
             new_kv_cache, attn_out_TNH = self.attention(
-                kv_cache, q_TNH, k_TKH, v_TKH, self.sinks_N.value, md,
-                self.mesh)
+                kv_cache=kv_cache,
+                q_TNH=q_TNH,
+                k_SKH=k_TKH,
+                v_SKH=v_TKH,
+                sinks=self.sinks_N.value,
+                attention_metadata=md,
+                mesh=self.mesh,
+                q_scale=q_scale,
+                k_scale=k_scale,
+                v_scale=v_scale,
+            )
             attn_out_TNH = attn_out_TNH[..., :self.head_dim]
 
         with jax.named_scope("o_proj"):

@@ -30,9 +30,9 @@ git config user.name "Buildkite Bot"
 git config user.email "buildkite-bot@users.noreply.github.com"
 
 echo "--- Fetching and checking out the target branch"
-git fetch origin ${TARGET_BRANCH}
-git checkout ${TARGET_BRANCH}
-git reset --hard origin/${TARGET_BRANCH}
+git fetch origin "${TARGET_BRANCH}"
+git checkout "${TARGET_BRANCH}"
+git reset --hard origin/"${TARGET_BRANCH}"
 
 echo "--- Downloading CSV artifacts"
 mkdir -p "${ARTIFACT_DOWNLOAD_PATH}"

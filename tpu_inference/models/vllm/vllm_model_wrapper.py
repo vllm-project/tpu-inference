@@ -1,6 +1,5 @@
 import copy
 import functools
-import os
 from collections.abc import Sequence
 from contextlib import nullcontext
 from typing import Any, List, Optional, Tuple
@@ -10,6 +9,7 @@ import jax
 import torch
 import torch.nn
 import torchax
+import vllm.envs as vllm_envs
 from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
@@ -26,6 +26,8 @@ from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.sharding import shard_model_to_tpu
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.jax_intermediate_tensor import \
+    JaxIntermediateTensors
 from tpu_inference.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 from tpu_inference.runner.lora_utils import replace_lora_metadata
@@ -82,16 +84,30 @@ class VllmModelWrapper:
 
     def load_weights(self):
         # Set up to load the model into CPU first.
+        # Cache device slice config since device config cannot be deepcopied
+        modified_slice_config = False
+        if hasattr(
+                self.vllm_config.device_config,
+                'slice') and self.vllm_config.device_config.slice is not None:
+            slice_config = self.vllm_config.device_config.slice
+            modified_slice_config = True
+            self.vllm_config.device_config.slice = None
+        self.vllm_config.compilation_config.static_forward_context.clear()
+
         vllm_config_for_load = copy.deepcopy(self.vllm_config)
+        if modified_slice_config:
+            self.vllm_config.device_config.slice = slice_config
         assert self.vllm_config.model_config.dtype in TORCH_DTYPE_TO_JAX, "The model_config.dtype must be a PyTorch dtype."
         vllm_config_for_load.device_config.device = "cpu"
+        # Clearing the cached compilation config, otherwise vllm model init will fail
 
-        if os.getenv("JAX_RANDOM_WEIGHTS", False):
-            vllm_config_for_load.load_config.load_format = "dummy"
-            use_random_weights = True
-        else:
-            use_random_weights = (
-                vllm_config_for_load.load_config.load_format == "dummy")
+        # When expert parallelism is enabled, vLLM loads weight in sharding
+        # aware manner. Since tpu-inference has its own sharding logic, this
+        # may casue errors. Therefore, we disable it during weight loading.
+        vllm_config_for_load.parallel_config.enable_expert_parallel = False
+
+        use_random_weights = (
+            vllm_config_for_load.load_config.load_format == "dummy")
         if use_random_weights:
             logger.info(
                 "Initializing vLLM model with random weights, weight loading skipped."
@@ -103,9 +119,16 @@ class VllmModelWrapper:
             "torch._sync",
             return_value=None) if use_random_weights else nullcontext()
 
+        # By default load weights to the CPU device first. If we are running
+        # under Pathways, this would cause weights to be loaded on a CPU-only
+        # node, so we'll need to remove this context.
+        jax_context = jax.default_device(
+            jax.devices("cpu")
+            [0]) if not vllm_envs.VLLM_TPU_USING_PATHWAYS else nullcontext()
+
         # Load the vLLM model and wrap it into a new model whose forward
         # function can calculate the hidden_state and logits.
-        with load_context, jax.default_device(jax.devices('cpu')[0]):
+        with load_context, jax_context:
             vllm_model = vllm_get_model(vllm_config=vllm_config_for_load)
         lora_manager = None
         if vllm_config_for_load.lora_config is not None:
@@ -137,7 +160,8 @@ class VllmModelWrapper:
                 "xla_tpu_reduce_scatter_collective_matmul_mode":
                 "post_spmd_conservative"
             },
-            static_argnames=("layer_name_to_kvcache_index", ),
+            static_argnames=("layer_name_to_kvcache_index", "is_first_rank",
+                             "is_last_rank"),
         )
         def step_fun(
             params_and_buffers,  # This has been wrapped into torchax TorchValue
@@ -145,8 +169,12 @@ class VllmModelWrapper:
             input_ids: jax.Array,
             attn_metadata: AttentionMetadata,
             input_embeds: jax.Array,
+            input_positions: jax.Array,
             layer_name_to_kvcache_index: Sequence[Tuple[str, int]],
             lora_metadata,
+            intermediate_tensors: JaxIntermediateTensors = None,
+            is_first_rank: bool = True,
+            is_last_rank: bool = True,
             *args,
         ) -> Tuple[List[jax.Array], jax.Array]:
             layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
@@ -161,12 +189,14 @@ class VllmModelWrapper:
                 # torch_view in order to call the Torch function.
                 original_lora_metadata = replace_lora_metadata(
                     self.model, lora_metadata, self.vllm_config.lora_config)
-                hidden_states = torch.func.functional_call(
+                if not is_first_rank:
+                    intermediate_tensors = intermediate_tensors.to_torch()
+                output_from_torch = torch.func.functional_call(
                     self.model,
                     torch_view(params_and_buffers),
                     kwargs={
                         "input_ids": torch_view(input_ids),
-                        "positions": torch_view(attn_metadata.input_positions),
+                        "positions": torch_view(input_positions),
                         "intermediate_tensors": None,
                         "inputs_embeds": None,
                     },
@@ -176,11 +206,13 @@ class VllmModelWrapper:
                                       self.vllm_config.lora_config)
                 vllm_model_wrapper_context = get_vllm_model_wrapper_context()
                 new_kv_caches = vllm_model_wrapper_context.kv_caches
-            # Wrap the hidden_states from torch land into a JaxValue for the jax
-            # code to consume.
-            hidden_states = jax_view(hidden_states)
-
-            return new_kv_caches, hidden_states, []
+            # Wrap the output(hidden states or intermediate tensor)
+            # from torch land into a JaxValue for the jax code to consume.
+            if not is_last_rank:
+                output = JaxIntermediateTensors.from_torch(output_from_torch)
+            else:
+                output = jax_view(output_from_torch)
+            return new_kv_caches, output, []
 
         return step_fun
 
@@ -189,7 +221,7 @@ class VllmModelWrapper:
         @functools.partial(
             jax.jit,
             out_shardings=(NamedSharding(self.mesh,
-                                         PartitionSpec(None, "model"))),
+                                         PartitionSpec("data", "model"))),
         )
         def compute_logits_func(
             params_and_buffers: Any,
@@ -231,7 +263,6 @@ def load_lora_model(model: torch.nn.Module, vllm_config: VllmConfig,
         vllm_config,
         device,
         model.embedding_modules,
-        model.embedding_padding_modules,
     )
     return lora_manager, lora_manager.create_lora_manager(model)
 
@@ -245,10 +276,9 @@ def replace_set_lora(model):
         index: int,
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
-        embeddings_tensor: Optional[torch.Tensor],
     ):
         with torchax.default_env():
-            self._original_set_lora(index, lora_a, lora_b, embeddings_tensor)
+            self._original_set_lora(index, lora_a, lora_b)
 
     def _tpu_reset_lora(self, index: int):
         with torchax.default_env():

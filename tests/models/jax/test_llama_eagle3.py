@@ -54,9 +54,9 @@ def mesh():
         pytest.skip("No JAX devices available for mesh creation.")
 
     devices = np.array(jax.local_devices()[:1])
-    device_mesh = devices.reshape((1, -1))
+    device_mesh = devices.reshape((1, 1, -1))
 
-    with Mesh(device_mesh, axis_names=('data', 'model')) as m:
+    with Mesh(device_mesh, axis_names=('data', 'attn_dp', 'model')) as m:
         yield m
 
 

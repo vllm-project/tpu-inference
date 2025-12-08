@@ -13,6 +13,7 @@ from tpu_inference import utils
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     ragged_paged_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.rope_interface import apply_rope
 
@@ -46,11 +47,11 @@ class Attention(nnx.Module):
     dkh_sharding: Sharding = ()
     nhd_sharding: Sharding = ()
 
-    activation_q_td: Sharding = ()
-    query_tnh: P = P()
-    keyvalue_skh: P = P()
+    activation_q_td: Sharding = (ShardingAxisName.ATTN_DATA)
+    query_tnh: P = P(ShardingAxisName.ATTN_DATA)
+    keyvalue_skh: P = P(ShardingAxisName.ATTN_DATA)
 
-    attn_o_tnh: P = P()
+    attn_o_tnh: P = P(ShardingAxisName.ATTN_DATA)
     rngs: InitVar[nnx.Rngs]
 
     random_init: bool = False
@@ -211,16 +212,16 @@ class Attention(nnx.Module):
                   `(seq, num_q_heads, head_dim)`.
         """
         md = attention_metadata
-        kv_cache_spec = P(None, None, "model")
+        kv_cache_spec = P(ShardingAxisName.ATTN_DATA, None, "model")
         in_specs = (
             self.query_tnh,  # q
             self.keyvalue_skh,  # k
             self.keyvalue_skh,  # v
             kv_cache_spec,  # kv_cache
-            P(),  # md.seq_lens: Replicated
-            P(),  # page_indices_flat: Replicated
-            P(),  # query_start_loc: Replicated
-            P(),  # distribution: Replicated
+            P(ShardingAxisName.ATTN_DATA),  # md.seq_lens
+            P(ShardingAxisName.ATTN_DATA),  # page_indices_flat
+            P(ShardingAxisName.ATTN_DATA),  # query_start_loc
+            P(ShardingAxisName.ATTN_DATA),  # distribution
         )
 
         out_specs = (self.attn_o_tnh, kv_cache_spec)

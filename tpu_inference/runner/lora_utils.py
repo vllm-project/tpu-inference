@@ -7,10 +7,10 @@ from torchax.interop import jax_view
 from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
 from vllm.lora.request import LoRARequest
 
-from tpu_inference.layers.vllm.sharding import shard_model_to_tpu
+from tpu_inference.layers.vllm.sharding import update_lora
 
 if TYPE_CHECKING:
-    from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
+    from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
 class LoraUtils:
@@ -41,8 +41,8 @@ class LoraUtils:
         self.runner._set_active_loras(prompt_lora_mapping, token_lora_mapping,
                                       lora_requests)
 
-        params_and_buffers = shard_model_to_tpu(self.runner.model.model,
-                                                self.runner.mesh)
+        params_and_buffers = update_lora(
+            self.runner.model.model, initial_params_buffers=self.runner.state)
         self.runner.state = jax_view(params_and_buffers)
 
     def extract_lora_metadata(self):

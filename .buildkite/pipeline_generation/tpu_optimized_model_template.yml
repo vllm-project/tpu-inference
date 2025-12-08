@@ -1,4 +1,5 @@
 # {MODEL_NAME}
+# {CATEGORY}
 steps:
   - label: "Unit tests for {MODEL_NAME}"
     key: "{SANITIZED_MODEL_NAME}_UnitTest"
@@ -11,10 +12,11 @@ steps:
     key: "record_{SANITIZED_MODEL_NAME}_UnitTest"
     depends_on: "{SANITIZED_MODEL_NAME}_UnitTest"
     env:
-      CI_STAGE: "UnitTest"
       CI_TARGET: {MODEL_NAME}
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "{CATEGORY}"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh {SANITIZED_MODEL_NAME}_UnitTest
@@ -38,8 +40,9 @@ steps:
     env:
       CI_TARGET: {MODEL_NAME}
       CI_STAGE: "IntegrationTest"
+      CI_CATEGORY: "{CATEGORY}"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh {SANITIZED_MODEL_NAME}_IntegrationTest
@@ -63,8 +66,9 @@ steps:
     env:
       CI_TARGET: {MODEL_NAME}
       CI_STAGE: "Benchmark"
+      CI_CATEGORY: "{CATEGORY}"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh {SANITIZED_MODEL_NAME}_Benchmark

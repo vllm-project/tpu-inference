@@ -1,0 +1,45 @@
+# INT4 W4A16
+# quantization support matrix
+steps:
+  - label: "Correctness tests for INT4 W4A16"
+    key: "INT4_W4A16_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "INT4_W4A16_CorrectnessTest" "to be added"
+  - label: "Record correctness test result for INT4 W4A16"
+    key: "record_INT4_W4A16_CorrectnessTest"
+    depends_on: "INT4_W4A16_CorrectnessTest"
+    env:
+      CI_TARGET: "INT4 W4A16"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "quantization support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh INT4_W4A16_CorrectnessTest
+
+  - label: "Performance tests for INT4 W4A16"
+    key: "INT4_W4A16_PerformanceTest"
+    depends_on: "record_INT4_W4A16_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "INT4_W4A16_PerformanceTest" "to be added"
+  - label: "Record performance test result for INT4 W4A16"
+    key: "record_INT4_W4A16_PerformanceTest"
+    depends_on: "INT4_W4A16_PerformanceTest"
+    env:
+      CI_TARGET: "INT4 W4A16"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "quantization support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh INT4_W4A16_PerformanceTest

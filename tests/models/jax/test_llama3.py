@@ -36,9 +36,10 @@ def mesh():
     devices = np.array(jax.local_devices()[:1])
     num_devices = len(devices)
     assert num_devices == 1
-    device_mesh = devices.reshape((num_devices, 1))
+    device_mesh = devices.reshape((num_devices, 1, 1, 1))
 
-    with Mesh(device_mesh, axis_names=('data', 'model')) as m:
+    with Mesh(device_mesh,
+              axis_names=('data', 'attn_dp', 'expert', 'model')) as m:
         yield m
 
 
@@ -89,7 +90,12 @@ class TestLlamaForCausalLM:
         model_config = mock_vllm_config.model_config
         hf_config = model_config.hf_config
 
-        assert model.mesh.shape == {"data": 1, "model": 1}
+        assert model.mesh.shape == {
+            "data": 1,
+            "attn_dp": 1,
+            "expert": 1,
+            "model": 1
+        }
 
         layers = model.model.layers
         assert len(layers) == hf_config.num_hidden_layers
@@ -101,15 +107,14 @@ class TestLlamaForCausalLM:
         num_heads = hf_config.num_attention_heads
         num_kv_heads = hf_config.num_key_value_heads
         rope_theta = hf_config.rope_theta
-        original_head_dim = hf_config.head_dim
-        head_dim = 128
+        head_dim = hf_config.head_dim
         intermediate_size = hf_config.intermediate_size
 
         assert attn.hidden_size == hidden_size
         assert attn.num_heads == num_heads
         assert attn.num_kv_heads == num_kv_heads
         assert attn.rope_theta == rope_theta
-        assert attn.head_dim_original == original_head_dim
+        assert attn.head_dim_original == head_dim
         assert attn.head_dim == head_dim
         assert attn.q_proj.kernel.shape == (hidden_size, num_heads, head_dim)
         assert attn.k_proj.kernel.shape == (hidden_size, num_kv_heads,

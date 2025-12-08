@@ -60,7 +60,6 @@ D workflow:
 
 import copy
 import functools
-import os
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -77,7 +76,7 @@ from jax.sharding import Mesh
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
-from vllm.utils import round_down
+from vllm.utils.math_utils import round_down
 from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
@@ -86,12 +85,13 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
+from tpu_inference import envs
 from tpu_inference.distributed.utils import (get_host_ip, get_kv_ips,
                                              get_kv_ports,
                                              get_kv_transfer_port, get_node_id,
                                              get_side_channel_port)
 from tpu_inference.logger import init_logger
-from tpu_inference.runner.tpu_jax_runner import TPUModelRunner
+from tpu_inference.runner.tpu_runner import TPUModelRunner
 from tpu_inference.utils import device_array
 
 ReqId = str
@@ -190,6 +190,10 @@ class TPUConnector(KVConnectorBase_V1):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
+    def get_finished_count(self) -> int:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.get_finished_count()
+
     ############################################################
     # Worker Side Methods
     ############################################################
@@ -280,7 +284,7 @@ class TPUConnectorScheduler():
                   because TPU pulls KV cache in a blocking way.
 
         """
-        if self.is_producer:
+        if self.is_producer or not request.kv_transfer_params:
             return 0, False
 
         assert num_computed_tokens % self.block_size == 0
@@ -308,7 +312,7 @@ class TPUConnectorScheduler():
             num_external_tokens (int): the number of tokens that will be
                 loaded from the external KV cache.
         """
-        if self.is_producer:
+        if self.is_producer or not request.kv_transfer_params:
             return
 
         params = request.kv_transfer_params
@@ -345,7 +349,9 @@ class TPUConnectorScheduler():
                 remote_host=params["remote_host"],
                 remote_port=params["remote_port"],
             )
-        logger.info(f"Scheduler -->  reqs_to_load={self.reqs_to_load}")
+        logger.info(
+            f"TPUConnector Scheduler update_state_after_alloc -->  reqs_to_load={self.reqs_to_load}"
+        )
 
     def build_connector_meta(self) -> TPUConnectorMetadata:
         """
@@ -364,6 +370,12 @@ class TPUConnectorScheduler():
             self.reqs_to_load = {}
 
         return meta
+
+    def get_finished_count(self) -> int:
+        """
+        Return how many workers need pull the kv cache and report back.
+        """
+        return len(self.kv_ip) if isinstance(self.kv_ip, list) else 1
 
     def request_finished(
         self,
@@ -429,8 +441,7 @@ class TPUConnectorWorker:
 
         self.runner: TPUModelRunner = None
         self.mesh: Mesh = None
-        self.multi_host = os.getenv("TPU_MULTIHOST_BACKEND",
-                                    "").lower() == "ray"
+        self.multi_host = envs.TPU_MULTIHOST_BACKEND == "ray"
         # NOTE(xiang): This can not be the worker rank set in RayDistributedExecutor.
         # The worker rank is assigned with vLLM's sorting logic, which does not work
         # for TPU host topology.
@@ -446,7 +457,6 @@ class TPUConnectorWorker:
         self.side_channel_port = get_side_channel_port()
 
         self.kv_transfer_server = None
-        self._maybe_start_p2p_server()
         self.zmq_cxt = zmq.Context()
         if self.is_producer:
             ready_event = threading.Event()
@@ -469,10 +479,13 @@ class TPUConnectorWorker:
 
     def __del__(self):
         if self.is_producer:
-            self.pull_notify_listener_t.join(timeout=0)
+            if hasattr(self, "pull_notify_listener_t"):
+                self.pull_notify_listener_t.join(timeout=0)
         else:
-            self.pull_executor.shutdown(wait=False)
-        self.zmq_cxt.destroy(linger=0)
+            if hasattr(self, "pull_executor"):
+                self.pull_executor.shutdown(wait=False)
+        if hasattr(self, "zmq_cxt"):
+            self.zmq_cxt.destroy(linger=0)
 
     def register_runner(self, runner: TPUModelRunner):
         self.runner = runner
@@ -485,6 +498,7 @@ class TPUConnectorWorker:
         self.shape = list(kv_layer.shape)
         self.dtype = kv_layer.dtype
         self.sharding = kv_layer.sharding
+        self._maybe_start_p2p_server()
 
     def _maybe_start_p2p_server(self):
         if self.kv_transfer_server is not None:

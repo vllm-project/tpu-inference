@@ -1,4 +1,5 @@
 # Qwen/Qwen3-32B
+# text-only
 steps:
   - label: "Unit tests for Qwen/Qwen3-32B"
     key: "Qwen_Qwen3-32B_UnitTest"
@@ -13,10 +14,11 @@ steps:
     key: "record_Qwen_Qwen3-32B_UnitTest"
     depends_on: "Qwen_Qwen3-32B_UnitTest"
     env:
-      CI_STAGE: "UnitTest"
       CI_TARGET: Qwen/Qwen3-32B
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "text-only"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh Qwen_Qwen3-32B_UnitTest
@@ -40,8 +42,9 @@ steps:
     env:
       CI_TARGET: Qwen/Qwen3-32B
       CI_STAGE: "IntegrationTest"
+      CI_CATEGORY: "text-only"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh Qwen_Qwen3-32B_IntegrationTest
@@ -71,8 +74,9 @@ steps:
     env:
       CI_TARGET: Qwen/Qwen3-32B
       CI_STAGE: "Benchmark"
+      CI_CATEGORY: "text-only"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
     commands:
       - |
         .buildkite/scripts/record_step_result.sh Qwen_Qwen3-32B_Benchmark
