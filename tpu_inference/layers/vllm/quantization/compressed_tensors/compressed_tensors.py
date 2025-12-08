@@ -113,8 +113,9 @@ class VllmCompressedTensorsConfig(CompressedTensorsConfig, JaxCommonConfig):
             layer.scheme = scheme
             return CompressedTensorsLinearMethod(self)
         if isinstance(layer, FusedMoE):
+            moe_config = self.get_moe_config(layer)
             return VllmCompressedTensorsW8A8Fp8MoEMethod(
-                self, layer.quant_config, self.mesh)
+                layer.quant_config, moe_config, self.mesh)
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
         return None

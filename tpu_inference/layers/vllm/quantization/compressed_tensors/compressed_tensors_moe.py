@@ -48,8 +48,13 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         assert isinstance(layer, FusedMoE)
 
         intermediate_size = layer.w13_weight.shape[1] // 2
-        num_experts = w13_weight.shape[0]
-        hidden_size = w13_weight.shape[2]
+        num_experts = layer.w13_weight.shape[0]
+        hidden_size = layer.w13_weight.shape[2]
+        print(f'xw32 process_weights_after_loading, line53 {layer.use_ep=}, {self.use_kernel=}, {layer.w13_weight.shape=}, {layer.w13_weight_scale.shape=}, {layer.w2_weight.shape=}, {layer.w2_weight_scale.shape=}')
+        # w13_weight=[160, 5120, 6144]=[num_expert, 2*moe_intermediate_size, hidden_size]
+        # w13_weight_scale=[160, 5120, 1]=[num_expert, 2*moe_intermediate_size, 1]
+        # w2_weight=[160, 6144, 2560]=[num_expert, hidden_size, moe_intermediate_size]
+        # w2_weight_scale=[160, 6144, 1]=[num_expert, hidden_size, 1]
         if layer.use_ep and self.use_kernel:
             w13_weight = t2j(layer.w13_weight, use_dlpack=False)
             w13_weight_scale = t2j(layer.w13_weight_scale, use_dlpack=False)
@@ -74,14 +79,14 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
             w2_weight_scale_transposed = jnp.transpose(w2_weight_scale, (0, 2, 1))
 
             # Apply EP sharding
-            w13_weight = jax.device_put(
-                w13_weight_transposed,
-                Format(Layout((0, 1, 2, 3)),
-                       NamedSharding(self.mesh, P("model", None, None, None))))
-            w2_weight = jax.device_put(
-                w2_weight_transposed,
-                Format(Layout((0, 1, 2)),
-                       NamedSharding(self.mesh, P("model", None, None))))
+            # w13_weight = jax.device_put(
+            #     w13_weight_transposed,
+            #     Format(Layout((0, 1, 2, 3)),
+            #            NamedSharding(self.mesh, P("model", None, None, None))))
+            # w2_weight = jax.device_put(
+            #     w2_weight_transposed,
+            #     Format(Layout((0, 1, 2)),
+            #            NamedSharding(self.mesh, P("model", None, None))))
             
             # Apply EP sharding
             w13_format = Format(Layout((0, 1, 2, 3)),
@@ -108,7 +113,7 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
             w2_weight = Parameter(torch_view(w2_weight), requires_grad=False)
             w2_weight_scale = Parameter(torch_view(w2_weight_scale),requires_grad=False)
                                         
-            layer.w13_weight = w1_weight
+            layer.w13_weight = w13_weight
             layer.w13_weight_scale = w13_weight_scale
             layer.w2_weight = w2_weight
             layer.w2_weight_scale = w2_weight_scale
@@ -215,6 +220,16 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
             raise NotImplementedError(
                 "Only softmax is supported for scoring_func")
         
+        # At the beginning of process_weights_after_loading
+        # w13_weight=[160, 5120, 6144]=[num_expert, 2*moe_intermediate_size, hidden_size]
+        # w13_weight_scale=[160, 5120, 1]=[num_expert, 2*moe_intermediate_size, 1]
+        # w2_weight=[160, 6144, 2560]=[num_expert, hidden_size, moe_intermediate_size]
+        # w2_weight_scale=[160, 6144, 1]=[num_expert, hidden_size, 1]
+        # print(f'xw32 apply, line239 {layer.use_ep=}, {self.use_kernel=}, {layer.w13_weight.shape=}, {layer.w13_weight_scale.shape=}, {layer.w2_weight.shape=}, {layer.w2_weight_scale.shape=}')
+        # w13_weight=[160, 2560, 6144]=[160, 2560, 6144]=[num_expert, moe_intermediate_size, hidden_size]  # xw32: why isn't 2*moe_intermediate_size?
+        # w13_weight_scale=[160, 2560, 1]=[num_expert, moe_intermediate_size, 1]
+        # w2_weight=[160, 6144, 2560]=[num_expert, hidden_size, moe_intermediate_size]
+        # w2_weight_scale=[160, 6144, 1]=[num_expert, hidden_size, 1]
         if self.use_kernel and layer.use_ep:
             output = fused_ep_moe(
                 mesh=self.mesh,
