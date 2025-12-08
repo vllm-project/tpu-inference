@@ -176,7 +176,7 @@ class RaggedPagedAttentionHeadDim64KernelTest(jtu.JaxTestCase):
         )
         output = output[:cu_q_lens[distribution[-1]]]
 
-        dtype_bits = dtypes.bit_width(jnp.dtype(kv_dtype))
+        dtype_bits = dtypes.itemsize_bits(jnp.dtype(kv_dtype))
         tols = {
             32: 0.15,
             16: 0.2,
