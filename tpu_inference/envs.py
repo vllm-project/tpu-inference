@@ -71,17 +71,12 @@ def env_with_choices(
 
 def env_bool(env_name: str, default: bool = False) -> Callable[[], bool]:
     """
-    Create a lambda that parses environment variable as boolean.
-
     Accepts both numeric strings ("0", "1") and boolean strings
     ("true", "false", "True", "False").
 
     Args:
         env_name: Name of the environment variable
         default: Default boolean value if not set
-
-    Returns:
-        Lambda function for environment_variables dict
     """
 
     def _get_bool_env() -> bool:
