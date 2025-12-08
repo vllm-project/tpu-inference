@@ -10,7 +10,7 @@ from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.request import Request
 
 from tpu_inference.offload.tpu_offload_connector import (
-    RequestTracker, TPUOffloadConnectorScheduler)
+    OffloadMetadata, RequestTracker, TPUOffloadConnectorScheduler)
 
 _DEFAULT_BLOCK_SIZE = 16
 
@@ -61,20 +61,27 @@ def scheduler_factory():
     def _scheduler(
         block_size: int = _DEFAULT_BLOCK_SIZE,
         offload_decode_save: int = 0,
-        offload_num_staging_blocks: int = -1,
-        offload_num_cpu_chunks: int = -1,
+        offload_staging_buf_gb: float = 8.0,
+        offload_cpu_buf_gb: float = 256.0,
     ):
         # update config
         vllm_config = MockVllmConfig(block_size=block_size)
         os.environ["TPU_OFFLOAD_DECODE_SAVE"] = str(offload_decode_save)
-        if offload_num_staging_blocks >= 0:
-            os.environ["TPU_OFFLOAD_NUM_STAGING_BLOCKS"] = str(
-                offload_num_staging_blocks)
-        if offload_num_cpu_chunks > 0:
-            os.environ["TPU_OFFLOAD_NUM_CPU_CHUNKS"] = str(
-                offload_num_cpu_chunks)
+        os.environ["TPU_offload_staging_buf_gb"] = str(offload_staging_buf_gb)
+        os.environ["TPU_OFFLOAD_CPU_BUF_SIZE_GB"] = str(offload_cpu_buf_gb)
 
-        return TPUOffloadConnectorScheduler(vllm_config)
+        scheduler = TPUOffloadConnectorScheduler(vllm_config)
+        # Mock offload_metadata to initialize managers
+        # each block is 2GB
+        scheduler.set_offload_metadata({
+            0:
+            OffloadMetadata(block_size=_DEFAULT_BLOCK_SIZE,
+                            block_size_in_bytes=1024**3,
+                            num_layers=2,
+                            kv_cache_layout="NHD",
+                            num_devices=1)
+        })
+        return scheduler
 
     return _scheduler
 
@@ -93,14 +100,13 @@ class TestTPUOffloadConnectorScheduler:
         assert "req1" not in scheduler.load_specs
 
     @pytest.mark.parametrize(
-        "num_computed_blocks, num_matched_blocks, num_prompt_blocks, num_staging_blocks",
-        [(0, 2, 4, 10), (1, 2, 4, 10), (0, 4, 4, 10), (1, 4, 4, 10),
-         (1, 4, 4, 1), (1, 4, 4, 0)])
+        "num_computed_blocks, num_matched_blocks, num_prompt_blocks, staging_buf_gb",
+        [(0, 2, 4, 20), (1, 2, 4, 20), (0, 4, 4, 20), (1, 4, 4, 20),
+         (1, 4, 4, 2)])
     def test_get_num_new_matched_tokens_hit(self, scheduler_factory,
                                             num_computed_blocks,
                                             num_matched_blocks,
-                                            num_prompt_blocks,
-                                            num_staging_blocks):
+                                            num_prompt_blocks, staging_buf_gb):
         """
         Tests correct identification of a prefix hit (partial and full).
         test cases:
@@ -109,13 +115,13 @@ class TestTPUOffloadConnectorScheduler:
         3. no-skip + full-hit + no staging buffer limit
         4. skip 1 block + full-hit + no staging buffer limit
         5. skip 1 block + full-hit + only 1 staging block
-        6. skip 1 block + full-hit + no staging block
         """
-        scheduler = scheduler_factory(
-            offload_num_staging_blocks=num_staging_blocks)
+        scheduler = scheduler_factory(offload_staging_buf_gb=staging_buf_gb)
+        num_staging_blocks = scheduler.num_staging_blocks
         prompt_len = scheduler.block_size * num_prompt_blocks
         num_computed_tokens = scheduler.block_size * num_computed_blocks
         num_blocks_to_load = num_matched_blocks - num_computed_blocks
+
         # consider the case of limited staging blocks
         num_blocks_to_load = min(num_blocks_to_load, num_staging_blocks)
         num_matched_blocks = num_blocks_to_load + num_computed_blocks
@@ -210,15 +216,14 @@ class TestTPUOffloadConnectorScheduler:
         assert len(scheduler._reqs_being_loaded[req_id]) == num_blocks_to_load
 
     @pytest.mark.parametrize(
-        "num_computed_tokens, num_matched_tokens, num_prompt_tokens, num_staging_tokens",
-        [(0, 0, 64, 160),
-         (0, 32, 64, 160), (16, 32, 64, 160), (0, 64, 64, 160),
-         (16, 64, 64, 160), (0, 32, 64, 48), (0, 32, 64, 16)])
+        "num_computed_tokens, num_matched_tokens, num_prompt_tokens, staging_buf_gb",
+        [(0, 0, 64, 20), (0, 32, 64, 20), (16, 32, 64, 20), (0, 64, 64, 20),
+         (16, 64, 64, 20), (0, 32, 64, 6), (0, 32, 64, 1)])
     def test_build_connector_meta_new_prefill(self, scheduler_factory,
                                               num_computed_tokens,
                                               num_matched_tokens,
                                               num_prompt_tokens,
-                                              num_staging_tokens):
+                                              staging_buf_gb):
         """
         Tests metadata generation for a new request (prefill) with no cache hit.
         1. no hit + save 4 blocks
@@ -229,11 +234,9 @@ class TestTPUOffloadConnectorScheduler:
         6. partial hit (no-skip + load 2 blocks) + save 2 blocks + 3 staging blocks limit
         7. partial hit (no-skip + load 2 blocks) + save 2 blocks + 1 staging blocks limit
         """
-        num_staging_blocks = num_staging_tokens // _DEFAULT_BLOCK_SIZE
-        scheduler = scheduler_factory(
-            offload_num_staging_blocks=num_staging_blocks,
-            offload_num_cpu_chunks=100)
+        scheduler = scheduler_factory(offload_staging_buf_gb=staging_buf_gb)
 
+        num_staging_blocks = scheduler.num_staging_blocks
         # calculate the groundtruth
         num_computed_blocks = num_computed_tokens // scheduler.block_size
         num_matched_blocks = num_matched_tokens // scheduler.block_size
@@ -348,8 +351,7 @@ class TestTPUOffloadConnectorScheduler:
         """
 
         scheduler = scheduler_factory(offload_decode_save=decode_save,
-                                      offload_num_staging_blocks=10,
-                                      offload_num_cpu_chunks=10)
+                                      offload_staging_buf_gb=20)
 
         prompt_tokens = list(range(prompt_len))
         generated_tokens = list(range(prompt_len, seq_len))
