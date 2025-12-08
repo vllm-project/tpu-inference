@@ -159,7 +159,7 @@ class SparseMoE(MoE):
     """
     num_experts_per_tok: int
     #TODO: tile size is (tile_batch_seq, tile_activation_dim, tile_weight_dim,) from MaxText
-    tile_size: tuple[int, int, int] = (128, 64, 128)
+    tile_size: tuple[int, int, int] = (256, 512, 512)
     use_megablox: bool = False
     mesh: jax.sharding.Mesh
     # This should be set if and only if you have quantized your model (via Qwix)
@@ -358,7 +358,7 @@ class SparseMoE(MoE):
             )
 
         return output_TD.astype(self.dtype)
-    @mosaic_fusion_group("qwix_quant")    
+    #@mosaic_fusion_group("qwix_quant")    
     def _gmm(self, inputs, kernel, group_sizes):
         """Performs Grouped Matrix Multiply."""
         num_rows = inputs.shape[0]
@@ -386,13 +386,8 @@ class SparseMoE(MoE):
                     scale=kernel_scale, 
                     qtype=self.quantized_dtype
                 )
-                m = inputs.qvalue.shape[0]
-                k, n = final_kernel.qvalue.shape[1], final_kernel.qvalue.shape[2]
-            else:
-                m = inputs.shape[0]
-                k, n = final_kernel.shape[1], final_kernel.shape[2]
 
-            tiling = (min(m, 512), k, n)
+            tiling = self.tile_size
             with set_xla_metadata(ragged_dot_tiling=",".join([str(t) for t in tiling])):
                 output = ragged_dot_func(
                     lhs=inputs,
