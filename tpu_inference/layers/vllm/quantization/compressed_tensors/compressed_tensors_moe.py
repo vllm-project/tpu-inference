@@ -31,11 +31,23 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
                                             JaxCommonConfig):
 
     def __init__(self, quant_config: "CompressedTensorsConfig",
-                 moe: FusedMoEConfig, mesh: Mesh):
+                 moe: FusedMoEConfig, mesh: Mesh, ep_axis_name: str = 'model'):
         super().__init__(quant_config, moe)
         self.mesh = mesh
         self.quant_config = quant_config
         self.use_kernel = envs.USE_MOE_EP_KERNEL
+        self.ep_axis_name = ep_axis_name
+        # TODO: Use autotune table once we have it.
+        self.block_size = {
+            "bt": 64,
+            "bf": 1024,
+            "bd1": 1536,
+            "bd2": 1536,
+            "btc": 64,
+            "bfc": 1024,
+            "bd1c": 1536,
+            "bd2c": 1536,
+        }
 
         # disable GPU paths
         self.use_marlin = False
@@ -50,6 +62,8 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         intermediate_size = layer.w13_weight.shape[1] // 2
         num_experts = layer.w13_weight.shape[0]
         hidden_size = layer.w13_weight.shape[2]
+        assert getattr(layer, "w13_bias", None) is None, "layer.w13_bias not supported yet"  # should we support it?
+        assert getattr(layer, "w2_bias", None) is None, "layer.w2_bias not supported yet"  # should we support it?
         print(f'xw32 process_weights_after_loading, line53 {layer.use_ep=}, {self.use_kernel=}, {layer.w13_weight.shape=}, {layer.w13_weight_scale.shape=}, {layer.w2_weight.shape=}, {layer.w2_weight_scale.shape=}')
         # w13_weight=[160, 5120, 6144]=[num_expert, 2*moe_intermediate_size, hidden_size]
         # w13_weight_scale=[160, 5120, 1]=[num_expert, 2*moe_intermediate_size, 1]
@@ -64,7 +78,7 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
             # Reshape and transpose w13_weight to (num_experts, 2, hidden_size, intermediate_size)
             w13_reshaped = w13_weight.reshape(num_experts, 2,
                                               intermediate_size, hidden_size)
-            w13_weight_transposed = jnp.transpose(w13_reshaped, (0, 1, 3, 2))
+            w13_weight_transposed = jnp.transpose(w13_reshaped, (0, 1, 3, 2))  # (num_experts, 2, hidden_size, intermediate_size)
 
             # Reshape and transpose w13_weight_scale to (num_experts, 2, 1, intermediate_size)
             w13_weight_scale_reshaped = w13_weight_scale.reshape(
@@ -221,23 +235,25 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
                 "Only softmax is supported for scoring_func")
         
         # At the beginning of process_weights_after_loading
-        # w13_weight=[160, 5120, 6144]=[num_expert, 2*moe_intermediate_size, hidden_size]
-        # w13_weight_scale=[160, 5120, 1]=[num_expert, 2*moe_intermediate_size, 1]
-        # w2_weight=[160, 6144, 2560]=[num_expert, hidden_size, moe_intermediate_size]
-        # w2_weight_scale=[160, 6144, 1]=[num_expert, hidden_size, 1]
-        # print(f'xw32 apply, line239 {layer.use_ep=}, {self.use_kernel=}, {layer.w13_weight.shape=}, {layer.w13_weight_scale.shape=}, {layer.w2_weight.shape=}, {layer.w2_weight_scale.shape=}')
+        # w13_weight=[160, 2, 6144, 5120]=(num_experts, 2, hidden_size, intermediate_size)
+        # w13_weight_scale=[160, 2, 1, 5120]=(num_experts, 2, 1, intermediate_size)
+        # w2_weight=[160, 2560, 6144]=[num_experts, intermediate_size, hidden_size]
+        # w2_weight_scale=[160, 1, 6144]=[num_experts, 1, hidden_size]
+        print(f'xw32 apply, line239 {layer.use_ep=}, {self.use_kernel=}, {layer.w13_weight.shape=}, {layer.w13_weight_scale.shape=}, {layer.w2_weight.shape=}, {layer.w2_weight_scale.shape=}')
         # w13_weight=[160, 2560, 6144]=[160, 2560, 6144]=[num_expert, moe_intermediate_size, hidden_size]  # xw32: why isn't 2*moe_intermediate_size?
         # w13_weight_scale=[160, 2560, 1]=[num_expert, moe_intermediate_size, 1]
         # w2_weight=[160, 6144, 2560]=[num_expert, hidden_size, moe_intermediate_size]
         # w2_weight_scale=[160, 6144, 1]=[num_expert, hidden_size, 1]
         if self.use_kernel and layer.use_ep:
+            w13_bias = getattr(layer, "w13_bias", None)
+            w2_bias = getattr(layer, "w2_bias", None)
             output = fused_ep_moe(
                 mesh=self.mesh,
                 tokens=jax_view(x),
                 w1=jax_view(layer.w13_weight),
                 w2=jax_view(layer.w2_weight),
-                b1=jax_view(layer.w13_bias),
-                b2=jax_view(layer.w2_bias),
+                b1=jax_view(w13_bias),
+                b2=jax_view(w2_bias),
                 gating_output=jax_view(router_logits),
                 top_k=top_k,
                 ep_axis_name=self.ep_axis_name,
@@ -245,6 +261,7 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
                 act_fn=activation,
                 **self.block_size,
             )
+            output = torch_view(output)
         else:
             # TODO: Use MoE kernel when it supports fp8
             seqlen = x.shape[0]
