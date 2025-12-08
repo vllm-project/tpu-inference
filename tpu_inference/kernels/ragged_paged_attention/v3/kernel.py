@@ -13,8 +13,6 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import \
-    get_tuned_block_sizes
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (
     align_to, cdiv, get_dtype_bitwidth, get_dtype_packing)
 
@@ -1389,174 +1387,191 @@ def ragged_paged_attention(
   Returns:
     The output of the attention.
   """
-    q, k, v = queries, keys, values
-    static_validate_inputs(
-        q,
-        k,
-        v,
-        kv_cache,
-        kv_lens,
-        page_indices,
-        cu_q_lens,
-        distribution,
-        sm_scale=sm_scale,
-        sliding_window=sliding_window,
-        soft_cap=soft_cap,
-        mask_value=mask_value,
-        q_scale=q_scale,
-        k_scale=k_scale,
-        v_scale=v_scale,
-        chunk_prefill_size=chunk_prefill_size,
-        num_kv_pages_per_block=num_kv_pages_per_block,
-        num_queries_per_block=num_queries_per_block,
-        vmem_limit_bytes=vmem_limit_bytes,
-    )
 
-    actual_num_q_heads = q.shape[1]
-    actual_head_dim = q.shape[2]
-    actual_num_kv_heads = k.shape[1]
-
-    actual_num_q_heads_per_kv_head = actual_num_q_heads // actual_num_kv_heads
-    q, kv = prepare_inputs(q, k, v)
-    (
-        _,
-        max_num_tokens,
-        num_q_heads_per_kv_head_per_q_packing,
-        q_packing,
-        head_dim,
-    ) = q.shape
-    page_size = kv_cache.shape[1]
-    max_num_seqs = kv_lens.shape[0]
-    num_page_indices = page_indices.shape[0]
-    assert num_page_indices % max_num_seqs == 0
-    pages_per_seq = num_page_indices // max_num_seqs
-    num_q_heads_per_kv_head = num_q_heads_per_kv_head_per_q_packing * q_packing
-
-    bkv_p = num_kv_pages_per_block
-    bq_sz = num_queries_per_block
-    if bq_sz is None or bkv_p is None:
-        bkv_p, bq_sz = get_tuned_block_sizes(
-            q.dtype,
-            kv_cache.dtype,
-            actual_num_q_heads,
-            actual_num_kv_heads,
-            head_dim,
-            page_size,
-            max_num_tokens,
-            pages_per_seq,
+    def wrapper(bq_sz, bkv_p):
+        q, k, v = queries, keys, values
+        vmem_limit_bytes = 120 * 1024 * 1024
+        static_validate_inputs(
+            q,
+            k,
+            v,
+            kv_cache,
+            kv_lens,
+            page_indices,
+            cu_q_lens,
+            distribution,
+            sm_scale=sm_scale,
+            sliding_window=sliding_window,
+            soft_cap=soft_cap,
+            mask_value=mask_value,
+            q_scale=q_scale,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            chunk_prefill_size=chunk_prefill_size,
+            num_kv_pages_per_block=num_kv_pages_per_block,
+            num_queries_per_block=num_queries_per_block,
+            vmem_limit_bytes=vmem_limit_bytes,
         )
-    bkv_sz = bkv_p * page_size
-    if vmem_limit_bytes is None:
-        # TODO (jevinjiang/jacobplatin): change this to use
-        # `get_vmem_estimate_bytes` when VREG spilling is fixed.
-        vmem_limit_bytes = DEFAULT_VMEM_LIMIT_BYTES
-    grid = (distribution[2], )
 
-    in_specs = [
-        pl.BlockSpec(memory_space=pltpu.HBM),
-        pl.BlockSpec(memory_space=pltpu.HBM),
-        pl.BlockSpec(memory_space=pltpu.HBM),
-    ]
+        actual_num_q_heads = q.shape[1]
+        actual_head_dim = q.shape[2]
+        actual_num_kv_heads = k.shape[1]
 
-    out_specs = [
-        pl.BlockSpec(memory_space=pltpu.HBM),
-        pl.BlockSpec(memory_space=pltpu.HBM),
-    ]
+        actual_num_q_heads_per_kv_head = actual_num_q_heads // actual_num_kv_heads
+        q, kv = prepare_inputs(q, k, v)
+        (
+            _,
+            max_num_tokens,
+            num_q_heads_per_kv_head_per_q_packing,
+            q_packing,
+            head_dim,
+        ) = q.shape
+        page_size = kv_cache.shape[1]
+        max_num_seqs = kv_lens.shape[0]
+        num_page_indices = page_indices.shape[0]
+        assert num_page_indices % max_num_seqs == 0
+        pages_per_seq = num_page_indices // max_num_seqs
+        num_q_heads_per_kv_head = num_q_heads_per_kv_head_per_q_packing * q_packing
 
-    bkv_double_buf = pltpu.VMEM(
-        (2, bkv_sz, *kv_cache.shape[2:]),
-        kv_cache.dtype,
-    )
+        bkv_sz = bkv_p * page_size
+        if vmem_limit_bytes is None:
+            # TODO (jevinjiang/jacobplatin): change this to use
+            # `get_vmem_estimate_bytes` when VREG spilling is fixed.
+            vmem_limit_bytes = DEFAULT_VMEM_LIMIT_BYTES
+        grid = (distribution[2], )
 
-    bq_double_buf = pltpu.VMEM(
-        (2, actual_num_kv_heads, bq_sz, *q.shape[2:]),
-        q.dtype,
-    )
+        in_specs = [
+            pl.BlockSpec(memory_space=pltpu.HBM),
+            pl.BlockSpec(memory_space=pltpu.HBM),
+            pl.BlockSpec(memory_space=pltpu.HBM),
+        ]
 
-    bo_double_buf = bq_double_buf
+        out_specs = [
+            pl.BlockSpec(memory_space=pltpu.HBM),
+            pl.BlockSpec(memory_space=pltpu.HBM),
+        ]
 
-    l_scratch = pltpu.VMEM(
-        (actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, 128),
-        jnp.float32,
-    )
-    m_scratch = l_scratch
+        bkv_double_buf = pltpu.VMEM(
+            (2, bkv_sz, *kv_cache.shape[2:]),
+            kv_cache.dtype,
+        )
 
-    acc_scratch = pltpu.VMEM(
-        (actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, head_dim),
-        jnp.float32,
-    )
+        bq_double_buf = pltpu.VMEM(
+            (2, actual_num_kv_heads, bq_sz, *q.shape[2:]),
+            q.dtype,
+        )
 
-    scratch_shapes = [
-        bkv_double_buf,  # Double buffering for kv block.
-        bq_double_buf,  # Double buffering for q block.
-        bo_double_buf,  # Double buffering for output block.
-        # Semaphores for double buffering of bkv, bq, bo and bkv_update.
-        pltpu.SemaphoreType.DMA((4, 2)),
-        # Intermediate buffers per kv head for flash attention.
-        l_scratch,
-        m_scratch,
-        acc_scratch,
-    ]
+        bo_double_buf = bq_double_buf
 
-    scalar_prefetches = (
-        kv_lens,
-        # TODO(jevinjiang): can we use ragged page_indices to save some smem?
-        page_indices,
-        cu_q_lens,
-        distribution,
-        # (bq_sem_idx, bkv_sem_idx, bo_sem_idx)
-        jnp.zeros((3, ), jnp.int32),
-        # (bo_sem_0_seq_idx, bo_sem_1_seq_idx, bo_sem_0_bo_idx, bo_sem_1_bo_idx)
-        jnp.full((4, ), -1, jnp.int32),
-        # (bkv_sem_0_seq_idx, bkv_sem_1_seq_idx, bkv_sem_0_offset, bkv_sem_1_offset, bkv_sem_0_sz, bkv_sem_1_sz)
-        jnp.full((6, ), -1, jnp.int32),
-    )
+        l_scratch = pltpu.VMEM(
+            (actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, 128),
+            jnp.float32,
+        )
+        m_scratch = l_scratch
 
-    scope_name = f"RPA-bq_{bq_sz}-bkvp_{bkv_p}-p_{page_size}"
-    kernel = jax.named_scope(scope_name)(
-        pl.pallas_call(
-            functools.partial(
-                _ragged_paged_attention_kernel,
-                sm_scale=sm_scale,
-                sliding_window=sliding_window,
-                soft_cap=soft_cap,
-                mask_value=mask_value,
-                q_scale=q_scale,
-                k_scale=k_scale,
-                v_scale=v_scale,
-                chunk_prefill_size=chunk_prefill_size,
-                bq_sz=bq_sz,
-                bkv_p=bkv_p,
-                debug_mode=debug_mode,
-            ),
-            grid_spec=pltpu.PrefetchScalarGridSpec(
-                num_scalar_prefetch=len(scalar_prefetches),
-                in_specs=in_specs,
-                out_specs=out_specs,
-                grid=grid,
-                scratch_shapes=scratch_shapes,
-            ),
-            compiler_params=pltpu.CompilerParams(
-                # TODO(jevinjiang): since each sequence depends on the previous
-                # one, we need some extra work to support Megacore mode.
-                dimension_semantics=("arbitrary", ),
-                vmem_limit_bytes=vmem_limit_bytes,
-            ),
-            out_shape=[
-                jax.ShapeDtypeStruct(shape=q.shape, dtype=q.dtype),
-                jax.ShapeDtypeStruct(shape=kv_cache.shape,
-                                     dtype=kv_cache.dtype),
-            ],
-            input_output_aliases={
-                7: 0,
-                9: 1
-            },
-            name=scope_name,
-        ))
+        acc_scratch = pltpu.VMEM(
+            (actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, head_dim),
+            jnp.float32,
+        )
 
-    output, updated_kv_cache = kernel(*scalar_prefetches, q, kv, kv_cache)
-    return (
-        prepare_outputs(output, actual_num_q_heads_per_kv_head,
-                        actual_head_dim),
-        updated_kv_cache,
+        scratch_shapes = [
+            bkv_double_buf,  # Double buffering for kv block.
+            bq_double_buf,  # Double buffering for q block.
+            bo_double_buf,  # Double buffering for output block.
+            # Semaphores for double buffering of bkv, bq, bo and bkv_update.
+            pltpu.SemaphoreType.DMA((4, 2)),
+            # Intermediate buffers per kv head for flash attention.
+            l_scratch,
+            m_scratch,
+            acc_scratch,
+        ]
+
+        scalar_prefetches = (
+            kv_lens,
+            # TODO(jevinjiang): can we use ragged page_indices to save some smem?
+            page_indices,
+            cu_q_lens,
+            distribution,
+            # (bq_sem_idx, bkv_sem_idx, bo_sem_idx)
+            jnp.zeros((3, ), jnp.int32),
+            # (bo_sem_0_seq_idx, bo_sem_1_seq_idx, bo_sem_0_bo_idx, bo_sem_1_bo_idx)
+            jnp.full((4, ), -1, jnp.int32),
+            # (bkv_sem_0_seq_idx, bkv_sem_1_seq_idx, bkv_sem_0_offset, bkv_sem_1_offset, bkv_sem_0_sz, bkv_sem_1_sz)
+            jnp.full((6, ), -1, jnp.int32),
+        )
+
+        scope_name = f"RPA-bq_{bq_sz}-bkvp_{bkv_p}-p_{page_size}"
+        kernel = jax.named_scope(scope_name)(
+            pl.pallas_call(
+                functools.partial(
+                    _ragged_paged_attention_kernel,
+                    sm_scale=sm_scale,
+                    sliding_window=sliding_window,
+                    soft_cap=soft_cap,
+                    mask_value=mask_value,
+                    q_scale=q_scale,
+                    k_scale=k_scale,
+                    v_scale=v_scale,
+                    chunk_prefill_size=chunk_prefill_size,
+                    bq_sz=bq_sz,
+                    bkv_p=bkv_p,
+                    debug_mode=debug_mode,
+                ),
+                grid_spec=pltpu.PrefetchScalarGridSpec(
+                    num_scalar_prefetch=len(scalar_prefetches),
+                    in_specs=in_specs,
+                    out_specs=out_specs,
+                    grid=grid,
+                    scratch_shapes=scratch_shapes,
+                ),
+                compiler_params=pltpu.CompilerParams(
+                    # TODO(jevinjiang): since each sequence depends on the previous
+                    # one, we need some extra work to support Megacore mode.
+                    dimension_semantics=("arbitrary", ),
+                    vmem_limit_bytes=vmem_limit_bytes,
+                ),
+                out_shape=[
+                    jax.ShapeDtypeStruct(shape=q.shape, dtype=q.dtype),
+                    jax.ShapeDtypeStruct(shape=kv_cache.shape,
+                                         dtype=kv_cache.dtype),
+                ],
+                input_output_aliases={
+                    7: 0,
+                    9: 1
+                },
+                name=scope_name,
+            ))
+
+        output, updated_kv_cache = kernel(*scalar_prefetches, q, kv, kv_cache)
+        return (
+            prepare_outputs(output, actual_num_q_heads_per_kv_head,
+                            actual_head_dim),
+            updated_kv_cache,
+        )
+
+    num_seqs = distribution[2]
+
+    # calculate the average kv length
+    avg_kv_len = jnp.sum(kv_lens) / num_seqs
+
+    def case_decode():
+        # Thresholds
+        AVG_LEN_THRESHOLD_LONG = 2048
+
+        # Branch Functions
+        def branch_long():
+            return wrapper(bq_sz=1, bkv_p=16)
+
+        def branch_short():
+            return wrapper(bq_sz=1, bkv_p=8)
+
+        # Top-level decode condition
+        return jax.lax.cond(avg_kv_len >= AVG_LEN_THRESHOLD_LONG, branch_long,
+                            branch_short)
+
+    is_pure_decode = distribution[0] == distribution[2]
+    return jax.lax.cond(
+        is_pure_decode,
+        case_decode,
+        functools.partial(wrapper, bq_sz=64, bkv_p=4),
     )
