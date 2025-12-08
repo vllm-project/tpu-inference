@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import math
 import os
 import tempfile
 from dataclasses import dataclass, field
@@ -13,6 +14,7 @@ import vllm.envs as vllm_envs
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed import get_pp_group
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
+                                          get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
@@ -294,17 +296,11 @@ class TPUWorker:
             kv_transfer_config = self.vllm_config.kv_transfer_config
             if kv_transfer_config.kv_connector == "TPUOffloadConnector" and kv_transfer_config.kv_connector_module_path == "tpu_inference.distributed.offload.tpu_offload_connector":
                 # If kv offloading is enabled, we need to account for the memory used by the KV transfer buffer.
-                staging_buffer_pages = envs.TPU_OFFLOAD_NUM_STAGING_BLOCKS
-
-                kv_cache_specs = self.model_runner.get_kv_cache_spec()
-                num_layers = len(kv_cache_specs)
-                vllm_page_size_bytes = get_uniform_page_size(
-                    list(kv_cache_specs.values()))
-                stage_buffer_size_bytes = staging_buffer_pages * num_layers * vllm_page_size_bytes
-
-                total_hbm_avail = total_hbm_avail - stage_buffer_size_bytes
+                staging_buffer_size_in_bytes = math.floor(
+                    envs.TPU_OFFLOAD_STAGING_BUF_SIZE_GB * utils.GBYTES)
+                total_hbm_avail -= staging_buffer_size_in_bytes
                 logger.info(
-                    f"  ALERT: KV offloading enabled. Deducting {stage_buffer_size_bytes} Bytes ({staging_buffer_pages} pages) from available HBM for staging buffer."
+                    f"  ALERT: KV offloading enabled. Deducting {staging_buffer_size_in_bytes} Bytes from available HBM for staging buffer."
                 )
 
         total_hbm_avail_gb = round(total_hbm_avail / utils.GBYTES, 2)
@@ -452,8 +448,18 @@ class TPUWorker:
 
     def get_kv_connector_handshake_metadata(self) -> dict | None:
         """Get KV connector metadata from this worker if available."""
-        # NOTE: we are not using it right now.
-        return
+
+        if not has_kv_transfer_group():
+            return None
+
+        connector = get_kv_transfer_group()
+        # Return None for connectors that don't need to exchange handshake
+        # metadata across workers.
+        if (metadata := connector.get_handshake_metadata()) is None:
+            return None
+
+        # NOTE(jcgu): single host only
+        return {self.rank: metadata}
 
     def initialize_from_config(
         self,
