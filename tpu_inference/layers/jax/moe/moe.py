@@ -91,6 +91,7 @@ class MoE(nnx.Module):
     activation_ffw_ted: Sharding
     edf_sharding: Sharding
     efd_sharding: Sharding
+    e2df_sharding: Sharding = ()
     random_init: bool = False
     mesh: jax.sharding.Mesh
     use_moe_kernel: bool = False
@@ -109,24 +110,20 @@ class MoE(nnx.Module):
         if self.use_moe_kernel:
             router_logits_TE = self.router(x_TD)
             block_size = {
-                "bt": 16,
-                "bf": 1024,
-                "bd1": 1024,
-                "bd2": 1024,
+                "bt": 32,
+                "bf": 512,
+                "bd1": 512,
+                "bd2": 512,
                 "btc": 64,
                 "bfc": 256,
-                "bd1c": 512,
-                "bd2c": 512,
+                "bd1c": 256,
+                "bd2c": 256,
             }
             ep_axis_name = self.efd_sharding[0]
-            self.mlp1_weight_E2DF = jnp.stack(
-                [self.kernel_gating_EDF.value, self.kernel_up_proj_EDF.value],
-                axis=1
-            )
             output_TD = fused_ep_moe(
                 mesh=self.mesh,
                 tokens=x_TD,
-                w1=self.mlp1_weight_E2DF,
+                w1=self.kernel_gating_upproj_E2DF.value,
                 w2=self.kernel_down_proj_EFD.value,
                 gating_output=router_logits_TE,
                 top_k=self.router.num_experts_per_tok,
@@ -152,28 +149,36 @@ class MoE(nnx.Module):
 
     def __post_init__(self, rngs: nnx.Rngs):
         """Generates the kernels (weights) for the router and experts (gating, up-projection, and down-projection layers)."""
-
+        E = self.num_local_experts
         D = self.hidden_size
         F = self.intermediate_size_moe
-        shape_gating = (self.num_local_experts, D, F)
-        shape_up = (self.num_local_experts, D, F)
         shape_down = (self.num_local_experts, F, D)
-
-        self.kernel_gating_EDF = create_param(rngs,
-                                              shape=shape_gating,
+        if self.use_moe_kernel:
+            shape_gating_up = (E, 2, D, F)
+            self.kernel_gating_upproj_E2DF = create_param(rngs,
+                                              shape=shape_gating_up,
                                               dtype=self.dtype,
-                                              sharding=self.edf_sharding,
+                                              sharding=self.e2df_sharding,
                                               random_init=self.random_init)
-        self.kernel_up_proj_EDF = create_param(rngs,
-                                               shape=shape_up,
-                                               dtype=self.dtype,
-                                               sharding=self.edf_sharding,
-                                               random_init=self.random_init)
+        else:
+            shape_gating = (self.num_local_experts, D, F)
+            shape_up = (self.num_local_experts, D, F)
+
+            self.kernel_gating_EDF = create_param(rngs,
+                                                shape=shape_gating,
+                                                dtype=self.dtype,
+                                                sharding=self.edf_sharding,
+                                                random_init=self.random_init)
+            self.kernel_up_proj_EDF = create_param(rngs,
+                                                shape=shape_up,
+                                                dtype=self.dtype,
+                                                sharding=self.edf_sharding,
+                                                random_init=self.random_init)
         self.kernel_down_proj_EFD = create_param(rngs,
-                                                 shape=shape_down,
-                                                 dtype=self.dtype,
-                                                 sharding=self.efd_sharding,
-                                                 random_init=self.random_init)
+                                                shape=shape_down,
+                                                dtype=self.dtype,
+                                                sharding=self.efd_sharding,
+                                                random_init=self.random_init)
 
     def _moe_fwd_preapply_router_weights(self, x_TD: jax.Array, weights_TE):
         """Performs the forward pass of the MoE experts with router weights pre-applied to the inputs.
