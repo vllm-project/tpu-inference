@@ -48,7 +48,12 @@ def align_to(a, b):
 
 # TODO(kyuyeunk): Move these functions into a common utility file.
 def u8_unpack_e2m1(u8_packed_e2m1: jax.Array) -> jax.Array:
-    assert u8_packed_e2m1.dtype == jnp.uint8
+    """
+    Unpack array of 8 bit slots with 2 fp4e2m1 value in each 
+    slot from uint8 array of 8 bit slots into fp4e2m1 array. 
+    of 8 bit slots with 1 fp4e2m1 number in each slot.
+    """
+    assert u8_packed_e2m1.dtype == jnp.uint8, f"got dtype {u8_packed_e2m1.dtype}"
     e2m1 = jax.lax.bitcast_convert_type(u8_packed_e2m1, jnp.float4_e2m1fn)
     # bitcast creates one more dimension that splits 8 bits into two e2m1.
     # we flatten them with the last dim.
@@ -56,6 +61,13 @@ def u8_unpack_e2m1(u8_packed_e2m1: jax.Array) -> jax.Array:
 
 
 def e8m0_to_fp32(u8: jax.Array) -> jax.Array:
+    """
+    Convert uint8 scale exponents to scale factors in fp32 in power of 2 scaling format.
+    :param u8: jax.Array: uint8 array representing exponents
+    :type u8: jax.Array
+    :return: jax.Array: scale factors in fp32
+    :rtype: jax.Array
+    """
     e8_finfo = jnp.finfo(jnp.float8_e8m0fnu)
     exponents = u8.astype(jnp.int32) + e8_finfo.minexp
     ones = jnp.ones_like(u8, dtype=jnp.float32)
@@ -66,7 +78,7 @@ def dequantize_block_weight(weight: jax.Array,
                             scale: jax.Array,
                             block_size: int,
                             out_dtype: jnp.dtype = jnp.bfloat16) -> jax.Array:
-    orig_shape = weight.shape
+    orig_shape = weight.shape # w13 and w2(experts,intermediate, hidden)
     weight_block = weight.reshape(orig_shape[:-1] + (-1, block_size))
     weight_dequantized = weight_block.astype(jnp.float32) * jnp.expand_dims(
         scale, -1)
@@ -90,7 +102,7 @@ def quantize_block_weight(
         end = min(start + block_size, contracting_size)
         padding_size = start + block_size - end
 
-        weight_slice = weight[..., start:end]
+        weight_slice = weight[..., start:end] # [num_experts, intermediate, 32]
         abs_max = jnp.max(jnp.abs(weight_slice), axis=-1, keepdims=True)
         scale = (abs_max / dtype_max).astype(jnp.float32)
         w_q = jnp.clip(weight_slice / scale, min=dtype_min,

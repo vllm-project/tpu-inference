@@ -81,6 +81,7 @@ def _calculate_num_tiles(x: int, tx: int) -> int:
 
 
 def _calculate_irregular_num_tiles(x: int, tx: int) -> tuple[int, int]:
+    assert tx != 0 , "x-dimension tile size must be non-zero."
     tiles, rem = divmod(x, tx)
     if rem:
         tiles += 1
@@ -375,6 +376,8 @@ def gmm(
 
     # Gather shape information.
     m, k, n = (lhs.shape[0], lhs.shape[1], rhs.shape[1])
+    print(f"kky gmm shapes: m {m}, k {k}, n {n}, num_current_groups {num_current_groups}")
+    print(f"shapes lhs {lhs.shape}, rhs {rhs.shape}")
 
     # If tiling is callable, look up the problem dimensions in the LUT. If no
     # tuned tile dimensions are available throw an error.
@@ -386,6 +389,9 @@ def gmm(
             f"No tuned tiling found for (m, k, n) = ({m}, {k}, {n})")
 
     tm, tk, tn = tiling
+    assert tk > 0, "k-dimension tile size must be non-zero."
+    assert tn > 0, "n-dimension tile size must be non-zero."
+    assert tm > 0, "m-dimension tile size must be non-zero."
 
     if rhs_scale is not None:
         assert isinstance(rhs_scale, jax.Array)
@@ -397,6 +403,8 @@ def gmm(
 
     if tk > block_size or block_size % tk != 0:
         tk = block_size
+        
+    print(f"kky adjusted tk: {tk} k {k} block_size n {n} tn {tn}")
 
     tiles_k, k_rem = _calculate_irregular_num_tiles(k, tk)
     tiles_n, n_rem = _calculate_irregular_num_tiles(n, tn)

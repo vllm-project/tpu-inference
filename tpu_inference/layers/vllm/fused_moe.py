@@ -160,7 +160,8 @@ def tensor_sharded_gmm_row_parallel(
 ) -> jax.Array:
 
     def _gmm_all_reduce(lhs, rhs, rhs_scale, rhs_bias, group_sizes):
-        m, g, n, k = lhs.shape[0], *rhs.shape
+        m, g, n, k = lhs.shape[0], *rhs.shape # k = 2560/8 = 320
+        jax.debug.print("GMM shapes: lhs {lhs.shape}, rhs {rhs.shape}", lhs=lhs, rhs=rhs)
         tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
         if rhs_bias is not None:
             shard_id = jax.lax.axis_index("model")
@@ -177,8 +178,8 @@ def tensor_sharded_gmm_row_parallel(
             group_offset=jnp.array(0),
         )
         return jax.lax.psum(out, axis_name="model")
-
-    rhs_scale_spec = None if rhs_scale is None else P(None, "model", None,
+    num_blocks = 1 if rhs_scale is None else rhs_scale.shape[1]
+    rhs_scale_spec = None if rhs_scale is None or num_blocks == 1 else P(None, "model", None,
                                                       None)
     rhs_bias_spec = None if rhs_bias is None else P(None, None, None)
     gmm_result = shard_map(
