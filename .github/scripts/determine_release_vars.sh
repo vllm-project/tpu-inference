@@ -19,7 +19,7 @@ if [[ "$GH_EVENT_NAME"  == "schedule" ]]; then
     echo "Using BASE_VERSION=${BASE_VERSION}"
 
     # --- Generate Nightly Version ---
-    DATETIME_STR=$(date -u +%Y%m%d%H%M)
+    DATETIME_STR=$(date -u +%Y%m%d)
     VERSION="${BASE_VERSION}.dev${DATETIME_STR}"
 
 # --- PUSH TAG TRIGGER ---

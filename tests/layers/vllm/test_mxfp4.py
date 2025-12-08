@@ -231,7 +231,7 @@ def test_mxfp4_fused_moe_use_kernel(mesh, num_tokens, intermediate_size,
     vllm_config = engine_args.create_engine_config()
     vllm_config.model_config.dtype = dtype
     vllm_config.parallel_config = ParallelConfig(
-        tensor_parallel_size=mesh.devices.size, enable_expert_paralle=True)
+        tensor_parallel_size=mesh.devices.size)
 
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
     with set_current_vllm_config(vllm_config):
@@ -247,6 +247,8 @@ def test_mxfp4_fused_moe_use_kernel(mesh, num_tokens, intermediate_size,
             quant_config=quant_config,
             has_bias=True,
         )
+        vllm_fused_moe.moe_parallel_config.use_ep = True
+
     vllm_fused_moe.w13_weight.data = w1_weight
     vllm_fused_moe.w2_weight.data = w2_weight
     vllm_fused_moe.w13_weight_scale.data = w1_weight_scale

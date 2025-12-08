@@ -7,6 +7,7 @@ from jax._src import dtypes
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.ops.mappings import t2j_dtype
 
+import tpu_inference.kernels.mla.v1.kernel as mla
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -17,9 +18,13 @@ logger = init_logger(__name__)
 DEFAULT_KV_CACHE_DTYPE = jnp.bfloat16
 
 
-def get_kv_cache_shape_with_mesh(mesh: Mesh, total_num_pages: int,
-                                 page_size: int, actual_num_kv_heads: int,
-                                 actual_head_dim: int, kv_dtype: any):
+def get_kv_cache_shape_with_mesh(mesh: Mesh,
+                                 total_num_pages: int,
+                                 page_size: int,
+                                 actual_num_kv_heads: int,
+                                 actual_head_dim: int,
+                                 kv_dtype: any,
+                                 use_mla: bool = False):
     """Gets the KV cache shape based on the mesh configuration."""
 
     model_cnt = mesh.shape["model"]
@@ -28,15 +33,21 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh, total_num_pages: int,
     # specific model, rather than being determined by the head_dim. If new
     # models are introduced with a head_dim of 64, this will require additional
     # model-specific adjustments.
-    get_kv_cache_shape_fn = (
-        rpa_hd64.get_kv_cache_shape if actual_head_dim == 64 \
-            else rpa.get_kv_cache_shape
-    )
-    shape = list(
-        get_kv_cache_shape_fn(total_num_pages, page_size,
-                              actual_num_kv_heads // model_cnt,
-                              actual_head_dim, kv_dtype))
-    shape[2] *= model_cnt
+    if use_mla:
+        get_kv_cache_shape_fn = mla.get_kv_cache_shape
+        shape = list(
+            get_kv_cache_shape_fn(total_num_pages, page_size, actual_head_dim,
+                                  kv_dtype))
+    else:
+        get_kv_cache_shape_fn = (
+            rpa_hd64.get_kv_cache_shape if actual_head_dim == 64 \
+                else rpa.get_kv_cache_shape
+        )
+        shape = list(
+            get_kv_cache_shape_fn(total_num_pages, page_size,
+                                  actual_num_kv_heads // model_cnt,
+                                  actual_head_dim, kv_dtype))
+        shape[2] *= model_cnt
     return tuple(shape)
 
 
@@ -48,6 +59,7 @@ def create_kv_caches(
     mesh: Mesh,
     layer_names: List[str],
     cache_dtype: jnp.dtype = DEFAULT_KV_CACHE_DTYPE,
+    use_mla: bool = False,
 ) -> List[jax.Array]:
     """
     Creates a list of KV cache where each array mapps to single attention layer.
@@ -74,12 +86,16 @@ def create_kv_caches(
 
     cache_shape = get_kv_cache_shape_with_mesh(mesh, num_blocks, block_size,
                                                num_kv_heads, head_size,
-                                               cache_dtype)
+                                               cache_dtype, use_mla)
 
-    sharding = NamedSharding(
-        mesh,
-        PartitionSpec(ShardingAxisName.ATTN_DATA, None,
-                      ShardingAxisName.ATTN_HEAD))
+    if use_mla:
+        sharding = NamedSharding(mesh,
+                                 PartitionSpec(ShardingAxisName.MLP_TENSOR))
+    else:
+        sharding = NamedSharding(
+            mesh,
+            PartitionSpec(ShardingAxisName.ATTN_DATA, None,
+                          ShardingAxisName.ATTN_HEAD))
 
     def _allocate() -> jax.Array:
         return jnp.empty(
@@ -94,7 +110,8 @@ def create_kv_caches(
     return kv_caches
 
 
-def get_rpa_page_size_bytes(mesh: Mesh, kv_cache_specs: dict[str, Any]) -> int:
+def get_attention_page_size_bytes(mesh: Mesh,
+                                  kv_cache_specs: dict[str, Any]) -> int:
     """
     Calculate KV cache page size of RPA kernel.
 
@@ -107,7 +124,7 @@ def get_rpa_page_size_bytes(mesh: Mesh, kv_cache_specs: dict[str, Any]) -> int:
     """
 
     # Import it here to avoid circular import.
-    from vllm.v1.kv_cache_interface import AttentionSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
     page_size_bytes_set = set()
     for kv_cache_spec in kv_cache_specs.values():
@@ -115,7 +132,7 @@ def get_rpa_page_size_bytes(mesh: Mesh, kv_cache_specs: dict[str, Any]) -> int:
 
         dtype = t2j_dtype(kv_cache_spec.dtype)
         bits = dtypes.bit_width(dtype)
-
+        use_mla = isinstance(kv_cache_spec, MLAAttentionSpec)
         kv_cache_shape = get_kv_cache_shape_with_mesh(
             mesh=mesh,
             total_num_pages=1,  # Pass 1 to get shape of a single page.
@@ -123,6 +140,7 @@ def get_rpa_page_size_bytes(mesh: Mesh, kv_cache_specs: dict[str, Any]) -> int:
             actual_num_kv_heads=kv_cache_spec.num_kv_heads,
             actual_head_dim=kv_cache_spec.head_size,
             kv_dtype=dtype,
+            use_mla=use_mla,
         )
         page_size_bytes = (bits * np.prod(kv_cache_shape)) // 8
         page_size_bytes_set.add(page_size_bytes)
