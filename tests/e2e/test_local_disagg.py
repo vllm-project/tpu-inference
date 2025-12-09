@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import time
 from dataclasses import asdict
 from unittest.mock import patch
 
@@ -116,7 +117,8 @@ def test_disaggregated_serving(test_prompts, sampling_params):
                     print(f"Generated: {output.outputs[0].text!r}")
 
             finally:
-                # Clean up if needed, though LLM destructor usually handles it
+                del llm
+                time.sleep(10)
                 pass
 
 
@@ -144,7 +146,7 @@ def _run_inference(model_name: str,
             return llm.generate(test_prompts, sampling_params)
         finally:
             del llm
-            # No explicit sleep needed for mock, but good practice if real hardware
+            time.sleep(10)
             pass
 
     if is_disagg:
