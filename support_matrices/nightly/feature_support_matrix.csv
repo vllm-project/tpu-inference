@@ -3,15 +3,15 @@ Feature,CorrectnessTest,PerformanceTest
 "DCN-based P/D disaggregation",to be added,to be added
 "KV cache host offloading",to be added,to be added
 "Llama 4 Maverick",to be added,to be added
-"LoRA_Torch",❌,N/A
+"LoRA_Torch",✅,to be added
 "Multimodal Inputs",✅,✅
-"Out-of-tree model support",❌,N/A
+"Out-of-tree model support",✅,✅
 "Prefix Caching",✅,✅
 "Single Program Multi Data",✅,✅
 "Single-Host-P-D-disaggregation",N/A,N/A
 "Speculative Decoding: Eagle3",✅,✅
-"Speculative Decoding: Ngram",❌,N/A
-"async scheduler",❌,N/A
-"runai_model_streamer_loader",❌,N/A
+"Speculative Decoding: Ngram",✅,✅
+"async scheduler",✅,❌
+"runai_model_streamer_loader",✅,N/A
 "sampling_params",✅,N/A
 "structured_decoding",✅,N/A
