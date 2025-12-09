@@ -31,7 +31,8 @@ steps:
       queue: tpu_v6e_queue
     commands:
       - |
-        buildkite-agent meta-data set "LoRA_Torch_PerformanceTest" "to be added"
+        .buildkite/scripts/run_in_docker.sh \
+          bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora_perf.py'
   - label: "Record performance test result for LoRA_Torch"
     key: "record_LoRA_Torch_PerformanceTest"
     depends_on: "LoRA_Torch_PerformanceTest"
