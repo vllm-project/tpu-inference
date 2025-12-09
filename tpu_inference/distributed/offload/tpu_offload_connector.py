@@ -80,10 +80,10 @@ Worker Side Execution:
 - `start_load_kv`: Iterates through the metadata. If a `meta.load_spec`
     exists, it reads the corresponding data from the CPU backend and copies it
     into the allocated blocks on the TPU. This is a blocking operation.
-- `wait_for_save`: Iterates through the metadata. If a `meta.save_spec`
+- `start_save_kv`: Iterates through the metadata. If a `meta.save_spec`
     exists, it submits an asynchronous task to copy the specified slice of
-    KV data from TPU to CPU and update the CPU backend. It then waits for all
-    submitted save tasks for the current step to complete.
+    KV data from TPU to CPU and update the CPU backend. The completed saves
+    will be collected by `_process_completed_saves` in `get_finished`.
 """
 import copy
 import math
@@ -462,7 +462,7 @@ class TPUOffloadConnector(KVConnectorBase_V1):
     def wait_for_save(self):
         assert isinstance(self._connector_metadata,
                           TPUOffloadConnectorMetadata)
-        self.connector_worker.wait_for_save()
+        self.connector_worker.start_save_kv()
 
     def get_finished(self,
                      finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
@@ -1217,6 +1217,8 @@ class TPUOffloadConnectorScheduler():
         self._reqs_being_saved.pop(req_id, None)
         self._reqs_being_loaded.pop(req_id, None)
 
+        # TODO(jcgu): clean-up all states of req_id
+
         return False, None
 
 
@@ -1255,12 +1257,16 @@ class TPUOffloadConnectorWorker:
 
         self.cpu_chunk_size = self.block_size
         # Thread pool for asynchronous TPU->CPU copies
+        self.num_save_threads = envs.TPU_OFFLOAD_SAVE_THREADS
         self.save_executor = ThreadPoolExecutor(
-            max_workers=4, thread_name_prefix="tpu_save_handler")
+            max_workers=self.num_save_threads,
+            thread_name_prefix="tpu_save_handler")
         self.finished_save_reqs: set[ReqId] = set()
         self.finished_load_reqs: set[ReqId] = set()
-        # Tracks if wait_for_save has been called for the current step's metadata.
+        # Tracks if start_save_kv has been called for the current step's metadata.
         self._processed_save_for_step = False
+        # On-going save operations
+        self._pending_save_futures: list[tuple[Future, TPUReqMeta]] = []
 
         # record finished save / load blocks (with req_ids) for each iteration
         self.offload_stats = KVOffloadConnectorStats()
@@ -1718,10 +1724,9 @@ class TPUOffloadConnectorWorker:
 
         return req_id
 
-    def wait_for_save(self):
+    def start_save_kv(self):
         """
-        Initiates and waits for all pending asynchronous save operations for the
-        current step to complete.
+        Initiates asynchronous save operations for the current step.
         """
         assert self.cpu_backend, "please initialize cpu_backend first."
         # This method is idempotent. If the save operations for the current
@@ -1729,7 +1734,7 @@ class TPUOffloadConnectorWorker:
         if self._processed_save_for_step:
             return
 
-        # logger.info("TPUOffloadConnectorWorker: Entering wait_for_save")
+        # logger.info("TPUOffloadConnectorWorker: Entering start_save_kv")
         metadata = self.connector._get_connector_metadata()
         if not isinstance(metadata, TPUOffloadConnectorMetadata):
             logger.info(
@@ -1739,11 +1744,9 @@ class TPUOffloadConnectorWorker:
             return
 
         if not metadata.requests_meta:
-            # logger.info("wait_for_save:no reqs to save")
             self._processed_save_for_step = True
             return
 
-        pending_save_futures: list[tuple[Future, TPUReqMeta]] = []
         # Handle save requests
         for meta in metadata.requests_meta:
             if meta.save_spec:
@@ -1765,41 +1768,55 @@ class TPUOffloadConnectorWorker:
                                                    meta.local_block_ids,
                                                    meta.token_ids,
                                                    meta.save_spec)
-                pending_save_futures.append((future, meta))
+                self._pending_save_futures.append((future, meta))
 
-        if not pending_save_futures:
-            self._processed_save_for_step = True
+        self._processed_save_for_step = True
+
+    def _process_completed_saves(self):
+        """
+        Checks for and processes completed asynchronous save operations.
+        """
+        if not self._pending_save_futures:
             return
 
-        logger.info(f"Waiting for {len(pending_save_futures)} save "
-                    "operations to complete...")
+        logger.info(
+            f"Checking for {len(self._pending_save_futures)} pending save "
+            "operations to complete...")
         start_time = time.time()
-
-        for future, meta in pending_save_futures:
-            try:
-                # The result of _save_blocks_to_cpu is the request_id
-                finished_req_id = future.result()
-                logger.info(
-                    f"Save operation completed for request {finished_req_id}")
-
-                if len(meta.save_spec.src_blocks) > 0:
-                    self.offload_stats.record_save(
-                        req=finished_req_id,
-                        saved_chunk_ids=meta.save_spec.dst_chunks)
-
-                if meta.save_spec and meta.save_spec.is_final_save:
+        completed_count = 0
+        remaining_futures: list[tuple[Future, TPUReqMeta]] = []
+        for future, meta in self._pending_save_futures:
+            if future.done():
+                try:
+                    # The result of _save_blocks_to_cpu is the request_id
+                    finished_req_id = future.result()
                     logger.info(
-                        f"Request {finished_req_id}: Final save completed. Marking as finished."
+                        f"Save operation completed for request {finished_req_id}"
                     )
-                    self.finished_save_reqs.add(finished_req_id)
 
-            except Exception as e:
-                logger.error(f"A save operation failed: {e}", exc_info=True)
+                    if len(meta.save_spec.src_blocks) > 0:
+                        self.offload_stats.record_save(
+                            req=finished_req_id,
+                            saved_chunk_ids=meta.save_spec.dst_chunks)
 
-        duration = time.time() - start_time
-        logger.info(f"All {len(pending_save_futures)} save operations "
-                    f"completed in {duration:.4f} seconds.")
-        self._processed_save_for_step = True
+                    if meta.save_spec and meta.save_spec.is_final_save:
+                        logger.info(
+                            f"Request {finished_req_id}: Final save completed. Marking as finished."
+                        )
+                        self.finished_save_reqs.add(finished_req_id)
+                    completed_count += 1
+                except Exception as e:
+                    logger.error(f"A save operation failed: {e}",
+                                 exc_info=True)
+            else:
+                remaining_futures.append((future, meta))
+
+        if completed_count > 0:
+            duration = time.time() - start_time
+            logger.info(f"{completed_count} save operations "
+                        f"completed in {duration:.4f} seconds.")
+
+        self._pending_save_futures = remaining_futures
 
     def start_load_kv(self, fwd_ctx: "ForwardContext") -> None:
         """
@@ -1943,18 +1960,20 @@ class TPUOffloadConnectorWorker:
         """
         Returns the sets of request IDs for completed save and load operations.
         """
-        # Safeguard call to wait_for_save().
+        # Safeguard call to start_save_kv().
         # In the final step for a request, the vLLM engine may not call
         # `worker.execute_model()` if there's no computation to be done.
-        # This skips the usual `wait_for_save()` call, preventing the final
+        # This skips the usual `start_save_kv()` call, preventing the final
         # save operation (marked with `is_final_save=True`) from being
         # processed. Calling it here ensures that any pending save operations
         # for the current step's metadata are executed, and the finished
         # request IDs are correctly identified and reported back to the engine
-        # for resource cleanup. The `wait_for_save` method is idempotent,
+        # for resource cleanup. The `start_save_kv` method is idempotent,
         # so this call is a no-op in the normal execution path.
         logger.info("TPUOffloadConnectorWorker: Entering get_finished")
-        self.wait_for_save()
+        self.start_save_kv()
+        # collect the completed save requests.
+        self._process_completed_saves()
 
         finished_saves = self.finished_save_reqs
         self.finished_save_reqs = set()

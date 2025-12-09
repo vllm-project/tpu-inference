@@ -4,6 +4,7 @@ import functools
 import gc
 import os
 import random
+import time
 from typing import List
 from unittest.mock import patch
 
@@ -193,7 +194,7 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
         """
         Tests the _decompose_into_buckets function for correct greedy decomposition.
         """
-        connector = self._create_connector(use_precompiled_swap_ops="0")
+        connector = self._create_connector(use_precompiled_swap_ops=False)
         worker = connector.connector_worker
         self.assertEqual(worker._decompose_into_buckets(num_blocks),
                          expected_buckets)
@@ -211,17 +212,14 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
         modifies the cache content.
         """
         connector = self._create_connector(swap_op_type,
-                                           use_precompiled_swap_ops="0")
-
+                                           use_precompiled_swap_ops=True)
         worker = connector.connector_worker
-
         # Keep a copy of the original cache content on the host
         original_cache_host = [
             np.array(cache) for cache in worker.runner.kv_caches
         ]
 
         worker._precompile_kv_swap_operations()
-
         # Fetch the new cache content to the host
         new_cache_host = [np.array(cache) for cache in worker.runner.kv_caches]
         self.assertTrue(
@@ -366,9 +364,14 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
         worker = connector.connector_worker
         connector.bind_connector_metadata(connector_metadata)
         logger.info(
-            "Connector metadata bound, calling worker.wait_for_save().")
-        worker.wait_for_save()
-        logger.info("worker.wait_for_save() completed.")
+            "Connector metadata bound, calling worker.start_save_kv().")
+        worker.start_save_kv()
+        logger.info("Waiting for all save operations to complete...")
+        while worker._pending_save_futures:
+            worker._process_completed_saves()
+            time.sleep(0.01)
+
+        logger.info("worker save completed.")
 
         # Verification
         logger.info("Starting verification phase.")
@@ -529,9 +532,14 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
             requests_meta=save_requests_meta)
         connector.bind_connector_metadata(connector_metadata)
         logger.info(
-            "Connector metadata bound, calling worker.wait_for_save().")
-        worker.wait_for_save()
-        logger.info("worker.wait_for_save() completed.")
+            "Connector metadata bound, calling worker.start_save_kv().")
+        worker.start_save_kv()
+        logger.info("Waiting for all save operations to complete...")
+        while worker._pending_save_futures:
+            worker._process_completed_saves()
+            time.sleep(0.01)
+
+        logger.info("worker save completed.")
 
         # 3. Prepare and Execute Delta Load
         worker.runner.kv_caches = dst_kv_cache
