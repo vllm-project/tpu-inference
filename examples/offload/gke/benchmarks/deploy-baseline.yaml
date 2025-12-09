@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tpu-offline-inference
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tpu-offline-inference
+  template:
+    metadata:
+      labels:
+        app: tpu-offline-inference
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+        cloud.google.com/gke-tpu-topology: 2x4 # Specify the physical topology for the TPU slice.
+      containers:
+      - name: tpu-job
+        image: <your-tpu-inference-container-image>
+        imagePullPolicy: Always
+        command: ["/bin/sh", "-c"]
+        args:
+        - "vllm serve meta-llama/Llama-3.3-70B-Instruct --port 8000 --enable-chunked-prefill --tensor-parallel-size 8 --seed 42 --enable_prefix_caching --gpu-memory-utilization 0.9"
+        env:
+        - name: HUGGING_FACE_HUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token-secret
+              key: token
+        - name: SKIP_JAX_PRECOMPILE
+          value: "1"
+        ports:
+        - containerPort: 8000
+        resources:
+          requests:
+            google.com/tpu: 8
+          limits:
+            google.com/tpu: 8
