@@ -250,7 +250,7 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         # w13_weight_scale=[160, 2, 1, 5120]=(num_experts, 2, 1, intermediate_size)
         # w2_weight=[160, 2560, 6144]=[num_experts, intermediate_size, hidden_size]
         # w2_weight_scale=[160, 1, 6144]=[num_experts, 1, hidden_size]
-        print(f'xw32 apply, line239 {layer.use_ep=}, {self.use_kernel=}, {layer.w13_weight.shape=}, {layer.w13_weight_scale.shape=}, {layer.w2_weight.shape=}, {layer.w2_weight_scale.shape=}')
+        # print(f'xw32 apply, line239 {layer.use_ep=}, {self.use_kernel=}, {layer.w13_weight.shape=}, {layer.w13_weight_scale.shape=}, {layer.w2_weight.shape=}, {layer.w2_weight_scale.shape=}')
         # w13_weight=[160, 2560, 6144]=[160, 2560, 6144]=[num_expert, moe_intermediate_size, hidden_size]  # xw32: why isn't 2*moe_intermediate_size?
         # w13_weight_scale=[160, 2560, 1]=[num_expert, moe_intermediate_size, 1]
         # w2_weight=[160, 6144, 2560]=[num_expert, hidden_size, moe_intermediate_size]
