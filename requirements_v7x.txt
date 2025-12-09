@@ -3,6 +3,6 @@
 --pre
 -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
 -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
-jax==0.8.0.dev20251013
-jaxlib==0.8.0.dev20251013
-libtpu==0.0.25.dev20251012+nightly
+jax==0.8.1.dev20251104
+jaxlib==0.8.1.dev20251104
+libtpu==0.0.28.dev20251104+nightly

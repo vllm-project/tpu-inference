@@ -41,7 +41,9 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
 
     def __init__(self, quant_config: "CompressedTensorsConfig",
                  moe: FusedMoEConfig, mesh: Mesh):
-        super().__init__(quant_config, moe)
+        weight_quant = quant_config.target_scheme_map["Linear"].get("weights")
+        input_quant = quant_config.target_scheme_map["Linear"].get("input_activations")
+        super().__init__(weight_quant, input_quant,moe)
         self.mesh = mesh
         self.quant_config = quant_config
 
@@ -286,7 +288,8 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
             jax.debug.inspect_array_sharding(w13_weight_scale, callback=print)
             jax.debug.inspect_array_sharding(w2_weight_scale, callback=print)
             jax.debug.inspect_array_sharding(gating_output, callback=print)
-            out = fused_moe_func(
+            out = torch_view(
+                    fused_moe_func(
                 hidden_states=x,
                 w13_weight=w13_weight,
                 w2_weight=w2_weight,
@@ -300,6 +303,6 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
                 mesh=self.mesh,
                 use_ep=layer.use_ep,
                 activation=activation,
-            )
+            ))
 
         return out

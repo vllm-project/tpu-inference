@@ -252,37 +252,37 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
                 w3_bias = w13_bias[:, 1::2]
                 w13_bias = jnp.concat([w1_bias, w3_bias], axis=1)
 
-        if self.use_kernel:
-            # Kernel expects:
-            # w13: (num_experts, 2, hidden_size, intermediate_size)
-            # w2: (num_experts, intermediate_size, hidden_size)
-            # Current format:
-            # w13_weight: (num_experts, 2*intermediate_size, hidden_size)
-            # w2_weight: (num_experts, hidden_size, intermediate_size)
+            if self.use_kernel:
+                # Kernel expects:
+                # w13: (num_experts, 2, hidden_size, intermediate_size)
+                # w2: (num_experts, intermediate_size, hidden_size)
+                # Current format:
+                # w13_weight: (num_experts, 2*intermediate_size, hidden_size)
+                # w2_weight: (num_experts, hidden_size, intermediate_size)
 
                 w13_reshaped = w13_weight.reshape(num_experts, 2,
-                                                  intermediate_size,
-                                                  hidden_size)
+                                                    intermediate_size,
+                                                    hidden_size)
 
                 # Transpose non-constracting dim to right most dim
                 w13_weight_transposed = jnp.swapaxes(w13_reshaped, 2, 3)
                 w2_weight_transposed = jnp.transpose(w2_weight, 1, 2)
 
-            # Apply EP sharding
-            ep_sharding = NamedSharding(self.mesh, P("model"))
+                # Apply EP sharding
+                ep_sharding = NamedSharding(self.mesh, P("model"))
 
                 w13_weight = jax.device_put(
                     w13_weight_transposed,
                     Format(Layout((0, 1, 2, 3)), ep_sharding))
                 w2_weight = jax.device_put(
                     w2_weight_transposed, Format(Layout((0, 1, 2)),
-                                                 ep_sharding))
+                                                    ep_sharding))
 
                 w13_bias = w13_bias.reshape(num_experts, 2, intermediate_size)
                 w13_bias = jax.device_put(
                     w13_bias, Format(Layout((0, 1, 2)), ep_sharding))
                 w2_bias = jax.device_put(w2_bias,
-                                         Format(Layout((0, 1)), ep_sharding))
+                                            Format(Layout((0, 1)), ep_sharding))
 
             elif layer.use_ep:
                 ep_sharding = NamedSharding(self.mesh, P("model"))
@@ -292,9 +292,9 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
                     w2_weight, Format(Layout((0, 1, 2)), ep_sharding))
 
                 w13_bias = jax.device_put(w13_bias,
-                                          Format(Layout((0, 1)), ep_sharding))
+                                            Format(Layout((0, 1)), ep_sharding))
                 w2_bias = jax.device_put(w2_bias,
-                                         Format(Layout((0, 1)), ep_sharding))
+                                            Format(Layout((0, 1)), ep_sharding))
 
             else:
                 output_sizes = [intermediate_size, intermediate_size]
@@ -324,10 +324,10 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
 
                 w13_weight = jax.lax.with_sharding_constraint(
                     w13_weight, NamedSharding(self.mesh,
-                                              P(None, "model", None)))
+                                                P(None, "model", None)))
                 w2_weight = jax.lax.with_sharding_constraint(
                     w2_weight, NamedSharding(self.mesh, P(None, None,
-                                                          "model")))
+                                                            "model")))
                 w13_weight_scale = jax.lax.with_sharding_constraint(
                     w13_weight_scale,
                     NamedSharding(self.mesh, P(None, "model", None)))
@@ -405,12 +405,6 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
         if self.use_kernel:
             output = fused_ep_moe(
                 mesh=self.mesh,
-                tokens=x,
-                w1=w13_weight,
-                w2=w2_weight,
-                b1=w13_bias,
-                b2=w2_bias,
-                gating_output=gating_output,
                 tokens=x,
                 w1=w13_weight,
                 w2=w2_weight,

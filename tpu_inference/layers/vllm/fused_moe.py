@@ -160,11 +160,12 @@ def tensor_sharded_gmm_row_parallel(
 
     def _gmm_all_reduce(lhs, rhs, rhs_scale, rhs_bias, group_sizes):
         m, g, n, k = lhs.shape[0], *rhs.shape # k = 2560/8 = 320
-        jax.debug.print("GMM shapes: lhs {lhs.shape}, rhs {rhs.shape}", lhs=lhs, rhs=rhs)
+        # jax.debug.print("GMM shapes: lhs {lhs.shape}, rhs {rhs.shape}", lhs=lhs, rhs=rhs)
         tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
         shard_id = jax.lax.axis_index("model")
         if rhs_bias:
-            rhs_bias = jnp.where(shard_id == 0, rhs_bias, 0)
+            rhs_bias = jnp.where(shard_id == 0
+                                 , rhs_bias, 0)
         out = gmm(
             lhs,
             rhs,
