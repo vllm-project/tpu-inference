@@ -272,18 +272,9 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
                 # w13_weight: (num_experts, 2*intermediate_size, hidden_size)
                 # w2_weight: (num_experts, hidden_size, intermediate_size)
 
-                w13_weight = w13_weight.reshape(num_experts, 2,
-                                                intermediate_size, hidden_size)
-
-                w13_weight_scale = w13_weight_scale.reshape(
-                    num_experts, 2, intermediate_size, 1, -1)
-                w2_weight_scale = w2_weight_scale.reshape(
-                    num_experts, hidden_size, 1, -1)
-
-                w13_bias = w13_bias.astype(jnp.float32).reshape(
-                    num_experts, 2, 1, intermediate_size)
-                w2_bias = w2_bias.astype(jnp.float32).reshape(
-                    num_experts, 1, hidden_size)
+                w13_reshaped = w13_weight.reshape(num_experts, 2,
+                                                  intermediate_size,
+                                                  hidden_size)
 
                 # Transpose non-constracting dim to right most dim
                 w13_weight = jnp.swapaxes(w13_weight, 2, 3)
@@ -295,47 +286,30 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
                 # Apply EP sharding
                 ep_sharding = NamedSharding(self.mesh, P("model"))
 
-                w13_weight = jax.lax.with_sharding_constraint(
-                    w13_weight, Format(Layout((0, 1, 2, 3)), ep_sharding))
-                w2_weight = jax.lax.with_sharding_constraint(
+                w13_weight = jax.device_put(
+                    w13_weight_transposed,
+                    Format(Layout((0, 1, 2, 3)), ep_sharding))
+                w2_weight = jax.device_put(
+                    w2_weight_transposed, Format(Layout((0, 1, 2)),
+                                                 ep_sharding))
+
+                w13_bias = w13_bias.reshape(num_experts, 2, intermediate_size)
+                w13_bias = jax.device_put(
+                    w13_bias, Format(Layout((0, 1, 2)), ep_sharding))
+                w2_bias = jax.device_put(w2_bias,
+                                         Format(Layout((0, 1)), ep_sharding))
+
+            elif layer.use_ep:
+                ep_sharding = NamedSharding(self.mesh, P("model"))
+                w13_weight = jax.device_put(
+                    w13_weight, Format(Layout((0, 1, 2)), ep_sharding))
+                w2_weight = jax.device_put(
                     w2_weight, Format(Layout((0, 1, 2)), ep_sharding))
 
-                w13_weight_scale = jax.lax.with_sharding_constraint(
-                    w13_weight_scale,
-                    Format(Layout((0, 1, 2, 3, 4)), ep_sharding))
-                w2_weight_scale = jax.lax.with_sharding_constraint(
-                    w2_weight_scale, Format(Layout((0, 1, 2, 3)), ep_sharding))
-
-                w13_bias = jax.lax.with_sharding_constraint(
-                    w13_bias, Format(Layout((0, 1, 2, 3)), ep_sharding))
-                w2_bias = jax.lax.with_sharding_constraint(
-                    w2_bias, Format(Layout((0, 1, 2)), ep_sharding))
-            else:
-                w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
-                w13_weight_scale = jnp.expand_dims(w13_weight_scale, 2)
-                w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
-                w2_weight_scale = jnp.expand_dims(w2_weight_scale, 2)
-
-                w13_bias = jnp.expand_dims(w13_bias, 1)
-                w2_bias = jnp.expand_dims(w2_bias, 1)
-
-                if layer.use_ep:
-                    ep_sharding = NamedSharding(self.mesh, P("model"))
-
-                    w13_weight = jax.lax.with_sharding_constraint(
-                        w13_weight, ep_sharding)
-                    w2_weight = jax.lax.with_sharding_constraint(
-                        w2_weight, ep_sharding)
-
-                    w13_weight_scale = jax.lax.with_sharding_constraint(
-                        w13_weight_scale, ep_sharding)
-                    w2_weight = jax.lax.with_sharding_constraint(
-                        w2_weight, ep_sharding)
-
-                    w13_bias = jax.lax.with_sharding_constraint(
-                        w13_bias, ep_sharding)
-                    w2_bias = jax.lax.with_sharding_constraint(
-                        w2_bias, ep_sharding)
+                w13_bias = jax.device_put(w13_bias,
+                                          Format(Layout((0, 1)), ep_sharding))
+                w2_bias = jax.device_put(w2_bias,
+                                         Format(Layout((0, 1)), ep_sharding))
 
                 else:
                     output_sizes = [intermediate_size, intermediate_size]
@@ -363,24 +337,29 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
                         dim=2,
                     )
 
-                    w13_weight = jax.lax.with_sharding_constraint(
-                        w13_weight,
-                        NamedSharding(self.mesh, P(None, "model", None)))
-                    w2_weight = jax.lax.with_sharding_constraint(
-                        w2_weight,
-                        NamedSharding(self.mesh, P(None, None, "model")))
-                    w13_weight_scale = jax.lax.with_sharding_constraint(
-                        w13_weight_scale,
-                        NamedSharding(self.mesh, P(None, None, None, "model")))
-                    w2_weight_scale = jax.lax.with_sharding_constraint(
-                        w2_weight_scale,
-                        NamedSharding(self.mesh, P(None, "model", None, None)))
-                    w13_bias = jax.lax.with_sharding_constraint(
-                        w13_bias,
-                        NamedSharding(self.mesh, P(None, None, "model")))
-                    w2_bias = jax.lax.with_sharding_constraint(
-                        w2_bias, NamedSharding(self.mesh, P(None, None, None)))
+                w13_weight = jax.lax.with_sharding_constraint(
+                    w13_weight, NamedSharding(self.mesh,
+                                              P(None, "model", None)))
+                w2_weight = jax.lax.with_sharding_constraint(
+                    w2_weight, NamedSharding(self.mesh, P(None, None,
+                                                          "model")))
+                w13_weight_scale = jax.lax.with_sharding_constraint(
+                    w13_weight_scale,
+                    NamedSharding(self.mesh, P(None, "model", None)))
+                w2_weight_scale = jax.lax.with_sharding_constraint(
+                    w2_weight_scale,
+                    NamedSharding(self.mesh, P(None, None, "model")))
+                w13_bias = jax.lax.with_sharding_constraint(
+                    w13_bias, NamedSharding(self.mesh, P(None, "model")))
+                w2_bias = jax.lax.with_sharding_constraint(
+                    w2_bias, NamedSharding(self.mesh, P(None, None)))
 
+                w13_bias = jnp.expand_dims(w13_bias, 1)
+                w2_bias = jnp.expand_dims(w2_bias, 1)
+                w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
+                w13_weight_scale = jnp.expand_dims(w13_weight_scale, 2)
+                w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
+                w2_weight_scale = jnp.expand_dims(w2_weight_scale, 2)
             return w13_weight, w13_weight_scale, w13_bias, w2_weight, w2_weight_scale, w2_bias
 
         w13_weight, w13_weight_scale, w13_bias, w2_weight, w2_weight_scale, w2_bias = wrapper(
@@ -430,13 +409,16 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
                 tokens=x,
                 w1=w13_weight,
                 w2=w2_weight,
-                w1_scale=w13_weight_scale,
-                w2_scale=w2_weight_scale,
                 b1=w13_bias,
                 b2=w2_bias,
                 gating_output=gating_output,
-                subc_quant_wsz=REQUANTIZED_BLOCK_SIZE,
-                top_k=layer.top_k,
+                tokens=x,
+                w1=w13_weight,
+                w2=w2_weight,
+                b1=w13_bias,
+                b2=w2_bias,
+                gating_output=gating_output,
+                top_k=top_k,
                 ep_axis_name=self.ep_axis_name,
                 renormalize_topk_logits=layer.renormalize,
                 act_fn=layer.activation,
