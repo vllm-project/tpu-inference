@@ -55,7 +55,8 @@ class TpuPlatform(Platform):
                              head_size: int, dtype: jnp.dtype,
                              kv_cache_dtype: Optional[str], block_size: int,
                              use_v1: bool, use_mla: bool, has_sink: bool,
-                             use_sparse: bool, attn_type: Any) -> str:
+                             use_sparse: bool, use_mm_prefix: bool,
+                             attn_type: Any) -> str:
         from vllm.attention.backends.registry import AttentionBackendEnum
         if selected_backend != AttentionBackendEnum.PALLAS:
             logger.info("Cannot use %s backend on TPU.", selected_backend)
