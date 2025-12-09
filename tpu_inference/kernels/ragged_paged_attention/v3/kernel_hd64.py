@@ -456,12 +456,7 @@ def _ragged_paged_attention_kernel(
         else:
             cp.start()
 
-    def _fetch_bkv(seq_idx,
-                   bkv_idx,
-                   bkv_sem_idx,
-                   *,
-                   is_full_fetch=False,
-                   wait=False):
+    def _fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx, *, wait=False):
         sem = sems.at[0, bkv_sem_idx]
         vmem_ref = bkv_x2_ref.at[bkv_sem_idx]
 
@@ -539,29 +534,10 @@ def _ragged_paged_attention_kernel(
                     wait,
                 )
 
-            # NOTE(chengjiyao): This condition is true for the first two bkv fetches.
-            # We need to ensure the bkv_x2_ref VMEM buffer is fully initialized to
-            # avoid potential NaN values in regions not overwritten by actual data.
-            # This is done by padding the remaining parts of the buffer with data
-            # from the KV cache. This special handling is only strictly necessary
-            # until both buffers in the double buffer (bkv_x2_ref) have been written
-            # to at least once.
-            @pl.when(is_full_fetch)
-            def _make_sure_bkv_vmem_is_not_nan():
-                effective_sz = offset + bkv_sz_frm_new
-                remaining_sz = bkv_sz - effective_sz
-                _async_copy(
-                    cache_hbm_ref.at[pl.ds(0, remaining_sz)],
-                    vmem_ref.at[pl.ds(effective_sz, remaining_sz)],
-                    sem,
-                    wait,
-                )
-
             return kv_len_start + offset, bkv_sz_frm_new
         else:
             offset = jnp.minimum(kv_left_frm_cache, page_size * bkv_p)
-            sz = lax.select(is_full_fetch, bkv_sz, offset + bkv_sz_frm_new)
-            dst = vmem_ref.at[pl.ds(0, sz)]
+            dst = vmem_ref.at[pl.ds(0, offset + bkv_sz_frm_new)]
             _async_copy(
                 src=dst,
                 dst=dst,
@@ -688,18 +664,11 @@ def _ragged_paged_attention_kernel(
             wait,
         )
 
-    def start_fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx, *, is_full_fetch=False):
-        return _fetch_bkv(seq_idx,
-                          bkv_idx,
-                          bkv_sem_idx,
-                          is_full_fetch=is_full_fetch)
+    def start_fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx):
+        return _fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx)
 
-    def wait_fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx, *, is_full_fetch=False):
-        return _fetch_bkv(seq_idx,
-                          bkv_idx,
-                          bkv_sem_idx,
-                          is_full_fetch=is_full_fetch,
-                          wait=True)
+    def wait_fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx):
+        return _fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx, wait=True)
 
     def start_fetch_bq(seq_idx, bq_idx, bq_sem_idx):
         return _fetch_bq(seq_idx, bq_idx, bq_sem_idx)
@@ -757,7 +726,7 @@ def _ragged_paged_attention_kernel(
         vec = ref[start::step]
         return vec
 
-    def strided_load_bkv(bkv_sem_idx, start, step):
+    def strided_load_bkv(bkv_sem_idx, start, step, *, bkv_mask):
         assert start % kv_packing == 0
         assert step % kv_packing == 0
         start //= kv_packing
@@ -766,6 +735,7 @@ def _ragged_paged_attention_kernel(
             bkv_sz * step, actual_head_dim_x2))
 
         kv = strided_load(kv_ref, start, step)
+        kv = lax.select(bkv_mask, kv, jnp.zeros_like(kv))
         bitwidth = 32 // kv_packing
         repack_ty = jnp.dtype(f"uint{bitwidth}")
         lst = []
@@ -839,23 +809,22 @@ def _ragged_paged_attention_kernel(
             def compute_with_bkv(bkv_idx, _):
                 # Create bitmask for KV.
                 assert bkv_sz % kv_packing == 0
+                actual_bkv_sz = jnp.minimum(bkv_sz, kv_len - bkv_idx * bkv_sz)
+                bkv_shape = (bkv_sz, actual_head_dim_x2)
+                bkv_mask = lax.broadcasted_iota(jnp.int32, bkv_shape,
+                                                0) < actual_bkv_sz
 
                 # Get next bkv ids.
                 bkv_sem_idx = sem_ids_ref[1]
-                next_seq_idx, next_bq_idx_for_kv, next_bkv_idx, next_bkv_sem_idx = (
-                    get_next_bkv_ids(seq_idx, bq_idx, bkv_idx, bkv_sem_idx))
+                next_seq_idx, _, next_bkv_idx, next_bkv_sem_idx = get_next_bkv_ids(
+                    seq_idx, bq_idx, bkv_idx, bkv_sem_idx)
 
                 # Prefetch next bkv
                 @pl.when(next_seq_idx < num_seqs)
                 def prefetch_next_bkv():
                     sem_ids_ref[1] = next_bkv_sem_idx
-                    start_fetch_bkv(
-                        next_seq_idx,
-                        next_bkv_idx,
-                        next_bkv_sem_idx,
-                        is_full_fetch=next_seq_idx + next_bq_idx_for_kv +
-                        next_bkv_idx < 2,
-                    )
+                    start_fetch_bkv(next_seq_idx, next_bkv_idx,
+                                    next_bkv_sem_idx)
 
                 # Wait for cur bq if not ready yet
                 @pl.when(bkv_idx == bkv_idx_start)
@@ -863,12 +832,8 @@ def _ragged_paged_attention_kernel(
                     wait_fetch_bq(seq_idx, bq_idx, bq_sem_idx)
 
                 # Wait for cur bkv
-                offset, update_sz = wait_fetch_bkv(
-                    seq_idx,
-                    bkv_idx,
-                    bkv_sem_idx,
-                    is_full_fetch=seq_idx + bq_idx + bkv_idx < 2,
-                )
+                offset, update_sz = wait_fetch_bkv(seq_idx, bkv_idx,
+                                                   bkv_sem_idx)
 
                 # Start updating bkv to kv cache if applicable.
                 # Only needed in first bq loop.
@@ -897,6 +862,7 @@ def _ragged_paged_attention_kernel(
                         bkv_sem_idx,
                         kv_head_start,
                         num_kv_heads,
+                        bkv_mask=bkv_mask,
                     )
                     assert len(bkv_lst) == kv_packing
                     for i in range(kv_packing):
@@ -980,7 +946,7 @@ def _ragged_paged_attention_kernel(
     @pl.when(seq_idx == 0)
     def prologue():
         start_fetch_bq(0, 0, 0)
-        start_fetch_bkv(0, bkv_idx_start, 0, is_full_fetch=True)
+        start_fetch_bkv(0, bkv_idx_start, 0)
 
     @pl.when(seq_idx < decode_end)
     def process_decode():
