@@ -56,8 +56,7 @@ setup_environment() {
       VLLM_COMMIT_HASH=""
       BUILDKITE_COMMIT=$(git log -n 1 --pretty="%H")
   else
-      VLLM_COMMIT_HASH="28097d5638cc695f4644c411edac8eb05a03b39b"
-      #VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH" --default "")
+      VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH" --default "")
   fi
 
   docker build \
