@@ -34,8 +34,7 @@ from tpu_inference.layers.jax.attention.attention import AttentionMetadata
 from tpu_inference.layers.jax.attention.deepseek_v3_attention import MLA
 from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
-from tpu_inference.layers.jax.moe.deepseek_v3_moe import (DeepSeekV3Router,
-                                                          SparseMoE)
+from tpu_inference.layers.jax.moe.deepseek_v3_moe import DeepSeekV3Router
 from tpu_inference.layers.jax.moe.moe import MoE
 from tpu_inference.layers.jax.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
@@ -122,9 +121,9 @@ class DeepSeekV3(nnx.Module):
             logger.info("sparse matmul is disabled, using dense matmul")
         self.mesh = mesh
 
-        self.use_moe_kernel = bool(int(os.getenv("USE_MOE_EP_KERNEL", "0"))),
-        if self.use_moe_kernel:
-            logger.info("MoE kernel is enabled")
+        self.use_fused_moe_kernel = bool(int(os.getenv("USE_MOE_EP_KERNEL", "0")))
+        if self.use_fused_moe_kernel:
+            logger.info("Fused MoE kernel is enabled")
 
         self.weight_loader = DeepSeekV3WeightLoader(
             vllm_config=vllm_config,
@@ -241,59 +240,34 @@ class DeepSeekV3(nnx.Module):
                 activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
                 ed_sharding=(ShardingAxisName.MLP_TENSOR, None),
                 e_sharding=(ShardingAxisName.MLP_TENSOR, ))
-            if self.sparse_matmul:
-                # TODO: orginize the SparseMoE and DenseMoE better given they share most interfaces
-                custom_module = SparseMoE(
+            custom_module = MoE(
+                dtype=dtype,
+                num_local_experts=num_local_experts,
+                apply_expert_weight_before_computation=False,
+                hidden_size=hidden_size,
+                intermediate_size_moe=moe_intermediate_size,
+                num_experts_per_tok=num_experts_per_token,
+                mesh=self.mesh,
+                hidden_act=hidden_act,
+                rngs=self.rng,
+                random_init=self.random_init,
+                activation_ffw_td=(ShardingAxisName.MLP_TENSOR, None),
+                activation_ffw_ted=(ShardingAxisName.MLP_DATA, None, None),
+                edf_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
+                efd_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
+                use_sparse_moe=self.sparse_matmul,
+                quantized_dtype=self.weight_loader.quant_dtype
+                if self.weight_loader.is_model_quantized else None,
+                use_fused_moe_kernel = self.use_fused_moe_kernel,
+                router=router) if is_moe_layer else DenseFFW(
                     dtype=dtype,
-                    num_local_experts=num_local_experts,
-                    apply_expert_weight_before_computation=False,
-                    hidden_size=hidden_size,
-                    intermediate_size_moe=moe_intermediate_size,
-                    num_experts_per_tok=num_experts_per_token,
-                    mesh=self.mesh,
                     hidden_act=hidden_act,
+                    hidden_size=hidden_size,
+                    intermediate_size=ffw_intermediate_size,
                     rngs=self.rng,
                     random_init=self.random_init,
-                    activation_ffw_td=(ShardingAxisName.MLP_TENSOR, None),
-                    activation_ffw_ted=(ShardingAxisName.MLP_DATA, None, None),
-                    edf_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
-                    efd_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
-                    quantized_dtype=self.weight_loader.quant_dtype
-                    if self.weight_loader.is_model_quantized else None,
-                    use_moe_kernel = self.use_moe_kernel,
-                    router=router) if is_moe_layer else DenseFFW(
-                        dtype=dtype,
-                        hidden_act=hidden_act,
-                        hidden_size=hidden_size,
-                        intermediate_size=ffw_intermediate_size,
-                        rngs=self.rng,
-                        random_init=self.random_init,
-                        df_sharding=(None, ShardingAxisName.MLP_TENSOR),
-                        fd_sharding=(ShardingAxisName.MLP_TENSOR, None))
-            else:
-                custom_module = MoE(
-                    dtype=dtype,
-                    num_local_experts=num_local_experts,
-                    apply_expert_weight_before_computation=False,
-                    hidden_size=hidden_size,
-                    intermediate_size_moe=moe_intermediate_size,
-                    mesh=self.mesh,
-                    hidden_act=hidden_act,
-                    rngs=self.rng,
-                    random_init=self.random_init,
-                    activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
-                    activation_ffw_ted=(ShardingAxisName.MLP_DATA, None, None),
-                    edf_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
-                    efd_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
-                    router=router) if is_moe_layer else DenseFFW(
-                        dtype=dtype,
-                        hidden_act=hidden_act,
-                        hidden_size=hidden_size,
-                        intermediate_size=ffw_intermediate_size,
-                        rngs=self.rng,
-                        random_init=self.random_init,
-                        df_sharding=(None, ShardingAxisName.MLP_TENSOR),
-                        fd_sharding=(ShardingAxisName.MLP_TENSOR, None))
+                    df_sharding=(None, ShardingAxisName.MLP_TENSOR),
+                    fd_sharding=(ShardingAxisName.MLP_TENSOR, None))
 
             shared_experts = DenseFFW(
                 dtype=dtype,
