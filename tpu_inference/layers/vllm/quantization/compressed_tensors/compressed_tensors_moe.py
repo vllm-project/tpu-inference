@@ -38,13 +38,24 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         self.use_kernel = envs.USE_MOE_EP_KERNEL
         self.ep_axis_name = ep_axis_name
         # TODO: Use autotune table once we have it.
+        # Original
+        # self.block_size = {
+        #     "bt": 64,
+        #     "bf": 1024,
+        #     "bd1": 1536,
+        #     "bd2": 1536,
+        #     "btc": 64,
+        #     "bfc": 1024,
+        #     "bd1c": 1536,
+        #     "bd2c": 1536,
+        # }
         self.block_size = {
             "bt": 64,
-            "bf": 1024,
+            "bf": 1280,
             "bd1": 1536,
             "bd2": 1536,
             "btc": 64,
-            "bfc": 1024,
+            "bfc": 1280,
             "bd1c": 1536,
             "bd2c": 1536,
         }
@@ -234,7 +245,7 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
             raise NotImplementedError(
                 "Only softmax is supported for scoring_func")
         
-        # At the beginning of process_weights_after_loading
+        # At the end of process_weights_after_loading
         # w13_weight=[160, 2, 6144, 5120]=(num_experts, 2, hidden_size, intermediate_size)
         # w13_weight_scale=[160, 2, 1, 5120]=(num_experts, 2, 1, intermediate_size)
         # w2_weight=[160, 2560, 6144]=[num_experts, intermediate_size, hidden_size]
@@ -259,6 +270,8 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
                 ep_axis_name=self.ep_axis_name,
                 renormalize_topk_logits=renormalize,
                 act_fn=activation,
+                w1_scale_per_channel=jax_view(layer.w13_weight_scale),
+                w2_scale_per_channel=jax_view(layer.w2_weight_scale),
                 **self.block_size,
             )
             output = torch_view(output)
