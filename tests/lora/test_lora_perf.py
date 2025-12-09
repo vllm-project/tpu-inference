@@ -51,4 +51,3 @@ def test_lora_performance(tp):
             lora_time) < 8, f"Base time: {base_time}, LoRA time: {lora_time}"
 
     del llm_with_lora
-    time.sleep(10)
