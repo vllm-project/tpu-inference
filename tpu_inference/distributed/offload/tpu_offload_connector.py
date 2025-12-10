@@ -1229,6 +1229,10 @@ class TPUOffloadConnectorWorker:
         # record finished save / load blocks (with req_ids) for each iteration
         self.offload_stats = KVOffloadConnectorStats()
 
+        self.no_op: bool = os.getenv("TPU_OFFLOAD_NO_OP", "0") == "1"
+        if self.no_op:
+            logger.info("TPU_OFFLOAD_NO_OP is set, skipping wait_for_save.")
+
     def __del__(self):
         logger.info("TPUOffloadConnectorWorker: Entering __del__")
         self.save_executor.shutdown(wait=True)
@@ -1701,11 +1705,12 @@ class TPUOffloadConnectorWorker:
 
                 # If there are tokens to save, submit the task to the thread pool.
                 logger.info(f"Submitting save task for request {meta.req_id}")
-                future = self.save_executor.submit(self._save_blocks_to_cpu,
-                                                   meta.req_id,
-                                                   meta.local_block_ids,
-                                                   meta.token_ids,
-                                                   meta.save_spec)
+                if self.no_op:
+                    future = None
+                else:
+                    future = self.save_executor.submit(
+                        self._save_blocks_to_cpu, meta.req_id,
+                        meta.local_block_ids, meta.token_ids, meta.save_spec)
                 pending_save_futures.append((future, meta))
 
         if not pending_save_futures:
@@ -1719,7 +1724,10 @@ class TPUOffloadConnectorWorker:
         for future, meta in pending_save_futures:
             try:
                 # The result of _save_blocks_to_cpu is the request_id
-                finished_req_id = future.result()
+                if self.no_op:
+                    finished_req_id = meta.req_id
+                else:
+                    finished_req_id = future.result()
                 logger.info(
                     f"Save operation completed for request {finished_req_id}")
 
@@ -1813,47 +1821,49 @@ class TPUOffloadConnectorWorker:
                 f"Fetching delta of {num_tokens_to_load_delta} tokens from cache for "
                 f"{num_blocks_to_load} blocks.")
 
-            # Assemble the per-layer data for the delta tokens on the CPU.
-            # We create a list of lists, where the outer list represents layers
-            # and the inner lists will hold the data chunks for that layer.
-            assembled_kv_on_cpu = [[] for _ in range(self.num_layers)]
-            # Fetch and chunks from the backend.
-            for i in range(num_blocks_to_load):
-                src_chunk_id = src_chunks[i]
-                cached_value = self.cpu_backend.get(src_chunk_id)
-                if cached_value:
-                    for j in range(self.num_layers):
-                        assembled_kv_on_cpu[j].append(cached_value[j])
+            if not self.no_op:
+                # Assemble the per-layer data for the delta tokens on the CPU.
+                # We create a list of lists, where the outer list represents layers
+                # and the inner lists will hold the data chunks for that layer.
+                assembled_kv_on_cpu = [[] for _ in range(self.num_layers)]
+                # Fetch and chunks from the backend.
+                for i in range(num_blocks_to_load):
+                    src_chunk_id = src_chunks[i]
+                    cached_value = self.cpu_backend.get(src_chunk_id)
+                    if cached_value:
+                        for j in range(self.num_layers):
+                            assembled_kv_on_cpu[j].append(cached_value[j])
+                    else:
+                        logger.error(
+                            f"Chunk[{src_chunk_id}] not found in CPU backend for request {meta.req_id}. Inconsistent state detected."
+                        )
+                        return
+
+                # swap-in
+                # output: [[cpu_chunk_size * num_chunks] * num_layer]
+                if self.use_bucketed_swap_ops:
+                    # Use the bucketed wrappers for a uniform two-step process
+                    raw_chunked_kv_on_tpu = self._bucketed_swap_in_fn(
+                        assembled_kv_on_cpu)
                 else:
-                    logger.error(
-                        f"Chunk[{src_chunk_id}] not found in CPU backend for request {meta.req_id}. Inconsistent state detected."
+                    raw_chunked_kv_on_tpu = self.swap_in_fn(
+                        assembled_kv_on_cpu)
+                jax.block_until_ready(raw_chunked_kv_on_tpu)
+
+                if self.use_bucketed_swap_ops:
+                    self.runner.kv_caches = self._bucketed_jitted_insert_kv_cache_slices(
+                        self.runner.kv_caches,
+                        raw_chunked_kv_on_tpu,
+                        jnp.array(dst_blocks),
                     )
-                    return
-
-            # swap-in
-            # output: [[cpu_chunk_size * num_chunks] * num_layer]
-            if self.use_bucketed_swap_ops:
-                # Use the bucketed wrappers for a uniform two-step process
-                raw_chunked_kv_on_tpu = self._bucketed_swap_in_fn(
-                    assembled_kv_on_cpu)
-            else:
-                raw_chunked_kv_on_tpu = self.swap_in_fn(assembled_kv_on_cpu)
-            jax.block_until_ready(raw_chunked_kv_on_tpu)
-
-            if self.use_bucketed_swap_ops:
-                self.runner.kv_caches = self._bucketed_jitted_insert_kv_cache_slices(
-                    self.runner.kv_caches,
-                    raw_chunked_kv_on_tpu,
-                    jnp.array(dst_blocks),
-                )
-            else:
-                self.runner.kv_caches = jitted_insert_kv_cache_slices(
-                    self.block_size,
-                    self.runner.kv_caches,
-                    raw_chunked_kv_on_tpu,
-                    jnp.array(dst_blocks),
-                )
-            jax.block_until_ready(self.runner.kv_caches)
+                else:
+                    self.runner.kv_caches = jitted_insert_kv_cache_slices(
+                        self.block_size,
+                        self.runner.kv_caches,
+                        raw_chunked_kv_on_tpu,
+                        jnp.array(dst_blocks),
+                    )
+                jax.block_until_ready(self.runner.kv_caches)
             logger.info(
                 f"Request {meta.req_id}: Loaded {num_tokens_to_load_delta} tokens into "
                 f"{num_blocks_to_load} new blocks.")
