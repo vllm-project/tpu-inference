@@ -21,7 +21,7 @@ def get_dtype_packing(dtype):
   bits = dtypes.itemsize_bits(dtype)
   return 32 // bits
 
-
+# xw32q: why do we want to broadcast minor?
 def broadcast_minor(src, shape):
   if src.shape == shape:
     return src
@@ -173,10 +173,12 @@ def _fused_ep_moe_kernel(
     b1_hbm,  # None | F32(local_num_experts, 2, 1, intermediate_size)
     b2_hbm,  # None | F32(local_num_experts, 1, hidden_size)
     gating_hbm,  # (local_num_tokens, padded_num_experts)
+    # xw32q: what is a2a_g_hbm?
     a2a_g_hbm,  # (num_experts, bt, t_packing, hidden_size // t_packing)
     # Output
     output_hbm,  # (local_num_tokens, hidden_size)
     # Scratch
+    # xw32q: what is t2e and d2e?
     t2e_routing_x2_smem,  # <bt_sem_id> (2, bt, padded_top_k)
     d2e_count_x2_smem,  # <bt_sem_id> (2, num_devices, 1, padded_num_experts)
     expert_offsets_x2_smem,  # <bt_sem_id> (2, 2, padded_num_experts): for a2a_s and a2a_g
@@ -186,8 +188,10 @@ def _fused_ep_moe_kernel(
     a2a_s_x2_vmem,  # <e_sem_id> (2, bt * num_devices, t_packing, hidden_size // t_packing)
     a2a_s_acc_x2_vmem,  # <e_sem_id> (2, bt * num_devices, t_packing, hidden_size // t_packing)
     ### Accumulation for gathered tokens:
+    # xw32q: what does 'g' stand for in a2a_g_acc_vmem?
     a2a_g_acc_vmem,  # (top_k, bt, t_packing, hidden_size // t_packing)
     ### Expert weight double buffering:
+    # xw32q: what does 'b' stand for in b_gating_x2_vmem?
     b_gating_x2_vmem,  # <bt_sem_id> (2, bt, padded_num_experts)
     b_output_x2_vmem,  # <bt_sem_id> (2, bt, hidden_size)
     b_w1_x2_vmem,  # <bw_sem_id> (2, t_packing, bd1 // t_packing, bf)
@@ -303,6 +307,7 @@ def _fused_ep_moe_kernel(
     ).wait()
 
   def get_top_k(input, top_k, renormalize_topk_logits):
+    # xw32q: what's the shape of input here?
     assert len(input.shape) == 2, input.shape
     input = input.astype(jnp.float32)
     padded_k_shape = (input.shape[0], padded_top_k)
@@ -350,10 +355,10 @@ def _fused_ep_moe_kernel(
     # All-reduce to accumulate starts and sizes and transfer to SMEM.
     def _all_reduce_metadata(
         t2e_routing_vmem,
-        d2e_count_vmem,
+        d2e_count_vmem, #xw32: d2e_count (Device-to-Expert Counts): A complete table of exactly how many tokens every device is sending to every expert. This is needed later for the "Gather" phase (sending results back).
         offsets_vmem,
-        starts_vmem,
-        sizes_vmem,
+        starts_vmem,# xw32: "starts" is expert_starts (Write Offsets): The starting index where this specific device should begin writing its tokens in the destination expert's buffer. This effectively assigns a reserved slice of memory to this device.
+        sizes_vmem,# xw32: sizes is expert_sizes (Global Totals): The sum of tokens for each expert across all devices. This tells the expert how much work it has to do in total.
     ):
       offsets_vmem[...] = jnp.zeros_like(offsets_vmem)
       # TODO(jevinjiang): check how slow is VMEM -> SMEM.
@@ -363,6 +368,7 @@ def _fused_ep_moe_kernel(
           sem=send_sem,
       )
       t2e_routing_vmem[...] = t2e_routing
+      # xw32q: why do we need to copy from vmem to smem?
       t2e_routing_copy = pltpu.async_copy(
           src_ref=t2e_routing_vmem,
           dst_ref=t2e_routing_x2_smem.at[bt_sem_id],
@@ -374,6 +380,7 @@ def _fused_ep_moe_kernel(
       d2e_count_vmem[row_id] = sizes
       for i in range(num_devices - 1):
         sync_barrier()
+        # xw32q: what is AR?
         # TODO(jevinjiang): we can use double buffering to improve AR if needed.
         pltpu.async_remote_copy(
             src_ref=d2e_count_vmem.at[row_id],
@@ -471,6 +478,7 @@ def _fused_ep_moe_kernel(
     bt_sem_id = bt_id % 2
     e_id = my_id * local_num_experts + local_e_id
     sz = expert_sizes_x2_smem[bt_sem_id, 0, e_id]
+    # xw32q: why is it not pltpu.make_async_remote_copy?
     pltpu.make_async_copy(
         src_ref=a2a_s_x2_vmem.at[e_sem_id, pl.ds(0, sz)],
         dst_ref=a2a_s_x2_vmem.at[e_sem_id, pl.ds(0, sz)],
@@ -1171,6 +1179,7 @@ def fused_ep_moe(
     *,
     renormalize_topk_logits: bool = False,
     act_fn: str = "silu",
+    # xw32: subc_quant_wsz=subchannel quant window size
     subc_quant_wsz: int | None = None,
     w1_scale: (
         jax.Array | None
@@ -1181,6 +1190,7 @@ def fused_ep_moe(
     b1: jax.Array | None = None,  # F32(num_experts, 2, 1, intermediate_size)
     b2: jax.Array | None = None,  # F32(num_experts, 1, hidden_size)
     # Kernel tuning parameters.
+    # xw32q: what are these block sizes for? t, f, d1, d2, tc, fc, d1c, d2c
     bt: int,
     bf: int,
     bd1: int,
