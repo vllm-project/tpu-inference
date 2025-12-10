@@ -62,6 +62,7 @@ setup_environment() {
 
   docker build \
       --build-arg VLLM_COMMIT_HASH="${VLLM_COMMIT_HASH}" \
+      --build-arg IS_FOR_V7X="${IS_FOR_V7X:-false}" \
       --no-cache -f docker/Dockerfile -t "${IMAGE_NAME}:${TPU_INFERENCE_HASH}" .
 
 }
