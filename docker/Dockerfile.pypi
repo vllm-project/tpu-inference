@@ -22,6 +22,9 @@ WORKDIR /workspace
 RUN export VLLM_TPU_VERSION=$(cat /tmp/tpu_inference_version) && \
     bash tpu_inference/.buildkite/scripts/build_vllm_tpu.sh 0.11.2rc3 ${VLLM_TPU_VERSION} 3a7751485b71ce5ef927e4aa03b28602cb90811c
 
+# Install test dependencies
+RUN python3 -m pip install -r vllm/requirements/test.txt
+
 # Install vllm-tpu wheel
 RUN pip install --no-cache-dir vllm/dist/*.whl
 
