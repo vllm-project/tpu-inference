@@ -1,6 +1,6 @@
 Model,UnitTest,IntegrationTest,Benchmark
-"meta-llama/Llama-3.3-70B-Instruct",✅,✅,✅
-"Qwen/Qwen3-4B",✅,✅,✅
+"meta-llama/Llama-3.3-70B-Instruct",✅,❌,N/A
+"Qwen/Qwen3-4B",✅,❌,N/A
 "google/gemma-3-27b-it",✅,✅,✅
 "Qwen/Qwen3-32B",✅,✅,✅
 "meta-llama/Llama-Guard-4-12B",✅,✅,✅
