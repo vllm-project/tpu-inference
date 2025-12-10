@@ -25,6 +25,7 @@ upload_pipeline() {
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
+    buildkite-agent pipeline upload .buildkite/pipeline_jax_tpu7x.yml
     # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
     buildkite-agent pipeline upload .buildkite/main.yml
     buildkite-agent pipeline upload .buildkite/nightly_releases.yml
