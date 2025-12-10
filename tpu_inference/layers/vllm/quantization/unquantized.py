@@ -1,4 +1,4 @@
-from typing import Any, Callable, Optional, Union
+from typing import Any, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -303,26 +303,9 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         layer: torch.nn.Module,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
-        global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: Optional[torch.Tensor] = None,
-        logical_to_physical_map: Optional[torch.Tensor] = None,
-        logical_replica_count: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         assert isinstance(layer, FusedMoE)
-        if scoring_func != "softmax":
+        if layer.scoring_func != "softmax":
             raise NotImplementedError(
                 "Only softmax is supported for scoring_func")
 
@@ -335,7 +318,7 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2_bias = jax_view(layer.w2_bias)
         gating_output = jax_view(router_logits)
 
-        if self.use_kernel and layer.use_ep:
+        if self.use_kernel:
             output = fused_ep_moe(
                 mesh=self.mesh,
                 tokens=x,
@@ -344,10 +327,10 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 b1=w13_bias,
                 b2=w2_bias,
                 gating_output=gating_output,
-                top_k=top_k,
+                top_k=layer.top_k,
                 ep_axis_name=self.ep_axis_name,
-                renormalize_topk_logits=renormalize,
-                act_fn=activation,
+                renormalize_topk_logits=layer.renormalize,
+                act_fn=layer.activation,
                 **self.block_size,
             )
         else:
@@ -358,11 +341,11 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 w1_bias=w13_bias,
                 w2_bias=w2_bias,
                 gating_output=gating_output,
-                topk=top_k,
-                renormalize=renormalize,
+                topk=layer.top_k,
+                renormalize=layer.renormalize,
                 mesh=self.mesh,
                 use_ep=layer.use_ep,
-                activation=activation,
+                activation=layer.activation,
             )
 
         return torch_view(output)
