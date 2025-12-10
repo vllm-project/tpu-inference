@@ -196,13 +196,14 @@ TUNED_BLOCK_SIZES = {
                     512: (4, 16),
                 },
                 'q_head-32_kv_head-4_head-64': {
+                    128: (4, 16),
                     256: (2, 8),
                     512: (4, 16),
                     1024: (8, 16),
                     2048: (16, 32),
                     4096: (32, 64),
-                    8192: (32, 16),
-                    128: (1, 16),
+                    8192: (32, 24),
+                    16384: (32, 24),
                 },
                 'q_head-16_kv_head-2_head-64': {
                     128: (1, 64),
@@ -267,19 +268,6 @@ def get_tuned_block_sizes(
 ) -> tuple[int, int]:
     """Search tuned values for (num_kv_pages_per_blk, num_queries_per_blk)."""
 
-    # Set default block sizes for each tpu_version.
-    tpu_version = get_tpu_version()
-    if tpu_version < 4:
-        raise NotImplementedError('TPU version must be 4 or higher.')
-    match tpu_version:
-        case 4:
-            # TPUv4 has much smaller VMEM size so we pick fixed block sizes.
-            bkv_p, bq = (512 // page_size, 32)
-        case 7:
-            bkv_p, bq = (4096 // page_size, 32)
-        case _:
-            bkv_p, bq = (2048 // page_size, 32)
-
     keys = get_lookup_keys(
         page_size,
         q_dtype,
@@ -294,11 +282,30 @@ def get_tuned_block_sizes(
     try:
         bkv_p, bq = TUNED_BLOCK_SIZES[device][page_size][dtypes][head_dims][
             max_model_len]
+        logger.info_once('RPA v3 kernel: Found tuned sizes for %s', keys)
     except KeyError:
-        logger.warning_once(
-            'Couldn`t find tuned sizes for the RPA v3 kernel with %s', keys)
+        logger.warning_once('RPA v3 kernel: Couldn`t find tuned sizes for %s',
+                            keys)
+        # When not available use a sensible default based on TPU version
+        # Set default block sizes for each tpu_version.
+        tpu_version = get_tpu_version()
+        if tpu_version < 4:
+            raise NotImplementedError('TPU version must be 4 or higher.')
+        match tpu_version:
+            case 4:
+                # TPUv4 has much smaller VMEM size so we pick fixed block sizes.
+                bkv_p, bq = (512 // page_size, 32)
+            case 7:
+                bkv_p, bq = (4096 // page_size, 32)
+            case _:
+                bkv_p, bq = (2048 // page_size, 32)
 
-    return (min(pages_per_seq, bkv_p), min(max_num_tokens, bq))
+        bkv_p, bq = (min(pages_per_seq, bkv_p), min(max_num_tokens, bq))
+
+    logger.info_once("RPA v3 kernel tuned block sizes: bkv_p=%s, bq=%s", bkv_p,
+                     bq)
+
+    return bkv_p, bq
 
 
 def get_lookup_keys(

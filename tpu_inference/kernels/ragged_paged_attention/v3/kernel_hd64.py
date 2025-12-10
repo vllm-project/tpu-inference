@@ -1428,12 +1428,20 @@ def ragged_paged_attention_hd64(
     page_size = kv_cache.shape[1]
     max_num_seqs = kv_lens.shape[0]
     num_page_indices = page_indices.shape[0]
-    assert num_page_indices % max_num_seqs == 0
-    pages_per_seq = num_page_indices // max_num_seqs
+
+    if sliding_window:
+        # When sliding window is only, it only need to access the tokens in the sliding window
+        # so kernel can use a different tuning of block sizes based on # of pages per seq
+        pages_per_seq = max(1, sliding_window // page_size)
+    else:
+        assert num_page_indices % max_num_seqs == 0
+        pages_per_seq = num_page_indices // max_num_seqs
+
     num_q_heads_per_kv_head = num_q_heads_per_kv_head_per_q_packing * q_packing
 
     bkv_p = num_kv_pages_per_block
     bq_sz = num_queries_per_block
+
     if bq_sz is None or bkv_p is None:
         bkv_p, bq_sz = get_tuned_block_sizes(
             q.dtype,
@@ -1445,6 +1453,7 @@ def ragged_paged_attention_hd64(
             max_num_tokens,
             pages_per_seq,
         )
+
     bkv_sz = bkv_p * page_size
     if vmem_limit_bytes is None:
         # TODO (jevinjiang/jacobplatin): change this to use
