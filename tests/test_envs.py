@@ -60,6 +60,7 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("SKIP_JAX_PRECOMPILE", "0")
     monkeypatch.setenv("VLLM_XLA_CHECK_RECOMPILATION", "0")
     monkeypatch.setenv("NEW_MODEL_DESIGN", "0")
+    monkeypatch.setenv("ENABLE_QUANTIZED_MATMUL_KERNEL", "0")
     monkeypatch.setenv("USE_MOE_EP_KERNEL", "0")
 
     # Test SKIP_JAX_PRECOMPILE (default False)
@@ -85,6 +86,11 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     assert envs.USE_MOE_EP_KERNEL is False
     monkeypatch.setenv("USE_MOE_EP_KERNEL", "1")
     assert envs.USE_MOE_EP_KERNEL is True
+
+    # Test ENABLE_QUANTIZED_MATMUL_KERNEL (default False)
+    assert envs.ENABLE_QUANTIZED_MATMUL_KERNEL is False
+    monkeypatch.setenv("ENABLE_QUANTIZED_MATMUL_KERNEL", "1")
+    assert envs.ENABLE_QUANTIZED_MATMUL_KERNEL is True
 
 
 def test_integer_env_vars(monkeypatch: pytest.MonkeyPatch):
