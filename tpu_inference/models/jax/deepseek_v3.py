@@ -141,13 +141,13 @@ class DeepSeekV3(nnx.Module):
                 nhd_spec=(ShardingAxisName.MLP_TENSOR, None, None)
 
             else:
-                query_tnh_spec = P(None, ShardingAxisName.ATTN_HEAD, None)
-                keyvalue_skh_spec = P(None, ShardingAxisName.ATTN_HEAD, None)
-                attn_o_tnh_spec = P(None, ShardingAxisName.ATTN_HEAD, None)
-                q_da_spec=(None, ShardingAxisName.ATTN_HEAD)
-                anh_spec=(None, ShardingAxisName.ATTN_HEAD, None)
-                kv_da_spec=(None, ShardingAxisName.ATTN_HEAD)
-                nhd_spec=(ShardingAxisName.ATTN_HEAD, None, None)
+                query_tnh_spec = P(None, ShardingAxisName.MOE_TENSOR, None)
+                keyvalue_skh_spec = P(None, ShardingAxisName.MOE_TENSOR, None)
+                attn_o_tnh_spec = P(None, ShardingAxisName.MOE_TENSOR, None)
+                q_da_spec=(None, ShardingAxisName.MOE_TENSOR)
+                anh_spec=(None, ShardingAxisName.MOE_TENSOR, None)
+                kv_da_spec=(None, ShardingAxisName.MOE_TENSOR)
+                nhd_spec=(ShardingAxisName.MOE_TENSOR, None, None)
 
             return MLA(
                 rope_theta=rope_theta,
@@ -230,6 +230,7 @@ class DeepSeekV3(nnx.Module):
                 e_sharding=(ShardingAxisName.MOE_TENSOR, ))
             if self.sparse_matmul:
                 # TODO: orginize the SparseMoE and DenseMoE better given they share most interfaces
+                logger.warning("***********Using sparse matmul!")
                 custom_module = SparseMoE(
                     dtype=dtype,
                     num_local_experts=num_local_experts,
@@ -257,6 +258,7 @@ class DeepSeekV3(nnx.Module):
                         df_sharding=(None, ShardingAxisName.MLP_TENSOR),
                         fd_sharding=(ShardingAxisName.MLP_TENSOR, None))
             else:
+                logger.warning("***********Using dense matmul!")
                 custom_module = MoE(
                     dtype=dtype,
                     num_local_experts=num_local_experts,
