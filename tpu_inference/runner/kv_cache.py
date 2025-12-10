@@ -27,7 +27,7 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
                                  use_mla: bool = False):
     """Gets the KV cache shape based on the mesh configuration."""
 
-    model_cnt = mesh.shape["model"] * mesh.shape["expert"]
+    model_cnt = mesh.shape["model"]
     assert actual_num_kv_heads % model_cnt == 0
     # NOTE(chengjiyao): Currently, the attention kernel is tailored to the
     # specific model, rather than being determined by the head_dim. If new
@@ -47,7 +47,9 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
             get_kv_cache_shape_fn(total_num_pages, page_size,
                                   actual_num_kv_heads // model_cnt,
                                   actual_head_dim, kv_dtype))
+        logger.warning(f"********KV creation shape = {shape}")
         shape[2] *= model_cnt
+        logger.warning(f"********KV creation final shape = {shape}")
     return tuple(shape)
 
 
@@ -94,8 +96,8 @@ def create_kv_caches(
     else:
         sharding = NamedSharding(
             mesh,
-            PartitionSpec(ShardingAxisName.ATTN_DATA, None,
-                          ShardingAxisName.VOCAB))
+            PartitionSpec(None, None,
+                          ShardingAxisName.ATTN_HEAD))
 
     def _allocate() -> jax.Array:
         return jnp.empty(

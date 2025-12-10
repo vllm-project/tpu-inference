@@ -67,7 +67,7 @@ class KVCacheManager:
             # Pad num_kv_heads to multiple of TP size.
             num_kv_heads = common_utils.get_padded_num_heads(
                 model_config.get_total_num_kv_heads(),
-                self.runner.mesh.shape["model"] * self.runner.mesh.shape["expert"])
+                self.runner.mesh.shape["model"])
             head_size = common_utils.get_padded_head_dim(
                 model_config.get_head_size())
             for i in range(model_config.get_num_layers(parallel_config)):
@@ -90,7 +90,7 @@ class KVCacheManager:
                 hf_config = draft_model_config.hf_config
                 num_kv_heads = common_utils.get_padded_num_heads(
                     hf_config.num_key_value_heads,
-                    self.runner.mesh.shape["model"] * self.runner.mesh.shape["expert"])
+                    self.runner.mesh.shape["model"])
                 head_size = common_utils.get_padded_head_dim(
                     hf_config.hidden_size // hf_config.num_attention_heads)
                 # Eagle3 has only 1 layer
@@ -132,7 +132,7 @@ class KVCacheManager:
                             block_size=block_size,
                             num_kv_heads=common_utils.get_padded_num_heads(
                                 attn_module.num_kv_heads,
-                                self.runner.mesh.shape["model"] * self.runner.mesh.shape["expert"]),
+                                self.runner.mesh.shape["model"]),
                             head_size=common_utils.get_padded_head_dim(
                                 attn_module.head_size),
                             dtype=self.runner.kv_cache_dtype,
@@ -150,7 +150,7 @@ class KVCacheManager:
                             block_size=block_size,
                             num_kv_heads=common_utils.get_padded_num_heads(
                                 attn_module.num_kv_heads,
-                                self.runner.mesh.shape["model"] * self.runner.mesh.shape["expert"]),
+                                self.runner.mesh.shape["model"]),
                             head_size=common_utils.get_padded_head_dim(
                                 attn_module.head_size),
                             dtype=self.runner.kv_cache_dtype)
@@ -163,6 +163,7 @@ class KVCacheManager:
                 else:
                     raise ValueError(
                         f"Unknown attention type: {attn_module.attn_type}")
+                logger.warning(f"******kv_cache_spec = {kv_cache_spec}")
         return kv_cache_spec
 
     def maybe_reinitialize_input_batch(self,
@@ -392,7 +393,7 @@ class KVCacheManager:
             f"Transferring kv cache shape {len(kv_cache_slices)} * {kv_cache_slices[0].shape} sharding {kv_cache_slices[0].sharding} size {kv_cache_slices[0].nbytes * len(kv_cache_slices)/1024/1024} Mbytes"
         )
         sharding = NamedSharding(self.runner.mesh,
-                                 PartitionSpec(None, ("model", "expert")))
+                                 PartitionSpec(None, ("model")))
         if envs.VLLM_TPU_USING_PATHWAYS:
             from pathwaysutils.experimental import \
                 reshard as experimental_reshard

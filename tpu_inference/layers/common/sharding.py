@@ -173,7 +173,7 @@ class ShardingConfigManager:
 
     @classmethod
     def validate(cls, vllm_config, sharding_strategy):
-        total_dp_size = sharding_strategy.data_parallelism * sharding_strategy.attention_data_parallelism
+        total_dp_size = sharding_strategy.data_parallelism * sharding_strategy.attention_data_parallelism * sharding_strategy.attention_data_expert_parallelism
         if total_dp_size > 1:
             if vllm_config.speculative_config is not None:
                 raise ValueError(
@@ -193,7 +193,7 @@ class ShardingConfigManager:
 
     @property
     def total_dp_size(self) -> int:
-        return self.sharding_strategy.data_parallelism * self.sharding_strategy.attention_data_parallelism
+        return self.sharding_strategy.data_parallelism * self.sharding_strategy.attention_data_parallelism * self.sharding_strategy.attention_data_expert_parallelism
 
     @property
     def model_dp_size(self) -> int:
