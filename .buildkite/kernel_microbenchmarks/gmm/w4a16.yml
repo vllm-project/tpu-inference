@@ -1,0 +1,45 @@
+# gmm-w4a16
+# kernel support matrix microbenchmarks
+steps:
+  - label: "Correctness tests for gmm-w4a16"
+    key: "gmm-w4a16_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "gmm-w4a16_CorrectnessTest" "to be added"
+  - label: "Record correctness test result for gmm-w4a16"
+    key: "record_gmm-w4a16_CorrectnessTest"
+    depends_on: "gmm-w4a16_CorrectnessTest"
+    env:
+      CI_TARGET: "gmm-w4a16"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "kernel support matrix microbenchmarks"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh gmm-w4a16_CorrectnessTest
+
+  - label: "Performance tests for gmm-w4a16"
+    key: "gmm-w4a16_PerformanceTest"
+    depends_on: "record_gmm-w4a16_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "gmm-w4a16_PerformanceTest" "to be added"
+  - label: "Record performance test result for gmm-w4a16"
+    key: "record_gmm-w4a16_PerformanceTest"
+    depends_on: "gmm-w4a16_PerformanceTest"
+    env:
+      CI_TARGET: "gmm-w4a16"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "kernel support matrix microbenchmarks"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh gmm-w4a16_PerformanceTest
