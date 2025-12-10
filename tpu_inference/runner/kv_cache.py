@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, List
 
 import jax
 import jax.numpy as jnp
@@ -95,7 +95,7 @@ def create_kv_caches(
         sharding = NamedSharding(
             mesh,
             PartitionSpec(ShardingAxisName.ATTN_DATA, None,
-                          ShardingAxisName.ATTN_HEAD))
+                          ShardingAxisName.VOCAB))
 
     def _allocate() -> jax.Array:
         return jnp.empty(

@@ -427,7 +427,7 @@ class CompilationManager:
                 indices_paddings=self.runner.num_reqs_paddings,
                 hidden_dim=vocab_size,
                 input_sharding=NamedSharding(self.runner.mesh,
-                                             PartitionSpec(None, ('model', 'expert'))),
+                                             PartitionSpec(None, ShardingAxisName.MLP_TENSOR)),
             )
             self._precompile_select_from_array_helper(
                 name=
@@ -436,7 +436,7 @@ class CompilationManager:
                 indices_paddings=self.runner.num_logits_paddings,
                 hidden_dim=vocab_size,
                 input_sharding=NamedSharding(self.runner.mesh,
-                                             PartitionSpec(None, ('model', 'expert'))),
+                                             PartitionSpec(None, ShardingAxisName.MLP_TENSOR)),
                 only_equal_paddings=True,
             )
 
@@ -473,7 +473,7 @@ class CompilationManager:
             dp_size = self.runner.vllm_config.sharding_config.total_dp_size
             sampling_metadata_sharding = NamedSharding(
                 self.runner.mesh, PartitionSpec(
-                    ShardingAxisName.MLP_DATA)) if dp_size > 1 else None
+                    ShardingAxisName.ATTN_DATA)) if dp_size > 1 else None
             logits = self._create_dummy_tensor((num_reqs, hsize), jnp.bfloat16,
                                                logits_sharding)
             for do_sampling in (True, False):
@@ -559,7 +559,7 @@ class CompilationManager:
         for num_logits in self.runner.num_logits_paddings:
             for num_reqs in self.runner.num_reqs_paddings:
                 sharding = NamedSharding(
-                    self.runner.mesh, PartitionSpec(None, ('model', 'expert')))
+                    self.runner.mesh, PartitionSpec(None, ShardingAxisName.MLP_TENSOR))
                 target_probs = self._create_dummy_tensor(
                     (num_logits, vocab_size), jnp.bfloat16, sharding)
                 draft_token_ids = self._create_dummy_tensor((num_logits, ),
@@ -764,7 +764,7 @@ class CompilationManager:
 
             draft_hidden_states = self._create_dummy_tensor(
                 (num_tokens, draft_hidden_size), dtype,
-                NamedSharding(self.runner.mesh, PartitionSpec(None, "model")))
+                NamedSharding(self.runner.mesh, PartitionSpec(None, ShardingAxisName.MOE_TENSOR)))
             input_ids = self._create_dummy_tensor(
                 (num_tokens, ), jnp.int32,
                 NamedSharding(self.runner.mesh, PartitionSpec()))
