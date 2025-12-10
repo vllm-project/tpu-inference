@@ -1,0 +1,31 @@
+ARG NIGHTLY_DATE="20250714"
+ARG BASE_IMAGE="us-central1-docker.pkg.dev/tpu-pytorch-releases/docker/xla:nightly_3.12_tpuvm_$NIGHTLY_DATE"
+
+FROM $BASE_IMAGE
+
+# Remove existing versions of dependencies
+RUN pip uninstall -y torch torch_xla torchvision
+
+# Install some basic utilities
+RUN apt-get update && apt-get install -y \
+    git \
+    libopenblas-base libopenmpi-dev libomp-dev
+
+# Install tpu_inference
+WORKDIR /workspace/tpu_inference
+COPY requirements_benchmarking.txt .
+# These are needed for the E2E benchmarking tests (i.e. tests/e2e/benchmarking/mlperf.sh)
+RUN pip install -r requirements_benchmarking.txt --retries 3
+COPY . .
+
+# Build vllm-tpu wheel
+WORKDIR /workspace
+RUN export VLLM_TPU_VERSION=$(pip index versions tpu-inference --pre 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.dev[0-9]+" | head -n 1) && \
+    bash tpu_inference/.buildkite/scripts/build_vllm_tpu.sh 0.11.2rc3 ${VLLM_TPU_VERSION} 3a7751485b71ce5ef927e4aa03b28602cb90811c
+
+
+# Install vllm-tpu wheel
+RUN pip install --no-cache-dir vllm/dist/*.whl
+
+
+CMD ["/bin/bash"]
