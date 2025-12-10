@@ -148,17 +148,19 @@ class DeepSeekV3(nnx.Module):
                 query_tnh_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
                 keyvalue_skh_spec = P(ShardingAxisName.MLP_TENSOR, None)
                 attn_o_tnh_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
-                q_da_sharding=(None, ShardingAxisName.ATTN_HEAD)
-                anh_sharding=(None, ShardingAxisName.ATTN_HEAD, None)
-                kv_da_sharding=(None, ShardingAxisName.ATTN_HEAD)
+                q_da_spec=(None, ShardingAxisName.VOCAB)
+                anh_spec=(None, ShardingAxisName.MLP_TENSOR, None)
+                kv_da_spec=(None, ShardingAxisName.VOCAB)
+                nhd_spec=(ShardingAxisName.MLP_TENSOR, None, None)
 
             else:
-                query_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
-                keyvalue_skh_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
-                attn_o_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
-                q_da_sharding=(None, ('model', 'expert'))
-                anh_sharding=(None, ('model', 'expert'), None)
-                kv_da_sharding=(None, ('model', 'expert'))
+                query_tnh_spec = P(None, ShardingAxisName.ATTN_HEAD, None)
+                keyvalue_skh_spec = P(None, ShardingAxisName.ATTN_HEAD, None)
+                attn_o_tnh_spec = P(None, ShardingAxisName.ATTN_HEAD, None)
+                q_da_spec=(None, ShardingAxisName.ATTN_HEAD)
+                anh_spec=(None, ShardingAxisName.ATTN_HEAD, None)
+                kv_da_spec=(None, ShardingAxisName.ATTN_HEAD)
+                nhd_spec=(ShardingAxisName.ATTN_HEAD, None, None)
 
             return MLA(
                 rope_theta=rope_theta,
@@ -192,7 +194,7 @@ class DeepSeekV3(nnx.Module):
                 anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None),
                 # TODO bz branch is kv_da_sharding=('model', None),
                 kv_da_sharding=(None, ShardingAxisName.VOCAB),
-                nhd_sharding=(ShardingAxisName.MLP_TENSOR, None, None))
+                nhd_sharding=(ShardingAxisName.MLP_TENSOR, None, None))t two-way TP as well as MLA/DP. MLA & no-MLA perf looks the same as main for single-host DenseMatmul.)
 
         for i in range(first_k_dense_replace):
             block = TransformerBlock(
@@ -266,8 +268,8 @@ class DeepSeekV3(nnx.Module):
                 efd_sharding=(None , ShardingAxisName.ATTN_DATA_EXPERT, ShardingAxisName.MOE_TENSOR),
                 # Previously had:
                 # activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
-                # ed_sharding=(ShardingAxisName.MLP_TENSOR, None),
-                # e_sharding=(ShardingAxisName.MLP_TENSOR, ))
+                # ed_sharding=(ShardingAxisName.MOE_TENSOR, None),
+                # e_sharding=(ShardingAxisName.MOE_TENSOR, ))
                 use_sparse_moe=self.sparse_matmul,
                 quantized_dtype=self.weight_loader.quant_dtype
                 if self.weight_loader.is_model_quantized else None,
