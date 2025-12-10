@@ -320,6 +320,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
     def _create_single_slice_mesh(self) -> jax.Array:
         sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config
+        logger.warning(f"ShardingConfigManager = {sharding_strategy}")
         mesh_shape = (
             sharding_strategy.model_dp_size,
             sharding_strategy.attn_dp_size,

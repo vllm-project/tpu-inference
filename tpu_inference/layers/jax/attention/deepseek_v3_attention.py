@@ -37,7 +37,8 @@ from tpu_inference.layers.jax.layers import RMSNorm
 from tpu_inference.layers.jax.rope import DeepseekScalingRotaryEmbedding
 
 KVCache = Tuple[jax.Array, jax.Array]
-
+from tpu_inference.logger import init_logger
+logger = init_logger(__name__)
 
 # TODO (wenxindongwork): Add MLA KV cache implementation. For now, cache complete KV vectors.
 @dataclass(kw_only=True)
@@ -397,13 +398,28 @@ class MLA(nnx.Module):
             self.query_tnh,  # q
             self.keyvalue_skh,  # k
             self.keyvalue_skh,  # v
-            P(None, None, ('model', 'expert')),  # kv_cache
+            P(None, None, 'model'),  # kv_cache
             P(),  # md.seq_lens: Replicated
             P(),  # page_indices_flat: Replicated
             P(),  # query_start_loc: Replicated
             P(),  # distribution: Replicated
         )
-        out_specs = (self.attn_o_tnh, P(None, None, ('model', 'expert')))
+        logger.warning(f"q_TNH.shape = {q_TNH.shape}")
+        jax.debug.inspect_array_sharding(
+           q_TNH,
+           callback=lambda sharding_info: print(f"Intermediate array sharding: {sharding_info}")
+        )
+        logger.warning(f"k_SKH.shape = {k_SKH.shape}")
+        jax.debug.inspect_array_sharding(
+           k_SKH,
+           callback=lambda sharding_info: print(f"Intermediate array sharding: {sharding_info}")
+           )
+        logger.warning(f"self.kv_cache.shape = {kv_cache.shape}")
+        jax.debug.inspect_array_sharding(
+            kv_cache,
+           callback=lambda sharding_info: print(f"Intermediate array sharding: {sharding_info}")
+        )
+        out_specs = (self.attn_o_tnh, P(None, None, 'model'))
 
         def _ragged_paged_attention(*args):
             outputs = ragged_paged_attention(
@@ -476,7 +492,8 @@ class MLA(nnx.Module):
             self.query_tnh,  # q_rope
             self.keyvalue_skh,  # k
             self.keyvalue_skh,  # k_rope
-            P(ShardingAxisName.MLP_TENSOR),  # kv_cache
+            P(ShardingAxisName.ATTN_DATA, None,
+                              ShardingAxisName.ATTN_HEAD),  # kv_cache
             P(ShardingAxisName.ATTN_DATA),  # md.seq_lens: Replicated
             P(ShardingAxisName.ATTN_DATA),  # page_indices_flat: Replicated
             P(ShardingAxisName.ATTN_DATA),  # query_start_loc: Replicated
