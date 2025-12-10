@@ -16,9 +16,11 @@ from dataclasses import InitVar, dataclass
 from functools import partial
 from typing import Optional, Tuple
 import math
+import enum
 
 import jax
 import jax.numpy as jnp
+from jax.experimental import xla_metadata
 from flax import nnx
 from flax.typing import Sharding
 from jax.sharding import PartitionSpec
@@ -29,11 +31,12 @@ from qwix._src.providers import ptq
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
+from tpu_inference.layers.vllm.fused_moe import fused_moe_func
 from tpu_inference.models.jax.utils.quantization.quantization_utils import (
     manually_quantize_qwix_activation, manually_quantize_qwix_weight)
 
 modeling_flax_utils = FlaxUtils()
-
+set_xla_metadata = xla_metadata.set_xla_metadata
 
 @dataclass(kw_only=True)
 class CombineExperts(nnx.Module):
@@ -144,7 +147,7 @@ class MoE(nnx.Module):
     apply_expert_weight_before_computation: bool
     random_init: bool = False
     use_fused_moe_kernel: bool = False
-    use_torchax_kernel: bool = False
+    use_vllm_moe_kernel: bool = False
     
     # --- Sparse MoE Specific Attributes ---
     use_sparse_moe: bool = False
@@ -167,49 +170,47 @@ class MoE(nnx.Module):
         """
         x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
-        if self.use_kernel:
-            print(f"Debug: {self.use_kernel}")
-            print(f"Debug: {self.use_fused_moe_kernel}")
-            print(f"Debug: {self.use_torchax_kernel}")
+        if self.use_fused_moe_kernel:
             router_logits_TE = self.router(x_TD)
-            if self.use_fused_moe_kernel:
-                block_size = {
-                    "bt": 32,
-                    "bf": 512,
-                    "bd1": 512,
-                    "bd2": 512,
-                    "btc": 64,
-                    "bfc": 256,
-                    "bd1c": 256,
-                    "bd2c": 256,
-                }
-                ep_axis_name = self.efd_sharding[0]
-                output_TD = fused_ep_moe(
-                    mesh=self.mesh,
-                    tokens=x_TD,
-                    w1=self.kernel_gating_upproj_E2DF.value,
-                    w2=self.kernel_down_proj_EFD.value,
-                    gating_output=router_logits_TE,
-                    top_k=self.router.num_experts_per_tok,
-                    ep_axis_name=ep_axis_name,
-                    renormalize_topk_logits=self.renormalize,
-                    act_fn=self.hidden_act,
-                    **block_size,
-                )
-            elif self.use_torchax_kernel:
-                output_TD = fused_moe_func(
-                    hidden_states=x_TD,
-                    w1=self.kernel_gating_upproj_E2DF.value,
-                    w2=self.kernel_down_proj_EFD.value,
-                    w1_bias=None,
-                    w2_bias=None,
-                    gating_output=router_logits_TE,
-                    topk=self.router.num_experts_per_tok,
-                    renormalize=self.renormalize,
-                    mesh=self.mesh,
-                    use_ep=self.num_expert_parallelism>1,
-                    activation=self.hidden_act,
-                )
+            block_size = {
+                "bt": 32,
+                "bf": 512,
+                "bd1": 512,
+                "bd2": 512,
+                "btc": 64,
+                "bfc": 256,
+                "bd1c": 256,
+                "bd2c": 256,
+            }
+            ep_axis_name = self.efd_sharding[0]
+            output_TD = fused_ep_moe(
+                mesh=self.mesh,
+                tokens=x_TD,
+                w1=self.kernel_gating_upproj_E2DF.value,
+                w2=self.kernel_down_proj_EFD.value,
+                gating_output=router_logits_TE,
+                top_k=self.router.num_experts_per_tok,
+                ep_axis_name=ep_axis_name,
+                renormalize_topk_logits=self.renormalize,
+                act_fn=self.hidden_act,
+                **block_size,
+            )
+            return output_TD
+        elif self.use_vllm_moe_kernel:
+            router_logits_TE = self.router(x_TD)
+            output_TD = fused_moe_func(
+                hidden_states=x_TD,
+                w1=self.kernel_gating_upproj_EFD.value,
+                w2=self.kernel_down_proj_EDF.value,
+                w1_bias=self.w1_bias,
+                w2_bias=self.w2_bias,
+                gating_output=router_logits_TE,
+                topk=self.router.num_experts_per_tok,
+                renormalize=self.renormalize,
+                mesh=self.mesh,
+                use_ep=self.num_expert_parallelism>1,
+                activation=self.hidden_act,
+            )
             return output_TD
         else:
             weights_TX, indices_TX = self.router(x_TD)
@@ -262,41 +263,64 @@ class MoE(nnx.Module):
         E = self.num_local_experts
         D = self.hidden_size
         F = self.intermediate_size_moe
-        shape_down = (self.num_local_experts, F, D)
-        self.use_kernel = self.use_fused_moe_kernel or self.use_torchax_kernel
-        if self.use_kernel:
+
+        if self.use_fused_moe_kernel:
             shape_gating_up = (E, 2, D, F)
+            if self.edf_sharding:
+                self.e2df_sharding = (self.edf_sharding[0], None, self.edf_sharding[1], self.edf_sharding[2])
             self.kernel_gating_upproj_E2DF = create_param(rngs,
-                                              shape=shape_gating_up,
+                                              shape=(E, 2, D, F),
                                               dtype=self.dtype,
                                               sharding=self.e2df_sharding,
                                               random_init=self.random_init)
+            self.kernel_down_proj_EFD = create_param(rngs,
+                                                    shape=(E, F, D),
+                                                    dtype=self.dtype,
+                                                    sharding=self.efd_sharding,
+                                                    random_init=self.random_init)
+        elif self.use_vllm_moe_kernel:
+            shape_gating_up = (E, 2 * F, D)
+            self.kernel_gating_upproj_EFD = create_param(rngs,
+                                              shape=(E, 2 * F, D),
+                                              dtype=self.dtype,
+                                              sharding=self.efd_sharding,
+                                              random_init=self.random_init)
+            self.kernel_down_proj_EDF = create_param(rngs,
+                                                    shape=(E, D, F),
+                                                    dtype=self.dtype,
+                                                    sharding=self.edf_sharding,
+                                                    random_init=self.random_init)
         else:
-            shape_gating = (self.num_local_experts, D, F)
-            shape_up = (self.num_local_experts, D, F)
+            #shape_gating = (self.num_local_experts, D, F)
+            #shape_up = (self.num_local_experts, D, F)
 
             self.kernel_gating_EDF = create_param(rngs,
-                                                shape=shape_gating,
+                                                shape=(E, D, F),
                                                 dtype=self.dtype,
                                                 sharding=self.edf_sharding,
                                                 random_init=self.random_init)
             self.kernel_up_proj_EDF = create_param(rngs,
-                                                shape=shape_up,
+                                                shape=(E, D, F),
                                                 dtype=self.dtype,
                                                 sharding=self.edf_sharding,
                                                 random_init=self.random_init)
-        self.kernel_down_proj_EFD = create_param(rngs,
-                                                shape=shape_down,
-                                                dtype=self.dtype,
-                                                sharding=self.efd_sharding,
-                                                random_init=self.random_init)
+            self.kernel_down_proj_EFD = create_param(rngs,
+                                                    shape=(E, F, D),
+                                                    dtype=self.dtype,
+                                                    sharding=self.efd_sharding,
+                                                    random_init=self.random_init)
 
+        # Default MoE has no bias vectors
+        self.w1_bias, self.w2_bias = (None, None)
 
         self.expert_axis_name = self.edf_sharding[0]
         if self.expert_axis_name is None:
             self.num_expert_parallelism = 1
         else:
-            self.num_expert_parallelism = math.prod(self.mesh.shape[axis] for axis in self.expert_axis_name)
+            if isinstance(self.expert_axis_name, str):
+                self.num_expert_parallelism =self.mesh.shape[self.expert_axis_name]
+            else:
+                self.num_expert_parallelism = math.prod(self.mesh.shape[axis] for axis in self.expert_axis_name)
 
         # Derive if data is sharded by expert
         self.data_axis_name = self.activation_ffw_td[0]
@@ -569,12 +593,12 @@ class MoE(nnx.Module):
             with set_xla_metadata(
                 ragged_dot_tiling=",".join([str(t) for t in tiling]),
                 mosaic_fusion_group="ragged-dot",):
-            output = ragged_dot_func(
-                lhs=inputs,
-                rhs=kernel,
-                group_sizes=group_sizes,
-                preferred_element_type=self.dtype,
-            )
+                output = ragged_dot_func(
+                    lhs=inputs,
+                    rhs=kernel,
+                    group_sizes=group_sizes,
+                    preferred_element_type=self.dtype,
+                )
 
         if pad_amount > 0:
             output = output[:num_rows, :]
