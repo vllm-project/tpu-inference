@@ -535,8 +535,10 @@ def _ragged_paged_attention_kernel(
                          update_sz,
                          *,
                          wait=False):
+        # NB: sems:[4, 2]. sems[0] is for fetching kv from kv cache. sems[1] is for fetching q blocks from hbm to vmem. sems[2] is for sending output from vmem to hbm. sems[3] is for copying kv from vmem to hbm (updating the kv cache).
         sem = sems.at[3, bkv_sem_idx]
-        vmem_ref = bkv_x2_ref.at[bkv_sem_idx]
+        # bkv_x2_ref: [2, bkv_sz, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
+        vmem_ref = bkv_x2_ref.at[bkv_sem_idx] # [bkv_sz, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]]
         bkv_id = offset // bkv_sz
         kv_p_start = offset // page_size
         kv_p_end = cdiv(offset + update_sz, page_size)
