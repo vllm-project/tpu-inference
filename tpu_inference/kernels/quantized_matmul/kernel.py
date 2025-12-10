@@ -50,7 +50,7 @@ def get_vmem_limit(
     """Calculate VMEM limit for the kernel."""
 
     # Calculate in/out VMEM size.
-    x_size = (batch_block_size * 
+    x_size = (batch_block_size *
               in_block_size * (dtypes.bit_width(x_dtype) if hasattr(
                   dtypes, "bit_width") else dtypes.itemsize_bits(x_dtype)))
     x_abs_max_size = (
@@ -83,8 +83,9 @@ def get_vmem_limit(
     x_q_size = (batch_block_size *
                 in_block_size * (dtypes.bit_width(x_q_dtype) if hasattr(
                     dtypes, "bit_width") else dtypes.itemsize_bits(x_q_dtype)))
-    x_scale_size = (batch_block_size * (dtypes.bit_width(scale_dtype) if hasattr(
-        dtypes, "bit_width") else dtypes.itemsize_bits(scale_dtype)))
+    x_scale_size = (
+        batch_block_size * (dtypes.bit_width(scale_dtype) if hasattr(
+            dtypes, "bit_width") else dtypes.itemsize_bits(scale_dtype)))
 
     vmem_scratch = acc_size if save_acc else 0
     vmem_scratch += x_q_size + x_scale_size if save_x_q else 0
