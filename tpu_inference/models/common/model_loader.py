@@ -24,6 +24,7 @@ logger = init_logger(__name__)
 
 _MODEL_REGISTRY = {}
 
+
 class UnsupportedArchitectureError(ValueError):
     """Raised when a model architecture is not supported in the registry."""
     pass
