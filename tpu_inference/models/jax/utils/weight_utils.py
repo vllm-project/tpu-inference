@@ -67,7 +67,13 @@ def transpose_params(param_key: str, param_tensor: jax.Array, transpose_map):
 def reshape_params(param_key: str, param_tensor: jax.Array, shape_map):
     for key, new_shape in shape_map.items():
         if key in param_key:
-            return jnp.reshape(param_tensor, new_shape)
+            try:
+                #TODO:(gpolovets) Add validation on whether reshape preserves data layout.
+                return jnp.reshape(param_tensor, new_shape)
+            except TypeError:
+                raise TypeError(
+                    f"Cannot reshape for key={key}, new_shape={new_shape}, param_shape={param_tensor.shape}"
+                )
     return param_tensor  # Base case / no-op
 
 

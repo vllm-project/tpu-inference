@@ -116,6 +116,9 @@ def test_quant_override(model, mesh):
 @pytest.mark.parametrize("topk", [2])
 def test_mxfp4_fused_moe(mesh, num_tokens, intermediate_size, hidden_size,
                          num_experts, topk):
+    if 'TPU7x' in jax.devices()[0].device_kind:
+        pytest.skip("Skipping test on TPU TPU7x.")
+
     torch.manual_seed(42)
     dtype = torch.bfloat16
 
@@ -205,6 +208,10 @@ def test_mxfp4_fused_moe(mesh, num_tokens, intermediate_size, hidden_size,
 @pytest.mark.parametrize("topk", [2])
 def test_mxfp4_fused_moe_use_kernel(mesh, num_tokens, intermediate_size,
                                     hidden_size, num_experts, topk):
+
+    if 'TPU7x' in jax.devices()[0].device_kind:
+        pytest.skip("Skipping test on TPU TPU7x.")
+
     torch.manual_seed(42)
     dtype = torch.bfloat16
 

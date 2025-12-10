@@ -1336,7 +1336,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         _request_distribution = []
         for dp_rank in range(dp_size):
             _num_reqs = num_req_per_dp_rank[dp_rank]
-            _request_distribution.append([0, 0, _num_reqs])
+            # The batch has been reordered by _reorder_batch so decode requests come first
+            # Count decode requests (those with num_scheduled_tokens == 1) in this DP rank
+            num_decode_in_dp_rank = 0
+            for req_id in req_ids_dp[dp_rank]:
+                if scheduler_output.num_scheduled_tokens[req_id] == 1:
+                    num_decode_in_dp_rank += 1
+            _request_distribution.append(
+                [num_decode_in_dp_rank, num_decode_in_dp_rank, _num_reqs])
         request_distribution = np.array(_request_distribution).ravel()
 
         use_spec_decode = len(
@@ -1395,7 +1402,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 block_tables[
                     req_offset:req_offset + _num_reqs, :self.
                     max_num_blocks_per_req] = self.input_batch.block_table[
-                        0].get_cpu_tensor()[req_indices_dp[dp_rank]]
+                        kv_cache_gid].get_cpu_tensor()[req_indices_dp[dp_rank]]
             # Convert block_tables to 1D on cpu.
             block_tables = block_tables.reshape(-1)
             block_tables = device_array(

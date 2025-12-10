@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Union
+from typing import Union
 
 import jax
 import jax.numpy as jnp
@@ -119,29 +119,12 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         layer: torch.nn.Module,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
-        global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: Optional[torch.Tensor] = None,
-        logical_to_physical_map: Optional[torch.Tensor] = None,
-        logical_replica_count: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         assert isinstance(layer, FusedMoE)
-        if activation != "silu":
+        if layer.activation != "silu":
             raise NotImplementedError(
                 "Only silu is supported for activation function.")
-        if scoring_func != "softmax":
+        if layer.scoring_func != "softmax":
             raise NotImplementedError(
                 "Only softmax is supported for scoring_func")
 
@@ -155,9 +138,9 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
 
         expert_weights = F.softmax(router_logits, dim=-1)
         expert_weights, expert_indices = torch.topk(expert_weights,
-                                                    top_k,
+                                                    layer.top_k,
                                                     dim=-1)
-        if renormalize:
+        if layer.renormalize:
             expert_weights /= expert_weights.sum(dim=-1, keepdim=True)
 
         # cond ffn

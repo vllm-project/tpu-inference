@@ -28,9 +28,9 @@ TPU_SECOND_LAST_MINOR = 8
 
 # Map vllm dtype string that doesn't exactly match jax dtype string name.
 _VLLM_DTYPE_STR_TO_JAX_DTYPE = {
-    "fp8": jnp.float8_e4m3fn,
-    "fp8_e4m3": jnp.float8_e4m3fn,
-    "fp8_e5m2": jnp.float8_e5m2,
+    "fp8": jnp.float8_e4m3fn.dtype,
+    "fp8_e4m3": jnp.float8_e4m3fn.dtype,
+    "fp8_e5m2": jnp.float8_e5m2.dtype,
 }
 
 
@@ -58,6 +58,10 @@ def to_torch_dtype(dtype: str | jnp.dtype | torch.dtype) -> torch.dtype:
 
 _megacore = False
 logger = init_logger(__name__)
+
+
+def align_to(unpadded_dim, pad_multiple):
+    return (unpadded_dim + pad_multiple - 1) // pad_multiple * pad_multiple
 
 
 def enable_megacore() -> None:
@@ -271,11 +275,11 @@ def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:
 
 def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:
     """
-    A wrapper function of vllm.utils.get_hash_fn_by_name to support builtin
+    A wrapper function of vllm.utils.hashing.get_hash_fn_by_name to support builtin
     """
     if hash_fn_name == "builtin":
         return hash
-    return utils.get_hash_fn_by_name(hash_fn_name)
+    return utils.hashing.get_hash_fn_by_name(hash_fn_name)
 
 
 def quantize_kv(key: jax.Array, value: jax.Array,

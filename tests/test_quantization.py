@@ -112,6 +112,8 @@ class TestQwixQuantizeNnxModel(unittest.TestCase):
         self.mesh = Mesh(jax.devices(), ('model', ))
         self.rng = jax.random.PRNGKey(0)
         self.model = SimpleModel(rngs=nnx.Rngs(0))
+        self.model.vllm_config = MagicMock()
+        self.model.vllm_config.model_config.use_mla = False
 
         self.qwix_config = [
             {
@@ -131,6 +133,7 @@ class TestQwixQuantizeNnxModel(unittest.TestCase):
         """Test that qwix.quantize_model is called with the correct arguments."""
         quantized_model_mock = MagicMock(spec=nnx.Module)
         mock_quantize_model.return_value = quantized_model_mock
+        self.model.vllm_config.sharding_config.total_dp_size = 1
 
         with patch(
                 "tpu_inference.models.jax.utils.quantization.quantization_utils.init_logger",

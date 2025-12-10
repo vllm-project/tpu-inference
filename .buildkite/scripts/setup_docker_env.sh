@@ -55,13 +55,10 @@ setup_environment() {
 
   echo "Cleanup complete."
 
-  echo "Installing Python dependencies"
-  python3 -m pip install --progress-bar off buildkite-test-collector==0.1.9
-  echo "Python dependencies installed"
-
   VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH" --default "")
 
   docker build \
       --build-arg VLLM_COMMIT_HASH="${VLLM_COMMIT_HASH}" \
+      --build-arg IS_FOR_V7X="${IS_FOR_V7X:-false}" \
       --no-cache -f docker/Dockerfile -t "${IMAGE_NAME}:${BUILDKITE_COMMIT}" .
 }
