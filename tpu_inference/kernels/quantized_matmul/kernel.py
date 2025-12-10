@@ -50,9 +50,9 @@ def get_vmem_limit(
     """Calculate VMEM limit for the kernel."""
 
     # Calculate in/out VMEM size.
-        x_size = (batch_block_size *
-                  in_block_size * (dtypes.bit_width(x_dtype) if hasattr(
-                      dtypes, "bit_width") else dtypes.itemsize_bits(x_dtype)))
+    x_size = (batch_block_size * 
+              in_block_size * (dtypes.bit_width(x_dtype) if hasattr(
+                  dtypes, "bit_width") else dtypes.itemsize_bits(x_dtype)))
     x_abs_max_size = (
         batch_block_size
         * (
