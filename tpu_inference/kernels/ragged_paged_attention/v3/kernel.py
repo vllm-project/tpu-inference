@@ -255,6 +255,7 @@ def _ragged_paged_attention_kernel(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
+    is_causal: bool = True,
     chunk_prefill_size: int | None = None,
     bkv_p,
     bq_sz,
@@ -358,14 +359,19 @@ def _ragged_paged_attention_kernel(
         if q_scale is not None:
             s *= q_scale
 
-        q_span = (kv_len - q_len + bq_idx * bq_sz +
-                  lax.broadcasted_iota(jnp.int32, s.shape, 0) //
-                  num_q_heads_per_kv_head)
-        k_span = bkv_idx * bkv_sz + lax.broadcasted_iota(jnp.int32, s.shape, 1)
-        mask = q_span < k_span
-        # TODO(jevinjiang, xiowei): reduce pages_per_seq based on sliding_window.
-        if sliding_window is not None:
-            mask = jnp.logical_or(mask, q_span - sliding_window >= k_span)
+        if is_causal:
+            q_span = (kv_len - q_len + bq_idx * bq_sz +
+                      lax.broadcasted_iota(jnp.int32, s.shape, 0) //
+                      num_q_heads_per_kv_head)
+            k_span = bkv_idx * bkv_sz + lax.broadcasted_iota(
+                jnp.int32, s.shape, 1)
+            mask = q_span < k_span
+            # TODO(jevinjiang, xiowei): reduce pages_per_seq based on sliding_window.
+            if sliding_window is not None:
+                mask = jnp.logical_or(mask, q_span - sliding_window >= k_span)
+        else:
+            # Full/Bidirectional Mask: Mask is always False (no masking)
+            mask = jnp.zeros_like(s, dtype=jnp.bool_)
 
         if soft_cap is not None:
             s = soft_cap * jnp.tanh(s / soft_cap)
@@ -1250,20 +1256,10 @@ def static_validate_inputs(
 
 @functools.partial(
     jax.jit,
-    static_argnames=(
-        "sm_scale",
-        "sliding_window",
-        "soft_cap",
-        "mask_value",
-        "q_scale",
-        "k_scale",
-        "v_scale",
-        "chunk_prefill_size",
-        "num_kv_pages_per_block",
-        "num_queries_per_block",
-        "vmem_limit_bytes",
-        "debug_mode",
-    ),
+    static_argnames=("sm_scale", "sliding_window", "soft_cap", "mask_value",
+                     "q_scale", "k_scale", "v_scale", "chunk_prefill_size",
+                     "num_kv_pages_per_block", "num_queries_per_block",
+                     "vmem_limit_bytes", "debug_mode", "is_causal"),
     donate_argnames=("kv_cache", ),
 )
 def ragged_paged_attention(
@@ -1286,6 +1282,7 @@ def ragged_paged_attention(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
+    is_causal: bool = True,
     # Kernel optimization params.
     chunk_prefill_size: int | None = None,
     # Kernel tuning params.
@@ -1463,6 +1460,7 @@ def ragged_paged_attention(
                 q_scale=q_scale,
                 k_scale=k_scale,
                 v_scale=v_scale,
+                is_causal=is_causal,
                 chunk_prefill_size=chunk_prefill_size,
                 bq_sz=bq_sz,
                 bkv_p=bkv_p,

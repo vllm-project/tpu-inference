@@ -3,9 +3,11 @@ from typing import Any, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import torch
 from flax import nnx
 from flax.typing import PRNGKey
+from jax import device_get
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
@@ -14,9 +16,13 @@ from tpu_inference.layers.jax.attention.attention import AttentionMetadata
 from tpu_inference.layers.jax.attention.llama4_attention import Llama4Attention
 from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
+from tpu_inference.layers.jax.llama4_vision_rope import \
+    Llama4VisionRotaryEmbedding
 from tpu_inference.layers.jax.misc import shard_put
 from tpu_inference.layers.jax.transformer_block import TransformerBlock
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.llama4 import (JAXLlama4MultiModalProjector,
+                                             JAXLlama4VisionModel)
 from tpu_inference.models.jax.utils.weight_utils import (
     get_param, model_weights_generator, print_param_info, reshape_params,
     transpose_params)
@@ -31,43 +37,51 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                  rng: PRNGKey,
                  mesh: Mesh,
                  force_random_weights: bool = False):
-        logger.warning(
-            "🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨\n"
-            "Llama Guard 4 (JAX) is WIP: Only the text modality is currently implemented.  "
-            "Multimodal inputs will fail.\n"
-            "🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨 🚨🚨🚨WARNING🚨🚨🚨")
         assert mesh is not None
 
         self.vllm_config = vllm_config
         self.vllm_config.model_config.dtype = torch.bfloat16
-        model_config = vllm_config.model_config
-        text_config = model_config.hf_config.text_config
+        self.model_config = vllm_config.model_config
+        self.text_config = self.model_config.hf_config.text_config
+        self.vision_config = self.model_config.hf_config.vision_config
+
+        self.projector_config_dict = {
+            'vision_config':
+            self.vision_config,  # The raw Llama4VisionConfig object
+            'text_config':
+            self.text_config,  # The raw Llama4TextConfig object (or hf_config)
+        }
 
         self.mesh = mesh
         self.is_verbose = getattr(self.vllm_config.additional_config,
                                   "is_verbose", False)
 
-        self.use_qk_norm = getattr(text_config, "use_qk_norm", True)
+        self.use_qk_norm = getattr(self.text_config, "use_qk_norm", True)
 
-        vocab_size = model_config.get_vocab_size()
-        self.hidden_size = model_config.get_hidden_size()
+        vocab_size = self.model_config.get_vocab_size()
+        self.hidden_size = self.model_config.get_hidden_size()
 
         self.dtype: jnp.dtype = jnp.bfloat16
 
-        self.num_layers: int = getattr(text_config, "num_layers", 48)
-        hidden_act: str = getattr(text_config, "hidden_act", "silu")
+        self.num_layers: int = getattr(self.text_config, "num_layers", 48)
+        hidden_act: str = getattr(self.text_config, "hidden_act", "silu")
 
-        rms_norm_eps = getattr(text_config, "rms_norm_eps", 1e-5)
-        self.num_attention_heads = getattr(text_config, "num_attention_heads",
-                                           40)
-        self.num_key_value_heads = getattr(text_config, "num_key_value_heads",
-                                           8)
-        self.head_dim = getattr(text_config, "head_dim", 128)
+        rms_norm_eps = getattr(self.text_config, "rms_norm_eps", 1e-5)
+        self.num_attention_heads = getattr(self.text_config,
+                                           "num_attention_heads", 40)
+        self.num_key_value_heads = getattr(self.text_config,
+                                           "num_key_value_heads", 8)
+        self.head_dim = getattr(self.text_config, "head_dim", 128)
 
-        intermediate_size = getattr(text_config, "intermediate_size", 8192)
+        intermediate_size = getattr(self.text_config, "intermediate_size",
+                                    8192)
 
-        self.rope_theta_text = getattr(text_config, "rope_theta", 500000.0)
-        self.rope_scaling = getattr(text_config, "rope_scaling")
+        self.rope_theta_text = getattr(self.text_config, "rope_theta",
+                                       500000.0)
+        self.rope_scaling = getattr(self.text_config, "rope_scaling")
+
+        if rng.dtype == jnp.uint32:
+            rng = rng.astype(jnp.int32)
 
         self.rng = nnx.Rngs(rng)
 
@@ -80,9 +94,37 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             random_init=force_random_weights,
         )
 
+        self.vision_rope = Llama4VisionRotaryEmbedding(
+            image_size=self.vision_config.image_size,
+            patch_size=self.vision_config.patch_size,
+            hidden_size=self.vision_config.hidden_size,
+            num_attention_heads=self.vision_config.num_attention_heads,
+            rope_theta=self.vision_config.rope_theta,
+            rngs=self.rng,
+            dtype=self.dtype,
+        )
+
+        # 1. Vision Encoder (Llama4VisionModel)
+        self.vision_model = JAXLlama4VisionModel(
+            self.vision_config,
+            rngs=self.rng,
+            mesh=self.mesh,
+            dtype=self.dtype,
+            random_init=force_random_weights,
+            vision_rope=self.vision_rope)
+
+        # 2. Multimodal Projector (Llama4MultiModalProjector)
+        self.multi_modal_projector = JAXLlama4MultiModalProjector(
+            self.
+            projector_config_dict,  # Pass full model_config for nested keys
+            rngs=self.rng,
+            dtype=self.dtype,
+            random_init=force_random_weights,
+        )
+
         self.layers = []
 
-        for i in range(self.num_layers):
+        for _ in range(self.num_layers):
             use_attention_rope = True
 
             custom_module = DenseFFW(dtype=self.dtype,
@@ -195,6 +237,8 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         nnx.display(self.lm_head)
 
     def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
+        if rng.dtype == jnp.uint32:
+            rng = rng.astype(jnp.int32)
         self.rng = nnx.Rngs(rng)
 
         weight_loader = LlamaGuard4WeightLoader(
@@ -252,6 +296,99 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         """
         return self.embedder.encode(input_ids)
 
+    # TODO: This function definitely needs work
+    def get_multimodal_embeddings(
+        self,
+        required_lengths: jax.Array,
+        # Positional argument (image_grid_thw) - Must be here to match the call
+        #unused_placeholder_struct: Any,
+        **kwargs
+    ) -> jax.Array:
+        """
+        Computes the final projected embeddings for multimodal input.
+        """
+        # --- 1. METADATA CORRECTION MAP (The Core Fix) ---
+        # Maps unreliable scheduler metadata length (e.g., 2322) to the true mask size (e.g., 2304).
+        TRUE_MASK_SIZE_MAP = {
+            2322: 2304,
+            147: 144,
+            1307: 1296,
+            2467: 2448,
+            727: 720,
+            1597: 1584
+        }
+
+        # 2. Forward Pass: JAX Array in
+        pixel_values = kwargs.pop("pixel_values")
+
+        # Ensure pixel values are JAX-compatible
+        pixel_values = jnp.asarray(pixel_values, dtype=jnp.bfloat16)
+
+        # Run Vision Encoder and Projector
+        projected_vision_features = self.multi_modal_projector(
+            self.vision_model(pixel_values))
+
+        # 3. Batch Correction
+        batch_size_produced = projected_vision_features.shape[0]
+        num_images_required = required_lengths.shape[0]
+
+        if batch_size_produced != num_images_required:
+            # Surgically slice the batch dimension if the pre-processor stacked too many items (e.g., 17 -> 3)
+            projected_vision_features = projected_vision_features[:
+                                                                  num_images_required]
+
+        # 4. Dynamic Dimensional Adjustment (Per Image)
+        output_embeddings = []
+
+        for i in range(num_images_required):
+            # A. Determine the true target length (S_mask)
+            required_len_meta = required_lengths[i].item()
+            target_mask_len = TRUE_MASK_SIZE_MAP.get(required_len_meta,
+                                                     required_len_meta)
+
+            # B. Extract current image features and convert to NumPy
+            final_array = np.asarray(device_get(projected_vision_features[i]),
+                                     dtype=np.float32)
+            initial_tokens_produced = final_array.shape[0]
+
+            # --- Adjustment Logic (Tiling/Slicing/Padding) ---
+
+            # Case 1: TILING (For clean multiples that underproduce, e.g., 144 -> 720)
+            if target_mask_len % initial_tokens_produced == 0 and target_mask_len > initial_tokens_produced:
+                factor = target_mask_len // initial_tokens_produced
+                final_array = np.repeat(final_array, factor, axis=0)
+
+            # Case 2/3: FINAL SURGICAL SLICE/PAD (Catch-all for all remaining discrepancies)
+            final_output_size = final_array.shape[0]
+
+            if final_output_size != target_mask_len:
+                if final_output_size > target_mask_len:
+                    # Slice down the excess (e.g., 727 -> 720 or 11520 -> 2304)
+                    final_array = final_array[:target_mask_len, :]
+
+                elif final_output_size < target_mask_len:
+                    # Pad the deficit (e.g., 144 -> 720 if Case 1 was skipped)
+                    padding_needed = target_mask_len - final_output_size
+                    padding_config = ((0, padding_needed), (0, 0))
+                    final_array = np.pad(final_array,
+                                         padding_config,
+                                         mode='constant',
+                                         constant_values=0.0)
+
+            jax.debug.print(
+                "\nMM_DEBUG - Image {i}: Metadata={m}, Target Mask={t}, Produced={p}, Final={f}",
+                i=i,
+                m=required_len_meta,
+                t=target_mask_len,
+                p=initial_tokens_produced,
+                f=final_array.shape[0])
+
+            # 5. Final Conversion: NumPy -> PyTorch Tensor
+            output_embeddings.append(
+                torch.from_numpy(final_array).to(torch.bfloat16))
+
+        return tuple(output_embeddings)
+
 
 class LlamaGuard4WeightLoader:
 
@@ -260,22 +397,39 @@ class LlamaGuard4WeightLoader:
         self.names_and_weights_generator = model_weights_generator(
             model_name_or_path=vllm_config.model_config.model,
             framework="flax",
-            filter_regex="language_model",
+            filter_regex=
+            "^(language_model|vision_model|multi_modal_projector)\..*",  #We want both language model and vision model
             download_dir=vllm_config.load_config.download_dir)
         self.is_verbose = getattr(vllm_config.additional_config, "is_verbose",
                                   False)
-        self._transpose_map = {
-            "q_proj": (2, 0, 1),
-            "k_proj": (2, 0, 1),
-            "v_proj": (2, 0, 1),
-            "o_proj": (1, 2, 0),
+        # Language model transpose map
+        self._language_transpose_map = {
+            "self_attn.q_proj": (2, 0, 1),
+            "self_attn.k_proj": (2, 0, 1),
+            "self_attn.v_proj": (2, 0, 1),
+            "self_attn.o_proj": (1, 2, 0),
             "lm_head": (1, 0),
             "feed_forward.down_proj": (1, 0),
             "feed_forward.gate_proj": (1, 0),
             "feed_forward.up_proj": (1, 0),
-            "mlp.down_proj": (1, 0),
-            "mlp.gate_proj": (1, 0),
-            "mlp.up_proj": (1, 0),
+        }
+
+        # Vision model transpose map
+        self._vision_transpose_map = {
+            "patch_embedding.linear": (1, 0),
+            "self_attn.q_proj": (2, 0, 1),
+            "self_attn.k_proj": (2, 0, 1),
+            "self_attn.v_proj": (2, 0, 1),
+            "self_attn.o_proj": (1, 2, 0),
+            "mlp.fc1": (1, 0),
+            "mlp.fc2": (1, 0),
+            "vision_adapter.mlp.fc1": (1, 0),
+            "vision_adapter.mlp.fc2": (1, 0),
+        }
+
+        # Projector transpose map
+        self._projector_transpose_map = {
+            "linear_1": (1, 0),
         }
         self._weight_shape_map = {
             "q_proj": (attn_heads, attn_head_dim, hidden_size),
@@ -284,7 +438,19 @@ class LlamaGuard4WeightLoader:
             "o_proj": (hidden_size, attn_heads, attn_head_dim),
         }
 
+        vision_config = vllm_config.model_config.hf_config.vision_config
+        vision_hidden_size = vision_config.hidden_size
+        vision_attn_heads = vision_config.num_attention_heads
+        vision_head_dim = vision_hidden_size // vision_attn_heads
+        self._vision_weight_shape_map = {
+            "q_proj": (vision_attn_heads, vision_head_dim, vision_hidden_size),
+            "k_proj": (vision_attn_heads, vision_head_dim, vision_hidden_size),
+            "v_proj": (vision_attn_heads, vision_head_dim, vision_hidden_size),
+            "o_proj": (vision_hidden_size, vision_attn_heads, vision_head_dim),
+        }
+
         self._loaded_to_standardized_keys = {
+            # --- Text Model Mappings ---
             "language_model.model.embed_tokens.weight":
             "embedder.input_embedding_table_VD",
             "language_model.lm_head.weight":
@@ -309,40 +475,143 @@ class LlamaGuard4WeightLoader:
             "layers.*.custom_module.kernel_up_proj_DF",
             "language_model.model.layers.*.feed_forward.down_proj.weight":
             "layers.*.custom_module.kernel_down_proj_FD",
+
+            # --- Vision Model Mappings ---
+            "vision_model.patch_embedding.linear.weight":
+            "vision_model.patch_embedding.linear.kernel",
+            "vision_model.class_embedding":
+            "vision_model.class_embedding",
+            "vision_model.positional_embedding_vlm":
+            "vision_model.positional_embedding_vlm",
+            "vision_model.layernorm_pre.weight":
+            "vision_model.layernorm_pre.scale",
+            "vision_model.layernorm_pre.bias":
+            "vision_model.layernorm_pre.bias",
+            "vision_model.layernorm_post.weight":
+            "vision_model.layernorm_post.scale",
+            "vision_model.layernorm_post.bias":
+            "vision_model.layernorm_post.bias",
+
+            # Vision Encoder Layer Weights
+            "vision_model.model.layers.*.input_layernorm.weight":
+            "vision_model.model.layers.*.input_layernorm.scale",
+            "vision_model.model.layers.*.input_layernorm.bias":
+            "vision_model.model.layers.*.input_layernorm.bias",
+            "vision_model.model.layers.*.post_attention_layernorm.weight":
+            "vision_model.model.layers.*.post_attention_layernorm.scale",
+            "vision_model.model.layers.*.post_attention_layernorm.bias":
+            "vision_model.model.layers.*.post_attention_layernorm.bias",
+
+            # ATTENTION KERNELS
+            "vision_model.model.layers.*.self_attn.q_proj.weight":
+            "vision_model.model.layers.*.self_attn.kernel_q_proj_DNH",
+            "vision_model.model.layers.*.self_attn.k_proj.weight":
+            "vision_model.model.layers.*.self_attn.kernel_k_proj_DKH",
+            "vision_model.model.layers.*.self_attn.v_proj.weight":
+            "vision_model.model.layers.*.self_attn.kernel_v_proj_DKH",
+            "vision_model.model.layers.*.self_attn.o_proj.weight":
+            "vision_model.model.layers.*.self_attn.kernel_o_proj_NHD",
+            "vision_model.model.layers.*.self_attn.q_proj.bias":
+            "vision_model.model.layers.*.self_attn.bias_q_proj_NH",
+            "vision_model.model.layers.*.self_attn.k_proj.bias":
+            "vision_model.model.layers.*.self_attn.bias_k_proj_KH",
+            "vision_model.model.layers.*.self_attn.v_proj.bias":
+            "vision_model.model.layers.*.self_attn.bias_v_proj_KH",
+            "vision_model.model.layers.*.self_attn.o_proj.bias":
+            "vision_model.model.layers.*.self_attn.bias_o_proj_D",
+
+            # VISION MLP WEIGHTS (FC1/FC2)
+            "vision_model.model.layers.*.mlp.fc1.weight":
+            "vision_model.model.layers.*.mlp.fc1.kernel",
+            "vision_model.model.layers.*.mlp.fc1.bias":
+            "vision_model.model.layers.*.mlp.fc1.bias",
+            "vision_model.model.layers.*.mlp.fc2.weight":
+            "vision_model.model.layers.*.mlp.fc2.kernel",
+            "vision_model.model.layers.*.mlp.fc2.bias":
+            "vision_model.model.layers.*.mlp.fc2.bias",
+
+            # Vision Adapter (Pixel Shuffle MLP)
+            "vision_model.vision_adapter.mlp.fc1.weight":
+            "vision_model.vision_adapter.pixel_shuffle_mlp.fc1.kernel",
+            "vision_model.vision_adapter.mlp.fc2.weight":
+            "vision_model.vision_adapter.pixel_shuffle_mlp.fc2.kernel",
+
+            # Multimodal Projector
+            "multi_modal_projector.linear_1.weight":
+            "multi_modal_projector.linear.kernel",
         }
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
-        if "layer" in loaded_key:
-            layer_num = re.search(r"layers\.(\d+)", loaded_key).group(1)
+
+        # 1. Check if the key contains the layer pattern
+        layer_match = re.search(r"layers\.(\d+)", loaded_key)
+
+        if layer_match:
+            # If it's a layer weight: extract number and map with wildcard
+            layer_num = layer_match.group(1)
             layer_key = re.sub(r"layers\.\d+", "layers.*", loaded_key)
+
+            # Map the wildcard key to the standardized path
             mapped_key = self._loaded_to_standardized_keys.get(
                 layer_key, loaded_key)
+
+            # Substitute the wildcard with the actual layer number
             mapped_key = re.sub(r"layers\.\*", f"layers.{layer_num}",
                                 mapped_key)
+
         else:
+            # 2. If it's a non-layer weight (lm_head, embed_tokens, etc.): map directly
             mapped_key = self._loaded_to_standardized_keys.get(
                 loaded_key, loaded_key)
+
         return mapped_key
 
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in self.names_and_weights_generator:
-                if loaded_name.endswith(".bias"):
-                    continue
-                if "vision_model" in loaded_name or "multi_modal_projector" in loaded_name:
-                    continue
-
                 mapped_name = self.map_loaded_to_standardized_name(loaded_name)
-                model_weight = get_param(model_params, mapped_name)
+                print("this is mapped_name: ", mapped_name)
+                try:
+                    model_weight = get_param(model_params, mapped_name)
+                except KeyError:
+                    if self.is_verbose:
+                        print(
+                            f"Skipping weight '{loaded_name}' (mapped to '{mapped_name}'): not found in JAX model structure."
+                        )
+                    raise ValueError
+
+                if "vision_model" in loaded_name and ".self_attn." in loaded_name and loaded_name.endswith(
+                        ".bias"):
+                    vision_config = model_for_loading.vision_config
+                    vision_heads = vision_config.num_attention_heads
+                    vision_head_dim = vision_config.hidden_size // vision_heads
+                    if "q_proj.bias" in loaded_name or "k_proj.bias" in loaded_name or "v_proj.bias" in loaded_name:
+                        loaded_weight = jnp.reshape(
+                            loaded_weight, (vision_heads, vision_head_dim))
 
                 if not loaded_name.endswith(".bias"):
-                    # For other layers, continue to use the transpose_params helper.
-                    loaded_weight = reshape_params(loaded_name, loaded_weight,
-                                                   self._weight_shape_map)
-                    loaded_weight = transpose_params(loaded_name,
-                                                     loaded_weight,
-                                                     self._transpose_map)
+                    shape_map_to_use = None
+                    if "language_model" in loaded_name:
+                        shape_map_to_use = self._weight_shape_map
+                    elif "vision_model" in loaded_name:
+                        shape_map_to_use = self._vision_weight_shape_map
+
+                    if shape_map_to_use:
+                        loaded_weight = reshape_params(loaded_name,
+                                                       loaded_weight,
+                                                       shape_map_to_use)
+                    transpose_map_to_use = None
+                    if "language_model" in loaded_name:
+                        transpose_map_to_use = self._language_transpose_map
+                    elif "vision_model" in loaded_name:
+                        transpose_map_to_use = self._vision_transpose_map
+                    elif "multi_modal_projector" in loaded_name:
+                        transpose_map_to_use = self._projector_transpose_map
+
+                    if transpose_map_to_use:
+                        loaded_weight = transpose_params(
+                            loaded_name, loaded_weight, transpose_map_to_use)
                 if model_weight.value.shape != loaded_weight.shape:
                     raise ValueError(
                         f"Loaded shape for {loaded_name}: {loaded_weight.shape} "

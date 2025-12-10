@@ -197,6 +197,33 @@ def _get_nnx_model(
                 del vllm_config.model_config.model_weights_iterator
             else:
                 model.load_weights(rng)
+
+            # Definitive patch for concretizing abstract RNG state after eval_shape.
+            graphdef, state = nnx.split(model)
+            flat_state = state.flat_state()
+            master_rng_key = rng
+
+            for i, (path, value) in enumerate(flat_state):
+                # The `value` is the leaf, which will be a ShapeDtypeStruct for abstract parts.
+                if isinstance(value, jax.ShapeDtypeStruct):
+                    # Concretize RNG counters
+                    if path[-1] == 'count' and 'rng' in path[-2]:
+                        logger.info(
+                            f"Concretizing abstract RNG counter at: {path}")
+                        flat_state._values[i] = jax.numpy.array(
+                            0, dtype=jax.numpy.int32)
+                    # Concretize RNG keys
+                    elif path[-1] == 'key' and 'rng' in path[-2]:
+                        logger.info(
+                            f"Concretizing abstract RNG key at: {path}")
+                        master_rng_key, new_concrete_key = jax.random.split(
+                            master_rng_key)
+                        flat_state._values[i] = new_concrete_key
+
+            # Reconstruct state from the modified leaves and create a new model
+            new_state = flat_state.to_nested_state()
+            model = nnx.merge(graphdef, new_state)
+
             jit_model = create_jit_model(
                 model,
                 use_qwix_on_abstract_model=should_apply_qwix_on_abstract_model)
@@ -261,10 +288,21 @@ def get_flax_model(
 
     # Multi-modal support only
     # This function calculates the image token's embeddings by VIT
-    def run_get_multimodal_embeddings(graphdef, state, image_grid_thw,
+    def run_get_multimodal_embeddings(graphdef, state, required_lengths,
                                       **kwargs):
         model = nnx.merge(graphdef, state)
-        return model.get_multimodal_embeddings(image_grid_thw, **kwargs)
+
+        safe_kwargs = {}
+        if 'pixel_values' in kwargs:
+            safe_kwargs['pixel_values'] = kwargs['pixel_values']
+
+        if 'patches_per_image' in kwargs:
+            safe_kwargs['patches_per_image'] = kwargs['patches_per_image']
+
+        if 'aspect_ratios' in kwargs:
+            safe_kwargs['aspect_ratios'] = kwargs['aspect_ratios']
+
+        return model.get_multimodal_embeddings(required_lengths, **safe_kwargs)
 
     embed_sharding = NamedSharding(mesh, PartitionSpec(None))
     # This function will calculates the embeddings of input texts and then merge with the image embeddings
