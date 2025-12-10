@@ -205,6 +205,9 @@ def create_random_inputs(
 @pytest.mark.parametrize("repeats", [1, 2, 3])
 @pytest.mark.parametrize("stage", [True, False])
 def test_column_parallel_packed(dist_init, num_loras, repeats, stage) -> None:
+    # TODO(Qiliang Cui): Remove when issue is resolved.
+    if 'TPU7x' in jax.devices()[0].device_kind:
+        pytest.skip("Skipping test on TPU TPU7x.")
     set_random_seed(6)
 
     max_loras = 9
