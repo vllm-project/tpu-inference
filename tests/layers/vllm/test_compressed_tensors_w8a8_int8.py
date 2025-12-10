@@ -129,6 +129,9 @@ def test_loading_model(model, mesh):
 ])
 @pytest.mark.parametrize("enable_sp", [False, True])
 def test_row_parallel_linear(model, bias, mesh, enable_sp):
+    if 'TPU7x' in jax.devices()[0].device_kind:
+        pytest.skip("Skipping test on TPU TPU7x.")
+
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
