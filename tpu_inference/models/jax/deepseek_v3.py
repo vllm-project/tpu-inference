@@ -106,8 +106,13 @@ class DeepSeekV3(nnx.Module):
         self.mesh = mesh
 
         self.use_fused_moe_kernel = bool(int(os.getenv("USE_MOE_EP_KERNEL", "0")))
+        self.use_vllm_moe_kernel = bool(int(os.getenv("USE_VLLM_MOE_KERNEL", "0")))
+        assert self.use_fused_moe_kernel + self.use_vllm_moe_kernel <= 1, "You can enable at most one MoE kernels." 
+
         if self.use_fused_moe_kernel:
             logger.info("Fused MoE kernel is enabled")
+        elif self.use_vllm_moe_kernel:
+            logger.info("VLLM MoE kernel is enabled")
 
         self.weight_loader = DeepSeekV3WeightLoader(
             vllm_config=vllm_config,
@@ -201,6 +206,7 @@ class DeepSeekV3(nnx.Module):
                     hidden_size=hidden_size,
                     intermediate_size=ffw_intermediate_size,
                     rngs=self.rng,
+                    activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
                     df_sharding=(None, ShardingAxisName.MLP_TENSOR),
                     fd_sharding=(ShardingAxisName.MLP_TENSOR, None),
                     random_init=self.random_init))
@@ -220,6 +226,7 @@ class DeepSeekV3(nnx.Module):
                 rngs=self.rng,
                 routed_scaling_factor=2.5,
                 dtype=dtype,
+                use_moe_kernel=(self.use_fused_moe_kernel or self.use_vllm_moe_kernel), 
                 activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
                 ed_sharding=(ShardingAxisName.MLP_TENSOR, None),
                 e_sharding=(ShardingAxisName.MLP_TENSOR, ))
@@ -234,14 +241,15 @@ class DeepSeekV3(nnx.Module):
                 hidden_act=hidden_act,
                 rngs=self.rng,
                 random_init=self.random_init,
-                activation_ffw_td=(ShardingAxisName.MLP_TENSOR, None),
+                activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
                 activation_ffw_ted=(ShardingAxisName.MLP_DATA, None, None),
                 edf_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
                 efd_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
                 use_sparse_moe=self.sparse_matmul,
                 quantized_dtype=self.weight_loader.quant_dtype
                 if self.weight_loader.is_model_quantized else None,
-                use_fused_moe_kernel = self.use_fused_moe_kernel,
+                use_vllm_moe_kernel=self.use_vllm_moe_kernel,
+                use_fused_moe_kernel=self.use_fused_moe_kernel,
                 router=router) if is_moe_layer else DenseFFW(
                     dtype=dtype,
                     hidden_act=hidden_act,
@@ -249,6 +257,7 @@ class DeepSeekV3(nnx.Module):
                     intermediate_size=ffw_intermediate_size,
                     rngs=self.rng,
                     random_init=self.random_init,
+                    activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
                     df_sharding=(None, ShardingAxisName.MLP_TENSOR),
                     fd_sharding=(ShardingAxisName.MLP_TENSOR, None))
 
@@ -259,6 +268,7 @@ class DeepSeekV3(nnx.Module):
                 intermediate_size=num_shared_experts * moe_intermediate_size,
                 rngs=self.rng,
                 random_init=self.random_init,
+                activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
                 df_sharding=(None, ShardingAxisName.MLP_TENSOR),
                 fd_sharding=(ShardingAxisName.MLP_TENSOR, None))
 
@@ -549,9 +559,9 @@ class DeepSeekV3WeightLoader:
                 "kernel_kv_up_proj_ANH": (4, 128, 2),
                 "kernel_q_up_proj_ANH": (12, 1, 192),
                 "kernel_o_proj_NHD": (128, 1, 56),
-                "kernel_down_proj_EFD": (256, 16, 56),
-                "kernel_up_proj_EDF": (256, 56, 16),
-                "kernel_gating_EDF": (256, 56, 16),
+                "kernel_down_proj_EFD": (1, 1, 1),
+                "kernel_up_proj_EDF": (1, 1, 1),
+                "kernel_gating_EDF": (1, 1, 1),
             }
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
