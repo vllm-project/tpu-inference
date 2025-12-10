@@ -323,6 +323,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         mesh_shape = (
             sharding_strategy.model_dp_size,
             sharding_strategy.attn_dp_size,
+            sharding_strategy.attn_dp_expert_size,
             sharding_strategy.expert_size,
             sharding_strategy.tp_size,
         )

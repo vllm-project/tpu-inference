@@ -109,7 +109,6 @@ def create_kv_caches(
         sharding = NamedSharding(
             mesh,
             PartitionSpec(ShardingAxisName.ATTN_DATA, None,
-                          ShardingAxisName.ATTN_HEAD))
                           ShardingAxisName.MLP_TENSOR))
 
     def _allocate() -> jax.Array:

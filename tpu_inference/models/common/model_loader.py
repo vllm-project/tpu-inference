@@ -239,14 +239,17 @@ def get_flax_model(
         model_class = _get_model_architecture(
             vllm_config.model_config.hf_config)
     jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
-    kv_cache_sharding = NamedSharding(
-        mesh,
-        PartitionSpec(ShardingAxisName.ATTN_DATA, None,
-                      ShardingAxisName.MLP_TENSOR))
+    if vllm_config.sharding_config.total_dp_size > 1:
+        kv_pspec = PartitionSpec(ShardingAxisName.ATTN_DATA, None,
+                              ShardingAxisName.ATTN_HEAD)
+    else:
+        kv_pspec = PartitionSpec(ShardingAxisName.MLP_DATA, None,
+                              ShardingAxisName.MLP_TENSOR)
+
+    kv_cache_sharding = NamedSharding(mesh, kv_pspec)
     hidden_states_sharding = NamedSharding(mesh,
-                                           PartitionSpec(
-                                               ShardingAxisName.ATTN_DATA,
-                                               None))  # (T, D)
+                                            PartitionSpec(ShardingAxisName.ATTN_DATA, None),
+                                            )  # (T, D)
 
     # For performance consideration, refer to:
     # https://flax.readthedocs.io/en/latest/guides/performance.html
