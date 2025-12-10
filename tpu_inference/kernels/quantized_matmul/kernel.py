@@ -160,6 +160,7 @@ def matmul_kernel(
     x_q_dtype: jnp.dtype,
     save_acc: bool,
     save_x_q: bool,
+    sc_size: int = 128,
 ):
     out_idx, in_idx = pl.program_id(1), pl.program_id(2)
     n_in = pl.num_programs(2)
@@ -191,31 +192,46 @@ def matmul_kernel(
     if quantize_activation and jnp.issubdtype(w_q_ref.dtype, jnp.integer):
         acc_dtype = jnp.int32
 
+    steps_k = w_scale_ref.shape[0]
+    x_q_list = []
+    x_scale_list = []
+    w_q_list = []
+    w_scale_list = []
+
     # Start of actual computation logic.
     def matmul_body(quant: bool, is_first_step: bool, is_last_step: bool):
         if quantize_activation:
-            if quant:
-                x_q_tmp, x_scale_tmp = quantize_array(
-                    x_ref[...],
-                    x_abs_max_ref[...],
-                    x_q_dtype,
-                )
+            for i in range(steps_k):
+                k_start, k_end = i * sc_size, (i + 1) * sc_size
+                if quant:
+                    x_sub = x_ref[:, k_start:k_end]
+                    x_sub_abs_max = jnp.max(jnp.abs(x_sub),
+                                            axis=-1,
+                                            keepdims=False)
+                    x_sub_abs_max = jnp.expand_dims(x_sub_abs_max, axis=0)
+                    x_q_tmp, x_scale_tmp = quantize_array(
+                        x_sub[...],
+                        x_sub_abs_max[...],
+                        x_q_dtype,
+                    )
+                    print("Printing x_scale_tmp:", x_scale_tmp)
+                    x_q_list.append(x_q)
+                    x_scale_list.append(x_scale_tmp.astype(jnp.bfloat16))
 
-                if save_x_q:
-                    x_q_scratch[...] = x_q_tmp
-                    x_scale_scratch[...] = x_scale_tmp
+            w_q_list.append(w_q_ref[k_start:k_end, :])
+            w_scale_list.append(w_scale_ref[i, :, :].astype(jnp.bfloat16))
+            acc = jnp.zeros(out_ref.shape, dtype=jnp.int32)
+            for i in range(steps_k):
+                x_q_tmp = x_q_list[i]
+                x_scale_tmp = x_scale_list[i]
+                w_q_tmp = w_q_list[i]
+                w_scale_tmp = w_scale_list[i]
 
-            else:
-                assert save_x_q
-                x_q_tmp = x_q_scratch[...]
-                if is_last_step:
-                    x_scale_tmp = x_scale_scratch[...]
+                acc_sub = jnp.matmul(x_q_tmp,
+                                     w_q_tmp,
+                                     preferred_element_type=acc_dtype)
+                acc += acc_sub
 
-            acc = jnp.matmul(
-                x_q_tmp,
-                w_q_ref[...],
-                preferred_element_type=acc_dtype,
-            )
         else:
             acc = jnp.matmul(
                 x_ref[...],
@@ -230,6 +246,7 @@ def matmul_kernel(
             acc *= w_scale_ref[...]
             if quantize_activation:
                 # TODO(kyuyeunk): Investigate caching broadcast.
+                x_scale_tmp = x_scale_list
                 acc *= x_scale_tmp
             out_ref[...] = acc.astype(x_ref_dtype)
         else:
@@ -246,7 +263,7 @@ def matmul_kernel(
         'tuned_value',
     ],
 )
-def quantized_matmul_kernel_original(
+def quantized_matmul_kernel(
     x: jax.Array,  # [bs, n_in]
     w_q: jax.Array,  # [n_in, n_out]
     w_scale: jax.Array,  # [n_blocks, n_out]
@@ -254,6 +271,7 @@ def quantized_matmul_kernel_original(
     x_q_dtype: jnp.dtype | None = None,
     *,
     tuned_value: TunedValue | None = None,
+    sc_size: int = 128,
 ) -> jax.Array:
     """Quantized matmul kernel.
 
@@ -365,8 +383,8 @@ def quantized_matmul_kernel_original(
                              (b, i)),  # x
                 pl.BlockSpec((in_block_size, out_block_size), lambda b, o, i:
                              (i, o)),  # w_q
-                pl.BlockSpec((1, out_block_size), lambda b, o, i:
-                             (0, o)),  # w_scale
+                pl.BlockSpec((in_block_size // sc_size, 1, out_block_size),
+                             lambda b, o, i: (i, 0, o)),  # w_scale
                 pl.BlockSpec((1, batch_block_size), lambda b, o, i:
                              (0, b)),  # x_abs_max
             ],
@@ -391,16 +409,16 @@ def quantized_matmul_kernel_original(
         ),
     )
 
-    validate_inputs(
-        x=x,
-        w_q=w_q,
-        w_scale=w_scale,
-        x_abs_max=x_abs_max,
-        x_q_dtype=x_q_dtype,
-        batch_block_size=batch_block_size,
-        out_block_size=out_block_size,
-        in_block_size=in_block_size,
-    )
+    #validate_inputs(
+    #x=x,
+    #w_q=w_q,
+    #w_scale=w_scale,
+    #3x_abs_max=x_abs_max,
+    #x_q_dtype=x_q_dtype,
+    #batch_block_size=batch_block_size,
+    #out_block_size=out_block_size,
+    #in_block_size=in_block_size,
+    #)
 
     # The named_scope is used for autotune.
     kernel_name = get_kernel_name(tuned_value)
@@ -423,7 +441,7 @@ def quantized_matmul_kernel_original(
         "use_bf16_acc",
     ],
 )
-def quantized_matmul_kernel(
+def quantized_matmul_kernel_new(
     lhs: jax.Array,
     rhs: jax.Array,
     w_scales: jax.Array | None = None,
