@@ -54,12 +54,13 @@ setup_environment() {
   echo "Python dependencies installed"
   if [ -z "${BUILDKITE:-}" ]; then
       VLLM_COMMIT_HASH=""
-      BUILDKITE_COMMIT=$(git log -n 1 --pretty="%H")
+      TPU_INFERENCE_HASH=$(git log -n 1 --pretty="%H")
   else
       VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH" --default "")
+      TPU_INFERENCE_HASH="$BUILDKITE_COMMIT"
   fi
 
   docker build \
       --build-arg VLLM_COMMIT_HASH="${VLLM_COMMIT_HASH}" \
-      --no-cache -f docker/Dockerfile -t "${IMAGE_NAME}:${BUILDKITE_COMMIT}" .
+      --no-cache -f docker/Dockerfile -t "${IMAGE_NAME}:${TPU_INFERENCE_HASH}" .
 }
