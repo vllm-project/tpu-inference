@@ -663,10 +663,9 @@ class JAXUnfoldConvolution(nnx.Module):
             cfg.hidden_size,  #output dimension
             use_bias=False,
             dtype=dtype,
-            kernel_init=nnx.initializers.lecun_normal(
-            ),  #TODO: could probably just generate weight matrix of all zeros tbh
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(),
+                                              (None, "model")),
             rngs=rngs,
-            #random_init=random_init,
         )
 
     def __call__(self, inputs: jax.Array) -> jax.Array:
@@ -711,14 +710,21 @@ class JAXLlama4VisionMLP(nnx.Module):
             cfg.intermediate_size,
             use_bias=True,
             dtype=dtype,
-            rngs=rngs,  #random_init=random_init
+            kernel_init=nnx.with_partitioning(
+                nnx.initializers.glorot_uniform(), (None, "model")),
+            bias_init=nnx.with_partitioning(nnx.initializers.zeros,
+                                            ("model", )),
+            rngs=rngs,
         )
         self.fc2 = nnx.Linear(
             cfg.intermediate_size,
             cfg.hidden_size,
             use_bias=True,
             dtype=dtype,
-            rngs=rngs,  #random_init=random_init
+            kernel_init=nnx.with_partitioning(
+                nnx.initializers.glorot_uniform(), ("model", None)),
+            bias_init=nnx.with_partitioning(nnx.initializers.zeros, (None, )),
+            rngs=rngs,
         )
 
     def __call__(self, hidden_states: jax.Array) -> jax.Array:
@@ -779,11 +785,19 @@ class JAXLlama4VisionEncoderLayer(nnx.Module):
 
         # HF/MaxText use nn.LayerNorm for vision
         self.input_layernorm = nnx.LayerNorm(
-            cfg.hidden_size, epsilon=cfg.norm_eps, dtype=dtype,
-            rngs=rngs)  #, random_init=random_init)
+            cfg.hidden_size,
+            epsilon=cfg.norm_eps,
+            dtype=dtype,
+            rngs=rngs,
+            scale_init=nnx.with_partitioning(nnx.initializers.ones, P()),
+            bias_init=nnx.with_partitioning(nnx.initializers.zeros, P()))
         self.post_attention_layernorm = nnx.LayerNorm(
-            cfg.hidden_size, epsilon=cfg.norm_eps, dtype=dtype,
-            rngs=rngs)  #, random_init=random_init)
+            cfg.hidden_size,
+            epsilon=cfg.norm_eps,
+            dtype=dtype,
+            rngs=rngs,
+            scale_init=nnx.with_partitioning(nnx.initializers.ones, P()),
+            bias_init=nnx.with_partitioning(nnx.initializers.zeros, P()))
 
     def __call__(self, hidden_state: jax.Array, freqs_ci_stacked: jax.Array,
                  **kwargs) -> jax.Array:
@@ -921,8 +935,7 @@ class JAXLlama4VisionMLP2(nnx.Module):
     def __init__(self,
                  config: dict,
                  rngs: nnx.Rngs,
-                 dtype: jnp.dtype = jnp.bfloat16,
-                 random_init: bool = False):
+                 dtype: jnp.dtype = jnp.bfloat16):
         cfg = config
 
         # Dimensions based on MaxText/HF:
@@ -935,20 +948,27 @@ class JAXLlama4VisionMLP2(nnx.Module):
             cfg.projector_output_dim,
             use_bias=False,
             dtype=dtype,
-            rngs=rngs,  #random_init=random_init
+            kernel_init=nnx.with_partitioning(
+                nnx.initializers.glorot_uniform(), (None, "model")),
+            rngs=rngs,
         )
         self.fc2 = nnx.Linear(
             cfg.projector_output_dim,
             cfg.projector_output_dim,
             use_bias=False,
             dtype=dtype,
-            rngs=rngs,  #random_init=random_init
+            kernel_init=nnx.with_partitioning(
+                nnx.initializers.glorot_uniform(), ("model", None)),
+            rngs=rngs,
         )
         # Dropout is not strictly nnx module, but its rate is needed
         self.dropout_rate = cfg.projector_dropout
         self.dropout_rng = rngs.dropout
         if self.dropout_rate > 0:
-            _ = self.dropout_rng()
+            key = self.dropout_rng()
+            if key.dtype == jnp.uint32:
+                key = key.astype(jnp.int32)
+            self.dropout_rng = nnx.Rngs(dropout=key)
 
     def __call__(self,
                  hidden_states: jax.Array,
@@ -979,8 +999,7 @@ class JAXLlama4VisionPixelShuffleMLP(nnx.Module):
         self.pixel_shuffle_ratio = cfg.pixel_shuffle_ratio
         self.pixel_shuffle_mlp = JAXLlama4VisionMLP2(cfg,
                                                      rngs=rngs,
-                                                     dtype=dtype,
-                                                     random_init=random_init)
+                                                     dtype=dtype)
 
     def __call__(self,
                  encoded_patches: jax.Array,
@@ -1034,19 +1053,29 @@ class JAXLlama4VisionModel(nnx.Module):
         # 3. Initialize nnx.Param using the raw jax.random function and the split keys
         self.class_embedding = nnx.Param(
             self.scale *
-            jax.random.normal(key_cls, (self.hidden_size, ), dtype=dtype))
+            jax.random.normal(key_cls, (self.hidden_size, ), dtype=dtype),
+            sharding=P())
         self.positional_embedding_vlm = nnx.Param(
             self.scale * jax.random.normal(
-                key_pos, (self.num_patches, self.hidden_size), dtype=dtype))
+                key_pos, (self.num_patches, self.hidden_size), dtype=dtype),
+            sharding=P(None, "model"))
         # Note: Rotary embedding initialization is complex, assumed to be constructed in the attention layer
 
         # 3. Layer Norms (HF: nn.LayerNorm)
         self.layernorm_pre = nnx.LayerNorm(
-            self.hidden_size, epsilon=self.norm_eps, dtype=dtype,
-            rngs=rngs)  #, random_init=random_init)
+            self.hidden_size,
+            epsilon=self.norm_eps,
+            dtype=dtype,
+            rngs=rngs,
+            scale_init=nnx.with_partitioning(nnx.initializers.ones, P()),
+            bias_init=nnx.with_partitioning(nnx.initializers.zeros, P()))
         self.layernorm_post = nnx.LayerNorm(
-            self.hidden_size, epsilon=self.norm_eps, dtype=dtype,
-            rngs=rngs)  #, random_init=random_init)
+            self.hidden_size,
+            epsilon=self.norm_eps,
+            dtype=dtype,
+            rngs=rngs,
+            scale_init=nnx.with_partitioning(nnx.initializers.ones, P()),
+            bias_init=nnx.with_partitioning(nnx.initializers.zeros, P()))
 
         # 4. Encoder (Llama4VisionEncoder)
         self.model = JAXLlama4VisionEncoder(cfg,
@@ -1137,9 +1166,9 @@ class JAXLlama4MultiModalProjector(nnx.Module):
             cfg["text_config"].hidden_size,
             use_bias=False,
             dtype=dtype,
-            kernel_init=nnx.initializers.lecun_normal(),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(),
+                                              (None, "model")),
             rngs=rngs,
-            #random_init=random_init,
         )
 
     def __call__(self, image_features: jax.Array) -> jax.Array:
