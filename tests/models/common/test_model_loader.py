@@ -296,6 +296,7 @@ def test_get_vllm_model_random_weights(mesh):
 # >> Test Suite for get_model Fallback Logic
 # ==============================================================================
 
+
 @pytest.mark.usefixtures("mesh")  # This fixture is module-scoped, but fine
 class TestGetModel:
     """Tests the main get_model() entrypoint and its fallback logic."""

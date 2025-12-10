@@ -131,7 +131,11 @@ def get_attention_page_size_bytes(mesh: Mesh,
         assert isinstance(kv_cache_spec, AttentionSpec)
 
         dtype = t2j_dtype(kv_cache_spec.dtype)
-        bits = dtypes.itemsize_bits(dtype)
+        bits = (
+            dtypes.bit_width(dtype)
+            if hasattr(dtypes, "bit_width")
+            else dtypes.itemsize_bits(dtype)
+        )
         use_mla = isinstance(kv_cache_spec, MLAAttentionSpec)
 
         kv_cache_shape = get_kv_cache_shape_with_mesh(

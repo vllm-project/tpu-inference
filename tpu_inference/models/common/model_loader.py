@@ -28,10 +28,6 @@ class UnsupportedArchitectureError(ValueError):
     """Raised when a model architecture is not supported in the registry."""
     pass
 
-class UnsupportedArchitectureError(ValueError):
-    """Raised when a model architecture is not supported in the registry."""
-    pass
-
 
 def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     # NOTE: Use inline imports here, otherwise the normal imports
