@@ -10,8 +10,7 @@ The rest of the description includes relevant details and context, examples:
 - some information about the specific implementation,
 - shortcomings of the solution and possible future improvements.
 
-If the change fixes a bug or a Github issue, please include a link, e.g.,:
-FIXES: b/123456
+If the change fixes a Github issue, please include a link, e.g.,:
 FIXES: #123456
 
 # Tests

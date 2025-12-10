@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import time
 from dataclasses import asdict
 from unittest.mock import patch
 
 import pytest
+import vllm.envs as vllm_envs
 from vllm import LLM, EngineArgs, SamplingParams
 
 from tpu_inference.core.core_tpu import DisaggEngineCore, DisaggEngineCoreProc
@@ -93,7 +95,7 @@ def test_disaggregated_serving(test_prompts, sampling_params):
              patch("vllm.v1.engine.core.EngineCoreProc", DisaggEngineCoreProc):
 
             model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct"
-
+            os.system(f"rm -rf {vllm_envs.VLLM_XLA_CACHE_PATH}/*")
             engine_args = EngineArgs(
                 model=model_name,
                 max_model_len=2048,
@@ -116,7 +118,8 @@ def test_disaggregated_serving(test_prompts, sampling_params):
                     print(f"Generated: {output.outputs[0].text!r}")
 
             finally:
-                # Clean up if needed, though LLM destructor usually handles it
+                del llm
+                time.sleep(10)
                 pass
 
 
@@ -144,7 +147,7 @@ def _run_inference(model_name: str,
             return llm.generate(test_prompts, sampling_params)
         finally:
             del llm
-            # No explicit sleep needed for mock, but good practice if real hardware
+            time.sleep(10)
             pass
 
     if is_disagg:
@@ -192,7 +195,9 @@ def test_disaggregated_serving_correctness(test_prompts, sampling_params):
                                       is_disagg=False)
 
     # Run disaggregated inference
+    os.system(f"rm -rf {vllm_envs.VLLM_XLA_CACHE_PATH}/*")
     print("Running Disaggregated Inference...")
+
     disagg_outputs = _run_inference(model_name=model_name,
                                     test_prompts=small_prompts,
                                     sampling_params=sampling_params,

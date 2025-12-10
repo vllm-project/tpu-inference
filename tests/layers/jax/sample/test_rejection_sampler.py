@@ -1181,6 +1181,9 @@ class TestStatisticalDistributionValidation:
         We expect that as sample size increases, the distance to the target
         distribution decreases much more than the distance to random distributions.
         """
+        if 'TPU7x' in jax.devices()[0].device_kind:
+            pytest.skip("Skipping test on TPU TPU7x.")
+
         vocab_size = 10
         k = 2
         num_reference_probs = 100
