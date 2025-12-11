@@ -148,19 +148,15 @@ class DeepSeekV3(nnx.Module):
                 query_tnh_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
                 keyvalue_skh_spec = P(ShardingAxisName.MLP_TENSOR, None)
                 attn_o_tnh_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
-                q_da_spec=(None, ShardingAxisName.VOCAB)
-                anh_spec=(None, ShardingAxisName.MLP_TENSOR, None)
-                kv_da_spec=(None, ShardingAxisName.VOCAB)
-                nhd_spec=(ShardingAxisName.MLP_TENSOR, None, None)
+                q_da_spec = (None, ShardingAxisName.VOCAB)
+                kv_da_spec = (None, ShardingAxisName.VOCAB)
 
             else:
-                query_tnh_spec = P(None, ShardingAxisName.MOE_TENSOR, None)
-                keyvalue_skh_spec = P(None, ShardingAxisName.MOE_TENSOR, None)
-                attn_o_tnh_spec = P(None, ShardingAxisName.MOE_TENSOR, None)
-                q_da_spec=(None, ShardingAxisName.MOE_TENSOR)
-                anh_spec=(None, ShardingAxisName.MOE_TENSOR, None)
-                kv_da_spec=(None, ShardingAxisName.MOE_TENSOR)
-                nhd_spec=(ShardingAxisName.MOE_TENSOR, None, None)
+                query_tnh_spec=P(None, ShardingAxisName.MLP_TENSOR, None)
+                keyvalue_skh_spec=P(None, ShardingAxisName.MLP_TENSOR, None)
+                attn_o_tnh_spec=P(None, ShardingAxisName.MLP_TENSOR, None)
+                q_da_spec = (None, ShardingAxisName.MOE_TENSOR)
+                kv_da_spec = (None, ShardingAxisName.MOE_TENSOR)
 
             return MLA(
                 rope_theta=rope_theta,
