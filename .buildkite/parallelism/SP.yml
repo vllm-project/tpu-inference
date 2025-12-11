@@ -1,45 +1,49 @@
 # SP
 # parallelism support matrix
 steps:
-  - label: "Correctness tests for SP"
-    key: "SP_CorrectnessTest"
+  - label: "${TEST_LABEL_PREFIX} Correctness tests for SP"
+    key: "${TEST_KEY_PREFIX}SP_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_SMALL_CORE_QUEUE}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
-        buildkite-agent meta-data set "SP_CorrectnessTest" "unverified"
-  - label: "Record correctness test result for SP"
-    key: "record_SP_CorrectnessTest"
-    depends_on: "SP_CorrectnessTest"
+        buildkite-agent meta-data set "${TEST_KEY_PREFIX}SP_CorrectnessTest" "unverified"
+  - label: "${TEST_LABEL_PREFIX} Record correctness test result for SP"
+    key: "${TEST_KEY_PREFIX}record_SP_CorrectnessTest"
+    depends_on: "${TEST_KEY_PREFIX}SP_CorrectnessTest"
     env:
-      CI_TARGET: "SP"
+      CI_TARGET: "${TEST_LABEL_PREFIX}SP"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "parallelism support matrix"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh SP_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TEST_KEY_PREFIX}SP_CorrectnessTest
 
-  - label: "Performance tests for SP"
-    key: "SP_PerformanceTest"
-    depends_on: "record_SP_CorrectnessTest"
+  - label: "${TEST_LABEL_PREFIX} Performance tests for SP"
+    key: "${TEST_KEY_PREFIX}SP_PerformanceTest"
+    depends_on: "${TEST_KEY_PREFIX}record_SP_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_SMALL_CORE_QUEUE}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
-        buildkite-agent meta-data set "SP_PerformanceTest" "unverified"
-  - label: "Record performance test result for SP"
-    key: "record_SP_PerformanceTest"
-    depends_on: "SP_PerformanceTest"
+        buildkite-agent meta-data set "${TEST_KEY_PREFIX}SP_PerformanceTest" "unverified"
+  - label: "${TEST_LABEL_PREFIX} Record performance test result for SP"
+    key: "${TEST_KEY_PREFIX}record_SP_PerformanceTest"
+    depends_on: "${TEST_KEY_PREFIX}SP_PerformanceTest"
     env:
-      CI_TARGET: "SP"
+      CI_TARGET: "${TEST_LABEL_PREFIX}SP"
       CI_STAGE: "PerformanceTest"
       CI_CATEGORY: "parallelism support matrix"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh SP_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${TEST_KEY_PREFIX}SP_PerformanceTest
