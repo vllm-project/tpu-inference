@@ -16,8 +16,7 @@ from tpu_inference.kernels.quantized_matmul.kernel_2d import (
 # ==========================================
 
 BLOCK_K = 128
-BLOCK_B = 64
-SUPER_CHUNK = 16
+BLOCK_B = 64 # Note: This is for the Reference Kernel. V7 Kernel ignores this and uses 256.
 
 def next_multiple(x: int, m: int) -> int:
     return ((x + m - 1) // m) * m
@@ -113,7 +112,7 @@ def quantize_2d_blocked(x: jax.Array, block_size: int, dtype: jnp.dtype = jnp.in
 # ==========================================
 
 class BenchmarkSuite:
-    def measure_ms(self, func, args, n_iter=100, n_warmup=5):
+    def measure_ms(self, func, args, n_iter=100, n_warmup=20):
         try:
             # Simple validity check
             jax.block_until_ready(func(*args))
@@ -159,30 +158,38 @@ class BenchmarkSuite:
              print("  > Skipping precise reference check for FP8...")
 
     def run_benchmark(self):
-        print(f"Config: BlockK={BLOCK_K}, BlockB={BLOCK_B}")
+        print(f"Config: BlockK={BLOCK_K}, Reference BlockB={BLOCK_B}")
         
         shapes = [
+            (1, 16384, 16384),
             (1, 8192, 8192),
             (8, 8192, 8192),
             (16, 8192, 8192),
             (32, 8192, 8192),
             (64, 8192, 8192),
             (128, 8192, 8192),
+            (256, 8192, 8192),
+            (512, 8192, 8192),
             (1, 4096, 4096),
             (8, 4096, 4096),
             (16, 4096, 4096),
             (32, 4096, 4096),
             (64, 4096, 4096),
             (128, 4096, 4096),
+            (256, 4096, 4096),
+            (512, 4096, 4096),
         ]
         
-        out_block = 512 
+        # --- V7 OPTIMIZATION ---
+        # Set to 256 to match the V7 256x256 MXU Width.
+        out_block = 256 
+        
         quant_block = BLOCK_K
         results = []
         
         bench_dtypes = [
             ("int8", jnp.int8),
-            # ("fp8", jnp.float8_e4m3fn)
+            ("fp8", jnp.float8_e4m3fn)
         ]
 
         for bs, n_in, n_out in shapes:
@@ -199,8 +206,6 @@ class BenchmarkSuite:
                 print(f"  [{d_name.upper()}] Benchmarking...")
                 
                 # Quantize weights (Shared standard format)
-                # w_q_std: [N_Out, N_In]
-                # w_s_std: [N_Out, N_Blocks]
                 w_q_std, w_s_std = quantize_2d_blocked(w, quant_block, d_type)
                 
                 # 2. Original Pallas Kernel
@@ -208,7 +213,6 @@ class BenchmarkSuite:
                                         (x, w_q_std, w_s_std, quant_block, d_type))
                 
                 # 3. New V7 Optimized Kernel
-                # Note: We pass standard weights. The kernel handles scale transposition internally.
                 t_opt = self.measure_ms(dispatch_real_v7, 
                                         (x, w_q_std, w_s_std, out_block, d_type))
 
@@ -217,8 +221,7 @@ class BenchmarkSuite:
                 res_opt = dispatch_real_v7(x, w_q_std, w_s_std, out_block, d_type).astype(jnp.float32)
                 self.check_correctness(x, w, quant_block, res_orig, res_opt, d_name)
 
-                bf16_speedup = t_bf16 / t_opt if t_opt > 0 else 0.0
-                orig_speedup = t_orig / t_opt if t_opt > 0 else 0.0
+                speedup_vs_bf16 = t_bf16 / t_opt if t_opt > 0 else 0.0
 
                 results.append({
                     "Batch": bs,
@@ -228,13 +231,12 @@ class BenchmarkSuite:
                     "BF16 (ms)": f"{t_bf16:.3f}",
                     "Orig (ms)": f"{t_orig:.3f}",
                     "V7 (ms)": f"{t_opt:.3f}",
-                    "Bf16 Speedup": f"{bf16_speedup:.2f}x" if t_opt > 0 else "N/A",
-                    "Orig Speedup": f"{orig_speedup:.2f}x" if t_opt > 0 else "N/A",
+                    "Speedup (vs BF16)": f"{speedup_vs_bf16:.2f}x" if t_opt > 0 else "N/A",
                 })
-            
+
         df = pd.DataFrame(results)
         print("\nBenchmark Results:")
-        cols = ["Batch", "In", "Out", "Dtype", "BF16 (ms)", "Orig (ms)", "V7 (ms)", "Bf16 Speedup", "Orig Speedup"]
+        cols = ["Batch", "In", "Out", "Dtype", "BF16 (ms)", "Orig (ms)", "V7 (ms)", "Speedup (vs BF16)"]
         print(df[cols].to_string(index=False))
 
 if __name__ == "__main__":
