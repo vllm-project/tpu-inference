@@ -119,7 +119,7 @@ def test_row_parallel_linear(model, bias, mesh, enable_sp):
         max_num_seqs=4,
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sequence_parallelism = enable_sp
+    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
 
     input_tensor = torch.rand(10, 4096, dtype=dtype) / 10
     input_tensor = input_tensor.to('cpu')
@@ -192,7 +192,7 @@ def test_column_parallel_linear(model, bias, mesh, enable_sp):
         max_num_seqs=4,
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sequence_parallelism = enable_sp
+    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
 
     input_tensor = torch.rand(10, 4096, dtype=dtype) / 10
     input_tensor = input_tensor.to('cpu')
@@ -265,7 +265,7 @@ def test_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
         max_num_seqs=4,
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sequence_parallelism = enable_sp
+    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
 
     input_tensor = torch.rand(10, 4096, dtype=dtype) / 10
     input_tensor = input_tensor.to('cpu')
@@ -344,7 +344,7 @@ def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
         max_num_seqs=4,
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sequence_parallelism = enable_sp
+    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
 
     input_tensor = torch.rand(10, 4096, dtype=dtype) / 10
     input_tensor = input_tensor.to('cpu')
