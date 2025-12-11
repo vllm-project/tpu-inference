@@ -20,7 +20,7 @@ from tpu_inference.layers.common.quant_methods import (COMPRESSED_TENSORS,
                                                        get_tpu_quant_method)
 from tpu_inference.layers.vllm.quantization.common import JaxCommonConfig
 from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors_moe import \
-    VllmCompressedTensorsW8A8Fp8MoEMethod
+    VllmCompressedTensorsMoEMethod
 from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import \
     VllmCompressedTensorsW8A8Fp8
 from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_int8 import \
@@ -113,8 +113,9 @@ class VllmCompressedTensorsConfig(CompressedTensorsConfig, JaxCommonConfig):
             layer.scheme = scheme
             return CompressedTensorsLinearMethod(self)
         if isinstance(layer, FusedMoE):
-            return VllmCompressedTensorsW8A8Fp8MoEMethod(
-                self, layer.quant_config, self.mesh)
+            layer.moe_config = self.get_moe_config(layer)
+            return VllmCompressedTensorsMoEMethod.get_moe_method(
+                self, layer, layer_name=prefix)
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
         return None
