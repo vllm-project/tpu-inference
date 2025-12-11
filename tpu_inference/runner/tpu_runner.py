@@ -13,7 +13,6 @@ import vllm.envs as vllm_envs
 from flax import nnx
 from jax.experimental import mesh_utils
 from jax.sharding import NamedSharding, PartitionSpec
-from torchax.ops.mappings import t2j_dtype
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
@@ -65,7 +64,7 @@ from tpu_inference.runner.structured_decoding_manager import \
     StructuredDecodingManager
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
 from tpu_inference.utils import (device_array, make_optimized_mesh,
-                                 time_function, to_torch_dtype)
+                                 time_function, to_jax_dtype, to_torch_dtype)
 
 logger = init_logger(__name__)
 
@@ -1718,8 +1717,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             shard=shard)
 
     def get_intermediate_tensor_spec(self, num_tokens: int):
-        impl = envs.MODEL_IMPL_TYPE
-        jax_dtype = t2j_dtype(self.dtype) if impl == "vllm" else self.dtype
+        jax_dtype = to_jax_dtype(self.dtype)
         num_padded_tokens = runner_utils.get_padded_token_len(
             self.num_tokens_paddings, num_tokens)
         sharding = NamedSharding(self.mesh, PartitionSpec())
