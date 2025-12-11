@@ -61,9 +61,7 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
             get_kv_cache_shape_fn(total_num_pages, page_size,
                                   actual_num_kv_heads // model_cnt,
                                   actual_head_dim, kv_dtype))
-        logger.warning(f"********KV creation shape = {shape}")
         shape[2] *= model_cnt
-        logger.warning(f"********KV creation final shape = {shape}")
     return tuple(shape)
 
 
