@@ -843,8 +843,8 @@ class Qwen3VLVisionTransformer(nnx.Module):
         """
         merge_size = self.spatial_merge_size
 
-        idx_list = [[], [], [], []]  # 4 corners for bilinear interpolation
-        weight_list = [[], [], [], []]
+        idx_list = [jnp.empty((0,), dtype=jnp.int32) for _ in range(4)]
+        weight_list = [jnp.empty((0,), dtype=jnp.float32) for _ in range(4)]
 
         grid_ts = [g[0] for g in grid_thw]
         grid_hs = [g[1] for g in grid_thw]
@@ -858,12 +858,8 @@ class Qwen3VLVisionTransformer(nnx.Module):
             # Floor and ceil indices for bilinear interpolation
             h_idxs_floor = h_idxs.astype(jnp.int32)
             w_idxs_floor = w_idxs.astype(jnp.int32)
-            h_idxs_ceil = (h_idxs.astype(jnp.int32) + 1).clip(
-                max=self.num_grid_per_side - 1
-            )
-            w_idxs_ceil = (w_idxs.astype(jnp.int32) + 1).clip(
-                max=self.num_grid_per_side - 1
-            )
+            h_idxs_ceil = (h_idxs.astype(jnp.int32) + 1).clip(max=self.num_grid_per_side - 1)
+            w_idxs_ceil = (w_idxs.astype(jnp.int32) + 1).clip(max=self.num_grid_per_side - 1)
 
             # Interpolation weights
             dh = h_idxs - h_idxs_floor
@@ -890,12 +886,12 @@ class Qwen3VLVisionTransformer(nnx.Module):
             ]
 
             for i in range(4):
-                idx_list[i].extend(indices[i].tolist())
-                weight_list[i].extend(weights[i].tolist())
+                idx_list[i] = jnp.concatenate([idx_list[i], indices[i]], axis=0)
+                weight_list[i] = jnp.concatenate([weight_list[i], weights[i]], axis=0)
 
         # Convert to JAX arrays
-        idx_tensor = jnp.array(idx_list, dtype=jnp.int32)
-        weight_tensor = jnp.array(weight_list, dtype=jnp.float32)
+        idx_tensor = jnp.stack(idx_list, axis=0)  # int32, shape (4, N)
+        weight_tensor = jnp.stack(weight_list, axis=0)  # float32, shape (4, N)
 
         # Lookup embeddings and apply bilinear interpolation
         pos_embeds = self.pos_embed(idx_tensor) * weight_tensor[:, :, None]
