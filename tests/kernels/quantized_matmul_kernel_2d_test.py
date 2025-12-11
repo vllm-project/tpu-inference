@@ -13,7 +13,7 @@ from absl.testing import absltest, parameterized
 # NOTE: Assuming the new kernel code is saved as tpu_inference/kernels/quantized_matmul/kernel_2d.py
 from tpu_inference.kernels.quantized_matmul.kernel_2d import (
     quantized_matmul_2d,
-    dispatch_real_v7,
+    dispatch_w8a8_v7,
 )
 # Note: Reuse existing util if available, or use the one defined in kernel file
 from tpu_inference.kernels.quantized_matmul.util_2d import quantize_2d_blocked
@@ -31,7 +31,7 @@ EPS = jnp.finfo(jnp.float16).tiny
 
 def adapter_v7_kernel(x, w_q, w_scale, quant_block_size, x_q_dtype, batch_block_size=None, out_block_size=128):
     """
-    Adapts dispatch_real_v7 to match the signature of quantized_matmul_2d 
+    Adapts dispatch_w8a8_v7 to match the signature of quantized_matmul_2d 
     for unified testing.
     
     The V7 kernel:
@@ -44,7 +44,7 @@ def adapter_v7_kernel(x, w_q, w_scale, quant_block_size, x_q_dtype, batch_block_
         # but the kernel might error if strict checks were enabled.
         pass
         
-    return dispatch_real_v7(x, w_q, w_scale, out_block_size, x_q_dtype)
+    return dispatch_w8a8_v7(x, w_q, w_scale, out_block_size, x_q_dtype)
 
 
 # ==============================================================================

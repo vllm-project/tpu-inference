@@ -4,7 +4,7 @@
 This module implements "Block-wise" or "Sub-channel" quantization.
 It contains:
 1. Standard 2D Quantized Matmul (quantized_matmul_2d)
-2. High-performance V7 Kernel (dispatch_real_v7) [Updated for standard layout]
+2. High-performance V7 Kernel (dispatch_w8a8_v7) [Updated for standard layout]
 """
 
 import functools
@@ -31,8 +31,6 @@ BLOCK_K = 128
 BLOCK_B = 64
 SUPER_CHUNK = 16
 TILE_K_SIZE = BLOCK_K * SUPER_CHUNK
-
-# ... (Keep _quantize_array_2d, _validate_inputs_2d, _quantized_matmul_kernel_2d, quantized_matmul_2d as is) ...
 
 def _quantize_array_2d(
     x: jax.Array,
@@ -321,8 +319,7 @@ def _compute_quant_params(x_slice, w_scale_row, max_val, dtype):
     x_f32 = x_slice.astype(jnp.float32)
     x_max = jnp.max(jnp.abs(x_f32), axis=1, keepdims=True)
     x_max = jnp.maximum(x_max, 1e-6)
-    scale_inv = max_val / x_max
-    val = x_f32 * scale_inv
+    val = x_f32 * max_val / x_max
 
     if dtype == jnp.int8:
         x_q = jnp.clip(jnp.floor(val + 0.5), -128, 127).astype(jnp.int8)
@@ -400,7 +397,7 @@ def _kernel_real_tiled_entry(x_ref, w_ref, scales_ref, out_ref, acc_vmem, *,
 
 
 @functools.partial(jax.jit, static_argnames=['out_block_size', 'quant_dtype'])
-def dispatch_real_v7(
+def dispatch_w8a8_v7(
     x: jax.Array, 
     w_q: jax.Array, 
     w_scale: jax.Array,
@@ -462,6 +459,132 @@ def dispatch_real_v7(
                           batch_block_size=BLOCK_B,
                           out_block_size=out_block_size,
                           dtype=quant_dtype),
+        grid_spec=pltpu.PrefetchScalarGridSpec(
+            num_scalar_prefetch=0,
+            in_specs=in_specs,
+            out_specs=pl.BlockSpec((BLOCK_B, out_block_size), lambda b, o: (b, o)),
+            grid=grid,
+            scratch_shapes=[pltpu.VMEM((BLOCK_B, out_block_size), jnp.float32)]
+        ),
+        out_shape=jax.ShapeDtypeStruct((padded_bs, padded_out), x.dtype),
+        compiler_params=pltpu.CompilerParams(vmem_limit_bytes=get_device_vmem_limit())
+    )
+
+    out = kernel(x, w_q, w_scale_t)
+    return out[:bs, :n_out]
+
+def _kernel_w8a16_tiled_entry(x_ref, w_ref, scales_ref, out_ref, acc_vmem, *,
+                              batch_block_size, out_block_size):
+    """
+    W8A16 Kernel.
+    X: [Batch, In] (BF16)
+    W: [Out, In]   (INT8/FP8)
+    Scales: [Blocks, Out] (BF16/F32)
+    """
+    # Initialize Accumulator
+    acc_vmem[...] = jnp.zeros((batch_block_size, out_block_size), dtype=jnp.float32)
+
+    def pipeline_step(x_chunk, w_chunk_std, s_chunk_transposed):
+        # x_chunk: [B, K_SUPER] (BF16)
+        # w_chunk_std: [Out, K_SUPER] (INT8)
+        # s_chunk_transposed: [SUPER_CHUNK_BLOCKS, Out]
+        
+        # Iterate through the SUPER_CHUNK in steps of BLOCK_K
+        for j in range(SUPER_CHUNK):
+            k_start = j * BLOCK_K
+            k_end = (j + 1) * BLOCK_K
+
+            # 1. Load sub-blocks
+            # [B, BLOCK_K]
+            x_curr = x_chunk[:, k_start:k_end] 
+            # [Out, BLOCK_K]
+            w_curr = w_chunk_std[:, k_start:k_end] 
+            # [1, Out] -> Broadcast later
+            s_curr = s_chunk_transposed[j, :][None, :] 
+
+            # 2. De-quantize Weights (VPU OP: Fast Cast + Mul)
+            # w_curr (int8) -> bf16
+            w_dq = w_curr.astype(jnp.bfloat16) * s_curr.T
+            
+            # 3. Matmul (MXU OP: BF16)
+            # Since both inputs are BF16, this runs at full V7 BF16 speed
+            dot_curr = jax.lax.dot_general(
+                x_curr, w_dq,
+                (((1,), (1,)), ((), ())),
+                preferred_element_type=jnp.float32
+            )
+
+            # 4. Accumulate
+            acc_vmem[...] += dot_curr
+
+    total_k = w_ref.shape[1]
+    n_k_chunks = total_k // TILE_K_SIZE
+
+    pltpu.emit_pipeline(
+        pipeline_step,
+        grid=(n_k_chunks,),
+        in_specs=[
+            pl.BlockSpec((batch_block_size, TILE_K_SIZE), lambda i: (0, i)),
+            pl.BlockSpec((out_block_size, TILE_K_SIZE), lambda i: (0, i)),
+            pl.BlockSpec((SUPER_CHUNK, out_block_size), lambda i: (i, 0))
+        ]
+    )(x_ref, w_ref, scales_ref)
+
+    out_ref[...] = acc_vmem[...].astype(out_ref.dtype)
+
+
+@functools.partial(jax.jit, static_argnames=['out_block_size'])
+def dispatch_w8a16_v7(
+    x: jax.Array, 
+    w_q: jax.Array, 
+    w_scale: jax.Array,
+    out_block_size: int = 256
+):
+    """
+    Dispatcher for W8A16 mode.
+    Call this when batch_size > 32 (approximately).
+    """
+    bs, n_in = x.shape
+    n_out, _ = w_q.shape
+    
+    # Standard Padding Logic (Same as before)
+    padded_bs = next_multiple(bs, BLOCK_B)
+    padded_out = next_multiple(n_out, out_block_size)
+    padded_in = next_multiple(n_in, TILE_K_SIZE)
+    
+    if padded_bs > bs: x = jnp.pad(x, ((0, padded_bs - bs), (0, 0)))
+    if padded_in > n_in:
+        padding_k = padded_in - n_in
+        x = jnp.pad(x, ((0, 0), (0, padding_k)))
+        w_q = jnp.pad(w_q, ((0, 0), (0, padding_k)))
+        pad_blocks = padding_k // BLOCK_K
+        w_scale = jnp.pad(w_scale, ((0, 0), (0, pad_blocks)), constant_values=1.0)
+    if padded_out > n_out:
+        padding_out = padded_out - n_out
+        w_q = jnp.pad(w_q, ((0, padding_out), (0, 0)))
+        w_scale = jnp.pad(w_scale, ((0, padding_out), (0, 0)))
+
+    w_scale_t = w_scale.T
+
+    # Grid Setup
+    n_batch_blocks = padded_bs // BLOCK_B
+    n_out_blocks = padded_out // out_block_size
+    grid = (n_batch_blocks, n_out_blocks)
+    
+    total_in_supported = padded_in
+    n_blocks_total = w_scale_t.shape[0]
+
+    # BlockSpecs (Note: X is BF16 now, not quantized)
+    in_specs = [
+        pl.BlockSpec((BLOCK_B, total_in_supported), lambda b, o: (b, 0)),
+        pl.BlockSpec((out_block_size, total_in_supported), lambda b, o: (o, 0)),
+        pl.BlockSpec((n_blocks_total, out_block_size), lambda b, o: (0, o)),
+    ]
+
+    kernel = pl.pallas_call(
+        functools.partial(_kernel_w8a16_tiled_entry,
+                          batch_block_size=BLOCK_B,
+                          out_block_size=out_block_size),
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=0,
             in_specs=in_specs,

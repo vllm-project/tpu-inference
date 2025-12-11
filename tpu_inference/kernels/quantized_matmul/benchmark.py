@@ -8,7 +8,9 @@ from jax import random
 # Import your kernels
 from tpu_inference.kernels.quantized_matmul.kernel_2d import (
     quantized_matmul_2d as original_quantized_matmul_2d,
-    dispatch_real_v7
+    dispatch_w8a8_v7,
+    # dispatch_w8a16_v7,
+    # dispatch_auto_v7,
 )
 
 # ==========================================
@@ -213,12 +215,12 @@ class BenchmarkSuite:
                                         (x, w_q_std, w_s_std, quant_block, d_type))
                 
                 # 3. New V7 Optimized Kernel
-                t_opt = self.measure_ms(dispatch_real_v7, 
+                t_opt = self.measure_ms(dispatch_w8a8_v7, 
                                         (x, w_q_std, w_s_std, out_block, d_type))
 
                 # Correctness (Run once)
                 res_orig = original_quantized_matmul_2d(x, w_q_std, w_s_std, quant_block, d_type).astype(jnp.float32)
-                res_opt = dispatch_real_v7(x, w_q_std, w_s_std, out_block, d_type).astype(jnp.float32)
+                res_opt = dispatch_w8a8_v7(x, w_q_std, w_s_std, out_block, d_type).astype(jnp.float32)
                 self.check_correctness(x, w, quant_block, res_orig, res_opt, d_name)
 
                 speedup_vs_bf16 = t_bf16 / t_opt if t_opt > 0 else 0.0
