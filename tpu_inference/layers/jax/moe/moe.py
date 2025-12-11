@@ -21,6 +21,8 @@ import enum
 import jax
 import jax.numpy as jnp
 from jax.experimental import xla_metadata
+from jax.experimental.pallas.ops.tpu.megablox.gmm import gmm as megablox_gmm
+
 from flax import nnx
 from flax.typing import Sharding
 from jax.sharding import PartitionSpec
@@ -31,6 +33,7 @@ from qwix._src.providers import ptq
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
+from tpu_inference.layers.jax.misc import round_up_to_multiple_of_128_within_limit
 from tpu_inference.layers.vllm.fused_moe import fused_moe_func
 from tpu_inference.models.jax.utils.quantization.quantization_utils import (
     manually_quantize_qwix_activation, manually_quantize_qwix_weight)
@@ -151,9 +154,9 @@ class MoE(nnx.Module):
     
     # --- Sparse MoE Specific Attributes ---
     use_sparse_moe: bool = False
+    use_megablox: bool = False
     num_experts_per_tok: int = 1  # Required for Sparse, optional/derived for Dense
     tile_size: tuple[int, int, int] = (128, 128, 128)
-    use_megablox: bool = False
     quantized_dtype: Optional[jnp.dtype] = None
 
     # --- MoE Kernel Specific Attributes ---
@@ -172,16 +175,6 @@ class MoE(nnx.Module):
         x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
         if self.use_fused_moe_kernel:
             router_logits_TE = self.router(x_TD)
-            block_size = {
-                "bt": 32,
-                "bf": 512,
-                "bd1": 512,
-                "bd2": 512,
-                "btc": 64,
-                "bfc": 256,
-                "bd1c": 256,
-                "bd2c": 256,
-            }
             ep_axis_name = self.efd_sharding[0]
             output_TD = fused_ep_moe(
                 mesh=self.mesh,
@@ -193,7 +186,7 @@ class MoE(nnx.Module):
                 ep_axis_name=ep_axis_name,
                 renormalize_topk_logits=self.renormalize,
                 act_fn=self.hidden_act,
-                **block_size,
+                **self.block_size,
             )
             return output_TD
         elif self.use_vllm_moe_kernel:
@@ -278,6 +271,16 @@ class MoE(nnx.Module):
                                                     dtype=self.dtype,
                                                     sharding=self.efd_sharding,
                                                     random_init=self.random_init)
+            self.block_size = {
+                "bt": 32,
+                "bf": 512,
+                "bd1": 512,
+                "bd2": 512,
+                "btc": 64,
+                "bfc": 256,
+                "bd1c": 256,
+                "bd2c": 256,
+            }
         elif self.use_vllm_moe_kernel:
             shape_gating_up = (E, 2 * F, D)
             self.kernel_gating_upproj_EFD = create_param(rngs,
@@ -291,9 +294,6 @@ class MoE(nnx.Module):
                                                     sharding=self.edf_sharding,
                                                     random_init=self.random_init)
         else:
-            #shape_gating = (self.num_local_experts, D, F)
-            #shape_up = (self.num_local_experts, D, F)
-
             self.kernel_gating_EDF = create_param(rngs,
                                                 shape=(E, D, F),
                                                 dtype=self.dtype,
@@ -327,6 +327,7 @@ class MoE(nnx.Module):
         self.is_batch_sharded_by_expert = (
             self.expert_axis_name is not None) and (self.expert_axis_name == self.data_axis_name)
 
+    ## ======= Methods used for Dense Matmul ======= ##
     def _moe_fwd_preapply_router_weights(self, x_TD: jax.Array, weights_TE):
         """Performs the forward pass of the MoE experts with router weights pre-applied to the inputs.
 
@@ -395,6 +396,10 @@ class MoE(nnx.Module):
         with jax.named_scope("sum"):
             output_TD = jnp.einsum('TED,TE -> TD', down_proj_TED, weights)
         return output_TD.astype(self.dtype)
+
+    ## ======= END Methods used for Dense Matmul ======= ##
+
+    ## ======= Methods used for Sparse Matmul ======= ##
 
     def _sort_activations(self, inputs: jax.Array,
                           sort_indices: jax.Array) -> jax.Array:
@@ -581,9 +586,18 @@ class MoE(nnx.Module):
             inputs = jnp.pad(inputs, ((0, pad_amount), (0, 0)))
 
         if self.use_megablox:
-            #TODO: megablox is used in MaxText, keep a placeholder here for future implement
-            raise NotImplementedError(
-                "MegaBlox kernel call is not implemented.")
+            m, g, k, n = inputs.shape[0], *kernel.shape
+            tm = round_up_to_multiple_of_128_within_limit(m, 512)
+            tk = round_up_to_multiple_of_128_within_limit(k, 2048)
+            tn = round_up_to_multiple_of_128_within_limit(n, 2048)
+
+            output = megablox_gmm(
+                lhs=inputs,
+                rhs=kernel,
+                group_sizes=group_sizes,
+                preferred_element_type=self.dtype,
+                tiling=(tm, tk, tn),
+            )
         else:
             inputs = manually_quantize_qwix_activation(
                 inputs, "ragged_dot", jnp.float8_e4m3fn, [0], {},
@@ -811,3 +825,5 @@ class MoE(nnx.Module):
             return weight.array
         
         return weight
+
+    ## ======= END Methods used for Sparse Matmul ======= ##
