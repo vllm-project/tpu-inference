@@ -79,6 +79,8 @@ class DeepSeekV3Router(nnx.Module):
 
     router_bias_dtype: jnp.dtype = jnp.float32
 
+    use_moe_kernel: bool = False
+
     def get_topk_indices(self, scores_TE: Float) -> Float:
         """Get the topk indices of the scores.
 
@@ -125,7 +127,8 @@ class DeepSeekV3Router(nnx.Module):
 
         scores_TE = jnp.einsum("TD,DE -> TE", x_TD, self.kernel_DE.value)
         scores_TE = nnx.sigmoid(scores_TE)
-
+        if self.use_moe_kernel:
+            return scores_TE
         original_scores_TE = scores_TE
         topk_indices_TX = self.get_topk_indices(scores_TE)
         weights_TX = jnp.take_along_axis(original_scores_TE,
@@ -363,22 +366,8 @@ class SparseMoE(MoE):
                 processed_tokens, jnp.argsort(sort_indices))
             D = unsorted_tokens_tD.shape[-1]
             reshaped_tokens_TXD = unsorted_tokens_tD.reshape(
-<<<<<<< HEAD
                 -1, self.num_experts_per_tok, self.hidden_size)
         return self.combine_experts(reshaped_tokens_TXD, router_weights_TX)
-=======
-                -1, self.num_experts_per_tok, D)
-        with jax.named_scope("combine_weights"):
-            output_TD = jnp.einsum(
-                "TXD,TX -> TD",
-                reshaped_tokens_TXD.astype(jnp.float32),
-                router_weights_TX.astype(jnp.float32),
-                precision='float32',
-            )
-
-        return output_TD.astype(self.dtype)
-    #@mosaic_fusion_group("qwix_quant")    
->>>>>>> caaf8041 (Update tile size and remove mosaic_fusion_group due to compilation error)
     def _gmm(self, inputs, kernel, group_sizes):
         """Performs Grouped Matrix Multiply."""
         num_rows = inputs.shape[0]
