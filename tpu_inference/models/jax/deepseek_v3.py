@@ -58,7 +58,7 @@ class DeepSeekV3(nnx.Module):
         print("this is hf_config: ", vllm_config.model_config.hf_config)
 
         # NOTE: the default is 61
-        num_layers: int = 5  #vllm_config.model_config.hf_config.num_hidden_layers
+        num_layers: int = vllm_config.model_config.hf_config.num_hidden_layers
         num_local_experts: int = 256
 
         vocab_size: int = 129280
@@ -527,11 +527,18 @@ class DeepSeekV3WeightLoader:
 
                 # reshape 100 x 100 to 100 x 10 x 10, this would break the groups (scales values would overlap different groups)
                 # play around with quantizing something like np.arange(1, 12).reshape(3, 4)
-                "q_b_proj": (attn_heads, qk_nope_head_dim + qk_rope_head_dim,
-                             q_lora_rank // 256),
-                "kv_b_proj": (attn_heads, qk_nope_head_dim + v_head_dim,
-                              kv_lora_rank // 256),
-                "o_proj": (hidden_size, attn_heads, v_head_dim // 256)
+                # "q_b_proj": (attn_heads, qk_nope_head_dim + qk_rope_head_dim,
+                #              q_lora_rank // 256),
+                # "kv_b_proj": (attn_heads, qk_nope_head_dim + v_head_dim,
+                #               kv_lora_rank // 256),
+                #"o_proj": (hidden_size, attn_heads, v_head_dim // 256)
+                "q_b_proj":
+                (1, qk_nope_head_dim + qk_rope_head_dim, q_lora_rank // 2),
+                "kv_b_proj": (attn_heads, (qk_nope_head_dim + v_head_dim) //
+                              self.quantization_block_size_n,
+                              kv_lora_rank // self.quantization_block_size_k),
+                "o_proj": (hidden_size // self.quantization_block_size_n,
+                           attn_heads // 4, v_head_dim // 64),
 
                 # # FFW weights are D->F, and F->D:
                 # "mlp.down_proj":
@@ -633,6 +640,11 @@ class DeepSeekV3WeightLoader:
         # Convert weights from torch into numpy
         cast_type = model_weight.value.dtype
 
+        # --- DEBUG LOGGING ---
+        weight_raw_shape = tuple(weight.shape)
+        model_expected_shape = tuple(model_weight.value.shape)
+        # --- END DEBUG LOGGING ---
+
         torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
 
         if torch_view_type:
@@ -649,12 +661,14 @@ class DeepSeekV3WeightLoader:
             raise ValueError(
                 f"Unsupported dtype for tensor conversion: {cast_type}")
 
+        raw_scale_shape = None
         if scale is not None:
-            logger.info(
-                f"--- RAW SCALE SHAPE before .to() call for {name}: {scale.shape}"
-            )
+            # logger.info(
+            #     f"--- RAW SCALE SHAPE before .to() call for {name}: {scale.shape}"
+            # )
             scale = scale.to(torch.float32).numpy().astype(self.scale_dtype)
-            logger.info(f"--- RAW SCALE SHAPE for {name}: {scale.shape}")
+            #logger.info(f"--- RAW SCALE SHAPE for {name}: {scale.shape}")
+            raw_scale_shape = scale.shape
 
         # Reshape weights if necessary (applies to 3D LORA weights for correct element count)
         weight_np = reshape_params(name, weight_np, self._weight_shape_map)
@@ -670,6 +684,24 @@ class DeepSeekV3WeightLoader:
             scale = self._transpose_params(name, scale)
 
         if scale is not None:
+            # original_shape = scale.shape
+
+            # if "o_proj" in name:
+
+            #     # Critical Fix: Truncate the last axis by half (Axis 2: 14336 -> 7168).
+            #     # This fixes the misalignment where the scale tensor seems to include
+            #     # redundant or packed data for the Hidden Dimension (7168).
+            #     last_axis_index = len(original_shape) - 1
+
+            #     # Perform truncation on the last axis
+            #     half_size = original_shape[last_axis_index] // 2
+            #     scale = jnp.take(scale, jnp.arange(half_size), axis=last_axis_index)
+
+            #     logger.warning(
+            #         f"ATTENTION FIX: Truncated scale dim {last_axis_index} for {name}. "
+            #         f"Original shape {original_shape} -> Fixed shape {scale.shape}"
+            #     )
+
             logger.info(f"--- FINAL SCALE SHAPE for {name}: {scale.shape}")
 
             weight_shape = weight_np.shape
@@ -744,6 +776,16 @@ class DeepSeekV3WeightLoader:
         else:
             assert model_weight.value.dtype == sharded_array.dtype, f"Expected dtype for model weight with name {mapped_name} and dtype ({model_weight.value.dtype}) to match that of the incoming weight ({sharded_array.dtype})"
             model_weight.value = sharded_array
+
+        logger.critical(f"--- LOAD SUMMARY FOR {name} ---")
+        logger.critical(f"1. Checkpoint Raw W Shape: {weight_raw_shape}")
+        logger.critical(f"2. Model Expected W Shape: {model_expected_shape}")
+        logger.critical(f"3. Final Loaded W Shape: {weight_np.shape}")
+        logger.critical(f"4. Checkpoint Raw Scale Shape: {raw_scale_shape}")
+        logger.critical(
+            f"5. Final Loaded Scale Shape: {scale.shape if scale is not None else None}"
+        )
+        logger.critical("------------------------------------")
 
         # ... (skipped memory calculation/logging for brevity, assuming they are fixed) ...
         return 0, 0

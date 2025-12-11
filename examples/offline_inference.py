@@ -33,6 +33,8 @@ def main(args: dict):
     top_p = args.pop("top_p")
     top_k = args.pop("top_k")
 
+    args["tensor_parallel_size"] = 8
+
     # Create an LLM
     llm = LLM(**args)
 
