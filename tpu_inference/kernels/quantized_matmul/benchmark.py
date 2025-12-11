@@ -190,7 +190,7 @@ class BenchmarkSuite:
         results = []
         
         bench_dtypes = [
-            ("int8", jnp.int8),
+            # ("int8", jnp.int8),
             ("fp8", jnp.float8_e4m3fn)
         ]
 
