@@ -397,7 +397,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                 MIN_NUM_SEQS)
         # [16, 32, 64, 128, 256, 512, 1024, 2048]
         self.num_tokens_paddings = runner_utils.get_token_paddings(
-            min_token_size=max(16, self.dp_size),
+            min_token_size=max(32, self.dp_size),
             max_token_size=scheduler_config.max_num_batched_tokens *
             self.dp_size,
             padding_gap=vllm_envs.VLLM_TPU_BUCKET_PADDING_GAP)
@@ -1205,6 +1205,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
          padded_total_num_scheduled_tokens, padded_num_reqs_per_dp_rank,
          logits_indices_selector, max_num_reqs_per_dp_rank
          ) = self._prepare_dp_input_metadata(scheduler_output)
+        print(f"{req_ids_dp=}")
+        print(f"{req_indices_dp=}")
+        print(f"{num_scheduled_tokens_per_dp_rank=}")
+        print(f"{scheduled_tokens_per_dp_rank=}")
+        print(f"{num_req_per_dp_rank=}")
+        print(f"{padded_num_scheduled_tokens_per_dp_rank=}")
+        print(f"{padded_num_reqs=}")
+        print(f"{padded_total_num_scheduled_tokens=}")
+        print(f"{padded_num_reqs_per_dp_rank=}")
+        print(f"{logits_indices_selector=}")
+        print(f"{max_num_reqs_per_dp_rank=}")
+        print(f"{self.dp_size=}")
+
         # Multi-modal support
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)

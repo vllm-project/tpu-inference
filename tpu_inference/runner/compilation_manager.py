@@ -47,7 +47,7 @@ class CompilationManager:
         tensor = jnp.ones(shape, dtype=dtype)
         if sharding:
             return device_array(self.runner.mesh, tensor, sharding=sharding)
-        return device_array(self.runner.mesh, tensor)
+        return (self.runner.mesh, tensor)
 
     def _should_skip_padding_combination(self, outer_val: int, inner_val: int,
                                          only_equal: bool) -> bool:
@@ -300,6 +300,10 @@ class CompilationManager:
                         "hidden_states": hidden_states,
                         "residual": residual
                     })
+            print(f'{self.runner.dp_size=}')
+            print(f'{input_ids=}')
+            print(f'{self.runner.num_tokens_paddings=}')
+            print(f'{num_tokens=}')
             self._precompile_backbone_helper(
                 f"worker{self.runner.rank} backbone",
                 input_ids=input_ids,

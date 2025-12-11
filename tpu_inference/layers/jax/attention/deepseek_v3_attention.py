@@ -309,6 +309,7 @@ class MLA(nnx.Module):
                 outputs_TNH = outputs_TNH[..., :self.v_head_dim]
 
             else:
+                print(f'{kv_SA.shape=}')
                 new_kv_cache, outputs_TNA = self.mla_attention(
                     kv_cache,
                     q_TNA,
@@ -490,6 +491,7 @@ class MLA(nnx.Module):
 
             num_kv_pages_per_block, num_queries_per_block = _initialize_block_sizes(
             )
+            print(f'{k.shape=}')
             output, kv_cache = mla_ragged_paged_attention(
                 q,
                 q_rope,
@@ -503,6 +505,7 @@ class MLA(nnx.Module):
 
             return kv_cache, output
 
+        print(f'{k_SA.shape=}')
         kv_cache, output_TNH = jax.jit(
             shard_map.shard_map(
                 _mla_ragged_paged_attention,

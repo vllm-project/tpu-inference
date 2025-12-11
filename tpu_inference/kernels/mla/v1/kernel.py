@@ -1029,6 +1029,8 @@ def prepare_kv_inputs(
 ):
     max_num_tokens, actual_head_dim = kv.shape
     kv_packing = get_dtype_packing(kv.dtype)
+    print(f"{kv.shape=}")
+    print(f'{kv_packing=}')
     assert max_num_tokens % kv_packing == 0
     head_dim = align_to(actual_head_dim, 128)
 
