@@ -17,6 +17,12 @@ ChunkHash = BlockHash
 
 @dataclass
 class CPUChunk:
+    """
+    ref_cnt:
+    -1: init, not saved
+    0: saved, ready_to_evict, ready_to_load
+    >=1: loadings, ready_to_load, in_use
+    """
     chunk_id: CpuChunkId
     ref_cnt: int = -1
     _chunk_hash: ChunkHash | None = None
@@ -27,7 +33,7 @@ class CPUChunk:
 
     @property
     def is_ready_to_evict(self):
-        return self.ref_cnt <= 0
+        return self.ref_cnt == 0
 
     @property
     def is_in_use(self):
