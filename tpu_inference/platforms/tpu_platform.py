@@ -54,19 +54,14 @@ class TpuPlatform(Platform):
     def get_attn_backend_cls(cls, selected_backend: "AttentionBackendEnum",
                              head_size: int, dtype: jnp.dtype,
                              kv_cache_dtype: Optional[str], block_size: int,
-                             use_v1: bool, use_mla: bool, has_sink: bool,
-                             use_sparse: bool, use_mm_prefix: bool,
-                             attn_type: Any) -> str:
+                             use_mla: bool, has_sink: bool, use_sparse: bool,
+                             use_mm_prefix: bool, attn_type: Any) -> str:
         from vllm.attention.backends.registry import AttentionBackendEnum
         if selected_backend != AttentionBackendEnum.PALLAS:
             logger.info("Cannot use %s backend on TPU.", selected_backend)
 
-        if use_v1:
-            logger.info("Using Pallas V1 backend.")
-            return "tpu_inference.layers.vllm.attention.PallasAttentionBackend"
-        else:
-            logger.info("Using Pallas backend.")
-            return "vllm.attention.backends.pallas.PallasAttentionBackend"
+        logger.info("Using Pallas V1 backend.")
+        return "tpu_inference.layers.vllm.attention.PallasAttentionBackend"
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
