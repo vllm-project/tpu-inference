@@ -1,6 +1,5 @@
 import copy
 import functools
-import os
 import random
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -1719,7 +1718,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             shard=shard)
 
     def get_intermediate_tensor_spec(self, num_tokens: int):
-        impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
+        impl = envs.MODEL_IMPL_TYPE
         jax_dtype = t2j_dtype(self.dtype) if impl == "vllm" else self.dtype
         num_padded_tokens = runner_utils.get_padded_token_len(
             self.num_tokens_paddings, num_tokens)
