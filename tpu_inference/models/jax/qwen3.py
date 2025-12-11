@@ -93,9 +93,24 @@ class Qwen3Attention(nnx.Module):
         self._k_scale = 1.0
         self._v_scale = 1.0
         self.kv_cache_quantized_dtype = None
+        self.calculcate_kv_scale = True
+        self.count = 0
         if kv_cache_dtype != "auto":
             self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
                 kv_cache_dtype)
+
+    def calc_kv_scales(self, query, key, value):
+        is_float = jnp.issubdtype(self.kv_cache_quantized_dtype, jnp.floating)
+        dtype_info = jnp.finfo(
+            self.kv_cache_quantized_dtype) if is_float else jnp.iinfo(
+                self.kv_cache_quantized_dtype)
+        dtype_max = float(dtype_info.max)
+
+        self._k_scale = (jnp.abs(key).max() / dtype_max).astype(jnp.float32)
+        self._v_scale = (jnp.abs(value).max() / dtype_max).astype(jnp.float32)
+        self.calculcate_kv_scale = False
+
+        # jax.debug.print("k_scale: {k_scale}, v_scale: {v_scale}", k_scale=self._k_scale, v_scale=self._v_scale)
 
     def __call__(
         self,
@@ -120,6 +135,8 @@ class Qwen3Attention(nnx.Module):
         v = self.v_proj(x)
         # o: (T, N, H)
         q_scale = k_scale = v_scale = None
+        if self.calculcate_kv_scale:
+            self.calc_kv_scales(q, k, v)
         if self.kv_cache_quantized_dtype:
             # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
             # q_scale = self._q_scale

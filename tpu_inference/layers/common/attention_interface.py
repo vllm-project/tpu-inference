@@ -284,9 +284,9 @@ def sharded_ragged_paged_attention(
     attention_sink: jax.Array | None,
     sm_scale: float,
     attention_chunk_size: int | None = None,
-    q_scale: float | None = None,
-    k_scale: float | None = None,
-    v_scale: float | None = None,
+    q_scale: jax.Array | None = None,
+    k_scale: jax.Array | None = None,
+    v_scale: jax.Array | None = None,
 ):
     """Shards along KV heads."""
 
@@ -302,10 +302,13 @@ def sharded_ragged_paged_attention(
         P(ShardingAxisName.ATTN_DATA),  # page_indices
         P(ShardingAxisName.ATTN_DATA),  # cu_q_lens
         P(ShardingAxisName.ATTN_DATA),  # distribution
+        P(),
+        P(),
     )
     out_specs = (qkv_spec, kv_cache_spec)
 
-    args = (q, k, v, kv_cache, kv_lens, page_indices, cu_q_lens, distribution)
+    args = (q, k, v, kv_cache, kv_lens, page_indices, cu_q_lens, distribution,
+            k_scale, v_scale)
 
     use_hd64 = q.shape[-1] == 64
 
@@ -330,8 +333,8 @@ def sharded_ragged_paged_attention(
             sm_scale=sm_scale,
             sliding_window=attention_chunk_size,
             q_scale=q_scale,
-            k_scale=k_scale,
-            v_scale=v_scale,
+            # k_scale=k_scale,
+            # v_scale=v_scale,
         )
 
     return shard_map.shard_map(
@@ -352,9 +355,9 @@ def attention(
     mesh: Mesh,
     head_dim_original: int | None = None,  # before padding,
     attention_chunk_size: int | None = None,
-    q_scale: float | None = None,
-    k_scale: float | None = None,
-    v_scale: float | None = None,
+    q_scale: jax.Array | None = None,
+    k_scale: jax.Array | None = None,
+    v_scale: jax.Array | None = None,
     sinks: jax.Array | None = None,
 ) -> Tuple[jax.Array, jax.Array]:
     # T: seq_len
