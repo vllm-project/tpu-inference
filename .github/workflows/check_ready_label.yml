@@ -1,0 +1,27 @@
+name: Enforce Ready Label
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+jobs:
+  check-ready-label:
+    name: Check for Ready Label
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify label existence
+        shell: bash
+        run: |
+          echo "Checking for 'ready' label..."
+          LABELS_JSON='${{ toJSON(github.event.pull_request.labels) }}'
+          echo "Current labels: $LABELS_JSON"
+          MATCHED_LABEL=$(echo "$LABELS_JSON" | jq -r '.[] | select(.name=="ready") | .name')
+
+          if [ "$MATCHED_LABEL" == "ready" ]; then
+            echo "'ready' label found. Check passed."
+            exit 0
+          else
+            echo "'ready' label NOT found."
+            echo "Blocking merge until 'ready' label is applied."
+            exit 1
+          fi
