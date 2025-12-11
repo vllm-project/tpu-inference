@@ -12,7 +12,6 @@ from jaxtyping import Float
 from qwix._src.core.ragged_dot import ragged_dot as qwix_ragged_dot
 from qwix._src.providers import ptq
 
-from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.models.jax.utils.quantization.quantization_utils import (
