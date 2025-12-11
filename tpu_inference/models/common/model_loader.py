@@ -5,7 +5,6 @@ import jax
 import torch
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from torchax.ops.mappings import j2t_dtype
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 from vllm.model_executor.model_loader import get_model_loader
@@ -19,14 +18,14 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.quantization.quantization_utils import (
     apply_qwix_on_abstract_model, apply_qwix_quantization,
     load_random_weights_into_qwix_abstract_model)
+from tpu_inference.utils import to_jax_dtype, to_torch_dtype
 
 logger = init_logger(__name__)
 
 _MODEL_REGISTRY = {}
 
-# Architectures that prefer "vllm" implementation type when MODEL_IMPL_TYPE is "auto".
-# These architectures are listed here because they have better performance with the
-# vLLM PyTorch backend compared to the flax_nnx JAX backend for now.
+# List of architectures that are preferred to use  "vllm" implementation over
+# "flax_nnx" implementation due to various factors such as performance.
 _VLLM_PREFERRED_ARCHITECTURES: frozenset[str] = frozenset(
     {"GptOssForCausalLM"})
 
@@ -216,6 +215,9 @@ def get_flax_model(
     mesh: Mesh,
     is_draft_model: bool = False,
 ) -> nnx.Module:
+    model_dtype = to_jax_dtype(vllm_config.model_config.dtype)
+    vllm_config.model_config.dtype = model_dtype
+
     if is_draft_model:
         model_class = _get_model_architecture(
             vllm_config.speculative_config.draft_model_config.hf_config)
@@ -323,6 +325,8 @@ def get_vllm_model(
     rng: jax.Array,
     mesh: Mesh,
 ):
+    model_dtype = to_torch_dtype(vllm_config.model_config.dtype)
+    vllm_config.model_config.dtype = model_dtype
     from tpu_inference.models.vllm.vllm_model_wrapper import VllmModelWrapper
 
     model = VllmModelWrapper(
@@ -371,8 +375,6 @@ def get_model(
                 logger.warning(error_msg)
 
                 # Fall back to the vLLM model and updating the dtype accordingly
-                vllm_config.model_config.dtype = j2t_dtype(
-                    vllm_config.model_config.dtype.dtype)
                 return get_vllm_model(vllm_config, rng, mesh)
         case "vllm":
             return get_vllm_model(vllm_config, rng, mesh)

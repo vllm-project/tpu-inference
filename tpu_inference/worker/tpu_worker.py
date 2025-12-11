@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional, Tuple
 
 import jax
-import jax.numpy as jnp
 import jaxlib
 import jaxtyping
 import vllm.envs as vllm_envs
@@ -36,12 +35,6 @@ from tpu_inference.runner.kv_cache import get_attention_page_size_bytes
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 logger = init_logger(__name__)
-
-_DTYPE: dict[str, jnp.dtype] = {
-    "bfloat16": jnp.bfloat16,
-    "float": jnp.float32,
-    "float32": jnp.float32,
-}
 
 
 @dataclass
@@ -77,21 +70,6 @@ class TPUWorker:
         ip: str = "localhost",
         prev_worker_ip: str = "localhost",
     ):
-        # If we use vLLM's model implementation in PyTorch, we should set it
-        # with torch version of the dtype.
-        impl = envs.MODEL_IMPL_TYPE
-        if impl != "vllm":  # vllm-pytorch implementation does not need this conversion
-
-            # NOTE(wenlong): because sometimes mm needs to use torch for preprocessing
-            if not isinstance(vllm_config.model_config.dtype, str):
-                logger.warning(
-                    "The model dtype is not properly set for JAX backend. "
-                    "Overwriting it to jnp.bfloat16")
-                vllm_config.model_config.dtype = jnp.bfloat16
-            else:
-                vllm_config.model_config.dtype = _DTYPE.get(
-                    vllm_config.model_config.dtype, jnp.bfloat16)
-
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.parallel_config = vllm_config.parallel_config
