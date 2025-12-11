@@ -261,8 +261,6 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
         layer.w13_bias = Parameter(torch_view(w13_bias), requires_grad=False)
         layer.w2_bias = Parameter(torch_view(w2_bias), requires_grad=False)
 
-        pass
-
     def apply(
         self,
         layer: torch.nn.Module,
