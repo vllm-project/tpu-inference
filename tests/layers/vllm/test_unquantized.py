@@ -415,6 +415,8 @@ def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
 @pytest.mark.parametrize("topk", [2])
 def test_fused_moe(use_ep, mesh, num_tokens, intermediate_size, hidden_size,
                    num_experts, topk):
+
+    # TODO(Qiliang Cui): Remove when issue is resolved.
     if 'TPU7x' in jax.devices()[0].device_kind:
         pytest.skip("Skipping test on TPU TPU7x.")
 
@@ -497,6 +499,7 @@ def test_fused_moe(use_ep, mesh, num_tokens, intermediate_size, hidden_size,
 @pytest.mark.parametrize("topk", [2])
 def test_fused_moe_bias(mesh, num_tokens, intermediate_size, hidden_size,
                         num_experts, topk):
+    # TODO(Qiliang Cui): Remove when issue is resolved.
     if 'TPU7x' in jax.devices()[0].device_kind:
         pytest.skip("Skipping test on TPU TPU7x.")
 
@@ -566,6 +569,7 @@ def test_fused_moe_bias(mesh, num_tokens, intermediate_size, hidden_size,
 @pytest.mark.parametrize("activation", ["silu", "swigluoai"])
 def test_fused_moe_activation(mesh, num_tokens, intermediate_size, hidden_size,
                               num_experts, topk, activation):
+    # TODO(Qiliang Cui): Remove when issue is resolved.
     if 'TPU7x' in jax.devices()[0].device_kind:
         pytest.skip("Skipping test on TPU TPU7x.")
 
@@ -628,6 +632,7 @@ def test_fused_moe_activation(mesh, num_tokens, intermediate_size, hidden_size,
 @pytest.mark.parametrize("has_bias", [False, True])
 def test_fused_moe_use_kernel(mesh, num_tokens, intermediate_size, hidden_size,
                               num_experts, topk, has_bias):
+    # TODO(Qiliang Cui): Remove when issue is resolved.
     if 'TPU7x' in jax.devices()[0].device_kind:
         pytest.skip("Skipping test on TPU TPU7x.")
 
