@@ -424,6 +424,7 @@ def _fused_ep_moe_kernel(
       starts_copy.wait()
       sizes_copy.wait()
 
+    # xw32q: when do we use pl.run_scoped?
     pl.run_scoped(
         _all_reduce_metadata,
         pltpu.VMEM(t2e_routing_x2_smem.shape[1:], t2e_routing_x2_smem.dtype),
@@ -931,6 +932,7 @@ def _fused_ep_moe_kernel(
     bw_sem_id = 0
     # start_fetch_bw1(local_e_id, bw_sem_id, 0, 0)
     # start_fetch_bw3(local_e_id, bw_sem_id, 0, 0)
+    # xw32: what does 's' and 'b32' mean in the var a2a_s_b32_vmem?
     a2a_s_b32_vmem = (
         a2a_s_x2_vmem.bitcast(jnp.uint32)
         .reshape(2, bt * num_devices, hidden_size // t_packing)
@@ -1620,6 +1622,7 @@ def fused_ep_moe(
         ),  # a2a_g_hbm
     )
 
+  # xw32: the g in a2a_g_hbm may mean global
   a2a_g_hbm_scratch = pl.empty(
       (num_experts, bt, t_packing, hidden_size // t_packing), t_dtype
   )
