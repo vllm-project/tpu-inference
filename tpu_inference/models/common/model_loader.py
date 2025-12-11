@@ -27,7 +27,8 @@ _MODEL_REGISTRY = {}
 # Architectures that prefer "vllm" implementation type when MODEL_IMPL_TYPE is "auto".
 # These architectures are listed here because they have better performance with the
 # vLLM PyTorch backend compared to the flax_nnx JAX backend for now.
-_VLLM_REQUIRED_ARCHITECTURES: frozenset[str] = frozenset({"GptOssForCausalLM"})
+_VLLM_PREFERRED_ARCHITECTURES: frozenset[str] = frozenset(
+    {"GptOssForCausalLM"})
 
 
 class UnsupportedArchitectureError(ValueError):
@@ -355,7 +356,7 @@ def get_model(
             f"Expected exactly one architecture, got {len(architectures)}: "
             f"{architectures}")
         arch = architectures[0]
-        impl = "vllm" if arch in _VLLM_REQUIRED_ARCHITECTURES else "flax_nnx"
+        impl = "vllm" if arch in _VLLM_PREFERRED_ARCHITECTURES else "flax_nnx"
         logger.info(f"Resolved MODEL_IMPL_TYPE 'auto' to '{impl}'")
 
     match impl:
