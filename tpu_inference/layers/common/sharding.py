@@ -21,6 +21,7 @@ class ShardingAxisNameBase:
     """Base class for sharding axis names."""
     SEQUENCE = ('data', 'attn_dp')
     ATTN_DATA = ('data', 'attn_dp', 'attn_dp_expert')
+    ATTN_DATA_EXPERT = ('attn_dp_expert', 'expert')
     MLP_DATA = 'data'
     ATTN_HEAD = 'model'
     ATTN_TENSOR = None

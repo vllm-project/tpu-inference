@@ -219,10 +219,9 @@ def get_flax_model(
     jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
     if vllm_config.sharding_config.total_dp_size > 1:
         kv_pspec = PartitionSpec(ShardingAxisName.ATTN_DATA, None,
-                              ShardingAxisName.ATTN_HEAD)
+                              ShardingAxisName.VOCAB)
     else:
-        kv_pspec = PartitionSpec(ShardingAxisName.MLP_DATA, None,
-                              ShardingAxisName.MLP_TENSOR)
+        kv_pspec = PartitionSpec(ShardingAxisName.ATTN_DATA, None, ("model", "expert"))
 
     kv_cache_sharding = NamedSharding(mesh, kv_pspec)
     hidden_states_sharding = NamedSharding(mesh,

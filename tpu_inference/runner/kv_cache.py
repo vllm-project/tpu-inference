@@ -47,9 +47,7 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
             get_kv_cache_shape_fn(total_num_pages, page_size,
                                   actual_num_kv_heads // model_cnt,
                                   actual_head_dim, kv_dtype))
-        logger.warning(f"********KV creation shape = {shape}")
         shape[2] *= model_cnt
-        logger.warning(f"********KV creation final shape = {shape}")
     return tuple(shape)
 
 
@@ -96,8 +94,8 @@ def create_kv_caches(
     else:
         sharding = NamedSharding(
             mesh,
-            PartitionSpec(None, None,
-                          ShardingAxisName.ATTN_HEAD))
+            PartitionSpec(ShardingAxisName.MLP_DATA, None,
+                          ShardingAxisName.MLP_TENSOR))
 
     def _allocate() -> jax.Array:
         return jnp.empty(

@@ -135,19 +135,15 @@ class DeepSeekV3(nnx.Module):
                 query_tnh_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
                 keyvalue_skh_spec = P(ShardingAxisName.MLP_TENSOR, None)
                 attn_o_tnh_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
-                q_da_spec=(None, ShardingAxisName.VOCAB)
-                anh_spec=(None, ShardingAxisName.MLP_TENSOR, None)
-                kv_da_spec=(None, ShardingAxisName.VOCAB)
-                nhd_spec=(ShardingAxisName.MLP_TENSOR, None, None)
+                q_da_spec = (None, ShardingAxisName.VOCAB)
+                kv_da_spec = (None, ShardingAxisName.VOCAB)
 
             else:
-                query_tnh_spec = P(None, ShardingAxisName.MOE_TENSOR, None)
-                keyvalue_skh_spec = P(None, ShardingAxisName.MOE_TENSOR, None)
-                attn_o_tnh_spec = P(None, ShardingAxisName.MOE_TENSOR, None)
-                q_da_spec=(None, ShardingAxisName.MOE_TENSOR)
-                anh_spec=(None, ShardingAxisName.MOE_TENSOR, None)
-                kv_da_spec=(None, ShardingAxisName.MOE_TENSOR)
-                nhd_spec=(ShardingAxisName.MOE_TENSOR, None, None)
+                query_tnh_spec=P(None, ShardingAxisName.MLP_TENSOR, None)
+                keyvalue_skh_spec=P(None, ShardingAxisName.MLP_TENSOR, None)
+                attn_o_tnh_spec=P(None, ShardingAxisName.MLP_TENSOR, None)
+                q_da_spec = (None, ShardingAxisName.MOE_TENSOR)
+                kv_da_spec = (None, ShardingAxisName.MOE_TENSOR)
 
             return MLA(
                 rope_theta=rope_theta,
@@ -177,9 +173,9 @@ class DeepSeekV3(nnx.Module):
                 activation_attention_out_td=(None, None),
                 attn_o_tnh=attn_o_tnh_spec,
                 q_da_sharding=q_da_spec,
-                anh_sharding=anh_spec,
+                anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None),
                 kv_da_sharding=kv_da_spec,
-                nhd_sharding=nhd_spec)
+                nhd_sharding=(ShardingAxisName.MLP_TENSOR, None, None))
 
         for i in range(first_k_dense_replace):
             block = TransformerBlock(
@@ -226,11 +222,10 @@ class DeepSeekV3(nnx.Module):
                 routed_scaling_factor=2.5,
                 dtype=dtype,
                 activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
-                ed_sharding=(ShardingAxisName.MOE_TENSOR, None),
-                e_sharding=(ShardingAxisName.MOE_TENSOR, ))
+                ed_sharding=(None, None),
+                e_sharding=(None, ))
             if self.sparse_matmul:
                 # TODO: orginize the SparseMoE and DenseMoE better given they share most interfaces
-                logger.warning("***********Using sparse matmul!")
                 custom_module = SparseMoE(
                     dtype=dtype,
                     num_local_experts=num_local_experts,
@@ -242,10 +237,10 @@ class DeepSeekV3(nnx.Module):
                     hidden_act=hidden_act,
                     rngs=self.rng,
                     random_init=self.random_init,
-                    activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
-                    activation_ffw_ted=(ShardingAxisName.MLP_DATA, None, None),
-                    edf_sharding=(ShardingAxisName.MOE_TENSOR, None, None),
-                    efd_sharding=(ShardingAxisName.MOE_TENSOR, None, None),
+                    activation_ffw_td=(ShardingAxisName.MLP_DATA, ShardingAxisName.MOE_TENSOR),
+                    activation_ffw_ted=(ShardingAxisName.MLP_DATA, None, ShardingAxisName.MOE_TENSOR),
+                    edf_sharding=(None, ShardingAxisName.MOE_TENSOR, ShardingAxisName.ATTN_DATA_EXPERT),
+                    efd_sharding=(None, ShardingAxisName.ATTN_DATA_EXPERT, ShardingAxisName.MOE_TENSOR),
                     quantized_dtype=self.weight_loader.quant_dtype
                     if self.weight_loader.is_model_quantized else None,
                     router=router) if is_moe_layer else DenseFFW(
@@ -258,7 +253,6 @@ class DeepSeekV3(nnx.Module):
                         df_sharding=(None, ShardingAxisName.MLP_TENSOR),
                         fd_sharding=(ShardingAxisName.MLP_TENSOR, None))
             else:
-                logger.warning("***********Using dense matmul!")
                 custom_module = MoE(
                     dtype=dtype,
                     num_local_experts=num_local_experts,
@@ -270,8 +264,8 @@ class DeepSeekV3(nnx.Module):
                     random_init=self.random_init,
                     activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
                     activation_ffw_ted=(ShardingAxisName.MLP_DATA, None, None),
-                    edf_sharding=(ShardingAxisName.MOE_TENSOR, None, None),
-                    efd_sharding=(ShardingAxisName.MOE_TENSOR, None, None),
+                    edf_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
+                    efd_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
                     router=router) if is_moe_layer else DenseFFW(
                         dtype=dtype,
                         hidden_act=hidden_act,
