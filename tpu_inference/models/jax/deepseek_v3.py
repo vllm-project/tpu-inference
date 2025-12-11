@@ -25,10 +25,9 @@ from tpu_inference.layers.jax.moe.moe import MoE
 from tpu_inference.layers.jax.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.utils.quantization.quantization_utils import \
-    get_quant_dtype_from_qwix_config
 from tpu_inference.models.jax.utils.weight_utils import (
-    get_param, model_weights_generator, print_param_info, reshape_params)
+    get_param, model_weights_generator, print_param_info)
+from tpu_inference.models.jax.utils.quantization.mxfp4_utils import unpack_mxfp4
 
 logger = init_logger(__name__)
 
@@ -169,7 +168,7 @@ class DeepSeekV3(nnx.Module):
                 activation_attention_out_td=(None, None),
                 attn_o_tnh=attn_o_tnh_spec,
                 q_da_sharding=(None, ShardingAxisName.VOCAB),
-                anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None),
+                ac_sharding=(None, ShardingAxisName.MLP_TENSOR),
                 kv_da_sharding=(None, ShardingAxisName.VOCAB),
                 nhd_sharding=(ShardingAxisName.MLP_TENSOR, None, None))
 
@@ -237,8 +236,7 @@ class DeepSeekV3(nnx.Module):
                     activation_ffw_ted=(ShardingAxisName.MLP_DATA, None, None),
                     edf_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
                     efd_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
-                    quantized_dtype=self.weight_loader.quant_dtype
-                    if self.weight_loader.is_model_quantized else None,
+                    quantized_dtype=self.weight_loader.quant_dtype,
                     router=router) if is_moe_layer else DenseFFW(
                         dtype=dtype,
                         hidden_act=hidden_act,
@@ -422,12 +420,12 @@ class DeepSeekV3WeightLoader:
             r"mlp\.up_proj": (1, 0),
             # mla
             r"q_a_proj": (1, 0),
-            r"q_b_proj": (2, 0, 1),
+            r"q_b_proj": (1, 0),
             r"kv_a_proj_with_mqa": (1, 0),
-            r"kv_b_proj": (2, 0, 1),
-            r"k_b_proj": (2, 0, 1),  # used for MLA kernel
-            r"v_b_proj": (2, 0, 1),  # used for MLA kernel
-            r"o_proj": (1, 2, 0),
+            r"kv_b_proj": (1, 0),
+            r"k_b_proj":  (1, 0),  # used for MLA kernel
+            r"v_b_proj": (1, 0),  # used for MLA kernel
+            r"o_proj": (1, 0),
             # moe
             r"mlp\.gate\.weight": (1, 0),
             r"mlp\.experts\.\d+\.gate_proj": (0, 2, 1),
@@ -438,15 +436,6 @@ class DeepSeekV3WeightLoader:
             r"mlp\.shared_experts\.up_proj": (1, 0),
             # lm_head
             r"lm_head\.weight": (1, 0)
-        }
-        self._weight_shape_map = {
-            "q_b_proj":
-            (attn_heads, qk_nope_head_dim + qk_rope_head_dim, q_lora_rank),
-            "kv_b_proj":
-            (attn_heads, qk_nope_head_dim + v_head_dim, kv_lora_rank),
-            "k_b_proj": (attn_heads, qk_nope_head_dim, kv_lora_rank),
-            "v_b_proj": (attn_heads, v_head_dim, kv_lora_rank),
-            "o_proj": (hidden_size, attn_heads, v_head_dim)
         }
 
         # Set the mappings from loaded parameter keys to standardized names.
@@ -472,13 +461,13 @@ class DeepSeekV3WeightLoader:
             "model.layers.*.self_attn.q_a_proj.weight":
             "layers.*.attn.kernel_q_down_proj_DA",
             "model.layers.*.self_attn.q_b_proj.weight":
-            "layers.*.attn.kernel_q_up_proj_ANH",
+            "layers.*.attn.kernel_q_up_proj_AC",
             "model.layers.*.self_attn.kv_a_proj_with_mqa.weight":
             "layers.*.attn.kernel_kv_down_proj_DA",
             "model.layers.*.self_attn.kv_b_proj.weight":
-            "layers.*.attn.kernel_kv_up_proj_ANH",
+            "layers.*.attn.kernel_kv_up_proj_AC",
             "model.layers.*.self_attn.o_proj.weight":
-            "layers.*.attn.kernel_o_proj_NHD",
+            "layers.*.attn.kernel_o_proj_CD",
             # Dense ffw
             "model.layers.*.mlp.gate_proj.weight":
             "layers.*.custom_module.kernel_gating_DF",
@@ -508,69 +497,14 @@ class DeepSeekV3WeightLoader:
         if self.use_mla_kernel:
             self._loaded_to_standardized_keys.update({
                 "model.layers.*.self_attn.k_b_proj.weight":
-                "layers.*.attn.kernel_k_up_proj_ANH",
+                "layers.*.attn.kernel_k_up_proj_AC",
                 "model.layers.*.self_attn.v_b_proj.weight":
-                "layers.*.attn.kernel_v_up_proj_ANH",
+                "layers.*.attn.kernel_v_up_proj_AC",
             })
-
-        # TODO (jacobplatin): we shouldn't hard-code this, but the logic to obtain the true quantized dtype
-        # is non-trivial and the default checkpoints all use this dtype
-        self.quant_dtype = jnp.float8_e4m3fn
-
-        self.is_model_quantized = not vllm_config.additional_config.get(
-            "skip_quantization", False)
-        if self.is_model_quantized:
-            # TODO (jacobplatin): expand support eventually
-            quantization_type = vllm_config.model_config.hf_config.quantization_config[
-                "quant_method"]
-            assert quantization_type == "fp8", "DeepSeek only supports the fp8 quantization method for now"
-            self.scale_dtype, self.quant_dtype = get_quant_dtype_from_qwix_config(
-                vllm_config)
-
-            logger.info(
-                f"Quantizing DeepSeek with quantization dtype: {self.quant_dtype} and scale dtype: {self.scale_dtype}"
-            )
-
-            quantization_block_sizes = vllm_config.model_config.hf_config.quantization_config[
-                "weight_block_size"]
-            assert len(
-                quantization_block_sizes
-            ) == 2, f"Expected only 2 quantization block sizes but got {quantization_block_sizes}"
-            self.quantization_block_size_n = quantization_block_sizes[0]
-            self.quantization_block_size_k = quantization_block_sizes[1]
-            # TODO (jacobplatin): remove this check in the future
-            assert self.quantization_block_size_n == self.quantization_block_size_k, "Quantization block size n and k must be the same!"
-            # NOTE: this is only needed for pre-quantized models
-            self._scale_shape_map = {
-                "q_b_proj": (1, qk_nope_head_dim + qk_rope_head_dim,
-                             q_lora_rank // self.quantization_block_size_n),
-                "kv_b_proj": (attn_heads, (qk_nope_head_dim + v_head_dim) //
-                              self.quantization_block_size_n,
-                              kv_lora_rank // self.quantization_block_size_n),
-                # used for MLA kernel
-                "k_b_proj":
-                (attn_heads,
-                 qk_nope_head_dim // self.quantization_block_size_n,
-                 kv_lora_rank // self.quantization_block_size_n),
-                # used for MLA kernel
-                "v_b_proj":
-                (attn_heads, v_head_dim // self.quantization_block_size_n,
-                 kv_lora_rank // self.quantization_block_size_n),
-                "o_proj":
-                (hidden_size // self.quantization_block_size_n, attn_heads,
-                 v_head_dim // self.quantization_block_size_n),
-            }
-            # NOTE: this is only needed for pre-quantized models when doing random weight loading
-            # TODO (jacobplatin): remove or clean this up
-            self.scale_shap_map_for_random_weight_loading = {
-                "kernel_kv_down_proj_DA": (56, 576),
-                "kernel_kv_up_proj_ANH": (4, 128, 2),
-                "kernel_q_up_proj_ANH": (12, 1, 192),
-                "kernel_o_proj_NHD": (128, 1, 56),
-                "kernel_down_proj_EFD": (256, 16, 56),
-                "kernel_up_proj_EDF": (256, 56, 16),
-                "kernel_gating_EDF": (256, 56, 16),
-            }
+        # Hardcode quantization params for DeepSeek V3
+        self.scale_dtype, self.quant_dtype =  jnp.bfloat16, jnp.float8_e4m3fn
+        self.quantization_block_size_n = 1
+        self.quantization_block_size_k = 256
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
@@ -649,45 +583,51 @@ class DeepSeekV3WeightLoader:
             base_model_weight, "array") else base_model_weight.sharding
 
         # Convert weights from torch into numpy
-        cast_type = model_weight.value.dtype
-
-        torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
-
-        if torch_view_type:
-            # Avoid unnecessary upcasting and mem copy by viewing the tensor's
-            # raw data as integers before converting to a JAX array.
-            weight_np = jnp.array(
-                weight.view(torch_view_type).numpy()).view(cast_type)
-        else:
-            raise ValueError(
-                f"Unsupported dtype for tensor conversion: {cast_type}")
-
-        if scale is not None:
+        if weight.dtype == torch.uint8 and scale is not None:
+            # Assume packed FP4 format when uint8 weights with scale provided
+            cast_type = jnp.float4_e2m1fn
+            codes = unpack_mxfp4(weight)
+            weight_np = jnp.array(codes.float().numpy()).astype(cast_type)
             scale = scale.to(torch.float32).numpy().astype(self.scale_dtype)
+        else:
+            cast_type = model_weight.value.dtype
+            torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
 
-        # Reshape and transpose weights if necessary.
-        weight_np = reshape_params(name, weight_np, self._weight_shape_map)
-        if scale is not None:
-            scale = reshape_params(name, scale, self._scale_shape_map)
+            if torch_view_type:
+                # Avoid unnecessary upcasting and mem copy by viewing the tensor's
+                # raw data as integers before converting to a JAX array.
+                weight_np = jnp.array(
+                    weight.view(torch_view_type).numpy()).view(cast_type)
+            else:
+                raise ValueError(
+                    f"Unsupported dtype for tensor conversion: {cast_type}")
+
+            if scale is not None:
+                scale = scale.to(torch.float32).numpy().astype(self.scale_dtype)
+
+        # Transpose weights if necessary.
         weight_np = self._transpose_params(name, weight_np)
         if scale is not None:
             scale = self._transpose_params(name, scale)
+            # Ensure scale is broadcastable to weight_np by repeating per-axis.
             weight_shape = weight_np.shape
             scale_shape = scale.shape
-            assert len(weight_shape) == len(scale_shape)
-            for idx, (weight_dim,
-                      scale_dim) in enumerate(zip(weight_shape, scale_shape)):
-                if weight_dim // self.quantization_block_size_n != scale_dim and weight_dim // scale_dim != 1:
-                    old_scale_shape = scale.shape
-                    scale = scale.repeat(self.quantization_block_size_n,
-                                         axis=idx)[:, :weight_dim]
+            if len(weight_shape) == len(scale_shape):
+                new_scale = scale
+                for idx, (wdim, sdim) in enumerate(zip(weight_shape, scale_shape)):
+                    # If divisible, leave scale as-is for this axis
+                    if (wdim % sdim == 0):
+                        continue
+                    # Otherwise repeat and then truncate to match weight dim
+                    reps = max(1, (wdim + sdim - 1) // sdim)
+                    new_scale = jnp.repeat(new_scale, reps, axis=idx)
+                    slicers = [slice(None)] * len(weight_shape)
+                    slicers[idx] = slice(0, wdim)
+                    new_scale = new_scale[tuple(slicers)]
+                if scale_shape != new_scale.shape:
                     logger.warning(
-                        f"Got a weight with shape {weight_shape} and scale with shape {old_scale_shape} "
-                        f"where the scale_dim {scale_dim} does not match the weight_dim {weight_dim} "
-                        f"multiplied by the quantization block size {self.quantization_block_size_n}. "
-                        f"Repeating the scale to new shape {scale.shape} along axis {idx} with repeat size {self.quantization_block_size_n}."
-                    )
-                    break
+                        f"Adjusted scale shape {scale_shape} to {new_scale.shape} to match weight {weight_shape}")
+                scale = new_scale
 
         if model_weight.value.shape != weight_np.shape:
             raise ValueError(
@@ -721,8 +661,6 @@ class DeepSeekV3WeightLoader:
                 logger.warning(
                     f"Could not create sharded scale for {name} with shape {scale.shape} and sharding {sharding}, skipping sharding..."
                 )
-            # NOTE: Despite the fact that scale has the name `scale_inv` in it, we don't need to
-            # inverse it
             assert base_model_weight.array.scale.value.dtype == maybe_sharded_scale.dtype, "Expected dtype for model weight scale with name {mapped_name} and dtype ({base_model_weight.array.scale.value.dtype}) to match that of the incoming weight scale ({maybe_sharded_scale.dtype})"
             assert base_model_weight.array.qvalue.value.dtype == sharded_array.dtype, "Expected dtype for model weight with name {mapped_name} and dtype ({base_model_weight.array.qvalue.value.dtype}) to match that of the incoming weight ({sharded_array.dtype})"
             base_model_weight.array.scale.value = maybe_sharded_scale
@@ -790,43 +728,29 @@ class DeepSeekV3WeightLoader:
                 # TODO (jacobplatin): refactor this so that we instead change / update `model_weights_generator`
                 # instead of checking "weight_scale_inv" and assuming quantization method is fp8
                 scale = None
-                if loaded_weight.dtype == j2t_dtype(self.quant_dtype.dtype):
-                    if self.is_model_quantized:
-                        scale_name = loaded_name.replace(
-                            ".weight", ".weight_scale_inv")
-                        if scale_name in quantized_scales:
-                            scale = quantized_scales[scale_name]
-                            del quantized_scales[scale_name]
-                        else:
-                            quantized_weights[loaded_name] = loaded_weight
-                            continue
+                # Mixed quantization: accept both fp8 and packed fp4 (uint8) tensors
+                allowed_quant_dtypes = {j2t_dtype(self.quant_dtype.dtype), torch.uint8}
+                if loaded_weight.dtype in allowed_quant_dtypes:
+                    scale_name = loaded_name.replace(
+                        ".weight", ".weight_scale_inv")
+                    if scale_name in quantized_scales:
+                        scale = quantized_scales[scale_name]
+                        del quantized_scales[scale_name]
                     else:
                         quantized_weights[loaded_name] = loaded_weight
                         continue
 
                 if loaded_name.endswith(".weight_scale_inv"):
-                    if self.is_model_quantized:
-                        weight_name = loaded_name.replace(
-                            ".weight_scale_inv", ".weight")
-                        if weight_name in quantized_weights:
-                            scale = loaded_weight
-                            loaded_weight = quantized_weights[weight_name]
-                            loaded_name = weight_name
-                            del quantized_weights[weight_name]
-                        else:
-                            quantized_scales[loaded_name] = loaded_weight
-                            continue
-                    # In the case that we don't want to use the quantized weights,
-                    # we'll dequantize the weights using the loaded scale on-the-fly
-                    else:
-                        # assuming weights are loaded before scales.
-                        weight_name = loaded_name.replace(
-                            ".weight_scale_inv", ".weight")
-                        loaded_weight = weights_dequant_cpu(
-                            quantized_weights[weight_name], loaded_weight,
-                            self.model_dtype)
+                    weight_name = loaded_name.replace(
+                        ".weight_scale_inv", ".weight")
+                    if weight_name in quantized_weights:
+                        scale = loaded_weight
+                        loaded_weight = quantized_weights[weight_name]
                         loaded_name = weight_name
                         del quantized_weights[weight_name]
+                    else:
+                        quantized_scales[loaded_name] = loaded_weight
+                        continue
                 # concat mlp.experts weights
                 stacked_scales = None
                 stacked_weights = None
@@ -946,44 +870,3 @@ class DeepSeekV3WeightLoader:
         del quantized_scales
         # TODO: validate that all of the model_params were accounted for as well.
         nnx.update(model_for_loading, model_params)
-
-
-def weights_dequant_cpu(x: torch.Tensor,
-                        s: torch.Tensor,
-                        output_dtype: jnp.dtype,
-                        block_size: int = 128) -> torch.Tensor:
-    assert x.dim() == 2 and s.dim() == 2, "Both x and s must be 2D tensors"
-    M, N = x.shape
-
-    x = x.to(torch.float32)
-    s = s.to(torch.float32)
-    y = torch.empty_like(x)
-
-    M_main = (M // block_size) * block_size
-    N_main = (N // block_size) * block_size
-
-    if M_main > 0 and N_main > 0:
-        x_main = x[:M_main, :N_main]
-        s_main = s[:(M // block_size), :(N // block_size)]
-
-        x_reshaped = x_main.view(M // block_size, block_size, N // block_size,
-                                 block_size).permute(0, 2, 1, 3)
-        s_reshaped = s_main.view(M // block_size, N // block_size, 1, 1)
-        y_main = (x_reshaped * s_reshaped).permute(0, 2, 1,
-                                                   3).reshape(M_main, N_main)
-
-        y[:M_main, :N_main] = y_main
-
-    if N_main < N:
-        for i in range(0, M_main, block_size):
-            block = x[i:i + block_size, N_main:N]
-            scale = s[i // block_size, N // block_size]
-            y[i:i + block_size, N_main:N] = block * scale
-
-    if M_main < M:
-        for j in range(0, N, block_size):
-            block = x[M_main:M, j:j + block_size]
-            scale = s[M // block_size, j // block_size]
-            y[M_main:M, j:j + block_size] = block * scale
-
-    return y.to(j2t_dtype(jnp.dtype(output_dtype)))

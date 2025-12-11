@@ -73,7 +73,7 @@ class TestMLA(unittest.TestCase):
                 keyvalue_skh=keyvalue_skh_spec,
                 attn_o_tnh=attn_o_tnh_spec,
                 q_da_sharding=(None, ShardingAxisName.VOCAB),
-                anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None),
+                ac_sharding=(None, ShardingAxisName.MLP_TENSOR),
                 kv_da_sharding=(None, ShardingAxisName.VOCAB),
                 nhd_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
             )
@@ -165,7 +165,7 @@ class TestMLA(unittest.TestCase):
                 keyvalue_skh=keyvalue_skh_spec,
                 attn_o_tnh=attn_o_tnh_spec,
                 q_da_sharding=(None, ShardingAxisName.VOCAB),
-                anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None),
+                ac_sharding=(None, ShardingAxisName.MLP_TENSOR),
                 kv_da_sharding=(None, ShardingAxisName.VOCAB),
                 nhd_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
             )

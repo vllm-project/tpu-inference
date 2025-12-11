@@ -36,15 +36,35 @@ DEFAULT_MAX_NUM_BLOCKS_PER_REQ = 16
 
 DEFAULT_DEEPSEEK_FP8_CONFIG = {
     "qwix": {
-        "use_abstract_model":
-        True,
-        "scale_dtype":
-        "bfloat16",
+        "use_abstract_model": True,
+        "scale_dtype": "bfloat16",
         "rules": [
+            # Exclude router from quantization
             {
                 "module_path": ".*.custom_module.router.*",
                 "weight_qtype": None,
             },
+            # Attention layers: keep FP8 for weights and activations
+            {
+                "module_path": ".*.attn.*",
+                "weight_qtype": "float8_e4m3fn",
+                "act_qtype": "float8_e4m3fn",
+            },
+            # MoE experts: use FP4 for expert weights
+            {
+                "module_path": ".*.custom_module.*",
+                "weight_qtype": "float4_e2m1fn",
+                "act_qtype": "float8_e4m3fn",
+                "tile_size": 256,
+            },
+            # Shared experts: also FP4
+            {
+                "module_path": ".*.shared_experts.*",
+                "weight_qtype": "float4_e2m1fn",
+                "act_qtype": "float8_e4m3fn",
+                "tile_size": 256,
+            },
+            # Fallback: anything else defaults to FP8
             {
                 "module_path": ".*",
                 "weight_qtype": "float8_e4m3fn",
@@ -418,6 +438,7 @@ def get_default_qwix_quantization_config(
     if skip_quantization:
         return None
     # TODO (jacobplatin): remove this so that we can support various quantization types
+    # DeepSeek: default to mixed FP8 (attention) + FP4 (MoE experts)
     if model_type == "deepseek_v3" and quant_method == "fp8":
         return DEFAULT_DEEPSEEK_FP8_CONFIG
     elif model_type == "llama4" and quant_method == "compressed-tensors":
