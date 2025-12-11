@@ -4,7 +4,7 @@
 This module implements "Block-wise" or "Sub-channel" quantization.
 It contains:
 1. Standard 2D Quantized Matmul (quantized_matmul_2d)
-2. High-performance Tiled V7 Kernel (dispatch_real_v7)
+2. High-performance V7 Kernel (dispatch_real_v7) [Updated for standard layout]
 """
 
 import functools
@@ -31,6 +31,8 @@ BLOCK_K = 128
 BLOCK_B = 64
 SUPER_CHUNK = 16
 TILE_K_SIZE = BLOCK_K * SUPER_CHUNK
+
+# ... (Keep _quantize_array_2d, _validate_inputs_2d, _quantized_matmul_kernel_2d, quantized_matmul_2d as is) ...
 
 def _quantize_array_2d(
     x: jax.Array,
@@ -384,8 +386,17 @@ def _compute_quant_params(x_slice, w_scale_row, max_val, dtype):
     scale_factor = (x_max / max_val) * w_scale_row
     return x_q, scale_factor
 
-def _kernel_real_tiled_entry(x_ref, w_tiled_ref, scales_ref, out_ref, acc_vmem, *,
+def _kernel_real_tiled_entry(x_ref, w_ref, scales_ref, out_ref, acc_vmem, *,
                              batch_block_size, out_block_size, dtype):
+    """
+    Kernel entry for V7.
+    
+    Args:
+        x_ref: [Batch_Block, N_In]
+        w_ref: [Out_Block, N_In] (Standard Layout)
+        scales_ref: [SUPER_CHUNK, Out_Block] (Transposed Layout for alignment)
+        out_ref: [Batch_Block, Out_Block]
+    """
     acc_vmem[...] = jnp.zeros((batch_block_size, out_block_size), dtype=jnp.float32)
 
     # Determine constants based on dtype
@@ -396,17 +407,29 @@ def _kernel_real_tiled_entry(x_ref, w_tiled_ref, scales_ref, out_ref, acc_vmem, 
         max_val = 448.0
         dot_preferred = jnp.float32
 
-    def pipeline_step(x_chunk, w_chunk_4d, s_chunk_4d):
-        w_curr_super = w_chunk_4d[0, 0]
-        s_curr_super = s_chunk_4d[0, 0]
-
+    def pipeline_step(x_chunk, w_chunk_std, s_chunk_transposed):
+        # FIX: Transpose issue resolved by passing transposed scales from Python.
+        
         # --- Stage 0 ---
-        x_0 = x_chunk[:, 0:BLOCK_K]
-        w_0 = w_curr_super[0:BLOCK_K, :]
-        s_0 = s_curr_super[0, :][None, :]
+        x_0 = x_chunk[:, 0:BLOCK_K] # [B, K]
+        w_0 = w_chunk_std[:, 0:BLOCK_K] # [Out, K]
+        
+        # s_chunk_transposed is [SUPER_CHUNK, Out_Block]
+        # We take row 0. Shape [Out_Block]
+        s_0 = s_chunk_transposed[0, :][None, :] # Broadcast to [1, Out]
 
         x_q_curr, scale_curr = _compute_quant_params(x_0, s_0, max_val, dtype)
-        dot_curr = jax.lax.dot_general(x_q_curr, w_0, (((1,), (0,)), ((), ())), preferred_element_type=dot_preferred)
+        
+        # DOT PRODUCT:
+        # x_q_curr: [B, K]
+        # w_0:      [Out, K]
+        # Contract dim 1 of X and dim 1 of W.
+        # Output: [B, Out]
+        dot_curr = jax.lax.dot_general(
+            x_q_curr, w_0, 
+            (((1,), (1,)), ((), ())), # Contraction on Dim 1 for both
+            preferred_element_type=dot_preferred
+        )
         dot_prev = dot_curr
         scale_prev = scale_curr
 
@@ -416,11 +439,15 @@ def _kernel_real_tiled_entry(x_ref, w_tiled_ref, scales_ref, out_ref, acc_vmem, 
             k_end = (j + 1) * BLOCK_K
 
             x_next = x_chunk[:, k_start:k_end]
-            w_next = w_curr_super[k_start:k_end, :]
-            s_next = s_curr_super[j, :][None, :]
+            w_next = w_chunk_std[:, k_start:k_end] # Slice columns
+            s_next = s_chunk_transposed[j, :][None, :] # Row slice (aligned)
 
             x_q_next, scale_next = _compute_quant_params(x_next, s_next, max_val, dtype)
-            dot_next = jax.lax.dot_general(x_q_next, w_next, (((1,), (0,)), ((), ())), preferred_element_type=dot_preferred)
+            dot_next = jax.lax.dot_general(
+                x_q_next, w_next, 
+                (((1,), (1,)), ((), ())), 
+                preferred_element_type=dot_preferred
+            )
 
             acc_vmem[...] += dot_prev.astype(jnp.float32) * scale_prev
             dot_prev = dot_next
@@ -429,36 +456,90 @@ def _kernel_real_tiled_entry(x_ref, w_tiled_ref, scales_ref, out_ref, acc_vmem, 
         # --- Epilogue ---
         acc_vmem[...] += dot_prev.astype(jnp.float32) * scale_prev
 
-    n_k_chunks = w_tiled_ref.shape[1]
+    # Total K size
+    total_k = w_ref.shape[1]
+    n_k_chunks = total_k // TILE_K_SIZE
+
     pltpu.emit_pipeline(
         pipeline_step,
         grid=(n_k_chunks,),
         in_specs=[
+            # X: Slice [Batch, TILE_K]
             pl.BlockSpec((batch_block_size, TILE_K_SIZE), lambda i: (0, i)),
-            pl.BlockSpec((1, 1, TILE_K_SIZE, out_block_size), lambda i: (0, i, 0, 0)),
-            pl.BlockSpec((1, 1, SUPER_CHUNK, out_block_size), lambda i: (0, i, 0, 0))
+            # W: Slice [Out_Block, TILE_K] (Standard Layout)
+            pl.BlockSpec((out_block_size, TILE_K_SIZE), lambda i: (0, i)),
+            # Scales: Slice [SUPER_CHUNK, Out_Block] (Transposed)
+            # Access pattern: We want rows i*SUPER_CHUNK to (i+1)*SUPER_CHUNK
+            pl.BlockSpec((SUPER_CHUNK, out_block_size), lambda i: (i, 0))
         ]
-    )(x_ref, w_tiled_ref, scales_ref)
+    )(x_ref, w_ref, scales_ref)
 
     out_ref[...] = acc_vmem[...].astype(out_ref.dtype)
 
+
 @functools.partial(jax.jit, static_argnames=['out_block_size', 'quant_dtype'])
-def dispatch_real_v7(x: jax.Array, w_tiled: jax.Array, scales_tiled: jax.Array,
-                     out_block_size: int, quant_dtype: jnp.dtype):
+def dispatch_real_v7(
+    x: jax.Array, 
+    w_q: jax.Array, 
+    w_scale: jax.Array,
+    out_block_size: int, 
+    quant_dtype: jnp.dtype
+):
+    """
+    Main V7 Dispatcher. Accepts Standard Layout Weights.
+    
+    Args:
+        x: [Batch, N_In]
+        w_q: [N_Out, N_In]
+        w_scale: [N_Out, N_Blocks]
+    """
     bs, n_in = x.shape
-    n_outer, k_outer, k_tile, n_tile = w_tiled.shape
+    n_out, _ = w_q.shape
+    
+    # 1. Padding
     padded_bs = next_multiple(bs, BLOCK_B)
-    total_in_supported = k_outer * k_tile
+    padded_out = next_multiple(n_out, out_block_size)
+    padded_in = next_multiple(n_in, TILE_K_SIZE)
+    
+    if padded_bs > bs: 
+        x = jnp.pad(x, ((0, padded_bs - bs), (0, 0)))
+        
+    if padded_in > n_in:
+        padding_k = padded_in - n_in
+        x = jnp.pad(x, ((0, 0), (0, padding_k)))
+        w_q = jnp.pad(w_q, ((0, 0), (0, padding_k)))
+        # Pad scales. 1 scale per 128 (BLOCK_K) elements.
+        pad_blocks = padding_k // BLOCK_K
+        w_scale = jnp.pad(w_scale, ((0, 0), (0, pad_blocks)), constant_values=1.0)
 
-    if padded_bs > bs: x = jnp.pad(x, ((0, padded_bs - bs), (0, 0)))
-    if total_in_supported > n_in: x = jnp.pad(x, ((0, 0), (0, total_in_supported - n_in)))
+    if padded_out > n_out:
+        padding_out = padded_out - n_out
+        w_q = jnp.pad(w_q, ((0, padding_out), (0, 0)))
+        w_scale = jnp.pad(w_scale, ((0, padding_out), (0, 0)))
 
-    grid = (padded_bs // BLOCK_B, n_outer)
+    # 2. Transpose Scales on Host/HBM
+    # Scales are small, so this is cheap. 
+    # [N_Out, N_Blocks] -> [N_Blocks, N_Out]
+    w_scale_t = w_scale.T
 
+    # 3. Grid Setup
+    n_batch_blocks = padded_bs // BLOCK_B
+    n_out_blocks = padded_out // out_block_size
+    grid = (n_batch_blocks, n_out_blocks)
+    
+    total_in_supported = padded_in
+    n_blocks_total = w_scale_t.shape[0] # Transposed shape
+
+    # 4. BlockSpecs
     in_specs = [
+        # X: [Batch_Block, N_In]
         pl.BlockSpec((BLOCK_B, total_in_supported), lambda b, o: (b, 0)),
-        pl.BlockSpec((1, k_outer, k_tile, n_tile), lambda b, o: (o, 0, 0, 0)),
-        pl.BlockSpec((1, k_outer, SUPER_CHUNK, n_tile), lambda b, o: (o, 0, 0, 0)),
+        
+        # W_Q: [Out_Block, N_In]
+        pl.BlockSpec((out_block_size, total_in_supported), lambda b, o: (o, 0)),
+        
+        # W_Scale (Transposed): [N_Blocks, Out_Block]
+        pl.BlockSpec((n_blocks_total, out_block_size), lambda b, o: (0, o)),
     ]
 
     kernel = pl.pallas_call(
@@ -473,103 +554,10 @@ def dispatch_real_v7(x: jax.Array, w_tiled: jax.Array, scales_tiled: jax.Array,
             grid=grid,
             scratch_shapes=[pltpu.VMEM((BLOCK_B, out_block_size), jnp.float32)]
         ),
-        out_shape=jax.ShapeDtypeStruct((padded_bs, n_outer * out_block_size), jnp.bfloat16),
+        # FIX: Use x.dtype instead of hardcoded jnp.bfloat16
+        out_shape=jax.ShapeDtypeStruct((padded_bs, padded_out), x.dtype),
         compiler_params=pltpu.CompilerParams(vmem_limit_bytes=get_device_vmem_limit())
     )
 
-    out = kernel(x, w_tiled, scales_tiled)
-    return out[:bs, : n_outer * out_block_size]
-
-
-def repack_weights_for_v7(w_q, w_scale, out_block_size):
-    """
-    Reshapes standard (N_out, N_in) quantized weights into the 
-    V7 Tiled format: (N_out_outer, N_in_outer, TILE_K, Out_Block).
-    """
-    n_out, n_in = w_q.shape
-    
-    # 1. Calculate Target Dimensions
-    padded_n_out = next_multiple(n_out, out_block_size)
-    padded_n_in = next_multiple(n_in, TILE_K_SIZE)
-    
-    # 2. Pad Weights (w_q)
-    # Pad output dim with 0, input dim with 0
-    if padded_n_out > n_out or padded_n_in > n_in:
-        w_q = jnp.pad(w_q, ((0, padded_n_out - n_out), (0, padded_n_in - n_in)))
-
-    n_out_outer = padded_n_out // out_block_size
-    n_in_outer = padded_n_in // TILE_K_SIZE
-
-    # 3. Tile Weights
-    # Reshape to [N_out_outer, Out_Block, N_in_outer, Tile_K]
-    w_reshaped = w_q.reshape(n_out_outer, out_block_size, n_in_outer, TILE_K_SIZE)
-    # Transpose to [N_out_outer, N_in_outer, Tile_K, Out_Block]
-    w_tiled = w_reshaped.transpose(0, 2, 3, 1)
-
-    # 4. Process Scales (w_scale)
-    # Input w_scale is [N_out, N_blocks] where block = 128 (BLOCK_K)
-    # Target scales_tiled is [N_out_outer, N_in_outer, SUPER_CHUNK, Out_Block]
-    
-    # Pad Output Dimension
-    if padded_n_out > n_out:
-        w_scale = jnp.pad(w_scale, ((0, padded_n_out - n_out), (0, 0)))
-        
-    # Pad Input Blocks Dimension
-    # We need n_in / 128 blocks. TILE_K needs 16 blocks (SUPER_CHUNK).
-    current_n_blocks = w_scale.shape[1]
-    required_n_blocks = padded_n_in // BLOCK_K
-    
-    if required_n_blocks > current_n_blocks:
-        # Pad with 1.0 (identity scale) so padding doesn't affect accumulation
-        w_scale = jnp.pad(w_scale, ((0, 0), (0, required_n_blocks - current_n_blocks)), constant_values=1.0)
-        
-    # Reshape to [N_out_outer, Out_Block, N_in_outer, Super_Chunk]
-    scales_reshaped = w_scale.reshape(n_out_outer, out_block_size, n_in_outer, SUPER_CHUNK)
-    
-    # Transpose to [N_out_outer, N_in_outer, Super_Chunk, Out_Block]
-    scales_tiled = scales_reshaped.transpose(0, 2, 3, 1)
-    
-    return w_tiled, scales_tiled
-
-def quantized_matmul_v7_shim(
-    x: jax.Array,
-    w_q: jax.Array,
-    w_scale: jax.Array,
-    quant_block_size: int,
-    x_q_dtype: jnp.dtype = jnp.int8,
-    *,
-    batch_block_size: int = 64, # Ignored, V7 uses global BLOCK_B
-    out_block_size: int = 128
-) -> jax.Array:
-    """
-    Drop-in replacement for quantized_matmul_2d that routes to dispatch_real_v7.
-    """
-    # 1. Validation for V7 Constraints
-    if quant_block_size != BLOCK_K:
-        raise ValueError(f"V7 Kernel requires block_size={BLOCK_K}, got {quant_block_size}")
-    
-    # The V7 kernel provided creates quant params on the fly based on 'x_q_dtype'.
-    # It does not support W8A16 (skipping activation quantization) easily.
-    if x_q_dtype == x.dtype:
-         # Fallback to logic or raise warning. For the test pass, we assume Int8/Float8 intent.
-         pass
-
-    # 2. Repack Weights into V7 Layout
-    # Note: We do this inside JIT usually, or pre-process. 
-    # For the unit test compatibility, we do it here.
-    w_tiled, scales_tiled = repack_weights_for_v7(w_q, w_scale, out_block_size)
-    
-    # 3. Invoke V7 Kernel
-    # The V7 kernel handles X padding internally for the Batch dim, 
-    # but we must ensure X input dim matches the padded weights.
-    bs, n_in = x.shape
-    n_in_tiled = w_tiled.shape[1] * TILE_K_SIZE
-    
-    if n_in < n_in_tiled:
-        x = jnp.pad(x, ((0,0), (0, n_in_tiled - n_in)))
-        
-    out = dispatch_real_v7(x, w_tiled, scales_tiled, out_block_size, x_q_dtype)
-    
-    # 4. Slice Output to original shape
-    orig_n_out = w_q.shape[0]
-    return out[:bs, :orig_n_out].astype(x.dtype)
+    out = kernel(x, w_q, w_scale_t)
+    return out[:bs, :n_out]
