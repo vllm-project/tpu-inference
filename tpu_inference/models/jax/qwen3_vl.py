@@ -898,10 +898,13 @@ class Qwen3VLVisionTransformer(nnx.Module):
         patch_pos_embeds = pos_embeds[0] + pos_embeds[1] + pos_embeds[2] + pos_embeds[3]
 
         # Split embeddings for each image/video
-        split_sizes = [int(h * w) for h, w in zip(grid_hs, grid_ws)]
-        patch_pos_embeds_list = jnp.split(
-            patch_pos_embeds, jnp.cumsum(jnp.array(split_sizes[:-1]))
-        )
+        split_sizes = [h * w for h, w in zip(grid_hs, grid_ws)]
+
+        patch_pos_embeds_list = []
+        offset = 0
+        for size in split_sizes:
+            patch_pos_embeds_list.append(patch_pos_embeds[offset: offset + size])
+            offset += size
 
         # Rearrange embeddings to match patch ordering (with merge blocks)
         patch_pos_embeds_permute = []
