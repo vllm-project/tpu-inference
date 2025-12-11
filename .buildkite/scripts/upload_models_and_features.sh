@@ -52,7 +52,11 @@ for folder_path in $TARGET_FOLDERS; do
 #     For each found .yml file, generate a command step
     pipeline_yaml=$(cat <<EOF
 - label: "Upload: ${yml_file}"
-  command: "buildkite-agent pipeline upload ${yml_file}"
+  command: "TPU_SMALL_CORE_QUEUE=tpu_v6e_queue TPU_LARGE_CORE_QUEUE=tpu_v6e_8_queue buildkite-agent pipeline upload ${yml_file}"
+  agents:
+    queue: cpu
+- label: "Upload: TPUv7 ${yml_file}"
+  command: "TPU_SMALL_CORE_QUEUE=tpu_v7x_2_queue TPU_LARGE_CORE_QUEUE=tpu_v7x_8_queue IS_FOR_V7X=true TEST_KEY_PREFIX=tpu7x_ TEST_LABEL_PREFIX=TPU7x buildkite-agent pipeline upload ${yml_file}"
   agents:
     queue: cpu
 EOF

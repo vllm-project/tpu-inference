@@ -24,8 +24,9 @@ upload_pipeline() {
     VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
-    buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
-    buildkite-agent pipeline upload .buildkite/pipeline_jax_tpu7x.yml
+    TPU_SMALL_CORE_QUEUE=tpu_v6e_queue TPU_LARGE_CORE_QUEUE=tpu_v6e_8_queue buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
+    TPU_SMALL_CORE_QUEUE=tpu_v7x_2_queue TPU_LARGE_CORE_QUEUE=tpu_v7x_8_queue IS_FOR_V7X=true TEST_KEY_PREFIX=tpu7x_ TEST_LABEL_PREFIX=TPU7x buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
+    # buildkite-agent pipeline upload .buildkite/pipeline_jax_tpu7x.yml
     # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
     buildkite-agent pipeline upload .buildkite/main.yml
     buildkite-agent pipeline upload .buildkite/nightly_releases.yml

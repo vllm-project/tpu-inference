@@ -5,22 +5,24 @@
 # GPU memory. This streaming process is significantly faster than the traditional
 # disk-based loading method.
 steps:
-  - label: "Correctness tests for runai_model_streamer_loader"
-    key: "runai_model_streamer_loader_CorrectnessTest"
+  - label: "${TEST_LABEL_PREFIX} Correctness tests for runai_model_streamer_loader"
+    key: "${TEST_KEY_PREFIX}runai_model_streamer_loader_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_SMALL_CORE_QUEUE}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness
-  - label: "Record correctness test result for runai_model_streamer_loader"
-    key: "record_runai_model_streamer_loader_CorrectnessTest"
-    depends_on: "runai_model_streamer_loader_CorrectnessTest"
+  - label: "${TEST_LABEL_PREFIX} Record correctness test result for runai_model_streamer_loader"
+    key: "${TEST_KEY_PREFIX}record_runai_model_streamer_loader_CorrectnessTest"
+    depends_on: "${TEST_KEY_PREFIX}runai_model_streamer_loader_CorrectnessTest"
     env:
-      CI_TARGET: "runai_model_streamer_loader"
+      CI_TARGET: "${TEST_LABEL_PREFIX} runai_model_streamer_loader"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "feature support matrix"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh runai_model_streamer_loader_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TEST_KEY_PREFIX}runai_model_streamer_loader_CorrectnessTest
