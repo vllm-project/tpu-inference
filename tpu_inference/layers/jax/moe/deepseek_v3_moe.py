@@ -65,6 +65,8 @@ class DeepSeekV3Router(nnx.Module):
 
     router_bias_dtype: jnp.dtype = jnp.float32
 
+    use_moe_kernel: bool = False
+
     def get_topk_indices(self, scores_TE: Float) -> Float:
         """Get the topk indices of the scores.
 
@@ -111,7 +113,8 @@ class DeepSeekV3Router(nnx.Module):
 
         scores_TE = jnp.einsum("TD,DE -> TE", x_TD, self.kernel_DE.value)
         scores_TE = nnx.sigmoid(scores_TE)
-
+        if self.use_moe_kernel:
+            return scores_TE
         original_scores_TE = scores_TE
         topk_indices_TX = self.get_topk_indices(scores_TE)
         weights_TX = jnp.take_along_axis(original_scores_TE,

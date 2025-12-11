@@ -1,3 +1,4 @@
+import os
 import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
@@ -18,7 +19,7 @@ from tpu_inference.layers.jax.attention.deepseek_v3_attention import MLA
 from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
 from tpu_inference.layers.jax.moe.deepseek_v3_moe import (DeepSeekV3Router,
-                                                          SparseMoE)
+                                                          )
 from tpu_inference.layers.jax.moe.moe import MoE
 from tpu_inference.layers.jax.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
@@ -101,6 +102,19 @@ class DeepSeekV3(nnx.Module):
             logger.info("sparse matmul is enabled")
         else:
             logger.info("sparse matmul is disabled, using dense matmul")
+        self.use_fused_moe_kernel = bool(int(os.getenv("USE_MOE_EP_KERNEL", "0")))
+        self.use_vllm_moe_kernel = bool(int(os.getenv("USE_VLLM_MOE_KERNEL", "0")))
+        self.use_megablox = bool(int(os.getenv("USE_MEGABLOCKS", "0")))
+
+        assert sum([self.use_fused_moe_kernel, self.use_vllm_moe_kernel, self.use_megablox]) <= 1, "You can enable at most one MoE kernels." 
+
+        if self.use_fused_moe_kernel:
+            logger.info("Fused MoE kernel is enabled")
+        elif self.use_vllm_moe_kernel:
+            logger.info("VLLM MoE kernel is enabled")
+        elif self.use_megablox:
+            logger.info("Mega Blocks is enabled")
+
         self.mesh = mesh
 
         self.weight_loader = DeepSeekV3WeightLoader(
@@ -200,60 +214,41 @@ class DeepSeekV3(nnx.Module):
                 rngs=self.rng,
                 routed_scaling_factor=2.5,
                 dtype=dtype,
+                use_moe_kernel=(self.use_fused_moe_kernel or self.use_vllm_moe_kernel),
                 activation_ffw_td=('data', None),
                 ed_sharding=(None, None),
                 e_sharding=(None, ))
-            if self.sparse_matmul:
-                # TODO: orginize the SparseMoE and DenseMoE better given they share most interfaces
-                custom_module = SparseMoE(
+
+            custom_module = MoE(
+                dtype=dtype,
+                num_local_experts=num_local_experts,
+                apply_expert_weight_before_computation=False,
+                hidden_size=hidden_size,
+                intermediate_size_moe=moe_intermediate_size,
+                num_experts_per_tok=num_experts_per_token,
+                mesh=self.mesh,
+                hidden_act=hidden_act,
+                rngs=self.rng,
+                random_init=self.random_init,
+                activation_ffw_td=('data', 'model'),
+                activation_ffw_ted=('data', None, 'model'),
+                edf_sharding=(None , 'model', 'expert'),
+                efd_sharding=(None , 'expert', 'model'),
+                use_sparse_moe=self.sparse_matmul,
+                quantized_dtype=self.weight_loader.quant_dtype
+                if self.weight_loader.is_model_quantized else None,
+                use_vllm_moe_kernel=self.use_vllm_moe_kernel,
+                use_fused_moe_kernel=self.use_fused_moe_kernel,
+                use_megablox=self.use_megablox,
+                router=router) if is_moe_layer else DenseFFW(
                     dtype=dtype,
-                    num_local_experts=num_local_experts,
-                    apply_expert_weight_before_computation=False,
-                    hidden_size=hidden_size,
-                    intermediate_size_moe=moe_intermediate_size,
-                    num_experts_per_tok=num_experts_per_token,
-                    mesh=self.mesh,
                     hidden_act=hidden_act,
+                    hidden_size=hidden_size,
+                    intermediate_size=ffw_intermediate_size,
                     rngs=self.rng,
                     random_init=self.random_init,
-                    activation_ffw_td=('data', 'model'),
-                    activation_ffw_ted=('data', None, 'model'),
-                    edf_sharding=(None , 'model', 'expert'),
-                    efd_sharding=(None , 'expert', 'model'),
-                    quantized_dtype=self.weight_loader.quant_dtype
-                    if self.weight_loader.is_model_quantized else None,
-                    router=router) if is_moe_layer else DenseFFW(
-                        dtype=dtype,
-                        hidden_act=hidden_act,
-                        hidden_size=hidden_size,
-                        intermediate_size=ffw_intermediate_size,
-                        rngs=self.rng,
-                        random_init=self.random_init,
-                        df_sharding=(None, ('model', 'expert')),
-                        fd_sharding=(('model', 'expert'), None))
-            else:
-                custom_module = MoE(
-                    dtype=dtype,
-                    num_local_experts=num_local_experts,
-                    apply_expert_weight_before_computation=False,
-                    hidden_size=hidden_size,
-                    intermediate_size_moe=moe_intermediate_size,
-                    hidden_act=hidden_act,
-                    rngs=self.rng,
-                    random_init=self.random_init,
-                    activation_ffw_td=('data', 'model'),
-                    activation_ffw_ted=('data', None, None),
-                    edf_sharding=('expert', 'model', None),
-                    efd_sharding=('expert', None, 'model'),
-                    router=router) if is_moe_layer else DenseFFW(
-                        dtype=dtype,
-                        hidden_act=hidden_act,
-                        hidden_size=hidden_size,
-                        intermediate_size=ffw_intermediate_size,
-                        rngs=self.rng,
-                        random_init=self.random_init,
-                        df_sharding=(None, ('model', 'expert')),
-                        fd_sharding=(('model', 'expert'), None))
+                    df_sharding=(None, ('model', 'expert')),
+                    fd_sharding=(('model', 'expert'), None))
 
             shared_experts = DenseFFW(dtype=dtype,
                                       hidden_act=hidden_act,
