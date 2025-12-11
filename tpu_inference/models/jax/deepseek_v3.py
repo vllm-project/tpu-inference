@@ -67,7 +67,7 @@ class DeepSeekV3(nnx.Module):
         self.rng = nnx.Rngs(rng)
 
         # NOTE: the default is 61
-        num_layers: int = 20
+        num_layers: int = vllm_config.model_config.hf_config.num_hidden_layers
         num_local_experts: int = 256
 
         vocab_size: int = 129280
@@ -107,28 +107,9 @@ class DeepSeekV3(nnx.Module):
 
         self.random_init = force_random_weights or self.vllm_config.additional_config.get(
             "random_weights", False)
-        self.sparse_matmul = self.vllm_config.additional_config.get(
-            "sparse_matmul", False)
-
-        if isinstance(self.sparse_matmul, str):
-            self.sparse_matmul = self.sparse_matmul.lower() == "true"
-        else:
-            self.sparse_matmul = bool(self.sparse_matmul)
-
-        if self.sparse_matmul:
-            logger.info("sparse matmul is enabled")
-        else:
-            logger.info("sparse matmul is disabled, using dense matmul")
         self.mesh = mesh
 
-        self.use_fused_moe_kernel = bool(int(os.getenv("USE_MOE_EP_KERNEL", "0")))
-        self.use_vllm_moe_kernel = bool(int(os.getenv("USE_VLLM_MOE_KERNEL", "0")))
-        assert self.use_fused_moe_kernel + self.use_vllm_moe_kernel <= 1, "You can enable at most one MoE kernels." 
-
-        if self.use_fused_moe_kernel:
-            logger.info("Fused MoE kernel is enabled")
-        elif self.use_vllm_moe_kernel:
-            logger.info("VLLM MoE kernel is enabled")
+        self._process_moe_kernel_flag()
 
         self.weight_loader = DeepSeekV3WeightLoader(
             vllm_config=vllm_config,
@@ -267,6 +248,7 @@ class DeepSeekV3(nnx.Module):
                 if self.weight_loader.is_model_quantized else None,
                 use_vllm_moe_kernel=self.use_vllm_moe_kernel,
                 use_fused_moe_kernel=self.use_fused_moe_kernel,
+                use_megablox=self.use_megablox,
                 router=router) if is_moe_layer else DenseFFW(
                     dtype=dtype,
                     hidden_act=hidden_act,
@@ -349,6 +331,31 @@ class DeepSeekV3(nnx.Module):
 
         logger.debug("\n### LM Head ###")
         nnx.display(self.lm_head)
+
+    def _process_moe_kernel_flag(self):
+        self.use_fused_moe_kernel = bool(int(os.getenv("USE_MOE_EP_KERNEL", "0")))
+        self.use_vllm_moe_kernel = bool(int(os.getenv("USE_VLLM_MOE_KERNEL", "0")))
+        self.sparse_matmul = bool(int(os.getenv("USE_SPARSE_MATMUL", "0")))
+        self.use_megablox = bool(int(os.getenv("USE_MEGABLOCKS", "0")))
+        self.use_ragged_dot = bool(int(os.getenv("USE_RAGGED_DOT", "1")))
+
+        assert sum([self.use_fused_moe_kernel, self.use_vllm_moe_kernel]) <= 1, "You can enable at most one MoE kernels." 
+
+        if self.use_fused_moe_kernel:
+            logger.info("Fused MoE kernel is enabled")
+        elif self.use_vllm_moe_kernel:
+            logger.info("VLLM MoE kernel is enabled")        
+        elif self.sparse_matmul:
+            logger.info("Sparse Matmul is enabled")
+            if self.use_megablox:
+                logger.info("Mega Blocks is enabled for GMM in Sparse Matmul")
+            elif self.use_ragged_dot:
+                logger.info("Ragged Dot is enabled for GMM in Sparse Matmul")
+            else:
+                logger.error("Neither Ragged Dot nor Mega Blocks is enabled for GMM if using Sparse Matmul")
+\
+        else:
+            logger.info("Dense Matmul is enabled")
 
     # For compatibility with flax.
     def apply(self, variables, *args, **kwargs):
