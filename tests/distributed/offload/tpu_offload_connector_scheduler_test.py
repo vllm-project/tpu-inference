@@ -141,22 +141,18 @@ class TestTPUOffloadConnectorScheduler:
             assert num_external_matched_tokens == num_blocks_to_load * scheduler.block_size
 
         # check scheduler internal states
+        # cache_hits
+        assert "req1" in scheduler._external_cache_hits
+        assert scheduler._external_cache_hits["req1"] == num_matched_tokens
         if num_blocks_to_load > 0:
             # load_spec
-            assert "req1" in scheduler.load_specs
-            load_spec = scheduler.load_specs["req1"]
+            assert "req1" in scheduler._pre_load_specs
+            load_spec = scheduler._pre_load_specs["req1"]
             assert load_spec.num_matched_tokens == num_matched_tokens
             assert not load_spec.can_load
-            allocated_chunk_ids = [
-                chunk.chunk_id for chunk in allocated_chunks
-            ]
-            load_src_chunk_ids = allocated_chunk_ids[num_computed_blocks:]
-            assert load_spec.src_chunks == load_src_chunk_ids
+            assert len(load_spec.src_chunks) == num_blocks_to_load
             assert load_spec.num_skip_leading_tokens == num_computed_tokens
             assert len(load_spec.dst_blocks) == num_blocks_to_load
-            # cache_hits
-            assert "req1" in scheduler._external_cache_hits
-            assert scheduler._external_cache_hits["req1"] == num_matched_tokens
             # staging_buffer
             assert "req1" in scheduler.staging_buffer_manager._blocks_for_load
             assert scheduler.staging_buffer_manager._blocks_for_load[
@@ -164,8 +160,7 @@ class TestTPUOffloadConnectorScheduler:
             assert scheduler.staging_buffer_manager.get_num_free_staging_blocks(
             ) == num_staging_blocks - num_blocks_to_load
         else:
-            assert "req1" not in scheduler.load_specs
-            assert "req1" not in scheduler._external_cache_hits
+            assert "req1" not in scheduler._pre_load_specs
             assert "req1" not in scheduler.staging_buffer_manager._blocks_for_load
 
     def test_update_state_after_alloc(self, scheduler_factory):
@@ -185,8 +180,14 @@ class TestTPUOffloadConnectorScheduler:
         request = create_request(req_id, [0] * num_prompt_tokens,
                                  scheduler.block_size)
 
+        # init offload_manager state
+        matched_block_hashes = request.block_hashes[:num_matched_blocks]
+        allocated_chunks, _ = scheduler.offload_manager.allocate_for_save(
+            matched_block_hashes)
+        scheduler.offload_manager.complete_save(matched_block_hashes)
+
         # Setup a pending load
-        scheduler.load_specs[req_id] = MagicMock(
+        scheduler._pre_load_specs[req_id] = MagicMock(
             num_matched_tokens=num_matched_tokens,
             num_skip_leading_tokens=num_computed_blocks * scheduler.block_size,
             dst_blocks=[-1] * num_blocks_to_load,
