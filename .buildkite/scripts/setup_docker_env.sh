@@ -49,9 +49,6 @@ setup_environment() {
 
   echo "Cleanup complete."
 
-  echo "Installing Python dependencies"
-  python3 -m pip install --progress-bar off buildkite-test-collector==0.1.9
-  echo "Python dependencies installed"
   if [ -z "${BUILDKITE:-}" ]; then
       VLLM_COMMIT_HASH=""
       TPU_INFERENCE_HASH=$(git log -n 1 --pretty="%H")
