@@ -17,9 +17,13 @@
 # --- Skip build if only docs/icons changed ---
 echo "--- :git: Checking changed files"
 
-# Get a list of all files changed in this commit
-FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r "$BUILDKITE_COMMIT")
+# Get merge base.
+MERGE_BASE=$(git merge-base main HEAD)
 
+# Get a list of all files changed in the PR
+FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r "$MERGE_BASE" HEAD)
+
+echo "Merge base: $MERGE_BASE"
 echo "Files changed:"
 echo "$FILES_CHANGED"
 
