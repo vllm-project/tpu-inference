@@ -126,6 +126,10 @@ class TestEagleLlama3ForCausalLM:
     def test_forward_pass(self, mock_vllm_config: MockVllmConfig, rng: PRNGKey,
                           mesh: Mesh, mock_model_inputs):
         """Tests the forward pass of the EagleLlama3ForCausalLM model."""
+        # TODO(Qiliang Cui): Remove when issue is resolved.
+        if 'TPU7x' in jax.devices()[0].device_kind:
+            pytest.skip("Skipping test on TPU TPU7x.")
+
         draft_model_config = mock_vllm_config.speculative_config.draft_model_config
         hf_config = draft_model_config.hf_config
         model = EagleLlama3ForCausalLM(mock_vllm_config, rng, mesh)

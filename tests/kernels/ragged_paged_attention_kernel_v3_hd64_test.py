@@ -99,7 +99,7 @@ class RaggedPagedAttentionHeadDim64KernelTest(jtu.JaxTestCase):
                     (0, 0),
                     (0, 0),
                 ),
-                constant_values=0,
+                constant_values=jnp.nan,
             ).reshape(
                 -1,
                 page_size,
@@ -122,7 +122,7 @@ class RaggedPagedAttentionHeadDim64KernelTest(jtu.JaxTestCase):
             kv_cache,
             ((0, num_pages - kv_cache.shape[0]), (0, 0), (0, 0), (0, 0),
              (0, 0)),
-            constant_values=0,
+            constant_values=jnp.nan,
         )
         page_indices = jnp.stack(page_indices_list, axis=0)
         page_indices = jnp.pad(
@@ -176,7 +176,9 @@ class RaggedPagedAttentionHeadDim64KernelTest(jtu.JaxTestCase):
         )
         output = output[:cu_q_lens[distribution[-1]]]
 
-        dtype_bits = dtypes.bit_width(jnp.dtype(kv_dtype))
+        dtype_bits = (dtypes.bit_width(jnp.dtype(kv_dtype)) if hasattr(
+            dtypes, "bit_width") else dtypes.itemsize_bits(
+                jnp.dtype(kv_dtype)))
         tols = {
             32: 0.15,
             16: 0.2,

@@ -31,17 +31,17 @@ class JaxCommonLinearConfig:
         self.output_sizes = [layer.output_size]
         self.weight_sharding = P(None, None)
         self.fuse_matmuls = True
-        self.enable_sequence_parallelism = vllm_config.compilation_config.pass_config.enable_sequence_parallelism
+        self.enable_sp = vllm_config.compilation_config.pass_config.enable_sp
         self.input_sharding = None
         self.output_sharding = None
 
         if isinstance(layer, RowParallelLinear):
             self.weight_sharding = P(None, "model")
-            if self.enable_sequence_parallelism:
+            if self.enable_sp:
                 self.output_sharding = P("model", None)
         elif isinstance(layer, ColumnParallelLinear):
             self.weight_sharding = P("model", None)
-            if self.enable_sequence_parallelism:
+            if self.enable_sp:
                 self.input_sharding = P("model", None)
 
             if isinstance(layer, MergedColumnParallelLinear) or isinstance(
@@ -69,7 +69,7 @@ class JaxCommonLinearConfig:
             self.n_shards = self.mesh.shape.get(self.weight_sharding[0], 1)
 
     def get_input_sharding(self, x: torchax.tensor.Tensor):
-        if self.enable_sequence_parallelism:
+        if self.enable_sp:
             token_num = x.shape[0]
             # NOTE(chengjiyao): make sure the sharded token_num is larger than TPU_SECOND_LAST_MINOR
             if token_num // self.mesh.shape["model"] >= TPU_SECOND_LAST_MINOR:
@@ -79,7 +79,7 @@ class JaxCommonLinearConfig:
         return self.input_sharding
 
     def get_output_sharding(self, x: torchax.tensor.Tensor):
-        if self.enable_sequence_parallelism:
+        if self.enable_sp:
             token_num = x.shape[0]
             # NOTE(chengjiyao): make sure the sharded token_num is larger than TPU_SECOND_LAST_MINOR
             if token_num // self.mesh.shape["model"] >= TPU_SECOND_LAST_MINOR:

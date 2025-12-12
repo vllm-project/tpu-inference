@@ -12,7 +12,6 @@ from vllm.platforms.interface import Platform, PlatformEnum
 from tpu_inference import envs
 from tpu_inference.layers.common.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import to_jax_dtype, to_torch_dtype
 
 if TYPE_CHECKING:
     from vllm.attention.backends.registry import AttentionBackendEnum
@@ -54,18 +53,14 @@ class TpuPlatform(Platform):
     def get_attn_backend_cls(cls, selected_backend: "AttentionBackendEnum",
                              head_size: int, dtype: jnp.dtype,
                              kv_cache_dtype: Optional[str], block_size: int,
-                             use_v1: bool, use_mla: bool, has_sink: bool,
-                             use_sparse: bool, attn_type: Any) -> str:
+                             use_mla: bool, has_sink: bool, use_sparse: bool,
+                             use_mm_prefix: bool, attn_type: Any) -> str:
         from vllm.attention.backends.registry import AttentionBackendEnum
         if selected_backend != AttentionBackendEnum.PALLAS:
             logger.info("Cannot use %s backend on TPU.", selected_backend)
 
-        if use_v1:
-            logger.info("Using Pallas V1 backend.")
-            return "tpu_inference.layers.vllm.attention.PallasAttentionBackend"
-        else:
-            logger.info("Using Pallas backend.")
-            return "vllm.attention.backends.pallas.PallasAttentionBackend"
+        logger.info("Using Pallas V1 backend.")
+        return "tpu_inference.layers.vllm.attention.PallasAttentionBackend"
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
@@ -149,26 +144,6 @@ class TpuPlatform(Platform):
         if compilation_config.backend == "":
             compilation_config.backend = "openxla"
 
-        # If we use vLLM's model implementation in PyTorch, we should set it with torch version of the dtype.
-        impl = envs.MODEL_IMPL_TYPE
-
-        # NOTE(xiang): convert dtype to jnp.dtype
-        # NOTE(wenlong): skip this logic for mm model preprocessing
-        # For mm model preprocessors, it may need the output dtype to be torch.
-        # In order to avoid a PR to vLLM, we postpone the dtype checking during
-        # tpu_worker initialization
-        if not vllm_config.scheduler_config.is_multimodal_model or impl == "vllm":
-            model_dtype = vllm_config.model_config.dtype
-            try:
-                dtype = to_jax_dtype(model_dtype)
-            except ValueError:
-                logger.warning(f"{model_dtype=} is not supported. "
-                               "Falling back to jnp.bfloat16")
-                dtype = jnp.bfloat16
-            if impl == "vllm":
-                dtype = to_torch_dtype(dtype)
-            vllm_config.model_config.dtype = dtype
-
         # TODO(cuiq): remove this dependency.
         from vllm.v1.attention.backends.pallas import PallasAttentionBackend
         cache_config.block_size = PallasAttentionBackend.get_page_size(
@@ -176,8 +151,7 @@ class TpuPlatform(Platform):
         min_page_size = PallasAttentionBackend.get_min_page_size(vllm_config)
         if min_page_size > cache_config.block_size:
             logger.warning(
-                "Increase the page size from %s to %s to make sure there's"
-                "no SMEM OOM",
+                "Increase the page size from %s to %s to avoid SMEM OOM",
                 cache_config.block_size,
                 min_page_size,
             )

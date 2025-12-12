@@ -28,9 +28,9 @@ TPU_SECOND_LAST_MINOR = 8
 
 # Map vllm dtype string that doesn't exactly match jax dtype string name.
 _VLLM_DTYPE_STR_TO_JAX_DTYPE = {
-    "fp8": jnp.float8_e4m3fn,
-    "fp8_e4m3": jnp.float8_e4m3fn,
-    "fp8_e5m2": jnp.float8_e5m2,
+    "fp8": jnp.float8_e4m3fn.dtype,
+    "fp8_e4m3": jnp.float8_e4m3fn.dtype,
+    "fp8_e5m2": jnp.float8_e5m2.dtype,
 }
 
 
@@ -190,7 +190,8 @@ def get_padded_num_heads(num_heads: int, sharding_size: int) -> int:
 
 
 def get_dtype_packing(dtype):
-    bits = dtypes.bit_width(dtype)
+    bits = (dtypes.bit_width(dtype)
+            if hasattr(dtypes, "bit_width") else dtypes.itemsize_bits(dtype))
     return 32 // bits
 
 
@@ -275,11 +276,11 @@ def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:
 
 def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:
     """
-    A wrapper function of vllm.utils.get_hash_fn_by_name to support builtin
+    A wrapper function of vllm.utils.hashing.get_hash_fn_by_name to support builtin
     """
     if hash_fn_name == "builtin":
         return hash
-    return utils.get_hash_fn_by_name(hash_fn_name)
+    return utils.hashing.get_hash_fn_by_name(hash_fn_name)
 
 
 def quantize_kv(key: jax.Array, value: jax.Array,

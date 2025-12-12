@@ -13,7 +13,8 @@ def align_to(x, a):
 
 
 def get_dtype_bitwidth(dtype):
-    return dtypes.bit_width(dtype)
+    return (dtypes.bit_width(dtype)
+            if hasattr(dtypes, "bit_width") else dtypes.itemsize_bits(dtype))
 
 
 def get_dtype_packing(dtype):

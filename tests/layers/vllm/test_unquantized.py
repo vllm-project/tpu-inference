@@ -119,7 +119,7 @@ def test_row_parallel_linear(model, bias, mesh, enable_sp):
         max_num_seqs=4,
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sequence_parallelism = enable_sp
+    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
 
     input_tensor = torch.rand(10, 4096, dtype=dtype) / 10
     input_tensor = input_tensor.to('cpu')
@@ -192,7 +192,7 @@ def test_column_parallel_linear(model, bias, mesh, enable_sp):
         max_num_seqs=4,
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sequence_parallelism = enable_sp
+    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
 
     input_tensor = torch.rand(10, 4096, dtype=dtype) / 10
     input_tensor = input_tensor.to('cpu')
@@ -265,7 +265,7 @@ def test_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
         max_num_seqs=4,
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sequence_parallelism = enable_sp
+    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
 
     input_tensor = torch.rand(10, 4096, dtype=dtype) / 10
     input_tensor = input_tensor.to('cpu')
@@ -344,7 +344,7 @@ def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
         max_num_seqs=4,
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sequence_parallelism = enable_sp
+    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
 
     input_tensor = torch.rand(10, 4096, dtype=dtype) / 10
     input_tensor = input_tensor.to('cpu')
@@ -415,6 +415,11 @@ def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
 @pytest.mark.parametrize("topk", [2])
 def test_fused_moe(use_ep, mesh, num_tokens, intermediate_size, hidden_size,
                    num_experts, topk):
+
+    # TODO(Qiliang Cui): Remove when issue is resolved.
+    if 'TPU7x' in jax.devices()[0].device_kind:
+        pytest.skip("Skipping test on TPU TPU7x.")
+
     torch.manual_seed(42)
     dtype = torch.bfloat16
 
@@ -494,6 +499,10 @@ def test_fused_moe(use_ep, mesh, num_tokens, intermediate_size, hidden_size,
 @pytest.mark.parametrize("topk", [2])
 def test_fused_moe_bias(mesh, num_tokens, intermediate_size, hidden_size,
                         num_experts, topk):
+    # TODO(Qiliang Cui): Remove when issue is resolved.
+    if 'TPU7x' in jax.devices()[0].device_kind:
+        pytest.skip("Skipping test on TPU TPU7x.")
+
     torch.manual_seed(42)
     dtype = torch.bfloat16
 
@@ -560,6 +569,10 @@ def test_fused_moe_bias(mesh, num_tokens, intermediate_size, hidden_size,
 @pytest.mark.parametrize("activation", ["silu", "swigluoai"])
 def test_fused_moe_activation(mesh, num_tokens, intermediate_size, hidden_size,
                               num_experts, topk, activation):
+    # TODO(Qiliang Cui): Remove when issue is resolved.
+    if 'TPU7x' in jax.devices()[0].device_kind:
+        pytest.skip("Skipping test on TPU TPU7x.")
+
     torch.manual_seed(42)
     dtype = torch.bfloat16
 
@@ -619,6 +632,9 @@ def test_fused_moe_activation(mesh, num_tokens, intermediate_size, hidden_size,
 @pytest.mark.parametrize("has_bias", [False, True])
 def test_fused_moe_use_kernel(mesh, num_tokens, intermediate_size, hidden_size,
                               num_experts, topk, has_bias):
+    # TODO(Qiliang Cui): Remove when issue is resolved.
+    if 'TPU7x' in jax.devices()[0].device_kind:
+        pytest.skip("Skipping test on TPU TPU7x.")
 
     if jax.local_device_count() < 8:
         pytest.skip("Test requires at least 8 devices")
