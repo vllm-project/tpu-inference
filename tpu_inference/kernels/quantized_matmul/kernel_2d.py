@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 2D (Block-wise) Quantized Matrix Multiplication Kernel.
-Optimized for 256x256 MXU architectures using Software Pipelining.
+
+This kernel implements 'Block-wise' quantization, where independent scaling factors
+are calculated for small groups of input features (e.g., every 128 elements). 
+This yields higher accuracy than standard row-wise quantization.
 """
 
 import functools
-from typing import Tuple, Any
+from typing import Tuple
 
 import jax
 import jax.numpy as jnp
@@ -15,225 +18,245 @@ from jax.experimental.pallas import tpu as pltpu
 from tpu_inference.kernels.quantized_matmul.util import next_multiple
 from tpu_inference.kernels.quantized_matmul.tuned_block_sizes import get_device_vmem_limit
 
-# ==============================================================================
-# Constants & Configuration
-# ==============================================================================
-
+# The number of quantized weights that share one scale
 QUANT_GROUP_SIZE = 128
-PIPELINE_STEPS = 16
-CACHE_LOAD_SIZE = QUANT_GROUP_SIZE * PIPELINE_STEPS
 
-# ==============================================================================
-# Helper Logic (VPU)
-# ==============================================================================
+# Number of quantization groups for a single fetch from HBM.
+GROUPS_PER_LOAD = 16
+
+# The total amount of data loaded into VMEM at once
+CACHE_LOAD_SIZE = QUANT_GROUP_SIZE * GROUPS_PER_LOAD
+
+# Max and min of fp8 and int8 types for scaling
+INT8_MIN, INT8_MAX = -128.0, 127.0
+FP8_MIN, FP8_MAX = -448.0, 448.0
+
 
 def quantize_and_scale_group(
-    act_group: jax.Array, 
+    activation_group: jax.Array, 
     weight_scale: jax.Array, 
     quant_max: float, 
     dtype: jnp.dtype
 ) -> Tuple[jax.Array, jax.Array]:
     """
-    Quantizes a specific group of input features and calculates the fused scale.
+    Quantizes a specific group of input features and calculates the scale.
+    
+    Args:
+        activation_group: Slice of input activations [Batch, QuantGroupSize].
+        weight_scale: Pre-loaded weight scales [1, OutputLoadSize].
+        quant_max: Max value for the target dtype (e.g., 127.0).
+        dtype: Target quantization dtype (e.g., jnp.int8, jnp.float8_e4m3fn).
+
+    Returns:
+        activation_quantized: Quantized activations.
+        combined_scale: The final float32 scale factor for the accumulator.
     """
     # 1. Cast to FP32.
-    act_f32 = act_group.astype(jnp.float32)
+    activation_f32 = activation_group.astype(jnp.float32)
     
-    # 2. Compute Max per Row (Batch Item).
-    act_max = jnp.max(jnp.abs(act_f32), axis=1, keepdims=True)
-    act_max = jnp.maximum(act_max, 1e-6)
+    # 2. Compute max of each row of the group 
+    activation_max = jnp.max(jnp.abs(activation_f32), axis=1, keepdims=True)
+    activation_max = jnp.maximum(activation_max, 1e-6)
 
-    # 3. Quantize Activations.
-    scale_to_int = quant_max / act_max
-    act_quant_f32 = jnp.floor((act_f32 * scale_to_int) + 0.5)
-
+    # 3. Quantize Activations
+    scale_to_int = quant_max / activation_max
+    
+    activation_quant_f32 = jnp.floor((activation_f32 * scale_to_int) + 0.5)
     if dtype == jnp.int8:
-        act_quant = jnp.clip(act_quant_f32, -128.0, 127.0).astype(jnp.int8)
+        activation_quantized = jnp.clip(activation_quant_f32, INT8_MIN, INT8_MAX).astype(dtype)
     else:
-        act_quant = jnp.clip(act_quant_f32, -448.0, 448.0).astype(dtype)
+        activation_quantized = jnp.clip(activation_quant_f32, FP8_MIN, FP8_MAX).astype(dtype)
 
-    # 4. Compute Combined Scale.
-    combined_scale = (act_max / quant_max) * weight_scale
-    
-    return act_quant, combined_scale
+    # 4. Compute combined scale for accumulator
+    combined_scale = (activation_max / quant_max) * weight_scale
+    return activation_quantized, combined_scale
 
-
-# ==============================================================================
-# Optimized Pipeline Kernel
-# ==============================================================================
 
 def _fused_matmul_kernel(
-    # --- Global Memory References ---
-    activations_ref,    # [Batch, In]
-    weights_ref,        # [Out, In]
-    scales_ref,         # [Groups, Out] (Transposed)
-    output_ref,         # [Batch, Out]
-    
-    # --- VMEM Scratchpad ---
-    accumulator,        # [BatchTile, OutTile]
-    
-    # --- Static Constants ---
+    # HBM References
+    activations_ref,    # [Batch, TotalInputFeatures]
+    weights_ref,        # [TotalOutputFeatures, TotalInputFeatures]
+    scales_ref,         # [TotalQuantGroups, TotalOutputFeatures] (Transposed)
+    output_ref,         # [Batch, TotalOutputFeatures]
+    # VMEM Scratchpad
+    accumulator,        # [BatchLoad, OutputLoad]
     *,
-    batch_tile_size: int, 
-    out_tile_size: int, 
+    batch_load_size: int, 
+    output_load_size: int, 
     quant_dtype: jnp.dtype
 ):
-    # 1. Initialize Accumulator
+    """
+    The Pallas Kernel executing on the TPU.
+    
+    Implements a 'Fused' strategy:
+    1. Loads raw BF16 activations and Int8/FP8 weights.
+    2. Quantizes the activations on the fly (VPU).
+    3. Multiplies them (MXU).
+    """
+    # 1. Initialize Accumulator (FP32)
     accumulator[...] = jnp.zeros(
-        (batch_tile_size, out_tile_size), dtype=jnp.float32
+        (batch_load_size, output_load_size), dtype=jnp.float32
     )
 
-    # 2. Config
+    #  2. Config based on dtype
     if quant_dtype == jnp.int8:
-        quant_max = 127.0
+        quant_max = INT8_MAX
         dot_dtype = jnp.int32 
     else:
-        quant_max = 448.0
+        quant_max = FP8_MAX
         dot_dtype = jnp.float32 
 
-    # 3. Pipeline Stage
+    # 3. Defines the work done on a single cache load (QUANT_GROUP_SIZE * GROUPS_PER_LOAD)
     def _process_cache_load(
-        act_cache: jax.Array,    # [BatchTile, CacheLoadSize]
-        weight_cache: jax.Array, # [OutTile, CacheLoadSize]
-        scales_cache: jax.Array  # [PipelineSteps, OutTile]
+        activation_cache: jax.Array,    # [BatchLoad, CacheLoadSize]
+        weight_cache: jax.Array,        # [OutputLoad, CacheLoadSize]
+        scales_cache: jax.Array         # [GroupsPerLoad, OutputLoad]
     ):
-        # --- PROLOGUE ---
-        a_0 = act_cache[:, 0:QUANT_GROUP_SIZE] 
-        w_0 = weight_cache[:, 0:QUANT_GROUP_SIZE]
-        s_0 = scales_cache[0, :][None, :]
+        # A. Get 0th group
+        activation_group = activation_cache[:, 0:QUANT_GROUP_SIZE] 
+        weight_group = weight_cache[:, 0:QUANT_GROUP_SIZE]
+        
+        # B. Scales are loaded as [GroupsPerLoad, OutputLoad]. Take the 0-th row and broadcast.
+        scale_group = scales_cache[0, :][None, :]
 
-        # VPU: Fused Quantization
-        a_q_curr, scale_curr = quantize_and_scale_group(
-            a_0, s_0, quant_max, quant_dtype
+        # C. Quantize group
+        activation_quantized, accumulator_scale = quantize_and_scale_group(
+            activation_group, scale_group, quant_max, quant_dtype
         )
         
-        # MXU
-        dot_curr = jax.lax.dot_general(
-            a_q_curr, w_0, (((1,), (1,)), ((), ())), preferred_element_type=dot_dtype
+        # D. Matrix multiplication
+        dot_product = jax.lax.dot_general(
+            activation_quantized, weight_group, 
+            (((1,), (1,)), ((), ())), 
+            preferred_element_type=dot_dtype
         )
         
-        dot_prev, scale_prev = dot_curr, scale_curr
+        # E. Hold the result of the previous step while the next step runs
+        dot_product_prev = dot_product
+        accumulator_scale_prev = accumulator_scale
 
-        # --- LOOP ---
-        for step in range(1, PIPELINE_STEPS):
-            start = step * QUANT_GROUP_SIZE
-            end   = (step + 1) * QUANT_GROUP_SIZE
+        # F. Iterate through the remaining groups in this cache load.
+        # While the MXU computes step 'i', the VPU accumulates step 'i-1'.
+        for group_idx in range(1, GROUPS_PER_LOAD):
+            start_feat = group_idx * QUANT_GROUP_SIZE
+            end_feat   = (group_idx + 1) * QUANT_GROUP_SIZE
             
-            # 1. Load Next
-            a_next = act_cache[:, start:end]
-            w_next = weight_cache[:, start:end]
-            s_next = scales_cache[step, :][None, :]
+            # F.1 Load next group data
+            activation_group_next = activation_cache[:, start_feat:end_feat]
+            weight_group_next = weight_cache[:, start_feat:end_feat]
+            scale_group_next = scales_cache[group_idx, :][None, :]
 
-            # 2. VPU: Quantize Next
-            a_q_next, scale_next = quantize_and_scale_group(
-                a_next, s_next, quant_max, quant_dtype
+            # F.2 Quantize next group
+            activation_quantized_next, accumulator_scale_next = quantize_and_scale_group(
+                activation_group_next, scale_group_next, quant_max, quant_dtype
             )
             
-            # 3. MXU
-            dot_next = jax.lax.dot_general(
-                a_q_next, w_next, (((1,), (1,)), ((), ())), preferred_element_type=dot_dtype
+            # F.3 Multiply the next group
+            dot_product_next = jax.lax.dot_general(
+                activation_quantized_next, weight_group_next, 
+                (((1,), (1,)), ((), ())), 
+                preferred_element_type=dot_dtype
             )
 
-            # 4. Accumulate Previous
-            accumulator[...] += dot_prev.astype(jnp.float32) * scale_prev
+            # F.4 Add previous result to accumulator while performing dot product
+            accumulator[...] += dot_product_prev.astype(jnp.float32) * accumulator_scale_prev
             
-            # 5. Shift
-            dot_prev, scale_prev = dot_next, scale_next
+            # F.5 Shift data to prepare for next step
+            dot_product_prev = dot_product_next
+            accumulator_scale_prev = accumulator_scale_next
 
-        # --- EPILOGUE ---
-        accumulator[...] += dot_prev.astype(jnp.float32) * scale_prev
+        # G. Add the last result to the accumulator
+        accumulator[...] += dot_product_prev.astype(jnp.float32) * accumulator_scale_prev
 
-    # 4. Emit Pipeline
-    total_in = weights_ref.shape[1]
-    n_cache_loads = total_in // CACHE_LOAD_SIZE
-
+    # 4. Emit the pallas Pipeline
+    total_features = weights_ref.shape[1]
+    n_cache_loads = total_features // CACHE_LOAD_SIZE
     pltpu.emit_pipeline(
         _process_cache_load,
         grid=(n_cache_loads,),
         in_specs=[
-            # Act: [BatchTile, CacheLoad]
-            pl.BlockSpec((batch_tile_size, CACHE_LOAD_SIZE), lambda i: (0, i)),
-            # Weight: [OutTile, CacheLoad]
-            pl.BlockSpec((out_tile_size, CACHE_LOAD_SIZE), lambda i: (0, i)),
-            # Scales: [PipelineSteps, OutTile]
-            pl.BlockSpec((PIPELINE_STEPS, out_tile_size), lambda i: (i, 0))
+            # Activation: [BatchLoad, CacheLoadSize]
+            pl.BlockSpec((batch_load_size, CACHE_LOAD_SIZE), lambda i: (0, i)),
+            # Weight: [OutputLoad, CacheLoadSize]
+            pl.BlockSpec((output_load_size, CACHE_LOAD_SIZE), lambda i: (0, i)),
+            # Scales: [GroupsPerLoad, OutputLoad] 
+            pl.BlockSpec((GROUPS_PER_LOAD, output_load_size), lambda i: (i, 0))
         ]
     )(activations_ref, weights_ref, scales_ref)
 
-    # 5. Store
+    # 5. Store result to HBM
     output_ref[...] = accumulator[...].astype(output_ref.dtype)
 
 
-# ==============================================================================
-# Kernel Launch & Implementation
-# ==============================================================================
-
-@functools.partial(jax.jit, static_argnames=['out_tile_size', 'quant_dtype', 'batch_tile_size'])
+@functools.partial(jax.jit, static_argnames=['output_load_size', 'quant_dtype', 'batch_load_size'])
 def _quantized_matmul_impl(
-    activations, weights_quantized, weight_scales, 
-    out_tile_size, quant_dtype, batch_tile_size
+    activations, 
+    weights_quantized, 
+    weight_scales, 
+    output_load_size, 
+    quant_dtype, 
+    batch_load_size
 ):
     """
-    Internal helper: Handles padding/alignment and launches the Pallas kernel.
+    Handles padding/alignment and launches the Pallas kernel.
     """
     bs, n_in = activations.shape
     n_out = weights_quantized.shape[0]
     
-    # 1. Padding
-    padded_bs = next_multiple(bs, batch_tile_size)
-    padded_out = next_multiple(n_out, out_tile_size)
+    # 1. Padding dims to multiples of their load sizes
+    padded_bs = next_multiple(bs, batch_load_size)
+    padded_out = next_multiple(n_out, output_load_size)
     padded_in = next_multiple(n_in, CACHE_LOAD_SIZE)
     
-    # Pad Activations
+    # 2. Pad Activations
     if padded_bs > bs or padded_in > n_in:
         pad_b = padded_bs - bs
         pad_in = padded_in - n_in
         activations = jnp.pad(activations, ((0, pad_b), (0, pad_in)))
         
-    # Pad Weights and Scales
+    # 3. Pad Weights and Scales
     if padded_out > n_out or padded_in > n_in:
         pad_out = padded_out - n_out
         pad_in = padded_in - n_in
         weights_quantized = jnp.pad(weights_quantized, ((0, pad_out), (0, pad_in)))
         
-        # Scales Padding Correction:
-        # We must calculate target groups based on PADDED input size.
+        # Scales are indexed by QuantGroup, so we pad based on the padded input size
         target_groups = padded_in // QUANT_GROUP_SIZE
         n_groups = weight_scales.shape[1]
         
         if target_groups > n_groups:
-            # Note: We do not pad 'pad_out' to scales here if it was handled above or logic differs.
-            # Usually weight_scales matches weights in dim 0.
+            # Pad the groups dimension
             weight_scales = jnp.pad(weight_scales, ((0, pad_out), (0, target_groups - n_groups)), constant_values=1.0)
         elif pad_out > 0:
+            # Only pad the output dimension if groups matched (unlikely)
             weight_scales = jnp.pad(weight_scales, ((0, pad_out), (0, 0)), constant_values=1.0)
 
-    # 2. Transpose Scales
+    # 4. Transpose Scales
+    # [Output, TotalGroups] -> [TotalGroups, Output]
     w_scale_t = weight_scales.T
 
-    # 3. Grid Definition
-    n_batch_tiles = padded_bs // batch_tile_size
-    n_out_tiles = padded_out // out_tile_size
-    grid = (n_batch_tiles, n_out_tiles)
+    # 5. Create the grid
+    n_batch_loads = padded_bs // batch_load_size
+    n_output_loads = padded_out // output_load_size
+    grid = (n_batch_loads, n_output_loads)
     
-    # 4. Block Specifications
+    # 6. Define the in/out specs for the kernel
     in_specs = [
-        # Act: Load [BatchTile, AllFeatures]
-        pl.BlockSpec((batch_tile_size, padded_in), lambda b, o: (b, 0)),
-        # Wgt: Load [OutTile, AllFeatures]
-        pl.BlockSpec((out_tile_size, padded_in), lambda b, o: (o, 0)),
-        # Scl: Load [AllGroups, OutTile]
-        pl.BlockSpec((w_scale_t.shape[0], out_tile_size), lambda b, o: (0, o)),
+        # Activation: Load [BatchLoad, AllFeatures] (Kernel handles slicing)
+        pl.BlockSpec((batch_load_size, padded_in), lambda b, o: (b, 0)),
+        # Weight: Load [OutputLoad, AllFeatures]
+        pl.BlockSpec((output_load_size, padded_in), lambda b, o: (o, 0)),
+        # Scale: Load [AllGroups, OutputLoad]
+        pl.BlockSpec((w_scale_t.shape[0], output_load_size), lambda b, o: (0, o)),
     ]
+    out_spec = pl.BlockSpec((batch_load_size, output_load_size), lambda b, o: (b, o))
 
-    out_spec = pl.BlockSpec((batch_tile_size, out_tile_size), lambda b, o: (b, o))
-
-    # 5. Launch
+    # 7. Execute the kernel
     kernel = pl.pallas_call(
         functools.partial(
             _fused_matmul_kernel, 
-            batch_tile_size=batch_tile_size, 
-            out_tile_size=out_tile_size, 
+            batch_load_size=batch_load_size, 
+            output_load_size=output_load_size, 
             quant_dtype=quant_dtype
         ),
         grid_spec=pltpu.PrefetchScalarGridSpec(
@@ -241,12 +264,11 @@ def _quantized_matmul_impl(
             in_specs=in_specs,
             out_specs=out_spec,
             grid=grid,
-            scratch_shapes=[pltpu.VMEM((batch_tile_size, out_tile_size), jnp.float32)]
+            scratch_shapes=[pltpu.VMEM((batch_load_size, output_load_size), jnp.float32)]
         ),
         out_shape=jax.ShapeDtypeStruct((padded_bs, padded_out), activations.dtype),
         compiler_params=pltpu.CompilerParams(vmem_limit_bytes=get_device_vmem_limit())
     )
-    
     out = kernel(activations, weights_quantized, w_scale_t)
     return out[:bs, :n_out]
 
@@ -255,20 +277,17 @@ def quantized_matmul_2d(
     activations: jax.Array, 
     weights_quantized: jax.Array, 
     weight_scales: jax.Array, 
-    out_block_size: int, 
-    quant_dtype: Any
+    output_load_size: int, 
+    quant_dtype: jnp.dtype
 ) -> jax.Array:
     """
-    Main Entry Point for 2D Block-wise Quantized Matmul.
-    
-    Automatically adapts the Batch Tile Size based on the input batch size
-    to maximize hardware occupancy.
+    Entry point for 2D block-wise quantized matmul.
 
     Args:
         activations: Input tensor [Batch, InputFeatures].
         weights_quantized: Weight tensor [OutputFeatures, InputFeatures].
         weight_scales: Scale tensor [OutputFeatures, InputFeatures // 128].
-        out_block_size: Tiling size for output features (recommend 128 or 256).
+        output_load_size: Tiling size for output features (recommend 128 or 256).
         quant_dtype: Target quantization format (jnp.int8 or jnp.float8_e4m3fn).
     
     Returns:
@@ -276,18 +295,19 @@ def quantized_matmul_2d(
     """
     batch_size = activations.shape[0]
 
-    if batch_size <= 8:   tile_b = 8
-    elif batch_size <= 16: tile_b = 16
-    elif batch_size <= 32: tile_b = 32
-    elif batch_size <= 64: tile_b = 64
-    elif batch_size <= 128: tile_b = 128
-    else: tile_b = 256
+    # Improves overall performance at different sizes
+    if batch_size <= 8:   batch_load = 8
+    elif batch_size <= 16: batch_load = 16
+    elif batch_size <= 32: batch_load = 32
+    elif batch_size <= 64: batch_load = 64
+    elif batch_size <= 128: batch_load = 128
+    else: batch_load = 256
 
     return _quantized_matmul_impl(
         activations, 
         weights_quantized, 
         weight_scales, 
-        out_tile_size=out_block_size, 
+        output_load_size=output_load_size, 
         quant_dtype=quant_dtype, 
-        batch_tile_size=tile_b
+        batch_load_size=batch_load
     )
