@@ -416,10 +416,6 @@ def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
 def test_fused_moe(use_ep, mesh, num_tokens, intermediate_size, hidden_size,
                    num_experts, topk):
 
-    # TODO(Qiliang Cui): Remove when issue is resolved.
-    if 'TPU7x' in jax.devices()[0].device_kind:
-        pytest.skip("Skipping test on TPU TPU7x.")
-
     torch.manual_seed(42)
     dtype = torch.bfloat16
 
@@ -499,9 +495,6 @@ def test_fused_moe(use_ep, mesh, num_tokens, intermediate_size, hidden_size,
 @pytest.mark.parametrize("topk", [2])
 def test_fused_moe_bias(mesh, num_tokens, intermediate_size, hidden_size,
                         num_experts, topk):
-    # TODO(Qiliang Cui): Remove when issue is resolved.
-    if 'TPU7x' in jax.devices()[0].device_kind:
-        pytest.skip("Skipping test on TPU TPU7x.")
 
     torch.manual_seed(42)
     dtype = torch.bfloat16
@@ -569,9 +562,6 @@ def test_fused_moe_bias(mesh, num_tokens, intermediate_size, hidden_size,
 @pytest.mark.parametrize("activation", ["silu", "swigluoai"])
 def test_fused_moe_activation(mesh, num_tokens, intermediate_size, hidden_size,
                               num_experts, topk, activation):
-    # TODO(Qiliang Cui): Remove when issue is resolved.
-    if 'TPU7x' in jax.devices()[0].device_kind:
-        pytest.skip("Skipping test on TPU TPU7x.")
 
     torch.manual_seed(42)
     dtype = torch.bfloat16
