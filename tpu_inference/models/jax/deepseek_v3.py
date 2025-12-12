@@ -591,16 +591,22 @@ class DeepSeekV3WeightLoader:
             scale = scale.to(torch.float32).numpy().astype(self.scale_dtype)
         else:
             cast_type = model_weight.value.dtype
-            torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
-
-            if torch_view_type:
-                # Avoid unnecessary upcasting and mem copy by viewing the tensor's
-                # raw data as integers before converting to a JAX array.
-                weight_np = jnp.array(
-                    weight.view(torch_view_type).numpy()).view(cast_type)
+            # Special-case: FP4 values stored as FP8 for compatibility.
+            # If the model expects float4_e2m1fn but the checkpoint provides FP8,
+            # convert by numeric value (float32) then cast to float4.
+            if cast_type == jnp.float4_e2m1fn and weight.dtype == torch.float8_e4m3fn:
+                weight_np = jnp.array(weight.float().numpy()).astype(cast_type)
             else:
-                raise ValueError(
-                    f"Unsupported dtype for tensor conversion: {cast_type}")
+                torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+
+                if torch_view_type:
+                    # Avoid unnecessary upcasting and mem copy by viewing the tensor's
+                    # raw data as integers before converting to a JAX array.
+                    weight_np = jnp.array(
+                        weight.view(torch_view_type).numpy()).view(cast_type)
+                else:
+                    raise ValueError(
+                        f"Unsupported dtype for tensor conversion: {cast_type}")
 
             if scale is not None:
                 scale = scale.to(torch.float32).numpy().astype(self.scale_dtype)
