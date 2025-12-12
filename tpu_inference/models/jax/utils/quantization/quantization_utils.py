@@ -44,6 +44,11 @@ DEFAULT_DEEPSEEK_FP8_CONFIG = {
                 "module_path": ".*.custom_module.router.*",
                 "weight_qtype": None,
             },
+            # Avoid the combine expert ops
+            {
+                "module_path": ".*combine_experts.*",
+                "weight_qtype": None,
+            },
             # Attention layers: keep FP8 for weights and activations
             {
                 "module_path": ".*.attn.*",
@@ -55,16 +60,15 @@ DEFAULT_DEEPSEEK_FP8_CONFIG = {
                 "module_path": ".*.custom_module.*",
                 "weight_qtype": "float4_e2m1fn",
                 "act_qtype": "float8_e4m3fn",
-                "tile_size": 256,
+                "tile_size": 512,
             },
             # Shared experts: also FP4
             {
                 "module_path": ".*.shared_experts.*",
                 "weight_qtype": "float4_e2m1fn",
                 "act_qtype": "float8_e4m3fn",
-                "tile_size": 256,
+                "tile_size": 512,
             },
-            # Fallback: anything else defaults to FP8
             {
                 "module_path": ".*",
                 "weight_qtype": "float8_e4m3fn",
