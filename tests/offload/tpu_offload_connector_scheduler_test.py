@@ -9,7 +9,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.request import Request
 
-from tpu_inference.distributed.offload.tpu_offload_connector import (
+from tpu_inference.offload.tpu_offload_connector import (
     RequestTracker, TPUOffloadConnectorScheduler)
 
 _DEFAULT_BLOCK_SIZE = 16

@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import sys
 from collections import OrderedDict
 from typing import Any, Optional
 
-from tpu_inference.distributed.offload.utils import CpuChunkId
 from tpu_inference.logger import init_logger
+from tpu_inference.offload.utils import CpuChunkId
 
 logger = init_logger(__name__)
 

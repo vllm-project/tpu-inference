@@ -12,7 +12,7 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
-          python3 -m pytest -s -v /workspace/tpu_inference/tests/distributed/offload/tpu_offload_accuracy_test.py
+          python3 -m pytest -s -v /workspace/tpu_inference/tests/offload/tpu_offload_accuracy_test.py
   - label: "Record correctness test result for KV Cache Offload"
     key: "record_KV_Cache_Offload_CorrectnessTest"
     depends_on: "KV_Cache_Offload_CorrectnessTest"

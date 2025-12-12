@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Scheduler side execution:
 TPUOffloadConnectorScheduler manages the state of KV cache loading and saving for
@@ -112,13 +111,14 @@ if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
 
 from tpu_inference import envs
-from tpu_inference.distributed.offload.cpu_backend import LocalCPUBackend
-from tpu_inference.distributed.offload.offload_manager import (
-    LRUCacheManager, StagingBufferManager)
-from tpu_inference.distributed.offload.utils import (
-    CPU_OFFLOADING_SWAP_OP_TYPE, CpuChunkId, KVCacheSwapFn, ReqId,
-    get_kv_cache_swap_fn, jitted_insert_kv_cache_slices)
 from tpu_inference.logger import init_logger
+from tpu_inference.offload.cpu_backend import LocalCPUBackend
+from tpu_inference.offload.offload_manager import (LRUCacheManager,
+                                                   StagingBufferManager)
+from tpu_inference.offload.utils import (CPU_OFFLOADING_SWAP_OP_TYPE,
+                                         CpuChunkId, KVCacheSwapFn, ReqId,
+                                         get_kv_cache_swap_fn,
+                                         jitted_insert_kv_cache_slices)
 from tpu_inference.runner.kv_cache_manager import KVCacheManager
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
