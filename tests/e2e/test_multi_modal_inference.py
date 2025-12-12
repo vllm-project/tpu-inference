@@ -26,7 +26,6 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes):
     """
     Runs multi-modal inference and verifies the output.
     """
-    os.environ['SKIP_JAX_PRECOMPILE'] = '1'  # Skip warmup to save time.
     os.environ[
         'VLLM_XLA_CHECK_RECOMPILATION'] = '0'  # Allow compilation during execution.
 
@@ -67,6 +66,7 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes):
             "fps": 1,
         },
         limit_mm_per_prompt={modality: 1},
+        enforce_eager=True,  # Skip warmup to save time.
     )
     engine_args = asdict(engine_args)
     if engine_args.get("additional_config") is None:

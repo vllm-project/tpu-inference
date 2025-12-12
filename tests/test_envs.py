@@ -57,18 +57,10 @@ def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
 
 def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     # Ensure clean environment for boolean vars by setting to default "0"
-    monkeypatch.setenv("SKIP_JAX_PRECOMPILE", "0")
     monkeypatch.setenv("VLLM_XLA_CHECK_RECOMPILATION", "0")
     monkeypatch.setenv("NEW_MODEL_DESIGN", "0")
     monkeypatch.setenv("ENABLE_QUANTIZED_MATMUL_KERNEL", "0")
     monkeypatch.setenv("USE_MOE_EP_KERNEL", "0")
-
-    # Test SKIP_JAX_PRECOMPILE (default False)
-    assert envs.SKIP_JAX_PRECOMPILE is False
-    monkeypatch.setenv("SKIP_JAX_PRECOMPILE", "1")
-    assert envs.SKIP_JAX_PRECOMPILE is True
-    monkeypatch.setenv("SKIP_JAX_PRECOMPILE", "0")
-    assert envs.SKIP_JAX_PRECOMPILE is False
 
     # Test VLLM_XLA_CHECK_RECOMPILATION (default False)
     assert envs.VLLM_XLA_CHECK_RECOMPILATION is False
@@ -233,7 +225,6 @@ def test_dir_returns_all_env_vars():
     assert len(env_vars) == len(environment_variables)
     assert "JAX_PLATFORMS" in env_vars
     assert "TPU_NAME" in env_vars
-    assert "SKIP_JAX_PRECOMPILE" in env_vars
     assert "VLLM_XLA_CHECK_RECOMPILATION" in env_vars
     assert "MODEL_IMPL_TYPE" in env_vars
 

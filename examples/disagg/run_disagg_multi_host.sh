@@ -63,7 +63,6 @@ for ((i=0; i<NUM_HOSTS_PER_INSTANCE; i++)); do
         -e TPU_KV_TRANSFER_PORT="${KV_PORT}" \
         -e TPU_SIDE_CHANNEL_PORT="${SIDE_PORT}" \
         -e RAY_DEDUP_LOGS="0" \
-        -e SKIP_JAX_PRECOMPILE="1" \
         \
         -e TPU_CHIPS_PER_PROCESS_BOUNDS="1,1,1" \
         -e TPU_PROCESS_BOUNDS="2,2,1" \
@@ -95,6 +94,7 @@ docker exec node-0 /bin/bash -c \
     --gpu-memory-utilization 0.3 \
     --tensor-parallel-size 4 \
     --kv-transfer-config '{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_producer\"}' \
+    --enforce-eager \
     > /root/logs/prefill.txt 2>&1 &"
 set +x
 
@@ -137,7 +137,6 @@ for ((i=0; i<NUM_HOSTS_PER_INSTANCE; i++)); do
         -e TPU_KV_TRANSFER_PORT="${KV_PORT}" \
         -e TPU_SIDE_CHANNEL_PORT="${SIDE_PORT}" \
         -e RAY_DEDUP_LOGS="0" \
-        -e SKIP_JAX_PRECOMPILE="1" \
         \
         -e TPU_CHIPS_PER_PROCESS_BOUNDS="1,1,1" \
         -e TPU_PROCESS_BOUNDS="2,2,1" \
@@ -169,6 +168,7 @@ docker exec node-20 /bin/bash -c \
     --gpu-memory-utilization 0.3 \
     --tensor-parallel-size 4 \
     --kv-transfer-config '{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\"}' \
+    --enforce-eager \
     > /root/logs/decode.txt 2>&1 &"
 set +x
 
