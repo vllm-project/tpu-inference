@@ -160,7 +160,8 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             num_queries_per_block=num_queries_per_block,
             vmem_limit_bytes=vmem_limit_bytes,
         )
-        output = output[:cu_q_lens[distribution[-1]]]
+        print(output.shape)
+        # output = output[:cu_q_lens[distribution[-1]]]
 
         dtype_bits = dtypes.bit_width(jnp.dtype(kv_dtype))
         tols = {

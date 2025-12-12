@@ -26,7 +26,7 @@ init_fn = nnx.initializers.uniform()
 class Qwen3Attention(nnx.Module):
 
     def __init__(self, config: Qwen3Config, dtype: jnp.dtype, rng: nnx.Rngs,
-                 mesh: Mesh, kv_cache_dtype: str, layer_id: int):
+                 mesh: Mesh, kv_cache_dtype: str):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
@@ -43,8 +43,6 @@ class Qwen3Attention(nnx.Module):
                                                     sharding_size)
         self.num_kv_heads = utils.get_padded_num_heads(self.num_kv_heads,
                                                        sharding_size)
-
-        self.layer_id = layer_id
 
         self.mesh = mesh
 
@@ -95,50 +93,9 @@ class Qwen3Attention(nnx.Module):
         self._k_scale = 1.0
         self._v_scale = 1.0
         self.kv_cache_quantized_dtype = None
-        self.calculcate_kv_scale = True
-        self.count = 0
         if kv_cache_dtype != "auto":
             self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
                 kv_cache_dtype)
-
-        self.load_scales()
-
-    def load_scales(self):
-        import os
-        import pickle
-        save_dir = f"qwen3_scales/layer_{self.layer_id}"
-        with open(os.path.join(save_dir, "k_scale.pkl"), "rb") as f:
-            self._k_scale = pickle.load(f)
-        with open(os.path.join(save_dir, "v_scale.pkl"), "rb") as f:
-            self._v_scale = pickle.load(f)
-
-    def calc_kv_scales(self, query, key, value):
-        is_float = jnp.issubdtype(self.kv_cache_quantized_dtype, jnp.floating)
-        dtype_info = jnp.finfo(
-            self.kv_cache_quantized_dtype) if is_float else jnp.iinfo(
-                self.kv_cache_quantized_dtype)
-        dtype_max = float(dtype_info.max)
-
-        self._k_scale = (jnp.abs(key).max() / dtype_max).astype(jnp.float32)
-        self._v_scale = (jnp.abs(value).max() / dtype_max).astype(jnp.float32)
-        self.calculcate_kv_scale = False
-
-        import os
-        import pickle
-
-        def _save_scales_to_disk(k_scale_val, v_scale_val, layer_id_val):
-            save_dir = f"qwen3_scales/layer_{layer_id_val}"
-            os.makedirs(save_dir, exist_ok=True)
-
-            with open(os.path.join(save_dir, "k_scale.pkl"), "wb") as f:
-                pickle.dump(k_scale_val.astype(jnp.float32).item(), f)
-            with open(os.path.join(save_dir, "v_scale.pkl"), "wb") as f:
-                pickle.dump(v_scale_val.astype(jnp.float32).item(), f)
-
-            print(f"Saved scales for layer {layer_id_val}")
-
-        jax.debug.callback(_save_scales_to_disk, self._k_scale, self._v_scale,
-                           self.layer_id)
 
     def __call__(
         self,
@@ -163,8 +120,6 @@ class Qwen3Attention(nnx.Module):
         v = self.v_proj(x)
         # o: (T, N, H)
         q_scale = k_scale = v_scale = None
-        # if self.calculcate_kv_scale:
-        #     self.calc_kv_scales(q, k, v)
         if self.kv_cache_quantized_dtype:
             # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
             # q_scale = self._q_scale
@@ -192,7 +147,7 @@ class Qwen3Attention(nnx.Module):
 class Qwen3DecoderLayer(Qwen2DecoderLayer):
 
     def __init__(self, config: Qwen3Config, dtype: jnp.dtype, rng: nnx.Rngs,
-                 mesh: Mesh, kv_cache_dtype: str, layer_id: int):
+                 mesh: Mesh, kv_cache_dtype: str):
         rms_norm_eps = config.rms_norm_eps
         hidden_size = config.hidden_size
 
@@ -207,8 +162,7 @@ class Qwen3DecoderLayer(Qwen2DecoderLayer):
                                         dtype=dtype,
                                         rng=rng,
                                         mesh=mesh,
-                                        kv_cache_dtype=kv_cache_dtype,
-                                        layer_id=layer_id)
+                                        kv_cache_dtype=kv_cache_dtype)
         self.post_attention_layernorm = nnx.RMSNorm(
             hidden_size,
             epsilon=rms_norm_eps,
@@ -248,8 +202,8 @@ class Qwen3Model(Qwen2Model):
                 rng=rng,
                 mesh=mesh,
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
-                kv_cache_dtype=vllm_config.cache_config.cache_dtype,
-                layer_id=i) for i in range(hf_config.num_hidden_layers)
+                kv_cache_dtype=vllm_config.cache_config.cache_dtype)
+            for _ in range(hf_config.num_hidden_layers)
         ]
         self.norm = nnx.RMSNorm(
             hidden_size,

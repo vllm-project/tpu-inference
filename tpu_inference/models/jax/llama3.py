@@ -121,8 +121,15 @@ class LlamaAttention(nnx.Module):
         )
 
         self._q_scale = 1.0
-        self._k_scale = 1.0
-        self._v_scale = 1.0
+        # [total_num_pages, page_size, num_kv_heads, 1]
+        self._k_scale = nnx.Variable(
+            jnp.zeros((1422, 256, self.num_kv_heads, 1)),
+            dtype=jnp.float32,
+        )
+        self._v_scale = nnx.Variable(
+            jnp.zeros((1422, 256, self.num_kv_heads, 1)),
+            dtype=jnp.float32,
+        )
         self.kv_cache_quantized_dtype = None
         if kv_cache_dtype != "auto":
             self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
@@ -146,15 +153,16 @@ class LlamaAttention(nnx.Module):
         # v: (T, K, H)
         v = self.v_proj(x)
         # o: (T, N, H)
-        q_scale = k_scale = v_scale = None
-        if self.kv_cache_quantized_dtype:
-            # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
-            # q_scale = self._q_scale
-            k_scale = self._k_scale
-            v_scale = self._v_scale
-            k, v = utils.quantize_kv(k, v, self.kv_cache_quantized_dtype,
-                                     k_scale, v_scale)
-        new_kv_cache, outputs = attention(
+        # if self.kv_cache_quantized_dtype:
+        #     # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
+        #     # q_scale = self._q_scale
+        #     k_scale = self._k_scale
+        #     v_scale = self._v_scale
+
+        #     k, v = utils.quantize_kv(k, v, self.kv_cache_quantized_dtype,
+        #                              k_scale, v_scale)
+
+        new_kv_cache, outputs, self._k_scale, self._v_scale = attention(
             kv_cache,
             q,
             k,
@@ -162,9 +170,9 @@ class LlamaAttention(nnx.Module):
             attention_metadata,
             self.mesh,
             self.head_dim_original,
-            q_scale=q_scale,
-            k_scale=k_scale,
-            v_scale=v_scale,
+            q_scale=None,
+            k_scale=self._k_scale.value,
+            v_scale=self._v_scale.value,
         )
         # (T, D)
         o = self.o_proj(outputs)
@@ -374,3 +382,16 @@ class LlamaForCausalLM(nnx.Module):
                         model=self,
                         metadata_map=metadata_map,
                         mesh=self.mesh)
+
+        for layer in self.model.layers:
+            attn = layer.self_attn
+            if hasattr(attn._k_scale, 'value') and isinstance(
+                    attn._k_scale.value, jax.ShapeDtypeStruct):
+                # Using the shape and dtype from the abstract struct to initialize zeros
+                attn._k_scale.value = jnp.zeros(
+                    attn._k_scale.value.shape, dtype=attn._k_scale.value.dtype)
+
+            if hasattr(attn._v_scale, 'value') and isinstance(
+                    attn._v_scale.value, jax.ShapeDtypeStruct):
+                attn._v_scale.value = jnp.zeros(
+                    attn._v_scale.value.shape, dtype=attn._v_scale.value.dtype)
