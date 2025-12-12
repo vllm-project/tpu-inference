@@ -2,7 +2,6 @@ Feature,CorrectnessTest,PerformanceTest
 "Chunked Prefill",✅,✅
 "DCN-based P/D disaggregation",to be added,to be added
 "KV cache host offloading",to be added,to be added
-"Llama 4 Maverick",to be added,to be added
 "LoRA_Torch",❌,N/A
 "Multimodal Inputs",✅,❌
 "Out-of-tree model support",❌,N/A
