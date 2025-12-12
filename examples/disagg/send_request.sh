@@ -63,14 +63,17 @@ LONG_PROMPTS=(
 echo "---------------------------------------------------"
 echo "Target: $ENDPOINT"
 echo "Model:  $MODEL"
-echo "Sending 20 requests (cycling through 20 detailed prompts)..."
+echo "Sending requests (cycling through all detailed prompts)..."
 echo "---------------------------------------------------"
 
-for i in {1..20}
-do
-    # Calculate which prompt to use (Modulo math to cycle 0-19)
-    INDEX=$(( (i - 1) % 20 ))
-    CURRENT_PROMPT="${LONG_PROMPTS[$INDEX]}"
+#combine the SHORT_PROMPTs and LONG_PROMPTS into a single array
+ALL_PROMPTS=("${SHORT_PROMPTs[@]}" "${LONG_PROMPTS[@]}")
+NUM_ALL_PROMPTS=${#ALL_PROMPTS[@]}
+
+for i in $(seq 1 "$NUM_ALL_PROMPTS"); do
+    # Calculate which prompt to use (Modulo math to cycle through all prompts)
+    INDEX=$(( (i - 1) % NUM_ALL_PROMPTS ))
+    CURRENT_PROMPT="${ALL_PROMPTS[$INDEX]}"
 
     echo ""
     echo ">>> Request #$i [Using Prompt ID: $INDEX] sending..."

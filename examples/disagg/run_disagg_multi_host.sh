@@ -9,7 +9,7 @@ set -e
 CONTAINER_PREFIX=${CONTAINER_PREFIX:="disagg-node"}
 RUN_IN_BUILDKITE=${RUN_IN_BUILDKITE:=false}
 MODEL=${MODEL:="Qwen/Qwen3-0.6B"}
-DOCKER_IMAGE=${DOCKER_IMAGE:="us-central1-docker.pkg.dev/cloud-tpu-inference-test/jun-vllm-tpu/tpu-inference:jun-12-05-v7x"}
+DOCKER_IMAGE=${DOCKER_IMAGE:="vllm-tpu:000"}
 
 # benchmark related
 INPUT_LEN=${INPUT_LEN:=1024}
