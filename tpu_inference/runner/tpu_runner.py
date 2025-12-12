@@ -1,5 +1,6 @@
 import copy
 import functools
+import logging
 import random
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -67,6 +68,8 @@ from tpu_inference.utils import (device_array, make_optimized_mesh,
                                  time_function, to_jax_dtype, to_torch_dtype)
 
 logger = init_logger(__name__)
+
+logging.getLogger("torchax.tensor").setLevel(logging.ERROR)
 
 INVALID_TOKEN_ID = -1
 # Smallest output size
