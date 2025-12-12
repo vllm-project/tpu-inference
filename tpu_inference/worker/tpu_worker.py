@@ -266,7 +266,10 @@ class TPUWorker:
                     f"is_last_rank={is_last_rank} | "
                     f"node_id={get_node_id()} | "
                     f"is_driver_worker={self.is_driver_worker} | "
-                    f"hbm={utils.hbm_usage_gb(self.devices)}GiB")
+                    f"hbm={utils.hbm_usage_gb(self.devices)}GiB | "
+                    f"self.devices={self.devices} | "
+                    f"total devices={jax.devices()} | "
+                    f"local_devices={jax.local_devices()} | ")
         vllm_utils.report_usage_stats(self.vllm_config)
 
     def initialize_pp_transfer_connect(self):
