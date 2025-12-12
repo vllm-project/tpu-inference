@@ -253,7 +253,7 @@ async def handle_chat_completions(request: Request):
     return await _handle_completions("/v1/chat/completions", request)
 
 
-@app.get("/healthcheck")
+@app.get("/health")
 async def healthcheck():
     """Simple endpoint to check if the server is running."""
     return {
