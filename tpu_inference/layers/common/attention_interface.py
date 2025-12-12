@@ -25,6 +25,7 @@ MAX_ALLOWED_PAGE_INDICES_N = (
 )  # Based on experiments on v5e, 256x1024 results in smem oom but 128x1024 not. TODO: Adjust this based on TPU version.
 
 ragged_paged_attention = rpa.ragged_paged_attention
+ref_ragged_paged_attention = rpa.ref_ragged_paged_attention
 get_kv_cache_shape = rpa.get_kv_cache_shape
 
 ragged_paged_attention_hd64 = rpa_hd64.ragged_paged_attention_hd64
@@ -309,13 +310,13 @@ def sharded_ragged_paged_attention(
 
     use_hd64 = q.shape[-1] == 64
 
+    # func = ragged_paged_attention
+    # if use_hd64:
+    #     func = functools.partial(ragged_paged_attention_hd64,
+    #                              strict_sliding_window=True)
+    # else:
+    #     func = ragged_paged_attention
     func = ragged_paged_attention
-    if use_hd64:
-        func = functools.partial(ragged_paged_attention_hd64,
-                                 strict_sliding_window=True)
-    else:
-        func = ragged_paged_attention
-
     if attention_sink is not None:
         if not use_hd64:
             raise NotImplementedError(
@@ -375,6 +376,45 @@ def attention(
     md = attention_metadata
 
     # (T, N, H)
+    # write out variables
+    def _save_scales_to_disk(q, k, v, kv_cache, seq_lens, block_tables,
+                             query_start_loc, request_distribution):
+        import os
+        import pickle
+        save_dir = "test_attn_outut"
+        os.makedirs(save_dir, exist_ok=True)
+
+        with open(os.path.join(save_dir, "q.pkl"), "wb") as f:
+            pickle.dump(q, f)
+
+        with open(os.path.join(save_dir, "k.pkl"), "wb") as f:
+            pickle.dump(k, f)
+
+        with open(os.path.join(save_dir, "v.pkl"), "wb") as f:
+            pickle.dump(v, f)
+
+        with open(os.path.join(save_dir, "kv_cache.pkl"), "wb") as f:
+            pickle.dump(kv_cache, f)
+
+        with open(os.path.join(save_dir, "seq_lens.pkl"), "wb") as f:
+            pickle.dump(seq_lens, f)
+
+        with open(os.path.join(save_dir, "block_tables.pkl"), "wb") as f:
+            pickle.dump(block_tables, f)
+
+        with open(os.path.join(save_dir, "query_start_loc.pkl"), "wb") as f:
+            pickle.dump(query_start_loc, f)
+
+        with open(os.path.join(save_dir, "request_distribution.pkl"),
+                  "wb") as f:
+            pickle.dump(request_distribution, f)
+
+        print("saved to", save_dir)
+        raise ValueError
+
+    jax.debug.callback(_save_scales_to_disk, q, k, v, kv_cache, md.seq_lens,
+                       md.block_tables, md.query_start_loc,
+                       md.request_distribution)
     output, kv_cache = sharded_ragged_paged_attention(
         mesh,
         q,

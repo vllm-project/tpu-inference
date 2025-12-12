@@ -152,8 +152,10 @@ class LlamaAttention(nnx.Module):
             # q_scale = self._q_scale
             k_scale = self._k_scale
             v_scale = self._v_scale
+
             k, v = utils.quantize_kv(k, v, self.kv_cache_quantized_dtype,
                                      k_scale, v_scale)
+
         new_kv_cache, outputs = attention(
             kv_cache,
             q,
