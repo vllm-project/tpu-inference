@@ -200,13 +200,16 @@ async def _handle_completions(api: str, request: Request):
 
         # Get the next prefill client in round-robin fashion
         prefill_client_info = get_next_client(request.app, 'prefill')
-
+        print("------------------")
+        print(f"prefill request:{req_data}")
         # Send request to prefill service
         response = await send_request_to_prefill(prefill_client_info, api,
                                                  req_data, request_id)
 
         # Extract the needed fields
         response_json = response.json()
+        print(f"prefill response: {response_json}")
+
         kv_transfer_params = response_json.get('kv_transfer_params', {})
         if kv_transfer_params:
             req_data["kv_transfer_params"] = kv_transfer_params
@@ -215,6 +218,8 @@ async def _handle_completions(api: str, request: Request):
         decode_client_info = get_next_client(request.app, 'decode')
 
         logger.debug("Using %s %s", prefill_client_info, decode_client_info)
+
+        print(f"decode request:{req_data}")
 
         # Stream response from decode service
         async def generate_stream():
