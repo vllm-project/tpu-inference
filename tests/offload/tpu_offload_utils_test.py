@@ -7,8 +7,8 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import NamedSharding, PartitionSpec
 
-from tpu_inference.distributed.offload.utils import (
-    get_kv_cache_swap_fn, jitted_insert_kv_cache_slices)
+from tpu_inference.offload.utils import (get_kv_cache_swap_fn,
+                                         jitted_insert_kv_cache_slices)
 
 
 class TestTPUOffloadUtilsFn(unittest.TestCase):

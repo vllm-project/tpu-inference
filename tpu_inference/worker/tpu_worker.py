@@ -292,7 +292,8 @@ class TPUWorker:
 
         if self.vllm_config.kv_transfer_config is not None:
             kv_transfer_config = self.vllm_config.kv_transfer_config
-            if kv_transfer_config.kv_connector == "TPUOffloadConnector" and kv_transfer_config.kv_connector_module_path == "tpu_inference.distributed.offload.tpu_offload_connector":
+            if kv_transfer_config.kv_connector == "TPUOffloadConnector" and \
+               kv_transfer_config.kv_connector_module_path == "tpu_inference.offload.tpu_offload_connector":
                 # If kv offloading is enabled, we need to account for the memory used by the KV transfer buffer.
                 staging_buffer_pages = envs.TPU_OFFLOAD_NUM_STAGING_BLOCKS
 

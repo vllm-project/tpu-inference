@@ -19,9 +19,8 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 
 from tpu_inference import utils
 from tpu_inference import utils as common_utils
-from tpu_inference.distributed.offload.utils import \
-    get_kv_connector_cache_layout
 from tpu_inference.logger import init_logger
+from tpu_inference.offload.utils import get_kv_connector_cache_layout
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
 from tpu_inference.runner.kv_cache import create_kv_caches

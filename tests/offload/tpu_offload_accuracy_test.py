@@ -40,8 +40,7 @@ def kv_transfer_config():
     return KVTransferConfig(
         kv_connector="TPUOffloadConnector",
         kv_role="kv_both",
-        kv_connector_module_path=
-        "tpu_inference.distributed.offload.tpu_offload_connector",
+        kv_connector_module_path="tpu_inference.offload.tpu_offload_connector",
     )
 
 

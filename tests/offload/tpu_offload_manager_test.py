@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 import pytest
 
-from tpu_inference.distributed.offload.offload_manager import (
-    CPUChunkPool, LRUCacheManager, StagingBufferManager)
-from tpu_inference.distributed.offload.utils import ReqId
 from tpu_inference.logger import init_logger
+from tpu_inference.offload.offload_manager import (CPUChunkPool,
+                                                   LRUCacheManager,
+                                                   StagingBufferManager)
+from tpu_inference.offload.utils import ReqId
 
 logger = init_logger(__name__)
 
