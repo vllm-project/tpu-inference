@@ -6,74 +6,25 @@ import jax.numpy as jnp
 from jax import random
 
 # Import your kernels
-from tpu_inference.kernels.quantized_matmul.kernel_2d import (
-    quantized_matmul_2d as original_quantized_matmul_2d,
-    dispatch_w8a8_v7,
-    # dispatch_w8a16_v7,
-    # dispatch_auto_v7,
-)
+from tpu_inference.kernels.quantized_matmul.kernel_2d import quantized_matmul_2d
 
 # ==========================================
 # 1. SHARED UTILITIES
 # ==========================================
 
-BLOCK_K = 128
-BLOCK_B = 64 # Note: This is for the Reference Kernel. V7 Kernel ignores this and uses 256.
+QUANT_GROUP_SIZE = 128
 
 def next_multiple(x: int, m: int) -> int:
     return ((x + m - 1) // m) * m
 
 # ==========================================
-# 2. INT8 REFERENCE (Verification)
-# ==========================================
-
-@functools.partial(jax.jit, static_argnames=['block_size'])
-def ref_int8_matmul(x, w, block_size):
-    """Pure JAX reference for Block-wise W8A8 Quantized Matmul."""
-    bs, n_in = x.shape
-    n_out, _ = w.shape
-    
-    padded_in = next_multiple(n_in, block_size)
-    if padded_in > n_in:
-        x = jnp.pad(x, ((0, 0), (0, padded_in - n_in)))
-        w = jnp.pad(w, ((0, 0), (0, padded_in - n_in)))
-    
-    n_blocks = padded_in // block_size
-    
-    # Reshape
-    x_blk = x.reshape(bs, n_blocks, block_size)
-    w_blk = w.reshape(n_out, n_blocks, block_size)
-    
-    # Quantize X
-    x_max = jnp.max(jnp.abs(x_blk), axis=2, keepdims=True)
-    x_max = jnp.maximum(x_max, 1e-6)
-    x_scale_inv = 127.0 / x_max
-    x_q = jnp.clip(jnp.floor(x_blk * x_scale_inv + 0.5), -128, 127).astype(jnp.int8)
-    
-    # Quantize W
-    w_max = jnp.max(jnp.abs(w_blk), axis=2, keepdims=True)
-    w_max = jnp.maximum(w_max, 1e-6)
-    w_scale_inv = 127.0 / w_max
-    w_q = jnp.clip(jnp.floor(w_blk * w_scale_inv + 0.5), -128, 127).astype(jnp.int8)
-    
-    # Dot Product
-    dot_int32 = jnp.einsum('bki,oki->bko', x_q.astype(jnp.int32), w_q.astype(jnp.int32))
-    
-    xs = (x_max / 127.0).squeeze(-1) 
-    ws = (w_max / 127.0).squeeze(-1)  
-    
-    joint_scale = xs[:, :, None] * ws.T[None, :, :]
-    out_float = dot_int32.astype(jnp.float32) * joint_scale
-    
-    return jnp.sum(out_float, axis=1)
-
-# ==========================================
-# 3. QUANTIZATION UTILS
+# 2. QUANTIZATION UTILS
 # ==========================================
 
 EPS = jnp.finfo(jnp.float16).tiny
 
 def quantize_2d_blocked(x: jax.Array, block_size: int, dtype: jnp.dtype = jnp.int8):
+    """Simple quantizer for benchmarking setup."""
     n_rows, n_cols = x.shape
     if n_cols % block_size != 0:
         padded = next_multiple(n_cols, block_size)
@@ -110,18 +61,16 @@ def quantize_2d_blocked(x: jax.Array, block_size: int, dtype: jnp.dtype = jnp.in
         raise TypeError(f"Unsupported dtype: {dtype}")
 
 # ==========================================
-# 4. BENCHMARK SUITE
+# 3. BENCHMARK SUITE
 # ==========================================
 
 class BenchmarkSuite:
-    def measure_ms(self, func, args, n_iter=100, n_warmup=20):
+    def measure_ms(self, func, args, n_iter=1000, n_warmup=100):
         try:
             # Simple validity check
             jax.block_until_ready(func(*args))
         except Exception as e:
             print(f"Error during execution: {e}")
-            import traceback
-            traceback.print_exc()
             return 0.0
             
         for _ in range(n_warmup): 
@@ -134,36 +83,13 @@ class BenchmarkSuite:
         
         return ((end - start) / n_iter) * 1000
 
-    def check_correctness(self, x, w, block_size, res_orig, res_opt, dtype_str):
-        if dtype_str == "int8":
-            print("  > Verifying against JAX Int8 Reference...")
-            try:
-                ref = ref_int8_matmul(x, w, block_size)
-                
-                # Mean Relative Error (MRE)
-                ref_abs = jnp.abs(ref)
-                denom = jnp.maximum(ref_abs, 1.0) 
-                
-                diff_orig = jnp.mean(jnp.abs(res_orig - ref) / denom)
-                diff_opt = jnp.mean(jnp.abs(res_opt - ref) / denom)
-                
-                thresh = 0.05
-                
-                status_orig = "OK" if diff_orig < thresh else "FAIL"
-                status_opt = "OK" if diff_opt < thresh else "FAIL"
-                
-                print(f"    Original Rel Err: {diff_orig:.4f} ({status_orig})")
-                print(f"    New V7 Rel Err:   {diff_opt:.4f} ({status_opt})")
-            except Exception as e:
-                print(f"    Verification Skipped due to error: {e}")
-        else:
-             print("  > Skipping precise reference check for FP8...")
-
     def run_benchmark(self):
-        print(f"Config: BlockK={BLOCK_K}, Reference BlockB={BLOCK_B}")
+        print(f"Config: QuantGroupSize={QUANT_GROUP_SIZE}")
         
         shapes = [
             (1, 16384, 16384),
+            (8, 16384, 16384),
+            (16, 16384, 16384),
             (1, 8192, 8192),
             (8, 8192, 8192),
             (16, 8192, 8192),
@@ -182,11 +108,7 @@ class BenchmarkSuite:
             (512, 4096, 4096),
         ]
         
-        # --- V7 OPTIMIZATION ---
-        # Set to 256 to match the V7 256x256 MXU Width.
-        out_block = 256 
-        
-        quant_block = BLOCK_K
+        out_block_size = 256 # Tuned for 256x256 MXU
         results = []
         
         bench_dtypes = [
@@ -205,23 +127,13 @@ class BenchmarkSuite:
             t_bf16 = self.measure_ms(jax.lax.dot_general, (x, w, (((1,), (1,)), ((), ()))))
 
             for d_name, d_type in bench_dtypes:
-                print(f"  [{d_name.upper()}] Benchmarking...")
                 
-                # Quantize weights (Shared standard format)
-                w_q_std, w_s_std = quantize_2d_blocked(w, quant_block, d_type)
+                # Quantize weights (Setup cost, not measured)
+                w_q_std, w_s_std = quantize_2d_blocked(w, QUANT_GROUP_SIZE, d_type)
                 
-                # 2. Original Pallas Kernel
-                t_orig = self.measure_ms(original_quantized_matmul_2d, 
-                                        (x, w_q_std, w_s_std, quant_block, d_type))
-                
-                # 3. New V7 Optimized Kernel
-                t_opt = self.measure_ms(dispatch_w8a8_v7, 
-                                        (x, w_q_std, w_s_std, out_block, d_type))
-
-                # Correctness (Run once)
-                res_orig = original_quantized_matmul_2d(x, w_q_std, w_s_std, quant_block, d_type).astype(jnp.float32)
-                res_opt = dispatch_w8a8_v7(x, w_q_std, w_s_std, out_block, d_type).astype(jnp.float32)
-                self.check_correctness(x, w, quant_block, res_orig, res_opt, d_name)
+                # 2. Optimized Kernel
+                t_opt = self.measure_ms(quantized_matmul_2d, 
+                                        (x, w_q_std, w_s_std, out_block_size, d_type))
 
                 speedup_vs_bf16 = t_bf16 / t_opt if t_opt > 0 else 0.0
 
@@ -231,15 +143,13 @@ class BenchmarkSuite:
                     "Out": n_out,
                     "Dtype": d_name,
                     "BF16 (ms)": f"{t_bf16:.3f}",
-                    "Orig (ms)": f"{t_orig:.3f}",
-                    "V7 (ms)": f"{t_opt:.3f}",
-                    "Speedup (vs BF16)": f"{speedup_vs_bf16:.2f}x" if t_opt > 0 else "N/A",
+                    "Kernel (ms)": f"{t_opt:.3f}",
+                    "Speedup": f"{speedup_vs_bf16:.2f}x",
                 })
 
         df = pd.DataFrame(results)
         print("\nBenchmark Results:")
-        cols = ["Batch", "In", "Out", "Dtype", "BF16 (ms)", "Orig (ms)", "V7 (ms)", "Speedup (vs BF16)"]
-        print(df[cols].to_string(index=False))
+        print(df.to_string(index=False))
 
 if __name__ == "__main__":
     suite = BenchmarkSuite()
