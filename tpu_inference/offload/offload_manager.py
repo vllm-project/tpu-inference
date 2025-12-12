@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -7,8 +6,8 @@ from typing import Literal, Optional, Tuple
 
 from vllm.v1.core.kv_cache_utils import BlockHash
 
-from tpu_inference.distributed.offload.utils import CpuChunkId, ReqId
 from tpu_inference.logger import init_logger
+from tpu_inference.offload.utils import CpuChunkId, ReqId
 
 logger = init_logger(__name__)
 

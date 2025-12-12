@@ -4,8 +4,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tpu_inference.distributed.offload.cpu_backend import LocalCPUBackend
-from tpu_inference.distributed.offload.utils import CpuChunkId
+from tpu_inference.offload.cpu_backend import LocalCPUBackend
+from tpu_inference.offload.utils import CpuChunkId
 
 
 # Helper to create a mock jax array with a specific size in bytes

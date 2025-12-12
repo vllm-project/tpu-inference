@@ -17,7 +17,7 @@ spec:
     command:
     - /bin/bash
     - -c
-    - "pytest -sv tests/distributed/offload/"
+    - "pytest -sv tests/offload/"
     env:
     - name: HUGGING_FACE_HUB_TOKEN
       valueFrom:
