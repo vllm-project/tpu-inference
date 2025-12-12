@@ -7,6 +7,7 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
 
+# Trigger a test
 def local_barrier(left_neighbor, right_neighbor, double_barrier=True):
     """Performs a barrier with neighbors on the global barrier semaphore.
 
