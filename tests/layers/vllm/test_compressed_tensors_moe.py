@@ -20,7 +20,6 @@ import pytest
 import torch
 import torch.nn.functional as F
 import torchax
-import utils as test_utils
 from compressed_tensors.quantization import QuantizationArgs
 from jax.sharding import PartitionSpec
 from vllm.config import set_current_vllm_config
@@ -37,6 +36,8 @@ from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensor
     VllmCompressedTensorsConfig
 from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors_moe import \
     VllmCompressedTensorsW8A8Fp8MoEMethod
+
+from . import utils as test_utils
 
 # yapf: enable
 
