@@ -11,6 +11,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.linear_common import \
     get_model_matmul_fusion_assignment
 from tpu_inference.utils import TPU_SECOND_LAST_MINOR
@@ -35,14 +36,18 @@ class JaxCommonLinearConfig:
         self.input_sharding = None
         self.output_sharding = None
 
+        self.tp_size = self.mesh.shape['model'] * self.mesh.shape.get(
+            'attn_dp', 1)
+
         if isinstance(layer, RowParallelLinear):
-            self.weight_sharding = P(None, "model")
+            self.weight_sharding = P(None, 'model')
             if self.enable_sequence_parallelism:
-                self.output_sharding = P("model", None)
+                self.output_sharding = P(ShardingAxisName.MLP_TENSOR, None)
         elif isinstance(layer, ColumnParallelLinear):
-            self.weight_sharding = P("model", None)
+            self.weight_sharding = P(ShardingAxisName.ATTN_HEAD, None)
+
             if self.enable_sequence_parallelism:
-                self.input_sharding = P("model", None)
+                self.input_sharding = P(ShardingAxisName.MLP_TENSOR, None)
 
             if isinstance(layer, MergedColumnParallelLinear) or isinstance(
                     layer, QKVParallelLinear):
@@ -72,7 +77,7 @@ class JaxCommonLinearConfig:
         if self.enable_sequence_parallelism:
             token_num = x.shape[0]
             # NOTE(chengjiyao): make sure the sharded token_num is larger than TPU_SECOND_LAST_MINOR
-            if token_num // self.mesh.shape["model"] >= TPU_SECOND_LAST_MINOR:
+            if token_num // self.tp_size >= TPU_SECOND_LAST_MINOR:
                 return self.input_sharding
             else:
                 return None
@@ -82,7 +87,7 @@ class JaxCommonLinearConfig:
         if self.enable_sequence_parallelism:
             token_num = x.shape[0]
             # NOTE(chengjiyao): make sure the sharded token_num is larger than TPU_SECOND_LAST_MINOR
-            if token_num // self.mesh.shape["model"] >= TPU_SECOND_LAST_MINOR:
+            if token_num // self.tp_size >= TPU_SECOND_LAST_MINOR:
                 return self.output_sharding
             else:
                 return None
