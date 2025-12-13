@@ -23,10 +23,49 @@ echo "--- The HOME variable is : $HOME ---"
 
 wait_for_server() {
   local port=$1
-  timeout 1200 bash -c "
-    until curl -s localhost:${port}/health > /dev/null; do
-      sleep 1
-    done" && return 0 || return 1
+  local container_name=$2
+  local service_name=$3
+  local log_path=$4
+
+  echo "port: $port, container_name: $container_name, service_name: $service_name, log_path: $log_path"
+
+
+  # 1. Get the PID inside the container
+  local pid=$(docker exec $container_name pgrep -n -f "$service_name")
+
+  # Handle case where process didn't even start fast enough or failed immediately
+  if [[ -z "$pid" ]]; then
+      echo "Error: Could not find PID for $service_name immediately after start."
+      docker exec "$container_name" cat "$log_path"
+      return 1
+  fi
+
+  echo "Waiting for $service_name on port $port (Container PID: $pid) to become healthy..."
+
+  local end_time=$((SECONDS + 600))
+  while [[ $SECONDS -lt $end_time ]]; do
+    # 2. Check health (Assuming port is mapped to localhost)
+    if curl -fs "localhost:${port}/health" > /dev/null; then
+      echo "=====$service_name is healthy on port: $port. ==="
+      return 0
+    fi
+
+    # 3. FIX: Check if PID is alive INSIDE the container
+    # We use 'docker exec' to run the kill command inside the container's namespace
+    if ! docker exec "$container_name" kill -0 "$pid" 2>/dev/null; then
+      echo "Error: $service_name on $port (PID $pid) died inside container while waiting for health check."
+      echo "Displaying logs from $container_name:$log_path"
+      docker exec "$container_name" cat "$log_path"
+      return 1
+    fi
+
+    sleep 1
+  done
+
+  echo "Error: $service_name on $port failed to become healthy within the timeout."
+  echo "Displaying logs from $container_name:$log_path"
+  docker exec "$container_name" cat "$log_path"
+  return 1
 }
 
 # clear existing container if there is
@@ -126,13 +165,13 @@ done
 PREFILL_VLLM_PORT="8400"
 
 set -x
-docker exec ${CONTAINER_PREFIX}-0 /bin/bash -c \
+docker exec -d ${CONTAINER_PREFIX}-0 /bin/bash -c \
     "vllm serve $MODEL \
     --port ${PREFILL_VLLM_PORT} \
     --gpu-memory-utilization 0.3 \
     --tensor-parallel-size 4 \
     --kv-transfer-config '{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_producer\"}' \
-    > /root/logs/prefill.txt 2>&1 &"
+    > /root/logs/prefill.txt 2>&1"
 set +x
 
 
@@ -198,22 +237,19 @@ done
 DECODE_VLLM_PORT="9400"
 
 set -x
-docker exec ${CONTAINER_PREFIX}-2-0 /bin/bash -c \
+docker exec -d ${CONTAINER_PREFIX}-2-0 /bin/bash -c \
     "vllm serve $MODEL \
     --port ${DECODE_VLLM_PORT} \
     --gpu-memory-utilization 0.3 \
     --tensor-parallel-size 4 \
     --kv-transfer-config '{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\"}' \
-    > /root/logs/decode.txt 2>&1 &"
+    > /root/logs/decode.txt 2>&1"
 set +x
 
+wait_for_server "$PREFILL_VLLM_PORT" "${CONTAINER_PREFIX}-0" "vllm serve" "/root/logs/prefill.txt"
 
-# Wait for all instances to start
-echo "Waiting for prefill on port $PREFILL_VLLM_PORT to start..."
-wait_for_server $PREFILL_VLLM_PORT
+wait_for_server "$DECODE_VLLM_PORT" "${CONTAINER_PREFIX}-2-0" "vllm serve" "/root/logs/decode.txt"
 
-echo "Waiting for decode on port $DECODE_VLLM_PORT to start..."
-wait_for_server $DECODE_VLLM_PORT
 
 # Start a long-running container for proxy and benchmark
 echo "Starting proxy/benchmark container..."
@@ -238,9 +274,7 @@ docker exec -d ${CONTAINER_PREFIX}-proxy-benchmark /bin/bash -c "python /workspa
 set +x
 
 # Wait for proxy server to start
-echo "Waiting for proxy on port 8000 to start..."
-wait_for_server 8000
-
+ wait_for_server 8000 "${CONTAINER_PREFIX}-proxy-benchmark" "toy_proxy_server" "/root/logs/proxy.txt"
 
 # Run benchmark inside the proxy-benchmark-node container
 set -x
