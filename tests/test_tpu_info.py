@@ -99,22 +99,38 @@ def test_get_num_cores_per_chip(mock_get_tpu_type, tpu_type, expected):
 
 
 # Test get_num_chips
+@patch("tpu_inference.tpu_info.get_tpu_type", return_value="v6e-8")
 @patch("tpu_inference.tpu_info.glob.glob",
        return_value=["/dev/accel0", "/dev/accel1"])
-def test_get_num_chips_from_accel(mock_glob):
+def test_get_num_chips_from_accel(mock_glob, mock_get_tpu_type):
     """Test get_num_chips when /dev/accel* files exist."""
     assert get_num_chips() == 2
 
 
+@patch("tpu_inference.tpu_info.get_tpu_type", return_value="v6e-8")
 @patch("tpu_inference.tpu_info.glob.glob", return_value=[])
 @patch("tpu_inference.tpu_info.os.listdir", return_value=["0", "1", "2"])
-def test_get_num_chips_from_vfio(mock_listdir, mock_glob):
+def test_get_num_chips_from_vfio(mock_listdir, mock_glob, mock_get_tpu_type):
     """Test get_num_chips when /dev/accel* files don't exist but /dev/vfio entries do."""
     assert get_num_chips() == 3
 
 
+@patch("tpu_inference.tpu_info.get_tpu_type", return_value="v6e-8")
 @patch("tpu_inference.tpu_info.glob.glob", return_value=[])
 @patch("tpu_inference.tpu_info.os.listdir", side_effect=FileNotFoundError)
-def test_get_num_chips_not_found(mock_listdir, mock_glob, caplog):
+def test_get_num_chips_not_found(mock_listdir, mock_glob, mock_get_tpu_type,
+                                 caplog):
     """Test get_num_chips when neither files nor directory are found."""
     assert get_num_chips() == 0
+
+
+# Test get_num_chips with tpu7x
+@patch("tpu_inference.tpu_info.get_tpu_type", return_value="tpu7x-8")
+@patch("tpu_inference.tpu_info.glob.glob",
+       return_value=[
+           "/dev/accel0", "/dev/accel1", "/dev/accel2", "/dev/accel3",
+           "/dev/accel4", "/dev/accel5", "/dev/accel6", "/dev/accel7"
+       ])
+def test_get_num_chips_tpu7x(mock_glob, mock_get_tpu_type):
+    """Test get_num_chips for tpu7x divides by 2 (8 devices = 4 chips)."""
+    assert get_num_chips() == 4
