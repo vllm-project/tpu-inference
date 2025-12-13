@@ -28,7 +28,8 @@ from tpu_inference.models.jax.qwen3_vl import (
     Qwen3VLVisionTransformer,
     SegmentIds,
     apply_rotary_pos_emb_vision,
-    generate_full_segment_ids,
+    generate_segment_ids_from_grid_thw,
+    pad_segment_ids_for_attention,
     get_mrope_input_positions,
 )
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
@@ -180,30 +181,62 @@ class TestUtils:
         x_rotated = apply_rotary_pos_emb_vision(x, rotary_pos_emb)
         assert x_rotated.shape == (B, T, N, H)
 
-    def test_generate_full_segment_ids(self):
-        """Test full attention segment ID generation."""
-        seq_len = 10
-        padded_seq_len = 16
-        segment_ids = generate_full_segment_ids(seq_len, padded_seq_len)
+    def test_generate_segment_ids_from_grid_thw_single_image(self):
+        """Test segment ID generation for single image."""
+        grid_thw = ((1, 4, 4),)  # 1 image: 1 * (4/2) * (4/2) = 4 tokens
+        spatial_merge_size = 2
+        segment_ids = generate_segment_ids_from_grid_thw(grid_thw, spatial_merge_size)
 
-        assert isinstance(segment_ids, SegmentIds)
-        assert segment_ids.q.shape == (1, padded_seq_len)
-        assert segment_ids.kv.shape == (1, padded_seq_len)
+        # All tokens from single image should have segment_id=1
+        assert segment_ids.shape == (4,)
+        np.testing.assert_array_equal(segment_ids, np.array([1, 1, 1, 1]))
 
-        # Valid tokens should have segment_id=1, padding should have 0
-        expected = np.array([[1] * seq_len + [0] * (padded_seq_len - seq_len)])
-        np.testing.assert_array_equal(segment_ids.q, expected)
-        np.testing.assert_array_equal(segment_ids.kv, expected)
+    def test_generate_segment_ids_from_grid_thw_multiple_images(self):
+        """Test segment ID generation for multiple images."""
+        grid_thw = ((1, 4, 4), (1, 8, 8))  # 2 images: 4 + 16 = 20 tokens
+        spatial_merge_size = 2
+        segment_ids = generate_segment_ids_from_grid_thw(grid_thw, spatial_merge_size)
 
-    def test_generate_full_segment_ids_no_padding(self):
-        """Test segment IDs when sequence length equals padded length."""
-        seq_len = 128
-        padded_seq_len = 128
-        segment_ids = generate_full_segment_ids(seq_len, padded_seq_len)
+        # Image 1: 4 tokens with segment_id=1
+        # Image 2: 16 tokens with segment_id=2
+        assert segment_ids.shape == (20,)
+        expected = np.array([1] * 4 + [2] * 16)
+        np.testing.assert_array_equal(segment_ids, expected)
 
-        assert segment_ids.q.shape == (1, padded_seq_len)
-        # All tokens should have segment_id=1
-        np.testing.assert_array_equal(segment_ids.q, np.ones((1, 128)))
+    def test_generate_segment_ids_from_grid_thw_video(self):
+        """Test segment ID generation for video (multiple temporal frames)."""
+        grid_thw = ((4, 4, 4),)  # 1 video: 4 * (4/2) * (4/2) = 16 tokens
+        spatial_merge_size = 2
+        segment_ids = generate_segment_ids_from_grid_thw(grid_thw, spatial_merge_size)
+
+        # All tokens from single video should have segment_id=1
+        assert segment_ids.shape == (16,)
+        np.testing.assert_array_equal(segment_ids, np.ones(16))
+
+    def test_pad_segment_ids_for_attention(self):
+        """Test segment ID padding for flash attention."""
+        segment_ids = jnp.array([1, 1, 1, 2, 2])
+        padded_seq_len = 8
+        padded = pad_segment_ids_for_attention(segment_ids, padded_seq_len)
+
+        assert isinstance(padded, SegmentIds)
+        assert padded.q.shape == (1, padded_seq_len)
+        assert padded.kv.shape == (1, padded_seq_len)
+
+        # Valid tokens keep their segment IDs, padding gets 0
+        expected = np.array([[1, 1, 1, 2, 2, 0, 0, 0]])
+        np.testing.assert_array_equal(padded.q, expected)
+        np.testing.assert_array_equal(padded.kv, expected)
+
+    def test_pad_segment_ids_for_attention_no_padding(self):
+        """Test segment ID padding when no padding needed."""
+        segment_ids = jnp.array([1, 1, 2, 2])
+        padded_seq_len = 4
+        padded = pad_segment_ids_for_attention(segment_ids, padded_seq_len)
+
+        assert padded.q.shape == (1, padded_seq_len)
+        expected = np.array([[1, 1, 2, 2]])
+        np.testing.assert_array_equal(padded.q, expected)
 
 
 class TestMRoPEPositions:
