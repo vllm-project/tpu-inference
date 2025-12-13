@@ -33,11 +33,6 @@ init_fn = nnx.initializers.uniform()
 DEFAULT_BLOCK_K_MAJOR = 128
 
 
-# ==============================================================================
-# Segment IDs for Flash Attention
-# ==============================================================================
-
-
 class SegmentIds(NamedTuple):
     """SegmentIds for Q and KV sequences.
 
@@ -54,28 +49,49 @@ class SegmentIds(NamedTuple):
     kv: jax.Array  # [batch_size, kv_seq_len]
 
 
-def generate_full_segment_ids(seq_len: int, padded_seq_len: int) -> SegmentIds:
-    """Generate segment IDs for full attention (all tokens in same segment).
+def generate_segment_ids_from_grid_thw(
+    grid_thw: Tuple[Tuple[int, int, int], ...],
+    spatial_merge_size: int,
+) -> jax.Array:
+    """Generate segment IDs from grid dimensions for variable-length attention.
 
-    Unlike windowed attention, full attention allows all tokens to attend
-    to all other tokens. We use segment_id=1 for valid tokens and 0 for padding.
+    Each image/video in grid_thw gets a unique segment ID (starting from 1).
+    This ensures tokens from different images cannot attend to each other.
 
     Args:
-        seq_len: Actual sequence length
+        grid_thw: Tuple of (T, H, W) for each image/video
+        spatial_merge_size: Spatial merge size from vision config
+
+    Returns:
+        segment_ids: (total_tokens,) array with segment IDs per token
+    """
+    segment_ids_list = []
+    for idx, (t, h, w) in enumerate(grid_thw):
+        num_tokens = t * (h // spatial_merge_size) * (w // spatial_merge_size)
+        # Segment IDs start from 1 (0 is reserved for padding)
+        segment_ids_list.append(jnp.full(num_tokens, idx + 1, dtype=jnp.int32))
+
+    return jnp.concatenate(segment_ids_list, axis=0)
+
+
+def pad_segment_ids_for_attention(
+    segment_ids: jax.Array,
+    padded_seq_len: int,
+) -> SegmentIds:
+    """Pad segment IDs and format for flash attention.
+
+    Args:
+        segment_ids: (seq_len,) segment IDs for valid tokens
         padded_seq_len: Padded sequence length (multiple of block size)
 
     Returns:
-        SegmentIds for flash attention
+        SegmentIds for flash attention with padding tokens set to 0
     """
-    segment_ids = jnp.ones(padded_seq_len, dtype=jnp.int32)
-    segment_ids = segment_ids.at[seq_len:].set(0)  # Padding tokens = 0
-    segment_ids = segment_ids.reshape(1, -1)
-    return SegmentIds(q=segment_ids, kv=segment_ids)
-
-
-# ==============================================================================
-# MRoPE Position Computation (Preprocessing - NOT JIT compatible)
-# ==============================================================================
+    seq_len = segment_ids.shape[0]
+    padded_ids = jnp.zeros(padded_seq_len, dtype=jnp.int32)
+    padded_ids = padded_ids.at[:seq_len].set(segment_ids)
+    padded_ids = padded_ids.reshape(1, -1)
+    return SegmentIds(q=padded_ids, kv=padded_ids)
 
 
 def compute_vision_counts_per_sequence(
@@ -86,7 +102,7 @@ def compute_vision_counts_per_sequence(
 ) -> Tuple[jax.Array, jax.Array]:
     """Compute the number of images and videos per sequence in a batch.
 
-    This is a preprocessing function that should be called before the forward pass.
+    This is a preprocessing function for MRoPE computation. It does not JIT.
 
     Args:
         input_ids: (batch_size, seq_len)
@@ -297,10 +313,6 @@ class Qwen3VLVisionRotaryEmbedding(nnx.Module):
         return freqs.astype(jnp.bfloat16)
 
 
-# ==============================================================================
-# Vision Patch Embedding
-# ==============================================================================
-
 
 class Qwen3VLVisionPatchEmbed(nnx.Module):
     """3D Patch Embedding for video/image input using 3D convolution."""
@@ -372,7 +384,7 @@ class Qwen3VLVisionMLP(nnx.Module):
         dtype: jnp.dtype,
         rngs: nnx.Rngs,
     ):
-        self.gate_proj = nnx.Linear(
+        self.fc1 = nnx.Linear(
             hidden_size,
             intermediate_size,
             use_bias=True,
@@ -381,16 +393,7 @@ class Qwen3VLVisionMLP(nnx.Module):
             bias_init=nnx.with_partitioning(init_fn, ("model",)),
             rngs=rngs,
         )
-        self.up_proj = nnx.Linear(
-            hidden_size,
-            intermediate_size,
-            use_bias=True,
-            param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
-            bias_init=nnx.with_partitioning(init_fn, ("model",)),
-            rngs=rngs,
-        )
-        self.down_proj = nnx.Linear(
+        self.fc2 = nnx.Linear(
             intermediate_size,
             hidden_size,
             use_bias=True,
@@ -401,14 +404,10 @@ class Qwen3VLVisionMLP(nnx.Module):
         )
 
     def __call__(self, x: jax.Array) -> jax.Array:
-        gate = nnx.silu(self.gate_proj(x))
-        up = self.up_proj(x)
-        return self.down_proj(gate * up)
+        x = self.fc1(x)
+        x = jax.nn.gelu(x, approximate=False)
+        return self.fc2(x)
 
-
-# ==============================================================================
-# Vision Attention
-# ==============================================================================
 
 
 class Qwen3VLVisionAttention(nnx.Module):
@@ -453,10 +452,10 @@ class Qwen3VLVisionAttention(nnx.Module):
             rngs=rngs,
         )
 
-        # Flash attention for full (non-causal) attention
+        # Qwen3VL's Vision Transformer uses full bidirectional attention.
         self.flash_attention = sharded_flash_attention(
             mesh=mesh,
-            causal=False,  # Vision uses full attention
+            causal=False,
             sm_scale=1.0 / math.sqrt(self.head_dim),
             vmem_limit_bytes=128 * 1024 * 1024,
         )
@@ -465,28 +464,26 @@ class Qwen3VLVisionAttention(nnx.Module):
         self,
         x: jax.Array,
         rotary_pos_emb: jax.Array,
-        cu_seqlens: Optional[jax.Array] = None,
+        segment_ids: jax.Array,
     ) -> jax.Array:
-        """Apply vision attention.
+        """Apply vision attention with variable-length segment masking.
 
         Args:
-            x: Input tensor of shape [T, B, D]
-            rotary_pos_emb: Rotary embeddings of shape [T, H//2]
-            cu_seqlens: Cumulative sequence lengths (optional)
+            x: Input tensor of shape (T, B, D)
+            rotary_pos_emb: Rotary position embeddings
+            segment_ids: Segment IDs (T,) for variable-length attention masking
 
         Returns:
-            Output tensor of shape [T, B, D]
+            Output tensor of shape (T, B, D)
         """
         T, B, D = x.shape
         assert B == 1, "Vision attention currently only supports batch size 1"
 
-        # QKV projection: [T, B, D] -> [T, B, 3*D]
         qkv = self.qkv_proj(x)
 
-        # Split into Q, K, V: [T, B, 3*D] -> 3 * [T, B, D]
         q, k, v = jnp.split(qkv, 3, axis=-1)
 
-        # Reshape to [T, B, N, H]
+        # Head-last reshape
         q = q.reshape(T, B, self.num_heads, self.head_dim)
         k = k.reshape(T, B, self.num_heads, self.head_dim)
         v = v.reshape(T, B, self.num_heads, self.head_dim)
@@ -496,7 +493,6 @@ class Qwen3VLVisionAttention(nnx.Module):
         k = jnp.transpose(k, (1, 0, 2, 3))
         v = jnp.transpose(v, (1, 0, 2, 3))
 
-        # Apply rotary embeddings
         q = apply_rotary_pos_emb_vision(q, rotary_pos_emb)
         k = apply_rotary_pos_emb_vision(k, rotary_pos_emb)
 
@@ -515,26 +511,20 @@ class Qwen3VLVisionAttention(nnx.Module):
         k = jnp.pad(k, pad_width, "constant")
         v = jnp.pad(v, pad_width, "constant")
 
-        # Generate segment IDs for full attention
-        segment_ids = generate_full_segment_ids(T_attn, padded_T)
+        # Pad segment IDs for attention (padding tokens get segment_id=0)
+        padded_segment_ids = pad_segment_ids_for_attention(segment_ids, padded_T)
 
-        # Apply flash attention
-        output = self.flash_attention(q, k, v, segment_ids)
+        output = self.flash_attention(q, k, v, padded_segment_ids)
 
         # Unpad and reshape: [B, N, T, H] -> [T, B, N, H] -> [T, B, D]
         output = output[:, :, :T_attn, :]
         output = jnp.transpose(output, (2, 0, 1, 3))
         output = output.reshape(T, B, D)
 
-        # Output projection
         output = self.proj(output)
 
         return output
 
-
-# ==============================================================================
-# Vision Block
-# ==============================================================================
 
 
 class Qwen3VLVisionBlock(nnx.Module):
@@ -582,16 +572,11 @@ class Qwen3VLVisionBlock(nnx.Module):
         self,
         x: jax.Array,
         rotary_pos_emb: jax.Array,
-        cu_seqlens: Optional[jax.Array] = None,
+        segment_ids: jax.Array,
     ) -> jax.Array:
-        x = x + self.attn(self.norm1(x), rotary_pos_emb, cu_seqlens)
+        x = x + self.attn(self.norm1(x), rotary_pos_emb, segment_ids)
         x = x + self.mlp(self.norm2(x))
         return x
-
-
-# ==============================================================================
-# Vision Patch Merger
-# ==============================================================================
 
 
 class Qwen3VLVisionPatchMerger(nnx.Module):
@@ -604,8 +589,8 @@ class Qwen3VLVisionPatchMerger(nnx.Module):
 
     def __init__(
         self,
-        d_model: int,
-        context_dim: int,
+        d_model: int, # in
+        context_dim: int, # out
         spatial_merge_size: int,
         dtype: jnp.dtype,
         rngs: nnx.Rngs,
@@ -617,7 +602,7 @@ class Qwen3VLVisionPatchMerger(nnx.Module):
 
         # Normalization dimension depends on use_postshuffle_norm
         norm_dim = self.hidden_size if use_postshuffle_norm else context_dim
-        self.ln_q = nnx.RMSNorm(
+        self.norm = nnx.LayerNorm(
             norm_dim,
             epsilon=norm_eps,
             dtype=dtype,
@@ -625,7 +610,7 @@ class Qwen3VLVisionPatchMerger(nnx.Module):
             scale_init=nnx.with_partitioning(init_fn, (None,)),
         )
 
-        self.mlp_fc1 = nnx.Linear(
+        self.linear_fc1 = nnx.Linear(
             self.hidden_size,
             self.hidden_size,
             use_bias=True,
@@ -634,7 +619,7 @@ class Qwen3VLVisionPatchMerger(nnx.Module):
             bias_init=nnx.with_partitioning(init_fn, ("model",)),
             rngs=rngs,
         )
-        self.mlp_fc2 = nnx.Linear(
+        self.linear_fc2 = nnx.Linear(
             self.hidden_size,
             d_model,
             use_bias=True,
@@ -647,30 +632,21 @@ class Qwen3VLVisionPatchMerger(nnx.Module):
     def __call__(self, x: jax.Array) -> jax.Array:
         """Apply patch merging.
 
-        Args:
-            x: Input tensor of shape (seq_len, hidden_size)
-
-        Returns:
-            Merged tensor of shape (merged_len, d_model)
+        If use_postshuffle_norm is True, reshaping would happen first.
         """
         if self.use_postshuffle_norm:
             # DeepStack: reshape first, then norm
             x = x.reshape(-1, self.hidden_size)
-            x = self.ln_q(x)
+            x = self.norm(x)
         else:
             # Final merger: norm first, then reshape
-            x = self.ln_q(x)
+            x = self.norm(x)
             x = x.reshape(-1, self.hidden_size)
 
-        x = self.mlp_fc1(x)
-        x = nnx.gelu(x)
-        x = self.mlp_fc2(x)
+        x = self.linear_fc1(x)
+        x = nnx.gelu(x) # make this configurable?
+        x = self.linear_fc2(x)
         return x
-
-
-# ==============================================================================
-# Vision Transformer
-# ==============================================================================
 
 
 class Qwen3VLVisionTransformer(nnx.Module):
@@ -691,16 +667,16 @@ class Qwen3VLVisionTransformer(nnx.Module):
         self.config = vision_config
         self.dtype = dtype
 
-        # Extract vision config
         patch_size = vision_config.patch_size
         temporal_patch_size = vision_config.temporal_patch_size
         in_channels = vision_config.in_channels
         self.hidden_size = vision_config.hidden_size
         self.num_heads = vision_config.num_heads
+
+        # analyze full attn block indexes' purpose by visiting flash attention impl.
         self.spatial_merge_size = vision_config.spatial_merge_size
         self.spatial_merge_unit = self.spatial_merge_size**2
 
-        # Patch embedding
         self.patch_embed = Qwen3VLVisionPatchEmbed(
             rngs=rngs,
             patch_size=patch_size,
@@ -710,7 +686,7 @@ class Qwen3VLVisionTransformer(nnx.Module):
             dtype=dtype,
         )
 
-        # Learned positional embeddings
+        # Learned PE, 48 x 48 H W
         num_position_embeddings = getattr(
             vision_config, "num_position_embeddings", 2304
         )
@@ -723,13 +699,11 @@ class Qwen3VLVisionTransformer(nnx.Module):
         )
         self.num_grid_per_side = int(num_position_embeddings**0.5)
 
-        # Rotary position embedding
         head_dim = self.hidden_size // self.num_heads
         self.rotary_pos_emb = Qwen3VLVisionRotaryEmbedding(head_dim // 2)
 
-        # Transformer blocks
         intermediate_size = vision_config.intermediate_size
-        self.blocks = [
+        self.blocks = nnx.List([
             Qwen3VLVisionBlock(
                 hidden_size=self.hidden_size,
                 num_heads=self.num_heads,
@@ -740,12 +714,11 @@ class Qwen3VLVisionTransformer(nnx.Module):
                 norm_eps=norm_eps,
             )
             for _ in range(vision_config.depth)
-        ]
+        ])
 
-        # Output dimension (language model hidden size)
+        # Final merger settings
         out_hidden_size = getattr(vision_config, "out_hidden_size", hf_config.hidden_size)
 
-        # Final merger (use_postshuffle_norm=False)
         self.merger = Qwen3VLVisionPatchMerger(
             d_model=out_hidden_size,
             context_dim=self.hidden_size,
@@ -773,7 +746,8 @@ class Qwen3VLVisionTransformer(nnx.Module):
             for _ in range(len(self.deepstack_visual_indexes))
         ]
 
-        # Dynamic image size support (following qwen2_5_vl pattern)
+        # TODO: Setting this to True should make patch module forward to use eager mode.
+        # However, transformer blocks(causes most overhead) may be JIT-ed. Padding would be required for efficiency.
         additional_config = getattr(vllm_config, "additional_config", None) or {}
         self.enable_dynamic_image_sizes = additional_config.get(
             "enable_dynamic_image_sizes", False
@@ -930,14 +904,14 @@ class Qwen3VLVisionTransformer(nnx.Module):
         self,
         x: jax.Array,
         rotary_pos_emb: jax.Array,
-        cu_seqlens: jax.Array,
+        segment_ids: jax.Array,
     ) -> Tuple[jax.Array, List[jax.Array]]:
         """JIT-compatible core computation.
 
         Args:
             x: Patch embeddings of shape (num_patches, hidden_size)
             rotary_pos_emb: Rotary embeddings
-            cu_seqlens: Cumulative sequence lengths
+            segment_ids: Segment IDs for variable-length attention
 
         Returns:
             hidden_states: Final merged features
@@ -961,7 +935,7 @@ class Qwen3VLVisionTransformer(nnx.Module):
             hidden_states = blk(
                 hidden_states,
                 rotary_pos_emb=rotary_pos_emb,
-                cu_seqlens=cu_seqlens,
+                segment_ids=segment_ids,
             )
 
             # Collect DeepStack features at specified layers
@@ -983,25 +957,22 @@ class Qwen3VLVisionTransformer(nnx.Module):
         self, x: jax.Array, grid_thw: Tuple[Tuple[int, int, int], ...]
     ) -> Tuple[jax.Array, List[jax.Array]]:
         """JIT-compiled encoding with static grid dimensions."""
-        # Compute position embeddings
+        # Learned PE interpolate
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
 
-        # Add position embeddings
         hidden_states = self.patch_embed(x)
         hidden_states = hidden_states + pos_embeds
 
-        # Compute rotary embeddings
         rotary_pos_emb_list = []
         for t, h, w in grid_thw:
             rotary_pos_emb_list.append(self.rotary_pos_emb_thw(t, h, w))
         rotary_pos_emb = jnp.concatenate(rotary_pos_emb_list, axis=0)
         rotary_pos_emb = rotary_pos_emb.reshape(-1, rotary_pos_emb.shape[-1])
 
-        # Compute cumulative sequence lengths
-        seq_lens = [t * (h // self.spatial_merge_size) * (w // self.spatial_merge_size)
-                    for t, h, w in grid_thw]
-        cu_seqlens = jnp.cumsum(jnp.array(seq_lens, dtype=jnp.int32))
-        cu_seqlens = jnp.pad(cu_seqlens, ((1, 0),), mode="constant", constant_values=0)
+        # Generate segment IDs for variable-length attention
+        segment_ids = generate_segment_ids_from_grid_thw(
+            grid_thw, self.spatial_merge_size
+        )
 
         # Reshape for transformer
         seq_len = hidden_states.shape[0]
@@ -1016,7 +987,7 @@ class Qwen3VLVisionTransformer(nnx.Module):
             hidden_states = blk(
                 hidden_states,
                 rotary_pos_emb=rotary_pos_emb,
-                cu_seqlens=cu_seqlens,
+                segment_ids=segment_ids,
             )
 
             if layer_num in self.deepstack_visual_indexes:
@@ -1046,10 +1017,6 @@ class Qwen3VLVisionTransformer(nnx.Module):
         return self.encode_jit(x, grid_thw)
 
 
-# ==============================================================================
-# Text Model with DeepStack
-# ==============================================================================
-
 
 class Qwen3VLModel(nnx.Module):
     """Text model that reuses Qwen3DecoderLayer with DeepStack injection."""
@@ -1067,7 +1034,7 @@ class Qwen3VLModel(nnx.Module):
         rms_norm_eps = hf_config.rms_norm_eps
         hidden_size = hf_config.hidden_size
 
-        # Embeddings
+        # Embedder
         self.embed = nnx.Embed(
             num_embeddings=vocab_size,
             features=hidden_size,
@@ -1076,7 +1043,7 @@ class Qwen3VLModel(nnx.Module):
             rngs=rng,
         )
 
-        # Reuse Qwen3DecoderLayer directly
+        # Text part is just Qwen3
         self.layers = [
             Qwen3DecoderLayer(
                 config=hf_config,
@@ -1088,7 +1055,6 @@ class Qwen3VLModel(nnx.Module):
             for _ in range(hf_config.num_hidden_layers)
         ]
 
-        # Final layer norm
         self.norm = nnx.RMSNorm(
             hidden_size,
             epsilon=rms_norm_eps,
@@ -1163,11 +1129,10 @@ class Qwen3VLModel(nnx.Module):
         else:
             x = self.embed(input_ids)
 
-        # Process through decoder layers
         for i, layer in enumerate(self.layers):
             kv_caches[i], x = layer(kv_caches[i], x, attention_metadata)
 
-            # DeepStack injection after early layers
+            # DeepStack injection
             if (
                 deepstack_visual_embeds is not None
                 and i < len(deepstack_visual_embeds)
@@ -1190,10 +1155,6 @@ class Qwen3VLModel(nnx.Module):
             logits = jnp.dot(hidden_states, self.lm_head.value)
         return logits
 
-
-# ==============================================================================
-# Main Model: Qwen3VLForConditionalGeneration
-# ==============================================================================
 
 
 class Qwen3VLForConditionalGeneration(nnx.Module):
