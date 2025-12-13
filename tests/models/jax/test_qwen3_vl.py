@@ -6,7 +6,7 @@ Focuses on:
 - Various batch cases for images and videos
 """
 
-from typing import Tuple
+from typing import List, Tuple
 from unittest.mock import MagicMock, patch
 
 import jax
@@ -1057,3 +1057,340 @@ class TestIntegration:
             4 * (4 // sm) * (4 // sm)    # Video
         )
         assert hidden_states.shape == (expected_tokens, vc.out_hidden_size)
+
+
+# ==============================================================================
+# Heterogeneous Batch Tests (Variable Images/Videos per Sequence)
+# ==============================================================================
+
+
+class TestHeterogeneousBatchProcessing:
+    """Tests for batches with variable numbers and shapes of images/videos.
+
+    These tests ensure robustness when different sequences in a batch have:
+    - Different numbers of images
+    - Different image sizes
+    - Different mixes of images and videos
+    """
+
+    @pytest.fixture
+    def model(self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh):
+        """Create model with mocked components for testing."""
+        with patch('tpu_inference.models.jax.qwen3_vl.Qwen3VLVisionTransformer', autospec=True) as MockVision, \
+             patch('tpu_inference.models.jax.qwen3_vl.Qwen3VLModel', autospec=True) as MockLM:
+
+            vc = mock_vllm_config.model_config.hf_config.vision_config
+            mock_visual = MockVision.return_value
+            mock_visual.dtype = mock_vllm_config.model_config.dtype
+            mock_visual.config = vc
+            mock_visual.spatial_merge_size = vc.spatial_merge_size
+
+            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+            model.visual = mock_visual
+            model.language_model = MockLM.return_value
+            model.language_model.embed = MagicMock()
+            yield model
+
+    def _compute_tokens_per_item(self, grid_thw: Tuple[Tuple[int, int, int], ...],
+                                  spatial_merge_size: int) -> List[int]:
+        """Compute number of tokens for each image/video in grid_thw."""
+        return [
+            t * (h // spatial_merge_size) * (w // spatial_merge_size)
+            for t, h, w in grid_thw
+        ]
+
+    def test_single_image_vs_multiple_images(
+            self, model: Qwen3VLForConditionalGeneration, rng: PRNGKey):
+        """Test batch where one sequence has 1 image and another has 3 images.
+
+        Simulates real-world scenario where users send different numbers of images.
+        """
+        vc = model.config.vision_config
+        patch_dim = vc.in_channels * vc.temporal_patch_size * vc.patch_size ** 2
+        sm = vc.spatial_merge_size
+
+        # Batch with 4 images total: can represent different sequences
+        # Sequence 1: 1 image (4x4)
+        # Sequence 2: 3 images (4x4, 8x8, 6x6)
+        grid_thw = (
+            (1, 4, 4),   # Seq 1: Image 1
+            (1, 4, 4),   # Seq 2: Image 1
+            (1, 8, 8),   # Seq 2: Image 2
+            (1, 6, 6),   # Seq 2: Image 3
+        )
+
+        num_patches = sum(t * h * w for t, h, w in grid_thw)
+        pixel_values = jax.random.normal(rng, (num_patches, patch_dim))
+
+        tokens_per_item = self._compute_tokens_per_item(grid_thw, sm)
+        total_tokens = sum(tokens_per_item)
+        mock_embeds = jnp.ones((total_tokens, vc.out_hidden_size))
+        mock_deepstack = [jnp.ones((total_tokens, vc.out_hidden_size))]
+
+        model.visual.return_value = (mock_embeds, mock_deepstack)
+
+        image_embeds_tuple = model.get_multimodal_embeddings(
+            grid_thw, pixel_values=pixel_values)
+
+        # Should return 4 separate embeddings (one per image)
+        assert isinstance(image_embeds_tuple, tuple)
+        assert len(image_embeds_tuple) == 4
+
+        # Verify each embedding has correct shape
+        for i, embed in enumerate(image_embeds_tuple):
+            assert embed.shape == (tokens_per_item[i], vc.out_hidden_size), \
+                f"Image {i} embedding shape mismatch"
+
+        # Verify deepstack cache
+        assert model._deepstack_cache is not None
+
+    def test_variable_image_sizes_same_count(
+            self, model: Qwen3VLForConditionalGeneration, rng: PRNGKey):
+        """Test batch where all sequences have same number but different sized images."""
+        vc = model.config.vision_config
+        patch_dim = vc.in_channels * vc.temporal_patch_size * vc.patch_size ** 2
+        sm = vc.spatial_merge_size
+
+        # 3 sequences, each with 1 image of different size
+        grid_thw = (
+            (1, 4, 4),    # Small image: 4 tokens
+            (1, 8, 8),    # Medium image: 16 tokens
+            (1, 12, 12),  # Large image: 36 tokens
+        )
+
+        num_patches = sum(t * h * w for t, h, w in grid_thw)
+        pixel_values = jax.random.normal(rng, (num_patches, patch_dim))
+
+        tokens_per_item = self._compute_tokens_per_item(grid_thw, sm)
+        total_tokens = sum(tokens_per_item)
+        mock_embeds = jnp.ones((total_tokens, vc.out_hidden_size))
+        mock_deepstack = [jnp.ones((total_tokens, vc.out_hidden_size))]
+
+        model.visual.return_value = (mock_embeds, mock_deepstack)
+
+        image_embeds_tuple = model.get_multimodal_embeddings(
+            grid_thw, pixel_values=pixel_values)
+
+        assert len(image_embeds_tuple) == 3
+
+        # Verify varying sizes
+        expected_tokens = [4, 16, 36]  # (4/2)^2, (8/2)^2, (12/2)^2
+        for i, (embed, expected) in enumerate(zip(image_embeds_tuple, expected_tokens)):
+            assert embed.shape[0] == expected, \
+                f"Image {i}: expected {expected} tokens, got {embed.shape[0]}"
+
+    def test_mixed_images_and_videos_variable_counts(
+            self, model: Qwen3VLForConditionalGeneration, rng: PRNGKey):
+        """Test batch mixing images and videos with variable temporal frames."""
+        vc = model.config.vision_config
+        patch_dim = vc.in_channels * vc.temporal_patch_size * vc.patch_size ** 2
+        sm = vc.spatial_merge_size
+
+        # Mixed batch:
+        # - 2 images (t=1)
+        # - 1 short video (t=2)
+        # - 1 long video (t=8)
+        grid_thw = (
+            (1, 4, 4),   # Image 1
+            (1, 8, 8),   # Image 2
+            (2, 4, 4),   # Short video: 2 frames
+            (8, 4, 4),   # Long video: 8 frames
+        )
+
+        num_patches = sum(t * h * w for t, h, w in grid_thw)
+        pixel_values = jax.random.normal(rng, (num_patches, patch_dim))
+
+        tokens_per_item = self._compute_tokens_per_item(grid_thw, sm)
+        total_tokens = sum(tokens_per_item)
+        mock_embeds = jnp.ones((total_tokens, vc.out_hidden_size))
+        mock_deepstack = [jnp.ones((total_tokens, vc.out_hidden_size))]
+
+        model.visual.return_value = (mock_embeds, mock_deepstack)
+
+        embeds_tuple = model.get_multimodal_embeddings(
+            grid_thw, pixel_values=pixel_values)
+
+        assert len(embeds_tuple) == 4
+
+        # Expected tokens: image tokens scale with spatial, video with temporal*spatial
+        expected = [
+            1 * 2 * 2,   # Image 1: 4 tokens
+            1 * 4 * 4,   # Image 2: 16 tokens
+            2 * 2 * 2,   # Short video: 8 tokens
+            8 * 2 * 2,   # Long video: 32 tokens
+        ]
+        for i, (embed, exp) in enumerate(zip(embeds_tuple, expected)):
+            assert embed.shape[0] == exp, \
+                f"Item {i}: expected {exp} tokens, got {embed.shape[0]}"
+
+    @pytest.mark.parametrize("num_items,grid_configs", [
+        # Single item
+        (1, [(1, 4, 4)]),
+        # Two items, same size
+        (2, [(1, 4, 4), (1, 4, 4)]),
+        # Two items, different sizes
+        (2, [(1, 4, 4), (1, 8, 8)]),
+        # Many items with varying sizes
+        (5, [(1, 4, 4), (1, 6, 6), (1, 8, 8), (1, 10, 10), (1, 4, 4)]),
+        # Mix of images and videos
+        (4, [(1, 4, 4), (2, 4, 4), (1, 8, 8), (4, 6, 6)]),
+        # All videos with different temporal lengths
+        (3, [(2, 4, 4), (4, 4, 4), (8, 4, 4)]),
+        # Large batch with heterogeneous items
+        (8, [(1, 4, 4), (1, 6, 6), (2, 4, 4), (1, 8, 8),
+             (4, 4, 4), (1, 10, 10), (2, 6, 6), (1, 4, 4)]),
+    ])
+    def test_parametrized_heterogeneous_batches(
+            self, model: Qwen3VLForConditionalGeneration, rng: PRNGKey,
+            num_items: int, grid_configs: List[Tuple[int, int, int]]):
+        """Parametrized test for various heterogeneous batch configurations."""
+        vc = model.config.vision_config
+        patch_dim = vc.in_channels * vc.temporal_patch_size * vc.patch_size ** 2
+        sm = vc.spatial_merge_size
+
+        grid_thw = tuple(grid_configs)
+        num_patches = sum(t * h * w for t, h, w in grid_thw)
+        pixel_values = jax.random.normal(rng, (num_patches, patch_dim))
+
+        tokens_per_item = self._compute_tokens_per_item(grid_thw, sm)
+        total_tokens = sum(tokens_per_item)
+        mock_embeds = jnp.ones((total_tokens, vc.out_hidden_size))
+        mock_deepstack = [jnp.ones((total_tokens, vc.out_hidden_size))]
+
+        model.visual.return_value = (mock_embeds, mock_deepstack)
+
+        embeds_tuple = model.get_multimodal_embeddings(
+            grid_thw, pixel_values=pixel_values)
+
+        # Verify correct number of items returned
+        assert len(embeds_tuple) == num_items, \
+            f"Expected {num_items} items, got {len(embeds_tuple)}"
+
+        # Verify each item has correct token count
+        for i, (embed, expected_tokens) in enumerate(zip(embeds_tuple, tokens_per_item)):
+            assert embed.shape == (expected_tokens, vc.out_hidden_size), \
+                f"Item {i}: expected shape ({expected_tokens}, {vc.out_hidden_size}), " \
+                f"got {embed.shape}"
+
+        # Verify deepstack cache is populated
+        assert model._deepstack_cache is not None
+
+    def test_concatenation_preserves_order(
+            self, model: Qwen3VLForConditionalGeneration, rng: PRNGKey):
+        """Test that embeddings maintain correct order when split from concatenated tensor."""
+        vc = model.config.vision_config
+        patch_dim = vc.in_channels * vc.temporal_patch_size * vc.patch_size ** 2
+        sm = vc.spatial_merge_size
+
+        grid_thw = (
+            (1, 4, 4),   # 4 tokens
+            (1, 8, 8),   # 16 tokens
+            (1, 6, 6),   # 9 tokens
+        )
+
+        num_patches = sum(t * h * w for t, h, w in grid_thw)
+        pixel_values = jax.random.normal(rng, (num_patches, patch_dim))
+
+        tokens_per_item = self._compute_tokens_per_item(grid_thw, sm)
+
+        # Create distinguishable embeddings for each image
+        # Fill with different values so we can verify order
+        embeds_list = []
+        for i, n_tokens in enumerate(tokens_per_item):
+            # Each image gets embeddings filled with its index value
+            embeds_list.append(jnp.full((n_tokens, vc.out_hidden_size), float(i + 1)))
+
+        mock_embeds = jnp.concatenate(embeds_list, axis=0)
+        mock_deepstack = [jnp.ones((sum(tokens_per_item), vc.out_hidden_size))]
+
+        model.visual.return_value = (mock_embeds, mock_deepstack)
+
+        embeds_tuple = model.get_multimodal_embeddings(
+            grid_thw, pixel_values=pixel_values)
+
+        # Verify order is preserved by checking values
+        for i, embed in enumerate(embeds_tuple):
+            expected_value = float(i + 1)
+            assert jnp.allclose(embed, expected_value), \
+                f"Image {i}: expected values {expected_value}, got {embed[0, 0]}"
+
+    def test_empty_pixel_values_returns_empty_tuple(
+            self, model: Qwen3VLForConditionalGeneration):
+        """Test that None pixel_values returns empty tuple."""
+        grid_thw = ((1, 4, 4),)
+
+        # Call with no pixel_values
+        result = model.get_multimodal_embeddings(grid_thw, pixel_values=None)
+
+        assert result == ()
+        # Deepstack cache should not be set
+        assert model._deepstack_cache is None
+
+    def test_deepstack_cache_cleared_after_call(
+            self, model: Qwen3VLForConditionalGeneration, rng: PRNGKey):
+        """Test that deepstack cache is properly cleared after __call__."""
+        vc = model.config.vision_config
+        patch_dim = vc.in_channels * vc.temporal_patch_size * vc.patch_size ** 2
+        sm = vc.spatial_merge_size
+
+        grid_thw = ((1, 4, 4),)
+        num_patches = 16
+        pixel_values = jax.random.normal(rng, (num_patches, patch_dim))
+
+        tokens = 1 * (4 // sm) * (4 // sm)
+        mock_embeds = jnp.ones((tokens, vc.out_hidden_size))
+        mock_deepstack = [jnp.ones((tokens, vc.out_hidden_size))]
+
+        model.visual.return_value = (mock_embeds, mock_deepstack)
+
+        # First call populates cache
+        _ = model.get_multimodal_embeddings(grid_thw, pixel_values=pixel_values)
+        assert model._deepstack_cache is not None
+
+        # Simulate __call__ consuming the cache
+        cache = model._deepstack_cache
+        model._deepstack_cache = None  # Simulate what __call__ does
+
+        assert model._deepstack_cache is None
+        assert cache is not None  # Original cache was valid
+
+    def test_vision_transformer_heterogeneous_batch(
+            self, mock_vllm_config: MockVllmConfig, rngs: nnx.Rngs,
+            mesh: Mesh, rng: PRNGKey):
+        """Test actual vision transformer (not mocked) with heterogeneous batch."""
+        vision_transformer = Qwen3VLVisionTransformer(mock_vllm_config, rngs, mesh)
+
+        # Mock flash attention
+        for block in vision_transformer.blocks:
+            block.attn.flash_attention = MagicMock(
+                side_effect=lambda q, k, v, seg: jnp.ones_like(q))
+
+        vc = vision_transformer.config
+        patch_dim = vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size
+        sm = vc.spatial_merge_size
+
+        # Heterogeneous batch: different sizes and temporal frames
+        grid_thw = (
+            (1, 4, 4),   # Small image
+            (1, 8, 8),   # Large image
+            (2, 4, 4),   # Short video
+            (4, 6, 6),   # Long video with different spatial size
+        )
+
+        num_patches = sum(t * h * w for t, h, w in grid_thw)
+        x = jax.random.normal(rng, (num_patches, patch_dim))
+
+        hidden_states, deepstack_features = vision_transformer(x, grid_thw)
+
+        # Calculate expected total tokens
+        expected_tokens = sum(
+            t * (h // sm) * (w // sm) for t, h, w in grid_thw
+        )
+
+        assert hidden_states.shape == (expected_tokens, vc.out_hidden_size)
+        assert isinstance(deepstack_features, list)
+        assert len(deepstack_features) == len(vision_transformer.deepstack_visual_indexes)
+
+        # Each deepstack feature should match total token count
+        for feat in deepstack_features:
+            assert feat.shape == (expected_tokens, vc.out_hidden_size)
