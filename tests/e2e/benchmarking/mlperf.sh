@@ -134,6 +134,18 @@ if [ "$use_dummy_weights" = true ]; then
     extra_serve_args+=("--load-format=dummy")
 fi
 
+if [ "$USE_V6E8_QUEUE" == "True" ]; then
+    # Set to 8 if job is in 8 chips queue.
+    # TODO (Qiliang Cui) Rename USE_V6E8_QUEUE to USE_8_CHIPS_QUEUE
+    extra_serve_args+=(--tensor-parallel-size 8)
+elif [ "$IS_FOR_V7X" == "true" ]; then
+    # Set the default value to 2 for tpu v7x
+    extra_serve_args+=(--tensor-parallel-size 2)
+else
+    extra_serve_args+=(--tensor-parallel-size 1)
+fi
+
+
 echo extra_serve_args: "${extra_serve_args[@]}"
 
 
@@ -251,7 +263,6 @@ for model_name in $model_list; do
     current_serve_args=("${extra_serve_args[@]}")
     max_batched_tokens=8192
     if [ "$USE_V6E8_QUEUE" == "True" ]; then
-        current_serve_args+=(--tensor-parallel-size 8)
         max_batched_tokens=1024
         if [ "$model_name" == "meta-llama/Llama-4-Scout-17B-16E-Instruct" ]; then
             current_serve_args+=(--hf-overrides '{"architectures": ["Llama4ForCausalLM"]}')
