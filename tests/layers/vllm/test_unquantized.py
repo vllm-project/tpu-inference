@@ -4,7 +4,6 @@ import jax
 import pytest
 import torch
 import torchax
-import utils as test_utils
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.interop import torch_view
 from torchax.ops.mappings import j2t, t2j
@@ -27,6 +26,8 @@ from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.unquantized import (
     VllmUnquantizedConfig, VllmUnquantizedFusedMoEMethod,
     VllmUnquantizedLinearMethod)
+
+from . import utils as test_utils
 
 P = PartitionSpec
 MODELS = ["Qwen/Qwen2-1.5B-Instruct"]
