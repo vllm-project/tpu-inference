@@ -900,23 +900,12 @@ class Qwen3VLVisionTransformer(nnx.Module):
         patch_pos_embeds = jnp.concatenate(patch_pos_embeds_permute, axis=0)
         return patch_pos_embeds
 
-    def compute_hidden_states(
+    def encode(
         self,
         x: jax.Array,
         rotary_pos_emb: jax.Array,
         segment_ids: jax.Array,
     ) -> Tuple[jax.Array, List[jax.Array]]:
-        """JIT-compatible core computation.
-
-        Args:
-            x: Patch embeddings of shape (num_patches, hidden_size)
-            rotary_pos_emb: Rotary embeddings
-            segment_ids: Segment IDs for variable-length attention
-
-        Returns:
-            hidden_states: Final merged features
-            deepstack_features: List of intermediate features
-        """
         # Patch embedding
         hidden_states = self.patch_embed(x)
 
@@ -1194,6 +1183,9 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         self.vision_start_token_id = getattr(config, "vision_start_token_id", 151652)
         self.spatial_merge_size = config.vision_config.spatial_merge_size
 
+        # DeepStack cache for serving (populated by get_multimodal_embeddings, consumed by __call__)
+        self._deepstack_cache: Optional[List[jax.Array]] = None
+
     def get_input_embeddings(
         self,
         input_ids: jax.Array,
@@ -1222,21 +1214,44 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
 
     def get_multimodal_embeddings(
         self,
-        pixel_values: jax.Array,
         image_grid_thw: Tuple[Tuple[int, int, int], ...],
-    ) -> Tuple[jax.Array, List[jax.Array]]:
+        **kwargs,
+    ) -> Tuple[jax.Array, ...]:
         """Get multimodal embeddings from pixel values.
 
+        This method is called by the serving infrastructure (multimodal_manager).
+        DeepStack embeddings are cached for later use in __call__.
+
         Args:
-            pixel_values: Pixel values for vision encoder
             image_grid_thw: Grid dimensions (T, H, W) for each image
+            **kwargs: Contains 'pixel_values' for vision encoder
 
         Returns:
-            image_embeds: Flattened image embeddings
-            deepstack_embeds: List of DeepStack embeddings
+            Tuple of embeddings, one per image (matching Qwen 2.5 VL format)
         """
+        pixel_values = kwargs.get("pixel_values")
+        if pixel_values is None:
+            return ()
+
+        # Run vision encoder
         image_embeds, deepstack_embeds = self.visual(pixel_values, image_grid_thw)
-        return image_embeds, deepstack_embeds
+
+        # Cache deepstack embeddings for forward pass
+        self._deepstack_cache = deepstack_embeds
+
+        # Split embeddings per image (matching Qwen 2.5 VL return format)
+        sizes = np.array([
+            t * (h // self.spatial_merge_size) * (w // self.spatial_merge_size)
+            for t, h, w in image_grid_thw
+        ])
+
+        if sizes.size == 0:
+            return ()
+        if sizes.size == 1:
+            return (image_embeds,)
+
+        split_indices = np.cumsum(sizes)[:-1]
+        return tuple(jnp.split(image_embeds, split_indices))
 
     def __call__(
         self,
@@ -1266,12 +1281,28 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         visual_pos_mask = None
         deepstack_embeds = None
 
-        # Process images if provided
-        if pixel_values is not None and image_grid_thw is not None:
-            image_embeds, deepstack_embeds = self.get_multimodal_embeddings(
-                pixel_values, image_grid_thw
+        # Check for cached deepstack embeddings from serving flow
+        # (populated by get_multimodal_embeddings called by multimodal_manager)
+        if self._deepstack_cache is not None:
+            deepstack_embeds = self._deepstack_cache
+            self._deepstack_cache = None  # Clear cache after use
+            # Build visual_pos_mask for DeepStack injection
+            if input_ids is not None:
+                visual_pos_mask = (input_ids == self.image_token_id) | (
+                    input_ids == self.video_token_id
+                )
+        # Direct call path: process images if provided
+        elif pixel_values is not None and image_grid_thw is not None:
+            image_embeds_tuple = self.get_multimodal_embeddings(
+                image_grid_thw, pixel_values=pixel_values
             )
-            inputs_embeds = self.get_input_embeddings(input_ids, image_embeds)
+            # Concatenate per-image embeddings back to single tensor
+            if image_embeds_tuple:
+                image_embeds = jnp.concatenate(image_embeds_tuple, axis=0)
+                inputs_embeds = self.get_input_embeddings(input_ids, image_embeds)
+            # Get deepstack from cache (populated by get_multimodal_embeddings)
+            deepstack_embeds = self._deepstack_cache
+            self._deepstack_cache = None
             visual_pos_mask = (input_ids == self.image_token_id) | (
                 input_ids == self.video_token_id
             )
@@ -1289,7 +1320,6 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         return kv_caches, x, []
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        """Compute logits from hidden states."""
         return self.language_model.compute_logits(hidden_states)
 
     def get_mrope_input_positions(
@@ -1378,12 +1408,8 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         """Load weights from HuggingFace model."""
         self.rng = nnx.Rngs(rng_key)
 
-        # Weight mappings: HF name -> JAX name
         mappings = {
-            # Language model embeddings
             "model.embed_tokens": "language_model.embed.embedding",
-
-            # Language model layers
             "model.layers.*.input_layernorm": "language_model.layers.*.input_layernorm.scale",
             "model.layers.*.mlp.down_proj": "language_model.layers.*.mlp.down_proj.kernel",
             "model.layers.*.mlp.gate_proj": "language_model.layers.*.mlp.gate_proj.kernel",
@@ -1396,40 +1422,28 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
             "model.layers.*.self_attn.q_norm": "language_model.layers.*.self_attn.q_norm.scale",
             "model.layers.*.self_attn.k_norm": "language_model.layers.*.self_attn.k_norm.scale",
             "model.norm": "language_model.norm.scale",
-
-            # Vision encoder - patch embedding
             "visual.patch_embed.proj": "visual.patch_embed.proj.kernel",
-
-            # Vision encoder - position embedding
             "visual.pos_embed": "visual.pos_embed.embedding",
-
-            # Vision encoder - blocks
             "visual.blocks.*.attn.qkv": "visual.blocks.*.attn.qkv_proj.kernel",
             "visual.blocks.*.attn.qkv.bias": "visual.blocks.*.attn.qkv_proj.bias",
             "visual.blocks.*.attn.proj": "visual.blocks.*.attn.proj.kernel",
             "visual.blocks.*.attn.proj.bias": "visual.blocks.*.attn.proj.bias",
-            "visual.blocks.*.mlp.gate_proj": "visual.blocks.*.mlp.gate_proj.kernel",
-            "visual.blocks.*.mlp.gate_proj.bias": "visual.blocks.*.mlp.gate_proj.bias",
-            "visual.blocks.*.mlp.up_proj": "visual.blocks.*.mlp.up_proj.kernel",
-            "visual.blocks.*.mlp.up_proj.bias": "visual.blocks.*.mlp.up_proj.bias",
-            "visual.blocks.*.mlp.down_proj": "visual.blocks.*.mlp.down_proj.kernel",
-            "visual.blocks.*.mlp.down_proj.bias": "visual.blocks.*.mlp.down_proj.bias",
+            "visual.blocks.*.mlp.fc1": "visual.blocks.*.mlp.fc1.kernel",
+            "visual.blocks.*.mlp.fc1.bias": "visual.blocks.*.mlp.fc1.bias",
+            "visual.blocks.*.mlp.fc2": "visual.blocks.*.mlp.fc2.kernel",
+            "visual.blocks.*.mlp.fc2.bias": "visual.blocks.*.mlp.fc2.bias",
             "visual.blocks.*.norm1": "visual.blocks.*.norm1.scale",
             "visual.blocks.*.norm2": "visual.blocks.*.norm2.scale",
-
-            # Vision encoder - main merger
-            "visual.merger.ln_q": "visual.merger.ln_q.scale",
-            "visual.merger.mlp.0": "visual.merger.mlp_fc1.kernel",
-            "visual.merger.mlp.0.bias": "visual.merger.mlp_fc1.bias",
-            "visual.merger.mlp.2": "visual.merger.mlp_fc2.kernel",
-            "visual.merger.mlp.2.bias": "visual.merger.mlp_fc2.bias",
-
-            # Vision encoder - DeepStack mergers
-            "visual.deepstack_merger_list.*.ln_q": "visual.deepstack_merger_list.*.ln_q.scale",
-            "visual.deepstack_merger_list.*.mlp.0": "visual.deepstack_merger_list.*.mlp_fc1.kernel",
-            "visual.deepstack_merger_list.*.mlp.0.bias": "visual.deepstack_merger_list.*.mlp_fc1.bias",
-            "visual.deepstack_merger_list.*.mlp.2": "visual.deepstack_merger_list.*.mlp_fc2.kernel",
-            "visual.deepstack_merger_list.*.mlp.2.bias": "visual.deepstack_merger_list.*.mlp_fc2.bias",
+            "visual.merger.ln_q": "visual.merger.norm.scale",
+            "visual.merger.mlp.0": "visual.merger.linear_fc1.kernel",
+            "visual.merger.mlp.0.bias": "visual.merger.linear_fc1.bias",
+            "visual.merger.mlp.2": "visual.merger.linear_fc2.kernel",
+            "visual.merger.mlp.2.bias": "visual.merger.linear_fc2.bias",
+            "visual.deepstack_merger_list.*.ln_q": "visual.deepstack_merger_list.*.norm.scale",
+            "visual.deepstack_merger_list.*.mlp.0": "visual.deepstack_merger_list.*.linear_fc1.kernel",
+            "visual.deepstack_merger_list.*.mlp.0.bias": "visual.deepstack_merger_list.*.linear_fc1.bias",
+            "visual.deepstack_merger_list.*.mlp.2": "visual.deepstack_merger_list.*.linear_fc2.kernel",
+            "visual.deepstack_merger_list.*.mlp.2.bias": "visual.deepstack_merger_list.*.linear_fc2.bias",
         }
 
         # Add lm_head mapping if not tied

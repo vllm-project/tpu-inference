@@ -595,7 +595,11 @@ class TestQwen3VLForConditionalGeneration:
 
     def test_get_multimodal_embeddings_single_image(
             self, model: Qwen3VLForConditionalGeneration, rng: PRNGKey):
-        """Test multimodal embeddings for single image."""
+        """Test multimodal embeddings for single image.
+
+        New signature: get_multimodal_embeddings(image_grid_thw, **kwargs) -> Tuple[jax.Array, ...]
+        Returns per-image embeddings, deepstack is cached internally.
+        """
         vc = model.config.vision_config
         patch_dim = vc.in_channels * vc.temporal_patch_size * vc.patch_size ** 2
 
@@ -609,15 +613,23 @@ class TestQwen3VLForConditionalGeneration:
 
         model.visual.return_value = (mock_embeds, mock_deepstack)
 
-        image_embeds, deepstack_embeds = model.get_multimodal_embeddings(
-            pixel_values, grid_thw)
+        # New signature: grid_thw first, pixel_values via kwargs
+        image_embeds_tuple = model.get_multimodal_embeddings(
+            grid_thw, pixel_values=pixel_values)
 
-        assert image_embeds.shape == (tokens_per_image, vc.out_hidden_size)
-        assert len(deepstack_embeds) == 1
+        # Returns tuple of per-image embeddings (single image = tuple of 1)
+        assert isinstance(image_embeds_tuple, tuple)
+        assert len(image_embeds_tuple) == 1
+        assert image_embeds_tuple[0].shape == (tokens_per_image, vc.out_hidden_size)
+        # Deepstack is cached internally, check cache was populated
+        assert model._deepstack_cache is not None
 
     def test_get_multimodal_embeddings_multiple_images(
             self, model: Qwen3VLForConditionalGeneration, rng: PRNGKey):
-        """Test multimodal embeddings for multiple images."""
+        """Test multimodal embeddings for multiple images.
+
+        New signature returns tuple of per-image embeddings.
+        """
         vc = model.config.vision_config
         patch_dim = vc.in_channels * vc.temporal_patch_size * vc.patch_size ** 2
 
@@ -625,23 +637,32 @@ class TestQwen3VLForConditionalGeneration:
         num_patches = 16 + 64
         pixel_values = jax.random.normal(rng, (num_patches, patch_dim))
 
-        total_tokens = (
-            1 * (4 // vc.spatial_merge_size) * (4 // vc.spatial_merge_size) +
-            1 * (8 // vc.spatial_merge_size) * (8 // vc.spatial_merge_size)
-        )
+        tokens_img1 = 1 * (4 // vc.spatial_merge_size) * (4 // vc.spatial_merge_size)
+        tokens_img2 = 1 * (8 // vc.spatial_merge_size) * (8 // vc.spatial_merge_size)
+        total_tokens = tokens_img1 + tokens_img2
         mock_embeds = jnp.ones((total_tokens, vc.out_hidden_size))
         mock_deepstack = [jnp.ones((total_tokens, vc.out_hidden_size))]
 
         model.visual.return_value = (mock_embeds, mock_deepstack)
 
-        image_embeds, deepstack_embeds = model.get_multimodal_embeddings(
-            pixel_values, grid_thw)
+        # New signature: grid_thw first, pixel_values via kwargs
+        image_embeds_tuple = model.get_multimodal_embeddings(
+            grid_thw, pixel_values=pixel_values)
 
-        assert image_embeds.shape == (total_tokens, vc.out_hidden_size)
+        # Returns tuple of per-image embeddings (2 images = tuple of 2)
+        assert isinstance(image_embeds_tuple, tuple)
+        assert len(image_embeds_tuple) == 2
+        assert image_embeds_tuple[0].shape == (tokens_img1, vc.out_hidden_size)
+        assert image_embeds_tuple[1].shape == (tokens_img2, vc.out_hidden_size)
+        # Deepstack is cached internally
+        assert model._deepstack_cache is not None
 
     def test_get_multimodal_embeddings_video(
             self, model: Qwen3VLForConditionalGeneration, rng: PRNGKey):
-        """Test multimodal embeddings for video input."""
+        """Test multimodal embeddings for video input.
+
+        New signature returns tuple of per-video embeddings (single video = tuple of 1).
+        """
         vc = model.config.vision_config
         patch_dim = vc.in_channels * vc.temporal_patch_size * vc.patch_size ** 2
 
@@ -656,10 +677,16 @@ class TestQwen3VLForConditionalGeneration:
 
         model.visual.return_value = (mock_embeds, mock_deepstack)
 
-        image_embeds, deepstack_embeds = model.get_multimodal_embeddings(
-            pixel_values, grid_thw)
+        # New signature: grid_thw first, pixel_values via kwargs
+        video_embeds_tuple = model.get_multimodal_embeddings(
+            grid_thw, pixel_values=pixel_values)
 
-        assert image_embeds.shape == (total_tokens, vc.out_hidden_size)
+        # Returns tuple of per-video embeddings (single video = tuple of 1)
+        assert isinstance(video_embeds_tuple, tuple)
+        assert len(video_embeds_tuple) == 1
+        assert video_embeds_tuple[0].shape == (total_tokens, vc.out_hidden_size)
+        # Deepstack is cached internally
+        assert model._deepstack_cache is not None
 
     def test_call_text_only(
             self, model: Qwen3VLForConditionalGeneration, rng: PRNGKey):
