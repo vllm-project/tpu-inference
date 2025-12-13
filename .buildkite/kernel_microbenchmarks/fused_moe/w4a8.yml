@@ -1,0 +1,45 @@
+# fused moe-w4a8
+# kernel support matrix microbenchmarks
+steps:
+  - label: "Correctness tests for fused moe-w4a8"
+    key: "fused_moe-w4a8_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "fused_moe-w4a8_CorrectnessTest" "to be added"
+  - label: "Record correctness test result for fused moe w4a8"
+    key: "record_fused_moe-w4a8_CorrectnessTest"
+    depends_on: "fused_moe-w4a8_CorrectnessTest"
+    env:
+      CI_TARGET: "fused moe-w4a8"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "kernel support matrix microbenchmarks"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh fused_moe-w4a8_CorrectnessTest
+
+  - label: "Performance tests for fused moe-w4a8"
+    key: "fused_moe-w4a8_PerformanceTest"
+    depends_on: "record_fused_moe-w4a8_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "fused_moe-w4a8_PerformanceTest" "to be added"
+  - label: "Record performance test result for fused moe-w4a8"
+    key: "record_fused_moe-w4a8_PerformanceTest"
+    depends_on: "fused_moe-w4a8_PerformanceTest"
+    env:
+      CI_TARGET: "fused moe-w4a8"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "kernel support matrix microbenchmarks"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh fused_moe-w4a8_PerformanceTest
