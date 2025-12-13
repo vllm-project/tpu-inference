@@ -19,8 +19,7 @@ from tpu_inference.layers.jax.attention.attention import AttentionMetadata
 from tpu_inference.layers.jax.attention.deepseek_v3_attention import MLA
 from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
-from tpu_inference.layers.jax.moe.deepseek_v3_moe import (DeepSeekV3Router,
-                                                          SparseMoE)
+from tpu_inference.layers.jax.moe.deepseek_v3_moe import DeepSeekV3Router
 from tpu_inference.layers.jax.moe.moe import MoE
 from tpu_inference.layers.jax.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
@@ -92,19 +91,9 @@ class DeepSeekV3(nnx.Module):
 
         self.random_init = force_random_weights or self.vllm_config.additional_config.get(
             "random_weights", False)
-        self.sparse_matmul = self.vllm_config.additional_config.get(
-            "sparse_matmul", False)
-
-        if isinstance(self.sparse_matmul, str):
-            self.sparse_matmul = self.sparse_matmul.lower() == "true"
-        else:
-            self.sparse_matmul = bool(self.sparse_matmul)
-
-        if self.sparse_matmul:
-            logger.info("sparse matmul is enabled")
-        else:
-            logger.info("sparse matmul is disabled, using dense matmul")
         self.mesh = mesh
+
+        self._process_moe_kernel_flag()
 
         self.weight_loader = DeepSeekV3WeightLoader(
             vllm_config=vllm_config,
@@ -198,6 +187,7 @@ class DeepSeekV3(nnx.Module):
                     hidden_size=hidden_size,
                     intermediate_size=ffw_intermediate_size,
                     rngs=self.rng,
+                    activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
                     df_sharding=(None, ShardingAxisName.MLP_TENSOR),
                     fd_sharding=(ShardingAxisName.MLP_TENSOR, None),
                     random_init=self.random_init))
@@ -217,60 +207,41 @@ class DeepSeekV3(nnx.Module):
                 rngs=self.rng,
                 routed_scaling_factor=2.5,
                 dtype=dtype,
+                use_moe_kernel=(self.use_fused_moe_kernel or self.use_vllm_moe_kernel), 
                 activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
                 ed_sharding=(ShardingAxisName.MLP_TENSOR, None),
                 e_sharding=(ShardingAxisName.MLP_TENSOR, ))
-            if self.sparse_matmul:
-                # TODO: orginize the SparseMoE and DenseMoE better given they share most interfaces
-                custom_module = SparseMoE(
+            custom_module = MoE(
+                dtype=dtype,
+                num_local_experts=num_local_experts,
+                apply_expert_weight_before_computation=False,
+                hidden_size=hidden_size,
+                intermediate_size_moe=moe_intermediate_size,
+                num_experts_per_tok=num_experts_per_token,
+                mesh=self.mesh,
+                hidden_act=hidden_act,
+                rngs=self.rng,
+                random_init=self.random_init,
+                activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
+                activation_ffw_ted=(ShardingAxisName.MLP_DATA, None, None),
+                edf_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
+                efd_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
+                use_sparse_moe=self.sparse_matmul,
+                quantized_dtype=self.weight_loader.quant_dtype
+                if self.weight_loader.is_model_quantized else None,
+                use_vllm_moe_kernel=self.use_vllm_moe_kernel,
+                use_fused_moe_kernel=self.use_fused_moe_kernel,
+                use_megablox=self.use_megablox,
+                router=router) if is_moe_layer else DenseFFW(
                     dtype=dtype,
-                    num_local_experts=num_local_experts,
-                    apply_expert_weight_before_computation=False,
-                    hidden_size=hidden_size,
-                    intermediate_size_moe=moe_intermediate_size,
-                    num_experts_per_tok=num_experts_per_token,
-                    mesh=self.mesh,
                     hidden_act=hidden_act,
-                    rngs=self.rng,
-                    random_init=self.random_init,
-                    activation_ffw_td=(ShardingAxisName.MLP_TENSOR, None),
-                    activation_ffw_ted=(ShardingAxisName.MLP_DATA, None, None),
-                    edf_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
-                    efd_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
-                    quantized_dtype=self.weight_loader.quant_dtype
-                    if self.weight_loader.is_model_quantized else None,
-                    router=router) if is_moe_layer else DenseFFW(
-                        dtype=dtype,
-                        hidden_act=hidden_act,
-                        hidden_size=hidden_size,
-                        intermediate_size=ffw_intermediate_size,
-                        rngs=self.rng,
-                        random_init=self.random_init,
-                        df_sharding=(None, ShardingAxisName.MLP_TENSOR),
-                        fd_sharding=(ShardingAxisName.MLP_TENSOR, None))
-            else:
-                custom_module = MoE(
-                    dtype=dtype,
-                    num_local_experts=num_local_experts,
-                    apply_expert_weight_before_computation=False,
                     hidden_size=hidden_size,
-                    intermediate_size_moe=moe_intermediate_size,
-                    hidden_act=hidden_act,
+                    intermediate_size=ffw_intermediate_size,
                     rngs=self.rng,
                     random_init=self.random_init,
                     activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
-                    activation_ffw_ted=(ShardingAxisName.MLP_DATA, None, None),
-                    edf_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
-                    efd_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
-                    router=router) if is_moe_layer else DenseFFW(
-                        dtype=dtype,
-                        hidden_act=hidden_act,
-                        hidden_size=hidden_size,
-                        intermediate_size=ffw_intermediate_size,
-                        rngs=self.rng,
-                        random_init=self.random_init,
-                        df_sharding=(None, ShardingAxisName.MLP_TENSOR),
-                        fd_sharding=(ShardingAxisName.MLP_TENSOR, None))
+                    df_sharding=(None, ShardingAxisName.MLP_TENSOR),
+                    fd_sharding=(ShardingAxisName.MLP_TENSOR, None))
 
             shared_experts = DenseFFW(
                 dtype=dtype,
@@ -279,6 +250,7 @@ class DeepSeekV3(nnx.Module):
                 intermediate_size=num_shared_experts * moe_intermediate_size,
                 rngs=self.rng,
                 random_init=self.random_init,
+                activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
                 df_sharding=(None, ShardingAxisName.MLP_TENSOR),
                 fd_sharding=(ShardingAxisName.MLP_TENSOR, None))
 
@@ -342,6 +314,31 @@ class DeepSeekV3(nnx.Module):
 
         logger.debug("\n### LM Head ###")
         nnx.display(self.lm_head)
+
+    def _process_moe_kernel_flag(self):
+        self.use_fused_moe_kernel = bool(int(os.getenv("USE_MOE_EP_KERNEL", "0")))
+        self.use_vllm_moe_kernel = bool(int(os.getenv("USE_VLLM_MOE_KERNEL", "0")))
+        self.sparse_matmul = bool(int(os.getenv("USE_SPARSE_MATMUL", "0")))
+        self.use_megablox = bool(int(os.getenv("USE_MEGABLOCKS", "0")))
+        self.use_ragged_dot = bool(int(os.getenv("USE_RAGGED_DOT", "1")))
+
+        assert sum([self.use_fused_moe_kernel, self.use_vllm_moe_kernel]) <= 1, "You can enable at most one MoE kernels." 
+
+        if self.use_fused_moe_kernel:
+            logger.info("Fused MoE kernel is enabled")
+        elif self.use_vllm_moe_kernel:
+            logger.info("VLLM MoE kernel is enabled")        
+        elif self.sparse_matmul:
+            logger.info("Sparse Matmul is enabled")
+            if self.use_megablox:
+                logger.info("Mega Blocks is enabled for GMM in Sparse Matmul")
+            elif self.use_ragged_dot:
+                logger.info("Ragged Dot is enabled for GMM in Sparse Matmul")
+            else:
+                logger.error("Neither Ragged Dot nor Mega Blocks is enabled for GMM if using Sparse Matmul")
+\
+        else:
+            logger.info("Dense Matmul is enabled")
 
     # For compatibility with flax.
     def apply(self, variables, *args, **kwargs):
@@ -497,6 +494,8 @@ class DeepSeekV3WeightLoader:
             "layers.*.custom_module.kernel_down_proj_EFD",
             "model.layers.*.mlp.experts.*.up_proj.weight":
             "layers.*.custom_module.kernel_up_proj_EDF",
+            "model.layers.*.mlp.experts.*.gate_upproj_fused.weight":
+            "layers.*.custom_module.kernel_gating_upproj_E2DF",
             # MOE(shared experts)
             "model.layers.*.mlp.shared_experts.down_proj.weight":
             "layers.*.shared_experts.kernel_down_proj_FD",
@@ -567,9 +566,9 @@ class DeepSeekV3WeightLoader:
                 "kernel_kv_up_proj_ANH": (4, 128, 2),
                 "kernel_q_up_proj_ANH": (12, 1, 192),
                 "kernel_o_proj_NHD": (128, 1, 56),
-                "kernel_down_proj_EFD": (256, 16, 56),
-                "kernel_up_proj_EDF": (256, 56, 16),
-                "kernel_gating_EDF": (256, 56, 16),
+                "kernel_down_proj_EFD": (1, 1, 1),
+                "kernel_up_proj_EDF": (1, 1, 1),
+                "kernel_gating_EDF": (1, 1, 1),
             }
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
@@ -764,6 +763,7 @@ class DeepSeekV3WeightLoader:
         mlp_experts_up_proj_scales = {}
         mlp_experts_down_proj_weights = {}
         mlp_experts_down_proj_scales = {}
+        stacked_tensors = {}
         quantized_weights = {}
         quantized_scales = {}
         with jax.default_device(jax.devices("cpu")[0]):
@@ -832,6 +832,7 @@ class DeepSeekV3WeightLoader:
                 stacked_weights = None
                 if "mlp.experts" in loaded_name:
                     if "down_proj" in loaded_name:
+                        proj_type = "down_proj"
                         stacked_weights = self._process_moe_weights(
                             loaded_name, loaded_weight,
                             mlp_experts_down_proj_weights)
@@ -840,6 +841,7 @@ class DeepSeekV3WeightLoader:
                                 loaded_name, scale,
                                 mlp_experts_down_proj_scales)
                     if "gate_proj" in loaded_name:
+                        proj_type = "gate_proj"
                         stacked_weights = self._process_moe_weights(
                             loaded_name, loaded_weight,
                             mlp_experts_gate_proj_weights)
@@ -848,6 +850,7 @@ class DeepSeekV3WeightLoader:
                                 loaded_name, scale,
                                 mlp_experts_gate_proj_scales)
                     if "up_proj" in loaded_name:
+                        proj_type = "up_proj"
                         stacked_weights = self._process_moe_weights(
                             loaded_name, loaded_weight,
                             mlp_experts_up_proj_weights)
@@ -855,6 +858,45 @@ class DeepSeekV3WeightLoader:
                             stacked_scales = self._process_moe_weights(
                                 loaded_name, scale, mlp_experts_up_proj_scales)
                     if stacked_weights is not None:
+                        stacked_tensors[layer_num + proj_type] = (stacked_weights, stacked_scales)
+                        if all(f"{layer_num}{p}" in stacked_tensors 
+                               for p in ["gate_proj", "up_proj", "down_proj"]):
+                            
+                            gate_w, gate_s = stacked_tensors.pop(layer_num + "gate_proj")
+                            up_w, up_s = stacked_tensors.pop(layer_num + "up_proj")
+                            down_w, down_s = stacked_tensors.pop(layer_num + "down_proj")
+                            
+                            is_moe_kernel = model_for_loading.use_moe_kernel
+                            
+                            if is_moe_kernel:
+                                # (E, D, F) -> (E, 2, D, F)
+                                fused_w = torch.stack([gate_w, up_w], dim=1)
+                                fused_s = torch.stack([gate_s, up_s], dim=1) if gate_s is not None and up_s is not None else None
+                                
+                                fused_name = f"model.layers.{layer_num}.mlp.experts.0.gate_upproj_fused.weight"
+                                w_bytes, w_shards = self._load_individual_weight(
+                                    fused_name, fused_w, model_params, model_for_loading.mesh, scale=fused_s)
+                                
+                                w_bytes_down, w_shards_down = self._load_individual_weight(
+                                    loaded_name, down_w, model_params, model_for_loading.mesh, scale=down_s)
+                                
+                                # Update cumulative memory
+                                w_bytes += w_bytes_down
+                                w_shards += w_shards_down
+                                
+                            else:
+                                w_bytes, w_shards = self._load_individual_weight(
+                                    loaded_name, gate_w, model_params, model_for_loading.mesh, scale=gate_s)
+                                
+                                w_bytes_up, w_shards_up = self._load_individual_weight(
+                                    loaded_name, up_w, model_params, model_for_loading.mesh, scale=up_s)
+                                w_bytes += w_bytes_up
+                                w_shards += w_shards_up
+                                
+                                w_bytes_down, w_shards_down = self._load_individual_weight(
+                                    loaded_name, down_w, model_params, model_for_loading.mesh, scale=down_s)
+                                w_bytes += w_bytes_down
+                                w_shards += w_shards_down
                         weight_bytes, weight_shards = self._load_individual_weight(
                             loaded_name,
                             stacked_weights,
