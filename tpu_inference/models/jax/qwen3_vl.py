@@ -703,7 +703,7 @@ class Qwen3VLVisionTransformer(nnx.Module):
         self.rotary_pos_emb = Qwen3VLVisionRotaryEmbedding(head_dim // 2)
 
         intermediate_size = vision_config.intermediate_size
-        self.blocks = nnx.List([
+        self.blocks = [
             Qwen3VLVisionBlock(
                 hidden_size=self.hidden_size,
                 num_heads=self.num_heads,
@@ -714,7 +714,7 @@ class Qwen3VLVisionTransformer(nnx.Module):
                 norm_eps=norm_eps,
             )
             for _ in range(vision_config.depth)
-        ])
+        ]
 
         # Final merger settings
         out_hidden_size = getattr(vision_config, "out_hidden_size", hf_config.hidden_size)
