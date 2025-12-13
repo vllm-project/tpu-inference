@@ -238,8 +238,7 @@ class CompilationManager:
 
         for num_tokens in self.runner.num_tokens_paddings:
             dp_sharding = NamedSharding(
-                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, )
-            ) if self.runner.vllm_config.sharding_config.total_dp_size > 1 else None
+                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
 
             for num_reqs in self.runner.num_reqs_paddings:
                 padded_token_in_tpu_cur_input_indices = np.zeros(
@@ -277,8 +276,7 @@ class CompilationManager:
         hidden_size = self.runner.model_config.get_hidden_size()
         for num_tokens in self.runner.num_tokens_paddings:
             dp_sharding = NamedSharding(
-                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, )
-            ) if self.runner.vllm_config.sharding_config.total_dp_size > 1 else None
+                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
 
             input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32,
                                                   dp_sharding)
