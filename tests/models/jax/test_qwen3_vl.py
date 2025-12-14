@@ -83,19 +83,6 @@ class TestVllmConfig:
     additional_config: dict
 
 
-def _is_tpu() -> bool:
-    """Check if running on TPU, compatible with Docker/Ray multihost serving."""
-    try:
-        devices = jax.devices()
-        if not devices:
-            return False
-        # In Ray/Docker setups, jax.devices() returns the backend devices.
-        # Check the default backend instead of individual device platform.
-        return jax.default_backend() == "tpu"
-    except Exception:
-        return False
-
-
 def _num_placeholders_for_grid(
     grid_thw: Tuple[int, int, int], spatial_merge_size: int
 ) -> int:
@@ -322,7 +309,6 @@ class TestServingIntegration:
         assert positions.shape == (3, (len(tokens) - 1) - 2)
         assert isinstance(delta, int)
 
-    @pytest.mark.skipif(not _is_tpu(), reason="TPU required for flash attention vision encoder")
     def test_vision_encoder_and_embedding_merge_end_to_end(
         self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
