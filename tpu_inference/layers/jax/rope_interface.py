@@ -27,13 +27,43 @@ def apply_rope(
     adjacent values are used as inputs for rotation.
     """
 
-    # M-RoPE support for Qwen2.5-VL
+    # M-RoPE support for multimodal models (e.g., Qwen-VL).
     if positions.ndim == 2 and positions.shape[0] == 3:
-        mrope_section = rope_scaling.get("mrope_section",
-                                         None) if rope_scaling else None
-        # NOTE: We assume mrope_section is always available
-        # as Qwen2.5-VL is the only model using mrope
-        assert mrope_section is not None
+        mrope_section = None
+        if rope_scaling is not None:
+            mrope_section = rope_scaling.get("mrope_section", None)
+
+        if mrope_section is None:
+            rope_scaling_keys = list(rope_scaling.keys()) if rope_scaling else []
+            raise ValueError(
+                "apply_rope received 3D M-RoPE positions (shape=(3, seq_len)) "
+                "but rope_scaling is missing 'mrope_section'. "
+                f"Got rope_scaling keys={rope_scaling_keys}. "
+                "Fix: ensure the HF config includes e.g. "
+                "`rope_scaling={'mrope_section': [t, h, w], ...}` or disable "
+                "M-RoPE/uses_mrope for this model."
+            )
+
+        if not isinstance(mrope_section, (list, tuple)) or len(mrope_section) != 3:
+            raise ValueError(
+                "Invalid rope_scaling['mrope_section']; expected a list/tuple "
+                f"of length 3, but got {mrope_section!r}."
+            )
+
+        mrope_section = tuple(int(x) for x in mrope_section)
+        if any(x < 0 for x in mrope_section):
+            raise ValueError(
+                "Invalid rope_scaling['mrope_section']; expected non-negative "
+                f"values, but got {mrope_section}."
+            )
+
+        half_dim = head_dim // 2
+        if mrope_section[0] + mrope_section[1] > half_dim:
+            raise ValueError(
+                "Invalid rope_scaling['mrope_section']; expected "
+                f"mrope_section[0]+mrope_section[1] <= head_dim//2 "
+                f"({half_dim}), but got {mrope_section} for head_dim={head_dim}."
+            )
 
         split_indices = [mrope_section[0], mrope_section[0] + mrope_section[1]]
 

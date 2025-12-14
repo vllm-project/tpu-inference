@@ -958,10 +958,14 @@ class Qwen3VLVisionTransformer(nnx.Module):
         rotary_pos_emb = jnp.concatenate(rotary_pos_emb_list, axis=0)
         rotary_pos_emb = rotary_pos_emb.reshape(-1, rotary_pos_emb.shape[-1])
 
-        # Generate segment IDs for variable-length attention
+        # post-merge segment ids. This may be changed to pre-merge with later considerations.
         segment_ids = generate_segment_ids_from_grid_thw(
             grid_thw, self.spatial_merge_size
         )
+        segment_ids = jnp.repeat(segment_ids, self.spatial_merge_unit, axis=0)
+        assert segment_ids.shape[0] == hidden_states.shape[0], (
+            "segment_ids must match the patch sequence length. "
+            f"Got {segment_ids.shape[0]=} vs {hidden_states.shape[0]=}.")
 
         # Reshape for transformer
         seq_len = hidden_states.shape[0]
@@ -1325,9 +1329,14 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
     def get_mrope_input_positions(
         self,
         input_tokens: List[int],
-        image_grid_thw: Optional[List[Tuple[int, int, int]]] = None,
-        video_grid_thw: Optional[List[Tuple[int, int, int]]] = None,
+        hf_config=None,
+        image_grid_thw=None,
+        video_grid_thw=None,
         second_per_grid_ts: Optional[List[float]] = None,
+        context_len: int = 0,
+        seq_len: Optional[int] = None,
+        audio_feature_lengths=None,
+        use_audio_in_video: bool = False,
     ) -> Tuple[jax.Array, int]:
         """Compute MRoPE 3D position IDs for input sequence.
 
@@ -1344,16 +1353,31 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
             llm_positions: (3, seq_len) position IDs for [T, H, W]
             mrope_position_delta: Delta for rope calculation
         """
-        return get_mrope_input_positions(
+        # Match the Qwen2.5-VL serving signature. Some arguments (e.g., audio)
+        # are currently unused by Qwen3-VL but are accepted for compatibility.
+        del audio_feature_lengths, use_audio_in_video
+
+        if hf_config is None:
+            hf_config = self.config
+
+        tokens_per_second = getattr(getattr(hf_config, "vision_config", None),
+                                    "tokens_per_second", 1.0)
+
+        llm_positions, mrope_position_delta = get_mrope_input_positions(
             input_tokens=input_tokens,
             image_grid_thw=image_grid_thw,
             video_grid_thw=video_grid_thw,
-            image_token_id=self.image_token_id,
-            video_token_id=self.video_token_id,
-            vision_start_token_id=self.vision_start_token_id,
-            spatial_merge_size=self.spatial_merge_size,
+            image_token_id=hf_config.image_token_id,
+            video_token_id=hf_config.video_token_id,
+            vision_start_token_id=getattr(hf_config, "vision_start_token_id",
+                                          self.vision_start_token_id),
+            spatial_merge_size=hf_config.vision_config.spatial_merge_size,
             second_per_grid_ts=second_per_grid_ts,
+            tokens_per_second=tokens_per_second,
         )
+
+        llm_positions = llm_positions[:, context_len:seq_len]
+        return llm_positions, mrope_position_delta
 
     def precompile_vision_encoder(
         self,
