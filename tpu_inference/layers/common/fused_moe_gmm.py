@@ -493,9 +493,12 @@ def fused_moe_func(
         )
 
     def _finalize_output(x_local, topk_argsort_revert_indices_local,
-                         topk_weights_local):
-        x_local = x_local[topk_argsort_revert_indices_local].reshape(
-            -1, topk, padded_hidden_size)
+                            topk_weights_local):
+        x_locals = []
+        for i in range(topk):
+            x_locals.append(
+                x_local[topk_argsort_revert_indices_local[i::topk]])
+        x_local = jnp.stack(x_locals, axis=1)
         x_local = x_local * jnp.expand_dims(topk_weights_local, axis=-1)
         x_local = x_local.sum(axis=-2)
         return x_local
