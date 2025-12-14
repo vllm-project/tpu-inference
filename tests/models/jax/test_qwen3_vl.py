@@ -84,7 +84,16 @@ class TestVllmConfig:
 
 
 def _is_tpu() -> bool:
-    return bool(jax.devices()) and jax.devices()[0].platform == "tpu"
+    """Check if running on TPU, compatible with Docker/Ray multihost serving."""
+    try:
+        devices = jax.devices()
+        if not devices:
+            return False
+        # In Ray/Docker setups, jax.devices() returns the backend devices.
+        # Check the default backend instead of individual device platform.
+        return jax.default_backend() == "tpu"
+    except Exception:
+        return False
 
 
 def _num_placeholders_for_grid(
@@ -167,11 +176,11 @@ class TestUtils:
 
     def test_generate_segment_ids_from_grid_thw(self):
         grid_thw = ((1, 4, 4), (2, 4, 4))
-        segment_ids = generate_segment_ids_from_grid_thw(grid_thw, spatial_merge_size=2)
-        # (1,4,4) -> 4 merged tokens, (2,4,4) -> 8 merged tokens.
-        assert segment_ids.shape == (12,)
-        np.testing.assert_array_equal(segment_ids[:4], np.ones(4, dtype=np.int32))
-        np.testing.assert_array_equal(segment_ids[4:], np.full(8, 2, dtype=np.int32))
+        segment_ids = generate_segment_ids_from_grid_thw(grid_thw)
+        # (1,4,4) -> 16 tokens (t*h*w), (2,4,4) -> 32 tokens.
+        assert segment_ids.shape == (48,)
+        np.testing.assert_array_equal(segment_ids[:16], np.ones(16, dtype=np.int32))
+        np.testing.assert_array_equal(segment_ids[16:], np.full(32, 2, dtype=np.int32))
 
     def test_pad_segment_ids_for_attention(self):
         segment_ids = jnp.array([1, 1, 2, 2], dtype=jnp.int32)

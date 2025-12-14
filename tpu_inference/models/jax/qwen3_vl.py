@@ -51,7 +51,6 @@ class SegmentIds(NamedTuple):
 
 def generate_segment_ids_from_grid_thw(
     grid_thw: Tuple[Tuple[int, int, int], ...],
-    spatial_merge_size: int,
 ) -> jax.Array:
     """Generate segment IDs from grid dimensions for variable-length attention.
 
@@ -67,7 +66,7 @@ def generate_segment_ids_from_grid_thw(
     """
     segment_ids_list = []
     for idx, (t, h, w) in enumerate(grid_thw):
-        num_tokens = t * (h // spatial_merge_size) * (w // spatial_merge_size)
+        num_tokens = t * h * w
         # Segment IDs start from 1 (0 is reserved for padding)
         segment_ids_list.append(jnp.full(num_tokens, idx + 1, dtype=jnp.int32))
 
@@ -918,7 +917,6 @@ class Qwen3VLVisionTransformer(nnx.Module):
         # Add batch dimension: (seq, merge_unit, dim) -> (seq * merge_unit, 1, dim)
         hidden_states = hidden_states.reshape(seq_len, 1, -1)
 
-        # Process through transformer blocks
         deepstack_features = []
         for layer_num, blk in enumerate(self.blocks):
             hidden_states = blk(
@@ -958,11 +956,10 @@ class Qwen3VLVisionTransformer(nnx.Module):
         rotary_pos_emb = jnp.concatenate(rotary_pos_emb_list, axis=0)
         rotary_pos_emb = rotary_pos_emb.reshape(-1, rotary_pos_emb.shape[-1])
 
-        # post-merge segment ids. This may be changed to pre-merge with later considerations.
+        # pre-merge patch segment ids
         segment_ids = generate_segment_ids_from_grid_thw(
-            grid_thw, self.spatial_merge_size
+            grid_thw
         )
-        segment_ids = jnp.repeat(segment_ids, self.spatial_merge_unit, axis=0)
         assert segment_ids.shape[0] == hidden_states.shape[0], (
             "segment_ids must match the patch sequence length. "
             f"Got {segment_ids.shape[0]=} vs {hidden_states.shape[0]=}.")
@@ -974,7 +971,6 @@ class Qwen3VLVisionTransformer(nnx.Module):
         )
         hidden_states = hidden_states.reshape(seq_len, 1, -1)
 
-        # Process through transformer blocks
         deepstack_features = []
         for layer_num, blk in enumerate(self.blocks):
             hidden_states = blk(
