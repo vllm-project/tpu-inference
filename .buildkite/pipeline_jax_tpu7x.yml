@@ -267,6 +267,7 @@ steps:
      env:
        USE_V6E8_QUEUE: "True"
        VLLM_LOG_LEVEL: "INFO"
+       IS_FOR_V7X: "true"
      agents:
        queue: tpu_v7x_8_queue
      commands:
