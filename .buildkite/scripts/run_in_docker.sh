@@ -48,6 +48,9 @@ else
   exit 1
 fi
 
+# Some test scripts set tp=2 on IS_FOR_V7X=true to mitigate test failures.
+# TODO (Qiliang Cui) Investigate why tensor-parallel-size=1 breaks in tpu7x.
+
 exec docker run \
   --privileged \
   --net host \
