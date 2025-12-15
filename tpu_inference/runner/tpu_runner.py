@@ -384,10 +384,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.execute_model_state: ExecuteModelState | None = None
         
         # Initialize multiprocessing pool for DP shard preparation
-        self._mp_pool = None
         if self.dp_size > 1:
-            # Create a pool with dp_size workers
             self._mp_pool = Pool(processes=self.dp_size)
+        else:
+            self._mp_pool = None
 
     def _init_random(self):
         if self.model_config.seed is None:
@@ -1151,9 +1151,87 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         logprobs = compute_logprobs(logits)
         return gather_logprobs(logprobs, next_tokens, max_logprobs)
 
+    def _prepare_inputs_dp_parallel(
+        self, dp_size, req_ids_dp, req_indices_dp,
+        scheduled_tokens_per_dp_rank, num_scheduled_tokens_per_dp_rank,
+        padded_num_scheduled_tokens_per_dp_rank, max_num_reqs_per_dp_rank,
+        padded_num_reqs_per_dp_rank, scheduler_output,
+        pre_async_placeholder_req_id_to_index, async_scheduling_enabled,
+        token_in_tpu_cur_input_indices_dp,
+        token_in_tpu_pre_next_tokens_indices_dp
+    ):
+        """Prepare DP inputs using multiprocessing for parallel execution."""
+        # Prepare shared data for workers
+        input_batch_data = (
+            self.input_batch.token_ids_cpu,
+            self.input_batch.num_computed_tokens_cpu,
+            self.max_model_len
+        )
+        
+        # Prepare block table data for all KV cache groups
+        block_tables_data = {}
+        for kv_cache_gid in range(len(self.kv_cache_config.kv_cache_groups)):
+            block_tables_data[kv_cache_gid] = self.input_batch.block_table[
+                kv_cache_gid].get_cpu_tensor()
+        
+        # Build arguments for each worker
+        worker_args = []
+        for dp_rank in range(dp_size):
+            args = (
+                dp_rank,
+                req_ids_dp[dp_rank],
+                req_indices_dp[dp_rank],
+                scheduled_tokens_per_dp_rank[dp_rank],
+                num_scheduled_tokens_per_dp_rank[dp_rank],
+                padded_num_scheduled_tokens_per_dp_rank,
+                max_num_reqs_per_dp_rank,
+                input_batch_data,
+                self.arange_cpu,
+                scheduler_output.num_scheduled_tokens,
+                block_tables_data,
+                self.max_num_blocks_per_req,
+                pre_async_placeholder_req_id_to_index,
+                async_scheduling_enabled,
+            )
+            worker_args.append(args)
+        
+        # Process all DP ranks in parallel
+        results = self._mp_pool.map(_prepare_dp_rank_shard, worker_args)
+        
+        # Concatenate results from all workers
+        for result in results:
+            dp_rank = result['dp_rank']
+            token_offset = padded_num_scheduled_tokens_per_dp_rank * dp_rank
+            req_offset = dp_rank * max_num_reqs_per_dp_rank
+            query_loc_req_offset = dp_rank * (max_num_reqs_per_dp_rank + 1)
+            
+            # Copy input_ids and positions
+            token_end = token_offset + padded_num_scheduled_tokens_per_dp_rank
+            self.input_ids_cpu[token_offset:token_end] = result['input_ids']
+            self.positions_cpu[token_offset:token_end] = result['positions']
+            
+            # Copy attention metadata
+            query_loc_end = query_loc_req_offset + max_num_reqs_per_dp_rank + 1
+            self.query_start_loc_cpu[query_loc_req_offset:query_loc_end] = result['query_start_loc']
+            
+            req_end = req_offset + max_num_reqs_per_dp_rank
+            self.seq_lens_cpu[req_offset:req_end] = result['seq_lens']
+            
+            # Copy logits_indices
+            padded_req_end = req_offset + padded_num_reqs_per_dp_rank
+            self.logits_indices_cpu[req_offset:padded_req_end] = result['logits_indices'][:padded_num_reqs_per_dp_rank]
+            
+            # Copy block tables for each KV cache group
+            for kv_cache_gid, block_table_shard in result['block_tables'].items():
+                self.block_tables_cpu[kv_cache_gid][req_offset:req_end, :] = block_table_shard
+            
+            # Collect async token substitution indices
+            token_in_tpu_cur_input_indices_dp[dp_rank] = result['token_in_tpu_cur_input_indices']
+            token_in_tpu_pre_next_tokens_indices_dp[dp_rank] = result['token_in_tpu_pre_next_tokens_indices']
+
     def _prepare_dp_input_metadata(self,
                                    scheduler_output: DPSchedulerOutput):
-
+        """Prepare metadata for distributing inputs across DP ranks."""
         dp_size = self.dp_size
         num_reqs = self.input_batch.num_reqs
         max_num_reqs_per_dp_rank = self.max_num_reqs // dp_size
@@ -1163,15 +1241,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         num_req_per_dp_rank = scheduler_output.num_req_per_dp_rank
         req_indices_dp = {dp_rank: [] for dp_rank in range(dp_size)}
 
-        start_time = time.time()
+        # Map request IDs to their DP ranks
         for req_id in self.input_batch.req_ids[:num_reqs]:
             dp_rank = scheduler_output.assigned_dp_rank[req_id]
             req_indices_dp[dp_rank].append(
                 self.input_batch.req_id_to_index[req_id])
-        print("[TPU Runner] dp input metadata distribution time:",
-              time.time() - start_time)
         
-        # Find maximum number of scheduled tokens across DP ranks
+        # Calculate padding requirements
         max_num_scheduled_tokens_across_dp = max(
             num_scheduled_tokens_per_dp_rank.values())
 
@@ -1191,50 +1267,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.num_reqs_paddings_per_dp, max_num_reqs_across_dp)
         padded_num_reqs = padded_num_reqs_per_dp_rank * dp_size
 
-        start_time = time.time()
+        # Build logits indices selector for reordering outputs
         logits_indices_selector = [0] * num_reqs
-        
         for dp_rank in range(dp_size):
             base_position = padded_num_reqs_per_dp_rank * dp_rank
             for local_idx, req_idx in enumerate(req_indices_dp[dp_rank]):
                 logits_indices_selector[req_idx] = base_position + local_idx
-        
         logits_indices_selector = np.array(logits_indices_selector, dtype=np.int32)
-        print("[TPU Runner] logits_indices_selector time:",
-              time.time() - start_time)
 
         return (req_ids_dp, req_indices_dp, num_scheduled_tokens_per_dp_rank,
                 scheduled_tokens_per_dp_rank, num_req_per_dp_rank,
                 padded_num_scheduled_tokens_per_dp_rank, padded_num_reqs,
                 padded_total_num_scheduled_tokens, padded_num_reqs_per_dp_rank,
                 logits_indices_selector, max_num_reqs_per_dp_rank)
-
-    def _prepare_async_token_substitution_indices_dp(
-            self, req_ids_dp, scheduled_tokens_per_dp_rank,
-            padded_num_scheduled_tokens_per_dp_rank, dp_size):
-        """Prepare token substitution indices for async scheduling in DP mode."""
-        token_in_tpu_cur_input_indices_dp = {}
-        token_in_tpu_pre_next_tokens_indices_dp = {}
-
-        for dp_rank in range(dp_size):
-            token_in_tpu_cur_input_indices_dp[dp_rank] = []
-            token_in_tpu_pre_next_tokens_indices_dp[dp_rank] = []
-
-            token_offset = padded_num_scheduled_tokens_per_dp_rank * dp_rank
-            acc_cur_len = token_offset
-
-            for i, req_id in enumerate(req_ids_dp[dp_rank]):
-                acc_cur_len += scheduled_tokens_per_dp_rank[dp_rank][i]
-                if req_id not in self._pre_async_results.placeholder_req_id_to_index:
-                    continue
-
-                token_in_tpu_cur_input_indices_dp[dp_rank].append(acc_cur_len -
-                                                                  1)
-                token_in_tpu_pre_next_tokens_indices_dp[dp_rank].append(
-                    self._pre_async_results.placeholder_req_id_to_index[req_id]
-                )
-
-        return token_in_tpu_cur_input_indices_dp, token_in_tpu_pre_next_tokens_indices_dp
 
     def _prepare_async_token_substitution_indices_non_dp(
             self, num_reqs, num_scheduled_tokens_per_req):
@@ -1301,245 +1346,83 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             return self._prepare_inputs_non_dp(scheduler_output)
 
     def _prepare_inputs_dp(self, scheduler_output: "VllmSchedulerOutput"):
+        """Prepare model inputs with data parallelism support.
+        
+        This method distributes input preparation across DP ranks, optionally
+        using multiprocessing for parallel computation.
+        """
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
-        start_time = time.time()
+        
         dp_size = self.dp_size
         data_parallel_attn_sharding = NamedSharding(
             self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
+        
+        # Prepare metadata for distributing inputs across DP ranks
         (req_ids_dp, req_indices_dp, num_scheduled_tokens_per_dp_rank,
          scheduled_tokens_per_dp_rank, num_req_per_dp_rank,
          padded_num_scheduled_tokens_per_dp_rank, padded_num_reqs,
          padded_total_num_scheduled_tokens, padded_num_reqs_per_dp_rank,
          logits_indices_selector, max_num_reqs_per_dp_rank
          ) = self._prepare_dp_input_metadata(scheduler_output)
-        print("[TPU Runner] _prepare_dp_input_metadata time:",
-              time.time() - start_time)
         
-        use_multiprocessing = self._mp_pool is not None
-        # Multi-modal support
-        # Calculate M-RoPE positions.
-        # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
+        # Multi-modal support: Calculate M-RoPE positions (e.g., Qwen2-VL)
         if self.uses_mrope:
             self.mm_manager.calc_mrope_positions(scheduler_output)
 
-        # Async scheduling: prepare token substitution indices for DP
+        # Prepare async scheduling support
         token_in_tpu_cur_input_indices_dp = {}
         token_in_tpu_pre_next_tokens_indices_dp = {}
-        
-        # Prepare placeholder mapping for workers (if async scheduling enabled)
         pre_async_placeholder_req_id_to_index = None
-        async_scheduling_enabled = self.scheduler_config.async_scheduling and self._pre_async_results is not None
+        async_scheduling_enabled = (self.scheduler_config.async_scheduling and 
+                                     self._pre_async_results is not None)
         if async_scheduling_enabled:
             pre_async_placeholder_req_id_to_index = self._pre_async_results.placeholder_req_id_to_index
 
-        if use_multiprocessing:
-            start_time = time.time()
-            
-            # Prepare arguments for each worker
-            input_batch_data = (
-                self.input_batch.token_ids_cpu,
-                self.input_batch.num_computed_tokens_cpu,
-                self.max_model_len
-            )
-            
-            # Prepare block table data for all KV cache groups
-            block_tables_data = {}
-            for kv_cache_gid in range(len(self.kv_cache_config.kv_cache_groups)):
-                block_tables_data[kv_cache_gid] = self.input_batch.block_table[
-                    kv_cache_gid].get_cpu_tensor()
-            
-            worker_args = []
-            for dp_rank in range(dp_size):
-                args = (
-                    dp_rank,
-                    req_ids_dp[dp_rank],
-                    req_indices_dp[dp_rank],
-                    scheduled_tokens_per_dp_rank[dp_rank],
-                    num_scheduled_tokens_per_dp_rank[dp_rank],
-                    padded_num_scheduled_tokens_per_dp_rank,
-                    max_num_reqs_per_dp_rank,
-                    input_batch_data,
-                    self.arange_cpu,
-                    scheduler_output.num_scheduled_tokens,
-                    block_tables_data,
-                    self.max_num_blocks_per_req,
-                    pre_async_placeholder_req_id_to_index,
-                    async_scheduling_enabled,
-                )
-                worker_args.append(args)
-            
-            # Process all DP ranks in parallel
-            results = self._mp_pool.map(_prepare_dp_rank_shard, worker_args)
-            
-            # Concatenate results
-            start_time = time.time()
-            for result in results:
-                dp_rank = result['dp_rank']
-                token_offset = padded_num_scheduled_tokens_per_dp_rank * dp_rank
-                req_offset = dp_rank * max_num_reqs_per_dp_rank
-                query_loc_req_offset = dp_rank * (max_num_reqs_per_dp_rank + 1)
-                
-                # Copy input_ids and positions
-                self.input_ids_cpu[token_offset:token_offset + padded_num_scheduled_tokens_per_dp_rank] = result['input_ids']
-                self.positions_cpu[token_offset:token_offset + padded_num_scheduled_tokens_per_dp_rank] = result['positions']
-                
-                # Copy attention metadata
-                self.query_start_loc_cpu[query_loc_req_offset:query_loc_req_offset + max_num_reqs_per_dp_rank + 1] = result['query_start_loc']
-                self.seq_lens_cpu[req_offset:req_offset + max_num_reqs_per_dp_rank] = result['seq_lens']
-                
-                # Copy logits_indices
-                self.logits_indices_cpu[req_offset:req_offset + padded_num_reqs_per_dp_rank] = result['logits_indices'][:padded_num_reqs_per_dp_rank]
-                
-                # Copy block tables for each KV cache group
-                for kv_cache_gid, block_table_shard in result['block_tables'].items():
-                    self.block_tables_cpu[kv_cache_gid][
-                        req_offset:req_offset + max_num_reqs_per_dp_rank, :
-                    ] = block_table_shard
-                
-                # Collect async token substitution indices from workers
-                token_in_tpu_cur_input_indices_dp[dp_rank] = result['token_in_tpu_cur_input_indices']
-                token_in_tpu_pre_next_tokens_indices_dp[dp_rank] = result['token_in_tpu_pre_next_tokens_indices']
-            
-            logits_indices = self.logits_indices_cpu[:padded_num_reqs]
-            print("[TPU Runner] concatenate shards time:",
-                  time.time() - start_time)
-        else:
-            # Sequential approach - prepare async indices if needed
-            if async_scheduling_enabled:
-                (token_in_tpu_cur_input_indices_dp,
-                 token_in_tpu_pre_next_tokens_indices_dp
-                 ) = self._prepare_async_token_substitution_indices_dp(
-                     req_ids_dp, scheduled_tokens_per_dp_rank,
-                     padded_num_scheduled_tokens_per_dp_rank, dp_size)
-            
-            # Populates input_ids and positions
-            start_time = time.time()
-            for dp_rank in range(dp_size):
-                if num_req_per_dp_rank[dp_rank] == 0:
-                    continue
-                token_offset = padded_num_scheduled_tokens_per_dp_rank * dp_rank
-                num_scheduled_tokens_per_req = scheduled_tokens_per_dp_rank[
-                    dp_rank]
-                total_num_scheduled_tokens = num_scheduled_tokens_per_dp_rank[
-                    dp_rank]
-                input_ids_cpu = self.input_ids_cpu[
-                    token_offset:token_offset +
-                    padded_num_scheduled_tokens_per_dp_rank]
-                positions_cpu = self.positions_cpu[
-                    token_offset:token_offset +
-                    padded_num_scheduled_tokens_per_dp_rank]
-                # Get request indices.
-                # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
-                # For each scheduled token, what are the corresponding req index.
-                req_indices = np.repeat(req_indices_dp[dp_rank],
-                                        num_scheduled_tokens_per_req)
-                # Get batched arange.
-                # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-                # For each scheduled token, what is its position in corresponding req.
-                arange = np.concatenate(
-                    [self.arange_cpu[:n] for n in num_scheduled_tokens_per_req])
-                # Get positions.
-                positions_np = positions_cpu[:total_num_scheduled_tokens]
-                np.add(
-                    self.input_batch.num_computed_tokens_cpu[req_indices],
-                    arange,
-                    out=positions_np,
-                )
-                # Get token indices.
-                # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-                # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
-                # where M is the max_model_len.
-                token_indices = (
-                    positions_np +
-                    req_indices * self.input_batch.token_ids_cpu.shape[1])
-                np.take(
-                    self.input_batch.token_ids_cpu.ravel(),
-                    token_indices,
-                    out=input_ids_cpu[:total_num_scheduled_tokens],
-                )
-
-                input_ids_cpu[total_num_scheduled_tokens:] = 0
-            print("[TPU Runner] populate input_ids and positions time:",
-                  time.time() - start_time)
-            # Prepare the attention metadata (query_start_loc_cpu, seq_lens_cpu)
-            start_time = time.time()
-            for dp_rank in range(dp_size):
-                req_offset = dp_rank * max_num_reqs_per_dp_rank
-                query_start_loc_cpu = self.query_start_loc_cpu[
-                    req_offset + dp_rank:req_offset + max_num_reqs_per_dp_rank +
-                    dp_rank + 1]
-                seq_lens_cpu = self.seq_lens_cpu[req_offset:req_offset +
-                                                 max_num_reqs_per_dp_rank]
-                _num_reqs = num_req_per_dp_rank[dp_rank]
-                req_indices = req_indices_dp[dp_rank]
-                num_scheduled_tokens_per_req = scheduled_tokens_per_dp_rank[
-                    dp_rank]
-
-                if _num_reqs == 0:
-                    query_start_loc_cpu[:] = 0
-                    seq_lens_cpu[:] = 0
-                    continue
-
-                np.cumsum(
-                    num_scheduled_tokens_per_req,
-                    out=query_start_loc_cpu[1:_num_reqs + 1],
-                )
-                query_start_loc_cpu[_num_reqs + 1:] = 1
-
-                seq_lens_cpu[:_num_reqs] = (
-                    self.input_batch.num_computed_tokens_cpu[req_indices] +
-                    num_scheduled_tokens_per_req)
-                seq_lens_cpu[_num_reqs:] = 0
-            print("[TPU Runner] populate attention metadata time:",
-                  time.time() - start_time  )
-            # populate logits_indices
-            start_time = time.time()
-            for dp_rank in range(dp_size):
-                req_offset = dp_rank * padded_num_reqs_per_dp_rank
-                query_loc_req_offset = dp_rank * (max_num_reqs_per_dp_rank + 1)
-                _num_reqs = num_req_per_dp_rank[dp_rank]
-
-                logits_indices_cpu = self.logits_indices_cpu[
-                    req_offset:req_offset + padded_num_reqs_per_dp_rank]
-                logits_indices_cpu[:_num_reqs] = (
-                    self.query_start_loc_cpu[query_loc_req_offset +
-                                             1:query_loc_req_offset + _num_reqs +
-                                             1] - 1)
-                logits_indices_cpu[_num_reqs:] = -1
-
-            logits_indices = self.logits_indices_cpu[:padded_num_reqs]
-            print("[TPU Runner] populate logits_indices time:",
-                  time.time() - start_time)
-        # Please see runner_utils.PhasedBasedProfiler for details
+        # Parallel processing: dispatch work to multiprocessing pool
+        self._prepare_inputs_dp_parallel(
+            dp_size, req_ids_dp, req_indices_dp,
+            scheduled_tokens_per_dp_rank, num_scheduled_tokens_per_dp_rank,
+            padded_num_scheduled_tokens_per_dp_rank, max_num_reqs_per_dp_rank,
+            padded_num_reqs_per_dp_rank, scheduler_output,
+            pre_async_placeholder_req_id_to_index, async_scheduling_enabled,
+            token_in_tpu_cur_input_indices_dp,
+            token_in_tpu_pre_next_tokens_indices_dp
+        )
+        logits_indices = self.logits_indices_cpu[:padded_num_reqs]
+        
+        # Build num_scheduled_tokens_per_req for LoRA support
+        num_scheduled_tokens_per_req = [
+            scheduler_output.num_scheduled_tokens[req_id]
+            for req_id in self.input_batch.req_ids[:num_reqs]
+        ]
+        
+        # Phased profiling support
         if self.phase_based_profiler:
             batch_composition_stats = runner_utils.get_batch_composition_stats(
                 self.input_batch, total_num_scheduled_tokens, num_reqs,
                 padded_total_num_scheduled_tokens, scheduler_output)
-
             self.phase_based_profiler.step(batch_composition_stats)
 
-        # Inputs
+        # Prepare input tensors
         input_ids = self.input_ids_cpu[:padded_total_num_scheduled_tokens]
         positions = self.positions_cpu[:padded_total_num_scheduled_tokens]
-        mrope_positions = self.mrope_positions_cpu[:, :
-                                                   padded_total_num_scheduled_tokens]
+        mrope_positions = self.mrope_positions_cpu[:, :padded_total_num_scheduled_tokens]
 
-        query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs +
-                                                   dp_size]
+        query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + dp_size]
         seq_lens = self.seq_lens_cpu[:self.max_num_reqs]
 
+        # Build request distribution for attention metadata
         _request_distribution = []
         for dp_rank in range(dp_size):
             _num_reqs = num_req_per_dp_rank[dp_rank]
-            # The batch has been reordered by _reorder_batch so decode requests come first
-            # Count decode requests (those with num_scheduled_tokens == 1) in this DP rank
-            num_decode_in_dp_rank = 0
-            for req_id in req_ids_dp[dp_rank]:
-                if scheduler_output.num_scheduled_tokens[req_id] == 1:
-                    num_decode_in_dp_rank += 1
+            # Count decode requests (those with num_scheduled_tokens == 1)
+            num_decode_in_dp_rank = sum(
+                1 for req_id in req_ids_dp[dp_rank]
+                if scheduler_output.num_scheduled_tokens[req_id] == 1
+            )
             _request_distribution.append(
                 [num_decode_in_dp_rank, num_decode_in_dp_rank, _num_reqs])
         request_distribution = np.array(_request_distribution).ravel()
@@ -1565,8 +1448,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 ))
             logits_indices = spec_decode_metadata.final_logits_indices
 
-        # Put to device
-        start_time = time.time()
+        # Transfer data to TPU device
         sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
             self.mesh,
             self.input_batch,
@@ -1587,25 +1469,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
               request_distribution),
              sharding=data_parallel_attn_sharding,
          )
-        print("[TPU Runner] device_array time:", time.time() - start_time)
-        start_time = time.time()
+        
+        # Prepare attention metadata for each KV cache group
         attention_metadata_per_layer: Dict[str, AttentionMetadata] = {}
         uniform_attention_metadata: AttentionMetadata = None
         for kv_cache_gid, kv_cache_group in enumerate(
                 self.kv_cache_config.kv_cache_groups):
-            block_tables = self.block_tables_cpu[kv_cache_gid][:self.
-                                                               max_num_reqs]
-            if not use_multiprocessing:
-                # Only populate block tables if not using multiprocessing
-                # (multiprocessing workers already did this)
-                for dp_rank in range(dp_size):
-                    req_offset = dp_rank * max_num_reqs_per_dp_rank
-                    _num_reqs = num_req_per_dp_rank[dp_rank]
-
-                    block_tables[
-                        req_offset:req_offset + _num_reqs, :self.
-                        max_num_blocks_per_req] = self.input_batch.block_table[
-                            kv_cache_gid].get_cpu_tensor()[req_indices_dp[dp_rank]]
+            block_tables = self.block_tables_cpu[kv_cache_gid][:self.max_num_reqs]
+            # Block tables are already populated by multiprocessing workers
             # Convert block_tables to 1D on cpu.
             block_tables = block_tables.reshape(-1)
             block_tables = device_array(
@@ -1632,8 +1503,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 for layer_name in kv_cache_group.layer_names:
                     attention_metadata_per_layer[
                         layer_name] = attention_metadata_gid
-        print("[TPU Runner] prepare block table time:",
-              time.time() - start_time)
+        
         # Async scheduling: substitute placeholder tokens for DP
         if self.scheduler_config.async_scheduling and self._pre_async_results is not None:
             # Collect all token indices that need substitution across all DP ranks
