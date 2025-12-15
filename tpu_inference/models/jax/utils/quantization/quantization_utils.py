@@ -456,8 +456,8 @@ def get_default_qwix_quantization_config(
     if skip_quantization:
         return None
     # TODO (jacobplatin): remove this so that we can support various quantization types
-    if model_type == "deepseek_v3" and quant_method == "fp8":
-        return DEFAULT_DEEPSEEK_FP8_CONFIG
+    if model_type == "deepseek_v3" and quant_method in ["fp8", "tpu_fp4"]:
+        return DEFAULT_DEEPSEEK_TPU_FP4_CONFIG  #TODO: still not quite right. .maybe is actually, we'll see
     elif model_type == "llama4" and quant_method == "compressed-tensors":
         return DEFAULT_LLAMA4_FP8_CONFIG
     # MXFP4 (GPT-OSS): provide a default configuration to quantize MoE experts via Qwix
@@ -546,6 +546,8 @@ def get_random_sharded_array(key: PRNGKey, mesh: Mesh, param: nnx.Param,
         return weight[index]
 
     try:
+        print("This is mesh: ", mesh)
+        print("This is param.sharding: ", param.sharding)
         sharded_array = jax.make_array_from_callback(
             param_shape, NamedSharding(mesh, P(*param.sharding)), get_slice)
     except (ValueError, TypeError):
@@ -595,6 +597,7 @@ def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
             continue
         is_qwix_scale = (path[-1] == 'scale' and path[-2] == "array")
         param_dtype = scale_dtype if is_qwix_scale else param.value.dtype
+        print("this is param_dtype: ", param_dtype)
         param_shape = param.value.shape
         # TODO (jacobplatin): clean this up
         if is_qwix_scale:
