@@ -184,6 +184,7 @@ class TPUReqMeta:
     # from the cache. For a save operation, this contains the new tokens
     # that have just been computed.
     token_ids: list[int]
+    # TODO(jcgu): rm full hbm block id list, it's not needed by the worker.
     # The full list of physical blocks corresponding to the `token_ids`.
     local_block_ids: list[int]
     # An optional `SaveSpec` object. If present, it instructs the worker to
@@ -232,9 +233,6 @@ class RequestTracker:
     # request so far. This list only contains the
     # tokens to be computed, not the prefix loaded from cache.
     token_ids: list[int]
-    # The number of tokens that were a hit in the CPU cache at the beginning
-    # of the request. This is constant for the lifetime of the request.
-    num_external_hits: int = 0
     # A high-water mark indicating how many tokens from the start of the
     # computed tokens (`token_ids`) have already been saved to the CPU cache.
     save_watermark: int = 0
@@ -254,6 +252,12 @@ class RequestTracker:
         else:
             raise ValueError(
                 f"Unsupported new_block_ids type {type(new_block_ids)}")
+        logger.info(
+            f" update req({self.req_id}): new_blocks: {new_block_ids}, "
+            f"num_new_tokens: {len(new_token_ids)}; "
+            f"existing blocks:{self.block_ids}, "
+            f"existing tokens: {len(self.token_ids)}.")
+
         self.block_ids.extend(new_block_ids)
         self.token_ids.extend(new_token_ids)
 
@@ -262,6 +266,14 @@ class RequestTracker:
         # is 1 (excluding chunked prefill), the request is in decode phase.
         if len(new_token_ids) == 1:
             self.is_decode_phase = True
+
+    def reset_after_preempt(self):
+        """ reset when a preempted request gets scheduled / resumed
+            1. block_id
+            2. execution phase (prefill, decode)
+        """
+        self.block_ids = []
+        self.is_decode_phase = False
 
     def __repr__(self) -> str:
         output_str = "    - RequestTracker: " + \
@@ -616,31 +628,26 @@ class TPUOffloadConnectorScheduler():
         # get block_hash
         block_hashes = self._get_request_block_hashes(request)
         num_total_blocks = len(block_hashes)
-        prompt_token_ids = request.prompt_token_ids
-        logger.info(f"Request {request.request_id}: Checking for cache hit. "
-                    f"Prompt length: {len(prompt_token_ids)}, "
-                    f"Block_hashes ({num_total_blocks}),"
-                    f"Already computed tokens: {num_computed_tokens}. ")
+        logger.info(f"Checking for cache hit: {request.request_id},"
+                    f"total_token_len: {request.num_tokens}, "
+                    f"block_hashes ({num_total_blocks}), "
+                    f"already computed tokens: {num_computed_tokens}. ")
 
         # look for blocks in the cache
         num_hits = self.offload_manager.lookup(block_hashes)
         matched_block_hashes = block_hashes[:num_hits]
         self.offload_manager.touch(block_hashes)
         num_matched_blocks = len(matched_block_hashes)
-        # num_matched_tokens = min(num_matched_blocks * self.block_size,
-        #                          len(prompt_token_ids))
         num_matched_tokens = num_matched_blocks * self.block_size
-        assert num_matched_tokens <= len(prompt_token_ids)
+        assert num_matched_tokens <= request.num_tokens
         num_computed_blocks = num_computed_tokens // self.block_size
         num_blocks_to_load = max(num_matched_blocks - num_computed_blocks, 0)
         logger.info(
-            f"Request {request.request_id}: Found {num_matched_tokens} (out of {len(prompt_token_ids)} prompt tokens) matched tokens ({num_matched_blocks} blocks) in CPU backend (computed_blocks: {num_computed_blocks}, blocks_to_load: {num_blocks_to_load})."
+            f"Request {request.request_id}: Found {num_matched_tokens} (out of {request.num_tokens} existing tokens) matched tokens ({num_matched_blocks} blocks) in CPU backend (computed_blocks: {num_computed_blocks}, blocks_to_load: {num_blocks_to_load})."
         )
 
         if num_blocks_to_load > 0:
             # planning staging blocks for load
-            # NOTE(jcgu): do not worry about the inconsistency of the staging buffer status;
-            # there is only one connector scheduler who is operating on it.
             num_avail_staging_blocks = self.staging_buffer_manager.get_num_free_staging_blocks(
             )
             if num_blocks_to_load > num_avail_staging_blocks:
@@ -675,7 +682,7 @@ class TPUOffloadConnectorScheduler():
         self._external_cache_hits[request.request_id] = num_matched_tokens
 
         is_full_prefix_hit = (num_matched_tokens > 0
-                              and num_matched_tokens == len(prompt_token_ids))
+                              and num_matched_tokens == request.num_tokens)
         num_matched_for_scheduler = num_matched_tokens
         if is_full_prefix_hit:
             # When the entire prompt is found in the CPU cache (a "full hit"),
@@ -696,15 +703,6 @@ class TPUOffloadConnectorScheduler():
             logger.info(
                 f"Request {request.request_id}: Full prompt hit. Reporting {num_matched_for_scheduler} matched tokens. Actual hit from backend is {num_matched_tokens} tokens"
             )
-
-        # Note on unpinning for the full prefix hit case: Although we report N-1 tokens
-        # to the scheduler, the RequestTracker (created later in
-        # `build_connector_meta`) stores the true, full N prompt tokens.
-        # The `get_finished` method on the worker side uses this complete
-        # token list to regenerate the keys, ensuring that all N keys
-        # originally pinned during this lookup are gracefully unpinned upon
-        # request completion.
-        # We don't need to load tokens that are already computed locally in vLLM
         num_to_load = max(0, num_matched_for_scheduler - num_computed_tokens)
         logger.info(
             f"Request {request.request_id}: After accounting for {num_computed_tokens} computed tokens, reporting {num_to_load} tokens to load."
@@ -762,19 +760,18 @@ class TPUOffloadConnectorScheduler():
             self._reqs_being_loaded[request.request_id] |= set(
                 load_spec.src_chunks)
             logger.info(
-                f"Request {request.request_id} ({len(dst_blocks)} dst_blocks) is ready to load."
+                f"Request {request.request_id} has {len(dst_blocks)} dst_blocks ({dst_blocks}) to load."
             )
 
-    def _prepare_req_meta(
+    def _prepare_save_spec(
         self,
         tracker: RequestTracker,
-        load_spec: Optional[LoadSpec],
         is_finished: bool,
-    ) -> Optional[TPUReqMeta]:
+    ) -> Optional[SaveSpec]:
         """
-        Central decision-making function. Determines if a save or load is
-        needed and prepares the metadata. Also performs the transactional
-        update of the tracker's save state.
+        Creates a SaveSpec.
+        It determines whether new tokens need to be saved based on the
+        request's progress.
         """
         req_id = tracker.req_id
         _request = self._unfinished_requests[req_id]
@@ -929,18 +926,31 @@ class TPUOffloadConnectorScheduler():
                 skip_save=True,
             )
 
-        # 2. Determine if a work order is needed.
+        return save_spec
+
+    def _create_request_meta(
+        self,
+        tracker: RequestTracker,
+        save_spec: Optional[SaveSpec],
+        load_spec: Optional[LoadSpec],
+    ) -> Optional[TPUReqMeta]:
+        """Creates a TPUReqMeta object if a save or load operation is required."""
         if not save_spec and not (load_spec and load_spec.can_load):
             return None
 
-        # 3. Construct and return the final work order.
-        return TPUReqMeta(
+        req_meta = TPUReqMeta(
             req_id=tracker.req_id,
             token_ids=tracker.token_ids,
             local_block_ids=tracker.block_ids,
             save_spec=save_spec,
             load_spec=load_spec,
         )
+        logger.info(
+            f"    - creating metadata for cached req: {req_meta.req_id} "
+            f"(has_save={req_meta.save_spec is not None}, "
+            f"has_load={req_meta.load_spec is not None})")
+
+        return req_meta
 
     def build_connector_meta(
             self,
@@ -948,6 +958,7 @@ class TPUOffloadConnectorScheduler():
         assert self.offload_manager and self.staging_buffer_manager, "please initialize offload / staging_buffer manager."
         metadata = TPUOffloadConnectorMetadata()
 
+        # TODO(jcgu): should we delete phase_1 for finished_requests
         # Phase 1: Handle and clean up finished requests
         # This block handles requests that have completed their generation.
         # We pop their state from our tracking dictionaries and call _prepare_req_meta
@@ -968,9 +979,10 @@ class TPUOffloadConnectorScheduler():
 
             # Prepare one final metadata object if there's a final save needed.
             # `is_finished` is set to True to flag this as the last save operation.
-            req_meta = self._prepare_req_meta(tracker,
-                                              load_spec=None,
-                                              is_finished=True)
+            save_spec = self._prepare_save_spec(tracker, is_finished=True)
+            req_meta = self._create_request_meta(tracker,
+                                                 save_spec,
+                                                 load_spec=None)
             if req_meta:
                 logger.info(
                     f"  - Creating final save metadata for req: {finished_req_id}"
@@ -1027,7 +1039,6 @@ class TPUOffloadConnectorScheduler():
                 prompt_len=len(request.prompt_token_ids),
                 block_ids=copy.deepcopy(request.block_ids[0]),
                 token_ids=tokens_for_tracker,
-                num_external_hits=num_external_hits,
                 # The high-water mark for saved tokens starts after the cached prefix.
                 save_watermark=initial_save_watermark,
             )
@@ -1040,81 +1051,59 @@ class TPUOffloadConnectorScheduler():
             # This could include both a load operation (for the cached part)
             # and a save operation (for the newly computed part).
             load_spec = self.load_specs.pop(req_id, None)
-            req_meta = self._prepare_req_meta(tracker,
-                                              load_spec,
-                                              is_finished=False)
+            save_spec = self._prepare_save_spec(tracker, is_finished=False)
+            req_meta = self._create_request_meta(tracker, save_spec, load_spec)
             if req_meta:
-                logger.info(f"    - Creating metadata for new req: {req_id} "
-                            f"(has_load={req_meta.load_spec is not None}, "
-                            f"has_save={req_meta.save_spec is not None})")
                 metadata.requests_meta.append(req_meta)
 
         # Phase 3: Process cached (running) requests
         # This block handles requests that have already been pre-filled at least
-        # once and are now being processed again (e.g., for chunked prefill).
+        # once and are now being processed again
+        # (e.g., chunked prefill, resumed_requests).
         cached_reqs = scheduler_output.scheduled_cached_reqs
         logger.info(
             f"Phase 3: Processing {len(cached_reqs.req_ids)} cached requests.")
         for i, req_id in enumerate(cached_reqs.req_ids):
             tracker = self._request_trackers[req_id]
-            full_request = self._unfinished_requests.get(req_id)
-            _block_hashes = full_request.block_hashes
+            _request = self._unfinished_requests.get(req_id)
+            _block_hashes = _request.block_hashes
             logger.info(
                 f"  - Processing cached req: {req_id}, {len(_block_hashes)} block_hashes."
             )
 
-            if full_request is None:
+            if _request is None:
                 logger.warning(
                     f"  - No full request found for cached req: {req_id}. Skipping."
                 )
                 continue
 
-            # num_new_tokens: The number of *additional* tokens the scheduler is
-            # processing in this step for this ongoing request.
+            # Update request tracker
+            # 1. collect new tokens and new blocks
             num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
-
-            # current_token_count: This is the crucial calculation to find our
-            # place in the full prompt. It's the length of the token prefix
-            # already processed in previous steps.
-            current_token_count = len(tracker.token_ids)
-
-            logger.info(
-                f"    - len(full_request.all_token_ids): {len(full_request.all_token_ids)}"
-            )
-            # new_token_ids: The slice of the full token sequence corresponding to the
-            # new work being done in this step.
-            new_token_ids = full_request.all_token_ids[
-                current_token_count:current_token_count + num_new_tokens]
-
-            # new_blocks: The new physical blocks allocated for the new_token_ids.
+            # (local_computed_tokens + cpu_cache_hit_tokens) + new_tokens
+            cur_total_tokens = _request.num_computed_tokens + num_new_tokens
+            num_tracked_tokens = len(tracker.token_ids)
+            # the slice of new tokens should be tracked
+            new_token_ids = _request.all_token_ids[
+                num_tracked_tokens:cur_total_tokens] if cur_total_tokens > num_tracked_tokens else []
+            # newly allocated blocks
             new_blocks = cached_reqs.new_block_ids[i]
             if new_blocks is None:
                 new_blocks = []
 
-            logger.info(
-                f"    - num_new_tokens: {num_new_tokens}, current_token_count: {current_token_count}"
-            )
-            logger.info(
-                f"    - Slicing prompt -> len(new_token_ids): {len(new_token_ids)}"
-            )
-            logger.info(f"    - New blocks allocated: {len(new_blocks)}")
-
-            # Update the tracker with the incremental data.
+            # resumed request gets all blocks reallocated,
+            # therefore, blocks in the tracker should be reset.
+            if req_id in cached_reqs.resumed_req_ids:
+                tracker.reset_after_preempt()
+            # 2. update
             tracker.update(new_blocks, new_token_ids)
-            logger.info(f"    - Updated tracker for {req_id}: "
-                        f"total_tokens={len(tracker.token_ids)}, "
-                        f"total_blocks={len(tracker.block_ids)}")
 
             # for cached requests, whose kv pages get evicted, there will be
             # load operations.
             load_spec = self.load_specs.pop(req_id, None)
-            req_meta = self._prepare_req_meta(tracker,
-                                              load_spec=load_spec,
-                                              is_finished=False)
+            save_spec = self._prepare_save_spec(tracker, is_finished=False)
+            req_meta = self._create_request_meta(tracker, save_spec, load_spec)
             if req_meta:
-                logger.info(
-                    f"    - Creating metadata for cached req: {req_id} "
-                    f"(has_save={req_meta.save_spec is not None})")
                 metadata.requests_meta.append(req_meta)
 
         if metadata.requests_meta:
@@ -1835,6 +1824,9 @@ class TPUOffloadConnectorWorker:
                     logger.info(
                         f"Request {finished_req_id}: Final save completed. Marking as finished."
                     )
+                    # TODO(jcgu): do we need to record finished save request?
+                    # connector_scheduler can identify the finished ones
+                    # based on kv_connector_stats["finished_save_chunks"]
                     self.finished_save_reqs.add(finished_req_id)
 
             except Exception as e:
