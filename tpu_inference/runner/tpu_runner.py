@@ -11,6 +11,7 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
+from tpu_inference.core.sched.dp_scheduler import DPSchedulerOutput
 import vllm.envs as vllm_envs
 from flax import nnx
 from jax.experimental import mesh_utils
@@ -1032,35 +1033,25 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         return gather_logprobs(logprobs, next_tokens, max_logprobs)
 
     def _prepare_dp_input_metadata(self,
-                                   scheduler_output: "VllmSchedulerOutput"):
+                                   scheduler_output: DPSchedulerOutput):
 
         dp_size = self.dp_size
         num_reqs = self.input_batch.num_reqs
         max_num_reqs_per_dp_rank = self.max_num_reqs // dp_size
-        req_ids_dp = {dp_rank: [] for dp_rank in range(dp_size)}
+        req_ids_dp = scheduler_output.rank_to_req_ids
+        num_scheduled_tokens_per_dp_rank= scheduler_output.num_scheduled_tokens_per_dp_rank
+        scheduled_tokens_per_dp_rank = scheduler_output.scheduled_tokens_per_dp_rank
+        num_req_per_dp_rank = scheduler_output.num_req_per_dp_rank
         req_indices_dp = {dp_rank: [] for dp_rank in range(dp_size)}
-        num_scheduled_tokens_per_dp_rank = {
-            dp_rank: 0
-            for dp_rank in range(dp_size)
-        }
-        scheduled_tokens_per_dp_rank = {
-            dp_rank: []
-            for dp_rank in range(dp_size)
-        }
-        num_req_per_dp_rank = {dp_rank: 0 for dp_rank in range(dp_size)}
+
         start_time = time.time()
         for req_id in self.input_batch.req_ids[:num_reqs]:
             dp_rank = scheduler_output.assigned_dp_rank[req_id]
-            req_ids_dp[dp_rank].append(req_id)
             req_indices_dp[dp_rank].append(
                 self.input_batch.req_id_to_index[req_id])
-            num_scheduled_tokens_per_dp_rank[
-                dp_rank] += scheduler_output.num_scheduled_tokens[req_id]
-            scheduled_tokens_per_dp_rank[dp_rank].append(
-                scheduler_output.num_scheduled_tokens[req_id])
-            num_req_per_dp_rank[dp_rank] += 1
         print("[TPU Runner] dp input metadata distribution time:",
               time.time() - start_time)
+        
         # Find maximum number of scheduled tokens across DP ranks
         max_num_scheduled_tokens_across_dp = max(
             num_scheduled_tokens_per_dp_rank.values())

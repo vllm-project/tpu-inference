@@ -133,11 +133,31 @@ def create_mock_scheduler_output(runner, num_reqs, dp_size, min_computed_tokens=
         computed_tokens = np.random.randint(min_computed_tokens, max_computed_tokens + 1)
         runner.input_batch.num_computed_tokens_cpu[i] = computed_tokens
     
+    # Create DP rank assignment mapping for scheduled requests
+    rank_to_req_ids = {dp_rank: [] for dp_rank in range(dp_size)}
+    num_scheduled_tokens_per_dp_rank = {dp_rank: 0 for dp_rank in range(dp_size)}
+    scheduled_tokens_per_dp_rank = {
+        dp_rank: []
+        for dp_rank in range(dp_size)
+    }
+    num_req_per_dp_rank = {dp_rank: 0 for dp_rank in range(dp_size)}
+
+    for req_id in num_scheduled_tokens.keys():
+        dp_rank = assigned_dp_ranks[req_id]
+        rank_to_req_ids[dp_rank].append(req_id)
+        num_scheduled_tokens_per_dp_rank[dp_rank] += num_scheduled_tokens[req_id]
+        scheduled_tokens_per_dp_rank[dp_rank].append(num_scheduled_tokens[req_id])
+        num_req_per_dp_rank[dp_rank] += 1
+    
     mock_output.num_scheduled_tokens = num_scheduled_tokens
     mock_output.assigned_dp_rank = assigned_dp_ranks
     mock_output.total_num_scheduled_tokens = total_tokens
     mock_output.scheduled_spec_decode_tokens = {}
     mock_output.grammar_bitmask = None
+    mock_output.rank_to_req_ids = rank_to_req_ids
+    mock_output.num_scheduled_tokens_per_dp_rank = num_scheduled_tokens_per_dp_rank
+    mock_output.scheduled_tokens_per_dp_rank = scheduled_tokens_per_dp_rank
+    mock_output.num_req_per_dp_rank = num_req_per_dp_rank
     
     return mock_output
 

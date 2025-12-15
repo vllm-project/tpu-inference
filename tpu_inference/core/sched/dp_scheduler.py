@@ -28,9 +28,14 @@ class DPSchedulerOutput(SchedulerOutput):
     """Extended SchedulerOutput that includes DP rank assignments."""
     assigned_dp_rank: Optional[Dict[str, int]] = None
 
-    def __init__(self, *args, assigned_dp_rank=None, **kwargs):
+    def __init__(self, *args, assigned_dp_rank=None, rank_to_req_ids=None,scheduled_tokens_per_dp_rank = None,num_scheduled_tokens_per_dp_rank = None, num_req_per_dp_rank=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.assigned_dp_rank = assigned_dp_rank or {}
+        self.rank_to_req_ids = rank_to_req_ids or {}
+        self.scheduled_tokens_per_dp_rank = scheduled_tokens_per_dp_rank or {}
+        self.num_scheduled_tokens_per_dp_rank = num_scheduled_tokens_per_dp_rank or {}
+        self.num_req_per_dp_rank = num_req_per_dp_rank or {}
+        
 
 
 class DPScheduler(SchedulerInterface):
@@ -222,9 +227,22 @@ class DPScheduler(SchedulerInterface):
 
         # Create DP rank assignment mapping for scheduled requests
         assigned_dp_rank = {}
+        rank_to_req_ids = {dp_rank: [] for dp_rank in range(self.dp_size)}
+        num_scheduled_tokens_per_dp_rank = {dp_rank: 0 for dp_rank in range(self.dp_size)}
+        scheduled_tokens_per_dp_rank = {
+            dp_rank: []
+            for dp_rank in range(self.dp_size)
+        }
+        num_req_per_dp_rank= {dp_rank: 0 for dp_rank in range(self.dp_size)}
+
         for req_id in combined_num_scheduled_tokens.keys():
             assigned_dp_rank[req_id] = self.assigned_dp_rank[req_id]
-
+            rank_to_req_ids[self.assigned_dp_rank[req_id]].append(req_id)
+            num_scheduled_tokens_per_dp_rank[self.assigned_dp_rank[req_id]] += combined_num_scheduled_tokens[req_id]
+            scheduled_tokens_per_dp_rank[self.assigned_dp_rank[req_id]].append(
+                combined_num_scheduled_tokens[req_id])
+            num_req_per_dp_rank[self.assigned_dp_rank[req_id]] += 1
+            
         return DPSchedulerOutput(
             scheduled_new_reqs=all_new_reqs,
             scheduled_cached_reqs=combined_cached_data,
@@ -236,6 +254,10 @@ class DPScheduler(SchedulerInterface):
             finished_req_ids=combined_finished_req_ids,
             free_encoder_mm_hashes=set(),
             assigned_dp_rank=assigned_dp_rank,
+            rank_to_req_ids=rank_to_req_ids,
+            num_scheduled_tokens_per_dp_rank=num_scheduled_tokens_per_dp_rank,
+            scheduled_tokens_per_dp_rank=scheduled_tokens_per_dp_rank, 
+            num_req_per_dp_rank=num_req_per_dp_rank,
         )
 
     def _combine_cached_request_data(
