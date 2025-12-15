@@ -4,6 +4,7 @@ import logging
 import random
 from contextlib import nullcontext
 from dataclasses import dataclass
+import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 import jax
@@ -1196,13 +1197,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         dp_size = self.dp_size
         data_parallel_attn_sharding = NamedSharding(
             self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
-
+        start_time = time.time()
         (req_ids_dp, req_indices_dp, num_scheduled_tokens_per_dp_rank,
          scheduled_tokens_per_dp_rank, num_req_per_dp_rank,
          padded_num_scheduled_tokens_per_dp_rank, padded_num_reqs,
          padded_total_num_scheduled_tokens, padded_num_reqs_per_dp_rank,
          logits_indices_selector, max_num_reqs_per_dp_rank
          ) = self._prepare_dp_input_metadata(scheduler_output)
+        print("[TPU Runner] _prepare_dp_input_metadata time:",
+              time.time() - start_time)
         # Multi-modal support
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -1222,6 +1225,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                  padded_num_scheduled_tokens_per_dp_rank, dp_size)
 
         # Populates input_ids and positions
+        start_time = time.time()
         for dp_rank in range(dp_size):
             if num_req_per_dp_rank[dp_rank] == 0:
                 continue
@@ -1270,8 +1274,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             )
 
             input_ids_cpu[total_num_scheduled_tokens:] = 0
-
+        print("[TPU Runner] populate input_ids and positions time:",
+              time.time() - start_time)
         # Prepare the attention metadata (query_start_loc_cpu, seq_lens_cpu)
+        start_time = time.time()
         for dp_rank in range(dp_size):
             req_offset = dp_rank * max_num_reqs_per_dp_rank
             query_start_loc_cpu = self.query_start_loc_cpu[
@@ -1299,8 +1305,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 self.input_batch.num_computed_tokens_cpu[req_indices] +
                 num_scheduled_tokens_per_req)
             seq_lens_cpu[_num_reqs:] = 0
-
+        print("[TPU Runner] populate attention metadata time:",
+              time.time() - start_time  )
         # populate logits_indices
+        start_time = time.time()
         for dp_rank in range(dp_size):
             req_offset = dp_rank * padded_num_reqs_per_dp_rank
             query_loc_req_offset = dp_rank * (max_num_reqs_per_dp_rank + 1)
@@ -1315,7 +1323,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logits_indices_cpu[_num_reqs:] = -1
 
         logits_indices = self.logits_indices_cpu[:padded_num_reqs]
-
+        print("[TPU Runner] populate logits_indices time:",
+              time.time() - start_time)
         # Please see runner_utils.PhasedBasedProfiler for details
         if self.phase_based_profiler:
             batch_composition_stats = runner_utils.get_batch_composition_stats(
@@ -1369,6 +1378,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logits_indices = spec_decode_metadata.final_logits_indices
 
         # Put to device
+        start_time = time.time()
         sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
             self.mesh,
             self.input_batch,
@@ -1389,7 +1399,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
               request_distribution),
              sharding=data_parallel_attn_sharding,
          )
-
+        print("[TPU Runner] device_array time:", time.time() - start_time)
+        start_time = time.time()
         attention_metadata_per_layer: Dict[str, AttentionMetadata] = {}
         uniform_attention_metadata: AttentionMetadata = None
         for kv_cache_gid, kv_cache_group in enumerate(
@@ -1430,7 +1441,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 for layer_name in kv_cache_group.layer_names:
                     attention_metadata_per_layer[
                         layer_name] = attention_metadata_gid
-
+        print("[TPU Runner] prepare block table time:",
+              time.time() - start_time)
         # Async scheduling: substitute placeholder tokens for DP
         if self.scheduler_config.async_scheduling and self._pre_async_results is not None:
             # Collect all token indices that need substitution across all DP ranks
