@@ -94,6 +94,44 @@ DEFAULT_GPT_OSS_FP4_CONFIG = {
     }
 }
 
+DEFAULT_DEEPSEEK_TPU_FP4_CONFIG = {
+    "qwix": {
+        "use_abstract_model":
+        True,
+        "scale_dtype":
+        "bfloat16",
+        "rules": [
+            {
+                # Rule 1: MoE Router/Gate (BF16)
+                "module_path": ".*.custom_module.router.*",
+                "weight_qtype": None,
+            },
+            {
+                # Rule 2: Attention (FP8)
+                "module_path": ".*attn.*",
+                "weight_qtype": "float8_e4m3fn",
+                "act_qtype": None,
+                "tile_size": None,
+            },
+            {
+                # Rule 3: MoE/MLP FFW (FP4)
+                "module_path": ".*custom_module.*",
+                "weight_qtype": "float4_e2m1fn",
+                "act_qtype": None,
+                "tile_size": 256,
+            },
+            # 💡 ADD THIS NEW RULE (Rule 4)
+            {
+                # Rule 4: Shared Experts (FP4)
+                "module_path": ".*shared_experts.*",
+                "weight_qtype": "float4_e2m1fn",
+                "act_qtype": None,
+                "tile_size": 256,
+            },
+        ],
+    }
+}
+
 
 def parse_qwix_config_to_rules(
         qwix_config: List[dict]) -> List[qwix.QuantizationRule]:

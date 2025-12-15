@@ -25,6 +25,8 @@ from tpu_inference.layers.jax.moe.moe import MoE
 from tpu_inference.layers.jax.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.utils.quantization.mxfp4_utils import \
+    unpack_mxfp4
 from tpu_inference.models.jax.utils.quantization.quantization_utils import \
     get_quant_dtype_from_qwix_config
 from tpu_inference.models.jax.utils.weight_utils import (
@@ -515,15 +517,15 @@ class DeepSeekV3WeightLoader:
 
         # TODO (jacobplatin): we shouldn't hard-code this, but the logic to obtain the true quantized dtype
         # is non-trivial and the default checkpoints all use this dtype
-        self.quant_dtype = jnp.float8_e4m3fn
+        #self.quant_dtype = jnp.float8_e4m3fn
 
         self.is_model_quantized = not vllm_config.additional_config.get(
             "skip_quantization", False)
         if self.is_model_quantized:
             # TODO (jacobplatin): expand support eventually
-            quantization_type = vllm_config.model_config.hf_config.quantization_config[
-                "quant_method"]
-            assert quantization_type == "fp8", "DeepSeek only supports the fp8 quantization method for now"
+            # quantization_type = vllm_config.model_config.hf_config.quantization_config[
+            #    "quant_method"]
+            # assert quantization_type == "fp8", "DeepSeek only supports the fp8 quantization method for now"
             self.scale_dtype, self.quant_dtype = get_quant_dtype_from_qwix_config(
                 vllm_config)
 
@@ -539,7 +541,7 @@ class DeepSeekV3WeightLoader:
             self.quantization_block_size_n = quantization_block_sizes[0]
             self.quantization_block_size_k = quantization_block_sizes[1]
             # TODO (jacobplatin): remove this check in the future
-            assert self.quantization_block_size_n == self.quantization_block_size_k, "Quantization block size n and k must be the same!"
+            # assert self.quantization_block_size_n == self.quantization_block_size_k, "Quantization block size n and k must be the same!"
             # NOTE: this is only needed for pre-quantized models
             self._scale_shape_map = {
                 "q_b_proj": (1, qk_nope_head_dim + qk_rope_head_dim,
@@ -564,13 +566,34 @@ class DeepSeekV3WeightLoader:
             # TODO (jacobplatin): remove or clean this up
             self.scale_shap_map_for_random_weight_loading = {
                 "kernel_kv_down_proj_DA": (56, 576),
-                "kernel_kv_up_proj_ANH": (4, 128, 2),
-                "kernel_q_up_proj_ANH": (12, 1, 192),
-                "kernel_o_proj_NHD": (128, 1, 56),
-                "kernel_down_proj_EFD": (256, 16, 56),
-                "kernel_up_proj_EDF": (256, 56, 16),
-                "kernel_gating_EDF": (256, 56, 16),
+                "kernel_kv_up_proj_ANH":
+                (attn_heads, qk_nope_head_dim + v_head_dim,
+                 max(kv_lora_rank // 256, 1)),
+                "kernel_q_up_proj_ANH":
+                (attn_heads, qk_nope_head_dim + qk_rope_head_dim,
+                 max(q_lora_rank // 256, 1)),
+                "kernel_o_proj_NHD": (hidden_size, attn_heads,
+                                      max(v_head_dim // 256, 1)),
+                # (refer to quantization analysis sheet and replace corresponding dimensions) https://docs.google.com/spreadsheets/d/1MMS_jirZT-J-JIEvGud6XqaB8lPZXWMbw2_V5DNPhRg/edit?resourcekey=0-L8JUfg7MR5lpZRGnSnaN_g&gid=1441289540#gid=1441289540
+                "kernel_down_proj_EFD":
+                (256, 16, 56),  #last two dims should change
+                "kernel_up_proj_EDF":
+                (256, 56, 16),  #last two dims should change
+                "kernel_gating_EDF": (256, 56,
+                                      16),  #last two dims should change
             }
+
+            # "q_b_proj": (attn_heads, qk_nope_head_dim + qk_rope_head_dim,
+            #              q_lora_rank // 256),
+            # "kv_b_proj": (attn_heads, qk_nope_head_dim + v_head_dim,
+            #               kv_lora_rank // 256),
+            #"o_proj": (hidden_size, attn_heads, v_head_dim // 256)
+
+            #things to discuss: how random weight loading works.
+
+            #you need to manually tranpose the entriesin the scale_shap_map_for_random_weight_loading because we don't call the transpose function on these
+            #this map needs to have entries that correspond to dimensions after reshaping and transposing happens
+            # i.e. if an entry has a tranpose of (2, 0, 1)
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
@@ -648,24 +671,41 @@ class DeepSeekV3WeightLoader:
         sharding = base_model_weight.array.qvalue.sharding if hasattr(
             base_model_weight, "array") else base_model_weight.sharding
 
+        ### FROM JORDAN
         # Convert weights from torch into numpy
-        cast_type = model_weight.value.dtype
-
-        torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
-
-        if torch_view_type:
-            # Avoid unnecessary upcasting and mem copy by viewing the tensor's
-            # raw data as integers before converting to a JAX array.
-            weight_np = jnp.array(
-                weight.view(torch_view_type).numpy()).view(cast_type)
-        else:
-            raise ValueError(
-                f"Unsupported dtype for tensor conversion: {cast_type}")
-
-        if scale is not None:
+        if weight.dtype == torch.uint8 and scale is not None:
+            # Assume packed FP4 format when uint8 weights with scale provided
+            cast_type = jnp.float4_e2m1fn
+            codes = unpack_mxfp4(weight)
+            weight_np = jnp.array(codes.float().numpy()).astype(cast_type)
             scale = scale.to(torch.float32).numpy().astype(self.scale_dtype)
+        else:
+            cast_type = model_weight.value.dtype
+            # Special-case: FP4 values stored as FP8 for compatibility.
+            # If the model expects float4_e2m1fn but the checkpoint provides FP8,
+            # convert by numeric value (float32) then cast to float4.
+            if cast_type == jnp.float4_e2m1fn and weight.dtype == torch.float8_e4m3fn:
+                weight_np = jnp.array(weight.float().numpy()).astype(cast_type)
+            else:
+                torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+
+                if torch_view_type:
+                    # Avoid unnecessary upcasting and mem copy by viewing the tensor's
+                    # raw data as integers before converting to a JAX array.
+                    weight_np = jnp.array(
+                        weight.view(torch_view_type).numpy()).view(cast_type)
+                else:
+                    raise ValueError(
+                        f"Unsupported dtype for tensor conversion: {cast_type}"
+                    )
+
+            if scale is not None:
+                scale = scale.to(torch.float32).numpy().astype(
+                    self.scale_dtype)
+        ### END FROM JORDAN
 
         # Reshape and transpose weights if necessary.
+        ### JORDAN REMOVED RESHAPING BECAUSE HE KEPT WEIGHT IN 2D
         weight_np = reshape_params(name, weight_np, self._weight_shape_map)
         if scale is not None:
             scale = reshape_params(name, scale, self._scale_shape_map)
@@ -790,7 +830,11 @@ class DeepSeekV3WeightLoader:
                 # TODO (jacobplatin): refactor this so that we instead change / update `model_weights_generator`
                 # instead of checking "weight_scale_inv" and assuming quantization method is fp8
                 scale = None
-                if loaded_weight.dtype == j2t_dtype(self.quant_dtype.dtype):
+                # Mixed quantization: accept both fp8 and packed fp4 (uint8) tensors.    ### FROM JORDAN
+                allowed_quant_dtypes = {
+                    j2t_dtype(self.quant_dtype.dtype), torch.uint8
+                }  ### FROM JORDAN
+                if loaded_weight.dtype in allowed_quant_dtypes:  ### FROM JORDAN
                     if self.is_model_quantized:
                         scale_name = loaded_name.replace(
                             ".weight", ".weight_scale_inv")
