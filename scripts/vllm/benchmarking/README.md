@@ -62,7 +62,7 @@ Total input tokens:                      XX
 Total generated tokens:                  XX
 Request throughput (req/s):              XX
 Output token throughput (tok/s):         XX
-Total Token throughput (tok/s):          XX
+Total token throughput (tok/s):          XX
 ---------------Time to First Token----------------
 Mean TTFT (ms):                          XX
 Median TTFT (ms):                        XX
