@@ -125,6 +125,86 @@ def validate_inputs(
             f'{x.shape[1]=} must be a multiple of {in_block_size=}')
 
 
+def subchannel_matmul_kernel(lhs_ref, rhs_ref, w_scales_ref, out_ref,
+                             acc_scratch, sc_size, dtype_lhs, k_dim, block_m,
+                             block_k, steps_k, steps_n, compute_tile_n):
+    print(
+        "Printing k_dim, block_m, block_k, steps_k, steps_n, compute_tile_n:",
+        k_dim, block_m, block_k, steps_k, steps_n, compute_tile_n)
+    pid_k = pl.program_id(2)
+    is_first_step = pid_k == 0
+    is_last_step = pid_k == (k_dim // block_k - 1)
+
+    @pl.when(is_first_step)
+    def _init():
+        acc_scratch[...] = jnp.zeros_like(acc_scratch)
+
+    # Outer Loop: Iterate through K-dimension sub-channels
+    acc_dtype = jnp.bfloat16
+
+    # Pre-calculate all quantized blocks for this tile. Relieves register
+    # pressure during the compute phase.
+    lhs_q_list = []
+    lhs_scale_list = []
+    rhs_q_list = []
+    rhs_scale_list = []
+
+    for i in range(steps_k):
+        k_start, k_end = i * sc_size, (i + 1) * sc_size
+
+        lhs_sub = lhs_ref[:, k_start:k_end].astype(jnp.float32)
+        lhs_sub_max = jnp.max(jnp.abs(lhs_sub), axis=-1, keepdims=False)
+        lhs_sub_max = jnp.expand_dims(lhs_sub_max, axis=0)
+        l_q, l_s = quantize_array(lhs_sub, lhs_sub_max, dtype_lhs)
+        lhs_q_list.append(l_q)
+        # cast scale to acc_dtype IMMEDIATELY to save register space
+        lhs_scale_list.append(l_s.astype(acc_dtype))
+
+        rhs_q_list.append(rhs_ref[k_start:k_end, :])
+        rhs_scale_list.append(w_scales_ref[i, :, :].astype(acc_dtype))
+
+    accumulators = [
+        jnp.zeros((block_m, compute_tile_n), dtype=acc_dtype)
+        for _ in range(steps_n)
+    ]
+    for i in range(steps_k):
+        lhs_q = lhs_q_list[i]
+        lhs_scale = lhs_scale_list[i]
+        rhs_q_full = rhs_q_list[i]
+        rhs_q_full = rhs_q_list[i]
+        rhs_q_full = rhs_q_list[i]
+        rhs_scale_full = rhs_scale_list[i]
+
+        # Inner Loop: stripmine the N dimension to respect MXU_SIZE constraints
+        for j in range(steps_n):
+            n_start, n_end = j * compute_tile_n, (j + 1) * compute_tile_n
+
+            rhs_q_slice = rhs_q_full[:, n_start:n_end]
+            rhs_scale_slice = rhs_scale_full[:, n_start:n_end]
+            if dtype_lhs == jnp.int4 or dtype_lhs == jnp.int8:
+                preferred_element_type = jnp.int32
+            else:
+                preferred_element_type = jnp.float32
+            dot_res = jnp.dot(lhs_q,
+                              rhs_q_slice,
+                              preferred_element_type=preferred_element_type)
+            res = dot_res.astype(acc_dtype)
+            # Broadcast multiply LHS scale (M, 1) -> (M, N)
+            # This keeps the scale in a small register footprint
+            res = res * lhs_scale
+            # Broadcast multiply RHS scale (1, N) -> (M, N)
+            res = res * rhs_scale_slice
+
+            accumulators[j] += res
+    acc_block = jnp.concatenate(accumulators, axis=1)
+    print("Printing acc_block.shape:", acc_block.shape)
+    acc_scratch[...] += acc_block
+
+    @pl.when(is_last_step)
+    def _write():
+        out_ref[...] = acc_scratch[...].astype(out_ref.dtype)
+
+
 def matmul_kernel(
     x_ref: jax.Array,  # (batch_block_size, in_block_size)
     w_q_ref: jax.Array,  # (in_block_size, out_block_size)
@@ -222,6 +302,7 @@ def matmul_kernel(
     static_argnames=[
         'x_q_dtype',
         'tuned_value',
+        'sc_size',
     ],
 )
 def quantized_matmul_kernel(
@@ -232,6 +313,7 @@ def quantized_matmul_kernel(
     x_q_dtype: jnp.dtype | None = None,
     *,
     tuned_value: TunedValue | None = None,
+    sc_size: int | None = None,
 ) -> jax.Array:
     """Quantized matmul kernel.
 
@@ -258,11 +340,12 @@ def quantized_matmul_kernel(
     # Pallas kernel only has access to a single block of the input. Therefere,
     # for per-token quantization, abs max has to be computed outside of the
     # kernel.
-    x_abs_max = jnp.max(jnp.abs(x), axis=-1, keepdims=False)  # [bs]
-    # Pallas requires minormost dim to be a multiple of sublane size 128.
-    # Therefore, instead of using [bs, 1], we reshape this into [1, bs]
-    x_abs_max = jnp.expand_dims(x_abs_max, axis=0)  # [1, bs]
-    assert x_abs_max.shape == (1, x.shape[0])
+    if not sc_size:
+        x_abs_max = jnp.max(jnp.abs(x), axis=-1, keepdims=False)  # [bs]
+        # Pallas requires minormost dim to be a multiple of sublane size 128.
+        # Therefore, instead of using [bs, 1], we reshape this into [1, bs]
+        x_abs_max = jnp.expand_dims(x_abs_max, axis=0)  # [1, bs]
+        assert x_abs_max.shape == (1, x.shape[0])
 
     orig_n_batch, orig_n_in = x.shape
     _, orig_n_out = w_q.shape
@@ -275,6 +358,7 @@ def quantized_matmul_kernel(
             x_q_dtype=jnp.dtype(x_q_dtype).name,
             w_q_dtype=jnp.dtype(w_q.dtype).name,
         )
+    print("Printing tuned_value:", tuned_value)
     batch_block_size = tuned_value.batch_block_size
     out_block_size = tuned_value.out_block_size
     in_block_size = tuned_value.in_block_size
@@ -283,8 +367,9 @@ def quantized_matmul_kernel(
     padded_n_batch = next_multiple(orig_n_batch, batch_block_size)
     if orig_n_batch < padded_n_batch:
         x = jnp.pad(x, ((0, padded_n_batch - orig_n_batch), (0, 0)))
-        x_abs_max = jnp.pad(x_abs_max,
-                            ((0, 0), (0, padded_n_batch - orig_n_batch)))
+        if not sc_size:
+            x_abs_max = jnp.pad(x_abs_max,
+                                ((0, 0), (0, padded_n_batch - orig_n_batch)))
     padded_n_out = next_multiple(orig_n_out, out_block_size)
     if orig_n_out < padded_n_out:
         w_q = jnp.pad(w_q, ((0, 0), (0, padded_n_out - orig_n_out)))
@@ -329,60 +414,111 @@ def quantized_matmul_kernel(
         upper_limit_bytes=get_device_vmem_limit(),
     )
 
-    kernel = pl.pallas_call(
-        functools.partial(
-            matmul_kernel,
-            x_q_dtype=x_q_dtype,
-            save_acc=save_acc,
-            save_x_q=save_x_q,
-        ),
-        grid_spec=pltpu.PrefetchScalarGridSpec(
-            num_scalar_prefetch=0,
-            in_specs=[
-                pl.BlockSpec((batch_block_size, in_block_size), lambda b, o, i:
-                             (b, i)),  # x
-                pl.BlockSpec((in_block_size, out_block_size), lambda b, o, i:
-                             (i, o)),  # w_q
-                pl.BlockSpec((1, out_block_size), lambda b, o, i:
-                             (0, o)),  # w_scale
-                pl.BlockSpec((1, batch_block_size), lambda b, o, i:
-                             (0, b)),  # x_abs_max
-            ],
-            out_specs=pl.BlockSpec((batch_block_size, out_block_size),
-                                   lambda b, o, i: (b, o)),
-            scratch_shapes=[
-                pltpu.VMEM((batch_block_size, out_block_size), acc_dtype)
-                if save_acc else None,  # acc_scratch
-                pltpu.VMEM((batch_block_size, in_block_size), x_q_dtype)
-                if save_x_q else None,  # x_q_scratch
-                pltpu.VMEM(
-                    (batch_block_size,
-                     1), jnp.float32) if save_x_q else None,  # x_scale_scratch
-            ],
-            grid=(n_batch, n_out, n_in),
-        ),
-        out_shape=jax.ShapeDtypeStruct((padded_n_batch, padded_n_out),
-                                       x.dtype),
-        compiler_params=pltpu.CompilerParams(
-            dimension_semantics=('parallel', 'arbitrary', 'arbitrary'),
-            vmem_limit_bytes=vmem_limit_bytes,
-        ),
-    )
+    x_block = pl.BlockSpec((batch_block_size, in_block_size), lambda b, o, i:
+                           (b, i))
+    w_q_block = pl.BlockSpec((in_block_size, out_block_size), lambda b, o, i:
+                             (i, o))
+    if sc_size:
+        compute_tile_n = 256 * 4
+        w_scale_block = pl.BlockSpec(
+            (in_block_size // sc_size, 1, out_block_size), lambda b, o, i:
+            (i, 0, o))
+    else:
+        w_scale_block = pl.BlockSpec((1, out_block_size), lambda b, o, i:
+                                     (0, o))
 
-    validate_inputs(
-        x=x,
-        w_q=w_q,
-        w_scale=w_scale,
-        x_abs_max=x_abs_max,
-        x_q_dtype=x_q_dtype,
-        batch_block_size=batch_block_size,
-        out_block_size=out_block_size,
-        in_block_size=in_block_size,
-    )
+    if sc_size:
+        kernel = pl.pallas_call(
+            functools.partial(
+                subchannel_matmul_kernel,
+                dtype_lhs=x_q_dtype,
+                sc_size=sc_size,
+                k_dim=orig_n_batch,
+                block_m=batch_block_size,
+                block_k=in_block_size,
+                steps_k=in_block_size // sc_size,
+                steps_n=out_block_size // compute_tile_n,
+                compute_tile_n=compute_tile_n,
+            ),
+            grid_spec=pltpu.PrefetchScalarGridSpec(
+                num_scalar_prefetch=0,
+                in_specs=[
+                    x_block,
+                    w_q_block,
+                    w_scale_block,
+                ],
+                out_specs=pl.BlockSpec((batch_block_size, out_block_size),
+                                       lambda b, o, i: (b, o)),
+                scratch_shapes=[
+                    pltpu.VMEM((batch_block_size, out_block_size),
+                               jnp.bfloat16)
+                ],
+                grid=(n_batch, n_out, n_in),
+            ),
+            out_shape=jax.ShapeDtypeStruct((padded_n_batch, padded_n_out),
+                                           x.dtype),
+            compiler_params=pltpu.CompilerParams(
+                dimension_semantics=('parallel', 'parallel', 'arbitrary'),
+                vmem_limit_bytes=vmem_limit_bytes,
+            ),
+        )
+    else:
+        kernel = pl.pallas_call(
+            functools.partial(
+                matmul_kernel,
+                x_q_dtype=x_q_dtype,
+                save_acc=save_acc,
+                save_x_q=save_x_q,
+            ),
+            grid_spec=pltpu.PrefetchScalarGridSpec(
+                num_scalar_prefetch=0,
+                in_specs=[
+                    pl.BlockSpec((batch_block_size, in_block_size),
+                                 lambda b, o, i: (b, i)),  # x
+                    pl.BlockSpec((in_block_size, out_block_size),
+                                 lambda b, o, i: (i, o)),  # w_q
+                    pl.BlockSpec((1, out_block_size), lambda b, o, i:
+                                 (0, o)),  # w_scale
+                    pl.BlockSpec((1, batch_block_size), lambda b, o, i:
+                                 (0, b)),  # x_abs_max
+                ],
+                out_specs=pl.BlockSpec((batch_block_size, out_block_size),
+                                       lambda b, o, i: (b, o)),
+                scratch_shapes=[
+                    pltpu.VMEM((batch_block_size, out_block_size), acc_dtype)
+                    if save_acc else None,  # acc_scratch
+                    pltpu.VMEM((batch_block_size, in_block_size), x_q_dtype)
+                    if save_x_q else None,  # x_q_scratch
+                    pltpu.VMEM((batch_block_size, 1), jnp.float32)
+                    if save_x_q else None,  # x_scale_scratch
+                ],
+                grid=(n_batch, n_out, n_in),
+            ),
+            out_shape=jax.ShapeDtypeStruct((padded_n_batch, padded_n_out),
+                                           x.dtype),
+            compiler_params=pltpu.CompilerParams(
+                dimension_semantics=('parallel', 'arbitrary', 'arbitrary'),
+                vmem_limit_bytes=vmem_limit_bytes,
+            ),
+        )
+
+    #validate_inputs(
+    #x=x,
+    #w_q=w_q,
+    #w_scale=w_scale,
+    #x_abs_max=x_abs_max,
+    #x_q_dtype=x_q_dtype,
+    #batch_block_size=batch_block_size,
+    #out_block_size=out_block_size,
+    #in_block_size=in_block_size,
+    #)
 
     # The named_scope is used for autotune.
     kernel_name = get_kernel_name(tuned_value)
     with jax.named_scope(kernel_name):
-        out = kernel(x, w_q, w_scale, x_abs_max)
+        if sc_size:
+            out = kernel(x, w_q, w_scale)
+        else:
+            out = kernel(x, w_q, w_scale, x_abs_max)
 
     return out[:orig_n_batch, :orig_n_out]

@@ -13,17 +13,25 @@ from tpu_inference.kernels.quantized_matmul.kernel import \
     quantized_matmul_kernel
 
 
-def sharded_quantized_matmul(x: jax.Array, w_q: jax.Array, w_s: jax.Array,
-                             mesh: Mesh, weight_sharding: P):
+def sharded_quantized_matmul(x: jax.Array,
+                             w_q: jax.Array,
+                             w_s: jax.Array,
+                             mesh: Mesh,
+                             weight_sharding: P,
+                             sc_size: int | None = None):
     in_axis, out_axis = weight_sharding
     x_sharding = P(None, in_axis)
-    scale_sharding = P(None, out_axis)
+    scale_sharding = P(None, None, out_axis)
     out_sharding = P(None, out_axis)
 
     x = jax.lax.with_sharding_constraint(x, NamedSharding(mesh, x_sharding))
 
     def wrapper(x, w_q, w_s):
-        output = quantized_matmul_kernel(x, w_q, w_s, x_q_dtype=w_q.dtype)
+        output = quantized_matmul_kernel(x,
+                                         w_q,
+                                         w_s,
+                                         x_q_dtype=w_q.dtype,
+                                         sc_size=sc_size)
         if in_axis:
             output = jax.lax.psum(output, axis_name=in_axis)
         return output

@@ -151,12 +151,15 @@ class VllmAWQLinearMethod(AWQLinearMethod):
         qzeros = jnp.expand_dims(jax_view(layer.qzeros), 1)
         scales = jnp.expand_dims(jax_view(layer.scales), 1)
 
-        qweight = qweight.astype(jnp.int8)
-        qzeros = qzeros.astype(jnp.int8)
+        qweight = qweight.astype(jnp.int4)
+        qzeros = qzeros.astype(jnp.int4)
         #reshaped_qweight = qweight.reshape((-1, qweight.shape[-1]))
-        outs = sharded_quantized_matmul(x_jax, qweight, scales[0],
+        outs = sharded_quantized_matmul(x_jax,
+                                        qweight,
+                                        scales,
                                         self.jax_config.mesh,
-                                        self.jax_config.weight_sharding)
+                                        self.jax_config.weight_sharding,
+                                        sc_size=128)
 
         #weight = (qweight - qzeros) * scales
         #weight = weight.reshape((-1, weight.shape[-1]))
