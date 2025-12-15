@@ -565,7 +565,9 @@ class DeepSeekV3WeightLoader:
             # NOTE: this is only needed for pre-quantized models when doing random weight loading
             # TODO (jacobplatin): remove or clean this up
             self.scale_shap_map_for_random_weight_loading = {
-                "kernel_kv_down_proj_DA": (56, 576),
+                "kernel_kv_down_proj_DA": (
+                    28, 576
+                ),  #check the quant analysis spreadsheet for correct values. it might be this (576, 28). make sure transpose/reshape is correct
                 "kernel_kv_up_proj_ANH":
                 (attn_heads, qk_nope_head_dim + v_head_dim,
                  max(kv_lora_rank // 256, 1)),
@@ -594,6 +596,8 @@ class DeepSeekV3WeightLoader:
             #you need to manually tranpose the entriesin the scale_shap_map_for_random_weight_loading because we don't call the transpose function on these
             #this map needs to have entries that correspond to dimensions after reshaping and transposing happens
             # i.e. if an entry has a tranpose of (2, 0, 1)
+
+            #MAKE SURE TO
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
