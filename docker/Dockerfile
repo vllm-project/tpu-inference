@@ -17,12 +17,13 @@ RUN apt-get update && apt-get install -y \
 
 # Build vLLM
 WORKDIR /workspace/vllm
-ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
+ARG VLLM_REPO=https://github.com/weiyu0824/vllm
 ARG VLLM_COMMIT_HASH
 RUN git clone $VLLM_REPO /workspace/vllm
-RUN if [ -n "$VLLM_COMMIT_HASH" ]; then \
-        git checkout $VLLM_COMMIT_HASH; \
-    fi
+#RUN if [ -n "$VLLM_COMMIT_HASH" ]; then \
+#        git checkout $VLLM_COMMIT_HASH; \
+#    fi
+RUN git checkout task/remove-xla-path-new
 RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements/tpu.txt --retries 3
 RUN --mount=type=cache,target=/root/.cache/pip VLLM_TARGET_DEVICE="tpu" pip install -e .
 
