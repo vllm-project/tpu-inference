@@ -260,3 +260,20 @@ if __name__ == "__main__":
         print(f"\nError: {e}")
         import traceback
         traceback.print_exc()
+
+# JAX devices available: 8
+# Number of requests: 4096
+# Scheduled tokens per request: 1 (decode)
+# Computed tokens (context) range: 4096 - 8192
+# Data parallel size: 4
+# Warmup iterations: 3
+# Benchmark iterations: 10
+
+# ================================================================================
+# RESULTS:
+# ================================================================================
+# Mean:   9.44 ms
+# Median: 9.42 ms
+# Std:    0.10 ms
+# Min:    9.31 ms
+# Max:    9.62 ms
