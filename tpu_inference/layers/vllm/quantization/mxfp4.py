@@ -123,8 +123,8 @@ class VllmMxfp4Config(Mxfp4Config, JaxCommonConfig):
             ):
                 return VllmUnquantizedLinearMethod(linear_config)
             logger.warning_once(
-                "MXFP4 linear layer is not implemented - falling back to "
-                "UnquantizedLinearMethod.")
+                "MXFP4 dense linear layer is not implemented - falling back to "
+                "UnquantizedLinearMethod. Only MoE layers are quantized.")
             return VllmUnquantizedLinearMethod(linear_config)
         elif isinstance(layer, FusedMoE):
             moe_config = self.get_moe_config(layer)
