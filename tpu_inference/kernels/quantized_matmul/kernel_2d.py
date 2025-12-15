@@ -32,6 +32,62 @@ INT8_MIN, INT8_MAX = -128.0, 127.0
 FP8_MIN, FP8_MAX = -448.0, 448.0
 
 
+def quantize_weights_2d(
+    weights: jax.Array,
+    quant_group_size: int = QUANT_GROUP_SIZE,
+    quant_dtype: jnp.dtype = jnp.int8
+) -> Tuple[jax.Array, jax.Array]:
+    """
+    Offline utility to quantize weights in the format expected by the kernel.
+    
+    Args:
+        weights: Input weight matrix [OutputFeatures, InputFeatures].
+        quant_group_size: Size of quantization block (default 128).
+        quant_dtype: Target dtype (jnp.int8 or jnp.float8_e4m3fn).
+
+    Returns:
+        weights_quantized: [OutputFeatures, InputFeatures] in target dtype.
+        weight_scales: [OutputFeatures, Ceil(InputFeatures / GroupSize)] in float32.
+    """
+    n_out, n_in = weights.shape
+    
+    # 1. Pad Input Features to multiple of group size
+    padded_in = next_multiple(n_in, quant_group_size)
+    if padded_in > n_in:
+        weights_padded = jnp.pad(weights, ((0, 0), (0, padded_in - n_in)))
+    else:
+        weights_padded = weights
+
+    # 2. Reshape to [Out, Groups, GroupSize]
+    n_groups = padded_in // quant_group_size
+    weights_blocked = weights_padded.reshape(n_out, n_groups, quant_group_size)
+    
+    # 3. Compute scale
+    abs_max = jnp.max(jnp.abs(weights_blocked), axis=-1, keepdims=True)
+    abs_max = jnp.maximum(abs_max, 1e-6) 
+    
+    if quant_dtype == jnp.int8:
+        scale = abs_max / INT8_MAX
+        w_scaled = weights_blocked / scale
+        w_quant = jnp.floor(w_scaled + 0.5)
+        w_quant = jnp.clip(w_quant, INT8_MIN, INT8_MAX).astype(jnp.int8)
+    else:
+        scale = abs_max / FP8_MAX
+        w_scaled = weights_blocked / scale
+        w_quant = jnp.clip(w_scaled, FP8_MIN, FP8_MAX).astype(quant_dtype)
+
+    # 4. Flatten Weights back to [Out, PaddedIn]
+    weights_quant_padded = w_quant.reshape(n_out, padded_in)
+    
+    # 5. Flatten Scales to [Out, Groups]
+    scales = scale.squeeze(-1).astype(jnp.float32)
+    
+    # 6. Slice weights back to original shape [Out, In]
+    weights_quantized = weights_quant_padded[:, :n_in]
+    
+    return weights_quantized, scales
+
+
 def quantize_and_scale_group(
     activation_group: jax.Array, 
     weight_scale: jax.Array, 
@@ -40,16 +96,6 @@ def quantize_and_scale_group(
 ) -> Tuple[jax.Array, jax.Array]:
     """
     Quantizes a specific group of input features and calculates the scale.
-    
-    Args:
-        activation_group: Slice of input activations [Batch, QuantGroupSize].
-        weight_scale: Pre-loaded weight scales [1, OutputLoadSize].
-        quant_max: Max value for the target dtype (e.g., 127.0).
-        dtype: Target quantization dtype (e.g., jnp.int8, jnp.float8_e4m3fn).
-
-    Returns:
-        activation_quantized: Quantized activations.
-        combined_scale: The final float32 scale factor for the accumulator.
     """
     # 1. Cast to FP32.
     activation_f32 = activation_group.astype(jnp.float32)
@@ -62,6 +108,8 @@ def quantize_and_scale_group(
     scale_to_int = quant_max / activation_max
     
     activation_quant_f32 = jnp.floor((activation_f32 * scale_to_int) + 0.5)
+    
+    # Note: Using float literals (constants defined above) ensures safe type promotion
     if dtype == jnp.int8:
         activation_quantized = jnp.clip(activation_quant_f32, INT8_MIN, INT8_MAX).astype(dtype)
     else:
@@ -87,11 +135,6 @@ def _fused_matmul_kernel(
 ):
     """
     The Pallas Kernel executing on the TPU.
-    
-    Implements a 'Fused' strategy:
-    1. Loads raw BF16 activations and Int8/FP8 weights.
-    2. Quantizes the activations on the fly (VPU).
-    3. Multiplies them (MXU).
     """
     # 1. Initialize Accumulator (FP32)
     accumulator[...] = jnp.zeros(
@@ -136,7 +179,6 @@ def _fused_matmul_kernel(
         accumulator_scale_prev = accumulator_scale
 
         # F. Iterate through the remaining groups in this cache load.
-        # While the MXU computes step 'i', the VPU accumulates step 'i-1'.
         for group_idx in range(1, GROUPS_PER_LOAD):
             start_feat = group_idx * QUANT_GROUP_SIZE
             end_feat   = (group_idx + 1) * QUANT_GROUP_SIZE
@@ -218,7 +260,7 @@ def _quantized_matmul_impl(
     if padded_out > n_out or padded_in > n_in:
         pad_out = padded_out - n_out
         pad_in = padded_in - n_in
-        weights_quantized = jnp.pad(weights_quantized, ((0, pad_out), (0, pad_in)))
+        weights_quantized = jnp.pad(weights_quantized, ((0, pad_out), (0, pad_in)), constant_values=0)
         
         # Scales are indexed by QuantGroup, so we pad based on the padded input size
         target_groups = padded_in // QUANT_GROUP_SIZE
