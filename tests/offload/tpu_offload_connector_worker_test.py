@@ -4,6 +4,7 @@ import functools
 import gc
 import os
 import random
+import time
 from typing import List
 
 import jax
@@ -348,9 +349,9 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
         worker = connector.connector_worker
         connector.bind_connector_metadata(connector_metadata)
         logger.info(
-            "Connector metadata bound, calling worker.wait_for_save().")
-        worker.wait_for_save()
-        logger.info("worker.wait_for_save() completed.")
+            "Connector metadata bound, calling worker.start_save_kv().")
+        worker.start_save_kv()
+        logger.info("worker.start_save_kv() completed.")
 
         # Verification
         logger.info("Starting verification phase.")
@@ -511,9 +512,14 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
             requests_meta=save_requests_meta)
         connector.bind_connector_metadata(connector_metadata)
         logger.info(
-            "Connector metadata bound, calling worker.wait_for_save().")
-        worker.wait_for_save()
-        logger.info("worker.wait_for_save() completed.")
+            "Connector metadata bound, calling worker.start_save_kv().")
+        worker.start_save_kv()
+        logger.info("Waiting for all save operations to complete...")
+        while worker._pending_save_futures:
+            worker._process_completed_saves()
+            time.sleep(0.01)
+
+        logger.info("worker save completed.")
 
         # 3. Prepare and Execute Delta Load
         worker.runner.kv_caches = dst_kv_cache

@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     FORCE_MOE_RANDOM_ROUTING: bool = False
     SC_KERNEL_THRESHOLD: int = 16777216
     SC_KERNEL_COL_CHUNK_SIZE: int = 1024
+    TPU_OFFLOAD_SAVE_THREADS: int = 10
     TPU_OFFLOAD_SKIP_JAX_PRECOMPILE: bool = False
     TPU_OFFLOAD_SWAP_OP_TYPE: str = "jax"
     TPU_OFFLOAD_DECODE_SAVE: bool = False
@@ -223,6 +224,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # kv offload to dram: save kv in the decode phase
     "TPU_OFFLOAD_DECODE_SAVE":
     lambda: bool(int(os.getenv("TPU_OFFLOAD_DECODE_SAVE", "0"))),
+    # kv offload to dram: the number of concurrent save threads
+    "TPU_OFFLOAD_SAVE_THREADS":
+    lambda: int(os.getenv("TPU_OFFLOAD_SAVE_THREADS", "10")),
     # kv offload to dram: skip pre-compiling swap-related jax functions
     "TPU_OFFLOAD_SKIP_JAX_PRECOMPILE":
     lambda: bool(int(os.getenv("TPU_OFFLOAD_SKIP_JAX_PRECOMPILE", "0"))),

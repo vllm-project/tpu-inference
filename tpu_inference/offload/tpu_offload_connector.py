@@ -94,6 +94,7 @@ from typing import TYPE_CHECKING, Any, Literal, Optional, get_args
 
 import jax
 import jax.numpy as jnp
+from prometheus_client import Counter, Histogram
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -127,7 +128,140 @@ logger = init_logger(__name__)
 # kv cache layout needed by cpu offloading mechanism
 REQUIRED_KV_CACHE_LAYOUT = "NHD"
 
-BLOCK_SIZE_BUCKETS = [1, 2, 4, 8, 16]
+BLOCK_SIZE_BUCKETS = [1, 2, 4, 8, 16, 32, 64]
+
+# Prometheus metrics
+KV_CACHE_HITS = Counter("vllm_kv_offload_cache_hits",
+                         "Number of CPU KV cache hits.")
+KV_CACHE_MISSES = Counter("vllm_kv_offload_cache_misses",
+                           "Number of CPU KV cache misses.")
+
+KV_SAVE_TRANSFER_LATENCY = Histogram(
+    "vllm_kv_cache_save_transfer_seconds",
+    "Time spent transferring KV blocks from TPU to CPU memory (Hardware Phase).",
+    buckets=[0.01, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0])
+
+KV_SAVE_POST_TRANSFER_LATENCY = Histogram(
+    'vllm_kv_cache_save_post_transfer_seconds',
+    'Time spent registering chunks and updating CPU backend (Software Phase)',
+    # Buckets often need to be smaller here (e.g., 1ms to 500ms) as Python loops are fast but variable
+    buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0)
+)
+
+# Measures how long the main loop is blocked waiting for the thread pool
+WAIT_FOR_SAVE_LATENCY = Histogram(
+    'vllm_kv_cache_wait_for_save_seconds',
+    'Time spent waiting for all asynchronous KV cache save operations to complete in a step',
+    # Adjust buckets based on your step time.
+    # If this blocks the step, you want to know if it's 10ms or 500ms.
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5)
+)
+
+WAIT_FOR_SAVE_CALLS = Counter(
+    "vllm_wait_for_save_calls_total",
+    "Total number of times wait_for_save has been called."
+)
+
+START_SAVE_KV_CALLS = Counter(
+    "vllm_start_save_kv_calls_total",
+    "Total number of times start_save_kv has been called."
+)
+
+PROCESS_COMPLETED_SAVE_CALLS = Counter(
+    "vllm_process_completed_saves_calls_total",
+    "Total number of times process_completed_saves has been called."
+)
+
+PROCESS_COMPLETED_SAVE_LATENCY = Histogram(
+    'vllm_kv_cache_process_completed_saves_seconds',
+    'Time spent on the CPU host processing transferred KV blocks (splitting chunks and updating the CPU backend). In async mode, this typically runs in a background thread.',
+    # Adjust buckets based on your step time.
+    # If this blocks the step, you want to know if it's 10ms or 500ms.
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5)
+)
+
+GATHER_TPU_BLOCKS_LATENCY = Histogram(
+    'vllm_kv_cache_gather_tpu_blocks_seconds',
+    'Time spent synchronously gathering KV cache blocks on the TPU. This is a blocking operation that halts the model runner to ensure data consistency.',
+    # Adjust buckets based on your step time.
+    # If this blocks the step, you want to know if it's 10ms or 500ms.
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5)
+)
+
+GATHER_TPU_BLOCKS_CALLS = Counter(
+    "vllm_gather_tpu_blocks_calls_total",
+    "Total number of times gather_tpu_blocks has been called."
+)
+
+TRANSFER_AND_GEGISTER_CPU_CHUNKS_CALLS = Counter(
+    "vllm__transfer_and_register_cpu_chunks_calls_total",
+    "Total number of times _transfer_and_register_cpu_chunks has been called."
+)
+
+SAVE_BLOCKS_TO_CPU_CALLS = Counter(
+    "vllm_save_blocks_to_cpu_calls_total",
+    "Total number of times _save_blocks_to_cpu has been called."
+)
+
+START_LOAD_KV_CALLS = Counter(
+    "vllm_start_load_kv_calls_total",
+    "Total number of times start_to_load has been called."
+)
+
+GET_KV_CONNECTOR_STATS_CALLS = Counter(
+    "vllm_get_kv_connector_stats_calls_total",
+    "Total number of times start_to_load has been called."
+)
+
+GET_FINISHED_CALLS = Counter(
+    "vllm_get_finished_calls_total",
+    "Total number of times get_finished has been called."
+)
+
+GET_NUM_NEW_MATCHED_TOKENS_CALLS = Counter(
+    "vllm_get_num_new_matched_tokens_calls_total",
+    "Total number of times get_num_new_matched_tokens has been called."
+)
+
+UPDATE_STATE_AFTER_ALLOC_CALLS = Counter(
+    "vllm_update_state_after_alloc_calls_total",
+    "Total number of times update_state_after_alloc has been called."
+)
+
+BUILD_CONNECTOR_META_CALLS = Counter(
+    "vllm_build_connector_meta_calls_total",
+    "Total number of times build_connector_meta has been called."
+)
+
+UPDATE_CONNECTOR_OUTPUT_CALLS = Counter(
+    "vllm_update_connector_output_calls_total",
+    "Total number of times update_connector_output has been called."
+)
+
+REQUEST_FINISHED_CALLS = Counter(
+    "vllm_request_finished_calls_total",
+    "Total number of times request_finished has been called."
+)
+
+
+# Measures the concurrency level (how many requests are saved in one batch)
+SAVE_BATCH_SIZE = Histogram(
+    'vllm_kv_cache_save_batch_size',
+    'Number of save requests submitted concurrently in a single step',
+    buckets=(1, 2, 4, 8, 16, 32, 64, 128)
+)
+
+# Measures reliability
+SAVE_OPERATION_ERRORS = Counter(
+    'vllm_kv_cache_save_errors_total',
+    'Total number of failed KV cache save operations'
+)
+
+KV_SAVED_BYTES = Counter("vllm_kv_offload_saved_bytes_total",
+                          "Total bytes saved to CPU KV cache.")
+KV_LOADED_BYTES = Counter("vllm_kv_offload_loaded_bytes_total",
+                           "Total bytes loaded from CPU KV cache.")
+
 
 # we keep our operations at vllm's block granularity,
 # and want to provide the following three preferences when handling
@@ -449,7 +583,7 @@ class TPUOffloadConnector(KVConnectorBase_V1):
     def wait_for_save(self):
         assert isinstance(self._connector_metadata,
                           TPUOffloadConnectorMetadata)
-        self.connector_worker.wait_for_save()
+        self.connector_worker.start_save_kv()
 
     def get_finished(self,
                      finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
@@ -541,6 +675,7 @@ class TPUOffloadConnectorScheduler():
         """
         Checks for external KV cache hit against the local CPU backend.
         """
+        GET_NUM_NEW_MATCHED_TOKENS_CALLS.inc()
         assert num_computed_tokens % self.block_size == 0, f"{num_computed_tokens} % {self.block_size} != 0"
         # get block_hash
         block_hashes = self._get_request_block_hashes(request)
@@ -554,6 +689,11 @@ class TPUOffloadConnectorScheduler():
         # look for blocks in the cache
         num_hits = self.offload_manager.lookup(block_hashes)
         matched_block_hashes = block_hashes[:num_hits]
+        if num_hits > 0:
+            KV_CACHE_HITS.inc(num_hits)
+        if len(block_hashes) - num_hits > 0:
+            KV_CACHE_MISSES.inc(len(block_hashes) - num_hits)
+
         self.offload_manager.touch(block_hashes)
         num_matched_blocks = len(matched_block_hashes)
         # num_matched_tokens = min(num_matched_blocks * self.block_size,
@@ -649,6 +789,7 @@ class TPUOffloadConnectorScheduler():
         This hook is not used for the save logic.
         Update the dst_blocks in the load_spec
         """
+        UPDATE_STATE_AFTER_ALLOC_CALLS.inc()
         logger.info(
             f"TPUOffloadConnectorScheduler: Entering update_state_after_alloc Request {request.request_id}: Scheduler allocated "
             f"{num_external_tokens} external tokens.")
@@ -875,6 +1016,8 @@ class TPUOffloadConnectorScheduler():
             scheduler_output: SchedulerOutput) -> TPUOffloadConnectorMetadata:
         metadata = TPUOffloadConnectorMetadata()
 
+        BUILD_CONNECTOR_META_CALLS.inc()
+
         # Phase 1: Handle and clean up finished requests
         # This block handles requests that have completed their generation.
         # We pop their state from our tracking dictionaries and call _prepare_req_meta
@@ -1074,6 +1217,9 @@ class TPUOffloadConnectorScheduler():
             connector_output (KVConnectorOutput): the worker-side
                 connectors output.
         """
+
+        UPDATE_CONNECTOR_OUTPUT_CALLS.inc()
+
         logger.info(
             f"TPUOffloadConnectorScheduler: getting workers' output: finished_sending: {connector_output.finished_sending}, finished_recving: {connector_output.finished_recving}"
         )
@@ -1164,6 +1310,7 @@ class TPUOffloadConnectorScheduler():
         return:
             delay_free_blocks, kv_xfer_params
         """
+        REQUEST_FINISHED_CALLS.inc()
         logger.info(" Entering request_finished")
         # Return True to indicate the request is being saved asynchronously
         # and its blocks should not be freed yet.
@@ -1226,9 +1373,16 @@ class TPUOffloadConnectorWorker:
         self.finished_load_reqs: set[ReqId] = set()
         # Tracks if wait_for_save has been called for the current step's metadata.
         self._processed_save_for_step = False
+        # On-going save operations
+        self._pending_save_futures: list[tuple[Future, TPUReqMeta]] = []
 
         # record finished save / load blocks (with req_ids) for each iteration
         self.offload_stats = KVOffloadConnectorStats()
+
+        # self.no_op: bool = os.getenv("TPU_OFFLOAD_NO_OP", "0") == "1"
+        self.no_op = False
+        if self.no_op:
+            logger.info("TPU_OFFLOAD_NO_OP is set, skipping wait_for_save.")
 
     def __del__(self):
         logger.info("TPUOffloadConnectorWorker: Entering __del__")
@@ -1524,154 +1678,169 @@ class TPUOffloadConnectorWorker:
 
         return updated_kv_caches
 
-    def _save_blocks_to_cpu(self, req_id: ReqId, full_block_ids: list[int],
+    def _gather_tpu_blocks(self, req_id: ReqId, full_block_ids: list[int],
                             full_token_ids: list[int],
-                            save_spec: SaveSpec) -> ReqId:
-        """
-        Extracts KV cache blocks from TPU, copies them to CPU, and updates the
-        CPU backend with the new cache keys and their corresponding token data.
-        """
-        if not self.runner or not self.runner.kv_caches:
-            logger.error(f"Cannot save blocks for request {req_id}: runner or "
-                         "KV caches not registered.")
-            return req_id
+                            save_spec: SaveSpec) -> tuple | None:
+            """
+            Part 1: Validates request, calculates blocks to save, and gathers data from TPU.
+            Returns: None if early exit, or tuple(flat_kv_caches_tpu, num_blocks_to_save, dst_chunks, start_time)
+            """
+            GATHER_TPU_BLOCKS_CALLS.inc()
+            if not self.runner or not self.runner.kv_caches:
+                logger.error(f"Cannot save blocks for request {req_id}: runner or "
+                            "KV caches not registered.")
+                return None
 
-        blocks_to_save = save_spec.src_blocks
-        dst_chunks = save_spec.dst_chunks
+            blocks_to_save = save_spec.src_blocks
+            dst_chunks = save_spec.dst_chunks
 
-        num_total_tokens = save_spec.num_total_tokens
-        num_skip_leading_tokens = save_spec.num_skip_leading_tokens
-        num_blocks_to_save = len(blocks_to_save)
+            num_total_tokens = save_spec.num_total_tokens
+            num_skip_leading_tokens = save_spec.num_skip_leading_tokens
+            num_blocks_to_save = len(blocks_to_save)
 
-        assert num_total_tokens <= len(
-            full_token_ids), f"{num_total_tokens} > {len(full_token_ids)}"
+            assert num_total_tokens <= len(
+                full_token_ids), f"{num_total_tokens} > {len(full_token_ids)}"
 
-        num_tokens_to_save = num_total_tokens - num_skip_leading_tokens
-        if num_tokens_to_save <= 0 and not save_spec.is_final_save:
-            logger.info(f"Request {req_id}: No new tokens to save.")
-            return req_id
+            num_tokens_to_save = num_total_tokens - num_skip_leading_tokens
+            if num_tokens_to_save <= 0 and not save_spec.is_final_save:
+                logger.info(f"Request {req_id}: No new tokens to save.")
+                return None
 
-        process_token_ids = full_token_ids[:num_total_tokens]
-        tokens_to_save = process_token_ids[num_skip_leading_tokens:]
+            process_token_ids = full_token_ids[:num_total_tokens]
+            tokens_to_save = process_token_ids[num_skip_leading_tokens:]
 
-        logger.info(
-            f"Request {req_id} save details: "
-            f"full_block_ids len={len(full_block_ids)}, "
-            f"num_skip_leading_tokens={num_skip_leading_tokens}, "
-            f"num_total_tokens={num_total_tokens}, "
-            f"num_tokens_to_save={num_tokens_to_save}, "
-            f"blocks_to_save({len(blocks_to_save)}: {blocks_to_save}), "
-            f"dst_chunks({len(dst_chunks)}: {dst_chunks}) ")
-
-        if not blocks_to_save and tokens_to_save:
-            logger.warning(
-                f"Request {req_id}: Tokens to save but no corresponding blocks found."
-            )
-            return req_id
-
-        if not tokens_to_save:
             logger.info(
-                f"Request {req_id}: No new tokens to save, but processing as final save."
-            )
-            return req_id
+                f"Request {req_id} save details: "
+                f"full_block_ids len={len(full_block_ids)}, "
+                f"num_skip_leading_tokens={num_skip_leading_tokens}, "
+                f"num_total_tokens={num_total_tokens}, "
+                f"num_tokens_to_save={num_tokens_to_save}, "
+                f"blocks_to_save({len(blocks_to_save)}: {blocks_to_save}), "
+                f"dst_chunks({len(dst_chunks)}: {dst_chunks}) ")
 
-        # Verify if blocks_to_save is a contiguous subarray of full_block_ids
-        first_src_block = blocks_to_save[0]
-        last_src_block = blocks_to_save[-1]
-        try:
-            first_block_idx_in_full = full_block_ids.index(first_src_block)
-            last_block_idx_in_full = full_block_ids.index(last_src_block)
-            if not (last_block_idx_in_full - first_block_idx_in_full + 1
-                    == len(blocks_to_save)):
-                raise ValueError(
-                    f"Request({req_id}): blocks_to_save {blocks_to_save} does not exist in full_block_ids {full_block_ids}"
+            if not blocks_to_save and tokens_to_save:
+                logger.warning(
+                    f"Request {req_id}: Tokens to save but no corresponding blocks found."
                 )
-        except ValueError:
-            raise ValueError(
-                f"Request({req_id}): blocks_to_save {blocks_to_save} contains blocks not present in local_block_ids {full_block_ids}"
-            )
+                return None
 
-        try:
+            if not tokens_to_save:
+                logger.info(
+                    f"Request {req_id}: No new tokens to save, but processing as final save."
+                )
+                return None
+
+            # Verify if blocks_to_save is a contiguous subarray of full_block_ids
+            first_src_block = blocks_to_save[0]
+            last_src_block = blocks_to_save[-1]
+            try:
+                first_block_idx_in_full = full_block_ids.index(first_src_block)
+                last_block_idx_in_full = full_block_ids.index(last_src_block)
+                if not (last_block_idx_in_full - first_block_idx_in_full + 1
+                        == len(blocks_to_save)):
+                    raise ValueError(
+                        f"Request({req_id}): blocks_to_save {blocks_to_save} does not exist in full_block_ids {full_block_ids}"
+                    )
+            except ValueError:
+                raise ValueError(
+                    f"Request({req_id}): blocks_to_save {blocks_to_save} contains blocks not present in local_block_ids {full_block_ids}"
+                )
+            
             start_time = time.time()
-            blocks_to_save = jnp.array(blocks_to_save)
+            blocks_to_save_arr = jnp.array(blocks_to_save)
             if self.use_bucketed_swap_ops:
                 flat_kv_caches_tpu = self._bucketed_gather_kv_cache(
-                    self.runner.kv_caches, blocks_to_save)
+                    self.runner.kv_caches, blocks_to_save_arr)
             else:
                 flat_kv_caches_tpu = KVCacheManager._jitted_gather_kv_cache(
-                    self.runner.kv_caches, blocks_to_save)
+                    self.runner.kv_caches, blocks_to_save_arr)
 
             jax.block_until_ready(flat_kv_caches_tpu)
+            duration = time.time() - start_time
+            GATHER_TPU_BLOCKS_LATENCY.observe(duration)
             logger.info(
                 f"extracted_blocks_tpu: {flat_kv_caches_tpu[0].shape}, {flat_kv_caches_tpu[0].sharding}"
             )
 
-            chunks_on_cpu = None
-            if self.use_bucketed_swap_ops:
-                chunks_on_cpu = self._bucketed_swap_out_fn(flat_kv_caches_tpu)
-            else:
-                flat_kv_caches_cpu = self.swap_out_fn(flat_kv_caches_tpu)
-                if flat_kv_caches_cpu:
-                    jax.block_until_ready(flat_kv_caches_cpu)
-                    # NOTE(jcgu): we keep cpu_chunk_size == block_size
-                    split_size_list = [self.cpu_chunk_size
-                                       ] * num_blocks_to_save
-                    chunks_on_cpu = jax.tree.map(
-                        lambda flat_layer_cache: jax.lax.split(
-                            flat_layer_cache, split_size_list, axis=0),
-                        flat_kv_caches_cpu)
+            # We return the data needed for the next phase
+            return flat_kv_caches_tpu, num_blocks_to_save, dst_chunks, blocks_to_save
 
-            if chunks_on_cpu and chunks_on_cpu[0]:
-                jax.block_until_ready(chunks_on_cpu)
-
-            duration = time.time() - start_time
-            logger.info(f"Successfully saved {len(blocks_to_save)} blocks for "
-                        f"request {req_id} to CPU in {duration:.4f} seconds.")
-
-            total_size_bytes = sum(
-                sum(chunk.nbytes for chunk in layer_chunks)
-                for layer_chunks in chunks_on_cpu)
-            logger.info(
-                f"Total size of chunks_on_cpu: {total_size_bytes / 1024**2:.2f} MB"
-            )
-
-            post_transfer_start_time = time.time()
-
-            for i in range(num_blocks_to_save):
-                chunk_id = dst_chunks[i]
-                cur_chunk_cross_layers = [
-                    chunks_on_cpu[j][i] for j in range(self.num_layers)
-                ]
-                self.cpu_backend.add(chunk_id, cur_chunk_cross_layers)
-                logger.info(f"Request {req_id}: Saving to CPU chunk: "
-                            f"chunk_id={chunk_id}, "
-                            f" local_chunk_idx={i}")
-
-            logger.info(
-                f"Request {req_id}: Added {num_blocks_to_save} chunks to CPU backend."
-            )
-
-            post_transfer_duration = time.time() - post_transfer_start_time
-            logger.info(
-                f"Request {req_id}: e2e host processing of {num_blocks_to_save} chunks took {post_transfer_duration:.4f} seconds."
-            )
-        except Exception as e:
-            logger.error(f"Error saving blocks for request {req_id}: {e}",
-                         exc_info=True)
-
-        return req_id
-
-    def wait_for_save(self):
+    def _transfer_and_register_cpu_chunks(self, req_id: ReqId,
+                                            flat_kv_caches_tpu: Any,
+                                            num_blocks_to_save: int,
+                                            dst_chunks: list[int],
+                                            blocks_to_save: list[int]):
         """
-        Initiates and waits for all pending asynchronous save operations for the
-        current step to complete.
+        Part 2: Swaps data to CPU, splits into chunks, and registers with CPU backend.
+        Starts from 'chunks_on_cpu = None'.
         """
+        TRANSFER_AND_GEGISTER_CPU_CHUNKS_CALLS.inc()
+        start_time = time.time()
+        chunks_on_cpu = None
+        if self.use_bucketed_swap_ops:
+            chunks_on_cpu = self._bucketed_swap_out_fn(flat_kv_caches_tpu)
+        else:
+            flat_kv_caches_cpu = self.swap_out_fn(flat_kv_caches_tpu)
+            if flat_kv_caches_cpu:
+                jax.block_until_ready(flat_kv_caches_cpu)
+                # NOTE(jcgu): we keep cpu_chunk_size == block_size
+                split_size_list = [self.cpu_chunk_size
+                                    ] * num_blocks_to_save
+                chunks_on_cpu = jax.tree.map(
+                    lambda flat_layer_cache: jax.lax.split(
+                        flat_layer_cache, split_size_list, axis=0),
+                    flat_kv_caches_cpu)
+
+        if chunks_on_cpu and chunks_on_cpu[0]:
+            jax.block_until_ready(chunks_on_cpu)
+
+        duration = time.time() - start_time
+        KV_SAVE_TRANSFER_LATENCY.observe(duration)
+        logger.info(f"Successfully saved {len(blocks_to_save)} blocks for "
+                    f"request {req_id} to CPU in {duration:.4f} seconds.")
+
+        total_size_bytes = sum(
+            sum(chunk.nbytes for chunk in layer_chunks)
+            for layer_chunks in chunks_on_cpu)
+        logger.info(
+            f"Total size of chunks_on_cpu: {total_size_bytes / 1024**2:.2f} MB"
+        )
+        KV_SAVED_BYTES.inc(total_size_bytes)
+
+        post_transfer_start_time = time.time()
+
+        for i in range(num_blocks_to_save):
+            chunk_id = dst_chunks[i]
+            cur_chunk_cross_layers = [
+                chunks_on_cpu[j][i] for j in range(self.num_layers)
+            ]
+            self.cpu_backend.add(chunk_id, cur_chunk_cross_layers)
+            logger.info(f"Request {req_id}: Saving to CPU chunk: "
+                        f"chunk_id={chunk_id}, "
+                        f" local_chunk_idx={i}")
+
+        logger.info(
+            f"Request {req_id}: Added {num_blocks_to_save} chunks to CPU backend."
+        )
+
+        post_transfer_duration = time.time() - post_transfer_start_time
+        KV_SAVE_POST_TRANSFER_LATENCY.observe(post_transfer_duration)
+        logger.info(
+            f"Request {req_id}: e2e host processing of {num_blocks_to_save} chunks took {post_transfer_duration:.4f} seconds."
+        )
+
+    def start_save_kv(self):
+        """
+        Initiates asynchronous save operations for the current step.
+        """
+        START_SAVE_KV_CALLS.inc()
+        # assert self.cpu_backend, "please initialize cpu_backend first."
         # This method is idempotent. If the save operations for the current
         # step's metadata have already been processed, we can exit early.
         if self._processed_save_for_step:
             return
 
-        # logger.info("TPUOffloadConnectorWorker: Entering wait_for_save")
+        # logger.info("TPUOffloadConnectorWorker: Entering start_save_kv")
         metadata = self.connector._get_connector_metadata()
         if not isinstance(metadata, TPUOffloadConnectorMetadata):
             logger.info(
@@ -1681,11 +1850,9 @@ class TPUOffloadConnectorWorker:
             return
 
         if not metadata.requests_meta:
-            # logger.info("wait_for_save:no reqs to save")
             self._processed_save_for_step = True
             return
 
-        pending_save_futures: list[tuple[Future, TPUReqMeta]] = []
         # Handle save requests
         for meta in metadata.requests_meta:
             if meta.save_spec:
@@ -1700,48 +1867,95 @@ class TPUOffloadConnectorWorker:
                         # self.finished_save_reqs.add(meta.req_id)
                     continue
 
-                # If there are tokens to save, submit the task to the thread pool.
-                logger.info(f"Submitting save task for request {meta.req_id}")
-                future = self.save_executor.submit(self._save_blocks_to_cpu,
-                                                   meta.req_id,
-                                                   meta.local_block_ids,
-                                                   meta.token_ids,
-                                                   meta.save_spec)
-                pending_save_futures.append((future, meta))
+            # 1. SYNC BLOCKING: Gather from TPU
+            # We wrap this in a try/except to catch validation errors immediately.
+            try:
+                gather_result = self._gather_tpu_blocks(
+                    meta.req_id, meta.local_block_ids, meta.token_ids, meta.save_spec
+                )
+            except Exception as e:
+                logger.error(f"Error gathering blocks for request {meta.req_id}: {e}",
+                             exc_info=True)
+                continue
 
-        if not pending_save_futures:
-            self._processed_save_for_step = True
+            if gather_result is None:
+                continue
+
+            # Unpack results from the sync step
+            (flat_kv_caches_tpu, num_blocks_to_save, dst_chunks, blocks_to_save) = gather_result
+
+            # Define a safe wrapper for the async part to ensure logging
+            def _async_transfer_task(req_id, *args):
+                try:
+                    self._transfer_and_register_cpu_chunks(req_id, *args)
+                except Exception as e:
+                    logger.error(f"Error transferring blocks for request {req_id}: {e}",
+                                 exc_info=True)
+                return req_id
+
+            # 2. ASYNC NON-BLOCKING: Transfer to CPU and Register
+            logger.info(f"Submitting transfer task for request {meta.req_id}")
+            future = self.save_executor.submit(
+                _async_transfer_task,
+                meta.req_id,
+                flat_kv_caches_tpu,
+                num_blocks_to_save,
+                dst_chunks,
+                blocks_to_save
+            )
+            
+            self._pending_save_futures.append((future, meta))
+
+        self._processed_save_for_step = True
+        SAVE_BATCH_SIZE.observe(len(self._pending_save_futures))
+
+    def _process_completed_saves(self):
+        """
+        Checks for and processes completed asynchronous save operations.
+        """
+        PROCESS_COMPLETED_SAVE_CALLS.inc()
+        if not self._pending_save_futures:
             return
 
-        logger.info(f"Waiting for {len(pending_save_futures)} save "
-                    "operations to complete...")
+        logger.info(
+            f"Checking for {len(self._pending_save_futures)} pending save "
+            "operations to complete...")
         start_time = time.time()
-
-        for future, meta in pending_save_futures:
-            try:
-                # The result of _save_blocks_to_cpu is the request_id
-                finished_req_id = future.result()
-                logger.info(
-                    f"Save operation completed for request {finished_req_id}")
-
-                if len(meta.save_spec.src_blocks) > 0:
-                    self.offload_stats.record_save(
-                        req=finished_req_id,
-                        saved_chunk_ids=meta.save_spec.dst_chunks)
-
-                if meta.save_spec and meta.save_spec.is_final_save:
+        completed_count = 0
+        remaining_futures: list[tuple[Future, TPUReqMeta]] = []
+        for future, meta in self._pending_save_futures:
+            if future.done():
+                try:
+                    # The result of _save_blocks_to_cpu is the request_id
+                    finished_req_id = future.result()
                     logger.info(
-                        f"Request {finished_req_id}: Final save completed. Marking as finished."
+                        f"Save operation completed for request {finished_req_id}"
                     )
-                    self.finished_save_reqs.add(finished_req_id)
 
-            except Exception as e:
-                logger.error(f"A save operation failed: {e}", exc_info=True)
+                    if len(meta.save_spec.src_blocks) > 0:
+                        self.offload_stats.record_save(
+                            req=finished_req_id,
+                            saved_chunk_ids=meta.save_spec.dst_chunks)
 
-        duration = time.time() - start_time
-        logger.info(f"All {len(pending_save_futures)} save operations "
-                    f"completed in {duration:.4f} seconds.")
-        self._processed_save_for_step = True
+                    if meta.save_spec and meta.save_spec.is_final_save:
+                        logger.info(
+                            f"Request {finished_req_id}: Final save completed. Marking as finished."
+                        )
+                        self.finished_save_reqs.add(finished_req_id)
+                    completed_count += 1
+                except Exception as e:
+                    logger.error(f"A save operation failed: {e}",
+                                 exc_info=True)
+            else:
+                remaining_futures.append((future, meta))
+
+        if completed_count > 0:
+            duration = time.time() - start_time
+            PROCESS_COMPLETED_SAVE_LATENCY.observe(duration)
+            logger.info(f"{completed_count} save operations "
+                        f"completed in {duration:.4f} seconds.")
+
+        self._pending_save_futures = remaining_futures
 
     def start_load_kv(self, fwd_ctx: "ForwardContext") -> None:
         """
@@ -1750,6 +1964,7 @@ class TPUOffloadConnectorWorker:
         operation that ensures the cache is fully updated before the model's
         forward pass begins.
         """
+        START_LOAD_KV_CALLS.inc()
         # Reset the save processing flag at the start of a new step.
         self._processed_save_for_step = False
         metadata = self.connector._get_connector_metadata()
@@ -1814,47 +2029,49 @@ class TPUOffloadConnectorWorker:
                 f"Fetching delta of {num_tokens_to_load_delta} tokens from cache for "
                 f"{num_blocks_to_load} blocks.")
 
-            # Assemble the per-layer data for the delta tokens on the CPU.
-            # We create a list of lists, where the outer list represents layers
-            # and the inner lists will hold the data chunks for that layer.
-            assembled_kv_on_cpu = [[] for _ in range(self.num_layers)]
-            # Fetch and chunks from the backend.
-            for i in range(num_blocks_to_load):
-                src_chunk_id = src_chunks[i]
-                cached_value = self.cpu_backend.get(src_chunk_id)
-                if cached_value:
-                    for j in range(self.num_layers):
-                        assembled_kv_on_cpu[j].append(cached_value[j])
+            if not self.no_op:
+                # Assemble the per-layer data for the delta tokens on the CPU.
+                # We create a list of lists, where the outer list represents layers
+                # and the inner lists will hold the data chunks for that layer.
+                assembled_kv_on_cpu = [[] for _ in range(self.num_layers)]
+                # Fetch and chunks from the backend.
+                for i in range(num_blocks_to_load):
+                    src_chunk_id = src_chunks[i]
+                    cached_value = self.cpu_backend.get(src_chunk_id)
+                    if cached_value:
+                        for j in range(self.num_layers):
+                            assembled_kv_on_cpu[j].append(cached_value[j])
+                    else:
+                        logger.error(
+                            f"Chunk[{src_chunk_id}] not found in CPU backend for request {meta.req_id}. Inconsistent state detected."
+                        )
+                        return
+
+                # swap-in
+                # output: [[cpu_chunk_size * num_chunks] * num_layer]
+                if self.use_bucketed_swap_ops:
+                    # Use the bucketed wrappers for a uniform two-step process
+                    raw_chunked_kv_on_tpu = self._bucketed_swap_in_fn(
+                        assembled_kv_on_cpu)
                 else:
-                    logger.error(
-                        f"Chunk[{src_chunk_id}] not found in CPU backend for request {meta.req_id}. Inconsistent state detected."
+                    raw_chunked_kv_on_tpu = self.swap_in_fn(
+                        assembled_kv_on_cpu)
+                jax.block_until_ready(raw_chunked_kv_on_tpu)
+
+                if self.use_bucketed_swap_ops:
+                    self.runner.kv_caches = self._bucketed_jitted_insert_kv_cache_slices(
+                        self.runner.kv_caches,
+                        raw_chunked_kv_on_tpu,
+                        jnp.array(dst_blocks),
                     )
-                    return
-
-            # swap-in
-            # output: [[cpu_chunk_size * num_chunks] * num_layer]
-            if self.use_bucketed_swap_ops:
-                # Use the bucketed wrappers for a uniform two-step process
-                raw_chunked_kv_on_tpu = self._bucketed_swap_in_fn(
-                    assembled_kv_on_cpu)
-            else:
-                raw_chunked_kv_on_tpu = self.swap_in_fn(assembled_kv_on_cpu)
-            jax.block_until_ready(raw_chunked_kv_on_tpu)
-
-            if self.use_bucketed_swap_ops:
-                self.runner.kv_caches = self._bucketed_jitted_insert_kv_cache_slices(
-                    self.runner.kv_caches,
-                    raw_chunked_kv_on_tpu,
-                    jnp.array(dst_blocks),
-                )
-            else:
-                self.runner.kv_caches = jitted_insert_kv_cache_slices(
-                    self.block_size,
-                    self.runner.kv_caches,
-                    raw_chunked_kv_on_tpu,
-                    jnp.array(dst_blocks),
-                )
-            jax.block_until_ready(self.runner.kv_caches)
+                else:
+                    self.runner.kv_caches = jitted_insert_kv_cache_slices(
+                        self.block_size,
+                        self.runner.kv_caches,
+                        raw_chunked_kv_on_tpu,
+                        jnp.array(dst_blocks),
+                    )
+                jax.block_until_ready(self.runner.kv_caches)
             logger.info(
                 f"Request {meta.req_id}: Loaded {num_tokens_to_load_delta} tokens into "
                 f"{num_blocks_to_load} new blocks.")
@@ -1875,6 +2092,7 @@ class TPUOffloadConnectorWorker:
         """
         Get the KV transfer stats for the connector.
         """
+        GET_KV_CONNECTOR_STATS_CALLS.inc()
         # Clear stats for next iteration
         if not self.offload_stats.is_empty():
             return self.offload_stats.clone_and_reset()
@@ -1894,8 +2112,11 @@ class TPUOffloadConnectorWorker:
         # request IDs are correctly identified and reported back to the engine
         # for resource cleanup. The `wait_for_save` method is idempotent,
         # so this call is a no-op in the normal execution path.
+        GET_FINISHED_CALLS.inc()
         logger.info("TPUOffloadConnectorWorker: Entering get_finished")
-        self.wait_for_save()
+        self.start_save_kv()
+        # collect the completed save requests.
+        self._process_completed_saves()
 
         finished_saves = self.finished_save_reqs
         self.finished_save_reqs = set()
