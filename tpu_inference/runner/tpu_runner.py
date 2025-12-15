@@ -1048,7 +1048,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             for dp_rank in range(dp_size)
         }
         num_req_per_dp_rank = {dp_rank: 0 for dp_rank in range(dp_size)}
-
+        start_time = time.time()
         for req_id in self.input_batch.req_ids[:num_reqs]:
             dp_rank = scheduler_output.assigned_dp_rank[req_id]
             req_ids_dp[dp_rank].append(req_id)
@@ -1059,7 +1059,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             scheduled_tokens_per_dp_rank[dp_rank].append(
                 scheduler_output.num_scheduled_tokens[req_id])
             num_req_per_dp_rank[dp_rank] += 1
-
+        print("[TPU Runner] dp input metadata distribution time:",
+              time.time() - start_time)
         # Find maximum number of scheduled tokens across DP ranks
         max_num_scheduled_tokens_across_dp = max(
             num_scheduled_tokens_per_dp_rank.values())
@@ -1080,16 +1081,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.num_reqs_paddings_per_dp, max_num_reqs_across_dp)
         padded_num_reqs = padded_num_reqs_per_dp_rank * dp_size
 
-        all_req_indices = np.concatenate(
-            [req_indices_dp[dp_rank] for dp_rank in range(dp_size)])
-        all_positions = np.concatenate([
-            np.arange(len(req_indices_dp[dp_rank])) +
-            padded_num_reqs_per_dp_rank * dp_rank for dp_rank in range(dp_size)
-        ])
-
-        # Sort positions by request indices
-        sorted_indices = np.argsort(all_req_indices)
-        logits_indices_selector = all_positions[sorted_indices]
+        start_time = time.time()
+        logits_indices_selector = [0] * num_reqs
+        
+        for dp_rank in range(dp_size):
+            base_position = padded_num_reqs_per_dp_rank * dp_rank
+            for local_idx, req_idx in enumerate(req_indices_dp[dp_rank]):
+                logits_indices_selector[req_idx] = base_position + local_idx
+        
+        logits_indices_selector = np.array(logits_indices_selector, dtype=np.int32)
+        print("[TPU Runner] logits_indices_selector time:",
+              time.time() - start_time)
 
         return (req_ids_dp, req_indices_dp, num_scheduled_tokens_per_dp_rank,
                 scheduled_tokens_per_dp_rank, num_req_per_dp_rank,

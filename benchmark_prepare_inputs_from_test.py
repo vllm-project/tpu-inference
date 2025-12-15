@@ -96,6 +96,7 @@ def create_mock_runner(num_reqs=4096, dp_size=4, tp_size=2, max_tokens=8192):
     
     # Bind the actual methods
     runner._prepare_inputs_dp = TPUModelRunner._prepare_inputs_dp.__get__(runner)
+    runner._prepare_inputs = TPUModelRunner._prepare_inputs.__get__(runner)
     runner._prepare_dp_input_metadata = TPUModelRunner._prepare_dp_input_metadata.__get__(runner)
     runner._prepare_async_token_substitution_indices_dp = TPUModelRunner._prepare_async_token_substitution_indices_dp.__get__(runner)
     
