@@ -56,22 +56,22 @@ checkThroughputAndRouge() {
         return
     fi
 
-    # Extract Total Token throughput
-    actual_throughput=$(awk '/Total Token throughput \(tok\/s\):/ {print $NF}' "$BENCHMARK_LOG_FILE")
+    # Extract Total token throughput
+    actual_throughput=$(awk '/Total token throughput \(tok\/s\):/ {print $NF}' "$BENCHMARK_LOG_FILE")
 
     echo "--- Extracted Values ---"
     echo
 
     if [ -z "$actual_throughput" ]; then
-        echo "Total Token throughput: NOT FOUND"
+        echo "Total token throughput: NOT FOUND"
         throughput_pass=0
     else
-        echo "Total Token throughput: $actual_throughput"
+        echo "Total token throughput: $actual_throughput"
         if awk -v actual="$actual_throughput" -v target="$TARGET_THROUGHPUT" 'BEGIN { exit !(actual >= target) }'; then
-            echo "Total Token throughput comparison (>= $TARGET_THROUGHPUT): PASSED"
+            echo "Total token throughput comparison (>= $TARGET_THROUGHPUT): PASSED"
             throughput_pass=1
         else
-            echo "Total Token throughput comparison (>= $TARGET_THROUGHPUT): FAILED"
+            echo "Total token throughput comparison (>= $TARGET_THROUGHPUT): FAILED"
             throughput_pass=0
         fi
     fi
