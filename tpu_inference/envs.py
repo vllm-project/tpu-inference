@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     LAYOUT_Q_PROJ_AS_NDH: bool = False
     USE_JAX_PROFILER_SERVER: bool = False
     JAX_PROFILER_SERVER_PORT: int = 9999
+    TPU_OFFLOAD_SAVE_THREADS: int = 10
     TPU_OFFLOAD_SKIP_JAX_PRECOMPILE: bool = False
     TPU_OFFLOAD_SWAP_OP_TYPE: str = "jax"
     TPU_OFFLOAD_DECODE_SAVE: bool = False
@@ -210,6 +211,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # kv offload to dram: save kv in the decode phase
     "TPU_OFFLOAD_DECODE_SAVE":
     lambda: bool(int(os.getenv("TPU_OFFLOAD_DECODE_SAVE", "0"))),
+    # kv offload to dram: the number of concurrent save threads
+    "TPU_OFFLOAD_SAVE_THREADS":
+    lambda: int(os.getenv("TPU_OFFLOAD_SAVE_THREADS", "10")),
     # kv offload to dram: skip pre-compiling swap-related jax functions
     "TPU_OFFLOAD_SKIP_JAX_PRECOMPILE":
     lambda: bool(int(os.getenv("TPU_OFFLOAD_SKIP_JAX_PRECOMPILE", "0"))),
