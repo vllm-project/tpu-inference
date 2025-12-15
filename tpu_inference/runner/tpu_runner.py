@@ -220,9 +220,9 @@ def _prepare_dp_rank_shard(args):
     (dp_rank, req_ids, req_indices, num_scheduled_tokens_per_req,
      total_num_scheduled_tokens, padded_num_scheduled_tokens_per_dp_rank,
      max_num_reqs_per_dp_rank, input_batch_data, arange_cpu,
-     token_in_tpu_cur_input_indices, token_in_tpu_pre_next_tokens_indices,
      scheduler_output_num_scheduled_tokens, block_tables_data,
-     max_num_blocks_per_req) = args
+     max_num_blocks_per_req, pre_async_placeholder_req_id_to_index,
+     async_scheduling_enabled) = args
     
     if len(req_indices) == 0:
         # Return empty arrays for this DP rank
@@ -242,10 +242,30 @@ def _prepare_dp_rank_shard(args):
             'block_tables': empty_block_tables,
             'num_reqs': 0,
             'num_decode': 0,
+            'token_in_tpu_cur_input_indices': [],
+            'token_in_tpu_pre_next_tokens_indices': [],
         }
     
     # Unpack input_batch_data
     (token_ids_cpu, num_computed_tokens_cpu, max_model_len) = input_batch_data
+    
+    # Prepare async token substitution indices for this DP rank
+    token_in_tpu_cur_input_indices = []
+    token_in_tpu_pre_next_tokens_indices = []
+    
+    if async_scheduling_enabled and pre_async_placeholder_req_id_to_index is not None:
+        token_offset = padded_num_scheduled_tokens_per_dp_rank * dp_rank
+        acc_cur_len = token_offset
+        
+        for i, req_id in enumerate(req_ids):
+            acc_cur_len += num_scheduled_tokens_per_req[i]
+            if req_id not in pre_async_placeholder_req_id_to_index:
+                continue
+            
+            token_in_tpu_cur_input_indices.append(acc_cur_len - 1)
+            token_in_tpu_pre_next_tokens_indices.append(
+                pre_async_placeholder_req_id_to_index[req_id]
+            )
     
     # Allocate output arrays
     input_ids = np.zeros(padded_num_scheduled_tokens_per_dp_rank, dtype=np.int32)
@@ -298,6 +318,8 @@ def _prepare_dp_rank_shard(args):
         'block_tables': prepared_block_tables,
         'num_reqs': _num_reqs,
         'num_decode': num_decode,
+        'token_in_tpu_cur_input_indices': token_in_tpu_cur_input_indices,
+        'token_in_tpu_pre_next_tokens_indices': token_in_tpu_pre_next_tokens_indices,
     }
 
 
@@ -1306,14 +1328,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Async scheduling: prepare token substitution indices for DP
         token_in_tpu_cur_input_indices_dp = {}
         token_in_tpu_pre_next_tokens_indices_dp = {}
-        if self.scheduler_config.async_scheduling and self._pre_async_results is not None:
-            # If async previous results exists, we will prepare for the token substitution here
-            # The actual substitution will be performed in tpu during later parts of this function.
-            (token_in_tpu_cur_input_indices_dp,
-             token_in_tpu_pre_next_tokens_indices_dp
-             ) = self._prepare_async_token_substitution_indices_dp(
-                 req_ids_dp, scheduled_tokens_per_dp_rank,
-                 padded_num_scheduled_tokens_per_dp_rank, dp_size)
+        
+        # Prepare placeholder mapping for workers (if async scheduling enabled)
+        pre_async_placeholder_req_id_to_index = None
+        async_scheduling_enabled = self.scheduler_config.async_scheduling and self._pre_async_results is not None
+        if async_scheduling_enabled:
+            pre_async_placeholder_req_id_to_index = self._pre_async_results.placeholder_req_id_to_index
 
         if use_multiprocessing:
             start_time = time.time()
@@ -1343,11 +1363,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     max_num_reqs_per_dp_rank,
                     input_batch_data,
                     self.arange_cpu,
-                    token_in_tpu_cur_input_indices_dp.get(dp_rank, []),
-                    token_in_tpu_pre_next_tokens_indices_dp.get(dp_rank, []),
                     scheduler_output.num_scheduled_tokens,
                     block_tables_data,
                     self.max_num_blocks_per_req,
+                    pre_async_placeholder_req_id_to_index,
+                    async_scheduling_enabled,
                 )
                 worker_args.append(args)
             
@@ -1378,11 +1398,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     self.block_tables_cpu[kv_cache_gid][
                         req_offset:req_offset + max_num_reqs_per_dp_rank, :
                     ] = block_table_shard
+                
+                # Collect async token substitution indices from workers
+                token_in_tpu_cur_input_indices_dp[dp_rank] = result['token_in_tpu_cur_input_indices']
+                token_in_tpu_pre_next_tokens_indices_dp[dp_rank] = result['token_in_tpu_pre_next_tokens_indices']
             
             logits_indices = self.logits_indices_cpu[:padded_num_reqs]
             print("[TPU Runner] concatenate shards time:",
                   time.time() - start_time)
         else:
+            # Sequential approach - prepare async indices if needed
+            if async_scheduling_enabled:
+                (token_in_tpu_cur_input_indices_dp,
+                 token_in_tpu_pre_next_tokens_indices_dp
+                 ) = self._prepare_async_token_substitution_indices_dp(
+                     req_ids_dp, scheduled_tokens_per_dp_rank,
+                     padded_num_scheduled_tokens_per_dp_rank, dp_size)
+            
             # Populates input_ids and positions
             start_time = time.time()
             for dp_rank in range(dp_size):
@@ -1609,8 +1641,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             all_pre_next_tokens_indices = []
 
             for dp_rank in range(dp_size):
-                cur_indices = token_in_tpu_cur_input_indices_dp[dp_rank]
-                pre_indices = token_in_tpu_pre_next_tokens_indices_dp[dp_rank]
+                cur_indices = token_in_tpu_cur_input_indices_dp.get(dp_rank, [])
+                pre_indices = token_in_tpu_pre_next_tokens_indices_dp.get(dp_rank, [])
                 all_token_indices_to_substitute.extend(cur_indices)
                 all_pre_next_tokens_indices.extend(pre_indices)
 
