@@ -122,6 +122,155 @@ class DPRankShardResult:
     token_in_tpu_pre_next_tokens_indices: List[int]
 
 
+@dataclass
+class PaddingInfo:
+    """Padding information for DP input preparation."""
+    tokens_per_rank: int  # Padded tokens per DP rank
+    total_tokens: int  # Total padded tokens across all DP ranks
+    reqs_per_rank: int  # Padded requests per DP rank
+    total_reqs: int  # Total padded requests across all DP ranks
+
+
+class AsyncTokenSubstitutionHelper:
+    """Handles async token substitution for scheduler.
+    
+    This helper consolidates async token substitution logic that was previously
+    scattered across multiple methods in both DP and non-DP paths.
+    """
+    
+    def __init__(self, mesh, substitute_placeholder_token_fn):
+        self.mesh = mesh
+        self.substitute_placeholder_token_fn = substitute_placeholder_token_fn
+    
+    def prepare_indices_non_dp(
+        self, 
+        num_reqs: int,
+        num_scheduled_tokens_per_req: np.ndarray,
+        req_ids: List[str],
+        placeholder_req_id_to_index: Dict[str, int]
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Prepare token substitution indices for async scheduling in non-DP mode.
+        
+        Args:
+            num_reqs: Number of requests
+            num_scheduled_tokens_per_req: Number of scheduled tokens per request
+            req_ids: List of request IDs
+            placeholder_req_id_to_index: Mapping from placeholder req_id to index
+            
+        Returns:
+            Tuple of (cur_input_indices, pre_next_tokens_indices)
+        """
+        token_in_tpu_cur_input_indices_list = []
+        token_in_tpu_pre_next_tokens_indices_list = []
+        acc_cur_len = 0
+
+        for i, req_id in enumerate(req_ids[:num_reqs]):
+            acc_cur_len += num_scheduled_tokens_per_req[i]
+            assert req_id is not None
+            if req_id not in placeholder_req_id_to_index:
+                continue
+
+            token_in_tpu_cur_input_indices_list.append(acc_cur_len - 1)
+            token_in_tpu_pre_next_tokens_indices_list.append(
+                placeholder_req_id_to_index[req_id])
+
+        if len(token_in_tpu_cur_input_indices_list) > 0:
+            return (np.array(token_in_tpu_cur_input_indices_list),
+                    np.array(token_in_tpu_pre_next_tokens_indices_list))
+        else:
+            return np.array([]), np.array([])
+    
+    def prepare_indices_dp(
+        self,
+        dp_rank: int,
+        req_ids: List[str],
+        num_scheduled_tokens_per_req: List[int],
+        padded_num_scheduled_tokens_per_dp_rank: int,
+        placeholder_req_id_to_index: Dict[str, int]
+    ) -> Tuple[List[int], List[int]]:
+        """Prepare token substitution indices for a single DP rank.
+        
+        Args:
+            dp_rank: The DP rank being processed
+            req_ids: Request IDs for this DP rank
+            num_scheduled_tokens_per_req: Number of scheduled tokens per request
+            padded_num_scheduled_tokens_per_dp_rank: Padded token count per rank
+            placeholder_req_id_to_index: Mapping from placeholder req_id to index
+            
+        Returns:
+            Tuple of (cur_input_indices, pre_next_tokens_indices) as lists
+        """
+        token_in_tpu_cur_input_indices = []
+        token_in_tpu_pre_next_tokens_indices = []
+        
+        token_offset = padded_num_scheduled_tokens_per_dp_rank * dp_rank
+        acc_cur_len = token_offset
+        
+        for i, req_id in enumerate(req_ids):
+            acc_cur_len += num_scheduled_tokens_per_req[i]
+            if req_id not in placeholder_req_id_to_index:
+                continue
+            
+            token_in_tpu_cur_input_indices.append(acc_cur_len - 1)
+            token_in_tpu_pre_next_tokens_indices.append(
+                placeholder_req_id_to_index[req_id]
+            )
+        
+        return token_in_tpu_cur_input_indices, token_in_tpu_pre_next_tokens_indices
+    
+    def apply_substitution(
+        self,
+        input_ids: jax.Array,
+        token_in_tpu_cur_input_indices: np.ndarray,
+        token_in_tpu_pre_next_tokens_indices: np.ndarray,
+        next_tokens: jax.Array,
+        maybe_forbid_compile
+    ) -> jax.Array:
+        """Apply async token substitution if needed.
+        
+        Args:
+            input_ids: Input token IDs
+            token_in_tpu_cur_input_indices: Indices in input_ids to substitute
+            token_in_tpu_pre_next_tokens_indices: Indices in next_tokens
+            next_tokens: Previously generated tokens
+            maybe_forbid_compile: Context manager for compilation control
+            
+        Returns:
+            Updated input_ids with substituted tokens
+        """
+        if len(token_in_tpu_cur_input_indices) == 0:
+            return input_ids
+
+        idx_pad_len = len(input_ids) - len(token_in_tpu_cur_input_indices)
+
+        # Pad according to the instructions written inside _substitute_placeholder_token
+        full_range = np.arange(0, len(input_ids))
+        missing_values = np.setdiff1d(full_range,
+                                      token_in_tpu_cur_input_indices)
+        padded_token_in_tpu_cur_input_indices = np.concatenate(
+            (token_in_tpu_cur_input_indices, missing_values))
+
+        padded_token_in_tpu_pre_next_tokens_indices = np.pad(
+            token_in_tpu_pre_next_tokens_indices, (0, idx_pad_len),
+            mode='constant',
+            constant_values=-1)
+
+        (padded_token_in_tpu_cur_input_indices,
+         padded_token_in_tpu_pre_next_tokens_indices) = device_array(
+             self.mesh, (padded_token_in_tpu_cur_input_indices,
+                         padded_token_in_tpu_pre_next_tokens_indices))
+
+        with maybe_forbid_compile:
+            input_ids = self.substitute_placeholder_token_fn(
+                input_ids, padded_token_in_tpu_cur_input_indices,
+                padded_token_in_tpu_pre_next_tokens_indices,
+                next_tokens,
+                len(token_in_tpu_cur_input_indices))
+
+        return input_ids
+
+
+
 class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
     """Holds asynchronous model output specifically from a TPU runner.
 
@@ -431,6 +580,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self._mp_pool = Pool(processes=self.dp_size)
         else:
             self._mp_pool = None
+        
+        # Initialize helper instances
+        self._async_token_helper = AsyncTokenSubstitutionHelper(
+            self.mesh, self._substitute_placeholder_token_fn
+        )
 
     def _init_random(self):
         if self.model_config.seed is None:
@@ -1270,6 +1424,46 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             token_in_tpu_cur_input_indices_dp[dp_rank] = result.token_in_tpu_cur_input_indices
             token_in_tpu_pre_next_tokens_indices_dp[dp_rank] = result.token_in_tpu_pre_next_tokens_indices
 
+    def _calculate_dp_padding(
+        self,
+        num_scheduled_tokens_per_dp_rank: Dict[int, int],
+        req_ids_dp: Dict[int, List[str]],
+        dp_size: int
+    ) -> PaddingInfo:
+        """Calculate all padding values for DP mode in one place.
+        
+        Args:
+            num_scheduled_tokens_per_dp_rank: Number of scheduled tokens per DP rank
+            req_ids_dp: Request IDs per DP rank
+            dp_size: Number of DP ranks
+            
+        Returns:
+            PaddingInfo with all calculated padding values
+        """
+        # Calculate token padding
+        max_num_scheduled_tokens_across_dp = max(
+            num_scheduled_tokens_per_dp_rank.values())
+        assert max_num_scheduled_tokens_across_dp > 0, \
+            "Must have at least one scheduled token"
+        
+        padded_tokens_per_rank = runner_utils.get_padded_token_len(
+            self.num_tokens_paddings_per_dp,
+            max_num_scheduled_tokens_across_dp)
+        padded_total_tokens = padded_tokens_per_rank * dp_size
+        
+        # Calculate request padding
+        max_num_reqs_across_dp = max(len(req_ids) for req_ids in req_ids_dp.values())
+        padded_reqs_per_rank = runner_utils.get_padded_token_len(
+            self.num_reqs_paddings_per_dp, max_num_reqs_across_dp)
+        padded_total_reqs = padded_reqs_per_rank * dp_size
+        
+        return PaddingInfo(
+            tokens_per_rank=padded_tokens_per_rank,
+            total_tokens=padded_total_tokens,
+            reqs_per_rank=padded_reqs_per_rank,
+            total_reqs=padded_total_reqs
+        )
+
     def _prepare_dp_input_metadata(self,
                                    scheduler_output: DPSchedulerOutput):
         """Prepare metadata for distributing inputs across DP ranks."""
@@ -1287,25 +1481,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             req_indices_dp[dp_rank].append(
                 self.input_batch.req_id_to_index[req_id])
         
-        # Calculate padding requirements
-        max_num_scheduled_tokens_across_dp = max(
-            num_scheduled_tokens_per_dp_rank.values())
-
-        padded_num_scheduled_tokens_per_dp_rank = runner_utils.get_padded_token_len(
-            self.num_tokens_paddings_per_dp,
-            max_num_scheduled_tokens_across_dp)
-
-        padded_total_num_scheduled_tokens = (
-            padded_num_scheduled_tokens_per_dp_rank * dp_size)
-
-        assert max_num_scheduled_tokens_across_dp > 0
-
-        # Find maximum number of requests across DP ranks
-        max_num_reqs_across_dp = max(
-            len(req_ids) for req_ids in req_ids_dp.values())
-        padded_num_reqs_per_dp_rank = runner_utils.get_padded_token_len(
-            self.num_reqs_paddings_per_dp, max_num_reqs_across_dp)
-        padded_num_reqs = padded_num_reqs_per_dp_rank * dp_size
+        # Calculate padding requirements using helper
+        padding_info = self._calculate_dp_padding(
+            num_scheduled_tokens_per_dp_rank, req_ids_dp, dp_size)
+        
+        padded_num_scheduled_tokens_per_dp_rank = padding_info.tokens_per_rank
+        padded_total_num_scheduled_tokens = padding_info.total_tokens
+        padded_num_reqs_per_dp_rank = padding_info.reqs_per_rank
+        padded_num_reqs = padding_info.total_reqs
 
         # Build logits indices selector for reordering outputs
         logits_indices_selector = [0] * num_reqs
@@ -1323,61 +1506,31 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
     def _prepare_async_token_substitution_indices_non_dp(
             self, num_reqs, num_scheduled_tokens_per_req):
-        """Prepare token substitution indices for async scheduling in non-DP mode."""
-        token_in_tpu_cur_input_indices_list = []
-        token_in_tpu_pre_next_tokens_indices_list = []
-        acc_cur_len = 0
-
-        for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
-            acc_cur_len += num_scheduled_tokens_per_req[i]
-            assert req_id is not None
-            if req_id not in self._pre_async_results.placeholder_req_id_to_index:
-                continue
-
-            token_in_tpu_cur_input_indices_list.append(acc_cur_len - 1)
-            token_in_tpu_pre_next_tokens_indices_list.append(
-                self._pre_async_results.placeholder_req_id_to_index[req_id])
-
-        if len(token_in_tpu_cur_input_indices_list) > 0:
-            return (np.array(token_in_tpu_cur_input_indices_list),
-                    np.array(token_in_tpu_pre_next_tokens_indices_list))
-        else:
-            return np.array([]), np.array([])
+        """Prepare token substitution indices for async scheduling in non-DP mode.
+        
+        This method now delegates to AsyncTokenSubstitutionHelper.
+        """
+        return self._async_token_helper.prepare_indices_non_dp(
+            num_reqs,
+            num_scheduled_tokens_per_req,
+            self.input_batch.req_ids,
+            self._pre_async_results.placeholder_req_id_to_index
+        )
 
     def _apply_async_token_substitution(self, input_ids,
                                         token_in_tpu_cur_input_indices,
                                         token_in_tpu_pre_next_tokens_indices):
-        """Apply async token substitution if needed."""
-        if len(token_in_tpu_cur_input_indices) == 0:
-            return input_ids
-
-        idx_pad_len = len(input_ids) - len(token_in_tpu_cur_input_indices)
-
-        # Pad according to the instructions written inside self._substitute_placeholder_token_fn
-        full_range = np.arange(0, len(input_ids))
-        missing_values = np.setdiff1d(full_range,
-                                      token_in_tpu_cur_input_indices)
-        padded_token_in_tpu_cur_input_indices = np.concatenate(
-            (token_in_tpu_cur_input_indices, missing_values))
-
-        padded_token_in_tpu_pre_next_tokens_indices = np.pad(
-            token_in_tpu_pre_next_tokens_indices, (0, idx_pad_len),
-            mode='constant',
-            constant_values=-1)
-
-        (padded_token_in_tpu_cur_input_indices,
-         padded_token_in_tpu_pre_next_tokens_indices) = device_array(
-             self.mesh, (padded_token_in_tpu_cur_input_indices,
-                         padded_token_in_tpu_pre_next_tokens_indices))
-
-        with self.maybe_forbid_compile:
-            input_ids = self._substitute_placeholder_token_fn(
-                input_ids, padded_token_in_tpu_cur_input_indices,
-                padded_token_in_tpu_pre_next_tokens_indices,
-                self._pre_async_results.next_tokens,
-                len(token_in_tpu_cur_input_indices))
-
-        return input_ids
+        """Apply async token substitution if needed.
+        
+        This method now delegates to AsyncTokenSubstitutionHelper.
+        """
+        return self._async_token_helper.apply_substitution(
+            input_ids,
+            token_in_tpu_cur_input_indices,
+            token_in_tpu_pre_next_tokens_indices,
+            self._pre_async_results.next_tokens,
+            self.maybe_forbid_compile
+        )
 
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         if self.dp_size > 1:
