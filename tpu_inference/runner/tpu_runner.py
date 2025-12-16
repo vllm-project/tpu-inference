@@ -218,7 +218,7 @@ def _prepare_dp_rank_shard(args):
     each responsible for processing one DP rank's data.
     """
     (dp_rank, req_ids, req_indices, num_scheduled_tokens_per_req,
-     total_num_scheduled_tokens, padded_num_scheduled_tokens_per_dp_rank,
+     total_num_scheduled_tokens, padded_num_scheduled_tokens_per_dp_rank,padded_num_reqs_per_dp_rank,
      max_num_reqs_per_dp_rank, input_batch_data, arange_cpu,
      scheduler_output_num_scheduled_tokens, block_tables_data,
      max_num_blocks_per_req, pre_async_placeholder_req_id_to_index,
@@ -272,7 +272,7 @@ def _prepare_dp_rank_shard(args):
     positions = np.zeros(padded_num_scheduled_tokens_per_dp_rank, dtype=np.int32)
     query_start_loc = np.zeros(max_num_reqs_per_dp_rank + 1, dtype=np.int32)
     seq_lens = np.zeros(max_num_reqs_per_dp_rank, dtype=np.int32)
-    logits_indices = np.full(max_num_reqs_per_dp_rank, -1, dtype=np.int32)
+    logits_indices = np.full(padded_num_reqs_per_dp_rank, -1, dtype=np.int32)
     
     # Populate input_ids and positions
     req_indices_array = np.repeat(req_indices, num_scheduled_tokens_per_req)
@@ -287,7 +287,7 @@ def _prepare_dp_rank_shard(args):
     _num_reqs = len(req_indices)
     np.cumsum(num_scheduled_tokens_per_req, out=query_start_loc[1:_num_reqs + 1])
     if _num_reqs < max_num_reqs_per_dp_rank:
-        query_start_loc[_num_reqs + 1:] = query_start_loc[_num_reqs]
+        query_start_loc[_num_reqs + 1:] = 1
     
     seq_lens[:_num_reqs] = num_computed_tokens_cpu[req_indices] + num_scheduled_tokens_per_req
     
@@ -1184,6 +1184,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 scheduled_tokens_per_dp_rank[dp_rank],
                 num_scheduled_tokens_per_dp_rank[dp_rank],
                 padded_num_scheduled_tokens_per_dp_rank,
+                padded_num_reqs_per_dp_rank,
                 max_num_reqs_per_dp_rank,
                 input_batch_data,
                 self.arange_cpu,
@@ -1204,7 +1205,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             token_offset = padded_num_scheduled_tokens_per_dp_rank * dp_rank
             req_offset = dp_rank * max_num_reqs_per_dp_rank
             query_loc_req_offset = dp_rank * (max_num_reqs_per_dp_rank + 1)
-            
+            logits_indices_offset = dp_rank * padded_num_reqs_per_dp_rank
             # Copy input_ids and positions
             token_end = token_offset + padded_num_scheduled_tokens_per_dp_rank
             self.input_ids_cpu[token_offset:token_end] = result['input_ids']
@@ -1218,9 +1219,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.seq_lens_cpu[req_offset:req_end] = result['seq_lens']
             
             # Copy logits_indices
-            padded_req_end = req_offset + padded_num_reqs_per_dp_rank
-            self.logits_indices_cpu[req_offset:padded_req_end] = result['logits_indices'][:padded_num_reqs_per_dp_rank]
-            
+            padded_req_end = logits_indices_offset + padded_num_reqs_per_dp_rank
+            self.logits_indices_cpu[logits_indices_offset:padded_req_end] = result['logits_indices'][:padded_num_reqs_per_dp_rank]
             # Copy block tables for each KV cache group
             for kv_cache_gid, block_table_shard in result['block_tables'].items():
                 self.block_tables_cpu[kv_cache_gid][req_offset:req_end, :] = block_table_shard
@@ -1459,7 +1459,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             positions = mrope_positions
 
         query_start_loc_cpu = query_start_loc
-        logits_indices_cpu = logits_indices
         seq_lens_cpu = seq_lens
 
         (input_ids, positions, query_start_loc, seq_lens, logits_indices,
