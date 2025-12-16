@@ -10,7 +10,7 @@ class MockVllmConfig:
         self.parallel_config = MagicMock()
         self.parallel_config.world_size = 4
         self.parallel_config.tensor_parallel_size = 2
-        self.parallel_config.pipeline_parallel_size = 2
+        self.parallel_config.pipeline_parallel_size = 1
         self.parallel_config.ray_workers_use_nsight = False
         self.parallel_config.placement_group = None
         self.parallel_config.max_parallel_loading_workers = None

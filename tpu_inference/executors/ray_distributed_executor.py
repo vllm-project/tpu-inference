@@ -145,6 +145,9 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
                 device_str: node['Resources'][device_str]
             } for node in ray_nodes]
         else:
+            assert pp_size == len(
+                ray_nodes
+            ), f"Cannot use PP across hosts, please set --pipeline-parallel-size to 1 or {len(ray_nodes)}"
             num_devices_per_pp_rank = self.vllm_config.sharding_config.total_devices
             placement_group_specs = [{
                 device_str: num_devices_per_pp_rank
