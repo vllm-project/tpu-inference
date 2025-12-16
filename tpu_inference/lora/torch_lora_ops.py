@@ -4,7 +4,6 @@
 import jax
 import jax.numpy as jnp
 import torch
-import torch.nn.functional as F
 from torchax.interop import call_jax
 
 
@@ -85,7 +84,8 @@ def bgmv_expand_slice(
         add_inputs (bool): Whether or not to add the input tensor to the output
             tensor.
     """
-    outputs = bgmv_torch(inputs, lora_b_weights, lora_indices_tensor)  # [num_tokens, out_features]
+    outputs = bgmv_torch(inputs, lora_b_weights,
+                         lora_indices_tensor)  # [num_tokens, out_features]
 
     # Create a padded tensor manually to avoid issues with F.pad on sharded tensors.
     # This is a more robust way to handle padding in a distributed environment.
