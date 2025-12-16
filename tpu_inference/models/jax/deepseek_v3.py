@@ -25,9 +25,10 @@ from tpu_inference.layers.jax.moe.moe import MoE
 from tpu_inference.layers.jax.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.utils.quantization.mxfp4_utils import \
+    unpack_mxfp4
 from tpu_inference.models.jax.utils.weight_utils import (
     get_param, model_weights_generator, print_param_info)
-from tpu_inference.models.jax.utils.quantization.mxfp4_utils import unpack_mxfp4
 
 logger = init_logger(__name__)
 
@@ -53,7 +54,7 @@ class DeepSeekV3(nnx.Module):
         self.rng = nnx.Rngs(rng)
 
         # NOTE: the default is 61
-        num_layers: int = vllm_config.model_config.hf_config.num_hidden_layers
+        num_layers: int = 5  #vllm_config.model_config.hf_config.num_hidden_layers
         num_local_experts: int = 256
 
         vocab_size: int = 129280
@@ -423,7 +424,7 @@ class DeepSeekV3WeightLoader:
             r"q_b_proj": (1, 0),
             r"kv_a_proj_with_mqa": (1, 0),
             r"kv_b_proj": (1, 0),
-            r"k_b_proj":  (1, 0),  # used for MLA kernel
+            r"k_b_proj": (1, 0),  # used for MLA kernel
             r"v_b_proj": (1, 0),  # used for MLA kernel
             r"o_proj": (1, 0),
             # moe
@@ -502,7 +503,7 @@ class DeepSeekV3WeightLoader:
                 "layers.*.attn.kernel_v_up_proj_AC",
             })
         # Hardcode quantization params for DeepSeek V3
-        self.scale_dtype, self.quant_dtype =  jnp.bfloat16, jnp.float8_e4m3fn
+        self.scale_dtype, self.quant_dtype = jnp.bfloat16, jnp.float8_e4m3fn
         self.quantization_block_size_n = 1
         self.quantization_block_size_k = 256
 
@@ -606,10 +607,12 @@ class DeepSeekV3WeightLoader:
                         weight.view(torch_view_type).numpy()).view(cast_type)
                 else:
                     raise ValueError(
-                        f"Unsupported dtype for tensor conversion: {cast_type}")
+                        f"Unsupported dtype for tensor conversion: {cast_type}"
+                    )
 
             if scale is not None:
-                scale = scale.to(torch.float32).numpy().astype(self.scale_dtype)
+                scale = scale.to(torch.float32).numpy().astype(
+                    self.scale_dtype)
 
         # Transpose weights if necessary.
         weight_np = self._transpose_params(name, weight_np)
@@ -620,7 +623,8 @@ class DeepSeekV3WeightLoader:
             scale_shape = scale.shape
             if len(weight_shape) == len(scale_shape):
                 new_scale = scale
-                for idx, (wdim, sdim) in enumerate(zip(weight_shape, scale_shape)):
+                for idx, (wdim,
+                          sdim) in enumerate(zip(weight_shape, scale_shape)):
                     # If divisible, leave scale as-is for this axis
                     if (wdim % sdim == 0):
                         continue
@@ -632,7 +636,8 @@ class DeepSeekV3WeightLoader:
                     new_scale = new_scale[tuple(slicers)]
                 if scale_shape != new_scale.shape:
                     logger.warning(
-                        f"Adjusted scale shape {scale_shape} to {new_scale.shape} to match weight {weight_shape}")
+                        f"Adjusted scale shape {scale_shape} to {new_scale.shape} to match weight {weight_shape}"
+                    )
                 scale = new_scale
 
         if model_weight.value.shape != weight_np.shape:
@@ -735,10 +740,12 @@ class DeepSeekV3WeightLoader:
                 # instead of checking "weight_scale_inv" and assuming quantization method is fp8
                 scale = None
                 # Mixed quantization: accept both fp8 and packed fp4 (uint8) tensors
-                allowed_quant_dtypes = {j2t_dtype(self.quant_dtype.dtype), torch.uint8}
+                allowed_quant_dtypes = {
+                    j2t_dtype(self.quant_dtype.dtype), torch.uint8
+                }
                 if loaded_weight.dtype in allowed_quant_dtypes:
-                    scale_name = loaded_name.replace(
-                        ".weight", ".weight_scale_inv")
+                    scale_name = loaded_name.replace(".weight",
+                                                     ".weight_scale_inv")
                     if scale_name in quantized_scales:
                         scale = quantized_scales[scale_name]
                         del quantized_scales[scale_name]
@@ -747,8 +754,8 @@ class DeepSeekV3WeightLoader:
                         continue
 
                 if loaded_name.endswith(".weight_scale_inv"):
-                    weight_name = loaded_name.replace(
-                        ".weight_scale_inv", ".weight")
+                    weight_name = loaded_name.replace(".weight_scale_inv",
+                                                      ".weight")
                     if weight_name in quantized_weights:
                         scale = loaded_weight
                         loaded_weight = quantized_weights[weight_name]

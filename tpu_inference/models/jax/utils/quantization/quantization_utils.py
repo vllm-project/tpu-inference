@@ -36,8 +36,10 @@ DEFAULT_MAX_NUM_BLOCKS_PER_REQ = 16
 
 DEFAULT_DEEPSEEK_FP8_CONFIG = {
     "qwix": {
-        "use_abstract_model": True,
-        "scale_dtype": "bfloat16",
+        "use_abstract_model":
+        True,
+        "scale_dtype":
+        "bfloat16",
         "rules": [
             # Exclude router from quantization
             {
@@ -60,14 +62,14 @@ DEFAULT_DEEPSEEK_FP8_CONFIG = {
                 "module_path": ".*.custom_module.*",
                 "weight_qtype": "float4_e2m1fn",
                 "act_qtype": "float8_e4m3fn",
-                "tile_size": 512,
+                "tile_size": 256,
             },
             # Shared experts: also FP4
             {
                 "module_path": ".*.shared_experts.*",
                 "weight_qtype": "float4_e2m1fn",
                 "act_qtype": "float8_e4m3fn",
-                "tile_size": 512,
+                "tile_size": 256,
             },
             {
                 "module_path": ".*",
