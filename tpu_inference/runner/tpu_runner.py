@@ -4,7 +4,6 @@ import logging
 import random
 from contextlib import nullcontext
 from dataclasses import dataclass
-import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 from multiprocessing import Pool
 
@@ -123,7 +122,7 @@ class DPRankShardResult:
 
 
 @dataclass
-class PaddingInfo:
+class DPPaddingInfo:
     """Padding information for DP input preparation."""
     tokens_per_rank: int  # Padded tokens per DP rank
     total_tokens: int  # Total padded tokens across all DP ranks
@@ -476,7 +475,7 @@ def _prepare_dp_rank_shard(args: DPRankShardArgs):
     token_indices = positions_np + req_indices_array * token_ids_cpu.shape[1]
     np.take(token_ids_cpu.ravel(), token_indices, out=input_ids[:total_num_scheduled_tokens])
     
-    # Prepare attention metadata
+    # Populate attention metadata
     _num_reqs = len(req_indices)
     np.cumsum(num_scheduled_tokens_per_req, out=query_start_loc[1:_num_reqs + 1])
     if _num_reqs < max_num_reqs_per_dp_rank:
@@ -487,7 +486,7 @@ def _prepare_dp_rank_shard(args: DPRankShardArgs):
     # Populate logits_indices
     logits_indices[:_num_reqs] = query_start_loc[1:_num_reqs + 1] - 1
     
-    # Prepare block tables for each KV cache group
+    # Populate block tables for each KV cache group
     prepared_block_tables = {}
     if block_tables_data is not None:
         for kv_cache_gid, block_table_tensor in block_tables_data.items():
@@ -574,14 +573,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self._pre_async_results: AsyncPreResults | None = None
         self._substitute_placeholder_token_fn = _substitute_placeholder_token
         self.execute_model_state: ExecuteModelState | None = None
-        
-        # Initialize multiprocessing pool for DP shard preparation
+
         if self.dp_size > 1:
             self._mp_pool = Pool(processes=self.dp_size)
         else:
             self._mp_pool = None
         
-        # Initialize helper instances
         self._async_token_helper = AsyncTokenSubstitutionHelper(
             self.mesh, self._substitute_placeholder_token_fn
         )
@@ -1405,22 +1402,22 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logits_indices_offset = dp_rank * padded_num_reqs_per_dp_rank
             logits_indices_offset_end = logits_indices_offset + padded_num_reqs_per_dp_rank
             
-            # input_ids and positions
+            # Populate input_ids and positions
             self.input_ids_cpu[token_offset:token_end] = result.input_ids
             self.positions_cpu[token_offset:token_end] = result.positions
             
-            # attention metadata
+            # Populate attention metadata
             self.query_start_loc_cpu[query_loc_req_offset:query_loc_end] = result.query_start_loc
             self.seq_lens_cpu[req_offset:req_end] = result.seq_lens
             
-            # logits_indices
+            # Populate logits_indices
             self.logits_indices_cpu[logits_indices_offset:logits_indices_offset_end] = result.logits_indices[:padded_num_reqs_per_dp_rank]
             
-            # Block tables
+            # Populate block tables
             for kv_cache_gid, block_table_shard in result.block_tables.items():
                 self.block_tables_cpu[kv_cache_gid][req_offset:req_end, :] = block_table_shard
             
-            # Async token substitution indices
+            # Populate async token substitution indices
             token_in_tpu_cur_input_indices_dp[dp_rank] = result.token_in_tpu_cur_input_indices
             token_in_tpu_pre_next_tokens_indices_dp[dp_rank] = result.token_in_tpu_pre_next_tokens_indices
 
@@ -1429,16 +1426,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         num_scheduled_tokens_per_dp_rank: Dict[int, int],
         req_ids_dp: Dict[int, List[str]],
         dp_size: int
-    ) -> PaddingInfo:
-        """Calculate all padding values for DP mode in one place.
-        
+    ) -> DPPaddingInfo:
+        """
         Args:
             num_scheduled_tokens_per_dp_rank: Number of scheduled tokens per DP rank
             req_ids_dp: Request IDs per DP rank
             dp_size: Number of DP ranks
             
         Returns:
-            PaddingInfo with all calculated padding values
+            DPPaddingInfo with all calculated padding values
         """
         # Calculate token padding
         max_num_scheduled_tokens_across_dp = max(
@@ -1457,7 +1453,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.num_reqs_paddings_per_dp, max_num_reqs_across_dp)
         padded_total_reqs = padded_reqs_per_rank * dp_size
         
-        return PaddingInfo(
+        return DPPaddingInfo(
             tokens_per_rank=padded_tokens_per_rank,
             total_tokens=padded_total_tokens,
             reqs_per_rank=padded_reqs_per_rank,
@@ -1539,11 +1535,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             return self._prepare_inputs_non_dp(scheduler_output)
 
     def _prepare_inputs_dp(self, scheduler_output: "VllmSchedulerOutput"):
-        """Prepare model inputs with data parallelism support.
-        
-        This method distributes input preparation across DP ranks, optionally
-        using multiprocessing for parallel computation.
-        """
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -1565,7 +1556,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.uses_mrope:
             self.mm_manager.calc_mrope_positions(scheduler_output)
 
-        # Prepare async scheduling support
+        # Async scheduling: prepare token substitution indices for DP
         token_in_tpu_cur_input_indices_dp = {}
         token_in_tpu_pre_next_tokens_indices_dp = {}
         pre_async_placeholder_req_id_to_index = None
@@ -1574,7 +1565,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if async_scheduling_enabled:
             pre_async_placeholder_req_id_to_index = self._pre_async_results.placeholder_req_id_to_index
 
-        # Parallel processing: dispatch work to multiprocessing pool
+        # Dispatch work to multiprocessing pool
         self._prepare_inputs_dp_parallel(
             dp_size, req_ids_dp, req_indices_dp,
             scheduled_tokens_per_dp_rank, num_scheduled_tokens_per_dp_rank,
@@ -1585,18 +1576,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             token_in_tpu_pre_next_tokens_indices_dp
         )
         logits_indices = self.logits_indices_cpu[:padded_num_reqs]
-        
-        # Build num_scheduled_tokens_per_req for LoRA support
-        num_scheduled_tokens_per_req = [
-            scheduler_output.num_scheduled_tokens[req_id]
-            for req_id in self.input_batch.req_ids[:num_reqs]
-        ]
-        
-        # Phased profiling support
+
+        # Please see runner_utils.PhasedBasedProfiler for details
         if self.phase_based_profiler:
             batch_composition_stats = runner_utils.get_batch_composition_stats(
                 self.input_batch, total_num_scheduled_tokens, num_reqs,
                 padded_total_num_scheduled_tokens, scheduler_output)
+
             self.phase_based_profiler.step(batch_composition_stats)
 
         # Prepare input tensors
@@ -1619,11 +1605,29 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             _request_distribution.append(
                 [num_decode_in_dp_rank, num_decode_in_dp_rank, _num_reqs])
         request_distribution = np.array(_request_distribution).ravel()
-        
-        assert len(
-            scheduler_output.scheduled_spec_decode_tokens) == 0, "Speculative decoding is not supported in DP mode yet."
-        spec_decode_metadata = None
 
+        use_spec_decode = len(
+            scheduler_output.scheduled_spec_decode_tokens) > 0
+        if not use_spec_decode:
+            spec_decode_metadata = None
+        else:
+            num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
+            for (
+                    req_id,
+                    draft_token_ids,
+            ) in scheduler_output.scheduled_spec_decode_tokens.items():
+                req_idx = self.input_batch.req_id_to_index[req_id]
+                num_draft_tokens[req_idx] = len(draft_token_ids)
+
+            spec_decode_metadata = (
+                self.speculative_decoding_manager.get_spec_decode_metadata(
+                    num_draft_tokens,
+                    self.query_start_loc_cpu[1:num_reqs + 1],
+                    padded_num_reqs,
+                ))
+            logits_indices = spec_decode_metadata.final_logits_indices
+
+        # Put to device
         sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
             self.mesh,
             self.input_batch,
@@ -1633,8 +1637,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.uses_mrope:
             positions = mrope_positions
 
-        query_start_loc_cpu = query_start_loc
-        seq_lens_cpu = seq_lens
 
         (input_ids, positions, query_start_loc, seq_lens, logits_indices,
          request_distribution) = device_array(
@@ -1667,8 +1669,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             )
 
             # This is for making these cpu buffers hidden during tracing
-            attention_metadata_gid.query_start_loc_cpu = query_start_loc_cpu
-            attention_metadata_gid.seq_lens_cpu = seq_lens_cpu
+            attention_metadata_gid.query_start_loc_cpu = query_start_loc
+            attention_metadata_gid.seq_lens_cpu = seq_lens
 
             if not self.use_hybrid_kvcache:
                 uniform_attention_metadata = attention_metadata_gid
@@ -1699,6 +1701,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     token_in_tpu_pre_next_tokens_indices)
 
         if self.lora_config is not None:
+            num_scheduled_tokens_per_req = []
+            for req_id in self.input_batch.req_ids[:num_reqs]:
+                assert req_id is not None
+                num_tokens = scheduler_output.num_scheduled_tokens[req_id]
+                num_scheduled_tokens_per_req.append(num_tokens)
             self.lora_utils.set_active_loras(
                 num_scheduled_tokens_per_req,
                 total_num_scheduled_tokens,
