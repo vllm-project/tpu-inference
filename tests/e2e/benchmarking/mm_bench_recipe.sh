@@ -50,7 +50,7 @@ checkThroughput() {
     echo
 
     if [ -z "$actual_throughput" ]; then
-        echo "Total Token throughput: NOT FOUND"
+        echo "Total token throughput: NOT FOUND"
         throughput_pass=0
     else
         echo "Request throughput: $actual_throughput"
