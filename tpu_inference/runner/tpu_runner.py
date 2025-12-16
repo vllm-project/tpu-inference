@@ -1605,15 +1605,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         query_start_loc_cpu = query_start_loc
         seq_lens_cpu = seq_lens
 
-        # (input_ids, positions, query_start_loc, seq_lens, logits_indices,
-        #  request_distribution) = jax.make_array_from_process_local_data(
-        #      NamedSharding(self.mesh, PartitionSpec(None)),
-        #      (input_ids, positions, query_start_loc, seq_lens, logits_indices,
-        #       request_distribution))
-        
         (input_ids, positions, query_start_loc, seq_lens, logits_indices,
-         request_distribution) = device_array(
-             self.mesh,
+         request_distribution) = jax.make_array_from_process_local_data(
+             NamedSharding(self.mesh, PartitionSpec(None)),
              (input_ids, positions, query_start_loc, seq_lens, logits_indices,
               request_distribution))
 
@@ -1628,12 +1622,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 [:num_reqs])
             # Convert block_tables to 1D on cpu.
             block_tables = block_tables.reshape(-1)
-            
-            # block_tables = jax.make_array_from_process_local_data(
-            #     NamedSharding(self.mesh, PartitionSpec(None)), (block_tables))
-            block_tables = device_array(
-                self.mesh,
-                block_tables)
+            block_tables = jax.make_array_from_process_local_data(
+                NamedSharding(self.mesh, PartitionSpec(None)), (block_tables))
 
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
