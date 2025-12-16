@@ -81,7 +81,6 @@ def _calculate_num_tiles(x: int, tx: int) -> int:
 
 
 def _calculate_irregular_num_tiles(x: int, tx: int) -> tuple[int, int]:
-    assert tx != 0 , "x-dimension tile size must be non-zero."
     tiles, rem = divmod(x, tx)
     if rem:
         tiles += 1
@@ -316,7 +315,6 @@ def gmm(
     rhs: jnp.ndarray,
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype = jnp.float32,
-    rhs_bias: jnp.ndarray | None = None,
     rhs_scale: jnp.ndarray | None = None,
     rhs_bias: jnp.ndarray | None = None,
     tiling: tuple[int, int, int] | LutFn | None = (128, 128, 128),
@@ -376,8 +374,6 @@ def gmm(
 
     # Gather shape information.
     m, k, n = (lhs.shape[0], lhs.shape[1], rhs.shape[1])
-    print(f"kky gmm shapes: m {m}, k {k}, n {n}, num_current_groups {num_current_groups}")
-    print(f"shapes lhs {lhs.shape}, rhs {rhs.shape}")
 
     # If tiling is callable, look up the problem dimensions in the LUT. If no
     # tuned tile dimensions are available throw an error.
@@ -389,22 +385,17 @@ def gmm(
             f"No tuned tiling found for (m, k, n) = ({m}, {k}, {n})")
 
     tm, tk, tn = tiling
-    assert tk > 0, "k-dimension tile size must be non-zero."
-    assert tn > 0, "n-dimension tile size must be non-zero."
-    assert tm > 0, "m-dimension tile size must be non-zero."
 
     if rhs_scale is not None:
         assert isinstance(rhs_scale, jax.Array)
         assert rhs_scale.shape[0] == num_current_groups
-        num_blocks = rhs_scale.shape[-1]
+        num_quant_blocks = rhs_scale.shape[1]
     else:
         num_quant_blocks = 1
     block_size = k // num_quant_blocks
 
     if tk > block_size or block_size % tk != 0:
         tk = block_size
-        
-    print(f"kky adjusted tk: {tk} k {k} block_size n {n} tn {tn}")
 
     tiles_k, k_rem = _calculate_irregular_num_tiles(k, tk)
     tiles_n, n_rem = _calculate_irregular_num_tiles(n, tn)
@@ -439,8 +430,6 @@ def gmm(
         grid_id = pl.program_id(1)
         b_i = pl.program_id(2)
         k_i = pl.program_id(3)
-
-        print(f"kky {rhs_scale=}")
 
         @pl.when(k_i == 0)
         def _zero_acc():
@@ -575,16 +564,12 @@ def gmm(
     if rhs_scale is None:
         rhs_scale_block_spec = None
     else:
-
-        rhs_scale = jnp.swapaxes(rhs_scale, 1, 2)
-        rhs_scale = jnp.expand_dims(rhs_scale, 2)
         rhs_scale_block_spec = pl.BlockSpec((None, None, 1, tn),
                                             rhs_scale_transform_indices)
 
     if rhs_bias is None:
         rhs_bias_block_spec = None
     else:
-        rhs_bias = jnp.expand_dims(rhs_bias, 1)
         rhs_bias_block_spec = pl.BlockSpec((None, 1, tn),
                                            rhs_bias_transform_indices)
 

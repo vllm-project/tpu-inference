@@ -10,8 +10,6 @@ from tpu_inference.kernels.megablox.gmm import gmm
 from tpu_inference.layers.vllm.linear_common import \
     slice_sharded_tensor_for_concatenation
 
-P = PartitionSpec
-
 
 def activation_fn(activation: str, x1: jax.Array, x2: jax.Array) -> jax.Array:
     match activation:
@@ -145,7 +143,8 @@ def tensor_sharded_gmm_merged_column_parallel(
     )(lhs, rhs, rhs_scale, rhs_bias, group_sizes)
 
     tp_size = mesh.shape["model"]
-    output_sizes = [gmm_result.shape[-1] // 2] * 2
+    intermediate_size = gmm_result.shape[-1] // 2
+    output_sizes = [intermediate_size, intermediate_size]
     return slice_sharded_tensor_for_concatenation(gmm_result, output_sizes,
                                                   tp_size)
 
@@ -160,8 +159,7 @@ def tensor_sharded_gmm_row_parallel(
 ) -> jax.Array:
 
     def _gmm_all_reduce(lhs, rhs, rhs_scale, rhs_bias, group_sizes):
-        m, g, n, k = lhs.shape[0], *rhs.shape # k = 2560/8 = 320
-        # jax.debug.print("GMM shapes: lhs {lhs.shape}, rhs {rhs.shape}", lhs=lhs, rhs=rhs)
+        m, g, n, k = lhs.shape[0], *rhs.shape
         tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
         if rhs_bias is not None:
             shard_id = jax.lax.axis_index("model")
@@ -274,8 +272,12 @@ def expert_sharded_gmm(
     # i*num_experts_per_shard to (i+1)*num_experts_per_shard We sum them up to
     # get total rows in that shard, and that is the size for shard to send to
     # its peers. This is also the number of non-zero rows from the gmm results.
-    # In the working example, send_sizes would be [3, 2, 5, 4]
-    send_sizes = group_sizes.reshape(-1, num_experts_per_shard).sum()
+    # In the working example, send_sizes would be [3, 2, 5, 4].
+
+    # group_sizes has shape of [num_tokens_per_shard * num_experts_per_shard].
+    # So reshaping to [num_tokens_per_shard, num_experts_per_shard] and applying
+    # sum(axis=1) will get desired send_sizes shaped [num_tokens_per_shard].
+    send_sizes = group_sizes.reshape(-1, num_experts_per_shard).sum(axis=1)
     # In the working example, input_offsets would be [0, 3, 5, 10]
     input_offsets = jnp.concatenate((jnp.array([0]), send_sizes.cumsum()[:-1]))
     output_offsets = input_offsets
@@ -469,8 +471,6 @@ def fused_moe_func(
             mesh=mesh,
         )
 
-    x = x[:, :hidden_size]
-
     def _finalize_output(x_local, topk_argsort_revert_indices_local,
                          topk_weights_local):
         x_local = x_local[topk_argsort_revert_indices_local].reshape(
@@ -479,9 +479,11 @@ def fused_moe_func(
         x_local = x_local.sum(axis=-2)
         return x_local
 
-    return shard_map(
+    x = shard_map(
         _finalize_output,
         mesh=mesh,
         in_specs=(P("data", None), P("data"), P("data", None)),
         out_specs=(P("data", None)),
     )(x, topk_argsort_revert_indices, topk_weights)
+
+    return x[:num_tokens, :hidden_size]
