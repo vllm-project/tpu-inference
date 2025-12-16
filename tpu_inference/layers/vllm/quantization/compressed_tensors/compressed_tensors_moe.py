@@ -194,8 +194,6 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         # w2_bias = jax_view(layer.w2_bias)
         gating_output = jax_view(router_logits)
         seqlen = x.shape[0]
-        
-        
         use_jax = False
         if use_jax:
             expert_weights = F.softmax(router_logits, dim=-1)
@@ -245,29 +243,6 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
                         dimension_numbers=(((1, ), (1, )), ((0, ), (0, ))),
                         preferred_element_type=jnp.bfloat16.dtype)
         else:
-            # # 160,5120,1 -> 160,1,5120 
-            # w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
-            # # 160,1,5120 -> 160, 1, 1, 5120,
-            # w13_weight_scale = jnp.expand_dims(w13_weight_scale, 2)
-            #(160, 6144, 1) -> (160, 1, 6144)
-            #(160, 1, 6144) -> (160, 6144, 1, 1)
-            # w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
-            # w2_weight_scale = jnp.expand_dims(w2_weight_scale, 2)
-            
-            
-            # logger.info(f"Shapes and dtype before fused_moe_func: "
-            #             f"x: {x.shape}, {x.dtype}, "
-            #             f"w13_weight: {w13_weight.shape},     {w13_weight.dtype}, "
-            #             f"w2_weight: {w2_weight.shape},     {w2_weight.dtype}, "
-            #             f"w13_weight_scale: {w13_weight_scale.shape},     {w13_weight_scale.dtype}, "
-            #             f"w2_weight_scale: {w2_weight_scale.shape},     {w2_weight_scale.dtype}, "
-            #             f"gating_output: {gating_output.shape},     {gating_output.dtype}")        
-            # jax.debug.inspect_array_sharding(x, callback=print)
-            # jax.debug.inspect_array_sharding(w13_weight, callback=print)
-            # jax.debug.inspect_array_sharding(w2_weight, callback=print)
-            # jax.debug.inspect_array_sharding(w13_weight_scale, callback=print)
-            # jax.debug.inspect_array_sharding(w2_weight_scale, callback=print)
-            # jax.debug.inspect_array_sharding(gating_output, callback=print)
             out = torch_view(
                     fused_moe_func(
                 hidden_states=x,
