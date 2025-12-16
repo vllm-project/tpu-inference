@@ -144,8 +144,7 @@ class TpuPlatform(Platform):
         if compilation_config.backend == "":
             compilation_config.backend = "openxla"
 
-        # TODO(cuiq): remove this dependency.
-        from vllm.v1.attention.backends.pallas import PallasAttentionBackend
+        from tpu_inference.layers.vllm.attention import PallasAttentionBackend
         cache_config.block_size = PallasAttentionBackend.get_page_size(
             vllm_config)  # type: ignore[assignment]
         min_page_size = PallasAttentionBackend.get_min_page_size(vllm_config)
