@@ -365,6 +365,11 @@ def get_model(
 
     match impl:
         case "flax_nnx":
+            if vllm_config.parallel_config.pipeline_parallel_size > 1:
+                logger.warning(
+                    "PP is not fully supported on Jax flax_nnx models yet, fallback to vllm models."
+                )
+                return get_vllm_model(vllm_config, rng, mesh)
             try:
                 # Try to load the flax model first
                 return get_flax_model(vllm_config, rng, mesh, is_draft_model)
