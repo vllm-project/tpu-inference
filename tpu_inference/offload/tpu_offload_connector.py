@@ -262,6 +262,32 @@ KV_SAVED_BYTES = Counter("vllm_kv_offload_saved_bytes_total",
 KV_LOADED_BYTES = Counter("vllm_kv_offload_loaded_bytes_total",
                            "Total bytes loaded from CPU KV cache.")
 
+GATHER_NUM_BLOCKS = Histogram(
+    "vllm_kv_cache_gather_num_blocks",
+    "Distribution of the number of blocks in gather requests"
+)
+GATHER_DECOMPOSE_LATENCY = Histogram(
+    "vllm_kv_cache_decompose_seconds",
+    "Time spent decomposing block counts into buckets"
+)
+GATHER_CHUNK_LATENCY = Histogram(
+    "vllm_kv_cache_chunk_gather_seconds",
+    "Time spent dispatching the jitted gather for a single chunk"
+)
+GATHER_APPEND_LATENCY = Histogram(
+    "vllm_kv_cache_append_seconds",
+    "Time spent appending the gathered chunk to the list"
+)
+GATHER_REASSEMBLE_LATENCY = Histogram(
+    "vllm_kv_cache_reassemble_seconds",
+    "Time spent reassembling/concatenating all chunks"
+)
+
+GATHER_SLICE_LATENCY = Histogram(
+    "vllm_kv_cache_slice_seconds",
+    "Time spent creating the dynamic slice for a block chunk"
+)
+
 
 # we keep our operations at vllm's block granularity,
 # and want to provide the following three preferences when handling
@@ -1524,30 +1550,44 @@ class TPUOffloadConnectorWorker:
         into bucket-aligned chunks to leverage JIT compilation cache.
         """
         num_blocks = len(block_ids)
+        GATHER_NUM_BLOCKS.observe(num_blocks)
         if num_blocks == 0:
             return []
+        # return KVCacheManager._jitted_gather_kv_cache(kv_caches, block_ids)
         if num_blocks in BLOCK_SIZE_BUCKETS:
             return KVCacheManager._jitted_gather_kv_cache(kv_caches, block_ids)
 
-        decomposed_block_sizes = self._decompose_into_buckets(num_blocks)
+        # 2. Report the latency of decomposed_block_sizes
+        with GATHER_DECOMPOSE_LATENCY.time():
+            decomposed_block_sizes = self._decompose_into_buckets(num_blocks)
         logger.info(
             f"Decomposing gather for {num_blocks} blocks into bucket sizes {decomposed_block_sizes}"
         )
         gathered_chunks = []
         block_offset = 0
         for decomposed_block_size in decomposed_block_sizes:
-            block_slice = jax.lax.dynamic_slice_in_dim(block_ids,
-                                                       block_offset,
-                                                       decomposed_block_size,
-                                                       axis=0)
+            with GATHER_SLICE_LATENCY.time():
+                block_slice = jax.lax.dynamic_slice_in_dim(
+                    block_ids,
+                    block_offset,
+                    decomposed_block_size,
+                    axis=0
+                )
+        with GATHER_CHUNK_LATENCY.time():
             gathered_chunk = KVCacheManager._jitted_gather_kv_cache(
-                kv_caches, block_slice)
+                kv_caches, block_slice
+            )
+        with GATHER_APPEND_LATENCY.time():
             gathered_chunks.append(gathered_chunk)
             block_offset += decomposed_block_size
 
         # Reassemble the results from all chunks
-        return jax.tree.map(lambda *x: jnp.concatenate(x, axis=0),
-                            *gathered_chunks)
+        with GATHER_REASSEMBLE_LATENCY.time():
+            result = jax.tree.map(
+                lambda *x: jnp.concatenate(x, axis=0),
+                *gathered_chunks
+            )
+        return result
 
     def _bucketed_swap_out_fn(
             self,
