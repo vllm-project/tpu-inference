@@ -29,7 +29,7 @@ spec:
               name: hf-token-secret
               key: token
         - name: SKIP_JAX_PRECOMPILE
-          value: "1"
+          value: "0"
         ports:
         - containerPort: 8000
         resources:
