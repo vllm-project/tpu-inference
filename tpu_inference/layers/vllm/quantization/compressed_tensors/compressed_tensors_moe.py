@@ -144,39 +144,58 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
         # 160,1,5120 -> 160, 1, 1, 5120   (num_experts, num_blocks, 1, outer_dim)
         w13_weight_scale = jnp.expand_dims(w13_weight_scale, 2)
-
-        # Shard weights for tp (rowwise w13, colwise w2)
-        w13_format = Format(
-            Layout((0, 1, 2)),  # expert, 2xintermed, input
-            NamedSharding(self.mesh, P(None, "model", None)),
-        )  # rowwise sharding on intermed dim
-
-        w13_scale_format = Format(
-            Layout((0, 1, 2, 3)),  #  (num_experts, num_blocks, 1, outer_dim)
-            NamedSharding(self.mesh, P(None, None, None, "model")),
-        )  # col wise GMM sharding on intermed dim
-
-        # Local shard shape: (num_experts, 2 x (intermediate_size // n_shards), input_size)
-        w13_weight = jax.device_put(w13_weight, w13_format)
-        # Local shard shape: (num_experts, (intermediate_size // n_shards), 1)
-        w13_weight_scale = jax.device_put(w13_weight_scale, w13_scale_format)
-
-        # Shard weights for tp (colwise w2)
-        w2_format = Format(
-            Layout((0, 1, 2)),  # expert, intermed, hidden
-            NamedSharding(self.mesh, P(None, None, "model")),
-        )
-        # Local shard shape: (num_experts, hidden, (intermediate_size // n_shards))
-        # #  (num_experts, num_blocks, 1, outer_dim)
-        w2_weight = jax.device_put(w2_weight, w2_format)
         w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
         w2_weight_scale = jnp.expand_dims(w2_weight_scale, 2)
-        w2_scale_format = Format(
-            Layout((0, 1, 2, 3)),  # expert, intermed, 1
-            NamedSharding(self.mesh, P(None, None, None, None)),
-        )
-        # Local shard shape: (num_experts, intermediate_size // n_shards, 1)
-        w2_weight_scale = jax.device_put(w2_weight_scale, w2_scale_format)
+
+        if layer.use_ep:
+            # Apply EP sharding
+            ep_sharding = NamedSharding(self.mesh, P("model"))
+
+            w13_weight = jax.lax.with_sharding_constraint(
+                w13_weight, Format(Layout((0, 1, 2, 3)), ep_sharding))
+            w2_weight = jax.lax.with_sharding_constraint(
+                w2_weight, Format(Layout((0, 1, 2)), ep_sharding))
+
+            w13_weight_scale = jax.lax.with_sharding_constraint(
+                w13_weight_scale, Format(Layout((0, 1, 2, 3, 4)), ep_sharding))
+            w2_weight_scale = jax.lax.with_sharding_constraint(
+                w2_weight_scale, Format(Layout((0, 1, 2, 3)), ep_sharding))
+        else:
+            # Shard weights for tp (rowwise w13, colwise w2)
+            w13_format = Format(
+                Layout((0, 1, 2)),  # expert, 2xintermed, input
+                NamedSharding(self.mesh, P(None, "model", None)),
+            )  # rowwise sharding on intermed dim
+
+            w13_scale_format = Format(
+                Layout(
+                    (0, 1, 2, 3)),  #  (num_experts, num_blocks, 1, outer_dim)
+                NamedSharding(self.mesh, P(None, None, None, "model")),
+            )  # col wise GMM sharding on intermed dim
+
+            # Local shard shape: (num_experts, 2 x (intermediate_size // n_shards), input_size)
+            w13_weight = jax.lax.with_sharding_constraint(
+                w13_weight, w13_format)
+            # Local shard shape: (num_experts, (intermediate_size // n_shards), 1)
+            w13_weight_scale = jax.lax.with_sharding_constraint(
+                w13_weight_scale, w13_scale_format)
+
+            # Shard weights for tp (colwise w2)
+            w2_format = Format(
+                Layout((0, 1, 2)),  # expert, intermed, hidden
+                NamedSharding(self.mesh, P(None, None, "model")),
+            )
+            # Local shard shape: (num_experts, hidden, (intermediate_size // n_shards))
+            # #  (num_experts, num_blocks, 1, outer_dim)
+            w2_weight = jax.lax.with_sharding_constraint(w2_weight, w2_format)
+
+            w2_scale_format = Format(
+                Layout((0, 1, 2, 3)),  # expert, intermed, 1
+                NamedSharding(self.mesh, P(None, None, None, None)),
+            )
+            # Local shard shape: (num_experts, intermediate_size // n_shards, 1)
+            w2_weight_scale = jax.lax.with_sharding_constraint(
+                w2_weight_scale, w2_scale_format)
 
         w13_weight = Parameter(torch_view(w13_weight), requires_grad=False)
         w13_weight_scale = Parameter(torch_view(w13_weight_scale),

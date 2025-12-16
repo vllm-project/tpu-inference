@@ -329,8 +329,8 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
 
                     w13_weight_scale = jax.lax.with_sharding_constraint(
                         w13_weight_scale, ep_sharding)
-                    w2_weight = jax.lax.with_sharding_constraint(
-                        w2_weight, ep_sharding)
+                    w2_weight_scale = jax.lax.with_sharding_constraint(
+                        w2_weight_scale, ep_sharding)
 
                     w13_bias = jax.lax.with_sharding_constraint(
                         w13_bias, ep_sharding)
