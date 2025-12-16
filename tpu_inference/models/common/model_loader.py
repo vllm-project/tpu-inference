@@ -15,7 +15,6 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.quantization.quantization_utils import (
     apply_qwix_on_abstract_model, apply_qwix_quantization,
     load_random_weights_into_qwix_abstract_model)
-from tpu_inference.layers.jax.moe.moe import MoEMetric
 
 logger = init_logger(__name__)
 

@@ -14,17 +14,6 @@ from tpu_inference.layers.jax.layers import FlaxUtils
 modeling_flax_utils = FlaxUtils()
 logger = init_logger(__name__)
 
-class MoEMetric(nnx.Variable):
-  """A Variable that *always* holds MoE metrics."""
-
-  def __init__(self, value=None):
-    # If no value is provided, create the default structure
-    if value is None:
-      value = {
-          'max_load_proportion': jnp.float32(0.0),
-      }
-    # Pass this value up to the base nnx.Variable
-    super().__init__(value)
 
 @dataclass(kw_only=True)
 class Router(nnx.Module):
