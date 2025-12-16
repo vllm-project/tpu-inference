@@ -56,7 +56,7 @@ class DeepSeekV3(nnx.Module):
         self.rng = nnx.Rngs(rng)
 
         # NOTE: the default is 61
-        num_layers: int = vllm_config.model_config.hf_config.num_hidden_layers
+        num_layers: int = 5  #vllm_config.model_config.hf_config.num_hidden_layers
         num_local_experts: int = 256
 
         vocab_size: int = 129280
@@ -565,24 +565,39 @@ class DeepSeekV3WeightLoader:
             # NOTE: this is only needed for pre-quantized models when doing random weight loading
             # TODO (jacobplatin): remove or clean this up
             self.scale_shap_map_for_random_weight_loading = {
+                # "model.layers.*.self_attn.kv_a_proj_with_mqa.weight":
+                # "layers.*.attn.kernel_kv_down_proj_DA",
                 "kernel_kv_down_proj_DA": (
                     28, 576
                 ),  #check the quant analysis spreadsheet for correct values. it might be this (576, 28). make sure transpose/reshape is correct
-                "kernel_kv_up_proj_ANH":
-                (attn_heads, qk_nope_head_dim + v_head_dim,
-                 max(kv_lora_rank // 256, 1)),
-                "kernel_q_up_proj_ANH":
-                (attn_heads, qk_nope_head_dim + qk_rope_head_dim,
-                 max(q_lora_rank // 256, 1)),
-                "kernel_o_proj_NHD": (hidden_size, attn_heads,
-                                      max(v_head_dim // 256, 1)),
+                # "model.layers.*.self_attn.kv_b_proj.weight":
+                # "layers.*.attn.kernel_kv_up_proj_ANH"
+                "kernel_kv_up_proj_ANH": (
+                    512, 128, 256
+                ),  #(2, 32768),  #ValueError: Scale (2, 32768) should have the same rank as qvalue (512, 128, 256).
+                # "model.layers.*.self_attn.q_b_proj.weight":
+                # "layers.*.attn.kernel_q_up_proj_ANH",
+                "kernel_q_up_proj_ANH": (
+                    1536, 128, 192
+                ),  #(6, 24576),  #ValueError: Scale (6, 24576) should have the same rank as qvalue (1536, 128, 192).
+                # "model.layers.*.self_attn.o_proj.weight":
+                # "layers.*.attn.kernel_o_proj_NHD",
+                "kernel_o_proj_NHD": (
+                    128, 128, 7168
+                ),  #(64, 7168), # ValueError: Scale (64, 7168) should have the same rank as qvalue (128, 128, 7168).
                 # (refer to quantization analysis sheet and replace corresponding dimensions) https://docs.google.com/spreadsheets/d/1MMS_jirZT-J-JIEvGud6XqaB8lPZXWMbw2_V5DNPhRg/edit?resourcekey=0-L8JUfg7MR5lpZRGnSnaN_g&gid=1441289540#gid=1441289540
+                # "model.layers.*.mlp.experts.*.down_proj.weight":
+                # "layers.*.custom_module.kernel_down_proj_EFD",
                 "kernel_down_proj_EFD":
-                (256, 16, 56),  #last two dims should change
+                (256, 8, 7168),  #last two dims should change
+                # "model.layers.*.mlp.experts.*.up_proj.weight":
+                # "layers.*.custom_module.kernel_up_proj_EDF",
                 "kernel_up_proj_EDF":
-                (256, 56, 16),  #last two dims should change
-                "kernel_gating_EDF": (256, 56,
-                                      16),  #last two dims should change
+                (256, 28, 2048),  #last two dims should change
+                # "model.layers.*.mlp.experts.*.gate_proj.weight":
+                # "layers.*.custom_module.kernel_gating_EDF",
+                "kernel_gating_EDF":
+                (256, 28, 2048),  #last two dims should change
             }
 
             # "q_b_proj": (attn_heads, qk_nope_head_dim + qk_rope_head_dim,
