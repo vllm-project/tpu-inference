@@ -1,0 +1,46 @@
+# attention_kernels-w4a16
+# kernel support matrix microbenchmarks
+# For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision-w4a16
+steps:
+  - label: "Correctness tests for attention kernels-w4a16"
+    key: "attention_kernels-w4a16_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "attention_kernels-w4a16_CorrectnessTest" "to be added"
+  - label: "Record correctness test result for attention kernels-w4a16"
+    key: "record_attention_kernels-w4a16_CorrectnessTest"
+    depends_on: "attention_kernels-w4a16_CorrectnessTest"
+    env:
+      CI_TARGET: "attention_kernels-w4a16"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "kernel support matrix microbenchmarks"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh attention_kernels-w4a16_CorrectnessTest
+
+  - label: "Performance tests for attention kernels-w4a16"
+    key: "attention_kernels-w4a16_PerformanceTest"
+    depends_on: "record_attention_kernels-w4a16_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "attention_kernels-w4a16_PerformanceTest" "to be added"
+  - label: "Record performance test result for attention kernels-w4a16"
+    key: "record_attention_kernels-w4a16_PerformanceTest"
+    depends_on: "attention_kernels-w4a16_PerformanceTest"
+    env:
+      CI_TARGET: "attention_kernels-w4a16"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "kernel support matrix microbenchmarks"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh attention_kernels-w4a16_PerformanceTest

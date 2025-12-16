@@ -1,0 +1,45 @@
+# mla-w4a8
+# kernel support matrix microbenchmarks
+steps:
+  - label: "Correctness tests for mla-w4a8"
+    key: "mla-w4a8_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "mla-w4a8_CorrectnessTest" "to be added"
+  - label: "Record correctness test result for mla-w4a8"
+    key: "record_mla-w4a8_CorrectnessTest"
+    depends_on: "mla-w4a8_CorrectnessTest"
+    env:
+      CI_TARGET: "mla-w4a8"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "kernel support matrix microbenchmarks"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh mla-w4a8_CorrectnessTest
+
+  - label: "Performance tests for mla-w4a8"
+    key: "mla-w4a8_PerformanceTest"
+    depends_on: "record_mla-w4a8_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "mla-w4a8_PerformanceTest" "to be added"
+  - label: "Record performance test result for mla-w4a8"
+    key: "record_mla-w4a8_PerformanceTest"
+    depends_on: "mla-w4a8_PerformanceTest"
+    env:
+      CI_TARGET: "mla-w4a8"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "kernel support matrix microbenchmarks"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh mla-w4a8_PerformanceTest
