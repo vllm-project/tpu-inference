@@ -8,7 +8,7 @@ steps:
       queue: tpu_v6e_queue
     commands:
       - |
-        buildkite-agent meta-data set "KV_Cache_Host_Offloading_CorrectnessTest" "to be added"
+        buildkite-agent meta-data set "KV_Cache_Host_Offloading_CorrectnessTest" "unverified"
   - label: "Record correctness test result for KV cache host offloading"
     key: "record_KV_Cache_Host_Offloading_CorrectnessTest"
     depends_on: "KV_Cache_Host_Offloading_CorrectnessTest"
@@ -30,7 +30,7 @@ steps:
       queue: tpu_v6e_queue
     commands:
       - |
-        buildkite-agent meta-data set "KV_Cache_Host_Offloading_PerformanceTest" "to be added"
+        buildkite-agent meta-data set "KV_Cache_Host_Offloading_PerformanceTest" "unverified"
   - label: "Record performance test result for KV cache host offloading"
     key: "record_KV_Cache_Host_Offloading_PerformanceTest"
     depends_on: "KV_Cache_Host_Offloading_PerformanceTest"

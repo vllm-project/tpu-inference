@@ -8,7 +8,7 @@ steps:
       queue: tpu_v6e_queue
     commands:
       - |
-        buildkite-agent meta-data set "MLA_CorrectnessTest" "to be added"
+        buildkite-agent meta-data set "MLA_CorrectnessTest" "unverified"
   - label: "Record correctness test result for MLA"
     key: "record_MLA_CorrectnessTest"
     depends_on: "MLA_CorrectnessTest"
@@ -30,7 +30,7 @@ steps:
       queue: tpu_v6e_queue
     commands:
       - |
-        buildkite-agent meta-data set "MLA_PerformanceTest" "to be added"
+        buildkite-agent meta-data set "MLA_PerformanceTest" "unverified"
   - label: "Record performance test result for MLA"
     key: "record_MLA_PerformanceTest"
     depends_on: "MLA_PerformanceTest"
