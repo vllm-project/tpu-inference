@@ -486,8 +486,6 @@ def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
     # Iterate through all variables and initialize them
     prev_param_shape = None
     from tpu_inference.layers.jax.moe.moe import MoEMetric
-    # for path, param in model.filter(nnx.Param):
-    # for path, param in model.state.filter(nnx.Param):
     for path, param in nnx.iter_graph(model):
         if isinstance(param, MoEMetric) or not isinstance(param, nnx.Variable):
             # if not isinstance(param, nnx.Param):
@@ -496,11 +494,6 @@ def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
             param.value = rng
             continue
         is_qwix_scale = (path[-1] == 'scale' and path[-2] == "array")
-        # if isinstance(param.value, (tuple, list)):
-        #     # Just grab the dtype from the first element (e.g., the weights)
-        #     param_dtype = param.value[0].dtype
-        #     param_shape = param.value[0].shape
-        # else:
         param_dtype = scale_dtype if is_qwix_scale else param.value.dtype
         param_shape = param.value.shape
         # TODO (jacobplatin): clean this up

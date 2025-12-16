@@ -69,16 +69,13 @@ def remove_all_intermediate_state(module: nnx.Module):
     Recursively finds and deletes all 'intermediate' attributes
     (created by nnx.sow) from a module and all its submodules.
     """
-    # Iterate over a copy of attribute names to allow deletion
     for name in list(vars(module)):
         value = getattr(module, name)
 
-        # if isinstance(value, nnx.Intermediate) and name == 'intermediate':
         if isinstance(value, nnx.Intermediate):
             logger.warning("Found one, delete it!")
             delattr(module, name)
         elif isinstance(value, nnx.Module):
-            # Recurse into submodule
             remove_all_intermediate_state(value)
         elif isinstance(value, (list, tuple)):
             # Recurse into lists/tuples of modules (like nnx.Sequential)
@@ -145,40 +142,11 @@ def _get_nnx_model(
 
             model = nnx.eval_shape(abstract_model_fn)
             remove_all_intermediate_state(model)
-            # if hasattr(model, 'intermediate'):
-            #     print("Removing 'intermediate' state added by eval_shape trace...")
-            #     del model.intermediate
-            # else:
-            #     print("No 'intermediate' state found. (This is also fine)")
-
-            # params, rest = nnx.partition(model, nnx.Param)
-            # # graphdef, abstract_state = nnx.split(model)
-            # #  --- 3. Dynamically discover all variable types ---
-            # # Get a flat list of all variable *instances* in the state
-            # all_variables = jax.tree_util.tree_leaves(abstract_state, is_leaf=lambda node: isinstance(node, nnx.Variable))
-
-            # # Get the unique *types* of all those variables
-            # # This will be a set like: {nnx.Param, nnx.BatchStat, Metric, ...}
-            # all_types = set(type(v) for v in all_variables)
-
-            # # --- 4. Create the final list of types to *keep* ---
-            # # Filter the set to remove the Metric type
-            # types_to_keep = {t for t in all_types if t is not MoEMetric}
-            # logger.warning(f"types_to_keep = {types_to_keep}")
-
-            # # --- 5. Call nnx.filter with the dynamic list of types ---
-            # # The * operator unpacks the set into separate arguments for filter
-            # # e.g., nnx.filter(abstract_state, nnx.Param, nnx.BatchStat, ...)
-            # kept_state = abstract_state.filter(*types_to_keep)
-            # model = nnx.merge(graphdef, kept_state)
             quantization_config = vllm_config.model_config.hf_config.quantization_config if hasattr(
                 vllm_config.model_config.hf_config,
                 "quantization_config") else {}
-            # initialized_params = load_random_weights_into_qwix_abstract_model(
             load_random_weights_into_qwix_abstract_model(
                 rng, model, mesh, quantization_config)
-                # rng, params, mesh, quantization_config)
-            # model = nnx.merge(initialized_params, rest)
             with mesh:
                 jit_model = create_jit_model(model,
                                              use_qwix_on_abstract_model=True)

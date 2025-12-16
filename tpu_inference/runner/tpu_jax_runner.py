@@ -407,8 +407,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      tuple(self.layer_name_to_kvcache_index.items()),
                      lora_metadata,
                  )
-            # if True:
-            # if metric:
             if True:
                 metrics_cpu = to_python_types(jax.device_get(metrics))
                 metrics_path = self.vllm_config.additional_config["metrics_path"]

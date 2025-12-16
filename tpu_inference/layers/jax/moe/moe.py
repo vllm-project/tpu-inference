@@ -114,12 +114,8 @@ class MoE(nnx.Module):
         x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
         weights_TX, indices_TX = self.router(x_TD)
-        # logger.info(f"metrics type in moe.py = {self.metrics}")
-        # jax.debug.print("metrics in moe.py = {value}", value=self.metrics.get('max_load_proportion', None))
-        # if self.metrics is not None:
         if True:
             expert_counts = jnp.bincount(indices_TX.flatten(), length=self.num_local_experts)
-            # jax.debug.print("expert_counts = {value}", value=expert_counts)
             expert_max = jnp.max(expert_counts)
             expert_argmax = jnp.argmax(expert_counts)
             expert_max_proportion = expert_max / jnp.sum(expert_counts)
@@ -128,8 +124,6 @@ class MoE(nnx.Module):
                 self.sow(nnx.Intermediate, 'max_load_count_index', expert_argmax)
                 self.sow(nnx.Intermediate, 'max_load_count', expert_max)
                 self.sow(nnx.Intermediate, 'max_load_proportion', expert_max_proportion)
-            # self.metrics.value = {'max_load_proportion': expert_max_proportion}
-        # self.sow('moe_load_metrics'] = metrics
         one_hot_indices_TXE = jax.nn.one_hot(
             indices_TX, num_classes=self.num_local_experts, dtype=self.dtype)
         full_weights_TE = jnp.sum(one_hot_indices_TXE * weights_TX[..., None],
