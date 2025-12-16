@@ -3,13 +3,12 @@ from typing import Union
 import jax
 import jax.numpy as jnp
 import torch
-import torch.nn.functional as F
 from compressed_tensors.quantization import QuantizationArgs
 from jax.experimental.layout import Format, Layout
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from torch.nn.parameter import Parameter
-from torchax.interop import call_jax, jax_view, torch_view
+from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEConfig
@@ -211,79 +210,22 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         w2_weight = jax_view(layer.w2_weight)
         w13_weight_scale = jax_view(layer.w13_weight_scale)
         w2_weight_scale = jax_view(layer.w2_weight_scale)
-        # w13_bias = jax_view(layer.w13_bias)
-        # w2_bias = jax_view(layer.w2_bias)
         gating_output = jax_view(router_logits)
-        seqlen = x.shape[0]
-        use_jax = False
-        if use_jax:
-            expert_weights = F.softmax(router_logits, dim=-1)
-            expert_weights, expert_indices = torch.topk(expert_weights,
-                                                        layer.top_k,
-                                                        dim=-1)
-            if layer.renormalize:
-                expert_weights /= expert_weights.sum(dim=-1, keepdim=True)
-
-            # cond ffn
-            # e = total num of exp = 160
-            # t = seqlen
-            # o = config.imtermediate size
-            # i = config.dim
-            # torch.einsum("ti, eoi -> teo", x, layer.w13_weight) * self.w13_weight_scale)
-            ux1 = call_jax(
-                jax.lax.dot,
-                x,
-                layer.w13_weight,
-                dimension_numbers=(((1, ), (2, )), ((), ())),
-                preferred_element_type=jnp.bfloat16.dtype,
-            )
-            x1 = F.silu(ux1 * layer.w13_weight_scale.squeeze(2))
-
-            # x3 = torch.einsum("ti, eoi -> teo", x, layer.w3_weight) * self.w3_weight_scale
-            x3 = call_jax(
-                jax.lax.dot,
-                x,
-                layer.w3_weight,
-                dimension_numbers=(((1, ), (2, )), ((), ())),
-                preferred_element_type=jnp.bfloat16.dtype,
-            ) * layer.w3_weight_scale.squeeze(2)
-
-            # expert_outs = torch.einsum("teo, eio -> tei", (x1 * x3), self.w2_weight) * self.w2_weight_scale
-            expert_outs = call_jax(
-                jax.lax.dot,
-                x1 * x3,
-                layer.w2_weight,
-                dimension_numbers=(((2, ), (2, )), ((1, ), (0, ))),
-                preferred_element_type=jnp.bfloat16.dtype,
-            ).transpose(0, 1) * layer.w2_weight_scale.squeeze(2)
-
-            seq_indexes = torch.arange(seqlen, device="jax").unsqueeze(1)
-            expert_outs = expert_outs[seq_indexes, expert_indices]
-
-            # out = torch.einsum("tai,ta -> ti", expert_outs, expert_weights)
-            out = call_jax(
-                jax.lax.dot,
-                expert_outs,
-                expert_weights,
-                dimension_numbers=(((1, ), (1, )), ((0, ), (0, ))),
-                preferred_element_type=jnp.bfloat16.dtype,
-            )
-        else:
-            out = torch_view(
-                fused_moe_func(
-                    hidden_states=x,
-                    w1=w13_weight,
-                    w2=w2_weight,
-                    w1_scale=w13_weight_scale,
-                    w2_scale=w2_weight_scale,
-                    w1_bias=None,
-                    w2_bias=None,
-                    gating_output=gating_output,
-                    topk=layer.top_k,
-                    renormalize=layer.renormalize,
-                    mesh=self.mesh,
-                    use_ep=layer.use_ep,
-                    activation=layer.activation,
-                ))
+        out = torch_view(
+            fused_moe_func(
+                hidden_states=x,
+                w1=w13_weight,
+                w2=w2_weight,
+                w1_scale=w13_weight_scale,
+                w2_scale=w2_weight_scale,
+                w1_bias=None,
+                w2_bias=None,
+                gating_output=gating_output,
+                topk=layer.top_k,
+                renormalize=layer.renormalize,
+                mesh=self.mesh,
+                use_ep=layer.use_ep,
+                activation=layer.activation,
+            ))
 
         return out
