@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Tuple
 
+import copy
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -28,6 +29,7 @@ from transformers import Qwen3Config
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.models.jax.qwen3_vl import (
     Qwen3VLForConditionalGeneration,
+    Qwen3VLVisionTransformer,
     SegmentIds,
     apply_rotary_pos_emb_vision,
     generate_segment_ids_from_grid_thw,
@@ -132,7 +134,7 @@ def hf_config() -> Qwen3Config:
 
     # Enable MRoPE branch in apply_rope when positions is (3, seq_len).
     # Keep mrope_section small enough for head_dim_original (hidden/heads=16).
-    cfg.rope_scaling = {"mrope_section": [2, 2, 0]}
+    cfg.rope_scaling = {"mrope_section": [4, 2, 2]}
 
     return cfg
 
@@ -196,6 +198,33 @@ class TestMRoPEPositions:
         assert int(delta) == 0
         np.testing.assert_array_equal(positions[0], positions[1])
         np.testing.assert_array_equal(positions[1], positions[2])
+
+    def test_mrope_vision_start_at_end_does_not_crash(self, hf_config: Qwen3Config):
+        tokens = [1, 2, hf_config.vision_start_token_id]
+        positions, delta = get_mrope_input_positions(
+            input_tokens=tokens,
+            image_grid_thw=None,
+            video_grid_thw=None,
+            image_token_id=hf_config.image_token_id,
+            video_token_id=hf_config.video_token_id,
+            vision_start_token_id=hf_config.vision_start_token_id,
+            spatial_merge_size=hf_config.vision_config.spatial_merge_size,
+        )
+        assert positions.shape == (3, len(tokens))
+        assert int(delta) == 0
+
+    def test_mrope_requires_grid_when_placeholders_present(self, hf_config: Qwen3Config):
+        tokens = [hf_config.vision_start_token_id, hf_config.image_token_id]
+        with pytest.raises(ValueError, match="image_grid_thw"):
+            _ = get_mrope_input_positions(
+                input_tokens=tokens,
+                image_grid_thw=None,
+                video_grid_thw=None,
+                image_token_id=hf_config.image_token_id,
+                video_token_id=hf_config.video_token_id,
+                vision_start_token_id=hf_config.vision_start_token_id,
+                spatial_merge_size=hf_config.vision_config.spatial_merge_size,
+            )
 
     def test_mrope_single_image_3d_structure(self, hf_config: Qwen3Config):
         grid = (1, 4, 4)
@@ -285,7 +314,53 @@ class TestRopeInterface:
         assert y.dtype == x.dtype
 
 
+class TestVisionPosEmbedInterpolation:
+    def test_fast_pos_embed_interpolate_supports_rectangular_base_grid(
+        self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
+    ):
+        cfg = copy.deepcopy(vllm_config.model_config.hf_config)
+        cfg.vision_config = VisionTestConfig(
+            hidden_size=32,
+            intermediate_size=64,
+            patch_size=2,
+            image_size=(6, 8),  # 3x4 in patch space
+            temporal_patch_size=1,
+            in_channels=3,
+            spatial_merge_size=2,
+            out_hidden_size=64,
+            depth=0,  # avoid flash attention dependency in this unit test
+            num_heads=4,
+            num_position_embeddings=12,  # 3x4 grid (non-square)
+            deepstack_visual_indexes=(),
+        )
+        model_config = TestModelConfig(hf_config=cfg, dtype=vllm_config.model_config.dtype)
+        rect_vllm_config = TestVllmConfig(
+            model_config=model_config,
+            cache_config=vllm_config.cache_config,
+            additional_config=vllm_config.additional_config,
+        )
+
+        vision = Qwen3VLVisionTransformer(rect_vllm_config, nnx.Rngs(params=rng), mesh)
+        assert vision.pos_embed_grid_h != vision.pos_embed_grid_w
+
+        pos_embeds = vision.fast_pos_embed_interpolate(((1, 2, 4),))
+        assert pos_embeds.shape == (8, cfg.vision_config.hidden_size)
+
+
 class TestServingIntegration:
+    def test_text_only_forward_is_causal(
+        self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
+    ):
+        model = Qwen3VLForConditionalGeneration(vllm_config, rng, mesh)
+        input_ids_1 = jnp.array([[1, 2, 3, 4, 5, 6]], dtype=jnp.int32)
+        input_ids_2 = jnp.array([[1, 2, 3, 4, 5, 7]], dtype=jnp.int32)
+
+        out_1 = model(input_ids=input_ids_1)
+        out_2 = model(input_ids=input_ids_2)
+        np.testing.assert_allclose(
+            np.array(out_1)[:, :-1, :], np.array(out_2)[:, :-1, :], rtol=0, atol=0
+        )
+
     def test_get_mrope_input_positions_wrapper_signature_and_slicing(
         self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
