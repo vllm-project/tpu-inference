@@ -500,13 +500,7 @@ def _create_random_linear_parallel_layer(layer_type, vllm_config, mesh):
 
 
 def _get_devices():
-    devices = jax.devices()
-    if len(devices) < 8:
-        # For v7x, the smallest VM is v7x2 with 1 chips and 2 cores.
-        # IOW, len(jax.devices()) is 2.
-        # In this case, we want to test lora on a single core.
-        return devices[:1]
-    return devices
+    return jax.devices()
 
 
 def _create_mesh():
