@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 import functools
 import os
 from typing import TYPE_CHECKING, Callable, List
@@ -36,8 +37,10 @@ DEFAULT_MAX_NUM_BLOCKS_PER_REQ = 16
 
 DEFAULT_DEEPSEEK_FP8_CONFIG = {
     "qwix": {
-        "use_abstract_model": True,
-        "scale_dtype": "bfloat16",
+        "use_abstract_model":
+        True,
+        "scale_dtype":
+        "bfloat16",
         "rules": [
             # Exclude router from quantization
             {
@@ -60,14 +63,14 @@ DEFAULT_DEEPSEEK_FP8_CONFIG = {
                 "module_path": ".*.custom_module.*",
                 "weight_qtype": "float4_e2m1fn",
                 "act_qtype": "float8_e4m3fn",
-                "tile_size": 512,
+                "tile_size": 256,
             },
             # Shared experts: also FP4
             {
                 "module_path": ".*.shared_experts.*",
                 "weight_qtype": "float4_e2m1fn",
                 "act_qtype": "float8_e4m3fn",
-                "tile_size": 512,
+                "tile_size": 256,
             },
             {
                 "module_path": ".*",
@@ -422,8 +425,7 @@ def apply_qwix_on_abstract_model(vllm_config: "VllmConfig") -> bool:
 
 
 def get_default_qwix_quantization_config(
-        model_type: str, quant_method: str,
-        skip_quantization: bool) -> dict | None:
+        hf_config: dict, skip_quantization: bool) -> dict | None:
     """
     Some models are pre-quantized and in those cases, we want to return a default set of
     Qwix quantization rules (instead of forcing the user to pass in a quantization config each time).
@@ -441,10 +443,42 @@ def get_default_qwix_quantization_config(
     """
     if skip_quantization:
         return None
-    # TODO (jacobplatin): remove this so that we can support various quantization types
-    # DeepSeek: default to mixed FP8 (attention) + FP4 (MoE experts)
+    model_type = hf_config.model_type.lower() if hasattr(
+        hf_config, "model_type") else None
+    quant_method = hf_config.quantization_config["quant_method"] if hasattr(
+        hf_config, "quantization_config") else None
+    # TODO (jacobplatin): remove this so that we can support various quantization types + make
+    # more flexible
+    # NOTE (jacobplatin): we'll default to mixed FP8 (attention) + FP4 (MoE experts)
+    # for DeepSeek
     if model_type == "deepseek_v3" and quant_method == "fp8":
-        return DEFAULT_DEEPSEEK_FP8_CONFIG
+        config = copy.deepcopy(DEFAULT_DEEPSEEK_FP8_CONFIG)
+
+        # Dynamically fetch block size from HF config if available
+        # Config fmt: 'weight_block_size': [1, 512] -> we want the 2nd dim for tile_size
+        # NOTE: if the checkpoint is not 1D subchannel, we will throw an error
+        hf_quant_config = hf_config.quantization_config
+        assert "weight_block_size" in hf_quant_config, "Expected weight_block_size in quantization_config"
+        block_size = hf_quant_config["weight_block_size"]
+        if isinstance(block_size, (list, tuple)) and len(block_size) == 2:
+            assert block_size[
+                0] == 1, f"Expected first dimension to be 1 (unchanneled), but got {block_size[0]}!"
+            tile_size = block_size[1]
+            assert tile_size > 1, f"Expected tile_size > 1 for DeepSeek, but got {tile_size}"
+            logger.info(
+                f"Detected DeepSeek tile_size from config: {tile_size}")
+
+            # Update tile_size in the rules, since we might not always use a 1D subchannel size of
+            # 256
+            for rule in config["qwix"]["rules"]:
+                if "tile_size" in rule:
+                    rule["tile_size"] = tile_size
+        else:
+            raise ValueError(
+                f"Invalid weight_block_size config: {block_size}, expected a list/tuple of length 2"
+            )
+
+        return config
     elif model_type == "llama4" and quant_method == "compressed-tensors":
         return DEFAULT_LLAMA4_FP8_CONFIG
     # MXFP4 (GPT-OSS): provide a default configuration to quantize MoE experts via Qwix
@@ -463,14 +497,10 @@ def update_vllm_config_for_qwix_quantization(vllm_config: "VllmConfig"):
     # Qwix quantization config accordingly
     # NOTE: if a Qwix config is provided (via the`additional_config`), we'll
     # use that instead
-    model_type = vllm_config.model_config.hf_config.model_type.lower(
-    ) if hasattr(vllm_config.model_config.hf_config, "model_type") else None
-    quant_method = vllm_config.model_config.hf_config.quantization_config[
-        "quant_method"] if hasattr(vllm_config.model_config.hf_config,
-                                   "quantization_config") else None
+    hf_config = vllm_config.model_config.hf_config
     default_quantization_config = get_default_qwix_quantization_config(
-        model_type, quant_method,
-        vllm_config.additional_config.get("skip_quantization", False))
+        hf_config, vllm_config.additional_config.get("skip_quantization",
+                                                     False))
 
     maybe_existing_quantization_config = vllm_config.additional_config.get(
         "quantization")

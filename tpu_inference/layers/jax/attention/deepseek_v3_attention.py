@@ -52,9 +52,10 @@ class MLA(nnx.Module):
     rms_norm_eps: float
 
     # Sharding attributes
-    nhd_sharding: Sharding = ()
+    cd_sharding: Sharding = ()
     q_da_sharding: Sharding = ()
     ac_sharding: Sharding = ()
+    anh_sharding: Sharding = ()
     kv_da_sharding: Sharding = ()
 
     activation_attention_td: Sharding = ()
@@ -127,32 +128,37 @@ class MLA(nnx.Module):
             self.dtype,
             random_init=self.random_init,
         )
+        # NOTE (jacobplatin): we are keeping these variables as 3D because
+        # we would need to reshape them before the below projection,
+        # which caused issues as Qwix wasn't quantizing it correctly
+        # on the abstract pass
         if self.use_mla_kernel:
-            self.kernel_k_up_proj_AC = create_param(
+            self.kernel_k_up_proj_ANH = create_param(
                 rngs,
-                (self.kv_lora_rank, self.N * self.qk_nope_head_dim),
-                self.ac_sharding,
+                (self.kv_lora_rank, self.N, self.qk_nope_head_dim),
+                self.anh_sharding,
                 self.dtype,
                 random_init=self.random_init,
             )
-            self.kernel_v_up_proj_AC = create_param(
+            self.kernel_v_up_proj_ANH = create_param(
                 rngs,
-                (self.kv_lora_rank, self.N * self.v_head_dim),
-                self.ac_sharding,
+                (self.kv_lora_rank, self.N, self.v_head_dim),
+                self.anh_sharding,
                 self.dtype,
                 random_init=self.random_init,
             )
         else:
             self.kernel_kv_up_proj_AC = create_param(
                 rngs,
-                (self.kv_lora_rank, self.N * (self.qk_nope_head_dim + self.v_head_dim)),
+                (self.kv_lora_rank, self.N *
+                 (self.qk_nope_head_dim + self.v_head_dim)),
                 self.ac_sharding,
                 self.dtype,
                 random_init=self.random_init,
             )
         self.kernel_o_proj_CD = create_param(
             rngs, (self.N * self.v_head_dim, self.D),
-            self.nhd_sharding,
+            self.cd_sharding,
             self.dtype,
             random_init=self.random_init)
         self.q_rms_norm = RMSNorm(
@@ -210,7 +216,7 @@ class MLA(nnx.Module):
             q_TA = self.q_rms_norm(q_TA)
             # Query up projection, then reshape to TNH.
             q_TC = jnp.einsum("TA,AC -> TC", q_TA,
-                               self.kernel_q_up_proj_AC.value)
+                              self.kernel_q_up_proj_AC.value)
             q_TNH = q_TC.reshape(q_TA.shape[0], self.N, self.qk_head_dim)
             # Split the query into nope and rope.
             q_nope_TNH = q_TNH[..., :self.qk_nope_head_dim]
@@ -218,10 +224,8 @@ class MLA(nnx.Module):
             q_rope_TNH = self.rope.apply_rope(md.input_positions, q_rope_TNH)
             if self.use_mla_kernel:
                 # Absorb the k up-projection matrix into q
-                k_up_proj_ANH = self.kernel_k_up_proj_AC.value.reshape(
-                    self.kv_lora_rank, self.N, self.qk_nope_head_dim)
                 q_TNA = jnp.einsum("TNH,ANH -> TNA", q_nope_TNH,
-                                   k_up_proj_ANH)
+                                   self.kernel_k_up_proj_ANH.value)
                 q_TNA = nnx.with_sharding_constraint(q_TNA, self.query_tnh)
             else:
                 # Concatenate the nope and rope queries.
@@ -252,8 +256,9 @@ class MLA(nnx.Module):
                 # KV up projection, then reshape to SN(Hk+Hv).
                 kv_SNC = jnp.einsum("SA,AC -> SC", kv_SA,
                                     self.kernel_kv_up_proj_AC.value)
-                kv_nope_SNH = kv_SNC.reshape(kv_SA.shape[0], self.N,
-                                             self.qk_nope_head_dim + self.v_head_dim)
+                kv_nope_SNH = kv_SNC.reshape(
+                    kv_SA.shape[0], self.N,
+                    self.qk_nope_head_dim + self.v_head_dim)
                 # Split the latent kv vector into k nope vector and v vector.
                 k_nope_SNH = kv_nope_SNH[..., :self.qk_nope_head_dim]
                 v_SNH = kv_nope_SNH[..., self.qk_nope_head_dim:]
@@ -321,10 +326,8 @@ class MLA(nnx.Module):
                     attention_metadata,
                     self.mesh,
                 )
-                v_up_proj_ANH = self.kernel_v_up_proj_AC.value.reshape(
-                    self.kv_lora_rank, self.N, self.v_head_dim)
                 outputs_TNH = jnp.einsum("TNA,ANH -> TNH", outputs_TNA,
-                                         v_up_proj_ANH)
+                                         self.kernel_v_up_proj_ANH.value)
 
             with jax.named_scope("o_proj"):
                 outputs_TNH = nnx.with_sharding_constraint(
