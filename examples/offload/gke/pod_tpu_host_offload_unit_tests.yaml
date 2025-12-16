@@ -12,7 +12,7 @@ spec:
     cloud.google.com/gke-tpu-topology: 2x4 # Specify the physical topology for the TPU slice.
   containers:
   - name: tpu-job
-    image: gcr.io/gke-shared-ai-dev/tpu-inference:cpu-offload-test-30
+    image: <your-tpu-inference-container-image>
     imagePullPolicy: Always
     command:
     - /bin/bash
