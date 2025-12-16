@@ -85,6 +85,42 @@ DUMMY_METADATA = AttentionMetadata(
 )
 
 
+@dataclass
+class DPRankShardArgs:
+    """Arguments for preparing input shard for a single DP rank."""
+    dp_rank: int
+    req_ids: List[str]
+    req_indices: List[int]
+    num_scheduled_tokens_per_req: List[int]
+    total_num_scheduled_tokens: int
+    padded_num_scheduled_tokens_per_dp_rank: int
+    padded_num_reqs_per_dp_rank: int
+    max_num_reqs_per_dp_rank: int
+    input_batch_data: Tuple[np.ndarray, np.ndarray, int]
+    arange_cpu: np.ndarray
+    scheduler_output_num_scheduled_tokens: Dict[str, int]
+    block_tables_data: Dict[int, np.ndarray]
+    max_num_blocks_per_req: int
+    pre_async_placeholder_req_id_to_index: Optional[Dict[str, int]]
+    async_scheduling_enabled: bool
+
+
+@dataclass
+class DPRankShardResult:
+    """Result from preparing input shard for a single DP rank."""
+    dp_rank: int
+    input_ids: np.ndarray
+    positions: np.ndarray
+    query_start_loc: np.ndarray
+    seq_lens: np.ndarray
+    logits_indices: np.ndarray
+    block_tables: Dict[int, np.ndarray]
+    num_reqs: int
+    num_decode: int
+    token_in_tpu_cur_input_indices: List[int]
+    token_in_tpu_pre_next_tokens_indices: List[int]
+
+
 class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
     """Holds asynchronous model output specifically from a TPU runner.
 
@@ -211,18 +247,27 @@ def _jax_logprobs_to_lists(logprobs_tensors,
     )
 
 
-def _prepare_dp_rank_shard(args):
+def _prepare_dp_rank_shard(args: DPRankShardArgs):
     """Worker function to prepare input shard for a single DP rank.
     
     This function is designed to be called in parallel by multiple processes,
     each responsible for processing one DP rank's data.
     """
-    (dp_rank, req_ids, req_indices, num_scheduled_tokens_per_req,
-     total_num_scheduled_tokens, padded_num_scheduled_tokens_per_dp_rank,padded_num_reqs_per_dp_rank,
-     max_num_reqs_per_dp_rank, input_batch_data, arange_cpu,
-     scheduler_output_num_scheduled_tokens, block_tables_data,
-     max_num_blocks_per_req, pre_async_placeholder_req_id_to_index,
-     async_scheduling_enabled) = args
+    dp_rank = args.dp_rank
+    req_ids = args.req_ids
+    req_indices = args.req_indices
+    num_scheduled_tokens_per_req = args.num_scheduled_tokens_per_req
+    total_num_scheduled_tokens = args.total_num_scheduled_tokens
+    padded_num_scheduled_tokens_per_dp_rank = args.padded_num_scheduled_tokens_per_dp_rank
+    padded_num_reqs_per_dp_rank = args.padded_num_reqs_per_dp_rank
+    max_num_reqs_per_dp_rank = args.max_num_reqs_per_dp_rank
+    input_batch_data = args.input_batch_data
+    arange_cpu = args.arange_cpu
+    scheduler_output_num_scheduled_tokens = args.scheduler_output_num_scheduled_tokens
+    block_tables_data = args.block_tables_data
+    max_num_blocks_per_req = args.max_num_blocks_per_req
+    pre_async_placeholder_req_id_to_index = args.pre_async_placeholder_req_id_to_index
+    async_scheduling_enabled = args.async_scheduling_enabled
     
     if len(req_indices) == 0:
         # Return empty arrays for this DP rank
@@ -232,19 +277,19 @@ def _prepare_dp_rank_shard(args):
                 empty_block_tables[kv_cache_gid] = np.zeros(
                     (max_num_reqs_per_dp_rank, max_num_blocks_per_req), dtype=np.int32)
         
-        return {
-            'dp_rank': dp_rank,
-            'input_ids': np.zeros(padded_num_scheduled_tokens_per_dp_rank, dtype=np.int32),
-            'positions': np.zeros(padded_num_scheduled_tokens_per_dp_rank, dtype=np.int32),
-            'query_start_loc': np.zeros(max_num_reqs_per_dp_rank + 1, dtype=np.int32),
-            'seq_lens': np.zeros(max_num_reqs_per_dp_rank, dtype=np.int32),
-            'logits_indices': np.full(max_num_reqs_per_dp_rank, -1, dtype=np.int32),
-            'block_tables': empty_block_tables,
-            'num_reqs': 0,
-            'num_decode': 0,
-            'token_in_tpu_cur_input_indices': [],
-            'token_in_tpu_pre_next_tokens_indices': [],
-        }
+        return DPRankShardResult(
+            dp_rank=dp_rank,
+            input_ids=np.zeros(padded_num_scheduled_tokens_per_dp_rank, dtype=np.int32),
+            positions=np.zeros(padded_num_scheduled_tokens_per_dp_rank, dtype=np.int32),
+            query_start_loc=np.zeros(max_num_reqs_per_dp_rank + 1, dtype=np.int32),
+            seq_lens=np.zeros(max_num_reqs_per_dp_rank, dtype=np.int32),
+            logits_indices=np.full(max_num_reqs_per_dp_rank, -1, dtype=np.int32),
+            block_tables=empty_block_tables,
+            num_reqs=0,
+            num_decode=0,
+            token_in_tpu_cur_input_indices=[],
+            token_in_tpu_pre_next_tokens_indices=[],
+        )
     
     # Unpack input_batch_data
     (token_ids_cpu, num_computed_tokens_cpu, max_model_len) = input_batch_data
@@ -308,19 +353,19 @@ def _prepare_dp_rank_shard(args):
     num_decode = sum(1 for req_id in req_ids 
                      if scheduler_output_num_scheduled_tokens[req_id] == 1)
     
-    return {
-        'dp_rank': dp_rank,
-        'input_ids': input_ids,
-        'positions': positions,
-        'query_start_loc': query_start_loc,
-        'seq_lens': seq_lens,
-        'logits_indices': logits_indices,
-        'block_tables': prepared_block_tables,
-        'num_reqs': _num_reqs,
-        'num_decode': num_decode,
-        'token_in_tpu_cur_input_indices': token_in_tpu_cur_input_indices,
-        'token_in_tpu_pre_next_tokens_indices': token_in_tpu_pre_next_tokens_indices,
-    }
+    return DPRankShardResult(
+        dp_rank=dp_rank,
+        input_ids=input_ids,
+        positions=positions,
+        query_start_loc=query_start_loc,
+        seq_lens=seq_lens,
+        logits_indices=logits_indices,
+        block_tables=prepared_block_tables,
+        num_reqs=_num_reqs,
+        num_decode=num_decode,
+        token_in_tpu_cur_input_indices=token_in_tpu_cur_input_indices,
+        token_in_tpu_pre_next_tokens_indices=token_in_tpu_pre_next_tokens_indices,
+    )
 
 
 class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
@@ -1177,22 +1222,22 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Build arguments for each worker
         worker_args = []
         for dp_rank in range(dp_size):
-            args = (
-                dp_rank,
-                req_ids_dp[dp_rank],
-                req_indices_dp[dp_rank],
-                scheduled_tokens_per_dp_rank[dp_rank],
-                num_scheduled_tokens_per_dp_rank[dp_rank],
-                padded_num_scheduled_tokens_per_dp_rank,
-                padded_num_reqs_per_dp_rank,
-                max_num_reqs_per_dp_rank,
-                input_batch_data,
-                self.arange_cpu,
-                scheduler_output.num_scheduled_tokens,
-                block_tables_data,
-                self.max_num_blocks_per_req,
-                pre_async_placeholder_req_id_to_index,
-                async_scheduling_enabled,
+            args = DPRankShardArgs(
+                dp_rank=dp_rank,
+                req_ids=req_ids_dp[dp_rank],
+                req_indices=req_indices_dp[dp_rank],
+                num_scheduled_tokens_per_req=scheduled_tokens_per_dp_rank[dp_rank],
+                total_num_scheduled_tokens=num_scheduled_tokens_per_dp_rank[dp_rank],
+                padded_num_scheduled_tokens_per_dp_rank=padded_num_scheduled_tokens_per_dp_rank,
+                padded_num_reqs_per_dp_rank=padded_num_reqs_per_dp_rank,
+                max_num_reqs_per_dp_rank=max_num_reqs_per_dp_rank,
+                input_batch_data=input_batch_data,
+                arange_cpu=self.arange_cpu,
+                scheduler_output_num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
+                block_tables_data=block_tables_data,
+                max_num_blocks_per_req=self.max_num_blocks_per_req,
+                pre_async_placeholder_req_id_to_index=pre_async_placeholder_req_id_to_index,
+                async_scheduling_enabled=async_scheduling_enabled,
             )
             worker_args.append(args)
         
@@ -1201,33 +1246,33 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         
         # Concatenate results from all workers
         for result in results:
-            dp_rank = result['dp_rank']
+            dp_rank = result.dp_rank
             token_offset = padded_num_scheduled_tokens_per_dp_rank * dp_rank
             req_offset = dp_rank * max_num_reqs_per_dp_rank
             query_loc_req_offset = dp_rank * (max_num_reqs_per_dp_rank + 1)
             logits_indices_offset = dp_rank * padded_num_reqs_per_dp_rank
             # Copy input_ids and positions
             token_end = token_offset + padded_num_scheduled_tokens_per_dp_rank
-            self.input_ids_cpu[token_offset:token_end] = result['input_ids']
-            self.positions_cpu[token_offset:token_end] = result['positions']
+            self.input_ids_cpu[token_offset:token_end] = result.input_ids
+            self.positions_cpu[token_offset:token_end] = result.positions
             
             # Copy attention metadata
             query_loc_end = query_loc_req_offset + max_num_reqs_per_dp_rank + 1
-            self.query_start_loc_cpu[query_loc_req_offset:query_loc_end] = result['query_start_loc']
+            self.query_start_loc_cpu[query_loc_req_offset:query_loc_end] = result.query_start_loc
             
             req_end = req_offset + max_num_reqs_per_dp_rank
-            self.seq_lens_cpu[req_offset:req_end] = result['seq_lens']
+            self.seq_lens_cpu[req_offset:req_end] = result.seq_lens
             
             # Copy logits_indices
             padded_req_end = logits_indices_offset + padded_num_reqs_per_dp_rank
-            self.logits_indices_cpu[logits_indices_offset:padded_req_end] = result['logits_indices'][:padded_num_reqs_per_dp_rank]
+            self.logits_indices_cpu[logits_indices_offset:padded_req_end] = result.logits_indices[:padded_num_reqs_per_dp_rank]
             # Copy block tables for each KV cache group
-            for kv_cache_gid, block_table_shard in result['block_tables'].items():
+            for kv_cache_gid, block_table_shard in result.block_tables.items():
                 self.block_tables_cpu[kv_cache_gid][req_offset:req_end, :] = block_table_shard
             
             # Collect async token substitution indices
-            token_in_tpu_cur_input_indices_dp[dp_rank] = result['token_in_tpu_cur_input_indices']
-            token_in_tpu_pre_next_tokens_indices_dp[dp_rank] = result['token_in_tpu_pre_next_tokens_indices']
+            token_in_tpu_cur_input_indices_dp[dp_rank] = result.token_in_tpu_cur_input_indices
+            token_in_tpu_pre_next_tokens_indices_dp[dp_rank] = result.token_in_tpu_pre_next_tokens_indices
 
     def _prepare_dp_input_metadata(self,
                                    scheduler_output: DPSchedulerOutput):
