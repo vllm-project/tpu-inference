@@ -34,7 +34,6 @@ class VllmCompressedTensorsMoEMethod(CompressedTensorsMoEMethod):
         layer: torch.nn.Module,
         layer_name: str,
     ) -> CompressedTensorsMoEMethod:
-
         assert isinstance(layer, FusedMoE)
 
         # FusedMoE was made by combining multiple Linears so need to
@@ -73,20 +72,24 @@ class VllmCompressedTensorsMoEMethod(CompressedTensorsMoEMethod):
 class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
                                             JaxCommonConfig):
 
-    def __init__(self, weight_quant: QuantizationArgs,
-                 input_quant: QuantizationArgs, moe: FusedMoEConfig,
-                 mesh: Mesh):
+    def __init__(
+        self,
+        weight_quant: QuantizationArgs,
+        input_quant: QuantizationArgs,
+        moe: FusedMoEConfig,
+        mesh: Mesh,
+    ):
         super().__init__(weight_quant, input_quant, moe)
         self.mesh = mesh
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """
         Docstring for process_weights_after_loading
-        
+
         :param self: Description
         :param layer: Description
         :type layer: torch.nn.Module
-        
+
         Steps:
         1. Read weights from layer object and convert to jax arrays
         2. Interleave concat w13 weights
@@ -128,13 +131,15 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
             w13_weight,
             split_sizes=(intermediate_size, intermediate_size),
             dim=1,
-            n_shards=n_shards)
+            n_shards=n_shards,
+        )
         # Interleave concat w13 weight scales
         w13_weight_scale = reorder_concatenated_tensor_for_sharding(
             w13_weight_scale,
             split_sizes=(intermediate_size, intermediate_size),
             dim=1,
-            n_shards=n_shards)
+            n_shards=n_shards,
+        )
 
         # 160,5120,1 -> 160,1,5120
         w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
@@ -144,15 +149,13 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         # Shard weights for tp (rowwise w13, colwise w2)
         w13_format = Format(
             Layout((0, 1, 2)),  # expert, 2xintermed, input
-            NamedSharding(self.mesh,
-                          P(None, "model",
-                            None)))  # rowwise sharding on intermed dim
+            NamedSharding(self.mesh, P(None, "model", None)),
+        )  # rowwise sharding on intermed dim
 
         w13_scale_format = Format(
             Layout((0, 1, 2, 3)),  #  (num_experts, num_blocks, 1, outer_dim)
-            NamedSharding(self.mesh,
-                          P(None, None, None,
-                            "model")))  # col wise GMM sharding on intermed dim
+            NamedSharding(self.mesh, P(None, None, None, "model")),
+        )  # col wise GMM sharding on intermed dim
 
         # Local shard shape: (num_experts, 2 x (intermediate_size // n_shards), input_size)
         w13_weight = jax.device_put(w13_weight, w13_format)
@@ -162,7 +165,8 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         # Shard weights for tp (colwise w2)
         w2_format = Format(
             Layout((0, 1, 2)),  # expert, intermed, hidden
-            NamedSharding(self.mesh, P(None, None, "model")))
+            NamedSharding(self.mesh, P(None, None, "model")),
+        )
         # Local shard shape: (num_experts, hidden, (intermediate_size // n_shards))
         # #  (num_experts, num_blocks, 1, outer_dim)
         w2_weight = jax.device_put(w2_weight, w2_format)
@@ -170,7 +174,8 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         w2_weight_scale = jnp.expand_dims(w2_weight_scale, 2)
         w2_scale_format = Format(
             Layout((0, 1, 2, 3)),  # expert, intermed, 1
-            NamedSharding(self.mesh, P(None, None, None, None)))
+            NamedSharding(self.mesh, P(None, None, None, None)),
+        )
         # Local shard shape: (num_experts, intermediate_size // n_shards, 1)
         w2_weight_scale = jax.device_put(w2_weight_scale, w2_scale_format)
 
@@ -224,40 +229,45 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
             # t = seqlen
             # o = config.imtermediate size
             # i = config.dim
-            #torch.einsum("ti, eoi -> teo", x, layer.w13_weight) * self.w13_weight_scale)
-            ux1 = call_jax(jax.lax.dot,
-                           x,
-                           layer.w13_weight,
-                           dimension_numbers=(((1, ), (2, )), ((), ())),
-                           preferred_element_type=jnp.bfloat16.dtype)
+            # torch.einsum("ti, eoi -> teo", x, layer.w13_weight) * self.w13_weight_scale)
+            ux1 = call_jax(
+                jax.lax.dot,
+                x,
+                layer.w13_weight,
+                dimension_numbers=(((1, ), (2, )), ((), ())),
+                preferred_element_type=jnp.bfloat16.dtype,
+            )
             x1 = F.silu(ux1 * layer.w13_weight_scale.squeeze(2))
 
-            #x3 = torch.einsum("ti, eoi -> teo", x, layer.w3_weight) * self.w3_weight_scale
-            x3 = call_jax(jax.lax.dot,
-                          x,
-                          layer.w3_weight,
-                          dimension_numbers=(((1, ), (2, )), ((), ())),
-                          preferred_element_type=jnp.bfloat16.dtype
-                          ) * layer.w3_weight_scale.squeeze(2)
+            # x3 = torch.einsum("ti, eoi -> teo", x, layer.w3_weight) * self.w3_weight_scale
+            x3 = call_jax(
+                jax.lax.dot,
+                x,
+                layer.w3_weight,
+                dimension_numbers=(((1, ), (2, )), ((), ())),
+                preferred_element_type=jnp.bfloat16.dtype,
+            ) * layer.w3_weight_scale.squeeze(2)
 
-            #expert_outs = torch.einsum("teo, eio -> tei", (x1 * x3), self.w2_weight) * self.w2_weight_scale
+            # expert_outs = torch.einsum("teo, eio -> tei", (x1 * x3), self.w2_weight) * self.w2_weight_scale
             expert_outs = call_jax(
                 jax.lax.dot,
                 x1 * x3,
                 layer.w2_weight,
                 dimension_numbers=(((2, ), (2, )), ((1, ), (0, ))),
-                preferred_element_type=jnp.bfloat16.dtype).transpose(
-                    0, 1) * layer.w2_weight_scale.squeeze(2)
+                preferred_element_type=jnp.bfloat16.dtype,
+            ).transpose(0, 1) * layer.w2_weight_scale.squeeze(2)
 
-            seq_indexes = torch.arange(seqlen, device='jax').unsqueeze(1)
+            seq_indexes = torch.arange(seqlen, device="jax").unsqueeze(1)
             expert_outs = expert_outs[seq_indexes, expert_indices]
 
             # out = torch.einsum("tai,ta -> ti", expert_outs, expert_weights)
-            out = call_jax(jax.lax.dot,
-                           expert_outs,
-                           expert_weights,
-                           dimension_numbers=(((1, ), (1, )), ((0, ), (0, ))),
-                           preferred_element_type=jnp.bfloat16.dtype)
+            out = call_jax(
+                jax.lax.dot,
+                expert_outs,
+                expert_weights,
+                dimension_numbers=(((1, ), (1, )), ((0, ), (0, ))),
+                preferred_element_type=jnp.bfloat16.dtype,
+            )
         else:
             out = torch_view(
                 fused_moe_func(

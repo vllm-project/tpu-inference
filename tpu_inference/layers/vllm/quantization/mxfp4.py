@@ -49,8 +49,8 @@ def align_to(a, b):
 # TODO(kyuyeunk): Move these functions into a common utility file.
 def u8_unpack_e2m1(u8_packed_e2m1: jax.Array) -> jax.Array:
     """
-    Unpack array of 8 bit slots with 2 fp4e2m1 value in each 
-    slot from uint8 array of 8 bit slots into fp4e2m1 array. 
+    Unpack array of 8 bit slots with 2 fp4e2m1 value in each
+    slot from uint8 array of 8 bit slots into fp4e2m1 array.
     of 8 bit slots with 1 fp4e2m1 number in each slot.
     """
     assert u8_packed_e2m1.dtype == jnp.uint8, f"got dtype {u8_packed_e2m1.dtype}"
@@ -74,10 +74,12 @@ def e8m0_to_fp32(u8: jax.Array) -> jax.Array:
     return jnp.ldexp(ones, exponents)
 
 
-def dequantize_block_weight(weight: jax.Array,
-                            scale: jax.Array,
-                            block_size: int,
-                            out_dtype: jnp.dtype = jnp.bfloat16) -> jax.Array:
+def dequantize_block_weight(
+    weight: jax.Array,
+    scale: jax.Array,
+    block_size: int,
+    out_dtype: jnp.dtype = jnp.bfloat16,
+) -> jax.Array:
     orig_shape = weight.shape
     weight_block = weight.reshape(orig_shape[:-1] + (-1, block_size))
     weight_dequantized = weight_block.astype(jnp.float32) * jnp.expand_dims(
@@ -152,7 +154,7 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
     def __init__(self,
                  moe: FusedMoEConfig,
                  mesh: Mesh,
-                 ep_axis_name: str = 'model'):
+                 ep_axis_name: str = "model"):
         FusedMoEMethodBase.__init__(self, moe)
 
         # We piggyback on triton implementation as it applies minimal hardware
@@ -369,21 +371,36 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
                         NamedSharding(self.mesh, P(None, None, "model")))
                     w13_weight_scale = jax.lax.with_sharding_constraint(
                         w13_weight_scale,
-                        NamedSharding(self.mesh, P(None, None, None, "model")))
+                        NamedSharding(self.mesh, P(None, None, None, "model")),
+                    )
                     w2_weight_scale = jax.lax.with_sharding_constraint(
                         w2_weight_scale,
-                        NamedSharding(self.mesh, P(None, "model", None, None)))
+                        NamedSharding(self.mesh, P(None, "model", None, None)),
+                    )
                     w13_bias = jax.lax.with_sharding_constraint(
                         w13_bias,
                         NamedSharding(self.mesh, P(None, None, "model")))
                     w2_bias = jax.lax.with_sharding_constraint(
                         w2_bias, NamedSharding(self.mesh, P(None, None, None)))
 
-            return w13_weight, w13_weight_scale, w13_bias, w2_weight, w2_weight_scale, w2_bias
+            return (
+                w13_weight,
+                w13_weight_scale,
+                w13_bias,
+                w2_weight,
+                w2_weight_scale,
+                w2_bias,
+            )
 
-        w13_weight, w13_weight_scale, w13_bias, w2_weight, w2_weight_scale, w2_bias = wrapper(
-            w13_weight, w13_weight_scale, w13_bias, w2_weight, w2_weight_scale,
-            w2_bias)
+        w13_weight, w13_weight_scale, w13_bias, w2_weight, w2_weight_scale, w2_bias = (
+            wrapper(
+                w13_weight,
+                w13_weight_scale,
+                w13_bias,
+                w2_weight,
+                w2_weight_scale,
+                w2_bias,
+            ))
 
         layer.w13_weight = Parameter(torch_view(w13_weight),
                                      requires_grad=False)
