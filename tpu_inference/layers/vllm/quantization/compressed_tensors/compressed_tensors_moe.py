@@ -125,20 +125,21 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         assert w13_weight_scale.shape == (num_experts, 2 * intermediate_size,
                                           1)
 
-        # Interleave concat w13 weights
-        w13_weight = reorder_concatenated_tensor_for_sharding(
-            w13_weight,
-            split_sizes=(intermediate_size, intermediate_size),
-            dim=1,
-            n_shards=n_shards,
-        )
-        # Interleave concat w13 weight scales
-        w13_weight_scale = reorder_concatenated_tensor_for_sharding(
-            w13_weight_scale,
-            split_sizes=(intermediate_size, intermediate_size),
-            dim=1,
-            n_shards=n_shards,
-        )
+        if not layer.use_ep:
+            # Interleave concat w13 weights
+            w13_weight = reorder_concatenated_tensor_for_sharding(
+                w13_weight,
+                split_sizes=(intermediate_size, intermediate_size),
+                dim=1,
+                n_shards=n_shards,
+            )
+            # Interleave concat w13 weight scales
+            w13_weight_scale = reorder_concatenated_tensor_for_sharding(
+                w13_weight_scale,
+                split_sizes=(intermediate_size, intermediate_size),
+                dim=1,
+                n_shards=n_shards,
+            )
 
         # 160,5120,1 -> 160,1,5120
         w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
