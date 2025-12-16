@@ -1219,8 +1219,9 @@ class TPUOffloadConnectorWorker:
 
         self.cpu_chunk_size = self.block_size
         # Thread pool for asynchronous TPU->CPU copies
+        self.num_save_threads = envs.TPU_OFFLOAD_SAVE_THREADS
         self.save_executor = ThreadPoolExecutor(
-            max_workers=4, thread_name_prefix="tpu_save_handler")
+            max_workers=self.num_save_threads, thread_name_prefix="tpu_save_handler")
         self.finished_save_reqs: set[ReqId] = set()
         self.finished_load_reqs: set[ReqId] = set()
         # Tracks if wait_for_save has been called for the current step's metadata.
