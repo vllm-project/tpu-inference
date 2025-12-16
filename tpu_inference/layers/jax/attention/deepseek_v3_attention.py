@@ -345,12 +345,12 @@ class MLA(nnx.Module):
                                          self.kernel_v_up_proj_ANH.value)
 
             with jax.named_scope("o_proj"):
-                outputs_TNH = nnx.with_sharding_constraint(
-                    outputs_TNH, self.activation_attention_out_td)
                 outputs_TR = outputs_TNH.reshape(outputs_TNH.shape[0],
                                                  self.N * self.v_head_dim)
                 o_TD = jnp.einsum("TR,RD -> TD", outputs_TR,
                                   self.kernel_o_proj_RD.value)
+                o_TD = nnx.with_sharding_constraint(
+                    o_TD, self.activation_attention_out_td)
 
             return new_kv_cache, o_TD
 
