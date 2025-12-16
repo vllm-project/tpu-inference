@@ -2,9 +2,17 @@
 """
 2D (Block-wise) Quantized Matrix Multiplication Kernel.
 
-This kernel implements 'Block-wise' quantization, where independent scaling factors
-are calculated for small groups of input features (e.g., every 128 elements). 
-This yields higher accuracy than standard row-wise quantization.
+Architecture:
+  - Read-Quantize-Compute loop.
+  - Weights are pre-quantized (offline).
+  - Activations are quantized dynamically (online) in the VPU.
+  - Accumulation happens in FP32.
+
+TPU Hardware Mapping:
+  - HBM: Stores inputs (BF16) and compressed weights (Int8/FP8).
+  - VMEM: Caches blocks of data (CACHE_LOAD_SIZE).
+  - VPU: Performs dynamic quantization (Cast -> Max -> Scale -> Clip).
+  - MXU: Performs dot_product.
 """
 
 import functools
