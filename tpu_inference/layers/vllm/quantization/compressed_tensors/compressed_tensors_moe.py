@@ -9,19 +9,19 @@ from jax.experimental.layout import Format, Layout
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from torch.nn.parameter import Parameter
-from torchax.interop import call_jax, torch_view, jax_view
+from torchax.interop import call_jax, jax_view, torch_view
 from torchax.ops.mappings import t2j
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
     CompressedTensorsMoEMethod, CompressedTensorsW8A8Fp8MoEMethod)
 
-from tpu_inference.layers.vllm.quantization.common import JaxCommonConfig
+from tpu_inference.layers.vllm.fused_moe import fused_moe_func
 from tpu_inference.layers.vllm.linear_common import \
     reorder_concatenated_tensor_for_sharding
+from tpu_inference.layers.vllm.quantization.common import JaxCommonConfig
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedFusedMoEMethod
-from tpu_inference.layers.vllm.fused_moe import fused_moe_func
 
 logger = init_logger(__name__)
 
