@@ -1354,7 +1354,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         token_in_tpu_cur_input_indices_dp,
         token_in_tpu_pre_next_tokens_indices_dp
     ):
-        """Prepare DP inputs using multiprocessing for parallel execution."""
+        """Prepare DP inputs using multiprocessing for parallel execution.
+        
+        Returns:
+            Dictionary mapping dp_rank to (num_reqs, num_decode) tuple
+        """
 
         # Prepare block table data for all KV cache groups
         block_tables_data = {}
@@ -1388,9 +1392,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Process all DP ranks in parallel
         results = self._mp_pool.map(_prepare_dp_rank_shard, worker_args)
         
+        # Store rank statistics for later use
+        rank_stats = {}
+        
         # Concatenate results from all workers
         for result in results:
             dp_rank = result.dp_rank
+            
+            # Store statistics from this rank
+            rank_stats[dp_rank] = (result.num_reqs, result.num_decode)
             
             # Calculate offsets
             token_offset = padded_num_scheduled_tokens_per_dp_rank * dp_rank
@@ -1420,6 +1430,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # Populate async token substitution indices
             token_in_tpu_cur_input_indices_dp[dp_rank] = result.token_in_tpu_cur_input_indices
             token_in_tpu_pre_next_tokens_indices_dp[dp_rank] = result.token_in_tpu_pre_next_tokens_indices
+        
+        return rank_stats
 
     def _calculate_dp_padding(
         self,
@@ -1565,8 +1577,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if async_scheduling_enabled:
             pre_async_placeholder_req_id_to_index = self._pre_async_results.placeholder_req_id_to_index
 
-        # Dispatch work to multiprocessing pool
-        self._prepare_inputs_dp_parallel(
+        # Dispatch work to multiprocessing pool and collect statistics
+        rank_stats = self._prepare_inputs_dp_parallel(
             dp_size, req_ids_dp, req_indices_dp,
             scheduled_tokens_per_dp_rank, num_scheduled_tokens_per_dp_rank,
             padded_num_scheduled_tokens_per_dp_rank, max_num_reqs_per_dp_rank,
@@ -1593,17 +1605,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + dp_size]
         seq_lens = self.seq_lens_cpu[:self.max_num_reqs]
 
-        # Build request distribution for attention metadata
+        # Build request distribution for attention metadata using pre-computed values
         _request_distribution = []
         for dp_rank in range(dp_size):
-            _num_reqs = num_req_per_dp_rank[dp_rank]
-            # Count decode requests (those with num_scheduled_tokens == 1)
-            num_decode_in_dp_rank = sum(
-                1 for req_id in req_ids_dp[dp_rank]
-                if scheduler_output.num_scheduled_tokens[req_id] == 1
-            )
+            num_reqs_in_rank, num_decode_in_rank = rank_stats[dp_rank]
             _request_distribution.append(
-                [num_decode_in_dp_rank, num_decode_in_dp_rank, _num_reqs])
+                [num_decode_in_rank, num_decode_in_rank, num_reqs_in_rank])
         request_distribution = np.array(_request_distribution).ravel()
 
         use_spec_decode = len(
