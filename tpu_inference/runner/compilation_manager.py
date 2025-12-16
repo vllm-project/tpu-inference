@@ -1,6 +1,5 @@
-import os
 import time
-from typing import TYPE_CHECKING, Any, Callable, Dict
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -17,6 +16,7 @@ from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import device_array
+import os
 
 if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
@@ -222,7 +222,8 @@ class CompilationManager:
 
         for num_tokens in self.runner.num_tokens_paddings:
             dp_sharding = NamedSharding(
-                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
+                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, )
+            ) if self.runner.vllm_config.sharding_config.total_dp_size > 1 else None
 
             for num_reqs in self.runner.num_reqs_paddings:
                 padded_token_in_tpu_cur_input_indices = np.zeros(
@@ -259,7 +260,8 @@ class CompilationManager:
     def _precompile_backbone_text_only(self) -> None:
         for num_tokens in self.runner.num_tokens_paddings:
             dp_sharding = NamedSharding(
-                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
+                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, )
+            ) if self.runner.vllm_config.sharding_config.total_dp_size > 1 else None
 
             input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32,
                                                   dp_sharding)
@@ -792,8 +794,8 @@ class CompilationManager:
             (dummy_require_struct_decoding,
              dummy_grammar_bitmask, arange) = device_array(
                  self.runner.mesh,
-                 (dummy_require_struct_decoding, dummy_grammar_bitmask,
-                  self.runner.structured_decode_arange))
+                 (dummy_require_struct_decoding,
+                  dummy_grammar_bitmask, self.runner.structured_decode_arange))
 
             self._run_compilation(
                 "structured_decode",
