@@ -496,14 +496,6 @@ def _ragged_paged_attention_kernel(
         debug_print("[RPA debug] bkv_p_frm_cache={}", bkv_p_frm_cache)
         debug_print("[RPA debug] bkv_sz_frm_new={}", bkv_sz_frm_new)
         debug_print("[RPA debug] page_indices_offset={}", page_indices_offset)
-        # NOTE(chengjiyao): This condition is true for the first two (seq_idx,
-        # bkv_idx) pairs, which are (0, 0) and either (0, 1) or (1, 0). We need to
-        # ensure the bkv_x2_ref VMEM buffer is fully initialized to avoid potential
-        # NaN values in regions not overwritten by actual data. This is done by
-        # padding the remaining parts of the buffer with data from the KV cache.
-        # This special handling is only strictly necessary until both buffers in
-        # the double buffer (bkv_x2_ref) have been written to at least once.
-        is_first_two_bkv_fetches = seq_idx + bkv_idx < 2
 
         if not wait:
             # Fetch effective kv from kv cache.
@@ -539,23 +531,10 @@ def _ragged_paged_attention_kernel(
                 wait,
             )
 
-            @pl.when(is_first_two_bkv_fetches)
-            def _make_sure_bkv_vmem_is_not_nan():
-                effective_sz = offset + bkv_sz_frm_new
-                remaining_sz = bkv_sz - effective_sz
-                _async_copy(
-                    cache_hbm_ref.at[pl.ds(0, remaining_sz)],
-                    vmem_ref.at[pl.ds(effective_sz, remaining_sz)],
-                    sem,
-                    wait,
-                )
-
             return kv_len_start + offset, bkv_sz_frm_new
         else:
             offset = jnp.minimum(kv_left_frm_cache, page_size * bkv_p)
-            sz = lax.select(is_first_two_bkv_fetches, bkv_sz,
-                            offset + bkv_sz_frm_new)
-            dst = vmem_ref.at[pl.ds(0, sz)]
+            dst = vmem_ref.at[pl.ds(0, offset + bkv_sz_frm_new)]
             _async_copy(
                 src=dst,
                 dst=dst,
@@ -744,7 +723,7 @@ def _ragged_paged_attention_kernel(
         vec = ref[start::step]
         return vec
 
-    def strided_load_bkv(bkv_sem_idx, start, step):
+    def strided_load_bkv(bkv_sem_idx, start, step, *, bkv_mask):
         assert start % kv_packing == 0
         assert step % kv_packing == 0
         start //= kv_packing
@@ -753,6 +732,7 @@ def _ragged_paged_attention_kernel(
             bkv_sz * step, actual_head_dim_x2))
 
         kv = strided_load(kv_ref, start, step)
+        kv = lax.select(bkv_mask, kv, jnp.zeros_like(kv))
         bitwidth = 32 // kv_packing
         repack_ty = jnp.dtype(f"uint{bitwidth}")
         lst = []
@@ -826,6 +806,10 @@ def _ragged_paged_attention_kernel(
             def compute_with_bkv(bkv_idx, _):
                 # Create bitmask for KV.
                 assert bkv_sz % kv_packing == 0
+                actual_bkv_sz = jnp.minimum(bkv_sz, kv_len - bkv_idx * bkv_sz)
+                bkv_shape = (bkv_sz, actual_head_dim_x2)
+                bkv_mask = lax.broadcasted_iota(jnp.int32, bkv_shape,
+                                                0) < actual_bkv_sz
 
                 # Get next bkv ids.
                 bkv_sem_idx = sem_ids_ref[1]
@@ -875,6 +859,7 @@ def _ragged_paged_attention_kernel(
                         bkv_sem_idx,
                         kv_head_start,
                         num_kv_heads,
+                        bkv_mask=bkv_mask,
                     )
                     assert len(bkv_lst) == kv_packing
                     for i in range(kv_packing):
@@ -1460,12 +1445,6 @@ def ragged_paged_attention_hd64(
             max_num_tokens,
             pages_per_seq,
         )
-
-    bq_sz = 16
-    bkv_p = 16
-    if sliding_window is not None:
-        bkv_p = 4
-
     bkv_sz = bkv_p * page_size
     if vmem_limit_bytes is None:
         # TODO (jevinjiang/jacobplatin): change this to use
