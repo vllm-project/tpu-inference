@@ -540,7 +540,11 @@ def get_random_sharded_array(key: PRNGKey, mesh: Mesh, param: nnx.Param,
         maxval = jnp.array(jnp.iinfo(dtype).max, dtype=dtype)
         weight = jax.random.randint(key, param_shape, minval, maxval, dtype)
     else:
-        weight = jax.random.normal(key, param_shape, dtype)
+        if dtype != "float4_e2m1fn":
+            weight = jax.random.normal(key, param_shape, dtype)
+        else:
+            weight = jax.random.normal(key, param_shape,
+                                       jnp.float8_e4m3fn).astype(dtype)
 
     def get_slice(index):
         return weight[index]
