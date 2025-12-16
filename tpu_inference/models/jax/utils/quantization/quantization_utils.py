@@ -550,8 +550,8 @@ def get_random_sharded_array(key: PRNGKey, mesh: Mesh, param: nnx.Param,
         return weight[index]
 
     try:
-        print("This is mesh: ", mesh)
-        print("This is param.sharding: ", param.sharding)
+        #print("This is mesh: ", mesh)
+        #print("This is param.sharding: ", param.sharding)
         sharded_array = jax.make_array_from_callback(
             param_shape, NamedSharding(mesh, P(*param.sharding)), get_slice)
     except (ValueError, TypeError):
@@ -588,8 +588,10 @@ def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
     assert len(
         quantization_block_sizes
     ) == 2, f"Expected only 2 quantization block sizes but got {quantization_block_sizes}"
-    quantization_block_size_n, _ = quantization_block_sizes[
+    _, quantization_block_size_k = quantization_block_sizes[
         0], quantization_block_sizes[1]
+
+    print("this is quantization_block_size_k: ", quantization_block_size_k)
 
     # Iterate through all variables and initialize them
     prev_param_shape = None
@@ -605,10 +607,24 @@ def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
         param_shape = param.value.shape
         # TODO (jacobplatin): clean this up
         if is_qwix_scale:
-            param_shape = scale_shape_map.get(
-                path[3],
-                tuple(dim // quantization_block_size_n
-                      for dim in prev_param_shape))
+            if path[3] in scale_shape_map:
+                param_shape = scale_shape_map[path[3]]
+            else:
+                shape_list = list(prev_param_shape)
+                if path[2] == 'attn':
+                    # For attention layers, divide the first dimension
+                    shape_list[0] //= quantization_block_size_k
+                elif path[2] == 'custom_module':
+                    if len(shape_list) == 2:
+                        # FFW, divide the first dimension
+                        shape_list[0] //= quantization_block_size_k
+                    elif len(shape_list) == 3:
+                        # MoE, divide the middle dimension
+                        shape_list[1] //= quantization_block_size_k
+                param_shape = tuple(shape_list)
+        print("this is param_shape: ", param_shape)
+        print("this is param_dtype: ", param_dtype)
+        print("this is path: ", path)
         param.value = get_random_sharded_array(
             rng, mesh, param, param_shape, param_dtype,
             ".".join([str(x) for x in path]))
