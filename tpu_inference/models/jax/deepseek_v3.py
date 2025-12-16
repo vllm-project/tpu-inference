@@ -544,11 +544,16 @@ class DeepSeekV3WeightLoader:
             # assert self.quantization_block_size_n == self.quantization_block_size_k, "Quantization block size n and k must be the same!"
             # NOTE: this is only needed for pre-quantized models
             self._scale_shape_map = {
-                "q_b_proj": (1, qk_nope_head_dim + qk_rope_head_dim,
-                             q_lora_rank // self.quantization_block_size_n),
-                "kv_b_proj": (attn_heads, (qk_nope_head_dim + v_head_dim) //
-                              self.quantization_block_size_n,
-                              kv_lora_rank // self.quantization_block_size_n),
+                "q_b_proj": (attn_heads, qk_nope_head_dim + qk_rope_head_dim,
+                             max(1, q_lora_rank // 256)),
+                "kv_b_proj": (attn_heads, qk_nope_head_dim + v_head_dim,
+                              max(1, kv_lora_rank // 256)),
+                "o_proj": (hidden_size, attn_heads, max(1, v_head_dim // 256)),
+                # "q_b_proj": (1, qk_nope_head_dim + qk_rope_head_dim,
+                #              q_lora_rank // self.quantization_block_size_n),
+                # "kv_b_proj": (attn_heads, (qk_nope_head_dim + v_head_dim) //
+                #               self.quantization_block_size_n,
+                #               kv_lora_rank // self.quantization_block_size_n),
                 # used for MLA kernel
                 "k_b_proj":
                 (attn_heads,
@@ -558,46 +563,43 @@ class DeepSeekV3WeightLoader:
                 "v_b_proj":
                 (attn_heads, v_head_dim // self.quantization_block_size_n,
                  kv_lora_rank // self.quantization_block_size_n),
-                "o_proj":
-                (hidden_size // self.quantization_block_size_n, attn_heads,
-                 v_head_dim // self.quantization_block_size_n),
+                # "o_proj":
+                # (hidden_size // self.quantization_block_size_n, attn_heads,
+                #  v_head_dim // self.quantization_block_size_n),
             }
             # NOTE: this is only needed for pre-quantized models when doing random weight loading
-            # TODO (jacobplatin): remove or clean this up
             self.scale_shap_map_for_random_weight_loading = {
-                # "model.layers.*.self_attn.kv_a_proj_with_mqa.weight":
-                # "layers.*.attn.kernel_kv_down_proj_DA",
-                "kernel_kv_down_proj_DA": (
-                    28, 576
-                ),  #check the quant analysis spreadsheet for correct values. it might be this (576, 28). make sure transpose/reshape is correct
-                # "model.layers.*.self_attn.kv_b_proj.weight":
-                # "layers.*.attn.kernel_kv_up_proj_ANH"
+                "kernel_kv_down_proj_DA": (28, 576),
                 "kernel_kv_up_proj_ANH": (
-                    512, 128, 256
-                ),  #(2, 32768),  #ValueError: Scale (2, 32768) should have the same rank as qvalue (512, 128, 256).
-                # "model.layers.*.self_attn.q_b_proj.weight":
-                # "layers.*.attn.kernel_q_up_proj_ANH",
+                    2,
+                    128,
+                    256,
+                ),
                 "kernel_q_up_proj_ANH": (
-                    1536, 128, 192
-                ),  #(6, 24576),  #ValueError: Scale (6, 24576) should have the same rank as qvalue (1536, 128, 192).
-                # "model.layers.*.self_attn.o_proj.weight":
-                # "layers.*.attn.kernel_o_proj_NHD",
+                    6,
+                    128,
+                    192,
+                ),
                 "kernel_o_proj_NHD": (
-                    128, 128, 7168
-                ),  #(64, 7168), # ValueError: Scale (64, 7168) should have the same rank as qvalue (128, 128, 7168).
-                # (refer to quantization analysis sheet and replace corresponding dimensions) https://docs.google.com/spreadsheets/d/1MMS_jirZT-J-JIEvGud6XqaB8lPZXWMbw2_V5DNPhRg/edit?resourcekey=0-L8JUfg7MR5lpZRGnSnaN_g&gid=1441289540#gid=1441289540
-                # "model.layers.*.mlp.experts.*.down_proj.weight":
-                # "layers.*.custom_module.kernel_down_proj_EFD",
-                "kernel_down_proj_EFD":
-                (256, 8, 7168),  #last two dims should change
-                # "model.layers.*.mlp.experts.*.up_proj.weight":
-                # "layers.*.custom_module.kernel_up_proj_EDF",
-                "kernel_up_proj_EDF":
-                (256, 28, 2048),  #last two dims should change
-                # "model.layers.*.mlp.experts.*.gate_proj.weight":
-                # "layers.*.custom_module.kernel_gating_EDF",
-                "kernel_gating_EDF":
-                (256, 28, 2048),  #last two dims should change
+                    128,
+                    1,
+                    7168,
+                ),
+                "kernel_down_proj_EFD": (
+                    256,
+                    8,
+                    7168,
+                ),
+                "kernel_up_proj_EDF": (
+                    256,
+                    28,
+                    2048,
+                ),
+                "kernel_gating_EDF": (
+                    256,
+                    28,
+                    2048,
+                ),
             }
 
             # "q_b_proj": (attn_heads, qk_nope_head_dim + qk_rope_head_dim,
@@ -729,8 +731,11 @@ class DeepSeekV3WeightLoader:
         if scale is not None:
             scale = reshape_params(name, scale, self._scale_shape_map)
         weight_np = self._transpose_params(name, weight_np)
+        print("This is weight/scale name: ", name)
+        print("This is weight shape: ", weight_np.shape)
         if scale is not None:
             scale = self._transpose_params(name, scale)
+            print("This is scale shape: ", scale.shape)
             weight_shape = weight_np.shape
             scale_shape = scale.shape
             assert len(weight_shape) == len(scale_shape)
@@ -851,7 +856,8 @@ class DeepSeekV3WeightLoader:
                 scale = None
                 # Mixed quantization: accept both fp8 and packed fp4 (uint8) tensors.    ### FROM JORDAN
                 allowed_quant_dtypes = {
-                    j2t_dtype(self.quant_dtype.dtype), torch.uint8
+                    # j2t_dtype(self.quant_dtype.dtype), torch.uint8
+                    torch.uint8
                 }  ### FROM JORDAN
                 if loaded_weight.dtype in allowed_quant_dtypes:  ### FROM JORDAN
                     if self.is_model_quantized:
