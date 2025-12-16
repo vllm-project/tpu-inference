@@ -98,8 +98,7 @@ def create_mock_runner(num_reqs=4096, dp_size=4, tp_size=2, max_tokens=8192):
     runner._prepare_inputs_dp = TPUModelRunner._prepare_inputs_dp.__get__(runner)
     runner._prepare_inputs = TPUModelRunner._prepare_inputs.__get__(runner)
     runner._prepare_dp_input_metadata = TPUModelRunner._prepare_dp_input_metadata.__get__(runner)
-    runner._prepare_async_token_substitution_indices_dp = TPUModelRunner._prepare_async_token_substitution_indices_dp.__get__(runner)
-    
+
     return runner
 
 
@@ -293,8 +292,8 @@ if __name__ == "__main__":
 # ================================================================================
 # RESULTS:
 # ================================================================================
-# Mean:   2.16 ms
-# Median: 2.16 ms
-# Std:    0.06 ms
-# Min:    2.03 ms
-# Max:    2.26 ms
+# Mean:   2.32 ms
+# Median: 2.30 ms
+# Std:    0.09 ms
+# Min:    2.21 ms
+# Max:    2.54 ms
