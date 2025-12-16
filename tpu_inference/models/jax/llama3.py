@@ -153,16 +153,16 @@ class LlamaAttention(nnx.Module):
         # v: (T, K, H)
         v = self.v_proj(x)
         # o: (T, N, H)
-        # if self.kv_cache_quantized_dtype:
-        #     # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
-        #     # q_scale = self._q_scale
-        #     k_scale = self._k_scale
-        #     v_scale = self._v_scale
+        if self.kv_cache_quantized_dtype:
+            # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
+            # q_scale = self._q_scale
+            k_scale = 1.0
+            v_scale = 1.0
 
-        #     k, v = utils.quantize_kv(k, v, self.kv_cache_quantized_dtype,
-        #                              k_scale, v_scale)
+            k, v = utils.quantize_kv(k, v, self.kv_cache_quantized_dtype,
+                                     k_scale, v_scale)
 
-        new_kv_cache, outputs, self._k_scale, self._v_scale = attention(
+        new_kv_cache, outputs = attention(
             kv_cache,
             q,
             k,
@@ -171,8 +171,8 @@ class LlamaAttention(nnx.Module):
             self.mesh,
             self.head_dim_original,
             q_scale=None,
-            k_scale=self._k_scale.value,
-            v_scale=self._v_scale.value,
+            k_scale=1.0,
+            v_scale=1.0,
         )
         # (T, D)
         o = self.o_proj(outputs)
@@ -383,15 +383,15 @@ class LlamaForCausalLM(nnx.Module):
                         metadata_map=metadata_map,
                         mesh=self.mesh)
 
-        for layer in self.model.layers:
-            attn = layer.self_attn
-            if hasattr(attn._k_scale, 'value') and isinstance(
-                    attn._k_scale.value, jax.ShapeDtypeStruct):
-                # Using the shape and dtype from the abstract struct to initialize zeros
-                attn._k_scale.value = jnp.zeros(
-                    attn._k_scale.value.shape, dtype=attn._k_scale.value.dtype)
+        # for layer in self.model.layers:
+        #     attn = layer.self_attn
+        #     if hasattr(attn._k_scale, 'value') and isinstance(
+        #             attn._k_scale.value, jax.ShapeDtypeStruct):
+        #         # Using the shape and dtype from the abstract struct to initialize zeros
+        #         attn._k_scale.value = jnp.zeros(
+        #             attn._k_scale.value.shape, dtype=attn._k_scale.value.dtype)
 
-            if hasattr(attn._v_scale, 'value') and isinstance(
-                    attn._v_scale.value, jax.ShapeDtypeStruct):
-                attn._v_scale.value = jnp.zeros(
-                    attn._v_scale.value.shape, dtype=attn._v_scale.value.dtype)
+        #     if hasattr(attn._v_scale, 'value') and isinstance(
+        #             attn._v_scale.value, jax.ShapeDtypeStruct):
+        #         attn._v_scale.value = jnp.zeros(
+        #             attn._v_scale.value.shape, dtype=attn._v_scale.value.dtype)

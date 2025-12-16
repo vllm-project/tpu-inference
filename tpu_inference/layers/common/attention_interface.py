@@ -307,8 +307,7 @@ def sharded_ragged_paged_attention(
     )
     out_specs = (qkv_spec, kv_cache_spec)
 
-    args = (q, k, v, kv_cache, kv_lens, page_indices, cu_q_lens, distribution,
-            k_scale, v_scale)
+    args = (q, k, v, kv_cache, kv_lens, page_indices, cu_q_lens, distribution)
 
     use_hd64 = q.shape[-1] == 64
 
@@ -318,7 +317,7 @@ def sharded_ragged_paged_attention(
     #                              strict_sliding_window=True)
     # else:
     #     func = ragged_paged_attention
-    func = ref_ragged_paged_attention_per_token
+    func = ref_ragged_paged_attention
     if attention_sink is not None:
         if not use_hd64:
             raise NotImplementedError(
@@ -419,7 +418,7 @@ def attention(
     # jax.debug.callback(_save_scales_to_disk, q, k, v, kv_cache, md.seq_lens,
     #                    md.block_tables, md.query_start_loc,
     #                    md.request_distribution)
-    output, kv_cache, k_scale, v_scale = sharded_ragged_paged_attention(
+    output, kv_cache = sharded_ragged_paged_attention(
         mesh,
         q,
         k,
@@ -437,4 +436,9 @@ def attention(
         v_scale=v_scale,
     )
 
-    return kv_cache, output, k_scale, v_scale
+    # print(kv_cache)
+    # print(output)
+
+    # raise ValueError
+
+    return kv_cache, output

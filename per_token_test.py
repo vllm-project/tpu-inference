@@ -127,14 +127,10 @@ kwargs = {
     # "v_scale": v_scale,
 }
 
-print(kv_cache.dtype)
-
 expected, expected_kv_cache, _, _ = ref_ragged_paged_attention_per_token(
     *args,
     **kwargs,
 )
-
-print(expected)
 k = k.astype(kv_dtype)
 v = v.astype(kv_dtype)
 
@@ -149,15 +145,10 @@ args = (
     distribution,
 )
 
-print("NEXT")
-
 expected, expected_kv_cache = ref_ragged_paged_attention(
     *args,
     **kwargs,
 )
-
-print(expected)
-
 # output, updated_kv_cache = ragged_paged_attention(
 #     *args,
 #     **kwargs,

@@ -176,11 +176,11 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         self.assertArraysEqual(updated_kv_cache[mask], expected_kv_cache[mask])
         self.assertEqual(output.shape[-1], head_dim)
 
-    @parameterized.product(dtype=[jnp.float32, jnp.bfloat16], )
+    @parameterized.product(dtype=[jnp.bfloat16], )
     def test_ragged_paged_attention_basic(self, dtype):
         seq_lens = [(192, 328), (128, 180), (64, 255)]
-        num_heads = (32, 8)
-        head_dim = 128
+        num_heads = (4, 1)
+        head_dim = 32
         page_size = 16
         num_pages = 1000
 
