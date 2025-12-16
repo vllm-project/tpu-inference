@@ -128,7 +128,10 @@ BASE_CMD="sudo bash ${REMOTE_SCRIPT_PATH} \
     '${HF_CACHE_PATH}' \
     -e HF_TOKEN='${HF_TOKEN}' \
     -e TPU_MULTIHOST_BACKEND=ray \
-    -e JAX_PLATFORMS=''"
+    -e JAX_PLATFORMS='' \
+    -e NEW_MODEL_DESIGN=1 \
+    -e TPU_BACKEND_TYPE=jax" \
+
 
 # Head Node (connects via SSH IP, runs command with internal IP)
 echo "⚙️  Configuring head node (Connecting to ${HEAD_SSH_IP})..."
