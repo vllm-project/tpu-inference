@@ -54,10 +54,6 @@ class TpuPlatform(Platform):
     def get_attn_backend_cls(cls, selected_backend: "AttentionBackendEnum",
                              attn_selector_config: "AttentionSelectorConfig",
                              **kwargs) -> str:
-        from vllm.attention.backends.registry import AttentionBackendEnum
-
-        if selected_backend != AttentionBackendEnum.PALLAS:
-            logger.info("Cannot use %s backend on TPU.", selected_backend)
 
         logger.info("Using Pallas V1 backend.")
         return "tpu_inference.layers.vllm.attention.PallasAttentionBackend"
@@ -144,14 +140,11 @@ class TpuPlatform(Platform):
         if compilation_config.backend == "":
             compilation_config.backend = "openxla"
 
-        # TODO(cuiq): remove this dependency.
         if vllm_config.model_config:
-            from vllm.v1.attention.backends.pallas import \
-                PallasAttentionBackend
+            from tpu_inference.layers.vllm.attention import PallasAttentionBackend
             cache_config.block_size = PallasAttentionBackend.get_page_size(
                 vllm_config)  # type: ignore[assignment]
-            min_page_size = PallasAttentionBackend.get_min_page_size(
-                vllm_config)
+            min_page_size = PallasAttentionBackend.get_min_page_size(vllm_config)
             if min_page_size > cache_config.block_size:
                 logger.warning(
                     "Increase the page size from %s to %s to avoid SMEM OOM",
