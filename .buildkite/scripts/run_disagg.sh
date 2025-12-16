@@ -5,7 +5,7 @@ set -ex
 IMAGE_NAME='vllm-tpu'
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 # Source the environment setup script
-shellcheck disable=SC1091
+# shellcheck disable=SC1091
 source "$SCRIPT_DIR/setup_docker_env.sh"
 setup_environment $IMAGE_NAME
 
@@ -23,6 +23,8 @@ DOCKER_IMAGE=${IMAGE_NAME}:${BUILDKITE_COMMIT} \
 # clear existing containers
 CONTAINERS=$(docker ps -a --filter "name=${CONTAINER_PREFIX}*" -q)
 if [ -n "$CONTAINERS" ]; then
+  # shellcheck disable=SC2086
   docker stop $CONTAINERS
+  # shellcheck disable=SC2086
   docker rm -f $CONTAINERS
 fi
