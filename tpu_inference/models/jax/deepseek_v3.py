@@ -190,7 +190,7 @@ class DeepSeekV3(nnx.Module):
                 anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None),
                 # TODO bz branch is kv_da_sharding=('model', None),
                 kv_da_sharding=(None, ShardingAxisName.VOCAB),
-                nhd_sharding=(ShardingAxisName.MLP_TENSOR, None, None))t two-way TP as well as MLA/DP. MLA & no-MLA perf looks the same as main for single-host DenseMatmul.)
+                nhd_sharding=(ShardingAxisName.MLP_TENSOR, None, None))
 
         for i in range(first_k_dense_replace):
             block = TransformerBlock(
