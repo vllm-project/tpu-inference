@@ -1,6 +1,6 @@
 import os
-from sortedcontainers import SortedDict
 
+from sortedcontainers import SortedDict
 from vllm.utils.network_utils import get_ip
 
 from tpu_inference import envs
@@ -16,7 +16,7 @@ _NODES_METADATA = SortedDict()
 def set_node_metadata(metadata: tuple[int, str, int, list]):
     global _NODES_METADATA
     node_id, ip, port, devices = metadata
-    devices_str = ','.join(str(d) for d in devices
+    devices_str = ','.join(str(d) for d in devices)
     _NODES_METADATA[devices_str] = (ip, port, node_id)
 
 
@@ -73,4 +73,3 @@ def get_topology_node_id() -> int:
             return device_id
         device_id += 1
     return device_id
-
