@@ -603,7 +603,6 @@ def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
             continue
         is_qwix_scale = (path[-1] == 'scale' and path[-2] == "array")
         param_dtype = scale_dtype if is_qwix_scale else param.value.dtype
-        print("this is param_dtype: ", param_dtype)
         param_shape = param.value.shape
         # TODO (jacobplatin): clean this up
         if is_qwix_scale:
@@ -621,10 +620,20 @@ def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
                     elif len(shape_list) == 3:
                         # MoE, divide the middle dimension
                         shape_list[1] //= quantization_block_size_k
+                elif path[2] == 'shared_experts':
+                    # For shared_experts layers, divide the first dimension
+                    shape_list[0] //= quantization_block_size_k
                 param_shape = tuple(shape_list)
+        print(
+            "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+        )
+        print("this is path: ", path)
         print("this is param_shape: ", param_shape)
         print("this is param_dtype: ", param_dtype)
-        print("this is path: ", path)
+        print(
+            "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n\n"
+        )
+
         param.value = get_random_sharded_array(
             rng, mesh, param, param_shape, param_dtype,
             ".".join([str(x) for x in path]))
