@@ -327,11 +327,11 @@ class TestQuantizedMatmul2D(jtu.JaxTestCase):
         """
         Tests large reduction dimension to verify accumulator stability
         """
-        batch_size, n_input_features, n_output_features = 4, 16384, 128 
+        batch_size, n_input_features, n_output_features = 4, 8192, 512
         dtype = jnp.float32
         q_dtype = jnp.int8
         quant_group_size = 128
-        output_load_size = 128
+        output_load_size = 256
         
         activations = jnp.ones((batch_size, n_input_features), dtype=dtype)
         weights = jnp.ones((n_output_features, n_input_features), dtype=dtype)
