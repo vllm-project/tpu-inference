@@ -14,7 +14,7 @@ logger = init_logger(__name__)
 #     - page_size
 #       - q_{q_dtype_name}_kv_{kv_dtype_name}
 #         - q_head-{num_q_heads}_kv_head-{num_kv_heads}-_head-{head_dim}
-#           - max_model_len
+#           - max_model_len-{max_model_len}-sw-{sliding_window}
 # value:
 #   - (num_kv_pages_per_block, num_queries_per_block)
 TUNED_BLOCK_SIZES = {
@@ -264,21 +264,9 @@ def get_tuned_block_sizes(
     page_size,
     max_num_tokens,
     pages_per_seq,
+    sliding_window,
 ) -> tuple[int, int]:
     """Search tuned values for (num_kv_pages_per_blk, num_queries_per_blk)."""
-
-    # Set default block sizes for each tpu_version.
-    tpu_version = get_tpu_version()
-    if tpu_version < 4:
-        raise NotImplementedError('TPU version must be 4 or higher.')
-    match tpu_version:
-        case 4:
-            # TPUv4 has much smaller VMEM size so we pick fixed block sizes.
-            bkv_p, bq = (512 // page_size, 32)
-        case 7:
-            bkv_p, bq = (4096 // page_size, 32)
-        case _:
-            bkv_p, bq = (2048 // page_size, 32)
 
     keys = get_lookup_keys(
         page_size,
@@ -288,17 +276,35 @@ def get_tuned_block_sizes(
         actual_num_kv_heads,
         head_dim,
         page_size * pages_per_seq,
+        sliding_window,
     )
-    device, page_size, dtypes, head_dims, max_model_len = keys
+    device, page_size, dtypes, head_dims, extra = keys
 
     try:
         bkv_p, bq = TUNED_BLOCK_SIZES[device][page_size][dtypes][head_dims][
-            max_model_len]
+            extra]
+        print('RPA v3 kernel: Found tuned sizes for %s', keys)
     except KeyError:
         logger.warning_once(
             'Couldn`t find tuned sizes for the RPA v3 kernel with %s', keys)
+        # When not available use a sensible default based on TPU version
+        # Set default block sizes for each tpu_version.
+        tpu_version = get_tpu_version()
+        if tpu_version < 4:
+            raise NotImplementedError('TPU version must be 4 or higher.')
+        match tpu_version:
+            case 4:
+                # TPUv4 has much smaller VMEM size so we pick fixed block sizes.
+                bkv_p, bq = (512 // page_size, 32)
+            case 7:
+                bkv_p, bq = (4096 // page_size, 32)
+            case _:
+                bkv_p, bq = (2048 // page_size, 32)
 
-    return (min(pages_per_seq, bkv_p), min(max_num_tokens, bq))
+        bkv_p, bq = (min(pages_per_seq, bkv_p), min(max_num_tokens, bq))
+
+    print('RPA v3 kernel tuned block sizes: bkv_p=%s, bq=%s', bkv_p, bq)
+    return bkv_p, bq
 
 
 def get_lookup_keys(
@@ -309,6 +315,7 @@ def get_lookup_keys(
     num_kv_heads,
     head_dim,
     max_model_len,
+    sliding_window,
 ):
     """Get the lookup keys for tuned block sizes."""
     (
@@ -319,6 +326,7 @@ def get_lookup_keys(
         num_kv_heads,
         head_dim,
         max_model_len,
+        sliding_window,
     ) = get_simplified_raw_key(
         page_size,
         q_dtype,
@@ -327,6 +335,7 @@ def get_lookup_keys(
         num_kv_heads,
         head_dim,
         max_model_len,
+        sliding_window,
     )
 
     return (
@@ -334,7 +343,7 @@ def get_lookup_keys(
         next_power_of_2(page_size),
         f'q_{q_dtype_name}_kv_{kv_dtype_name}',
         f'q_head-{num_q_heads}_kv_head-{num_kv_heads}_head-{head_dim}',
-        next_power_of_2(max_model_len),
+        f'max_model_len-{next_power_of_2(max_model_len)}-sw-{sliding_window}',
     )
 
 
@@ -346,6 +355,7 @@ def get_simplified_raw_key(
     actual_num_kv_heads,
     head_dim,
     max_model_len,
+    sliding_window,
 ):
     """Get the simplified key."""
     assert head_dim == 64
@@ -365,4 +375,5 @@ def get_simplified_raw_key(
         next_power_of_2(num_kv_heads),
         head_dim,
         next_power_of_2(max_model_len),
+        sliding_window,
     )

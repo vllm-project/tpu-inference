@@ -1311,6 +1311,10 @@ def static_validate_inputs(
     del debug_mode
 
 
+def get_kernel_scope_name(bq_size, bkv_p, page_size):
+    return f"RPA-HD_64-bq_{bq_size}-bkvp_{bkv_p}-p_{page_size}-"
+
+
 @functools.partial(
     jax.jit,
     static_argnames=(
@@ -1449,6 +1453,7 @@ def ragged_paged_attention_hd64(
             page_size,
             max_num_tokens,
             pages_per_seq,
+            sliding_window,
         )
     bkv_sz = bkv_p * page_size
     if vmem_limit_bytes is None:
@@ -1519,7 +1524,7 @@ def ragged_paged_attention_hd64(
         jnp.full((6, ), -1, jnp.int32),
     )
 
-    scope_name = f"RPA-HD_64-bq_{bq_sz}-bkvp_{bkv_p}-p_{page_size}"
+    scope_name = get_kernel_scope_name(bq_sz, bkv_p, page_size)
     kernel = pl.pallas_call(
         functools.partial(
             _ragged_paged_attention_kernel,
