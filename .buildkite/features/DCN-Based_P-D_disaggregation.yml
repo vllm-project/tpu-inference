@@ -24,7 +24,6 @@ steps:
 
   - label: "Performance tests for DCN-based P/D disaggregation"
     key: "DCN_based_P-D_disaggregation_PerformanceTest"
-    depends_on: "record_DCN_based_P-D_disaggregation_CorrectnessTest"
     soft_fail: true
     env:
       MODEL:"Qwen/Qwen3-0.6B"
