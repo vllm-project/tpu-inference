@@ -80,7 +80,8 @@ def _ref_math_in_bf16(w1, w2, w3, x, router_logits, top_k):
     return out
 
 
-def test_fused_moe_method():
+@pytest.mark.parametrize("use_ep", [False, True])
+def test_fused_moe_method(use_ep):
     mesh = test_utils.get_spmd_mesh(jax.local_device_count())
 
     engine_args = EngineArgs(
@@ -152,7 +153,7 @@ def test_fused_moe_method():
             tp_rank=0,
             dp_rank=0,
             ep_rank=0,
-            use_ep=False,
+            use_ep=use_ep,
             all2all_backend='',
         ),
         in_dtype=torch.bfloat16,
