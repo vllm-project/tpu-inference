@@ -324,6 +324,27 @@ class DeepSeekV3(nnx.Module):
                               dv_sharding=(None, ShardingAxisName.MLP_TENSOR),
                               random_init=self.random_init)
 
+        self.scale_shap_map_for_random_weight_loading = {
+            # MoE experts (3D)
+            "custom_module.kernel_down_proj_EFD": (256, 8, 7168),
+            "custom_module.kernel_gating_EDF": (256, 28, 2048),
+            "custom_module.kernel_up_proj_EDF": (256, 28, 2048),
+            # Shared experts (2D)
+            "shared_experts.kernel_down_proj_FD": (8, 7168),
+            "shared_experts.kernel_gating_DF": (28, 2048),
+            "shared_experts.kernel_up_proj_DF": (28, 2048),
+            # Dense FFW (2D)
+            "custom_module.kernel_gating_DF": (28, 18432),
+            "custom_module.kernel_up_proj_DF": (28, 18432),
+            "custom_module.kernel_down_proj_FD": (72, 7168),
+            # Attention (2D)
+            "kernel_q_down_proj_DA": (28, 1536),
+            "kernel_q_up_proj_AC": (6, 24576),
+            "kernel_kv_down_proj_DA": (28, 576),
+            "kernel_kv_up_proj_AC": (2, 32768),
+            "kernel_o_proj_CD": (64, 7168),
+        }
+
         if os.environ.get("VLLM_LOGGING_LEVEL", "").upper() == "DEBUG":
             self._print_model_architecture()
 
