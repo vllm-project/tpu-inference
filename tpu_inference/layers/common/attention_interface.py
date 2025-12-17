@@ -308,13 +308,7 @@ def sharded_ragged_paged_attention(
     args = (q, k, v, kv_cache, kv_lens, page_indices, cu_q_lens, distribution)
 
     use_hd64 = q.shape[-1] == 64
-
-    func = ragged_paged_attention
-    if use_hd64:
-        func = functools.partial(ragged_paged_attention_hd64,
-                                 strict_sliding_window=True)
-    else:
-        func = ragged_paged_attention
+    func = ragged_paged_attention_hd64 if use_hd64 else ragged_paged_attention
 
     if attention_sink is not None:
         if not use_hd64:
