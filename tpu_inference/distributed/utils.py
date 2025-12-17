@@ -13,11 +13,10 @@ logger = init_logger(__name__)
 _NODES_METADATA = SortedDict()
 
 
-def set_node_metadata(metadata: tuple[int, str, int, list]):
+def set_node_metadata(metadata: tuple[int, str, int, str]):
     global _NODES_METADATA
     node_id, ip, port, devices = metadata
-    devices_str = ','.join(str(d) for d in devices)
-    _NODES_METADATA[devices_str] = (ip, port, node_id)
+    _NODES_METADATA[devices] = (ip, port, node_id)
 
 
 def get_kv_ips() -> str:
