@@ -153,14 +153,15 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
             ep_sharding = NamedSharding(self.mesh, P("model"))
 
             w13_weight = jax.lax.with_sharding_constraint(
-                w13_weight, Format(Layout((0, 1, 2, 3)), ep_sharding))
+                w13_weight, ep_sharding)
             w2_weight = jax.lax.with_sharding_constraint(
-                w2_weight, Format(Layout((0, 1, 2)), ep_sharding))
+                w2_weight, ep_sharding)
 
             w13_weight_scale = jax.lax.with_sharding_constraint(
-                w13_weight_scale, Format(Layout((0, 1, 2, 3, 4)), ep_sharding))
+                w13_weight_scale, ep_sharding)
             w2_weight_scale = jax.lax.with_sharding_constraint(
-                w2_weight_scale, Format(Layout((0, 1, 2, 3)), ep_sharding))
+                w2_weight_scale, ep_sharding)
+
         else:
             # Shard weights for tp (rowwise w13, colwise w2)
             w13_format = Format(
