@@ -14,6 +14,10 @@ echo "--- Checking Test Outcomes"
 
 for KEY in "$@"; do
     OUTCOME=$(buildkite-agent step get "outcome" --step "${KEY}" || echo "skipped")
+    if [ -z "$OUTCOME" ]; then
+        OUTCOME="skipped"
+    fi
+
     echo "Step ${KEY} outcome: ${OUTCOME}"
 
     if [ "${OUTCOME}" != "passed" ] && [ "${OUTCOME}" != "skipped" ] ; then
