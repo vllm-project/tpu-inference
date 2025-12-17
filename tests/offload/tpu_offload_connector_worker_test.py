@@ -6,6 +6,7 @@ import os
 import random
 import time
 from typing import List
+from unittest import mock
 
 import jax
 import jax.numpy as jnp
@@ -171,18 +172,22 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
              num_blocks=100,
              expected_buckets=[16, 16, 16, 16, 16, 16, 4]),
     )
+    @mock.patch(
+        "tpu_inference.offload.tpu_offload_connector.BLOCK_SIZE_BUCKETS",
+        [1, 2, 4, 8, 16],
+    )
     def test_decompose_into_buckets(self, num_blocks: int,
                                     expected_buckets: List[int]):
         """
         Tests the _decompose_into_buckets function for correct greedy decomposition.
+        fix BLOCK_SIZE_BUCKETS = [1, 2, 4, 8, 16]
         """
-        connector = self._create_connector(use_precompiled_swap_ops="0")
+        connector = self._create_connector()
         worker = connector.connector_worker
-        self.assertEqual(worker._decompose_into_buckets(num_blocks),
-                         expected_buckets)
+        chunks_list = worker._decompose_into_buckets(num_blocks)
+        self.assertEqual(chunks_list, expected_buckets)
         logger.info(
-            f"Decomposition for {num_blocks} blocks: {worker._decompose_into_buckets(num_blocks)} matched expected: {expected_buckets}"
-        )
+            f"Decomposition for {num_blocks} blocks into {expected_buckets}.")
 
     @parameterized.named_parameters(
         dict(testcase_name="_jax", swap_op_type="jax"),
@@ -194,7 +199,7 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
         modifies the cache content.
         """
         connector = self._create_connector(swap_op_type,
-                                           use_precompiled_swap_ops="0")
+                                           use_precompiled_swap_ops=True)
 
         worker = connector.connector_worker
 
@@ -351,7 +356,10 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
         logger.info(
             "Connector metadata bound, calling worker.start_save_kv().")
         worker.start_save_kv()
-        logger.info("worker.start_save_kv() completed.")
+        logger.info("Waiting for all save operations to complete...")
+        while worker._pending_save_futures:
+            worker._process_completed_saves()
+            time.sleep(0.01)
 
         # Verification
         logger.info("Starting verification phase.")
