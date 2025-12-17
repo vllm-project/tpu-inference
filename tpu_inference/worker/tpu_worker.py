@@ -431,7 +431,8 @@ class TPUWorker:
         port = get_kv_transfer_port()
         # jax.local_devices is guaranteed to be ordered deterministically.
         devices = jax.local_devices()
-        return (int(node_id), ip, int(port), ','.join(str(d.coords) for d in devices))
+        return (int(node_id), ip, int(port),
+                ','.join(str(d.coords) for d in devices))
 
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.
