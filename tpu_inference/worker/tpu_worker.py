@@ -425,11 +425,13 @@ class TPUWorker:
         """Allocate GPU KV cache with the specified kv_cache_config."""
         self.model_runner.initialize_kv_cache(kv_cache_config)
 
-    def get_node_kv_ip_port(self) -> tuple[int, str, int]:
+    def get_node_metadata(self) -> tuple[int, str, int, list]:
         node_id = get_node_id()
         ip = get_host_ip()
         port = get_kv_transfer_port()
-        return (int(node_id), ip, int(port))
+        # self.devices is guaranteed to be ordered according to device index
+        devices = self.devices
+        return (int(node_id), ip, int(port), devices)
 
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.

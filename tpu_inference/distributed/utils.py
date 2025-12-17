@@ -1,4 +1,5 @@
 import os
+from sortedcontainers import SortedDict
 
 from vllm.utils.network_utils import get_ip
 
@@ -7,22 +8,24 @@ from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
 
-# For multi-host usage only, to collect IP and port for all nodes.
-_NODES_KV_IP_PORT = dict()
+# For multi-host usage only, to collect IP, port, and local devices for all nodes.
+# This dictionary should always be sorted by the device coordinates as index.
+_NODES_METADATA = SortedDict()
 
 
-def set_node_kv_ip_port(ip_port: tuple[int, str, int]):
-    global _NODES_KV_IP_PORT
-    node_id, ip, port = ip_port
-    _NODES_KV_IP_PORT[node_id] = (ip, port)
+def set_node_metadata(metadata: tuple[int, str, int, list]):
+    global _NODES_METADATA
+    node_id, ip, port, devices = metadata
+    devices_str = ','.join(str(d) for d in devices
+    _NODES_METADATA[devices_str] = (ip, port, node_id)
 
 
 def get_kv_ips() -> str:
     if envs.TPU_MULTIHOST_BACKEND == "ray":
-        num_nodes = len(_NODES_KV_IP_PORT)
         ips = []
-        for node_id in range(num_nodes):
-            ips.append(_NODES_KV_IP_PORT[node_id][0])
+        # IPs are sorted by device index
+        for _, metadata in _NODES_METADATA.items():
+            ips.append(metadata[0])
         return ips
     else:
         return get_host_ip()
@@ -30,10 +33,10 @@ def get_kv_ips() -> str:
 
 def get_kv_ports() -> str:
     if envs.TPU_MULTIHOST_BACKEND == "ray":
-        num_nodes = len(_NODES_KV_IP_PORT)
         ports = []
-        for node_id in range(num_nodes):
-            ports.append(_NODES_KV_IP_PORT[node_id][1])
+        # Ports are sorted by device index
+        for _, metadata in _NODES_METADATA.items():
+            ports.append(metadata[1])
         return ports
     else:
         return get_kv_transfer_port()
@@ -58,3 +61,16 @@ def get_node_id() -> int:
     # TODO(xiang): Is it possible to get this from a pre-defiend env?
     id = os.getenv("TPU_NODE_ID", 0)
     return int(id)
+
+
+def get_topology_node_id() -> int:
+    # Return the topology-ordered index of the node (not the node id set from
+    # the environment).
+    device_id = 0
+    current_node_id = os.getenv("TPU_NODE_ID", 0)
+    for _, metadata in _NODES_METADATA.items():
+        if metadata[2] == int(current_node_id):
+            return device_id
+        device_id += 1
+    return device_id
+

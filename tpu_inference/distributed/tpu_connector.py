@@ -88,7 +88,7 @@ if TYPE_CHECKING:
 from tpu_inference import envs
 from tpu_inference.distributed.utils import (get_host_ip, get_kv_ips,
                                              get_kv_ports,
-                                             get_kv_transfer_port, get_node_id,
+                                             get_kv_transfer_port, get_topology_node_id,
                                              get_side_channel_port)
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.tpu_runner import TPUModelRunner
@@ -445,7 +445,7 @@ class TPUConnectorWorker:
         # NOTE(xiang): This can not be the worker rank set in RayDistributedExecutor.
         # The worker rank is assigned with vLLM's sorting logic, which does not work
         # for TPU host topology.
-        self.node_id = get_node_id()
+        self.node_id = get_topology_node_id()
 
         # req_id: (kv, expiration_time)
         self.reqs_wait_pull: dict[ReqId, list[list[jax.Array], float]] = {}
