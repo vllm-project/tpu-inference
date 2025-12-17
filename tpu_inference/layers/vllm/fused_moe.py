@@ -177,8 +177,8 @@ def tensor_sharded_gmm_row_parallel(
         )
         return jax.lax.psum(out, axis_name="model")
 
-    rhs_scale_spec = None if rhs_scale is None else P(None, "model", None,
-                                                      None)
+    num_blocks = 1 if rhs_scale is None else rhs_scale.shape[1]
+    rhs_scale_spec = None if num_blocks == 1 else P(None, "model", None, None)
     rhs_bias_spec = None if rhs_bias is None else P(None, None, None)
     gmm_result = shard_map(
         _gmm_all_reduce,
