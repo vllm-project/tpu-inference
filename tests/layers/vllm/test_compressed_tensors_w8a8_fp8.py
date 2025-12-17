@@ -1,5 +1,6 @@
 import tempfile
 from typing import Optional
+from unittest.mock import MagicMock, patch
 
 import jax
 import pytest
@@ -161,6 +162,16 @@ def initialize_layer_weights(layer: torch.nn.Module):
 
     if layer.bias is not None:
         layer.bias.data = torch.rand_like(layer.bias.data)
+
+
+@pytest.fixture(autouse=True)
+def mock_get_pp_group():
+    with patch("tpu_inference.distributed.jax_parallel_state.get_pp_group",
+               return_value=MagicMock(is_first_rank=True,
+                                      is_last_rank=True,
+                                      rank_in_group=0,
+                                      world_size=1)):
+        yield
 
 
 @pytest.fixture(autouse=True)

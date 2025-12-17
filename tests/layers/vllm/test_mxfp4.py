@@ -1,4 +1,5 @@
 import tempfile
+from unittest.mock import MagicMock, patch
 
 import jax
 import jax.numpy as jnp
@@ -54,6 +55,16 @@ def quantize_to_mxfp4(weight: torch.tensor):
     scale_exp = (scale_exp - e8m0_finfo.minexp).astype(jnp.uint8)
 
     return j2t(weight_packed), j2t(scale_exp)
+
+
+@pytest.fixture(autouse=True)
+def mock_get_pp_group():
+    with patch("tpu_inference.distributed.jax_parallel_state.get_pp_group",
+               return_value=MagicMock(is_first_rank=True,
+                                      is_last_rank=True,
+                                      rank_in_group=0,
+                                      world_size=1)):
+        yield
 
 
 @pytest.fixture(autouse=True)

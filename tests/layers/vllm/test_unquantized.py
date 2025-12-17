@@ -1,4 +1,5 @@
 import tempfile
+from unittest.mock import MagicMock, patch
 
 import jax
 import pytest
@@ -29,6 +30,16 @@ from tpu_inference.layers.vllm.quantization.unquantized import (
 
 P = PartitionSpec
 MODELS = ["Qwen/Qwen2-1.5B-Instruct"]
+
+
+@pytest.fixture(autouse=True)
+def mock_get_pp_group():
+    with patch("tpu_inference.distributed.jax_parallel_state.get_pp_group",
+               return_value=MagicMock(is_first_rank=True,
+                                      is_last_rank=True,
+                                      rank_in_group=0,
+                                      world_size=1)):
+        yield
 
 
 @pytest.fixture(autouse=True)
