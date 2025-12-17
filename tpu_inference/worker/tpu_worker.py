@@ -429,9 +429,9 @@ class TPUWorker:
         node_id = get_node_id()
         ip = get_host_ip()
         port = get_kv_transfer_port()
-        # self.devices is guaranteed to be ordered according to device index
-        devices = ','.join(str(d) for d in self.devices)
-        return (int(node_id), ip, int(port), devices)
+        # jax.local_devices is guaranteed to be ordered deterministically.
+        devices = jax.local_devices()
+        return (int(node_id), ip, int(port), ','.join(str(d.coords) for d in devices))
 
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.
