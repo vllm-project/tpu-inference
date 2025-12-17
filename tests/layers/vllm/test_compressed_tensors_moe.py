@@ -80,7 +80,15 @@ def _ref_math_in_bf16(w1, w2, w3, x, router_logits, top_k):
     return out
 
 
-@pytest.mark.parametrize("use_ep", [False, True])
+@pytest.mark.parametrize(
+    "mesh", [test_utils.get_spmd_mesh(1),
+             test_utils.get_spmd_mesh(2)])
+@pytest.mark.parametrize("num_tokens", [8])
+@pytest.mark.parametrize("intermediate_size", [1024])
+@pytest.mark.parametrize("hidden_size", [128])
+@pytest.mark.parametrize("num_experts", [8])
+@pytest.mark.parametrize("topk", [2])
+@pytest.mark.parametrize("use_ep", [True, False])
 def test_fused_moe_method(use_ep):
     mesh = test_utils.get_spmd_mesh(jax.local_device_count())
 
