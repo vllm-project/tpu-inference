@@ -299,16 +299,18 @@ def apply_interleaved_mrope(
     """Apply interleaved MRoPE by combining T, H, W frequencies.
 
     MRoPE interleaves the temporal (T), height (H), and width (W) frequency
-    components across the head dimension. The first min(sections)*3 dimensions
-    follow the pattern [T,H,W,T,H,W,...], and remaining dimensions are filled
-    with T values.
+    components across the head dimension. The output follows a cyclic ordering
+    over the available axes: [T,H,W,T,H,W,...]. If one axis exhausts its
+    allocated dimensions, the remaining axes continue interleaving in-order
+    (e.g., [H,W,H,W,...] if T is exhausted).
 
     Args:
         freqs: Frequency tensor of shape (3, bs, seq_len, head_dim // 2)
                where freqs[0]=T, freqs[1]=H, freqs[2]=W frequencies
         mrope_section: List of [T_dim, H_dim, W_dim] specifying how many
-                       dimensions each component gets. E.g., [24, 20, 20]
-                       means T gets 24, H gets 20, W gets 20 (total 64)
+                       dimensions each component gets; must sum to head_dim//2.
+                       Indices are split into contiguous sections (T first, then
+                       H, then W) and then interleaved cyclically.
 
     Returns:
         Interleaved frequencies of shape (bs, seq_len, head_dim // 2)
@@ -319,23 +321,79 @@ def apply_interleaved_mrope(
         - interleaved_len = 60
         - Output layout: [T0,H0,W0, T1,H1,W1, ..., T19,H19,W19, T20,T21,T22,T23]
     """
-    min_section = min(mrope_section)
-    interleaved_len = min_section * 3
+    if not isinstance(mrope_section, (list, tuple)) or len(mrope_section) != 3:
+        raise ValueError(
+            "mrope_section must be a list/tuple of length 3, "
+            f"but got {mrope_section!r}."
+        )
 
-    freqs_t = freqs[0]  # Base: temporal frequencies
+    t_dim, h_dim, w_dim = (int(x) for x in mrope_section)
+    if t_dim < 0 or h_dim < 0 or w_dim < 0:
+        raise ValueError(
+            "mrope_section values must be non-negative, "
+            f"but got {mrope_section!r}."
+        )
 
-    # Create interleaved region
-    interleaved = jnp.zeros_like(freqs_t[..., :interleaved_len])
-    for i in range(min_section):
-        interleaved = interleaved.at[..., i * 3].set(freqs[0, ..., i])      # T
-        interleaved = interleaved.at[..., i * 3 + 1].set(freqs[1, ..., i])  # H
-        interleaved = interleaved.at[..., i * 3 + 2].set(freqs[2, ..., i])  # W
+    half_dim = int(freqs.shape[-1])
+    if t_dim + h_dim + w_dim != half_dim:
+        raise ValueError(
+            "mrope_section must sum to head_dim//2. "
+            f"Got sum={t_dim + h_dim + w_dim} but head_dim//2={half_dim} "
+            f"for mrope_section={mrope_section!r}."
+        )
 
-    # Append remaining T dimensions (if T_dim > min_section)
-    remaining_t = freqs[0, ..., min_section:mrope_section[0]]
-    freqs_result = jnp.concatenate([interleaved, remaining_t], axis=-1)
+    # Split frequency indices into disjoint per-axis sections, then interleave values
+    # across axes in a cyclic [T, H, W] order (skipping exhausted sections).
+    freqs_t = freqs[0, ..., :t_dim]
+    freqs_h = freqs[1, ..., t_dim : t_dim + h_dim]
+    freqs_w = freqs[2, ..., t_dim + h_dim : t_dim + h_dim + w_dim]
 
-    return freqs_result
+    min_section = min(t_dim, h_dim, w_dim)
+    pieces: List[jax.Array] = []
+
+    if min_section > 0:
+        # (bs, seq_len, min_section, 3) -> (bs, seq_len, min_section*3)
+        interleaved_thw = jnp.stack(
+            [
+                freqs_t[..., :min_section],
+                freqs_h[..., :min_section],
+                freqs_w[..., :min_section],
+            ],
+            axis=-1,
+        ).reshape(freqs_t.shape[:-1] + (min_section * 3,))
+        pieces.append(interleaved_thw)
+
+    # Remaining sections (0, 1, or 2 axes may have remaining dims).
+    freqs_t_rem = freqs_t[..., min_section:]
+    freqs_h_rem = freqs_h[..., min_section:]
+    freqs_w_rem = freqs_w[..., min_section:]
+
+    rem_axes: List[jax.Array] = []
+    if freqs_t_rem.shape[-1] > 0:
+        rem_axes.append(freqs_t_rem)
+    if freqs_h_rem.shape[-1] > 0:
+        rem_axes.append(freqs_h_rem)
+    if freqs_w_rem.shape[-1] > 0:
+        rem_axes.append(freqs_w_rem)
+
+    if len(rem_axes) == 1:
+        pieces.append(rem_axes[0])
+    elif len(rem_axes) == 2:
+        a, b = rem_axes
+        min_rem = min(a.shape[-1], b.shape[-1])
+        if min_rem > 0:
+            interleaved_ab = jnp.stack(
+                [a[..., :min_rem], b[..., :min_rem]], axis=-1
+            ).reshape(a.shape[:-1] + (min_rem * 2,))
+            pieces.append(interleaved_ab)
+        if a.shape[-1] > min_rem:
+            pieces.append(a[..., min_rem:])
+        if b.shape[-1] > min_rem:
+            pieces.append(b[..., min_rem:])
+
+    if not pieces:
+        return jnp.zeros(freqs.shape[1:], dtype=freqs.dtype)
+    return jnp.concatenate(pieces, axis=-1)
 
 
 # ==============================================================================
@@ -1575,7 +1633,36 @@ class Qwen3VLModel(nnx.Module):
         )
 
         # MRoPE embedding
-        head_dim = getattr(hf_config, "head_dim", hidden_size // hf_config.num_attention_heads)
+        #
+        # Prefer `hidden_size // num_attention_heads` for internal consistency.
+        # Some HF configs expose a `head_dim` field that may not match
+        # `hidden_size` in unit tests / synthetic configs.
+        num_attention_heads = int(hf_config.num_attention_heads)
+        head_dim_from_hidden = (
+            hidden_size // num_attention_heads
+            if num_attention_heads > 0 and hidden_size % num_attention_heads == 0
+            else None
+        )
+        head_dim_cfg = getattr(hf_config, "head_dim", None)
+        if head_dim_from_hidden is None:
+            if head_dim_cfg is None:
+                raise ValueError(
+                    "Cannot infer head_dim: expected hidden_size to be divisible by "
+                    f"num_attention_heads, but got hidden_size={hidden_size} and "
+                    f"num_attention_heads={num_attention_heads}."
+                )
+            head_dim = int(head_dim_cfg)
+        else:
+            if head_dim_cfg is not None and int(head_dim_cfg) != head_dim_from_hidden:
+                logger.warning(
+                    "Ignoring hf_config.head_dim=%s because hidden_size/num_attention_heads=%s "
+                    "(hidden_size=%s, num_attention_heads=%s).",
+                    head_dim_cfg,
+                    head_dim_from_hidden,
+                    hidden_size,
+                    num_attention_heads,
+                )
+            head_dim = int(head_dim_from_hidden)
         rope_theta = getattr(hf_config, "rope_theta", 1000000.0)
         rope_scaling = getattr(hf_config, "rope_scaling", {}) or {}
         mrope_section = rope_scaling.get("mrope_section", [16, 24, 24])
