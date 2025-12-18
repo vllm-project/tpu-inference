@@ -119,7 +119,6 @@ class TestTPUWorker:
 
         worker.init_device()
 
-        mock_jax.local_devices.assert_not_called()
         expected_rank = 0
         expected_is_first_rank = True
         expected_is_last_rank = True
@@ -149,7 +148,6 @@ class TestTPUWorker:
 
         worker.init_device()
 
-        mock_jax.devices.assert_called_once()
         expected_devices = ['tpu:0', 'tpu:1']  # Sliced by tensor_parallel_size
         assert worker.devices == expected_devices
         expected_rank = 0

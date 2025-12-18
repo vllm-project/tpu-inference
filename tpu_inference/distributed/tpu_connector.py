@@ -694,9 +694,9 @@ class TPUConnectorWorker:
 
 def get_uuid() -> int:
     int128 = uuid4().int
-    # Must be 64-bit int, otherwise vllm output encoder would raise error.
-    int64 = int128 >> 64
-    return int64
+    # Must be less than 64-bit int, otherwise vllm output encoder would raise error.
+    # use 50 bit to avoid GO trunk the int when doing JSon serialization
+    return int128 >> 78
 
 
 @jax.jit

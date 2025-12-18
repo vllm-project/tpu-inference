@@ -79,7 +79,7 @@ process_models() {
             local result
             result=$(buildkite-agent meta-data get "${model}:${stage}" --default "N/A")
             row="$row,$result"
-            if [ "${result}" != "✅" ] && [ "${result}" != "N/A" ] && [ "${result}" != "to be added" ]; then
+            if [ "${result}" != "✅" ] && [ "${result}" != "N/A" ] && [ "${result}" != "unverified" ]; then
                 ANY_FAILED=true
             fi
         done
@@ -137,7 +137,7 @@ process_features() {
             row="$row,$result"
 
             # Check for failure (exclude the hardcoded TPU generation column)
-            if [ "$stage" != "RecommendedTPUGenerations" ] && [ "${result}" != "✅" ] && [ "${result}" != "N/A" ] && [ "${result}" != "to be added" ]; then
+            if [ "$stage" != "RecommendedTPUGenerations" ] && [ "${result}" != "✅" ] && [ "${result}" != "N/A" ] && [ "${result}" != "unverified" ]; then
                 ANY_FAILED=true
             fi
 

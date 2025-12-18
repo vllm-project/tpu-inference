@@ -197,7 +197,7 @@ class VllmModelWrapper:
                     kwargs={
                         "input_ids": torch_view(input_ids),
                         "positions": torch_view(input_positions),
-                        "intermediate_tensors": None,
+                        "intermediate_tensors": intermediate_tensors,
                         "inputs_embeds": None,
                     },
                     tie_weights=False,

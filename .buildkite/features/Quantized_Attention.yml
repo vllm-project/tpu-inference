@@ -8,7 +8,7 @@ steps:
       queue: tpu_v6e_queue
     commands:
       - |
-        buildkite-agent meta-data set "Quantized_Attention_CorrectnessTest" "to be added"
+        buildkite-agent meta-data set "Quantized_Attention_CorrectnessTest" "unverified"
   - label: "Record correctness test result for Quantized Attention"
     key: "record_Quantized_Attention_CorrectnessTest"
     depends_on: "Quantized_Attention_CorrectnessTest"
@@ -30,7 +30,7 @@ steps:
       queue: tpu_v6e_queue
     commands:
       - |
-        buildkite-agent meta-data set "Quantized_Attention_PerformanceTest" "to be added"
+        buildkite-agent meta-data set "Quantized_Attention_PerformanceTest" "unverified"
   - label: "Record performance test result for Quantized Attention"
     key: "record_Quantized_Attention_PerformanceTest"
     depends_on: "Quantized_Attention_PerformanceTest"

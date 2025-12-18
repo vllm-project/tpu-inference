@@ -9,7 +9,8 @@ import pytest
 import torch
 from jax.sharding import Mesh
 from transformers import PretrainedConfig
-from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+from vllm.config import (ModelConfig, ParallelConfig, VllmConfig,
+                         set_current_vllm_config)
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
@@ -58,6 +59,7 @@ def vllm_config() -> MagicMock:
     mock_config.load_config.load_format = "auto"
     mock_config.additional_config = {}
     mock_config.cache_config = MagicMock(cache_dtype="auto")
+    mock_config.parallel_config = ParallelConfig(pipeline_parallel_size=1)
     return mock_config
 
 
@@ -315,6 +317,22 @@ class TestGetModel:
         mock_get_vllm.assert_not_called()
         assert result == "flax_model_sentinel"
 
+    @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "flax_nnx"}, clear=True)
+    @patch("tpu_inference.models.common.model_loader.get_vllm_model")
+    @patch("tpu_inference.models.common.model_loader.get_flax_model")
+    def test_get_model_flax_happy_path_withPP(self, mock_get_flax,
+                                              mock_get_vllm, vllm_config, rng,
+                                              mesh):
+        """Tests that 'flax_nnx' impl calls get_vllm_model when PP is enabled."""
+        mock_get_flax.return_value = "flax_model_sentinel"
+        mock_get_vllm.return_value = "vllm_model_sentinel"
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+        result = model_loader.get_model(vllm_config, rng, mesh)
+
+        mock_get_flax.assert_not_called()
+        mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh)
+        assert result == "vllm_model_sentinel"
+
     @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "vllm"}, clear=True)
     @patch("tpu_inference.models.common.model_loader.get_vllm_model")
     @patch("tpu_inference.models.common.model_loader.get_flax_model")
@@ -381,3 +399,43 @@ class TestGetModel:
 
         mock_get_flax.assert_not_called()
         mock_get_vllm.assert_not_called()
+
+    @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "auto"}, clear=True)
+    @patch("tpu_inference.models.common.model_loader.get_vllm_model")
+    @patch("tpu_inference.models.common.model_loader.get_flax_model")
+    def test_get_model_auto_resolves_to_flax_nnx(self, mock_get_flax,
+                                                 mock_get_vllm, vllm_config,
+                                                 rng, mesh):
+        """
+        Tests that 'auto' resolves to 'flax_nnx' for standard architectures
+        (not in _VLLM_REQUIRED_ARCHITECTURES).
+        """
+        # vllm_config uses Qwen3 which is NOT in _VLLM_REQUIRED_ARCHITECTURES
+        mock_get_flax.return_value = "flax_model_sentinel"
+
+        result = model_loader.get_model(vllm_config, rng, mesh)
+
+        mock_get_flax.assert_called_once_with(vllm_config, rng, mesh, False)
+        mock_get_vllm.assert_not_called()
+        assert result == "flax_model_sentinel"
+
+    @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "auto"}, clear=True)
+    @patch("tpu_inference.models.common.model_loader.get_vllm_model")
+    @patch("tpu_inference.models.common.model_loader.get_flax_model")
+    def test_get_model_auto_resolves_to_vllm_for_gpt_oss(
+            self, mock_get_flax, mock_get_vllm, vllm_config, rng, mesh):
+        """
+        Tests that 'auto' resolves to 'vllm' for architectures in
+        _VLLM_REQUIRED_ARCHITECTURES (e.g., GptOssForCausalLM).
+        """
+        # Mock the architecture to be GptOssForCausalLM
+        vllm_config.model_config.hf_config.architectures = [
+            "GptOssForCausalLM"
+        ]
+        mock_get_vllm.return_value = "vllm_model_sentinel"
+
+        result = model_loader.get_model(vllm_config, rng, mesh)
+
+        mock_get_flax.assert_not_called()
+        mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh)
+        assert result == "vllm_model_sentinel"

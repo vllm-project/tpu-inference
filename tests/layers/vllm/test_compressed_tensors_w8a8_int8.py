@@ -129,8 +129,6 @@ def test_loading_model(model, mesh):
 ])
 @pytest.mark.parametrize("enable_sp", [False, True])
 def test_row_parallel_linear(model, bias, mesh, enable_sp):
-    if 'TPU7x' in jax.devices()[0].device_kind:
-        pytest.skip("Skipping test on TPU TPU7x.")
 
     dtype = torch.bfloat16
 
@@ -141,7 +139,7 @@ def test_row_parallel_linear(model, bias, mesh, enable_sp):
         max_num_seqs=4,
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sequence_parallelism = enable_sp
+    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
 
     # Call tpu_inference code
     vllm_config.model_config.dtype = dtype
@@ -211,7 +209,7 @@ def test_column_parallel_linear(model, bias, mesh, enable_sp):
         max_num_seqs=4,
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sequence_parallelism = enable_sp
+    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
 
     # Call tpu_inference code
     vllm_config.model_config.dtype = torch.bfloat16
@@ -283,7 +281,7 @@ def test_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
         max_num_seqs=4,
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sequence_parallelism = enable_sp
+    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
 
     # Call tpu_inference code
     vllm_config.model_config.dtype = torch.bfloat16
@@ -358,7 +356,7 @@ def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
         max_num_seqs=4,
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sequence_parallelism = enable_sp
+    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
 
     # Call tpu_inference code
     vllm_config.model_config.dtype = torch.bfloat16

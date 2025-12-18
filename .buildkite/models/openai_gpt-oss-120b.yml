@@ -1,0 +1,67 @@
+# openai/gpt-oss-120b
+# text-only
+steps:
+  - label: "Unit tests for openai/gpt-oss-120b"
+    key: "openai_gpt-oss-120b_UnitTest"
+    agents:
+      queue: tpu_v6e_8_queue
+    soft_fail: true
+    commands:
+      - |
+        buildkite-agent meta-data set "openai_gpt-oss-120b_UnitTest" "unverified"
+  - label: "Record unit test result for openai/gpt-oss-120b"
+    key: "record_openai_gpt-oss-120b_UnitTest"
+    depends_on: "openai_gpt-oss-120b_UnitTest"
+    env:
+      CI_TARGET: openai/gpt-oss-120b
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "text-only"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh openai_gpt-oss-120b_UnitTest
+
+  - label: "Integration tests for openai/gpt-oss-120b"
+    key: "openai_gpt-oss-120b_IntegrationTest"
+    depends_on: "record_openai_gpt-oss-120b_UnitTest"
+    agents:
+      queue: tpu_v6e_8_queue
+    soft_fail: true
+    commands:
+      - |
+        buildkite-agent meta-data set "openai_gpt-oss-120b_IntegrationTest" "unverified"
+  - label: "Record integration test result for openai/gpt-oss-120b"
+    key: "record_openai_gpt-oss-120b_IntegrationTest"
+    depends_on: "openai_gpt-oss-120b_IntegrationTest"
+    env:
+      CI_TARGET: openai/gpt-oss-120b
+      CI_STAGE: "IntegrationTest"
+      CI_CATEGORY: "text-only"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh openai_gpt-oss-120b_IntegrationTest
+
+  - label: "Performance benchmarks for openai/gpt-oss-120b"
+    key: "openai_gpt-oss-120b_Benchmark"
+    depends_on: "record_openai_gpt-oss-120b_IntegrationTest"
+    agents:
+      queue: tpu_v6e_8_queue
+    soft_fail: true
+    commands:
+      - |
+        buildkite-agent meta-data set "openai_gpt-oss-120b_Benchmark" "unverified"
+  - label: "Record performance benchmark result for openai/gpt-oss-120b"
+    key: "record_openai_gpt-oss-120b_Benchmark"
+    depends_on: "openai_gpt-oss-120b_Benchmark"
+    env:
+      CI_TARGET: openai/gpt-oss-120b
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "text-only"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh openai_gpt-oss-120b_Benchmark

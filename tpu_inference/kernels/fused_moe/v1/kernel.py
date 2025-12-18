@@ -19,7 +19,8 @@ def align_to(x, a):
 
 
 def get_dtype_packing(dtype):
-    bits = dtypes.bit_width(dtype)
+    bits = (dtypes.bit_width(dtype)
+            if hasattr(dtypes, "bit_width") else dtypes.itemsize_bits(dtype))
     return 32 // bits
 
 
@@ -1375,171 +1376,166 @@ def fused_ep_moe(
     hbm_block_spec = pl.BlockSpec(memory_space=pltpu.MemorySpace.HBM)
     renorm_str = "-renorm_k" if renormalize_topk_logits else ""
     scope_name = f"fused-moe-k_{top_k}{renorm_str}-bt_{bt}_{btc}-bf_{bf}_{bfc}-bd1_{bd1}_{bd1c}-bd2_{bd2}_{bd2c}"
-    fused_moe = jax.named_scope(scope_name)(
-        pl.pallas_call(
-            functools.partial(
-                _fused_ep_moe_kernel,
-                top_k=top_k,
-                renormalize_topk_logits=renormalize_topk_logits,
-                ep_axis_name=ep_axis_name,
-                act_fn=act_fn,
-                subc_quant_wsz=subc_quant_wsz,
-                bt=bt,
-                bf=bf,
-                bd1=bd1,
-                bd2=bd2,
-                btc=btc,
-                bfc=bfc,
-                bd1c=bd1c,
-                bd2c=bd2c,
-            ),
-            out_shape=jax.ShapeDtypeStruct((local_num_tokens, hidden_size),
-                                           t_dtype),
-            grid_spec=pltpu.PrefetchScalarGridSpec(
-                num_scalar_prefetch=0,
-                in_specs=[
-                    hbm_block_spec,  # tokens_hbm
-                    hbm_block_spec,  # w1_hbm
-                    hbm_block_spec,  # w2_hbm
-                    None
-                    if w1_scale is None else hbm_block_spec,  # w1_scale_hbm
-                    None
-                    if w2_scale is None else hbm_block_spec,  # w2_scale_hbm
-                    None if b1 is None else hbm_block_spec,  # b1_hbm
-                    None if b2 is None else hbm_block_spec,  # b2_hbm
-                    hbm_block_spec,  # gating_output_hbm
-                    hbm_block_spec,  # a2a_g_hbm
-                ],
-                out_specs=pl.BlockSpec(memory_space=pltpu.MemorySpace.HBM),
-                scratch_shapes=([
-                    # t2e_routing_x2_smem
-                    pltpu.SMEM((2, bt, padded_top_k), jnp.int32),
-                    # d2e_count_x2_smem
-                    pltpu.SMEM((2, num_devices, 1, padded_num_experts),
-                               jnp.int32),
-                    # expert_offsets_x2_smem
-                    pltpu.SMEM((2, 2, padded_num_experts), jnp.int32),
-                    # expert_starts_x2_smem
-                    pltpu.SMEM((2, 1, padded_num_experts), jnp.int32),
-                    # expert_sizes_x2_smem
-                    pltpu.SMEM((2, 1, padded_num_experts), jnp.int32),
-                    # a2a_s_sends_x2_smem
-                    pltpu.SMEM((2, ), jnp.int32),
-                    # a2a_s_x2_vmem
-                    pltpu.VMEM(
-                        (
-                            2,
-                            bt * num_devices,
-                            t_packing,
-                            hidden_size // t_packing,
-                        ),
-                        t_dtype,
+    fused_moe = pl.pallas_call(
+        functools.partial(
+            _fused_ep_moe_kernel,
+            top_k=top_k,
+            renormalize_topk_logits=renormalize_topk_logits,
+            ep_axis_name=ep_axis_name,
+            act_fn=act_fn,
+            subc_quant_wsz=subc_quant_wsz,
+            bt=bt,
+            bf=bf,
+            bd1=bd1,
+            bd2=bd2,
+            btc=btc,
+            bfc=bfc,
+            bd1c=bd1c,
+            bd2c=bd2c,
+        ),
+        out_shape=jax.ShapeDtypeStruct((local_num_tokens, hidden_size),
+                                       t_dtype),
+        grid_spec=pltpu.PrefetchScalarGridSpec(
+            num_scalar_prefetch=0,
+            in_specs=[
+                hbm_block_spec,  # tokens_hbm
+                hbm_block_spec,  # w1_hbm
+                hbm_block_spec,  # w2_hbm
+                None if w1_scale is None else hbm_block_spec,  # w1_scale_hbm
+                None if w2_scale is None else hbm_block_spec,  # w2_scale_hbm
+                None if b1 is None else hbm_block_spec,  # b1_hbm
+                None if b2 is None else hbm_block_spec,  # b2_hbm
+                hbm_block_spec,  # gating_output_hbm
+                hbm_block_spec,  # a2a_g_hbm
+            ],
+            out_specs=pl.BlockSpec(memory_space=pltpu.MemorySpace.HBM),
+            scratch_shapes=([
+                # t2e_routing_x2_smem
+                pltpu.SMEM((2, bt, padded_top_k), jnp.int32),
+                # d2e_count_x2_smem
+                pltpu.SMEM((2, num_devices, 1, padded_num_experts), jnp.int32),
+                # expert_offsets_x2_smem
+                pltpu.SMEM((2, 2, padded_num_experts), jnp.int32),
+                # expert_starts_x2_smem
+                pltpu.SMEM((2, 1, padded_num_experts), jnp.int32),
+                # expert_sizes_x2_smem
+                pltpu.SMEM((2, 1, padded_num_experts), jnp.int32),
+                # a2a_s_sends_x2_smem
+                pltpu.SMEM((2, ), jnp.int32),
+                # a2a_s_x2_vmem
+                pltpu.VMEM(
+                    (
+                        2,
+                        bt * num_devices,
+                        t_packing,
+                        hidden_size // t_packing,
                     ),
-                    # a2a_s_acc_x2_vmem
-                    pltpu.VMEM(
-                        (
-                            2,
-                            bt * num_devices,
-                            t_packing,
-                            hidden_size // t_packing,
-                        ),
-                        t_dtype,
+                    t_dtype,
+                ),
+                # a2a_s_acc_x2_vmem
+                pltpu.VMEM(
+                    (
+                        2,
+                        bt * num_devices,
+                        t_packing,
+                        hidden_size // t_packing,
                     ),
-                    # a2a_g_acc_vmem
-                    pltpu.VMEM(
-                        (top_k, bt, t_packing, hidden_size // t_packing),
-                        t_dtype),
-                    # b_gating_x2_vmem
-                    pltpu.VMEM((2, bt, padded_num_experts), t_dtype),
-                    # b_output_x2_vmem
-                    pltpu.VMEM((2, bt, hidden_size), t_dtype),
-                    # b_w1_x2_vmem
-                    pltpu.VMEM((2, t_packing, bd1 // t_packing, bf), w1.dtype),
-                    # b_w3_x2_vmem
-                    pltpu.VMEM((2, t_packing, bd1 // t_packing, bf), w1.dtype),
-                    # b_w2_x2_vmem
-                    pltpu.VMEM((2, t_packing, bf, bd2 // t_packing), w2.dtype),
-                    # b_w1_scale_x2_vmem
-                    (None if w1_scale is None else pltpu.VMEM(
-                        (
-                            2,
-                            t_packing,
-                            bd1 // t_packing // subc_quant_wsz,
-                            1,
-                            bf,
-                        ),
-                        jnp.float32,
-                    )),
-                    # b_w3_scale_x2_vmem
-                    (None if w1_scale is None else pltpu.VMEM(
-                        (
-                            2,
-                            t_packing,
-                            bd1 // t_packing // subc_quant_wsz,
-                            1,
-                            bf,
-                        ),
-                        jnp.float32,
-                    )),
-                    # b_w2_scale_x2_vmem
-                    (None if w2_scale is None else pltpu.VMEM(
-                        (
-                            2,
-                            t_packing,
-                            bf // subc_quant_wsz,
-                            1,
-                            bd2 // t_packing,
-                        ),
-                        jnp.float32,
-                    )),
-                    # b_b1_x2_vmem
-                    (None if b1 is None else pltpu.VMEM(
-                        (
-                            2,
-                            1,
-                            bf,
-                        ),
-                        jnp.float32,
-                    )),
-                    # b_b3_x2_vmem
-                    (None if b1 is None else pltpu.VMEM(
-                        (
-                            2,
-                            1,
-                            bf,
-                        ),
-                        jnp.float32,
-                    )),
-                    # b_b2_x2_vmem
-                    (None if b2 is None else pltpu.VMEM(
-                        (
-                            2,
-                            t_packing,
-                            1,
-                            bd2 // t_packing,
-                        ),
-                        jnp.float32,
-                    )),
-                    # b_acc_vmem
-                    pltpu.VMEM((bt * num_devices, 1, bf * 2), jnp.float32),
-                    # local_sems
-                    pltpu.SemaphoreType.DMA((2, 5)),
-                    # send_sems
-                    pltpu.SemaphoreType.DMA((2, )),
-                    # recv_sems
-                    pltpu.SemaphoreType.DMA((2, )),
-                    # a2a_gather_sem
-                    pltpu.SemaphoreType.DMA,
-                    # a2a_acc_sem
-                    pltpu.SemaphoreType.DMA,
-                ]),
-            ),
-            compiler_params=pltpu.CompilerParams(
-                collective_id=0,
-                vmem_limit_bytes=100 * 1024 * 1024,
-            ),
-            name=scope_name,
-        ))
+                    t_dtype,
+                ),
+                # a2a_g_acc_vmem
+                pltpu.VMEM((top_k, bt, t_packing, hidden_size // t_packing),
+                           t_dtype),
+                # b_gating_x2_vmem
+                pltpu.VMEM((2, bt, padded_num_experts), t_dtype),
+                # b_output_x2_vmem
+                pltpu.VMEM((2, bt, hidden_size), t_dtype),
+                # b_w1_x2_vmem
+                pltpu.VMEM((2, t_packing, bd1 // t_packing, bf), w1.dtype),
+                # b_w3_x2_vmem
+                pltpu.VMEM((2, t_packing, bd1 // t_packing, bf), w1.dtype),
+                # b_w2_x2_vmem
+                pltpu.VMEM((2, t_packing, bf, bd2 // t_packing), w2.dtype),
+                # b_w1_scale_x2_vmem
+                (None if w1_scale is None else pltpu.VMEM(
+                    (
+                        2,
+                        t_packing,
+                        bd1 // t_packing // subc_quant_wsz,
+                        1,
+                        bf,
+                    ),
+                    jnp.float32,
+                )),
+                # b_w3_scale_x2_vmem
+                (None if w1_scale is None else pltpu.VMEM(
+                    (
+                        2,
+                        t_packing,
+                        bd1 // t_packing // subc_quant_wsz,
+                        1,
+                        bf,
+                    ),
+                    jnp.float32,
+                )),
+                # b_w2_scale_x2_vmem
+                (None if w2_scale is None else pltpu.VMEM(
+                    (
+                        2,
+                        t_packing,
+                        bf // subc_quant_wsz,
+                        1,
+                        bd2 // t_packing,
+                    ),
+                    jnp.float32,
+                )),
+                # b_b1_x2_vmem
+                (None if b1 is None else pltpu.VMEM(
+                    (
+                        2,
+                        1,
+                        bf,
+                    ),
+                    jnp.float32,
+                )),
+                # b_b3_x2_vmem
+                (None if b1 is None else pltpu.VMEM(
+                    (
+                        2,
+                        1,
+                        bf,
+                    ),
+                    jnp.float32,
+                )),
+                # b_b2_x2_vmem
+                (None if b2 is None else pltpu.VMEM(
+                    (
+                        2,
+                        t_packing,
+                        1,
+                        bd2 // t_packing,
+                    ),
+                    jnp.float32,
+                )),
+                # b_acc_vmem
+                pltpu.VMEM((bt * num_devices, 1, bf * 2), jnp.float32),
+                # local_sems
+                pltpu.SemaphoreType.DMA((2, 5)),
+                # send_sems
+                pltpu.SemaphoreType.DMA((2, )),
+                # recv_sems
+                pltpu.SemaphoreType.DMA((2, )),
+                # a2a_gather_sem
+                pltpu.SemaphoreType.DMA,
+                # a2a_acc_sem
+                pltpu.SemaphoreType.DMA,
+            ]),
+        ),
+        compiler_params=pltpu.CompilerParams(
+            collective_id=0,
+            vmem_limit_bytes=100 * 1024 * 1024,
+        ),
+        name=scope_name,
+    )
 
     @jax.jit
     @jax.shard_map(
