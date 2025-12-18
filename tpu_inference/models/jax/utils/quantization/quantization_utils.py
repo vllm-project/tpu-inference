@@ -617,6 +617,16 @@ def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
                         shape_list[
                             1] = shape_list[1] // quantization_block_size_k
                 param_shape = tuple(shape_list)
+        print(
+            "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+        )
+        print("this is path: ", path)
+        print("this is param_shape: ", param_shape)
+        print("this is param_dtype: ", param_dtype)
+        print("this is path: ", path)
+        print(
+            "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n\n"
+        )
         param.value = get_random_sharded_array(
             rng, mesh, param, param_shape, param_dtype,
             ".".join([str(x) for x in path]))
