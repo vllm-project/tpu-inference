@@ -3,7 +3,6 @@ from typing import Optional, Union
 import jax
 import jax.numpy as jnp
 import torch
-from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from torchax.interop import torch_view
@@ -47,12 +46,12 @@ def sharded_quantized_matmul(x: jax.Array, w_q: jax.Array, w_s: jax.Array,
                 output = jax.lax.psum(output, axis_name=in_axis)
             return output
 
-        return shard_map(wrapper,
+        return jax.shard_map(wrapper,
                          mesh=mesh,
                          in_specs=(x_sharding, weight_sharding,
                                    scale_sharding),
                          out_specs=(out_sharding),
-                         check_rep=False)(x, w_q, w_s)
+                         check_vma=False)(x, w_q, w_s)
     else:
         return xla_quantized_matmul(x, w_q, w_s)
 

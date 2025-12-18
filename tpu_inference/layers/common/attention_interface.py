@@ -4,7 +4,6 @@ from typing import Any, Callable, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
-from jax.experimental import shard_map
 from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention
 from jax.experimental.pallas.ops.tpu.splash_attention import \
     splash_attention_kernel as splash
@@ -55,11 +54,12 @@ def sharded_flash_attention(
                                vmem_limit_bytes=vmem_limit_bytes)
 
     return jax.jit(
-        shard_map.shard_map(_flash_attention,
-                            mesh=mesh,
-                            in_specs=in_specs,
-                            out_specs=out_specs,
-                            check_rep=False))
+        jax.shard_map(
+            _flash_attention,
+            mesh=mesh,
+            in_specs=in_specs,
+            out_specs=out_specs,
+            check_vma=False))
 
 
 def sharded_paged_attention(
@@ -94,12 +94,12 @@ def sharded_paged_attention(
         )
 
     return jax.jit(
-        shard_map.shard_map(
+        jax.shard_map(
             _paged_attention_fn,
             mesh=mesh,
             in_specs=in_specs,
             out_specs=out_specs,
-            check_rep=False,
+            check_vma=False,
         ))
 
 
@@ -257,7 +257,7 @@ def sharded_splash_attention(
     )
     out_specs = P("data", "model", None, None)
     return jax.jit(
-        shard_map.shard_map(
+        jax.shard_map(
             functools.partial(
                 apply_splash,
                 window_size=window_size,
@@ -267,7 +267,7 @@ def sharded_splash_attention(
             mesh=mesh,
             in_specs=in_specs,
             out_specs=out_specs,
-            check_rep=False,
+            check_vma=False,
         ))
 
 
@@ -334,12 +334,12 @@ def sharded_ragged_paged_attention(
             v_scale=v_scale,
         )
 
-    return shard_map.shard_map(
+    return jax.shard_map(
         _ragged_paged_attention,
         mesh=mesh,
         in_specs=in_specs,
         out_specs=out_specs,
-        check_rep=False,
+        check_vma=False,
     )(*args)
 
 
