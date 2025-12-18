@@ -20,7 +20,7 @@ notify:
 
 steps:
   - label: "Publish vllm/vllm-tpu nightly image"
-    if: build.env("NIGHTLY") == "1"
+    if: build.env("NIGHTLY") == "1" && build.env("BUILDKITE_BRANCH") == "main"
     agents:
       queue: cpu
     secrets:
@@ -40,7 +40,7 @@ steps:
           password-env: DOCKERHUB_TOKEN
 
   - label: "Publish vllm/vllm-tpu nightly image for ironwood"
-    if: build.env("NIGHTLY") == "1"
+    if: build.env("NIGHTLY") == "1" && build.env("BUILDKITE_BRANCH") == "main"
     agents:
       queue: cpu
     secrets:
