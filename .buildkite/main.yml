@@ -28,7 +28,8 @@ steps:
        - bash .buildkite/scripts/generate_support_matrices.sh
 
    - label: "Commit support matrices if is nightly build or release tag specified"
-     <<: *run-on-nightly-or-tag
+    #  <<: *run-on-nightly-or-tag
+     if: build.env("BUILDKITE_BRANCH") == "main" && (build.env("NIGHTLY") == "1" || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/)
      key: commit_support_matrices
      depends_on: generate_support_matrices
      agents:
@@ -38,24 +39,24 @@ steps:
      command:
        - bash .buildkite/scripts/commit_support_matrices.sh
 
-   - label: "Notify test results"
-     <<: *run-on-nightly-or-tag
-     key: notify_test_results
-     depends_on: commit_support_matrices
-     agents:
-       queue: cpu
-     commands:
-       - bash .buildkite/scripts/notify_test_results.sh
+  #  - label: "Notify test results"
+  #    <<: *run-on-nightly-or-tag
+  #    key: notify_test_results
+  #    depends_on: commit_support_matrices
+  #    agents:
+  #      queue: cpu
+  #    commands:
+  #      - bash .buildkite/scripts/notify_test_results.sh
 
-   - label: "Record verified commit hashes"
-     if: build.env("NIGHTLY") == "1"
-     key: record_verified_commit_hashes
-     depends_on:
-       - notify_test_results
-       - tpu_test_notification
-     agents:
-       queue: cpu
-     secrets:
-      - GITHUB_PAT
-     command:
-       - bash .buildkite/scripts/commit_verified_commit_hashes.sh
+  #  - label: "Record verified commit hashes"
+  #    if: build.env("NIGHTLY") == "1"
+  #    key: record_verified_commit_hashes
+  #    depends_on:
+  #      - notify_test_results
+  #      - tpu_test_notification
+  #    agents:
+  #      queue: cpu
+  #    secrets:
+  #     - GITHUB_PAT
+  #    command:
+  #      - bash .buildkite/scripts/commit_verified_commit_hashes.sh
