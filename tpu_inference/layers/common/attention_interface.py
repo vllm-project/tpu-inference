@@ -54,12 +54,11 @@ def sharded_flash_attention(
                                vmem_limit_bytes=vmem_limit_bytes)
 
     return jax.jit(
-        jax.shard_map(
-            _flash_attention,
-            mesh=mesh,
-            in_specs=in_specs,
-            out_specs=out_specs,
-            check_vma=False))
+        jax.shard_map(_flash_attention,
+                      mesh=mesh,
+                      in_specs=in_specs,
+                      out_specs=out_specs,
+                      check_vma=False))
 
 
 def sharded_paged_attention(

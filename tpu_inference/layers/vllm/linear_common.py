@@ -47,11 +47,11 @@ def sharded_quantized_matmul(x: jax.Array, w_q: jax.Array, w_s: jax.Array,
             return output
 
         return jax.shard_map(wrapper,
-                         mesh=mesh,
-                         in_specs=(x_sharding, weight_sharding,
-                                   scale_sharding),
-                         out_specs=(out_sharding),
-                         check_vma=False)(x, w_q, w_s)
+                             mesh=mesh,
+                             in_specs=(x_sharding, weight_sharding,
+                                       scale_sharding),
+                             out_specs=(out_sharding),
+                             check_vma=False)(x, w_q, w_s)
     else:
         return xla_quantized_matmul(x, w_q, w_s)
 
