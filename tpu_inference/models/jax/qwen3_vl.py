@@ -143,8 +143,6 @@ def get_mrope_input_positions(
     video_token_id: int,
     vision_start_token_id: int,
     spatial_merge_size: int,
-    second_per_grid_ts: Optional[List[float]] = None,
-    tokens_per_second: float = 1.0,
 ) -> Tuple[jax.Array, int]:
     """Compute MRoPE 3D position IDs for a single sequence.
 
@@ -183,31 +181,15 @@ def get_mrope_input_positions(
 
     # If vision placeholder tokens exist, matching grids must be provided.
     if image_nums > 0 and not image_grid_thw:
-        raise ValueError(
-            "image_grid_thw must be provided when image tokens are present."
-        )
+        raise ValueError("image_grid_thw must be provided when image tokens are present.")
     if video_nums > 0 and not video_grid_thw:
-        raise ValueError(
-            "video_grid_thw must be provided when video tokens are present."
-        )
-    if image_grid_thw is not None and len(image_grid_thw) < image_nums:
-        raise ValueError(
-            f"image_grid_thw has {len(image_grid_thw)} entries but found {image_nums} image tokens."
-        )
-    if video_grid_thw is not None and len(video_grid_thw) < video_nums:
-        raise ValueError(
-            f"video_grid_thw has {len(video_grid_thw)} entries but found {video_nums} video tokens."
-        )
-
+        raise ValueError("video_grid_thw must be provided when video tokens are present.")
     llm_pos_ids_list = []
-
     st = 0
     remain_images, remain_videos = image_nums, video_nums
     image_index, video_index = 0, 0
 
     for _ in range(image_nums + video_nums):
-        video_second_per_grid_t = 0.0
-
         if remain_images > 0:
             try:
                 ed_image = input_tokens.index(image_token_id, st)
@@ -230,41 +212,39 @@ def get_mrope_input_positions(
             remain_images -= 1
             ed = ed_image
         else:
-            t, h, w = video_grid_thw[video_index]
-            video_second_per_grid_t = 1.0
-            if second_per_grid_ts:
-                video_second_per_grid_t = second_per_grid_ts[video_index]
+            t, h, w = video_grid_thw[video_index]  # t=1
             video_index += 1
             remain_videos -= 1
             ed = ed_video
 
+        # t would always be 1
         llm_grid_t = t
         llm_grid_h = h // spatial_merge_size
         llm_grid_w = w // spatial_merge_size
         text_len = ed - st
 
         st_idx = int(llm_pos_ids_list[-1].max()) + 1 if llm_pos_ids_list else 0
+
         llm_pos_ids_list.append(
             jnp.broadcast_to(
                 jnp.arange(text_len, dtype=jnp.int32).reshape(1, -1),
                 (3, text_len),
-            )
-            + st_idx
+            ) + st_idx
         )
 
-        t_index = (
-            jnp.broadcast_to(
-                jnp.arange(llm_grid_t, dtype=jnp.int32).reshape(-1, 1),
-                (llm_grid_t, llm_grid_h * llm_grid_w),
-            )
-            * video_second_per_grid_t
-            * tokens_per_second
-        ).astype(jnp.int32).flatten()
+        # t_index alaways zero
+        num_vision_tokens = llm_grid_t * llm_grid_h * llm_grid_w
+
+        t_index = jnp.broadcast_to(
+            jnp.arange(llm_grid_t, dtype=jnp.int32).reshape(-1, 1),
+            (llm_grid_t, llm_grid_h * llm_grid_w),
+        ).flatten()  # llm_grid_t=1 then [0, 0, 0, ...]
 
         h_index = jnp.broadcast_to(
             jnp.arange(llm_grid_h, dtype=jnp.int32).reshape(1, -1, 1),
             (llm_grid_t, llm_grid_h, llm_grid_w),
         ).flatten()
+
         w_index = jnp.broadcast_to(
             jnp.arange(llm_grid_w, dtype=jnp.int32).reshape(1, 1, -1),
             (llm_grid_t, llm_grid_h, llm_grid_w),
@@ -273,8 +253,10 @@ def get_mrope_input_positions(
         llm_pos_ids_list.append(
             jnp.stack([t_index, h_index, w_index]) + text_len + st_idx
         )
-        st = ed + llm_grid_t * llm_grid_h * llm_grid_w
 
+        st = ed + num_vision_tokens
+
+    # Trailing text
     if st < len(input_tokens):
         st_idx = int(llm_pos_ids_list[-1].max()) + 1 if llm_pos_ids_list else 0
         text_len = len(input_tokens) - st
@@ -282,8 +264,7 @@ def get_mrope_input_positions(
             jnp.broadcast_to(
                 jnp.arange(text_len, dtype=jnp.int32).reshape(1, -1),
                 (3, text_len),
-            )
-            + st_idx
+            ) + st_idx
         )
 
     llm_positions = jnp.concatenate(llm_pos_ids_list, axis=1).reshape(3, -1)
@@ -294,111 +275,26 @@ def get_mrope_input_positions(
 
 def apply_interleaved_mrope(
     freqs: jax.Array,
-    mrope_section: List[int],
+    mrope_section: List[int] = [24, 20, 20],
 ) -> jax.Array:
-    """Apply interleaved MRoPE by combining T, H, W frequencies.
-
-    MRoPE interleaves the temporal (T), height (H), and width (W) frequency
-    components across the head dimension. The output follows a cyclic ordering
-    over the available axes: [T,H,W,T,H,W,...]. If one axis exhausts its
-    allocated dimensions, the remaining axes continue interleaving in-order
-    (e.g., [H,W,H,W,...] if T is exhausted).
-
-    Args:
-        freqs: Frequency tensor of shape (3, bs, seq_len, head_dim // 2)
-               where freqs[0]=T, freqs[1]=H, freqs[2]=W frequencies
-        mrope_section: List of [T_dim, H_dim, W_dim] specifying how many
-                       dimensions each component gets; must sum to head_dim//2.
-                       Indices are split into contiguous sections (T first, then
-                       H, then W) and then interleaved cyclically.
-
-    Returns:
-        Interleaved frequencies of shape (bs, seq_len, head_dim // 2)
-
-    Example:
-        With mrope_section = [24, 20, 20]:
-        - min_section = 20
-        - interleaved_len = 60
-        - Output layout: [T0,H0,W0, T1,H1,W1, ..., T19,H19,W19, T20,T21,T22,T23]
     """
-    if not isinstance(mrope_section, (list, tuple)) or len(mrope_section) != 3:
-        raise ValueError(
-            "mrope_section must be a list/tuple of length 3, "
-            f"but got {mrope_section!r}."
-        )
 
-    t_dim, h_dim, w_dim = (int(x) for x in mrope_section)
-    if t_dim < 0 or h_dim < 0 or w_dim < 0:
-        raise ValueError(
-            "mrope_section values must be non-negative, "
-            f"but got {mrope_section!r}."
-        )
+    :param freqs: MRoPE frequency derived from T, H, W values. (3, bs, seq, 64)
+    :param mrope_section: How MRoPE would be placed.
+    :return: A final interleaved MRoPE frequency. (bs, seq, 64)
+    """
 
-    half_dim = int(freqs.shape[-1])
-    if t_dim + h_dim + w_dim != half_dim:
-        raise ValueError(
-            "mrope_section must sum to head_dim//2. "
-            f"Got sum={t_dim + h_dim + w_dim} but head_dim//2={half_dim} "
-            f"for mrope_section={mrope_section!r}."
-        )
+    t, h, w = mrope_section # 24, 20, 20
 
-    # Split frequency indices into disjoint per-axis sections, then interleave values
-    # across axes in a cyclic [T, H, W] order (skipping exhausted sections).
-    freqs_t = freqs[0, ..., :t_dim]
-    freqs_h = freqs[1, ..., t_dim : t_dim + h_dim]
-    freqs_w = freqs[2, ..., t_dim + h_dim : t_dim + h_dim + w_dim]
+    result = freqs[0].copy()
 
-    min_section = min(t_dim, h_dim, w_dim)
-    pieces: List[jax.Array] = []
+    h_indices = jnp.arange(1, h * 3, 3)
+    result = result.at[..., h_indices].set(freqs[1, ..., h_indices])
 
-    if min_section > 0:
-        # (bs, seq_len, min_section, 3) -> (bs, seq_len, min_section*3)
-        interleaved_thw = jnp.stack(
-            [
-                freqs_t[..., :min_section],
-                freqs_h[..., :min_section],
-                freqs_w[..., :min_section],
-            ],
-            axis=-1,
-        ).reshape(freqs_t.shape[:-1] + (min_section * 3,))
-        pieces.append(interleaved_thw)
+    w_indices = jnp.arange(2, w * 3, 3)  # [2, 5, 8, ..., 59]
+    result = result.at[..., w_indices].set(freqs[2, ..., w_indices])
 
-    # Remaining sections (0, 1, or 2 axes may have remaining dims).
-    freqs_t_rem = freqs_t[..., min_section:]
-    freqs_h_rem = freqs_h[..., min_section:]
-    freqs_w_rem = freqs_w[..., min_section:]
-
-    rem_axes: List[jax.Array] = []
-    if freqs_t_rem.shape[-1] > 0:
-        rem_axes.append(freqs_t_rem)
-    if freqs_h_rem.shape[-1] > 0:
-        rem_axes.append(freqs_h_rem)
-    if freqs_w_rem.shape[-1] > 0:
-        rem_axes.append(freqs_w_rem)
-
-    if len(rem_axes) == 1:
-        pieces.append(rem_axes[0])
-    elif len(rem_axes) == 2:
-        a, b = rem_axes
-        min_rem = min(a.shape[-1], b.shape[-1])
-        if min_rem > 0:
-            interleaved_ab = jnp.stack(
-                [a[..., :min_rem], b[..., :min_rem]], axis=-1
-            ).reshape(a.shape[:-1] + (min_rem * 2,))
-            pieces.append(interleaved_ab)
-        if a.shape[-1] > min_rem:
-            pieces.append(a[..., min_rem:])
-        if b.shape[-1] > min_rem:
-            pieces.append(b[..., min_rem:])
-
-    if not pieces:
-        return jnp.zeros(freqs.shape[1:], dtype=freqs.dtype)
-    return jnp.concatenate(pieces, axis=-1)
-
-
-# ==============================================================================
-# Text Model Components
-# ==============================================================================
+    return result
 
 
 class Qwen3VLTextRMSNorm(nnx.Module):
@@ -494,7 +390,7 @@ class Qwen3VLTextRotaryEmbedding(nnx.Module):
         self.inv_freq = inv_freq
 
         # MRoPE section for interleaving [T_dim, H_dim, W_dim]
-        # Must sum to dim // 2
+        # Must sum to dim // 2 = 64
         self.mrope_section = mrope_section if mrope_section is not None else [24, 20, 20]
 
     def __call__(
@@ -570,7 +466,6 @@ class Qwen3VLTextAttention(nnx.Module):
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.scaling = self.head_dim ** -0.5
 
-        # Query, Key, Value projections
         self.q_proj = nnx.Linear(
             self.hidden_size,
             self.num_heads * self.head_dim,
@@ -622,7 +517,6 @@ class Qwen3VLTextAttention(nnx.Module):
         """
         batch_size, seq_len, _ = hidden_states.shape
 
-        # Project to Q, K, V
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
@@ -641,7 +535,6 @@ class Qwen3VLTextAttention(nnx.Module):
         key_states = jnp.transpose(key_states, (0, 2, 1, 3))
         value_states = jnp.transpose(value_states, (0, 2, 1, 3))
 
-        # Apply rotary position embeddings
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
@@ -650,7 +543,6 @@ class Qwen3VLTextAttention(nnx.Module):
             key_states = jnp.repeat(key_states, self.num_key_value_groups, axis=1)
             value_states = jnp.repeat(value_states, self.num_key_value_groups, axis=1)
 
-        # Scaled dot-product attention
         attn_weights = jnp.einsum("bhqd,bhkd->bhqk", query_states, key_states) * self.scaling
 
         if attention_mask is not None:
@@ -818,11 +710,6 @@ class Qwen3VLTextDecoderLayer(nnx.Module):
         return hidden_states
 
 
-# ==============================================================================
-# Vision Rotary Embedding
-# ==============================================================================
-
-
 def apply_rotary_pos_emb_vision(
     x: jax.Array, rotary_pos_emb: jax.Array
 ) -> jax.Array:
@@ -899,7 +786,7 @@ class Qwen3VLVisionPatchEmbed(nnx.Module):
             out_features=hidden_size,
             kernel_size=kernel_size,
             strides=kernel_size,
-            use_bias=False,
+            use_bias=True,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(
                 init_fn, (None, None, None, None, "model")
@@ -931,10 +818,6 @@ class Qwen3VLVisionPatchEmbed(nnx.Module):
         x = x.reshape(L, self.hidden_size)
         return x
 
-
-# ==============================================================================
-# Vision MLP
-# ==============================================================================
 
 
 class Qwen3VLVisionMLP(nnx.Module):
@@ -1103,7 +986,7 @@ class Qwen3VLVisionBlock(nnx.Module):
         mesh: Mesh,
         norm_eps: float = 1e-6,
     ):
-        self.norm1 = nnx.RMSNorm(
+        self.norm1 = nnx.LayerNorm(
             hidden_size,
             epsilon=norm_eps,
             dtype=dtype,
@@ -1117,7 +1000,7 @@ class Qwen3VLVisionBlock(nnx.Module):
             rngs=rngs,
             mesh=mesh,
         )
-        self.norm2 = nnx.RMSNorm(
+        self.norm2 = nnx.LayerNorm(
             hidden_size,
             epsilon=norm_eps,
             dtype=dtype,
@@ -1504,7 +1387,6 @@ class Qwen3VLVisionTransformer(nnx.Module):
         rotary_pos_emb: jax.Array,
         segment_ids: jax.Array,
     ) -> Tuple[jax.Array, List[jax.Array]]:
-        # Patch embedding
         hidden_states = self.patch_embed(x)
 
         # Reshape for merge block ordering
@@ -1758,7 +1640,6 @@ class Qwen3VLModel(nnx.Module):
         Returns:
             hidden_states: Final hidden states of shape (batch, seq_len, hidden_size)
         """
-        # Get embeddings
         if inputs_embeds is not None:
             x = inputs_embeds
         else:
@@ -1767,7 +1648,6 @@ class Qwen3VLModel(nnx.Module):
         # Compute MRoPE position embeddings
         position_embeddings = self.rotary_emb(position_ids)
 
-        # Pass through decoder layers
         for i, layer in enumerate(self.layers):
             x = layer(
                 hidden_states=x,
@@ -1785,7 +1665,6 @@ class Qwen3VLModel(nnx.Module):
                     x, visual_pos_mask, deepstack_visual_embeds[i]
                 )
 
-        # Final normalization
         x = self.norm(x)
 
         return x
@@ -1816,7 +1695,6 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         config = vllm_config.model_config.hf_config
         self.config = config
 
-        # Vision encoder
         self.visual = Qwen3VLVisionTransformer(
             vllm_config=vllm_config,
             rngs=self.rng,
@@ -1824,7 +1702,6 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
         )
 
-        # Text model with DeepStack
         self.language_model = Qwen3VLModel(
             vllm_config=vllm_config,
             rng=self.rng,
@@ -1888,10 +1765,8 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         if not image_grid_thw:
             return ()
 
-        # Run vision encoder
         image_embeds, deepstack_embeds = self.visual(pixel_values, image_grid_thw)
 
-        # Cache deepstack embeddings for forward pass
         self._deepstack_cache = deepstack_embeds
 
         # Split embeddings per image (matching Qwen 2.5 VL return format)
@@ -1974,6 +1849,7 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
             )
 
         # Create causal attention mask if not provided
+        # TODO: This robustness makes the forward complex.
         if attention_mask is None and input_ids is not None:
             seq_len = input_ids.shape[-1]
             # Additive causal mask: 0 for allowed positions, large negative for masked.
@@ -1982,7 +1858,6 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
                 causal_mask, 0.0, jnp.finfo(jnp.float32).min
             )[None, None, :, :]
 
-        # Forward through language model with MRoPE
         hidden_states = self.language_model(
             input_ids=input_ids,
             position_ids=position_ids,
@@ -2024,8 +1899,6 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
             llm_positions: (3, seq_len) position IDs for [T, H, W]
             mrope_position_delta: Delta for rope calculation
         """
-        # Match the Qwen2.5-VL serving signature. Some arguments (e.g., audio)
-        # are currently unused by Qwen3-VL but are accepted for compatibility.
         del audio_feature_lengths, use_audio_in_video
 
         if hf_config is None:
@@ -2064,7 +1937,6 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         patch_input_dim = (
             vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size
         )
-        spatial_merge_unit = vc.spatial_merge_size ** 2
 
         # Get warmup image shapes from config
         image_shapes = []
@@ -2102,8 +1974,7 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
 
     def load_weights(self, rng_key: jax.Array) -> None:
         """Load weights from HuggingFace model."""
-        # TODO: Current mappings rely on `get_default_maps` (Einsum-style transforms);
-        # this may need revisiting for `nnx.Linear`-based attention projections.
+        # TODO: verify model loading
         self.rng = nnx.Rngs(rng_key)
 
         mappings = {
@@ -2131,7 +2002,9 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
             "visual.blocks.*.mlp.fc2": "visual.blocks.*.mlp.fc2.kernel",
             "visual.blocks.*.mlp.fc2.bias": "visual.blocks.*.mlp.fc2.bias",
             "visual.blocks.*.norm1": "visual.blocks.*.norm1.scale",
+            "visual.blocks.*.norm1.bias": "visual.blocks.*.norm1.bias",
             "visual.blocks.*.norm2": "visual.blocks.*.norm2.scale",
+            "visual.blocks.*.norm2.bias": "visual.blocks.*.norm2.bias",
             "visual.merger.ln_q": "visual.merger.norm.scale",
             "visual.merger.mlp.0": "visual.merger.linear_fc1.kernel",
             "visual.merger.mlp.0.bias": "visual.merger.linear_fc1.bias",
