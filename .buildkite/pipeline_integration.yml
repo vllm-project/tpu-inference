@@ -1,0 +1,25 @@
+notify:
+  - email: "weiyulin@google.com"
+    if: build.state == "failed" # Note(weiyulin) Remove branch check for debugging purpose
+  # - slack: "vllm#tpu-ci-notifications"
+  #   if: build.state == "failed" && build.branch == "main"
+
+steps:
+  - wait: ~
+  # -----------------------------------------------------------------
+  # Checkin LKG
+  # -----------------------------------------------------------------
+  - label: "Promote to Last Known Good (LKG)"
+    key: "promote_lkg"
+    depends_on: "test_0" 
+    agents:
+      queue: "cpu"
+    secrets:
+      - GITHUB_PAT
+    commands:
+      - |
+        VLLM_LKG_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH")
+        chmod +x .buildkite/scripts/update_lkg_version.sh
+        .buildkite/scripts/update_lkg_version.sh "$$VLLM_LKG_HASH"
+        
+        buildkite-agent annotate ":white_check_mark: LKG Updated: $$VLLM_LKG_HASH" --style "success"
