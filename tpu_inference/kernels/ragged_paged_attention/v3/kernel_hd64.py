@@ -486,14 +486,9 @@ def _ragged_paged_attention_kernel(
         kv_left = kv_len - kv_len_start
         kv_left_frm_cache = jnp.maximum(kv_left - q_len, 0)
         kv_left_frm_new = kv_left - kv_left_frm_cache
-        bkv_p_frm_cache = jnp.minimum(cdiv(kv_left_frm_cache, page_size),
-                                      bkv_p)
         bkv_sz_frm_new = jnp.minimum(
             jnp.maximum(bkv_sz - kv_left_frm_cache, 0), kv_left_frm_new)
         page_indices_offset = seq_idx * pages_per_seq + kv_p_start
-
-        # Make sure the current bkv buffer is safe to overwrite.
-        wait_update_kv_cache(bkv_sem_idx)
 
         debug_print(
             "[RPA debug]"
@@ -506,14 +501,17 @@ def _ragged_paged_attention_kernel(
         debug_print("[RPA debug] kv_left={}", kv_left)
         debug_print("[RPA debug] kv_left_frm_cache={}", kv_left_frm_cache)
         debug_print("[RPA debug] kv_left_frm_new={}", kv_left_frm_new)
-        debug_print("[RPA debug] bkv_p_frm_cache={}", bkv_p_frm_cache)
         debug_print("[RPA debug] bkv_sz_frm_new={}", bkv_sz_frm_new)
         debug_print("[RPA debug] page_indices_offset={}", page_indices_offset)
 
         if not wait:
-            # Fetch effective kv from kv cache.
-            def loop_body(i, offset):
-                sz = jnp.minimum(page_size, kv_left_frm_cache - i * page_size)
+            # Make sure the current bkv buffer is safe to overwrite.
+            wait_update_kv_cache(bkv_sem_idx)
+
+            offset = jnp.minimum(kv_left_frm_cache, page_size * bkv_p)
+
+            for i in range(bkv_p):
+                sz = jnp.clip(kv_left_frm_cache - i * page_size, 0, page_size)
                 _async_copy(
                     cache_hbm_ref.at[pl.ds(
                         page_indices_ref[page_indices_offset + i] * page_size,
@@ -523,23 +521,14 @@ def _ragged_paged_attention_kernel(
                     wait=False,
                 )
                 debug_print("[RPA debug] loop_body i={}, sz={}", i, sz)
-                return offset + sz
 
-            offset = lax.fori_loop(
-                0,
-                bkv_p_frm_cache,
-                loop_body,
-                0,  # offset
-                unroll=False,
-            )
-
-            size = lax.select(bkv_sz_frm_new > 0, bkv_sz_frm_new, 0)
+            sz = lax.select(bkv_sz_frm_new > 0, bkv_sz_frm_new, 0)
             new_kv_len_start = q_end - kv_left_frm_new
             debug_print("[RPA debug] new_kv_len_start={}", new_kv_len_start)
             debug_print("[RPA debug] offset_in_bkv={}", offset)
             _async_copy(
-                kv_hbm_ref.at[pl.ds(new_kv_len_start, size)],
-                vmem_ref.at[pl.ds(offset, size)],
+                kv_hbm_ref.at[pl.ds(new_kv_len_start, sz)],
+                vmem_ref.at[pl.ds(offset, sz)],
                 sem,
                 wait,
             )
@@ -1571,6 +1560,7 @@ def ragged_paged_attention_hd64(
             # one, we need some extra work to support Megacore mode.
             dimension_semantics=("arbitrary", ),
             vmem_limit_bytes=vmem_limit_bytes,
+            disable_bounds_checks=True,
         ),
         out_shape=[
             jax.ShapeDtypeStruct(shape=q.shape, dtype=q.dtype),
