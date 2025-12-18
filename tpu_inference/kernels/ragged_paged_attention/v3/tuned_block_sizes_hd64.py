@@ -420,7 +420,7 @@ def get_tuned_block_sizes(
     page_size,
     max_num_tokens,
     pages_per_seq,
-    sliding_window,
+    sliding_window=None,
 ) -> tuple[int, int]:
     """Search tuned values for (num_kv_pages_per_blk, num_queries_per_blk)."""
 
