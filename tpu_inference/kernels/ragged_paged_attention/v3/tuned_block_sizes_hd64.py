@@ -439,7 +439,6 @@ def get_tuned_block_sizes(
     try:
         bkv_p, bq = TUNED_BLOCK_SIZES[device][page_size][dtypes][head_dims][
             extra]
-        logger.warning_once('RPA v3 kernel: Found tuned sizes for %s', keys)
     except KeyError:
         logger.warning_once(
             'Couldn`t find tuned sizes for the RPA v3 kernel with %s', keys)
@@ -459,8 +458,8 @@ def get_tuned_block_sizes(
 
         bkv_p, bq = (min(pages_per_seq, bkv_p), min(max_num_tokens, bq))
 
-    logger.warning_once('RPA v3 kernel tuned block sizes: bkv_p=%s, bq=%s',
-                        bkv_p, bq)
+    logger.info_once('RPA v3 kernel tuned block sizes for %s: bkv_p=%s, bq=%s',
+                     keys, bkv_p, bq)
     return bkv_p, bq
 
 
