@@ -9,4 +9,4 @@ Model,UnitTest,IntegrationTest,Benchmark
 "meta-llama/Llama-Guard-4-12B",✅,✅,✅
 "openai/gpt-oss-120b",unverified,unverified,unverified
 "meta-llama/Llama-3.1-8B-Instruct",❌,N/A,N/A
-"Qwen/Qwen3-30B-A3B",✅,✅,✅
+"Qwen/Qwen3-30B-A3B",✅,❌,N/A
