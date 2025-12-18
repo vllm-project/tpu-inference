@@ -809,36 +809,17 @@ def _mla_ragged_paged_attention_kernel(
         return q_nope_vec, q_rope_vec
 
     def load_bkv(bkv_sem_idx, *, bkvc_mask, bkpe_mask):
-        bitwidth = 32 // kv_packing
-        repack_ty = jnp.dtype(f"uint{bitwidth}")
         bkvc_ref = (bkvc_x2_ref.bitcast(jnp.uint32).at[bkv_sem_idx].reshape(
             bkv_sz_per_kv_packing, lkv_dim))
-        bkvc_vec = bkvc_ref[...]
-        bkvc_vecs = []
-        for i in range(kv_packing):
-            masked_bkvc_vec = bkvc_vec >> (i * bitwidth)
-            bkvc_vecs.append(masked_bkvc_vec)
-        concated_bkvc_vec = jnp.concatenate(bkvc_vecs, axis=-1)
-        concated_bkvc_vec = concated_bkvc_vec.reshape(bkv_sz, lkv_dim)
-        concated_bkvc_vec = lax.select(bkvc_mask, concated_bkvc_vec,
-                                       jnp.zeros_like(concated_bkvc_vec))
-        concated_bkvc_vec = pltpu.bitcast(concated_bkvc_vec.astype(repack_ty),
-                                          kv_dtype)
+        bkvc_vec = pltpu.bitcast(bkvc_ref[...], kv_dtype)
+        bkvc_vec = lax.select(bkvc_mask, bkvc_vec, jnp.zeros_like(bkvc_vec))
+
         bkpe_ref = (bkpe_x2_ref.bitcast(jnp.uint32).at[bkv_sem_idx].reshape(
             bkv_sz_per_kv_packing, r_dim))
-        bkpe_vec = bkpe_ref[...]
-        bkpe_vecs = []
-        for i in range(kv_packing):
-            masked_bkpe_vec = bkpe_vec >> (i * bitwidth)
-            bkpe_vecs.append(masked_bkpe_vec)
-        concated_bkpe_vec = jnp.concatenate(bkpe_vecs, axis=-1)
-        concated_bkpe_vec = concated_bkpe_vec.reshape(bkv_sz, r_dim)
-        concated_bkpe_vec = lax.select(bkpe_mask, concated_bkpe_vec,
-                                       jnp.zeros_like(concated_bkpe_vec))
-        concated_bkpe_vec = pltpu.bitcast(concated_bkpe_vec.astype(repack_ty),
-                                          kv_dtype)
+        bkpe_vec = pltpu.bitcast(bkpe_ref[...], kv_dtype)
+        bkpe_vec = lax.select(bkpe_mask, bkpe_vec, jnp.zeros_like(bkpe_vec))
 
-        return concated_bkvc_vec, concated_bkpe_vec
+        return bkvc_vec, bkpe_vec
 
     def broadcast_minor(src, shape):
         if src.shape == shape:
