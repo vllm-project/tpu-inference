@@ -122,9 +122,7 @@ class VllmModelWrapper:
         # By default load weights to the CPU device first. If we are running
         # under Pathways, this would cause weights to be loaded on a CPU-only
         # node, so we'll need to remove this context.
-        jax_context = jax.default_device(
-            jax.devices("cpu")
-            [0]) if not vllm_envs.VLLM_TPU_USING_PATHWAYS else nullcontext()
+        jax_context = nullcontext()
 
         # Load the vLLM model and wrap it into a new model whose forward
         # function can calculate the hidden_state and logits.

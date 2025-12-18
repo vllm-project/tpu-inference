@@ -290,6 +290,16 @@ def sharded_ragged_paged_attention(
 ):
     """Shards along KV heads."""
 
+    # Handle GQA/MQA where num_kv_heads < tp_size
+    # We replicate KV heads to match tp_size so that we can shard them evenly.
+    if ShardingAxisName.ATTN_HEAD in mesh.shape:
+        tp_size = mesh.shape[ShardingAxisName.ATTN_HEAD]
+        num_kv_heads = k.shape[1]
+        if num_kv_heads < tp_size and tp_size % num_kv_heads == 0:
+            factor = tp_size // num_kv_heads
+            k = jnp.repeat(k, factor, axis=1)
+            v = jnp.repeat(v, factor, axis=1)
+
     qkv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
     kv_cache_spec = P(ShardingAxisName.ATTN_DATA, None,
                       ShardingAxisName.ATTN_HEAD, None, None)

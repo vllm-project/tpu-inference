@@ -1,3 +1,4 @@
+import itertools
 from typing import Any, List
 
 import jax
@@ -10,6 +11,7 @@ from torchax.ops.mappings import t2j_dtype
 import tpu_inference.kernels.mla.v1.kernel as mla
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
+from tpu_inference import utils as common_utils
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 
@@ -28,6 +30,7 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
     """Gets the KV cache shape based on the mesh configuration."""
 
     model_cnt = mesh.shape["model"]
+    print(f'{model_cnt=}')
     assert actual_num_kv_heads % model_cnt == 0
     # NOTE(chengjiyao): Currently, the attention kernel is tailored to the
     # specific model, rather than being determined by the head_dim. If new
@@ -84,6 +87,12 @@ def create_kv_caches(
     # TODO(xiang): fix this together with get_kv_cache_spec
     # cache_dtype = kv_cache_spec.dtype
 
+    print(f'{mesh=}')
+    print(f'{num_blocks=}')
+    print(f'{block_size=}')
+    print(f'{num_kv_heads=}')
+    print(f'{head_size=}')
+
     cache_shape = get_kv_cache_shape_with_mesh(mesh, num_blocks, block_size,
                                                num_kv_heads, head_size,
                                                cache_dtype, use_mla)
@@ -97,6 +106,9 @@ def create_kv_caches(
             PartitionSpec(ShardingAxisName.ATTN_DATA, None,
                           ShardingAxisName.ATTN_HEAD))
 
+    print(f'{cache_shape=}')
+    print(f'{cache_dtype=}')
+
     def _allocate() -> jax.Array:
         return jnp.empty(
             shape=cache_shape,
@@ -105,7 +117,13 @@ def create_kv_caches(
 
     sharded_allocate = jax.jit(_allocate, out_shardings=sharding)
     kv_caches = []
-    for _ in layer_names:
+    devices = mesh.devices
+    devices = list(itertools.chain.from_iterable(devices))
+    print(f'{sharding=}')
+    print(f'{layer_names=}')
+    for layer_name in layer_names:
+        print(f"{layer_name=}")
+        print(f"hbm={common_utils.hbm_usage_gb(devices)}GiB")
         kv_caches.append(sharded_allocate())
     return kv_caches
 
@@ -142,6 +160,7 @@ def get_attention_page_size_bytes(mesh: Mesh,
             kv_dtype=dtype,
             use_mla=use_mla,
         )
+        print(f'{kv_cache_shape=}')
         page_size_bytes = (bits * np.prod(kv_cache_shape)) // 8
         page_size_bytes_set.add(page_size_bytes)
 

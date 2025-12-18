@@ -204,6 +204,7 @@ class KVCacheManager:
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
             assert kv_cache_tensor.size % page_size_bytes == 0
             num_blocks = kv_cache_tensor.size // page_size_bytes
+            print(f'{kv_cache_tensor.size=}, {page_size_bytes=}, {num_blocks=}')
             dp_size = self.runner.vllm_config.sharding_config.total_dp_size
             # num_blocks must be a multiple of dp_size
             num_blocks = (num_blocks // dp_size) * dp_size

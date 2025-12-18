@@ -415,7 +415,8 @@ class TPUWorker:
             list(kv_cache_specs.values()))
         attention_page_size_bytes = get_attention_page_size_bytes(
             self.model_runner.mesh, kv_cache_specs)
-
+        print(f'{list(kv_cache_specs.values())[0].page_size_bytes=}')
+        print(f"{vllm_page_size_bytes=}, {attention_page_size_bytes=}")
         if vllm_page_size_bytes != attention_page_size_bytes:
             logger.info(
                 f"KV cache page size calculated by vLLM "
@@ -429,7 +430,12 @@ class TPUWorker:
                                         attention_page_size_bytes)
             cache_config = self.vllm_config.cache_config
             cache_config.num_gpu_blocks_override = num_blocks
+            print(f'add num_gpu_blocks_override {num_blocks=}')
 
+
+        print('get_kv_cache_spec:')
+        print(f'{self.vllm_config=}')
+        print(f'{self.vllm_config.cache_config.num_gpu_blocks_override=}')
         return kv_cache_specs
 
     def initialize_from_config(
