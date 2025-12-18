@@ -8,7 +8,7 @@ steps:
       queue: tpu_v6e_queue
     commands:
       - |
-        buildkite-agent meta-data set "MoE_CorrectnessTest" "to be added"
+        buildkite-agent meta-data set "MoE_CorrectnessTest" "unverified"
   - label: "Record correctness test result for MoE"
     key: "record_MoE_CorrectnessTest"
     depends_on: "MoE_CorrectnessTest"
@@ -30,7 +30,7 @@ steps:
       queue: tpu_v6e_queue
     commands:
       - |
-        buildkite-agent meta-data set "MoE_PerformanceTest" "to be added"
+        buildkite-agent meta-data set "MoE_PerformanceTest" "unverified"
   - label: "Record performance test result for MoE"
     key: "record_MoE_PerformanceTest"
     depends_on: "MoE_PerformanceTest"

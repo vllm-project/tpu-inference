@@ -557,7 +557,11 @@ def get_random_sharded_array(key: PRNGKey, mesh: Mesh, param: nnx.Param,
         maxval = jnp.array(jnp.iinfo(dtype).max, dtype=dtype)
         weight = jax.random.randint(key, param_shape, minval, maxval, dtype)
     else:
-        weight = jax.random.normal(key, param_shape, dtype)
+        if dtype != "float4_e2m1fn":
+            weight = jax.random.normal(key, param_shape, dtype)
+        else:
+            weight = jax.random.normal(key, param_shape,
+                                       jnp.float8_e4m3fn).astype(dtype)
 
     def get_slice(index):
         return weight[index]
@@ -599,7 +603,7 @@ def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
     assert len(
         quantization_block_sizes
     ) == 2, f"Expected only 2 quantization block sizes but got {quantization_block_sizes}"
-    quantization_block_size_n, _ = quantization_block_sizes[
+    _, quantization_block_size_k = quantization_block_sizes[
         0], quantization_block_sizes[1]
 
     # Iterate through all variables and initialize them
@@ -613,12 +617,26 @@ def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
         is_qwix_scale = (path[-1] == 'scale' and path[-2] == "array")
         param_dtype = scale_dtype if is_qwix_scale else param.value.dtype
         param_shape = param.value.shape
-        # TODO (jacobplatin): clean this up
         if is_qwix_scale:
-            param_shape = scale_shape_map.get(
-                path[3],
-                tuple(dim // quantization_block_size_n
-                      for dim in prev_param_shape))
+            simple_key = path[3]
+            prefixed_key = f"{path[2]}.{simple_key}"
+
+            if simple_key in scale_shape_map:
+                param_shape = scale_shape_map[simple_key]
+            elif prefixed_key in scale_shape_map:
+                param_shape = scale_shape_map[prefixed_key]
+            else:
+                shape_list = list(prev_param_shape)
+                quantization_block_size_k = quantization_config[
+                    "weight_block_size"][1]
+                if path[2] == "attn":
+                    shape_list[0] //= quantization_block_size_k
+                elif path[2] in ("custom_module", "shared_experts"):
+                    if len(shape_list) == 2:  # FFW
+                        shape_list[0] //= quantization_block_size_k
+                    elif len(shape_list) == 3:  # MoE
+                        shape_list[1] //= quantization_block_size_k
+                param_shape = tuple(shape_list)
         param.value = get_random_sharded_array(
             rng, mesh, param, param_shape, param_dtype,
             ".".join([str(x) for x in path]))

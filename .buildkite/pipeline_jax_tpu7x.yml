@@ -232,7 +232,7 @@ steps:
      key: tpu7x_test_13
      soft_fail: true
      env:
-       USE_V6E8_QUEUE: "True"
+       TEST_LORA_TP: "True"
        VLLM_LOG_LEVEL: "INFO"
        IS_FOR_V7X: "true"
      agents:

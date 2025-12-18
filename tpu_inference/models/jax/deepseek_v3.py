@@ -518,13 +518,26 @@ class DeepSeekV3WeightLoader:
             # scales in practice
             # TODO (jacobplatin): remove or clean this up
             self.scale_shap_map_for_random_weight_loading = {
-                "kernel_kv_down_proj_DA": (56, 576),
-                "kernel_kv_up_proj_ANH": (4, 128, 2),
-                "kernel_q_up_proj_ANH": (12, 1, 192),
-                "kernel_o_proj_NHD": (128, 1, 56),
-                "kernel_down_proj_EFD": (256, 16, 56),
-                "kernel_up_proj_EDF": (256, 56, 16),
-                "kernel_gating_EDF": (256, 56, 16),
+                # MoE experts (3D)
+                "custom_module.kernel_down_proj_EFD": (256, 8, 7168),
+                "custom_module.kernel_gating_EDF": (256, 28, 2048),
+                "custom_module.kernel_up_proj_EDF": (256, 28, 2048),
+                # Shared experts (2D)
+                "shared_experts.kernel_down_proj_FD": (8, 7168),
+                "shared_experts.kernel_gating_DF": (28, 2048),
+                "shared_experts.kernel_up_proj_DF": (28, 2048),
+                # Dense FFW (2D)
+                "custom_module.kernel_gating_DF": (28, 18432),
+                "custom_module.kernel_up_proj_DF": (28, 18432),
+                "custom_module.kernel_down_proj_FD": (72, 7168),
+                # Attention (2D)
+                "kernel_q_down_proj_DA": (28, 1536),
+                "kernel_q_up_proj_AC": (6, 24576),
+                "kernel_kv_down_proj_DA": (28, 576),
+                "kernel_kv_up_proj_AC": (2, 32768),
+                "kernel_o_proj_CD": (64, 7168),
+                "kernel_k_up_proj_ANH": (2, 128, 128),
+                "kernel_v_up_proj_ANH": (2, 128, 128),
             }
 
             # TODO (jacobplatin): remove this check eventually!
@@ -694,8 +707,8 @@ class DeepSeekV3WeightLoader:
                 logger.warning(
                     f"Could not create sharded scale for {name} with shape {scale.shape} and sharding {sharding}, skipping sharding..."
                 )
-            assert base_model_weight.array.scale.value.dtype == maybe_sharded_scale.dtype, "Expected dtype for model weight scale with name {mapped_name} and dtype ({base_model_weight.array.scale.value.dtype}) to match that of the incoming weight scale ({maybe_sharded_scale.dtype})"
-            assert base_model_weight.array.qvalue.value.dtype == sharded_array.dtype, "Expected dtype for model weight with name {mapped_name} and dtype ({base_model_weight.array.qvalue.value.dtype}) to match that of the incoming weight ({sharded_array.dtype})"
+            assert base_model_weight.array.scale.value.dtype == maybe_sharded_scale.dtype, f"Expected dtype for model weight scale with name {mapped_name} and dtype ({base_model_weight.array.scale.value.dtype}) to match that of the incoming weight scale ({maybe_sharded_scale.dtype})"
+            assert base_model_weight.array.qvalue.value.dtype == sharded_array.dtype, f"Expected dtype for model weight with name {mapped_name} and dtype ({base_model_weight.array.qvalue.value.dtype}) to match that of the incoming weight ({sharded_array.dtype})"
             base_model_weight.array.scale.value = maybe_sharded_scale
             base_model_weight.array.qvalue.value = sharded_array
         else:

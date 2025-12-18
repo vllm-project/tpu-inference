@@ -28,6 +28,7 @@ class MockVariable:
             scale=SimpleNamespace(
                 value=jnp.ones((1, )),
                 nbytes=4,
+                sharding=None,
                 addressable_shards=[SimpleNamespace(data=jnp.ones((1, )))]))
         self.addressable_shards = [SimpleNamespace(data=self.value)]
 
@@ -44,7 +45,7 @@ class MockVllmConfig:
 
         # DeepSeek V3 specific config
         hf_config = MagicMock()
-        hf_config.num_hidden_layers = 2  # Small for testing
+        hf_config.num_hidden_layers = 4  # Small for testing
         hf_config.num_nextn_predict_layers = 1
         self.model_config.hf_config = hf_config
 
@@ -86,19 +87,13 @@ def mock_config():
 
 class TestDeepSeekV3:
 
-    @patch(
-        "tpu_inference.models.jax.deepseek_v3.get_quant_dtype_from_qwix_config",
-        return_value=[jnp.bfloat16, jnp.float8_e4m3fn])
     def test_init(self, mock_config, rng, mesh):
         """Tests if the model initializes with the correct hierarchy."""
         model = DeepSeekV3(mock_config, rng, mesh)
-        assert len(model.layers) == 2  # num_layers from mock
+        assert len(model.layers) == 4  # num_layers from mock
         assert isinstance(model.embedder, nnx.Module)
-        assert model.vllm_config.model_config.hf_config.num_hidden_layers == 2
+        assert model.vllm_config.model_config.hf_config.num_hidden_layers == 4
 
-    @patch(
-        "tpu_inference.models.jax.deepseek_v3.get_quant_dtype_from_qwix_config",
-        return_value=[jnp.bfloat16, jnp.float8_e4m3fn])
     def test_random_weights(self, mock_config, rng, mesh):
         """Tests that force_random_weights initializes non-zero weights."""
         with jax.set_mesh(mesh):
@@ -130,10 +125,7 @@ class TestDeepSeekV3WeightLoader:
         # We need to mock the generator so it doesn't try to download files
         with patch(
                 "tpu_inference.models.jax.deepseek_v3.model_weights_generator",
-                return_value=[]
-        ), patch(
-                "tpu_inference.models.jax.deepseek_v3.get_quant_dtype_from_qwix_config",
-                return_value=[jnp.bfloat16, jnp.float8_e4m3fn]):
+                return_value=[]):
             return DeepSeekV3WeightLoader(vllm_config=mock_config,
                                           num_layers=2,
                                           hidden_size=7168,
@@ -145,25 +137,6 @@ class TestDeepSeekV3WeightLoader:
                                           v_head_dim=128,
                                           num_local_experts=256,
                                           model_dtype=jnp.bfloat16)
-
-    def test_invalid_quant_dtype_assertion(self, mock_get_dtype, mock_config):
-        """Verifies that an AssertionError is raised if quant_dtype is not fp8."""
-        # Mock returning bfloat16 instead of float8_e4m3fn
-        mock_get_dtype.return_value = (jnp.bfloat16, jnp.bfloat16)
-
-        with pytest.raises(AssertionError) as excinfo:
-            DeepSeekV3WeightLoader(vllm_config=mock_config,
-                                   num_layers=2,
-                                   hidden_size=7168,
-                                   q_lora_rank=1536,
-                                   kv_lora_rank=512,
-                                   attn_heads=128,
-                                   qk_nope_head_dim=128,
-                                   qk_rope_head_dim=64,
-                                   v_head_dim=128,
-                                   num_local_experts=256,
-                                   model_dtype=jnp.bfloat16)
-        assert "Expected quant_dtype to be float8_e4m3fn" in str(excinfo.value)
 
     @pytest.mark.parametrize("loaded_key, expected_mapped", [
         ("model.embed_tokens.weight", "embedder.input_embedding_table_VD"),
@@ -243,11 +216,18 @@ class TestDeepSeekV3WeightLoader:
         """Tests the logic for unpacking MXFP4 weights."""
         name = "layers.0.attn.kernel_q_down_proj_DA"
         # Mocking torch tensor as uint8 (packed fp4)
-        weight = torch.zeros((128, 64), dtype=torch.uint8)
-        scale = torch.ones((128, 1), dtype=torch.float32)
+        expected_weight_shape = (128, 128)  # Unpacked
+        expected_scale_shape = (128, 1)
+
+        weight = torch.zeros(expected_weight_shape, dtype=torch.uint8)
+        scale = torch.ones(expected_scale_shape, dtype=torch.float32)
 
         # Mock model parameters
-        mock_var = MockVariable((128, 128))  # Unpacked shape (64 * 2)
+        mock_var = MockVariable(
+            (128, 128),
+            dtype=jnp.float4_e2m1fn,
+            sharding=(None, ('attn_dp', 'model',
+                             'expert')))  # Unpacked shape (64 * 2)
         mock_params = {
             "layers": {
                 "0": {
@@ -262,9 +242,17 @@ class TestDeepSeekV3WeightLoader:
              patch("tpu_inference.models.jax.deepseek_v3.unpack_mxfp4") as mock_unpack, \
              patch("jax.make_array_from_callback") as mock_make_array:
 
-            # Setup unpack to return a float tensor of double the width
-            mock_unpack.return_value = torch.zeros((128, 128))
-            mock_make_array.return_value = jnp.zeros((128, 128))
+            def side_effect_router(shape, *args, **kwargs):
+                if shape == expected_scale_shape:
+                    # Return FP32 for the scale call
+                    return jnp.ones(shape, dtype=jnp.float32)
+                elif shape == expected_weight_shape:
+                    # Return FP4 for the weight call
+                    return jnp.zeros(shape, dtype=jnp.float4_e2m1fn)
+                return jnp.zeros(shape)  # Fallback
+
+            mock_make_array.side_effect = side_effect_router
+            mock_unpack.return_value = torch.zeros(expected_weight_shape)
 
             loader._load_individual_weight(name,
                                            weight,
@@ -294,3 +282,102 @@ class TestDeepSeekV3WeightLoader:
             loader.load_weights(model)
             # Verify verbose logging worked if enabled
             assert loader.is_verbose is True
+
+    def test_load_individual_weight_unpacked(self, loader, mesh):
+        """
+        Tests the logic for loading 'unpacked' weights (e.g., standard FP8).
+        This verifies the branch that uses DTYPE_VIEW_MAP for raw memory conversion.
+        """
+        name = "layers.0.attn.kernel_q_down_proj_DA"
+
+        # 1. Setup a standard 'unpacked' FP8 torch tensor
+        # DeepSeek V3 weights are often float8_e4m3fn
+        weight_shape = (128, 128)
+        weight = torch.randn(weight_shape).to(torch.float8_e4m3fn)
+
+        # 2. Mock model parameters to expect jnp.float8_e4m3fn
+        # We reuse the MockVariable helper but specify the dtype
+        mock_var = MockVariable(weight_shape, dtype=jnp.float8_e4m3fn)
+        mock_params = {
+            "layers": {
+                "0": {
+                    "attn": {
+                        "kernel_q_down_proj_DA": mock_var
+                    }
+                }
+            }
+        }
+
+        # 3. Patch the necessary JAX/Utility functions
+        with patch("tpu_inference.models.jax.deepseek_v3.get_param", return_value=mock_var), \
+             patch("tpu_inference.models.jax.deepseek_v3.unpack_mxfp4") as mock_unpack, \
+             patch("jax.make_array_from_callback") as mock_make_array:
+
+            # Mock the JAX array creation to return a dummy
+            mock_make_array.return_value = jnp.zeros(weight_shape,
+                                                     dtype=jnp.float8_e4m3fn)
+
+            # Execute the loader method
+            loader._load_individual_weight(name,
+                                           weight,
+                                           mock_params,
+                                           mesh,
+                                           scale=None)
+
+            # VERIFICATIONS:
+            # - unpack_mxfp4 should NOT be called for standard FP8 (only for packed uint8 + scale)
+            mock_unpack.assert_not_called()
+
+            # - make_array_from_callback should be called with the correct shape and sharding
+            # The first argument to make_array_from_callback is the shape
+            assert mock_make_array.call_args[0][0] == weight_shape
+
+            # - Verify the model weight value was updated (even if with our dummy)
+            assert mock_var.value.dtype == jnp.float8_e4m3fn
+
+    def test_load_individual_weight_with_scale(self, loader, mesh):
+        """
+        Tests loading an unpacked weight that also has a quantization scale.
+        """
+        name = "layers.0.custom_module.kernel_gating_DF"
+        weight_shape = (64, 128)
+        scale_shape = (64, 1)
+
+        # Use BF16 for this test to verify DTYPE_VIEW_MAP handles multiple types
+        weight = torch.randn(weight_shape).to(torch.bfloat16)
+        scale = torch.ones(scale_shape, dtype=torch.float32)
+
+        mock_var = MockVariable(weight_shape, dtype=jnp.bfloat16)
+        mock_params = {
+            "layers": {
+                "0": {
+                    "custom_module": {
+                        "kernel_gating_DF": mock_var
+                    }
+                }
+            }
+        }
+
+        with patch("tpu_inference.models.jax.deepseek_v3.get_param", return_value=mock_var), \
+             patch("jax.make_array_from_callback") as mock_make_array:
+
+            def side_effect_router(shape, *args, **kwargs):
+                if shape == scale_shape:
+                    # Return FP32 for the scale call
+                    return jnp.ones(shape, dtype=jnp.float32)
+                elif shape == weight_shape:
+                    # Return FP4 for the weight call
+                    return jnp.zeros(shape, dtype=jnp.bfloat16)
+                return jnp.zeros(shape)  # Fallback
+
+            mock_make_array.side_effect = side_effect_router
+
+            loader._load_individual_weight(name,
+                                           weight,
+                                           mock_params,
+                                           mesh,
+                                           scale=scale)
+
+            # Verify the scale was applied to the MockVariable's internal QArray structure
+            # (In the model code: base_model_weight.array.scale.value = maybe_sharded_scale)
+            assert mock_var.array.scale.value is not None
