@@ -22,7 +22,7 @@ fi
 
 upload_pipeline() {
     # VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
-    VLLM_COMMIT_HASH="v0.13.0rc1"
+    VLLM_COMMIT_HASH="v0.13.0rc3"
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
