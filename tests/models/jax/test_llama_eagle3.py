@@ -127,9 +127,6 @@ class TestEagleLlama3ForCausalLM:
                           mesh: Mesh, mock_model_inputs):
         """Tests the forward pass of the EagleLlama3ForCausalLM model."""
 
-        if 'TPU7x' in jax.devices()[0].device_kind:
-            pytest.skip("Skipping test on TPU TPU7x.")
-
         draft_model_config = mock_vllm_config.speculative_config.draft_model_config
         hf_config = draft_model_config.hf_config
         model = EagleLlama3ForCausalLM(mock_vllm_config, rng, mesh)

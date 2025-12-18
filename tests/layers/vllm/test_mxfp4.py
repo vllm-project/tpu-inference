@@ -7,8 +7,7 @@ import torch
 import torchax
 import utils as test_utils
 from jax._src import test_util as jtu
-from jax.sharding import NamedSharding, PartitionSpec
-from torchax.interop import torch_view
+from jax.sharding import PartitionSpec
 from torchax.ops.mappings import j2t, t2j
 from vllm.config import ParallelConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
@@ -105,20 +104,17 @@ def test_quant_override(model, mesh):
     assert quant_config.mesh == mesh
 
 
-@pytest.mark.parametrize("mesh", [
-    test_utils.get_spmd_mesh(1),
-    test_utils.get_spmd_mesh(jax.local_device_count())
-])
+@pytest.mark.parametrize(
+    "mesh", [test_utils.get_spmd_mesh(1),
+             test_utils.get_spmd_mesh(2)])
 @pytest.mark.parametrize("num_tokens", [8])
 @pytest.mark.parametrize("intermediate_size", [1024])
 @pytest.mark.parametrize("hidden_size", [128])
 @pytest.mark.parametrize("num_experts", [8])
 @pytest.mark.parametrize("topk", [2])
+@pytest.mark.parametrize("use_ep", [True, False])
 def test_mxfp4_fused_moe(mesh, num_tokens, intermediate_size, hidden_size,
-                         num_experts, topk):
-    if 'TPU7x' in jax.devices()[0].device_kind:
-        pytest.skip("Skipping test on TPU TPU7x.")
-
+                         num_experts, topk, use_ep):
     torch.manual_seed(42)
     dtype = torch.bfloat16
 
@@ -159,6 +155,7 @@ def test_mxfp4_fused_moe(mesh, num_tokens, intermediate_size, hidden_size,
             quant_config=quant_config,
             has_bias=True,
         )
+        vllm_fused_moe.moe_parallel_config.use_ep = use_ep
     vllm_fused_moe.w13_weight.data = w1_weight
     vllm_fused_moe.w2_weight.data = w2_weight
     vllm_fused_moe.w13_weight_scale.data = w1_weight_scale
@@ -166,51 +163,39 @@ def test_mxfp4_fused_moe(mesh, num_tokens, intermediate_size, hidden_size,
     vllm_fused_moe.w13_bias.data = w1_bias
     vllm_fused_moe.w2_bias.data = w2_bias
 
+    expected = test_utils.ref_moe(a, score, w1, w2, w1_bias, w2_bias,
+                                  vllm_fused_moe.top_k,
+                                  vllm_fused_moe.renormalize,
+                                  vllm_fused_moe.activation)
+
     with torchax.default_env(), set_forward_context(None, vllm_config):
         assert isinstance(vllm_fused_moe.quant_method, VllmMxfp4MoEMethod)
 
         jax_a = a.to('jax')
-        jax_a.apply_jax_(jax.device_put, NamedSharding(mesh, P(None, None)))
-        score = torch_view(t2j(score))
-        score.apply_jax_(jax.device_put, NamedSharding(mesh, P(None, None)))
+        score = score.to('jax')
 
         vllm_fused_moe.quant_method.process_weights_after_loading(
             vllm_fused_moe)
 
-        # Because we are dequantizing mxfp4 weights for now, we verify if
-        # dequantized weights matches with the original weights.
-        # Due to NaN, comparing two values are difficult. Therefore, we utilize
-        # nanmean instead.
-        torch.testing.assert_close(torch.nanmean(vllm_fused_moe.w13_weight),
-                                   torch.nanmean(w1),
+        actual = vllm_fused_moe(jax_a, score)
+
+        torch.testing.assert_close(expected,
+                                   actual,
                                    check_device=False,
-                                   equal_nan=True,
-                                   rtol=0.2,
-                                   atol=0.1)
-        torch.testing.assert_close(torch.nanmean(vllm_fused_moe.w2_weight),
-                                   torch.nanmean(w2),
-                                   check_device=False,
-                                   equal_nan=True,
-                                   rtol=0.2,
-                                   atol=0.1)
-
-        vllm_fused_moe(jax_a, score)
+                                   atol=1e-1,
+                                   rtol=1e-1)
 
 
-@pytest.mark.parametrize("mesh", [
-    test_utils.get_spmd_mesh(1),
-    test_utils.get_spmd_mesh(jax.local_device_count())
-])
+@pytest.mark.parametrize(
+    "mesh", [test_utils.get_spmd_mesh(1),
+             test_utils.get_spmd_mesh(2)])
 @pytest.mark.parametrize("num_tokens", [8])
-@pytest.mark.parametrize("intermediate_size", [1024])
-@pytest.mark.parametrize("hidden_size", [128])
+@pytest.mark.parametrize("intermediate_size", [512])
+@pytest.mark.parametrize("hidden_size", [1024])
 @pytest.mark.parametrize("num_experts", [8])
 @pytest.mark.parametrize("topk", [2])
 def test_mxfp4_fused_moe_use_kernel(mesh, num_tokens, intermediate_size,
                                     hidden_size, num_experts, topk):
-
-    if 'TPU7x' in jax.devices()[0].device_kind:
-        pytest.skip("Skipping test on TPU TPU7x.")
 
     torch.manual_seed(42)
     dtype = torch.bfloat16
@@ -263,13 +248,16 @@ def test_mxfp4_fused_moe_use_kernel(mesh, num_tokens, intermediate_size,
     vllm_fused_moe.w13_bias.data = w1_bias
     vllm_fused_moe.w2_bias.data = w2_bias
 
+    expected = test_utils.ref_moe(a, score, w1, w2, w1_bias, w2_bias,
+                                  vllm_fused_moe.top_k,
+                                  vllm_fused_moe.renormalize,
+                                  vllm_fused_moe.activation)
+
     with torchax.default_env(), set_forward_context(None, vllm_config):
         assert isinstance(vllm_fused_moe.quant_method, VllmMxfp4MoEMethod)
 
         jax_a = a.to('jax')
-        jax_a.apply_jax_(jax.device_put, NamedSharding(mesh, P(None, None)))
-        score = torch_view(t2j(score))
-        score.apply_jax_(jax.device_put, NamedSharding(mesh, P(None, None)))
+        score = score.to('jax')
 
         vllm_fused_moe.quant_method.use_kernel = True
         vllm_fused_moe.quant_method.process_weights_after_loading(
@@ -277,12 +265,18 @@ def test_mxfp4_fused_moe_use_kernel(mesh, num_tokens, intermediate_size,
         vllm_fused_moe.quant_method.block_size = {
             "bt": 32,
             "bf": 512,
-            "bd1": 512,
-            "bd2": 512,
+            "bd1": 1024,
+            "bd2": 1024,
             "btc": 32,
-            "bfc": 256,
-            "bd1c": 256,
-            "bd2c": 256,
+            "bfc": 512,
+            "bd1c": 1024,
+            "bd2c": 1024,
         }
 
-        vllm_fused_moe(jax_a, score)
+        actual = vllm_fused_moe(jax_a, score)
+
+        torch.testing.assert_close(expected,
+                                   actual,
+                                   check_device=False,
+                                   atol=2e-1,
+                                   rtol=2e-1)

@@ -29,7 +29,7 @@ def setup_vllm(num_loras: int, tp: int = 1) -> vllm.LLM:
 
 
 # For multi-chip test, we only use TP=2 because the base model Qwen/Qwen2.5-3B-Instruct has 2 kv heads and the current attention kernel requires it to be divisible by tp_size.
-TP = [2] if os.environ.get("USE_V6E8_QUEUE", False) else [1]
+TP = [2] if os.environ.get("TEST_LORA_TP", False) else [1]
 
 
 @pytest.mark.parametrize("tp", TP)

@@ -5,7 +5,6 @@ import jax
 import torch
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from torchax.ops.mappings import j2t_dtype
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 from vllm.model_executor.model_loader import get_model_loader
@@ -19,10 +18,16 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.quantization.quantization_utils import (
     apply_qwix_on_abstract_model, apply_qwix_quantization,
     load_random_weights_into_qwix_abstract_model)
+from tpu_inference.utils import to_jax_dtype, to_torch_dtype
 
 logger = init_logger(__name__)
 
 _MODEL_REGISTRY = {}
+
+# List of architectures that are preferred to use  "vllm" implementation over
+# "flax_nnx" implementation due to various factors such as performance.
+_VLLM_PREFERRED_ARCHITECTURES: frozenset[str] = frozenset(
+    {"GptOssForCausalLM"})
 
 
 class UnsupportedArchitectureError(ValueError):
@@ -214,6 +219,9 @@ def get_flax_model(
     mesh: Mesh,
     is_draft_model: bool = False,
 ) -> nnx.Module:
+    model_dtype = to_jax_dtype(vllm_config.model_config.dtype)
+    vllm_config.model_config.dtype = model_dtype
+
     if is_draft_model:
         model_class = _get_model_architecture(
             vllm_config.speculative_config.draft_model_config.hf_config)
@@ -321,6 +329,8 @@ def get_vllm_model(
     rng: jax.Array,
     mesh: Mesh,
 ):
+    model_dtype = to_torch_dtype(vllm_config.model_config.dtype)
+    vllm_config.model_config.dtype = model_dtype
     from tpu_inference.models.vllm.vllm_model_wrapper import VllmModelWrapper
 
     model = VllmModelWrapper(
@@ -346,24 +356,39 @@ def get_model(
     impl = envs.MODEL_IMPL_TYPE
     logger.info(f"Loading model with MODEL_IMPL_TYPE={impl}")
 
-    if impl == "flax_nnx":
-        try:
-            # Try to load the flax model first
-            return get_flax_model(vllm_config, rng, mesh, is_draft_model)
-        except UnsupportedArchitectureError as e:
-            # Convert the error message to a string to check its contents
-            error_msg = str(e)
+    if impl == "auto":
+        # Resolve "auto" based on architecture
+        architectures = getattr(vllm_config.model_config.hf_config,
+                                "architectures", [])
+        assert len(architectures) == 1, (
+            f"Expected exactly one architecture, got {len(architectures)}: "
+            f"{architectures}")
+        arch = architectures[0]
+        impl = "vllm" if arch in _VLLM_PREFERRED_ARCHITECTURES else "flax_nnx"
+        logger.info(f"Resolved MODEL_IMPL_TYPE 'auto' to '{impl}'")
 
-            logger.warning(error_msg)
+    match impl:
+        case "flax_nnx":
+            if vllm_config.parallel_config.pipeline_parallel_size > 1:
+                logger.warning(
+                    "PP is not fully supported on Jax flax_nnx models yet, fallback to vllm models."
+                )
+                return get_vllm_model(vllm_config, rng, mesh)
+            try:
+                # Try to load the flax model first
+                return get_flax_model(vllm_config, rng, mesh, is_draft_model)
+            except UnsupportedArchitectureError as e:
+                # Convert the error message to a string to check its contents
+                error_msg = str(e)
 
-            # Fall back to the vLLM model and updating the dtype accordingly
-            vllm_config.model_config.dtype = j2t_dtype(
-                vllm_config.model_config.dtype.dtype)
+                logger.warning(error_msg)
+
+                # Fall back to the vLLM model and updating the dtype accordingly
+                return get_vllm_model(vllm_config, rng, mesh)
+        case "vllm":
             return get_vllm_model(vllm_config, rng, mesh)
-    elif impl == "vllm":
-        return get_vllm_model(vllm_config, rng, mesh)
-    else:
-        raise NotImplementedError("Unsupported MODEL_IMPL_TYPE")
+        case _:
+            raise NotImplementedError(f"Unsupported MODEL_IMPL_TYPE: {impl}")
 
 
 def _validate_model_interface(model: Any) -> None:

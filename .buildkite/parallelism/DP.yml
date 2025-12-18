@@ -33,7 +33,7 @@ steps:
       queue: tpu_v6e_queue
     commands:
       - |
-        buildkite-agent meta-data set "DP_PerformanceTest" "to be added"
+        buildkite-agent meta-data set "DP_PerformanceTest" "unverified"
   - label: "Record performance test result for DP"
     key: "record_DP_PerformanceTest"
     depends_on: "DP_PerformanceTest"

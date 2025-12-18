@@ -8,7 +8,7 @@ steps:
       queue: tpu_v6e_queue
     commands:
       - |
-        buildkite-agent meta-data set "DCN_based_P-D_disaggregation_CorrectnessTest" "to be added"
+        buildkite-agent meta-data set "DCN_based_P-D_disaggregation_CorrectnessTest" "unverified"
   - label: "Record correctness test result for DCN-based P/D disaggregation"
     key: "record_DCN_based_P-D_disaggregation_CorrectnessTest"
     depends_on: "DCN_based_P-D_disaggregation_CorrectnessTest"
@@ -24,13 +24,20 @@ steps:
 
   - label: "Performance tests for DCN-based P/D disaggregation"
     key: "DCN_based_P-D_disaggregation_PerformanceTest"
-    depends_on: "record_DCN_based_P-D_disaggregation_CorrectnessTest"
     soft_fail: true
+    env:
+      MODEL:"Qwen/Qwen3-0.6B"
+      INPUT_LEN:1024
+      OUTPUT_LEN:=1024
+      NUM_PROMPTS:=20
+      RANDOM_SEED:=10
+      MAX_CONCURRENCY:=1
     agents:
-      queue: tpu_v6e_queue
+      queue: tpu_v6e_8_queue
     commands:
       - |
-        buildkite-agent meta-data set "DCN_based_P-D_disaggregation_PerformanceTest" "to be added"
+        .buildkite/scripts/run_disagg.sh
+
   - label: "Record performance test result for DCN-based P/D disaggregation"
     key: "record_DCN_based_P-D_disaggregation_PerformanceTest"
     depends_on: "DCN_based_P-D_disaggregation_PerformanceTest"

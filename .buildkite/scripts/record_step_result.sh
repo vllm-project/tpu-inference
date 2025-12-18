@@ -29,8 +29,8 @@ case $OUTCOME in
   "skipped")
     message="N/A"
     ;;
-  "to be added")
-    message="to be added"
+  "unverified")
+    message="unverified"
     ;;
   *)
     message="❌"
@@ -40,6 +40,6 @@ esac
 buildkite-agent meta-data set "${CI_TARGET}_category" "${CI_CATEGORY}"
 buildkite-agent meta-data set "${CI_TARGET}:${CI_STAGE}" "${message}"
 
-if [ "${OUTCOME}" != "passed" ] && [ "${OUTCOME}" != "skipped" ] && [ "${OUTCOME}" != "to be added" ]; then
+if [ "${OUTCOME}" != "passed" ] && [ "${OUTCOME}" != "skipped" ] && [ "${OUTCOME}" != "unverified" ]; then
     exit 1
 fi

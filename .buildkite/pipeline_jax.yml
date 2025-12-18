@@ -124,22 +124,6 @@ steps:
            --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py \
            --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference --cov-report term-missing --cov-fail-under=69
 
-   - label: "JAX unit tests - tpuv7x"
-     key: test_7_tpu7x
-     soft_fail: true
-     agents:
-       queue: tpu_v7x_2_queue
-     commands:
-       - |
-         IS_FOR_V7X=true .buildkite/scripts/run_in_docker.sh \
-           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/ \
-           --ignore=/workspace/tpu_inference/tests/kernels \
-           --ignore=/workspace/tpu_inference/tests/lora \
-           --ignore=/workspace/tpu_inference/tests/e2e \
-           --ignore=/workspace/tpu_inference/tpu_inference/mock \
-           --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py \
-           --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference --cov-report term-missing --cov-fail-under=67
-
    - label: "JAX unit tests - kernels"
      key: test_8
      soft_fail: true
@@ -228,7 +212,7 @@ steps:
      key: test_13
      soft_fail: true
      env:
-       USE_V6E8_QUEUE: "True"
+       TEST_LORA_TP: "True"
        VLLM_LOG_LEVEL: "INFO"
      agents:
        queue: tpu_v6e_8_queue
@@ -285,7 +269,6 @@ steps:
        - test_5
        - test_6
        - test_7
-       - test_7_tpu7x
        - test_8
        - test_9
        - test_10
@@ -299,4 +282,4 @@ steps:
      commands:
        - |
          .buildkite/scripts/check_results.sh \
-           "TPU JAX Tests Failed" test_0 test_1 test_2 test_3 test_4 test_5 test_6 test_7 test_7_tpu7x test_8 test_9 test_10 test_11 test_12 test_13 test_15 test_16
+           "TPU JAX Tests Failed" test_0 test_1 test_2 test_3 test_4 test_5 test_6 test_7 test_8 test_9 test_10 test_11 test_12 test_13 test_15 test_16

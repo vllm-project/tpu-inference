@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional, Tuple
 
 import jax
-import jax.numpy as jnp
 import jaxlib
 import jaxtyping
 import vllm.envs as vllm_envs
@@ -19,7 +18,8 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
 from vllm.v1 import utils as vllm_utils
-from vllm.v1.core.kv_cache_utils import get_num_blocks, get_uniform_page_size
+from vllm.v1.core.kv_cache_utils import (get_kv_cache_groups, get_num_blocks,
+                                         get_uniform_page_size)
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
@@ -36,12 +36,6 @@ from tpu_inference.runner.kv_cache import get_attention_page_size_bytes
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 logger = init_logger(__name__)
-
-_DTYPE: dict[str, jnp.dtype] = {
-    "bfloat16": jnp.bfloat16,
-    "float": jnp.float32,
-    "float32": jnp.float32,
-}
 
 
 @dataclass
@@ -77,21 +71,6 @@ class TPUWorker:
         ip: str = "localhost",
         prev_worker_ip: str = "localhost",
     ):
-        # If we use vLLM's model implementation in PyTorch, we should set it
-        # with torch version of the dtype.
-        impl = envs.MODEL_IMPL_TYPE
-        if impl != "vllm":  # vllm-pytorch implementation does not need this conversion
-
-            # NOTE(wenlong): because sometimes mm needs to use torch for preprocessing
-            if not isinstance(vllm_config.model_config.dtype, str):
-                logger.warning(
-                    "The model dtype is not properly set for JAX backend. "
-                    "Overwriting it to jnp.bfloat16")
-                vllm_config.model_config.dtype = jnp.bfloat16
-            else:
-                vllm_config.model_config.dtype = _DTYPE.get(
-                    vllm_config.model_config.dtype, jnp.bfloat16)
-
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.parallel_config = vllm_config.parallel_config
@@ -266,7 +245,10 @@ class TPUWorker:
                     f"is_last_rank={is_last_rank} | "
                     f"node_id={get_node_id()} | "
                     f"is_driver_worker={self.is_driver_worker} | "
-                    f"hbm={utils.hbm_usage_gb(self.devices)}GiB")
+                    f"hbm={utils.hbm_usage_gb(self.devices)}GiB |"
+                    f"self.devices={self.devices} | "
+                    f"total devices={jax.devices()} | "
+                    f"local_devices={jax.local_devices()}")
         vllm_utils.report_usage_stats(self.vllm_config)
 
     def initialize_pp_transfer_connect(self):
@@ -404,33 +386,37 @@ class TPUWorker:
         # responsible for this translation. When vLLM can be modified, this
         # method should be changed to return `dict[str, AbstractKVCacheSpec]`,
         # and the vLLM side should be updated to handle the translation.
-        kv_cache_specs = self.model_runner.get_kv_cache_spec()
+        kv_cache_spec = self.model_runner.get_kv_cache_spec()
 
-        if len(kv_cache_specs) == 0:
-            return kv_cache_specs
+        if len(kv_cache_spec) == 0:
+            return kv_cache_spec
 
         # TODO(kyuyeunk): Instead of checking page_size_bytes here, introduce
         # feature that allows overriding page_size_bytes of KVCacheSpec.
         vllm_page_size_bytes = get_uniform_page_size(
-            list(kv_cache_specs.values()))
+            list(kv_cache_spec.values()))
         attention_page_size_bytes = get_attention_page_size_bytes(
-            self.model_runner.mesh, kv_cache_specs)
+            self.model_runner.mesh, kv_cache_spec)
 
         if vllm_page_size_bytes != attention_page_size_bytes:
             logger.info(
-                f"KV cache page size calculated by vLLM "
-                f"({vllm_page_size_bytes} Bytes) does not match with actual "
-                f"page size used by Attention kernel ({attention_page_size_bytes} Bytes). "
-                f"Recalculating number of KV blocks using actual page size.")
+                f"Page size calculated by vLLM ({vllm_page_size_bytes} Bytes) "
+                f"does not match with actual page size used by the kernel "
+                f"({attention_page_size_bytes} Bytes). Recalculating number of "
+                f"KV blocks using actual page size.")
 
+            kv_cache_groups = get_kv_cache_groups(self.vllm_config,
+                                                  kv_cache_spec)
+            group_size = max(
+                len(group.layer_names) for group in kv_cache_groups)
             available_memory = self.determine_available_memory()
-            num_blocks = get_num_blocks(self.vllm_config, len(kv_cache_specs),
+            num_blocks = get_num_blocks(self.vllm_config, group_size,
                                         available_memory,
                                         attention_page_size_bytes)
             cache_config = self.vllm_config.cache_config
             cache_config.num_gpu_blocks_override = num_blocks
 
-        return kv_cache_specs
+        return kv_cache_spec
 
     def initialize_from_config(
         self,

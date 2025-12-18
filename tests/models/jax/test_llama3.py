@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import jax
 import jax.numpy as jnp
@@ -74,6 +74,16 @@ def rng() -> PRNGKey:
     return jax.random.PRNGKey(42)
 
 
+@pytest.fixture(autouse=True)
+def mock_get_pp_group():
+    with patch("tpu_inference.distributed.jax_parallel_state.get_pp_group",
+               return_value=MagicMock(is_first_rank=True,
+                                      is_last_rank=True,
+                                      rank_in_group=0,
+                                      world_size=1)):
+        yield
+
+
 class TestLlamaForCausalLM:
     """Tests for the main LlamaForCausalLM model class."""
 
@@ -145,7 +155,8 @@ class TestLlamaForCausalLM:
         # 1 seq with 16 tokens
         input_ids, attention_metadata, indices_do_sample = mock_model_inputs
         kv_caches, hidden_states, aux_hidden_states = model(
-            kv_caches, input_ids, attention_metadata)
+            kv_caches, input_ids, attention_metadata, None, None, None, None,
+            None, True, True)
         assert hidden_states.shape == (8, hidden_size)
         assert len(aux_hidden_states) == 0
 
