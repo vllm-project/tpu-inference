@@ -415,6 +415,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # The total number of requests is dp_size * max_num_seqs
         self.max_num_reqs = max(self.dp_size * scheduler_config.max_num_seqs,
                                 MIN_NUM_SEQS)
+        additional_sizes = self.vllm_config.additional_config.get("compilation_shapes", [])
         # [16, 32, 64, 128, 256, 512, 1024, 2048]
         cache_dtype = self.cache_config.cache_dtype
         if cache_dtype == "auto":
@@ -426,6 +427,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             max_token_size=scheduler_config.max_num_batched_tokens *
             self.dp_size,
             padding_gap=vllm_envs.VLLM_TPU_BUCKET_PADDING_GAP)
+        self.num_tokens_paddings = sorted(self.num_tokens_paddings + additional_sizes)
         self.num_tokens_paddings_per_dp = [
             padding // self.dp_size for padding in self.num_tokens_paddings
         ]
