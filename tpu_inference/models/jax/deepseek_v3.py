@@ -54,7 +54,7 @@ class DeepSeekV3(nnx.Module):
         self.rng = nnx.Rngs(rng)
 
         # NOTE: the default is 61
-        num_layers: int = vllm_config.model_config.hf_config.num_hidden_layers
+        num_layers: int = 5  #vllm_config.model_config.hf_config.num_hidden_layers
         num_local_experts: int = 256
 
         vocab_size: int = 129280
@@ -530,14 +530,14 @@ class DeepSeekV3WeightLoader:
                 "custom_module.kernel_gating_DF": (28, 18432),
                 "custom_module.kernel_up_proj_DF": (28, 18432),
                 "custom_module.kernel_down_proj_FD": (72, 7168),
-                # Attention (2D)
-                "kernel_q_down_proj_DA": (28, 1536),
-                "kernel_q_up_proj_AC": (6, 24576),
-                "kernel_kv_down_proj_DA": (28, 576),
-                "kernel_kv_up_proj_AC": (2, 32768),
-                "kernel_o_proj_CD": (64, 7168),
-                "kernel_k_up_proj_ANH": (2, 128, 128),
-                "kernel_v_up_proj_ANH": (2, 128, 128),
+                # Attention (3D for MLA, 2D for the rest)
+                "attn.kernel_q_down_proj_DA": (28, 1536),
+                "attn.kernel_q_up_proj_AC": (6, 24576),
+                "attn.kernel_kv_down_proj_DA": (28, 576),
+                "attn.kernel_kv_up_proj_AC": (2, 32768),
+                "attn.kernel_o_proj_CD": (64, 7168),
+                "attn.kernel_k_up_proj_ANH": (2, 128, 128),  # MLA
+                "attn.kernel_v_up_proj_ANH": (2, 128, 128),  # MLA
             }
 
             # TODO (jacobplatin): remove this check eventually!

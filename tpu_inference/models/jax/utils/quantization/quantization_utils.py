@@ -557,6 +557,9 @@ def get_random_sharded_array(key: PRNGKey, mesh: Mesh, param: nnx.Param,
         maxval = jnp.array(jnp.iinfo(dtype).max, dtype=dtype)
         weight = jax.random.randint(key, param_shape, minval, maxval, dtype)
     else:
+        # NOTE: _uniform() in random.py does not accept float4_e2m1fn
+        # Error: "TypeError: uniform only accepts 8-, 16-, 32-, or 64-bit dtypesgot float4_e2m1fn."
+        # Workaround: call function with dtype jnp.float8_e4m3fn and cast back to float4_e2m1fn
         if dtype != "float4_e2m1fn":
             weight = jax.random.normal(key, param_shape, dtype)
         else:
@@ -603,11 +606,9 @@ def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
     assert len(
         quantization_block_sizes
     ) == 2, f"Expected only 2 quantization block sizes but got {quantization_block_sizes}"
-    _, quantization_block_size_k = quantization_block_sizes[
-        0], quantization_block_sizes[1]
 
     # Iterate through all variables and initialize them
-    prev_param_shape = None
+
     for path, param in nnx.iter_graph(model):
         if not isinstance(param, nnx.Variable):
             continue
@@ -618,29 +619,16 @@ def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
         param_dtype = scale_dtype if is_qwix_scale else param.value.dtype
         param_shape = param.value.shape
         if is_qwix_scale:
-            simple_key = path[3]
-            prefixed_key = f"{path[2]}.{simple_key}"
+            key = f"{path[2]}.{path[3]}"
 
-            if simple_key in scale_shape_map:
-                param_shape = scale_shape_map[simple_key]
-            elif prefixed_key in scale_shape_map:
-                param_shape = scale_shape_map[prefixed_key]
+            if key in scale_shape_map:
+                param_shape = scale_shape_map[key]
             else:
-                shape_list = list(prev_param_shape)
-                quantization_block_size_k = quantization_config[
-                    "weight_block_size"][1]
-                if path[2] == "attn":
-                    shape_list[0] //= quantization_block_size_k
-                elif path[2] in ("custom_module", "shared_experts"):
-                    if len(shape_list) == 2:  # FFW
-                        shape_list[0] //= quantization_block_size_k
-                    elif len(shape_list) == 3:  # MoE
-                        shape_list[1] //= quantization_block_size_k
-                param_shape = tuple(shape_list)
+                raise ValueError(
+                    f"Scale shape for {key} not found in scale_shape_map.")
         param.value = get_random_sharded_array(
             rng, mesh, param, param_shape, param_dtype,
             ".".join([str(x) for x in path]))
-        prev_param_shape = param_shape
 
     # Handles the DeepSeek case, where this needs to be called to make the cache weights
     # concrete
