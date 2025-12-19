@@ -524,8 +524,7 @@ class CompilationManager:
                     num_reqs=num_reqs,
                     do_sampling=do_sampling,
                 )
-        
-        # Mark sampling as precompiled
+
         self._sampling_precompiled = True
 
     def _precompile_disagg_utils(self) -> None:
@@ -566,8 +565,7 @@ class CompilationManager:
                 self.runner.model_config.max_logprobs,
                 num_reqs=num_reqs,
             )
-        
-        # Mark gather_logprobs as precompiled
+
         self._gather_logprobs_precompiled = True
 
     def _precompile_speculative_decoding(self) -> None:
