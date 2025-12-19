@@ -69,6 +69,7 @@ class SchedulerWorkerError(Exception):
 
 
 # Monkey-patch multiprocessing to use cloudpickle
+# Standard pickle fails to serialize the vLLM Request object.
 _original_dumps = multiprocessing.reduction.ForkingPickler.dumps
 _original_loads = multiprocessing.reduction.ForkingPickler.loads
 
@@ -127,75 +128,80 @@ def _scheduler_worker_process(
         try:
             command, data = input_queue.get()
             
-            if command == SchedulerCommand.ADD_REQUEST:
-                request = data
-                scheduler.add_request(request)
-                output_queue.put(None)  # Signal completion
-                
-            elif command == SchedulerCommand.SCHEDULE:
-                output = scheduler.schedule()
-                output_queue.put(output)
-                
-            elif command == SchedulerCommand.FINISH_REQUESTS:
-                request_ids, finished_status = data
-                scheduler.finish_requests(request_ids, finished_status)
-                output_queue.put(None)  # Signal completion
-                
-            elif command == SchedulerCommand.UPDATE_DRAFT_TOKEN_IDS:
-                draft_token_ids = data
-                scheduler.update_draft_token_ids(draft_token_ids)
-                output_queue.put(None)  # Signal completion
-                
-            elif command == SchedulerCommand.UPDATE_FROM_OUTPUT:
-                scheduler_output, model_runner_output = data
-                result = scheduler.update_from_output(scheduler_output, model_runner_output)
-                output_queue.put(result)
-                
-            elif command == SchedulerCommand.GET_GRAMMAR_BITMASK:
-                scheduler_output = data
-                result = scheduler.get_grammar_bitmask(scheduler_output)
-                output_queue.put(result)
-                
-            elif command == SchedulerCommand.MAKE_STATS:
-                spec_decoding_stats, kv_connector_stats = data
-                result = scheduler.make_stats(spec_decoding_stats, kv_connector_stats)
-                output_queue.put(result)
-                
-            elif command == SchedulerCommand.RESET_PREFIX_CACHE:
-                result = scheduler.reset_prefix_cache()
-                output_queue.put(result)
-                
-            elif command == SchedulerCommand.GET_NUM_UNFINISHED_REQUESTS:
-                result = scheduler.get_num_unfinished_requests()
-                output_queue.put(result)
-                
-            elif command == SchedulerCommand.HAS_FINISHED_REQUESTS:
-                result = scheduler.has_finished_requests()
-                output_queue.put(result)
-                
-            elif command == SchedulerCommand.GET_REQUEST_COUNTS:
-                running = len(scheduler.running)
-                waiting = len(scheduler.waiting)
-                output_queue.put((running, waiting))
-                
-            elif command == SchedulerCommand.GET_TOKEN_COUNT:
-                # Calculate total tokens across running and waiting requests
-                total_tokens = 0
-                for req in scheduler.running:
-                    total_tokens += len(req.all_token_ids)
-                for req in scheduler.waiting:
-                    total_tokens += len(req.all_token_ids)
-                output_queue.put(total_tokens)
-                
-            elif command == SchedulerCommand.GET_COMPUTED_BLOCKS:
-                request = data
-                blocks, cached_tokens = scheduler.kv_cache_manager.get_computed_blocks(request)
-                output_queue.put((blocks, cached_tokens))
-                
-            elif command == SchedulerCommand.SHUTDOWN:
-                scheduler.shutdown()
-                output_queue.put(None)  # Signal completion
-                break
+            match command:
+                case SchedulerCommand.ADD_REQUEST:
+                    request = data
+                    scheduler.add_request(request)
+                    output_queue.put(None)  # Signal completion
+                    
+                case SchedulerCommand.SCHEDULE:
+                    output = scheduler.schedule()
+                    output_queue.put(output)
+                    
+                case SchedulerCommand.FINISH_REQUESTS:
+                    request_ids, finished_status = data
+                    scheduler.finish_requests(request_ids, finished_status)
+                    output_queue.put(None)  # Signal completion
+                    
+                case SchedulerCommand.UPDATE_DRAFT_TOKEN_IDS:
+                    draft_token_ids = data
+                    scheduler.update_draft_token_ids(draft_token_ids)
+                    output_queue.put(None)  # Signal completion
+                    
+                case SchedulerCommand.UPDATE_FROM_OUTPUT:
+                    scheduler_output, model_runner_output = data
+                    result = scheduler.update_from_output(scheduler_output, model_runner_output)
+                    output_queue.put(result)
+                    
+                case SchedulerCommand.GET_GRAMMAR_BITMASK:
+                    scheduler_output = data
+                    result = scheduler.get_grammar_bitmask(scheduler_output)
+                    output_queue.put(result)
+                    
+                case SchedulerCommand.MAKE_STATS:
+                    spec_decoding_stats, kv_connector_stats = data
+                    result = scheduler.make_stats(spec_decoding_stats, kv_connector_stats)
+                    output_queue.put(result)
+                    
+                case SchedulerCommand.RESET_PREFIX_CACHE:
+                    result = scheduler.reset_prefix_cache()
+                    output_queue.put(result)
+                    
+                case SchedulerCommand.GET_NUM_UNFINISHED_REQUESTS:
+                    result = scheduler.get_num_unfinished_requests()
+                    output_queue.put(result)
+                    
+                case SchedulerCommand.HAS_FINISHED_REQUESTS:
+                    result = scheduler.has_finished_requests()
+                    output_queue.put(result)
+                    
+                case SchedulerCommand.GET_REQUEST_COUNTS:
+                    running = len(scheduler.running)
+                    waiting = len(scheduler.waiting)
+                    output_queue.put((running, waiting))
+                    
+                case SchedulerCommand.GET_TOKEN_COUNT:
+                    # Calculate total tokens across running and waiting requests
+                    total_tokens = 0
+                    for req in scheduler.running:
+                        total_tokens += len(req.all_token_ids)
+                    for req in scheduler.waiting:
+                        total_tokens += len(req.all_token_ids)
+                    output_queue.put(total_tokens)
+                    
+                case SchedulerCommand.GET_COMPUTED_BLOCKS:
+                    request = data
+                    blocks, cached_tokens = scheduler.kv_cache_manager.get_computed_blocks(request)
+                    output_queue.put((blocks, cached_tokens))
+                    
+                case SchedulerCommand.SHUTDOWN:
+                    scheduler.shutdown()
+                    output_queue.put(None)  # Signal completion
+                    break         
+                case _:
+                    error = SchedulerWorkerError(rank, f"Unknown command: {command}")
+                    output_queue.put(error)
+                    raise error
                 
         except Exception as e:
             logger.error(f"Error in scheduler worker {rank}: {e}", exc_info=True)
