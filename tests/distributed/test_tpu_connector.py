@@ -295,9 +295,6 @@ class TestTPUConnectorWorker(unittest.TestCase):
         patchers = {
             "jax":
             patch('tpu_inference.distributed.tpu_connector.jax'),
-            "get_node_id":
-            patch('tpu_inference.distributed.tpu_connector.get_node_id',
-                  return_value=0),
             "get_host_ip":
             patch('tpu_inference.distributed.tpu_connector.get_host_ip',
                   return_value='127.0.0.1'),
