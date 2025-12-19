@@ -1,7 +1,4 @@
 steps:
-  # -----------------------------------------------------------------
-  # TEST STEPS - Calling wrapper
-  # -----------------------------------------------------------------
    - label: "PyPI Test Performance benchmarks for meta-llama/Llama-3.1-8B-Instruct"
      key: "pypi_meta-llama_Llama-3_1-8B-Instruct_Benchmark"
      if: build.env("NIGHTLY") == "1"

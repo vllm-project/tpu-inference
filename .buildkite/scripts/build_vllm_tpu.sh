@@ -1,8 +1,16 @@
 #!/bin/bash
+#
+# Build vLLM-TPU with tpu-inference from PyPI.
+# ./build_vllm_tpu.sh <tpu-inference-version> <vllm-tpu-version> [vllm-branch-tag-or-commit-hash](default: main)
+# Example: ./build_vllm_tpu.sh 0.12.0rc1 0.12.0rc1 releases/v0.12.0
+# ---------------------------
 
 set -e
 
 # --- Script Configuration ---
+# TPU_INFERENCE_VERSION: Must be a version already published on PyPI.
+# VLLM_TPU_VERSION: Version assigned to the output wheel.
+# VLLM_BRANCH: vLLM branch, tag or commit hash to build (default: main).
 TPU_INFERENCE_VERSION=$1
 VLLM_TPU_VERSION=$2
 VLLM_BRANCH=${3:-"main"}
@@ -11,15 +19,15 @@ REPO_DIR="vllm"
 
 # --- Argument Validation ---
 if [ "$#" -lt 2 ]; then
-    echo "Usage: $0 <tpu-inference-version> <vllm-tpu-version> [vllm-branch-or-tag]"
-    echo "  [vllm-branch-or-tag] is optional, defaults to 'main'."
+    echo "Usage: $0 <tpu-inference-version> <vllm-tpu-version> [vllm-branch-tag-or-commit-hash]"
+    echo "  [vllm-branch-tag-or-commit-hash] is optional, defaults to 'main'."
     exit 1
 fi
 
 echo "--- Starting vLLM-TPU wheel build ---"
 echo "TPU Inference Version: ${TPU_INFERENCE_VERSION}"
 echo "vLLM-TPU Version: ${VLLM_TPU_VERSION}"
-echo "vLLM Branch/Tag: ${VLLM_BRANCH}"
+echo "vLLM Branch/Tag/Commit Hash: ${VLLM_BRANCH}"
 
 # --- Step 1: Clone vLLM repository ---
 if [ -d "$REPO_DIR" ]; then
@@ -30,10 +38,10 @@ else
 fi
 cd ${REPO_DIR}
 
-# --- Step 1.5: Checkout the specified vLLM branch/tag ---
-echo "Checking out vLLM branch/tag: ${VLLM_BRANCH}..."
+# --- Step 1.5: Checkout the specified vLLM branch/tag/commit hash ---
+echo "Checking out vLLM branch/tag/commit hash: ${VLLM_BRANCH}..."
 if ! git checkout "${VLLM_BRANCH}"; then
-    echo "ERROR: Failed to checkout branch/tag '${VLLM_BRANCH}'. Please check the branch/tag name."
+    echo "ERROR: Failed to checkout branch/tag/commit hash '${VLLM_BRANCH}'. Please check the name of branch/tag/commit hash ."
     exit 1
 fi
 echo "Successfully checked out ${VLLM_BRANCH}."
