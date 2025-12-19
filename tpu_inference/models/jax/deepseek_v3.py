@@ -148,15 +148,20 @@ class DeepSeekV3(nnx.Module):
                 query_tnh_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
                 keyvalue_skh_spec = P(ShardingAxisName.MLP_TENSOR, None)
                 attn_o_tnh_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
-                q_da_spec = (None, ShardingAxisName.VOCAB)
-                kv_da_spec = (None, ShardingAxisName.VOCAB)
+                if self.vllm_config.additional_config.get(
+                    "replicate_attn_weights", False):
+                    nhd_sharding=()
+                    anh_sharding=()
+                else:
+                    nhd_sharding=(ShardingAxisName.MLP_TENSOR, None, None)
+                    anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None)
 
             else:
                 query_tnh_spec=P(None, ShardingAxisName.MLP_TENSOR, None)
                 keyvalue_skh_spec=P(None, ShardingAxisName.MLP_TENSOR, None)
                 attn_o_tnh_spec=P(None, ShardingAxisName.MLP_TENSOR, None)
-                q_da_spec = (None, ShardingAxisName.MOE_TENSOR)
-                kv_da_spec = (None, ShardingAxisName.MOE_TENSOR)
+                nhd_sharding=(ShardingAxisName.MLP_TENSOR, None, None)
+                anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None)
 
             return MLA(
                 rope_theta=rope_theta,
@@ -186,11 +191,13 @@ class DeepSeekV3(nnx.Module):
                 activation_attention_out_td=(None, None),
                 attn_o_tnh=attn_o_tnh_spec,
                 # TODO: bz branch is: q_da_sharding=('model', None),
-                q_da_sharding=(None, ShardingAxisName.VOCAB),
-                anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None),
+                # q_da_sharding=(None, ShardingAxisName.VOCAB),
+                q_da_sharding=(None, ShardingAxisName.MOE_TENSOR),
+                anh_sharding=anh_sharding,
                 # TODO bz branch is kv_da_sharding=('model', None),
-                kv_da_sharding=(None, ShardingAxisName.VOCAB),
-                nhd_sharding=(ShardingAxisName.MLP_TENSOR, None, None))
+                # kv_da_sharding=(None, ShardingAxisName.VOCAB),
+                kv_da_sharding=(None, ShardingAxisName.MOE_TENSOR),
+                nhd_sharding=nhd_sharding)
 
         for i in range(first_k_dense_replace):
             block = TransformerBlock(

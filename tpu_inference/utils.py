@@ -270,8 +270,8 @@ def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:
     """
     if sharding is None:
         sharding = NamedSharding(mesh, PartitionSpec(None))
-    return jax.make_array_from_process_local_data(sharding, *args)
-    # return jax.device_put(*args, device=sharding, **kwargs)
+    # return jax.make_array_from_process_local_data(sharding, *args)
+    return jax.device_put(*args, device=sharding, **kwargs)
 
 
 def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:
