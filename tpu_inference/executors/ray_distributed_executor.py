@@ -47,7 +47,7 @@ from collections import defaultdict
 import msgspec
 from vllm.v1.outputs import SamplerOutput
 
-from tpu_inference.distributed.utils import set_node_kv_ip_port
+from tpu_inference.distributed.utils import set_node_metadata
 
 logger = init_logger(__name__)
 
@@ -119,9 +119,9 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         # KV connector setup
         self.has_connector = self.vllm_config.kv_transfer_config is not None
         if self.has_connector:
-            ip_port = self.collective_rpc("get_node_kv_ip_port")
-            for item in ip_port:
-                set_node_kv_ip_port(item)
+            metadata = self.collective_rpc("get_node_metadata")
+            for item in metadata:
+                set_node_metadata(item)
         self.uses_sampler = self.vllm_config.model_config.runner_type != "pooling" and (
             self.vllm_config.ec_transfer_config is None
             or not self.vllm_config.ec_transfer_config.is_ec_producer)

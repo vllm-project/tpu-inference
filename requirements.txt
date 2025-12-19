@@ -16,3 +16,4 @@ pathwaysutils
 parameterized
 numba==0.62.1
 runai-model-streamer[s3,gcs]==0.15.0
+sortedcontainers
