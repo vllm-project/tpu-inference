@@ -26,6 +26,12 @@ repos:
         exclude: ^mkdocs\.yml$ # Exclude mkdocs.yml from this check
     -   id: end-of-file-fixer
     -   id: trailing-whitespace
+repos:
+- repo: https://github.com/google/addlicense
+  rev: v1.2.0
+  hooks:
+  - id: addlicense
+    args: [ "-c", "Google LLC", "-l", "apache" ]    
 - repo: https://github.com/PyCQA/isort
   rev: 6.0.1
   hooks:
