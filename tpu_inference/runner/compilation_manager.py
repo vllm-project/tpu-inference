@@ -46,6 +46,8 @@ class CompilationManager:
 
     def __init__(self, runner: "TPUModelRunner"):
         self.runner = runner
+        self._sampling_precompiled = False
+        self._gather_logprobs_precompiled = False
         if not vllm_envs.VLLM_DISABLE_COMPILE_CACHE:
             logger.info("Enabling JAX compile cache.")
             jax.config.update("jax_compilation_cache_dir",
@@ -100,9 +102,13 @@ class CompilationManager:
                 return
             self._precompile_select_from_array()
             self._precompile_compute_logits()
+            # Skip sampling if already precompiled before KV cache allocation
+            if not self._sampling_precompiled:
+                self._precompile_sampling()
             self._precompile_disagg_utils()
-            self._precompile_sampling()
-            self._precompile_gather_logprobs()
+            # Skip gather_logprobs if already precompiled before KV cache allocation
+            if not self._gather_logprobs_precompiled:
+                self._precompile_gather_logprobs()
             self._precompile_structured_decoding()
             if self.runner.speculative_config:
                 self._precompile_speculative_decoding()
@@ -518,6 +524,9 @@ class CompilationManager:
                     num_reqs=num_reqs,
                     do_sampling=do_sampling,
                 )
+        
+        # Mark sampling as precompiled
+        self._sampling_precompiled = True
 
     def _precompile_disagg_utils(self) -> None:
         if not is_disagg_enabled():
@@ -557,6 +566,9 @@ class CompilationManager:
                 self.runner.model_config.max_logprobs,
                 num_reqs=num_reqs,
             )
+        
+        # Mark gather_logprobs as precompiled
+        self._gather_logprobs_precompiled = True
 
     def _precompile_speculative_decoding(self) -> None:
         logger.info(
