@@ -1,7 +1,7 @@
 #!/bin/bash
 # .buildkite/scripts/update_lkg_version.sh
 
-set -e
+set -ex
 NEW_LKG_HASH=$1
 if [[ -z "$NEW_LKG_HASH" ]]; then
     echo "Error: No hash provided."
