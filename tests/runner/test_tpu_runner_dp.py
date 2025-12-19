@@ -97,6 +97,20 @@ class TestTPUJaxRunnerDPInputsLightweight:
         mock_output.grammar_bitmask = None
         return mock_output
 
+    def _create_mock_hybrid_kv_cache_config(self):
+        mock_kv_cache_config = MagicMock()
+        mock_kv_cache_group1 = MagicMock()
+        mock_kv_cache_group1.layer_names = [f'layer.{i}' for i in range(10)]
+        mock_kv_cache_group2 = MagicMock()
+        mock_kv_cache_group2.layer_names = [
+            f'layer.{i}' for i in range(10, 20)
+        ]
+        mock_kv_cache_config.kv_cache_groups = [
+            mock_kv_cache_group1, mock_kv_cache_group2
+        ]
+        self.runner.kv_cache_config = mock_kv_cache_config
+        self.runner.use_hybrid_kvcache = True
+
     @patch('tpu_inference.runner.tpu_runner.NamedSharding')
     @patch('tpu_inference.runner.tpu_runner.runner_utils')
     @patch('tpu_inference.runner.tpu_runner.device_array',
@@ -145,6 +159,58 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         with pytest.raises(AssertionError):
             self.runner._prepare_inputs_dp(scheduler_output)
+
+    @patch('tpu_inference.runner.tpu_runner.NamedSharding')
+    @patch('tpu_inference.runner.tpu_runner.runner_utils')
+    @patch('tpu_inference.runner.tpu_runner.device_array',
+           side_effect=lambda mesh, tensors, **kwargs: tensors)
+    @patch('tpu_inference.runner.tpu_runner.TPUSupportedSamplingMetadata')
+    def test_prepare_inputs_dp_hybrid_kvcache(self, mock_sampling_metadata,
+                                              mock_device_array,
+                                              mock_runner_utils,
+                                              mock_named_sharding):
+        """Test basic functionality of _prepare_inputs_dp."""
+        # Mock utility functions
+        mock_runner_utils.get_padded_token_len.return_value = 16
+        mock_sampling_metadata.from_input_batch.return_value = MagicMock()
+        mock_named_sharding.return_value = MagicMock()
+
+        # Create test data - only use req1 and req2 to match num_reqs=2
+        num_scheduled_tokens = {"req1": 5, "req2": 3}
+        assigned_dp_ranks = {"req1": 0, "req2": 1}
+        scheduler_output = self._create_mock_scheduler_output(
+            num_scheduled_tokens, assigned_dp_ranks)
+
+        # Create hybrid kv cache config with 10 full attn layers, 10 sw attn layers
+        self._create_mock_hybrid_kv_cache_config()
+
+        # update input_batch's block_table
+        mock_block_table = MagicMock()
+        mock_block_table.get_cpu_tensor.return_value = np.arange(32).reshape(
+            4, 8)
+        self.runner.input_batch.block_table = [
+            mock_block_table, mock_block_table
+        ]
+
+        # update model runner's block_tables_cpu:
+        self.runner.block_tables_cpu = [
+            np.zeros((8, 8), dtype=np.int32),
+            np.zeros((8, 8), dtype=np.int32)
+        ]
+
+        # Execute the method
+        result = self.runner._prepare_inputs_dp(scheduler_output)
+
+        # Basic assertions
+        assert len(result) == 8
+        input_ids, positions, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs = result
+
+        # Verify utility functions were called
+        mock_runner_utils.get_padded_token_len.assert_called()
+
+        # Verify there's attention_metadata for each layer
+        assert isinstance(attention_metadata, dict)
+        assert len(attention_metadata) == 20
 
     def test_prepare_dp_input_metadata(self):
         num_scheduled_tokens = {"req1": 10, "req2": 5, "req3": 8, "req4": 3}
