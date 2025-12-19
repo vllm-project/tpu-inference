@@ -20,6 +20,7 @@ from multiprocessing import Process, Queue
 from typing import Any, Dict, List, Optional, Tuple
 
 import cloudpickle
+import multiprocessing.reduction
 import torch
 from tpu_inference.utils import time_function
 from vllm.config import VllmConfig
@@ -68,7 +69,6 @@ class SchedulerWorkerError(Exception):
 
 
 # Monkey-patch multiprocessing to use cloudpickle
-import multiprocessing.reduction
 _original_dumps = multiprocessing.reduction.ForkingPickler.dumps
 _original_loads = multiprocessing.reduction.ForkingPickler.loads
 
