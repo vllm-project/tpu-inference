@@ -35,11 +35,7 @@ else
 fi
 
 upload_pipeline() {
-    VLLM_COMMIT_HASH=$(cat .buildkite/vllm_lkg.version)
-    if [ -z "$VLLM_COMMIT_HASH" ]; then
-        echo "vllm_lkg.version is empty. Fetching latest commit from vLLM repository."
-        VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
-    fi
+    VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
@@ -50,10 +46,11 @@ upload_pipeline() {
 }
 
 echo "--- Starting Buildkite Bootstrap ---"
-echo "$BUILDKITE_PIPELINE_SLUG"
+echo "Running in pipeline: $BUILDKITE_PIPELINE_SLUG"
 if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
     VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
+    echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
     buildkite-agent pipeline upload .buildkite/pipeline_jax_tpu7x.yml
     buildkite-agent pipeline upload .buildkite/pipeline_integration.yml
