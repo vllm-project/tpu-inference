@@ -236,7 +236,7 @@ def extract_abcd_gpqa(text: str) -> str:
     Based on gpt-oss abcd_grader.py with patterns for various answer formats.
     """
     import re
-    
+
     patterns = [
         # "Answer: (C)" or "Answers: (B)"
         re.compile(r'(?ix)\bAnswer[s]?\b\s*[:\-–]?\s*\(\s*([ABCD])\s*\)'),
@@ -245,32 +245,42 @@ def extract_abcd_gpqa(text: str) -> str:
         # "answer is C" or "answer is (C)"
         re.compile(r'(?ix)\banswer\s+is\s+\(?([ABCD])\)?'),
         # **Answer:** A or *Answers* – B (markdown wrapped)
-        re.compile(r'''(?ix)(?:\*{1,2}|_{1,2})Answer[s]?\s*[:\-–]?(?:\*{1,2}|_{1,2})\s*([ABCD])\b'''),
+        re.compile(
+            r'''(?ix)(?:\*{1,2}|_{1,2})Answer[s]?\s*[:\-–]?(?:\*{1,2}|_{1,2})\s*([ABCD])\b'''
+        ),
         # "Option B" or "Choice: C"
         re.compile(r'(?ix)\b(?:Option|Choice)\b\s*[:\-–]?\s*([ABCD])\b'),
         # LaTeX \boxed{A}
         re.compile(r'(?x)\\boxed\{[^}]*?([ABCD])[^}]*\}', re.MULTILINE),
         # Bare (A), [B], etc.
-        re.compile(r'(?x)(?<![A-Za-z0-9])[\(\[]\s*([ABCD])\s*[\)\]](?![A-Za-z0-9])'),
+        re.compile(
+            r'(?x)(?<![A-Za-z0-9])[\(\[]\s*([ABCD])\s*[\)\]](?![A-Za-z0-9])'),
         # Markdown wrapped: *A*, **B**, _C_, __D__
-        re.compile(r'(?x)(?<![A-Za-z0-9])(?:\*{1,2}|_{1,2})([ABCD])(?:\*{1,2}|_{1,2})(?![A-Za-z0-9])'),
+        re.compile(
+            r'(?x)(?<![A-Za-z0-9])(?:\*{1,2}|_{1,2})([ABCD])(?:\*{1,2}|_{1,2})(?![A-Za-z0-9])'
+        ),
         # Final fallback: line that's exactly "A", "B.", "C)", etc.
-        re.compile(r'''(?x)^\s*(?:\*{1,2}|_{1,2})?([ABCD])(?:\*{1,2}|_{1,2})?\s*[\.\)\-–:]?\s*.*$''', re.MULTILINE),
+        re.compile(
+            r'''(?x)^\s*(?:\*{1,2}|_{1,2})?([ABCD])(?:\*{1,2}|_{1,2})?\s*[\.\)\-–:]?\s*.*$''',
+            re.MULTILINE),
     ]
-    
+
     # Also check for gpt-oss style "assistantfinal" block
-    final_block_match = re.search(r"assistant.*final(.*)", text, re.IGNORECASE | re.DOTALL)
+    final_block_match = re.search(r"assistant.*final(.*)", text,
+                                  re.IGNORECASE | re.DOTALL)
     if final_block_match:
         final_block = final_block_match.group(1)
         # Check for **... (A) ...** pattern
-        match = re.search(r"\*\*[^\(]*\s*\(?([A-D])\s*\)?", final_block, re.DOTALL)
+        match = re.search(r"\*\*[^\(]*\s*\(?([A-D])\s*\)?", final_block,
+                          re.DOTALL)
         if match:
             return match.group(1).upper()
         # Check for choice/answer ... (A) pattern
-        match = re.search(r"(?:choice|answer)[^\(]*\s*\(?([A-D])\s*\)?", final_block, re.IGNORECASE | re.DOTALL)
+        match = re.search(r"(?:choice|answer)[^\(]*\s*\(?([A-D])\s*\)?",
+                          final_block, re.IGNORECASE | re.DOTALL)
         if match:
             return match.group(1).upper()
-    
+
     # Try each pattern
     for pat in patterns:
         m = pat.search(text)
@@ -278,12 +288,12 @@ def extract_abcd_gpqa(text: str) -> str:
             letter = m.group(1).upper()
             if letter in 'ABCD':
                 return letter
-    
+
     # Last resort: return first letter if it's A-D
     first_char = text.strip()[:1].upper()
     if first_char in 'ABCD':
         return first_char
-    
+
     return None
 
 
@@ -299,19 +309,19 @@ def eval_accuracy_gpqa(request_outputs: List[RequestFuncOutput]) -> dict:
     """
     correct = 0
     total = 0
-    
+
     for output in request_outputs:
         if not output.success:
             continue
-            
+
         generated_text = output.generated_text
         target = output.input_request.completion  # This is 'A', 'B', 'C', or 'D'
-        
+
         extracted = extract_abcd_gpqa(generated_text)
         if extracted == target.upper():
             correct += 1
         total += 1
-    
+
     accuracy = correct / total if total > 0 else 0.0
     result = {
         "accuracy": round(accuracy, 4),

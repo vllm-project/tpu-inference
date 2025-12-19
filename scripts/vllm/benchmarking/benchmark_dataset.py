@@ -452,13 +452,16 @@ Express your final answer as the corresponding option 'A', 'B', 'C', or 'D'."""
             # Default to downloading from OpenAI
             url = "https://openaipublic.blob.core.windows.net/simple-evals/gpqa_diamond.csv"
             df = pd.read_csv(url)
-        
+
         rng = random.Random(self.random_seed)
         examples = [row.to_dict() for _, row in df.iterrows()]
 
         # Generate a random permutation for each example.
-        examples = [example | {"permutation": rng.sample(range(4), 4)}
-                    for example in examples]
+        examples = [
+            example | {
+                "permutation": rng.sample(range(4), 4)
+            } for example in examples
+        ]
 
         gpqa_data = []
         for row in examples:
@@ -472,15 +475,16 @@ Express your final answer as the corresponding option 'A', 'B', 'C', or 'D'."""
             choices = [choices[i] for i in row["permutation"]]
             correct_index = choices.index(row["Correct Answer"])
             correct_answer = "ABCD"[correct_index]
-            
+
             # Format the question
-            choices_dict = dict(
-                A=choices[0], B=choices[1], C=choices[2], D=choices[3],
-                Question=row["Question"]
-            )
+            choices_dict = dict(A=choices[0],
+                                B=choices[1],
+                                C=choices[2],
+                                D=choices[3],
+                                Question=row["Question"])
             prompt = self.QUERY_TEMPLATE.format(**choices_dict)
             gpqa_data.append((prompt, correct_answer))
-        
+
         self.data = gpqa_data
         print(f"Loaded {len(self.data)} examples from GPQA diamond dataset")
 
@@ -517,7 +521,7 @@ Express your final answer as the corresponding option 'A', 'B', 'C', or 'D'."""
             prompt_len = len(prompt_ids)
             # Model may generate reasoning
             new_output_len = output_len if output_len is not None else 2048
-            
+
             samples.append(
                 SampleRequest(
                     prompt=prompt,
