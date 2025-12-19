@@ -443,7 +443,7 @@ class TPUConnectorWorker:
         self.mesh: Mesh = None
         self.multi_host = envs.TPU_MULTIHOST_BACKEND == "ray"
         # default value for none distributed scenario
-        # when the topology is initialized, runner will update it 
+        # when the topology is initialized, runner will update it
         # based on topology_order_id
         self.node_id = 0
 

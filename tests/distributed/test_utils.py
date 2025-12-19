@@ -1,9 +1,13 @@
-import pytest
 from collections import namedtuple
+
+import pytest
+
 from tpu_inference.distributed.utils import get_device_topology_order_id
 
 # Mock TpuDevice object to simulate the real one.
-TpuDevice = namedtuple('TpuDevice', ['id', 'process_index', 'coords', 'core_on_chip'])
+TpuDevice = namedtuple('TpuDevice',
+                       ['id', 'process_index', 'coords', 'core_on_chip'])
+
 
 def test_get_device_topology_order_id():
     """
@@ -40,30 +44,44 @@ def test_get_device_topology_order_id():
         TpuDevice(id=8, process_index=1, coords=(0, 0, 1), core_on_chip=0),
         TpuDevice(id=0, process_index=0, coords=(0, 0, 0), core_on_chip=0),
     ]
-    local_devices_z1 = [TpuDevice(id=8, process_index=1, coords=(0, 0, 1), core_on_chip=0)]
-    local_devices_z0 = [TpuDevice(id=0, process_index=0, coords=(0, 0, 0), core_on_chip=0)]
+    local_devices_z1 = [
+        TpuDevice(id=8, process_index=1, coords=(0, 0, 1), core_on_chip=0)
+    ]
+    local_devices_z0 = [
+        TpuDevice(id=0, process_index=0, coords=(0, 0, 0), core_on_chip=0)
+    ]
 
-    assert get_device_topology_order_id(local_devices_z0, shuffled_z_global_devices) == 0
-    assert get_device_topology_order_id(local_devices_z1, shuffled_z_global_devices) == 1
+    assert get_device_topology_order_id(local_devices_z0,
+                                        shuffled_z_global_devices) == 0
+    assert get_device_topology_order_id(local_devices_z1,
+                                        shuffled_z_global_devices) == 1
 
     #v6e
     global_devices = [
-        TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0), 
-        TpuDevice(id=1, process_index=1, coords=(1,0,0), core_on_chip=0), 
-        TpuDevice(id=2, process_index=2, coords=(0,1,0), core_on_chip=0), 
-        TpuDevice(id=3, process_index=3, coords=(1,1,0), core_on_chip=0)]
-    local_devices = [TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0)]
+        TpuDevice(id=0, process_index=0, coords=(0, 0, 0), core_on_chip=0),
+        TpuDevice(id=1, process_index=1, coords=(1, 0, 0), core_on_chip=0),
+        TpuDevice(id=2, process_index=2, coords=(0, 1, 0), core_on_chip=0),
+        TpuDevice(id=3, process_index=3, coords=(1, 1, 0), core_on_chip=0)
+    ]
+    local_devices = [
+        TpuDevice(id=0, process_index=0, coords=(0, 0, 0), core_on_chip=0)
+    ]
     assert get_device_topology_order_id(local_devices, global_devices) == 0
 
-    local_devices = [TpuDevice(id=1, process_index=1, coords=(1,0,0), core_on_chip=0)]
+    local_devices = [
+        TpuDevice(id=1, process_index=1, coords=(1, 0, 0), core_on_chip=0)
+    ]
     assert get_device_topology_order_id(local_devices, global_devices) == 2
 
-    local_devices = [TpuDevice(id=2, process_index=2, coords=(0,1,0), core_on_chip=0)]
+    local_devices = [
+        TpuDevice(id=2, process_index=2, coords=(0, 1, 0), core_on_chip=0)
+    ]
     assert get_device_topology_order_id(local_devices, global_devices) == 1
 
-    local_devices = [TpuDevice(id=3, process_index=3, coords=(1,1,0), core_on_chip=0)]
+    local_devices = [
+        TpuDevice(id=3, process_index=3, coords=(1, 1, 0), core_on_chip=0)
+    ]
     assert get_device_topology_order_id(local_devices, global_devices) == 3
-
 
 
 def test_get_device_topology_order_id_empty_local():
