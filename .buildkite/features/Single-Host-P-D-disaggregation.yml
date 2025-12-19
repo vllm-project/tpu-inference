@@ -1,25 +1,27 @@
 # Single-Host-P-D-disaggregation
 # features support matrix
 steps:
-  - label: "Correctness tests for Single-Host P-D disaggregation"
-    key: "SingleHostPDDisaggregation_CorrectnessTest"
+  - label: "${TEST_LABEL_PREFIX} Correctness tests for Single-Host P-D disaggregation"
+    key: "${TEST_KEY_PREFIX}SingleHostPDDisaggregation_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_8_queue
+      queue: "${TPU_LARGE_CORE_QUEUE}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
           python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_local_disagg.py::test_disaggregated_serving \
           /workspace/tpu_inference/tests/e2e/test_local_disagg.py::test_disaggregated_serving_correctness
-  - label: "Record correctness test result for Single-Host P-D disaggregation"
-    key: "record_SingleHostPDDisaggregation_CorrectnessTest"
-    depends_on: "SingleHostPDDisaggregation_CorrectnessTest"
+  - label: "${TEST_LABEL_PREFIX} Record correctness test result for Single-Host P-D disaggregation"
+    key: "${TEST_KEY_PREFIX}record_SingleHostPDDisaggregation_CorrectnessTest"
+    depends_on: "${TEST_KEY_PREFIX}SingleHostPDDisaggregation_CorrectnessTest"
     env:
-      CI_TARGET: "SingleHostPDDisaggregation"
+      CI_TARGET: "${TEST_LABEL_PREFIX}SingleHostPDDisaggregation"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "features support matrix"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh SingleHostPDDisaggregation_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TEST_KEY_PREFIX}SingleHostPDDisaggregation_CorrectnessTest
