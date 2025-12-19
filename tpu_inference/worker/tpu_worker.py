@@ -423,6 +423,9 @@ class TPUWorker:
         kv_cache_config: KVCacheConfig,
     ) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
+        # Precompile functions with large vocab_size tensors before allocating KV cache to avoid OOM
+        self.model_runner.compilation_manager._precompile_sampling()
+        self.model_runner.compilation_manager._precompile_gather_logprobs()
         self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def get_node_kv_ip_port(self) -> tuple[int, str, int]:
