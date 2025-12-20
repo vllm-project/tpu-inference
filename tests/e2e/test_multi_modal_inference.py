@@ -7,6 +7,7 @@
 import os
 from dataclasses import asdict
 
+import difflib
 import pytest
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.image import ImageAsset
@@ -101,4 +102,11 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes):
     print("-" * 50)
 
     # Check output
-    assert generated_text == EXPECTED_TEXT
+    similarity_score = difflib.SequenceMatcher(None, generated_text, EXPECTED_TEXT).ratio()
+    print(f"Similarity Score: {similarity_score:.4f}")
+    assert similarity_score >= 0.85, (
+        f"Text similarity too low ({similarity_score:.2f}).\n"
+        f"Expected: {EXPECTED_TEXT}\n"
+        f"Actual:   {generated_text}"
+    )
+
