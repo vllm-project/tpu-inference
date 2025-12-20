@@ -1,0 +1,48 @@
+# data_parallelism
+# feature support matrix
+steps:
+  - label: "Correctness tests for data_parallelism"
+    key: "data_parallelism_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        .buildkite/scripts/run_in_docker.sh \
+          bash -c 'NEW_MODEL_DESIGN=1 python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_data_parallel.py -k test_data_parallelism_correctness'
+  - label: "Record correctness test result for data_parallelism"
+    key: "record_data_parallelism_CorrectnessTest"
+    depends_on: "data_parallelism_CorrectnessTest"
+    env:
+      CI_TARGET: "data_parallelism"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh data_parallelism_CorrectnessTest
+
+  - label: "Performance tests for data_parallelism"
+    key: "data_parallelism_PerformanceTest"
+    depends_on: "record_data_parallelism_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        .buildkite/scripts/run_in_docker.sh \
+          bash -c 'NEW_MODEL_DESIGN=1 python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_data_parallel.py -k test_data_parallelism_performance'
+
+  - label: "Record performance test result for data_parallelism"
+    key: "record_data_parallelism_PerformanceTest"
+    depends_on: "data_parallelism_PerformanceTest"
+    env:
+      CI_TARGET: "data_parallelism"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh data_parallelism_PerformanceTest
