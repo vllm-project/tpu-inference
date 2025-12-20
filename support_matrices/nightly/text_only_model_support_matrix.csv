@@ -1,8 +1,15 @@
 Model,UnitTest,IntegrationTest,Benchmark
-"meta-llama/Llama-3.3-70B-Instruct",✅,✅,✅
-"Qwen/Qwen3-4B",✅,✅,✅
-"google/gemma-3-27b-it",❌,N/A,N/A
-"Qwen/Qwen3-32B",✅,✅,✅
-"meta-llama/Llama-Guard-4-12B",✅,✅,✅
-"meta-llama/Llama-3.1-8B-Instruct",✅,✅,✅
-"Qwen/Qwen3-30B-A3B",✅,✅,✅
+"Copyright 2025 Google LLC",N/A,N/A,N/A
+"Copyright 2025 Google LLC",N/A,N/A,N/A
+"Copyright 2025 Google LLC",N/A,N/A,N/A
+"Copyright 2025 Google LLC",N/A,N/A,N/A
+"Copyright 2025 Google LLC",N/A,N/A,N/A
+"Copyright 2025 Google LLC",N/A,N/A,N/A
+"Copyright 2025 Google LLC",N/A,N/A,N/A
+"Copyright 2025 Google LLC",N/A,N/A,N/A
+"Copyright 2025 Google LLC",N/A,N/A,N/A
+"Copyright 2025 Google LLC",N/A,N/A,N/A
+"Copyright 2025 Google LLC",N/A,N/A,N/A
+"Copyright 2025 Google LLC",N/A,N/A,N/A
+"Copyright 2025 Google LLC",N/A,N/A,N/A
+"Copyright 2025 Google LLC",N/A,N/A,N/A

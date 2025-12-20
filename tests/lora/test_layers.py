@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import random
 from typing import Optional
 
@@ -205,9 +219,6 @@ def create_random_inputs(
 @pytest.mark.parametrize("repeats", [1, 2, 3])
 @pytest.mark.parametrize("stage", [True, False])
 def test_column_parallel_packed(dist_init, num_loras, repeats, stage) -> None:
-    # TODO(Qiliang Cui): Remove when issue is resolved.
-    if 'TPU7x' in jax.devices()[0].device_kind:
-        pytest.skip("Skipping test on TPU TPU7x.")
     set_random_seed(6)
 
     max_loras = 9
@@ -502,9 +513,13 @@ def _create_random_linear_parallel_layer(layer_type, vllm_config, mesh):
     return linear, lora_linear
 
 
+def _get_devices():
+    return jax.devices()
+
+
 def _create_mesh():
     axis_names = ("data", "model")
-    devices = jax.devices()
+    devices = _get_devices()
     mesh_shape = (1, len(devices))
     mesh = jax.make_mesh(mesh_shape, axis_names, devices=devices)
     return mesh
@@ -516,7 +531,7 @@ def _verify_lora_linear_layer(linear, lora_linear):
         # BaseLinearLayerWithLoRA.weight property guarantees this.
         # if len(devices) != 1, `reorder_concatenated_tensor_for_sharding` function may reorder the out_features dimension of the weight matrix.
         # So the below check will fail.
-        if len(jax.devices()) == 1:
+        if len(_get_devices()) == 1:
             assert torch.equal(linear.weight.data,
                                lora_linear.weight.to('cpu'))
 

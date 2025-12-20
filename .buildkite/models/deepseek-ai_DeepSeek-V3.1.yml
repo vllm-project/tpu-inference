@@ -1,0 +1,81 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# deepseek-ai/DeepSeek-V3.1
+# text-only
+steps:
+  - label: "Unit tests for deepseek-ai/DeepSeek-V3.1"
+    key: "deepseek-ai_DeepSeek-V3_1_UnitTest"
+    agents:
+      queue: tpu_v6e_8_queue
+    soft_fail: true
+    commands:
+      - |
+        buildkite-agent meta-data set "deepseek-ai_DeepSeek-V3_1_UnitTest" "unverified"
+  - label: "Record unit test result for deepseek-ai/DeepSeek-V3.1"
+    key: "record_deepseek-ai_DeepSeek-V3_1_UnitTest"
+    depends_on: "deepseek-ai_DeepSeek-V3_1_UnitTest"
+    env:
+      CI_TARGET: deepseek-ai/DeepSeek-V3.1
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "text-only"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh deepseek-ai_DeepSeek-V3_1_UnitTest
+
+  - label: "Integration tests for deepseek-ai/DeepSeek-V3.1"
+    key: "deepseek-ai_DeepSeek-V3_1_IntegrationTest"
+    depends_on: "record_deepseek-ai_DeepSeek-V3_1_UnitTest"
+    agents:
+      queue: tpu_v6e_8_queue
+    soft_fail: true
+    commands:
+      - |
+        buildkite-agent meta-data set "deepseek-ai_DeepSeek-V3_1_IntegrationTest" "unverified"
+  - label: "Record integration test result for deepseek-ai/DeepSeek-V3.1"
+    key: "record_deepseek-ai_DeepSeek-V3_1_IntegrationTest"
+    depends_on: "deepseek-ai_DeepSeek-V3_1_IntegrationTest"
+    env:
+      CI_TARGET: deepseek-ai/DeepSeek-V3.1
+      CI_STAGE: "IntegrationTest"
+      CI_CATEGORY: "text-only"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh deepseek-ai_DeepSeek-V3_1_IntegrationTest
+
+  - label: "Performance benchmarks for deepseek-ai/DeepSeek-V3.1"
+    key: "deepseek-ai_DeepSeek-V3_1_Benchmark"
+    depends_on: "record_deepseek-ai_DeepSeek-V3_1_IntegrationTest"
+    agents:
+      queue: tpu_v6e_8_queue
+    soft_fail: true
+    commands:
+      - |
+        buildkite-agent meta-data set "deepseek-ai_DeepSeek-V3_1_Benchmark" "unverified"
+  - label: "Record performance benchmark result for deepseek-ai/DeepSeek-V3.1"
+    key: "record_deepseek-ai_DeepSeek-V3_1_Benchmark"
+    depends_on: "deepseek-ai_DeepSeek-V3_1_Benchmark"
+    env:
+      CI_TARGET: deepseek-ai/DeepSeek-V3.1
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "text-only"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh deepseek-ai_DeepSeek-V3_1_Benchmark

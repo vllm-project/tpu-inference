@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import os
 import tempfile
 from unittest.mock import MagicMock, patch
@@ -9,7 +23,8 @@ import pytest
 import torch
 from jax.sharding import Mesh
 from transformers import PretrainedConfig
-from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+from vllm.config import (ModelConfig, ParallelConfig, VllmConfig,
+                         set_current_vllm_config)
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
@@ -58,6 +73,7 @@ def vllm_config() -> MagicMock:
     mock_config.load_config.load_format = "auto"
     mock_config.additional_config = {}
     mock_config.cache_config = MagicMock(cache_dtype="auto")
+    mock_config.parallel_config = ParallelConfig(pipeline_parallel_size=1)
     return mock_config
 
 
@@ -314,6 +330,22 @@ class TestGetModel:
         mock_get_flax.assert_called_once_with(vllm_config, rng, mesh, False)
         mock_get_vllm.assert_not_called()
         assert result == "flax_model_sentinel"
+
+    @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "flax_nnx"}, clear=True)
+    @patch("tpu_inference.models.common.model_loader.get_vllm_model")
+    @patch("tpu_inference.models.common.model_loader.get_flax_model")
+    def test_get_model_flax_happy_path_withPP(self, mock_get_flax,
+                                              mock_get_vllm, vllm_config, rng,
+                                              mesh):
+        """Tests that 'flax_nnx' impl calls get_vllm_model when PP is enabled."""
+        mock_get_flax.return_value = "flax_model_sentinel"
+        mock_get_vllm.return_value = "vllm_model_sentinel"
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+        result = model_loader.get_model(vllm_config, rng, mesh)
+
+        mock_get_flax.assert_not_called()
+        mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh)
+        assert result == "vllm_model_sentinel"
 
     @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "vllm"}, clear=True)
     @patch("tpu_inference.models.common.model_loader.get_vllm_model")

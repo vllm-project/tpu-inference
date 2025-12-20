@@ -1,8 +1,2 @@
 Feature,CorrectnessTest,PerformanceTest
-"Collective Communication Matmul",✅,to be added
-"MLA",to be added,to be added
-"MoE",to be added,to be added
-"Quantized Attention",to be added,to be added
-"Quantized KV Cache",to be added,to be added
-"Quantized Matmul",to be added,to be added
 "Ragged Paged Attention V3",✅,✅

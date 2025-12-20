@@ -88,7 +88,7 @@ if TYPE_CHECKING:
 from tpu_inference import envs
 from tpu_inference.distributed.utils import (get_host_ip, get_kv_ips,
                                              get_kv_ports,
-                                             get_kv_transfer_port, get_node_id,
+                                             get_kv_transfer_port,
                                              get_side_channel_port)
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.tpu_runner import TPUModelRunner
@@ -442,10 +442,10 @@ class TPUConnectorWorker:
         self.runner: TPUModelRunner = None
         self.mesh: Mesh = None
         self.multi_host = envs.TPU_MULTIHOST_BACKEND == "ray"
-        # NOTE(xiang): This can not be the worker rank set in RayDistributedExecutor.
-        # The worker rank is assigned with vLLM's sorting logic, which does not work
-        # for TPU host topology.
-        self.node_id = get_node_id()
+        # default value for none distributed scenario
+        # when the topology is initialized, runner will update it
+        # based on topology_order_id
+        self.node_id = 0
 
         # req_id: (kv, expiration_time)
         self.reqs_wait_pull: dict[ReqId, list[list[jax.Array], float]] = {}
@@ -472,7 +472,7 @@ class TPUConnectorWorker:
             self.pull_conns: dict[str, Any] = {}
             self.notif_sockets: dict[str, zmq.Socket] = {}
 
-        logger.info(f"TPUConnector Worker {self.node_id} --> init | "
+        logger.info(f"TPUConnector Worker --> init | "
                     f"ip={self.host_ip} | "
                     f"kv_transfer_port={self.kv_transfer_port} | "
                     f"side_channel_port={self.side_channel_port}")
@@ -488,6 +488,7 @@ class TPUConnectorWorker:
             self.zmq_cxt.destroy(linger=0)
 
     def register_runner(self, runner: TPUModelRunner):
+        self.node_id = runner.topology_order_id
         self.runner = runner
         self.mesh = runner.mesh
 
@@ -498,6 +499,10 @@ class TPUConnectorWorker:
         self.shape = list(kv_layer.shape)
         self.dtype = kv_layer.dtype
         self.sharding = kv_layer.sharding
+        logger.info(f"TPUConnector Worker --> register_runner | "
+                    f"node_id={self.node_id} | "
+                    f"ip={self.host_ip} | "
+                    f"kv_transfer_port={self.kv_transfer_port}")
         self._maybe_start_p2p_server()
 
     def _maybe_start_p2p_server(self):

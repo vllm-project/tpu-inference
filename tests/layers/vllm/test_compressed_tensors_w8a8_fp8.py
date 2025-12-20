@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import tempfile
 from typing import Optional
 
@@ -5,7 +19,6 @@ import jax
 import pytest
 import torch
 import torchax
-import utils as test_utils
 from compressed_tensors.quantization import QuantizationStrategy
 from jax.sharding import PartitionSpec
 from torchax.interop import torch_view
@@ -29,6 +42,8 @@ from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensor
     VllmCompressedTensorsConfig
 from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import (
     VllmCompressedTensorsW8A8Fp8, requantize_with_max_scale)
+
+from . import utils as test_utils
 
 P = PartitionSpec
 MODELS = [
