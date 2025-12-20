@@ -90,11 +90,14 @@ def rng() -> PRNGKey:
 
 @pytest.fixture(autouse=True)
 def mock_get_pp_group():
-    with patch("tpu_inference.distributed.jax_parallel_state.get_pp_group",
-               return_value=MagicMock(is_first_rank=True,
-                                      is_last_rank=True,
-                                      rank_in_group=0,
-                                      world_size=1)):
+    mock_pp = MagicMock(is_first_rank=True,
+                        is_last_rank=True,
+                        rank_in_group=0,
+                        world_size=1)
+    with patch("tpu_inference.models.jax.llama3.get_pp_group",
+               return_value=mock_pp), patch(
+                   "tpu_inference.layers.jax.pp_utils.get_pp_group",
+                   return_value=mock_pp):
         yield
 
 
