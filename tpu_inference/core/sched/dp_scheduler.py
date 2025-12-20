@@ -207,10 +207,7 @@ def _scheduler_worker_process(
             logger.error(f"Error in scheduler worker {rank}: {e}", exc_info=True)
             # Put error on output queue
             error = SchedulerWorkerError(rank, str(e))
-            try:
-                output_queue.put(error)
-            except:
-                pass
+            output_queue.put(error)
 
 
 @dataclass
