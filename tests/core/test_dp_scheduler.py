@@ -15,15 +15,11 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-import torch
 from vllm.config import VllmConfig
-from vllm.v1.core.sched.output import (CachedRequestData, GrammarOutput,
-                                       SchedulerOutput)
+from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
-from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
 
 from tpu_inference.core.sched.dp_scheduler import (
@@ -65,7 +61,9 @@ class TestDPScheduler:
         mock_structured_output_manager,
     ):
         """Test initialization creates worker processes for each DP rank."""
-        with patch('tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'):
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
             with patch('multiprocessing.get_context') as mock_get_context:
                 # Setup mock context
                 mock_ctx = MagicMock()
@@ -103,7 +101,9 @@ class TestDPScheduler:
                                    mock_kv_cache_config,
                                    mock_structured_output_manager):
         """Test _get_rank_token_counts queries workers and aggregates tokens."""
-        with patch('tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'):
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
             with patch('multiprocessing.get_context'):
                 scheduler = DPScheduler(
                     vllm_config=mock_vllm_config,
@@ -135,7 +135,9 @@ class TestDPScheduler:
                                            mock_kv_cache_config,
                                            mock_structured_output_manager):
         """Test _find_best_rank_for_request prefers cache hits."""
-        with patch('tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'):
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
             with patch('multiprocessing.get_context'):
                 scheduler = DPScheduler(
                     vllm_config=mock_vllm_config,
@@ -152,12 +154,13 @@ class TestDPScheduler:
 
                 # Track call counts for proper sequencing
                 call_sequence = [100, 50, ([], 10), ([], 25)]
-                call_index = [0]
 
                 # Both queues use the same sequence
                 for q in scheduler.output_queues:
-                    q.get = MagicMock(side_effect=lambda timeout=None: call_sequence[
-                        len([c for c in scheduler.output_queues if c.get.called])])
+                    q.get = MagicMock(
+                        side_effect=lambda timeout=None: call_sequence[len([
+                            c for c in scheduler.output_queues if c.get.called
+                        ])])
 
                 # Simpler mock setup
                 responses_0 = [100, ([], 10)]
@@ -176,7 +179,9 @@ class TestDPScheduler:
                                               mock_kv_cache_config,
                                               mock_structured_output_manager):
         """Test _find_best_rank_for_request uses load balancing without cache hit."""
-        with patch('tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'):
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
             with patch('multiprocessing.get_context'):
                 scheduler = DPScheduler(
                     vllm_config=mock_vllm_config,
@@ -206,7 +211,9 @@ class TestDPScheduler:
                                               mock_kv_cache_config,
                                               mock_structured_output_manager):
         """Test add_request assigns request to best rank."""
-        with patch('tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'):
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
             with patch('multiprocessing.get_context'):
                 scheduler = DPScheduler(
                     vllm_config=mock_vllm_config,
@@ -244,7 +251,9 @@ class TestDPScheduler:
             self, mock_vllm_config, mock_kv_cache_config,
             mock_structured_output_manager):
         """Test schedule sends SCHEDULE command to all workers and combines output."""
-        with patch('tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'):
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
             with patch('multiprocessing.get_context'):
                 scheduler = DPScheduler(
                     vllm_config=mock_vllm_config,
@@ -322,7 +331,9 @@ class TestDPScheduler:
                                          mock_kv_cache_config,
                                          mock_structured_output_manager):
         """Test _combine_cached_request_data combines data from all ranks."""
-        with patch('tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'):
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
             with patch('multiprocessing.get_context'):
                 scheduler = DPScheduler(
                     vllm_config=mock_vllm_config,
@@ -368,7 +379,9 @@ class TestDPScheduler:
                                                mock_kv_cache_config,
                                                mock_structured_output_manager):
         """Test finish_requests sends FINISH_REQUESTS command to appropriate workers."""
-        with patch('tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'):
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
             with patch('multiprocessing.get_context'):
                 scheduler = DPScheduler(
                     vllm_config=mock_vllm_config,
@@ -396,7 +409,9 @@ class TestDPScheduler:
                                          mock_kv_cache_config,
                                          mock_structured_output_manager):
         """Test get_num_unfinished_requests queries all workers."""
-        with patch('tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'):
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
             with patch('multiprocessing.get_context'):
                 scheduler = DPScheduler(
                     vllm_config=mock_vllm_config,
@@ -425,7 +440,9 @@ class TestDPScheduler:
                                    mock_kv_cache_config,
                                    mock_structured_output_manager):
         """Test has_finished_requests checks all workers."""
-        with patch('tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'):
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
             with patch('multiprocessing.get_context'):
                 scheduler = DPScheduler(
                     vllm_config=mock_vllm_config,
@@ -453,7 +470,9 @@ class TestDPScheduler:
     def test_get_request_counts(self, mock_vllm_config, mock_kv_cache_config,
                                 mock_structured_output_manager):
         """Test get_request_counts queries all workers."""
-        with patch('tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'):
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
             with patch('multiprocessing.get_context'):
                 scheduler = DPScheduler(
                     vllm_config=mock_vllm_config,
@@ -465,10 +484,8 @@ class TestDPScheduler:
                 scheduler.input_queues = [MagicMock(), MagicMock()]
                 scheduler.output_queues = [MagicMock(), MagicMock()]
 
-                scheduler.output_queues[0].get = MagicMock(
-                    return_value=(2, 1))
-                scheduler.output_queues[1].get = MagicMock(
-                    return_value=(1, 3))
+                scheduler.output_queues[0].get = MagicMock(return_value=(2, 1))
+                scheduler.output_queues[1].get = MagicMock(return_value=(1, 3))
 
                 running, waiting = scheduler.get_request_counts()
 
@@ -484,7 +501,9 @@ class TestDPScheduler:
     def test_reset_prefix_cache(self, mock_vllm_config, mock_kv_cache_config,
                                 mock_structured_output_manager):
         """Test reset_prefix_cache sends command to all workers."""
-        with patch('tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'):
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
             with patch('multiprocessing.get_context'):
                 scheduler = DPScheduler(
                     vllm_config=mock_vllm_config,
@@ -509,11 +528,13 @@ class TestDPScheduler:
 
                 assert result is True
 
-    def test_make_stats_aggregates_from_workers(self, mock_vllm_config,
-                                                mock_kv_cache_config,
-                                                mock_structured_output_manager):
+    def test_make_stats_aggregates_from_workers(
+            self, mock_vllm_config, mock_kv_cache_config,
+            mock_structured_output_manager):
         """Test make_stats aggregates statistics from all workers."""
-        with patch('tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'):
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
             with patch('multiprocessing.get_context'):
                 scheduler = DPScheduler(
                     vllm_config=mock_vllm_config,
@@ -535,8 +556,10 @@ class TestDPScheduler:
                                                         requests=10,
                                                         queries=8,
                                                         hits=5),
-                    connector_prefix_cache_stats=PrefixCacheStats(
-                        reset=False, requests=5, queries=4, hits=2),
+                    connector_prefix_cache_stats=PrefixCacheStats(reset=False,
+                                                                  requests=5,
+                                                                  queries=4,
+                                                                  hits=2),
                     spec_decoding_stats=None,
                     kv_connector_stats=None,
                 )
@@ -549,14 +572,18 @@ class TestDPScheduler:
                                                         requests=15,
                                                         queries=12,
                                                         hits=8),
-                    connector_prefix_cache_stats=PrefixCacheStats(
-                        reset=False, requests=6, queries=5, hits=3),
+                    connector_prefix_cache_stats=PrefixCacheStats(reset=False,
+                                                                  requests=6,
+                                                                  queries=5,
+                                                                  hits=3),
                     spec_decoding_stats=None,
                     kv_connector_stats=None,
                 )
 
-                scheduler.output_queues[0].get = MagicMock(return_value=stats_0)
-                scheduler.output_queues[1].get = MagicMock(return_value=stats_1)
+                scheduler.output_queues[0].get = MagicMock(
+                    return_value=stats_0)
+                scheduler.output_queues[1].get = MagicMock(
+                    return_value=stats_1)
 
                 combined_stats = scheduler.make_stats()
 
@@ -570,11 +597,13 @@ class TestDPScheduler:
                 assert combined_stats.num_waiting_reqs == 3
                 assert combined_stats.kv_cache_usage == 0.6
 
-    def test_make_stats_returns_none_when_disabled(self, mock_vllm_config,
-                                                   mock_kv_cache_config,
-                                                   mock_structured_output_manager):
+    def test_make_stats_returns_none_when_disabled(
+            self, mock_vllm_config, mock_kv_cache_config,
+            mock_structured_output_manager):
         """Test make_stats returns None when logging disabled."""
-        with patch('tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'):
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
             with patch('multiprocessing.get_context'):
                 scheduler = DPScheduler(
                     vllm_config=mock_vllm_config,
@@ -591,7 +620,9 @@ class TestDPScheduler:
                                     mock_kv_cache_config,
                                     mock_structured_output_manager):
         """Test update_draft_token_ids routes to correct workers."""
-        with patch('tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'):
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
             with patch('multiprocessing.get_context'):
                 scheduler = DPScheduler(
                     vllm_config=mock_vllm_config,
@@ -624,7 +655,9 @@ class TestDPScheduler:
     def test_shutdown(self, mock_vllm_config, mock_kv_cache_config,
                       mock_structured_output_manager):
         """Test shutdown sends SHUTDOWN command to all workers."""
-        with patch('tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'):
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
             with patch('multiprocessing.get_context'):
                 scheduler = DPScheduler(
                     vllm_config=mock_vllm_config,
