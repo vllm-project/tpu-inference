@@ -26,8 +26,8 @@ from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 
 from tpu_inference import envs, utils
 from tpu_inference.distributed import jax_parallel_state
-from tpu_inference.distributed.utils import (get_host_ip, get_kv_transfer_port,
-                                             get_node_id)
+from tpu_inference.distributed.utils import (get_device_topology_order_id,
+                                             get_host_ip, get_kv_transfer_port)
 from tpu_inference.layers.common.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
@@ -232,9 +232,16 @@ class TPUWorker:
 
         is_first_rank = True
         is_last_rank = True
+        self.topology_order_id = self.rank
         if self.parallel_config.pipeline_parallel_size > 1:
             is_first_rank = self.rank == 0
             is_last_rank = self.rank == self.pp_config.pp_world_size - 1
+        else:
+            # topology_order_id is used to determine the KV cache
+            # mapping between P/D workers
+            if multihost_backend == "ray":
+                self.topology_order_id = get_device_topology_order_id(
+                    jax.local_devices(), jax.devices())
 
         self.model_runner = TPUModelRunner(self.vllm_config, self.devices,
                                            self.rank, is_first_rank,
@@ -243,7 +250,7 @@ class TPUWorker:
                     f"rank={self.rank} | "
                     f"is_first_rank={is_first_rank} | "
                     f"is_last_rank={is_last_rank} | "
-                    f"node_id={get_node_id()} | "
+                    f"topology_order_id={self.topology_order_id} | "
                     f"is_driver_worker={self.is_driver_worker} | "
                     f"hbm={utils.hbm_usage_gb(self.devices)}GiB |"
                     f"self.devices={self.devices} | "
@@ -426,13 +433,13 @@ class TPUWorker:
         # Precompile functions with large vocab_size tensors before allocating KV cache to avoid OOM
         self.model_runner.compilation_manager._precompile_sampling()
         self.model_runner.compilation_manager._precompile_gather_logprobs()
-        self.model_runner.initialize_kv_cache(kv_cache_config)
+        self.model_runner.initialize_kv_cache(kv_cache_config,
+                                              self.topology_order_id)
 
     def get_node_kv_ip_port(self) -> tuple[int, str, int]:
-        node_id = get_node_id()
         ip = get_host_ip()
         port = get_kv_transfer_port()
-        return (int(node_id), ip, int(port))
+        return (int(self.topology_order_id), ip, int(port))
 
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.

@@ -68,7 +68,45 @@ def get_side_channel_port() -> str:
     return port
 
 
-def get_node_id() -> int:
-    # TODO(xiang): Is it possible to get this from a pre-defiend env?
-    id = os.getenv("TPU_NODE_ID", 0)
-    return int(id)
+def get_device_topology_order_id(local_devices, global_devices) -> int:
+    """
+    Calculates the topology order ID for the local device set within the global topology.
+
+    This function determines the rank of the current host/process based on the
+    coordinate of its TPU devices relative to all devices in the topology.
+
+    Args:
+        local_devices: A list of TpuDevice objects available to the current process.
+        global_devices: A list of all TpuDevice objects in the global topology.
+
+    Returns:
+        The topology order ID (rank) of the local devices.
+    """
+    if not local_devices:
+        raise ValueError("local_devices cannot be empty")
+    if not global_devices:
+        raise ValueError("global_devices cannot be empty")
+
+    # 1. Find the 'anchor' (minimum coordinate) for the local devices.
+    #    This represents the physical top-left corner of the local machine.
+    local_anchor = min(d.coords for d in local_devices)
+
+    # 2. Group global devices by process to find the anchor for EVERY process.
+    process_anchors = {}
+    for d in global_devices:
+        pid = d.process_index
+        # Update the minimum coordinate found for this process so far
+        if pid not in process_anchors or d.coords < process_anchors[pid]:
+            process_anchors[pid] = d.coords
+
+    # 3. Sort the unique anchors to establish the canonical topology order.
+    #    Tuples (x, y, z) sort lexicographically (x first, then y, then z).
+    sorted_anchors = sorted(process_anchors.values())
+
+    # 4. Return the index (rank) of the local anchor in the sorted list.
+    try:
+        return sorted_anchors.index(local_anchor)
+    except ValueError:
+        raise ValueError(
+            f"Local devices: {local_devices} do not exist in the global device: {global_devices} list."
+        )
