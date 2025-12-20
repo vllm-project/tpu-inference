@@ -7,9 +7,9 @@ from flax import nnx
 from jax.sharding import Mesh
 from transformers import LlamaConfig, modeling_flax_utils
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group
 
 from tpu_inference import utils
+from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
