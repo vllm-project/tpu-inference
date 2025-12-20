@@ -1203,6 +1203,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
          padded_total_num_scheduled_tokens, padded_num_reqs_per_dp_rank,
          logits_indices_selector, max_num_reqs_per_dp_rank
          ) = self._prepare_dp_input_metadata(scheduler_output)
+        num_padded_tokens_per_dp_rank = {
+            dp_rank:
+            padded_num_scheduled_tokens_per_dp_rank - num_scheduled_tokens
+            for dp_rank, num_scheduled_tokens in
+            num_scheduled_tokens_per_dp_rank.items()
+        }
+        logger.info(
+            f"Padding tokens for each DP rank: {num_padded_tokens_per_dp_rank}, "
+            f"scheduled {padded_num_scheduled_tokens_per_dp_rank} tokens per DP rank."
+        )
         # Multi-modal support
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
