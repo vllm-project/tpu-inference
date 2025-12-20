@@ -11,9 +11,9 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from qwix._src.providers import ptq
 
-import tpu_inference.models.jax.utils.quantization.quantization_utils as quantize_qwix  # noqa: E402
+import tpu_inference.models.jax.utils.qwix.qwix_utils as quantize_qwix  # noqa: E402
 from tpu_inference.models.common.model_loader import apply_qwix_quantization
-from tpu_inference.models.jax.utils.quantization.quantization_utils import (
+from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     DEFAULT_MAX_NUM_BLOCKS_PER_REQ, DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS,
     DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS)
 
@@ -29,8 +29,7 @@ module_mocks = {
     'vllm.config': MagicMock(),
     'tpu_inference': MagicMock(),
     'tpu_inference.logger': MagicMock(init_logger=lambda name: MagicMock()),
-    'tpu_inference.models.jax.utils.quantization.quantization_utils':
-    MagicMock(),
+    'tpu_inference.models.jax.utils.qwix.qwix_utils': MagicMock(),
 }
 
 
@@ -136,16 +135,16 @@ class TestQwixQuantizeNnxModel(unittest.TestCase):
         self.model.vllm_config.sharding_config.total_dp_size = 1
 
         with patch(
-                "tpu_inference.models.jax.utils.quantization.quantization_utils.init_logger",
+                "tpu_inference.models.jax.utils.qwix.qwix_utils.init_logger",
                 return_value=MagicMock()
         ), patch(
                 "tpu_inference.utils.hbm_usage_gb",
                 return_value=[(0.0, 0.0), (0.0, 0.0)]
         ), patch(
-                "tpu_inference.models.jax.utils.quantization.quantization_utils.create_kv_caches",
+                "tpu_inference.models.jax.utils.qwix.qwix_utils.create_kv_caches",
                 return_value=self.mock_kv_caches
         ), patch(
-                "tpu_inference.models.jax.utils.quantization.quantization_utils.quantization_config_file_path_to_dict",
+                "tpu_inference.models.jax.utils.qwix.qwix_utils.quantization_config_file_path_to_dict",
                 return_value=self.qwix_config):
             returned_model = quantize_qwix.qwix_quantize_nnx_model(
                 model=self.model,
@@ -320,10 +319,9 @@ class TestApplyQwixQuantizationLogic(unittest.TestCase):
         self.assertIs(result2, self.mock_model)
 
     @patch(
-        'tpu_inference.models.jax.utils.quantization.quantization_utils.qwix_quantize_nnx_model'
+        'tpu_inference.models.jax.utils.qwix.qwix_utils.qwix_quantize_nnx_model'
     )
-    @patch(
-        'tpu_inference.models.jax.utils.quantization.quantization_utils.utils')
+    @patch('tpu_inference.models.jax.utils.qwix.qwix_utils.utils')
     def test_apply_to_abstract_model(self, mock_utils, mock_quantize_func):
         """Test quantization is correctly applied to an abstract model factory."""
         mock_utils.get_padded_num_heads.return_value = 8
@@ -360,10 +358,9 @@ class TestApplyQwixQuantizationLogic(unittest.TestCase):
         self.assertIs(result_model, quantized_model)
 
     @patch(
-        'tpu_inference.models.jax.utils.quantization.quantization_utils.qwix_quantize_nnx_model'
+        'tpu_inference.models.jax.utils.qwix.qwix_utils.qwix_quantize_nnx_model'
     )
-    @patch(
-        'tpu_inference.models.jax.utils.quantization.quantization_utils.utils')
+    @patch('tpu_inference.models.jax.utils.qwix.qwix_utils.utils')
     def test_apply_to_abstract_model_with_initialize_cache(
             self, mock_utils, mock_quantize_func):
         """Test abstract model quantization with 'initialize_cache' method."""
@@ -468,11 +465,9 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
         self.model.weight_loader.scale_dtype = jnp.float16
         self.model.weight_loader.scale_shap_map_for_random_weight_loading = {}
 
+    @patch('tpu_inference.models.jax.utils.qwix.qwix_utils.nnx.iter_graph')
     @patch(
-        'tpu_inference.models.jax.utils.quantization.quantization_utils.nnx.iter_graph'
-    )
-    @patch(
-        'tpu_inference.models.jax.utils.quantization.quantization_utils.get_random_sharded_array'
+        'tpu_inference.models.jax.utils.qwix.qwix_utils.get_random_sharded_array'
     )
     def test_successful_initialization(self, mock_get_random_array,
                                        mock_iter_graph):
@@ -512,9 +507,7 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
             quantize_qwix.load_random_weights_into_qwix_abstract_model(
                 self.rng, self.model, self.mesh, invalid_config)
 
-    @patch(
-        'tpu_inference.models.jax.utils.quantization.quantization_utils.nnx.iter_graph'
-    )
+    @patch('tpu_inference.models.jax.utils.qwix.qwix_utils.nnx.iter_graph')
     def test_param_shape_setting_no_scale_map(self, mock_iter_graph):
         """Test correct scale shape calculation when not in the map."""
         old_weight_param_val = jnp.empty((128, 64))
@@ -545,9 +538,7 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
         self.assertNotEqual(old_scale_var_val.shape, new_scale_var_val.shape)
         assert jnp.not_equal(old_weight_param_val, new_weight_param_val).all()
 
-    @patch(
-        'tpu_inference.models.jax.utils.quantization.quantization_utils.nnx.iter_graph'
-    )
+    @patch('tpu_inference.models.jax.utils.qwix.qwix_utils.nnx.iter_graph')
     def test_param_shape_setting_with_scale_map(self, mock_iter_graph):
         """Test correct scale shape calculation when in the map."""
         old_weight_param_val = jnp.empty((128, 64))
@@ -607,9 +598,7 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
         mock_randint.assert_not_called()
         mock_normal.assert_called_once()
 
-    @patch(
-        "tpu_inference.models.jax.utils.quantization.quantization_utils.logger.warning"
-    )
+    @patch("tpu_inference.models.jax.utils.qwix.qwix_utils.logger.warning")
     @patch("jax.make_array_from_callback")
     def test_get_random_sharded_array_sharding_fallback(
             self, mock_make_array, mock_logger_warning):
@@ -651,7 +640,7 @@ class TestManualQwixQuantization(unittest.TestCase):
         self.calibration_method = 'max'
 
     @patch(
-        'tpu_inference.models.jax.utils.quantization.quantization_utils.ptq.create_quantized_param'
+        'tpu_inference.models.jax.utils.qwix.qwix_utils.ptq.create_quantized_param'
     )
     def test_manually_quantize_qwix_weight(self, mock_create_param):
         """Test that manually_quantize_qwix_weight calls ptq.create_quantized_param correctly."""
@@ -675,9 +664,7 @@ class TestManualQwixQuantization(unittest.TestCase):
         self.assertEqual(passed_how_to_quantize.calibration_method,
                          self.calibration_method)
 
-    @patch(
-        'tpu_inference.models.jax.utils.quantization.quantization_utils.ptq.quantize_act'
-    )
+    @patch('tpu_inference.models.jax.utils.qwix.qwix_utils.ptq.quantize_act')
     @patch('qwix.pallas.get_current_rule')
     def test_manually_quantize_qwix_activation(self, mock_get_rule,
                                                mock_quantize_act):
