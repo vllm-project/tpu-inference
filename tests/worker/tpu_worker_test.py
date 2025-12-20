@@ -363,12 +363,13 @@ class TestTPUWorker:
                            rank=0,
                            distributed_init_method="test")
         worker.model_runner = MagicMock()
+        worker.topology_order_id = 0
         mock_input_config = MagicMock()
 
         worker.initialize_from_config(mock_input_config)
 
         worker.model_runner.initialize_kv_cache.assert_called_once_with(
-            mock_input_config)
+            mock_input_config, 0)
 
     def test_initialize_from_config_kv_cache_config(self, mock_vllm_config):
         """Tests the special case pass-through for initialize_from_config."""
@@ -377,12 +378,13 @@ class TestTPUWorker:
                            rank=0,
                            distributed_init_method="test")
         worker.model_runner = MagicMock()
+        worker.topology_order_id = 0
         mock_input_config = MagicMock(spec=KVCacheConfig)
 
         worker.initialize_from_config(mock_input_config)
 
         worker.model_runner.initialize_kv_cache.assert_called_once_with(
-            mock_input_config)
+            mock_input_config, 0)
 
     def test_compile_or_warm_up_model(self, mock_vllm_config):
         """Tests the special case pass-through for model compilation/warmup."""
