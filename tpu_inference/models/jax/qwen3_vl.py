@@ -2,7 +2,7 @@
 
 import math
 from functools import partial
-from typing import Callable, List, NamedTuple, Optional, Tuple
+from typing import List, NamedTuple, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -15,7 +15,6 @@ from tpu_inference import utils
 from tpu_inference.layers.common.attention_interface import (
     sharded_flash_attention,
 )
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.multi_modal_utils import (
     merge_multimodal_embeddings,
