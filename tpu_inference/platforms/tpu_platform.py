@@ -145,17 +145,20 @@ class TpuPlatform(Platform):
             compilation_config.backend = "openxla"
 
         # TODO(cuiq): remove this dependency.
-        from vllm.v1.attention.backends.pallas import PallasAttentionBackend
-        cache_config.block_size = PallasAttentionBackend.get_page_size(
-            vllm_config)  # type: ignore[assignment]
-        min_page_size = PallasAttentionBackend.get_min_page_size(vllm_config)
-        if min_page_size > cache_config.block_size:
-            logger.warning(
-                "Increase the page size from %s to %s to avoid SMEM OOM",
-                cache_config.block_size,
-                min_page_size,
-            )
-            cache_config.block_size = min_page_size  # type: ignore[assignment]
+        if vllm_config.model_config:
+            from vllm.v1.attention.backends.pallas import \
+                PallasAttentionBackend
+            cache_config.block_size = PallasAttentionBackend.get_page_size(
+                vllm_config)  # type: ignore[assignment]
+            min_page_size = PallasAttentionBackend.get_min_page_size(
+                vllm_config)
+            if min_page_size > cache_config.block_size:
+                logger.warning(
+                    "Increase the page size from %s to %s to avoid SMEM OOM",
+                    cache_config.block_size,
+                    min_page_size,
+                )
+                cache_config.block_size = min_page_size  # type: ignore[assignment]
 
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
@@ -194,11 +197,13 @@ class TpuPlatform(Platform):
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is not None:
             assert kv_transfer_config.kv_connector == "TPUConnector"
-        # Late initialization to avoid circular import
-        from tpu_inference.models.jax.utils.quantization.quantization_utils import \
-            update_vllm_config_for_qwix_quantization
-
-        update_vllm_config_for_qwix_quantization(vllm_config)
+        # Late initialization to avoid circular import.
+        # Only perform qwix quantization if it is jax model.
+        if vllm_config.model_config is not None:
+            from tpu_inference.models.jax.utils.qwix.qwix_utils import \
+                update_vllm_config_for_qwix_quantization
+            if vllm_config.model_config:
+                update_vllm_config_for_qwix_quantization(vllm_config)
 
         from tpu_inference.core.sched.dp_scheduler import \
             update_vllm_config_for_dp_scheduler

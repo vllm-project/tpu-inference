@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -349,12 +363,13 @@ class TestTPUWorker:
                            rank=0,
                            distributed_init_method="test")
         worker.model_runner = MagicMock()
+        worker.topology_order_id = 0
         mock_input_config = MagicMock()
 
         worker.initialize_from_config(mock_input_config)
 
         worker.model_runner.initialize_kv_cache.assert_called_once_with(
-            mock_input_config)
+            mock_input_config, 0)
 
     def test_initialize_from_config_kv_cache_config(self, mock_vllm_config):
         """Tests the special case pass-through for initialize_from_config."""
@@ -363,12 +378,13 @@ class TestTPUWorker:
                            rank=0,
                            distributed_init_method="test")
         worker.model_runner = MagicMock()
+        worker.topology_order_id = 0
         mock_input_config = MagicMock(spec=KVCacheConfig)
 
         worker.initialize_from_config(mock_input_config)
 
         worker.model_runner.initialize_kv_cache.assert_called_once_with(
-            mock_input_config)
+            mock_input_config, 0)
 
     def test_compile_or_warm_up_model(self, mock_vllm_config):
         """Tests the special case pass-through for model compilation/warmup."""

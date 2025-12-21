@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import os
 import re
 from dataclasses import dataclass
@@ -14,6 +28,7 @@ from torchax.ops.mappings import j2t_dtype
 from vllm.config import VllmConfig
 
 from tpu_inference import utils
+from tpu_inference.layers.common.quantization import u8_unpack_e2m1
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
 from tpu_inference.layers.jax.attention.deepseek_v3_attention import MLA
@@ -25,8 +40,6 @@ from tpu_inference.layers.jax.moe.moe import MoE
 from tpu_inference.layers.jax.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.utils.quantization.mxfp4_utils import \
-    unpack_mxfp4
 from tpu_inference.models.jax.utils.weight_utils import (
     get_param, model_weights_generator, print_param_info)
 
@@ -622,9 +635,8 @@ class DeepSeekV3WeightLoader:
         # Convert weights from torch into numpy
         if weight.dtype == torch.uint8 and scale is not None:
             # Assume packed FP4 format when uint8 weights with scale provided
-            cast_type = jnp.float4_e2m1fn
-            codes = unpack_mxfp4(weight)
-            weight_np = jnp.array(codes.float().numpy()).astype(cast_type)
+            weight_jax_u8 = jnp.array(weight.cpu().numpy())
+            weight_np = u8_unpack_e2m1(weight_jax_u8)
             scale = scale.to(torch.float32).numpy().astype(self.scale_dtype)
         else:
             cast_type = model_weight.value.dtype
@@ -649,7 +661,6 @@ class DeepSeekV3WeightLoader:
             if scale is not None:
                 scale = scale.to(torch.float32).numpy().astype(
                     self.scale_dtype)
-
         weight_np = self._transpose_params(name, weight_np)
         if scale is not None:
             scale = self._transpose_params(name, scale)

@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from typing import Optional, Union
 
 import jax
@@ -28,6 +42,8 @@ from tpu_inference import envs
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
 from tpu_inference.layers.common.quant_methods import (MXFP4,
                                                        get_tpu_quant_method)
+from tpu_inference.layers.common.quantization import (
+    dequantize_tensor_from_mxfp4_packed, quantize_tensor)
 from tpu_inference.layers.vllm.fused_moe import fused_moe_func
 from tpu_inference.layers.vllm.linear_common import \
     reorder_concatenated_tensor_for_sharding
@@ -35,72 +51,11 @@ from tpu_inference.layers.vllm.quantization.common import JaxCommonConfig
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedLinearMethod
 
-MXFP4_BLOCK_SIZE = 32
 REQUANTIZED_BLOCK_SIZE = 512
 
 P = PartitionSpec
+
 logger = init_logger(__name__)
-
-
-def align_to(a, b):
-    return (a + b - 1) // b * b
-
-
-# TODO(kyuyeunk): Move these functions into a common utility file.
-def u8_unpack_e2m1(u8_packed_e2m1: jax.Array) -> jax.Array:
-    assert u8_packed_e2m1.dtype == jnp.uint8
-    e2m1 = jax.lax.bitcast_convert_type(u8_packed_e2m1, jnp.float4_e2m1fn)
-    # bitcast creates one more dimension that splits 8 bits into two e2m1.
-    # we flatten them with the last dim.
-    return jnp.reshape(e2m1, e2m1.shape[:-2] + (-1, ))
-
-
-def e8m0_to_fp32(u8: jax.Array) -> jax.Array:
-    e8_finfo = jnp.finfo(jnp.float8_e8m0fnu)
-    exponents = u8.astype(jnp.int32) + e8_finfo.minexp
-    ones = jnp.ones_like(u8, dtype=jnp.float32)
-    return jnp.ldexp(ones, exponents)
-
-
-def dequantize_block_weight(weight: jax.Array,
-                            scale: jax.Array,
-                            block_size: int,
-                            out_dtype: jnp.dtype = jnp.bfloat16) -> jax.Array:
-    orig_shape = weight.shape
-    weight_block = weight.reshape(orig_shape[:-1] + (-1, block_size))
-    weight_dequantized = weight_block.astype(jnp.float32) * jnp.expand_dims(
-        scale, -1)
-    return weight_dequantized.reshape(orig_shape).astype(out_dtype)
-
-
-def quantize_block_weight(
-        weight: jax.Array, block_size: int,
-        quant_dtype: jnp.dtype) -> tuple[jax.Array, jax.Array]:
-    if jnp.issubdtype(quant_dtype, jnp.floating):
-        dtype_info = jnp.finfo(quant_dtype)
-    else:
-        dtype_info = jnp.iinfo(quant_dtype)
-    dtype_max = float(dtype_info.max)
-    dtype_min = float(dtype_info.min)
-
-    w_q_list = []
-    scale_list = []
-    contracting_size = weight.shape[-1]
-    for start in range(0, contracting_size, block_size):
-        end = min(start + block_size, contracting_size)
-        padding_size = start + block_size - end
-
-        weight_slice = weight[..., start:end]
-        abs_max = jnp.max(jnp.abs(weight_slice), axis=-1, keepdims=True)
-        scale = (abs_max / dtype_max).astype(jnp.float32)
-        w_q = jnp.clip(weight_slice / scale, min=dtype_min,
-                       max=dtype_max).astype(quant_dtype)
-
-        if padding_size > 0:
-            w_q = jnp.pad(w_q, ((0, 0), (0, 0), (0, padding_size)))
-        w_q_list.append(w_q)
-        scale_list.append(scale)
-    return jnp.concat(w_q_list, axis=-1), jnp.concat(scale_list, axis=-1)
 
 
 @register_quantization_config(get_tpu_quant_method(MXFP4))
@@ -187,29 +142,24 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
         @jax.jit
         def wrapper(w13_weight, w13_weight_scale, w13_bias, w2_weight,
                     w2_weight_scale, w2_bias):
-            w13_weight = u8_unpack_e2m1(w13_weight)
-            w13_weight_scale = e8m0_to_fp32(w13_weight_scale)
-            w2_weight = u8_unpack_e2m1(w2_weight)
-            w2_weight_scale = e8m0_to_fp32(w2_weight_scale)
-
             # Dequantize fp4 weights into fp32.
-            w13_weight = dequantize_block_weight(w13_weight, w13_weight_scale,
-                                                 MXFP4_BLOCK_SIZE, jnp.float32)
-            w2_weight = dequantize_block_weight(w2_weight, w2_weight_scale,
-                                                MXFP4_BLOCK_SIZE, jnp.float32)
+            w13_weight = dequantize_tensor_from_mxfp4_packed(
+                w13_weight, w13_weight_scale, 2)
+            w2_weight = dequantize_tensor_from_mxfp4_packed(
+                w2_weight, w2_weight_scale, 2)
 
             num_experts, orig_hidden_size, orig_intermediate_size = w2_weight.shape
 
             # Requantize the weights into TPU friendly block size.
-            w13_weight, w13_weight_scale = quantize_block_weight(
-                w13_weight, REQUANTIZED_BLOCK_SIZE, jnp.float4_e2m1fn)
-            w2_weight, w2_weight_scale = quantize_block_weight(
-                w2_weight, REQUANTIZED_BLOCK_SIZE, jnp.float4_e2m1fn)
+            w13_weight, w13_weight_scale = quantize_tensor(
+                jnp.float4_e2m1fn, w13_weight, 2, REQUANTIZED_BLOCK_SIZE, True)
+            w2_weight, w2_weight_scale = quantize_tensor(
+                jnp.float4_e2m1fn, w2_weight, 2, REQUANTIZED_BLOCK_SIZE, True)
 
             intermediate_size = w2_weight.shape[-1]
             hidden_size = w13_weight.shape[-1]
 
-            # Dim may have been padded to align with subchannel size during
+            # Dims may have been padded to align with subchannel size during
             # quantization. We pad the corresponding dim on other weight.
             # NOTE: We perform padding after quantization as padding value can
             # affect quantization numerics.
@@ -407,10 +357,8 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
 
         if self.use_kernel:
             actual_hidden_size = x.shape[-1]
-            padded_hidden_size = align_to(actual_hidden_size,
-                                          REQUANTIZED_BLOCK_SIZE)
-            x = jnp.pad(x,
-                        ((0, 0), (0, padded_hidden_size - actual_hidden_size)))
+            padding_size = w13_weight.shape[-2] - actual_hidden_size
+            x = jnp.pad(x, ((0, 0), (0, padding_size)))
             output = fused_ep_moe(
                 mesh=self.mesh,
                 tokens=x,

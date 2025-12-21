@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import time
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
@@ -32,6 +46,8 @@ class CompilationManager:
 
     def __init__(self, runner: "TPUModelRunner"):
         self.runner = runner
+        self._sampling_precompiled = False
+        self._gather_logprobs_precompiled = False
         if not vllm_envs.VLLM_DISABLE_COMPILE_CACHE:
             logger.info("Enabling JAX compile cache.")
             jax.config.update("jax_compilation_cache_dir",
@@ -86,9 +102,13 @@ class CompilationManager:
                 return
             self._precompile_select_from_array()
             self._precompile_compute_logits()
+            # Skip sampling if already precompiled before KV cache allocation
+            if not self._sampling_precompiled:
+                self._precompile_sampling()
             self._precompile_disagg_utils()
-            self._precompile_sampling()
-            self._precompile_gather_logprobs()
+            # Skip gather_logprobs if already precompiled before KV cache allocation
+            if not self._gather_logprobs_precompiled:
+                self._precompile_gather_logprobs()
             self._precompile_structured_decoding()
             if self.runner.speculative_config:
                 self._precompile_speculative_decoding()
@@ -505,6 +525,8 @@ class CompilationManager:
                     do_sampling=do_sampling,
                 )
 
+        self._sampling_precompiled = True
+
     def _precompile_disagg_utils(self) -> None:
         if not is_disagg_enabled():
             return
@@ -543,6 +565,8 @@ class CompilationManager:
                 self.runner.model_config.max_logprobs,
                 num_reqs=num_reqs,
             )
+
+        self._gather_logprobs_precompiled = True
 
     def _precompile_speculative_decoding(self) -> None:
         logger.info(

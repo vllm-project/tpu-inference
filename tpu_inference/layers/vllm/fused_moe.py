@@ -1,8 +1,21 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import functools
 
 import jax
 from jax import numpy as jnp
-from jax import shard_map
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
@@ -128,7 +141,7 @@ def tensor_sharded_gmm_merged_column_parallel(
                                                       "model")
     rhs_bias_spec = None if rhs_bias is None else P(None, None, "model")
 
-    gmm_result = shard_map(
+    gmm_result = jax.shard_map(
         _gmm,
         mesh=mesh,
         in_specs=(
@@ -180,7 +193,7 @@ def tensor_sharded_gmm_row_parallel(
     num_blocks = 1 if rhs_scale is None else rhs_scale.shape[1]
     rhs_scale_spec = None if num_blocks == 1 else P(None, "model", None, None)
     rhs_bias_spec = None if rhs_bias is None else P(None, None, None)
-    gmm_result = shard_map(
+    gmm_result = jax.shard_map(
         _gmm_all_reduce,
         mesh=mesh,
         in_specs=(
@@ -250,7 +263,7 @@ def expert_sharded_gmm(
     lhs_spec = P("model") if is_last_expert else P()
     rhs_scale_spec = None if rhs_scale is None else P("model")
     rhs_bias_spec = None if rhs_bias is None else P("model")
-    gmm_res = shard_map(
+    gmm_res = jax.shard_map(
         _gmm,
         mesh=mesh,
         in_specs=(
@@ -334,7 +347,7 @@ def expert_sharded_gmm(
     #       D, D, D, D     D, D, D, D     D, D, D, D     D, D, D, D
     #       D, D, D, D     D, D, D, D     D, D, D, D     D, D, D, D
     #        shard-0        shard-1        shard-2        shard-3
-    return shard_map(
+    return jax.shard_map(
         _ragged_all_to_all,
         mesh=mesh,
         in_specs=(P("model", None), P("model"), P("model"), P("model"), P()),
@@ -418,7 +431,7 @@ def fused_moe_func(
         x = hidden_states_local[token_indices_sorted]
         return x, group_sizes_local, topk_argsort_revert_indices
 
-    x, group_sizes, topk_argsort_revert_indices = shard_map(
+    x, group_sizes, topk_argsort_revert_indices = jax.shard_map(
         _process_tokens_locally,
         mesh=mesh,
         in_specs=(P("data", None), P("data", None)),
@@ -479,7 +492,7 @@ def fused_moe_func(
         x_local = x_local.sum(axis=-2)
         return x_local
 
-    x = shard_map(
+    x = jax.shard_map(
         _finalize_output,
         mesh=mesh,
         in_specs=(P("data", None), P("data"), P("data", None)),

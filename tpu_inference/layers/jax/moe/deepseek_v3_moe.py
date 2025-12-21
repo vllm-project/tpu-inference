@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import enum
 from dataclasses import InitVar, dataclass
 from functools import partial
@@ -14,8 +28,8 @@ from qwix._src.providers import ptq
 
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
-from tpu_inference.layers.jax.moe.moe import MoE, CombineExperts
-from tpu_inference.models.jax.utils.quantization.quantization_utils import (
+from tpu_inference.layers.jax.moe.moe import CombineExperts, MoE
+from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     manually_quantize_qwix_activation, manually_quantize_qwix_weight)
 
 modeling_flax_utils = FlaxUtils()
@@ -568,11 +582,11 @@ class SparseMoE(MoE):
         )
         out_specs = PartitionSpec(*self.activation_ffw_td)
 
-        mapped_moe_fwd = partial(jax.experimental.shard_map.shard_map,
+        mapped_moe_fwd = partial(jax.shard_map,
                                  mesh=self.mesh,
                                  in_specs=in_specs,
                                  out_specs=out_specs,
-                                 check_rep=False)(
+                                 check_vma=False)(
                                      SparseMoE._distributed_sparse_moe_fwd)
 
         kernel_gating_EDF = self.kernel_gating_EDF.value
