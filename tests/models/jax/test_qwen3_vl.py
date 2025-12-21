@@ -26,6 +26,10 @@ pytest.importorskip("vllm")
 pytest.importorskip("transformers")
 from transformers import Qwen3Config
 
+# Only run tests on process 0 to avoid duplicate output in multi-host setups.
+if jax.process_index() != 0:
+    pytest.skip("Skipping tests on non-primary process", allow_module_level=True)
+
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.models.jax.qwen3_vl import (
     Qwen3VLForConditionalGeneration,
