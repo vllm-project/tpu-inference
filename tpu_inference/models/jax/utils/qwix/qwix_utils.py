@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 import functools
 import os
 from typing import TYPE_CHECKING, Callable, List
@@ -41,9 +42,35 @@ DEFAULT_DEEPSEEK_FP8_CONFIG = {
         "scale_dtype":
         "bfloat16",
         "rules": [
+            # Exclude router from quantization
             {
                 "module_path": ".*.custom_module.router.*",
                 "weight_qtype": None,
+            },
+            # Avoid the combine expert ops
+            {
+                "module_path": ".*combine_experts.*",
+                "weight_qtype": None,
+            },
+            # Attention layers: keep FP8 for weights and activations
+            {
+                "module_path": ".*.attn.*",
+                "weight_qtype": "float8_e4m3fn",
+                "act_qtype": "float8_e4m3fn",
+            },
+            # MoE experts: use FP4 for expert weights
+            {
+                "module_path": ".*.custom_module.*",
+                "weight_qtype": "float4_e2m1fn",
+                "act_qtype": "float8_e4m3fn",
+                "tile_size": 256,
+            },
+            # Shared experts: also FP4
+            {
+                "module_path": ".*.shared_experts.*",
+                "weight_qtype": "float4_e2m1fn",
+                "act_qtype": "float8_e4m3fn",
+                "tile_size": 256,
             },
             {
                 "module_path": ".*",
@@ -398,8 +425,7 @@ def apply_qwix_on_abstract_model(vllm_config: "VllmConfig") -> bool:
 
 
 def get_default_qwix_quantization_config(
-        model_type: str, quant_method: str,
-        skip_quantization: bool) -> dict | None:
+        hf_config: dict, skip_quantization: bool) -> dict | None:
     """
     Some models are pre-quantized and in those cases, we want to return a default set of
     Qwix quantization rules (instead of forcing the user to pass in a quantization config each time).
@@ -417,9 +443,42 @@ def get_default_qwix_quantization_config(
     """
     if skip_quantization:
         return None
-    # TODO (jacobplatin): remove this so that we can support various quantization types
+    model_type = hf_config.model_type.lower() if hasattr(
+        hf_config, "model_type") else None
+    quant_method = hf_config.quantization_config["quant_method"] if hasattr(
+        hf_config, "quantization_config") else None
+    # TODO (jacobplatin): remove this so that we can support various quantization types + make
+    # more flexible
+    # NOTE (jacobplatin): we'll default to mixed FP8 (attention) + FP4 (MoE experts)
+    # for DeepSeek
     if model_type == "deepseek_v3" and quant_method == "fp8":
-        return DEFAULT_DEEPSEEK_FP8_CONFIG
+        config = copy.deepcopy(DEFAULT_DEEPSEEK_FP8_CONFIG)
+
+        # Dynamically fetch block size from HF config if available
+        # Config fmt: 'weight_block_size': [1, 512] -> we want the 2nd dim for tile_size
+        # NOTE: if the checkpoint is not 1D subchannel, we will throw an error
+        hf_quant_config = hf_config.quantization_config
+        assert "weight_block_size" in hf_quant_config, "Expected weight_block_size in quantization_config"
+        block_size = hf_quant_config["weight_block_size"]
+        if isinstance(block_size, (list, tuple)) and len(block_size) == 2:
+            assert block_size[
+                0] == 1, f"Expected first dimension to be 1 (unchanneled), but got {block_size[0]}!"
+            tile_size = block_size[1]
+            assert tile_size > 1, f"Expected tile_size > 1 for DeepSeek, but got {tile_size}"
+            logger.info(
+                f"Detected DeepSeek tile_size from config: {tile_size}")
+
+            # Update tile_size in the rules, since we might not always use a 1D subchannel size of
+            # 256
+            for rule in config["qwix"]["rules"]:
+                if "tile_size" in rule:
+                    rule["tile_size"] = tile_size
+        else:
+            raise ValueError(
+                f"Invalid weight_block_size config: {block_size}, expected a list/tuple of length 2"
+            )
+
+        return config
     elif model_type == "llama4" and quant_method == "compressed-tensors":
         return DEFAULT_LLAMA4_FP8_CONFIG
     # MXFP4 (GPT-OSS): provide a default configuration to quantize MoE experts via Qwix
@@ -438,14 +497,10 @@ def update_vllm_config_for_qwix_quantization(vllm_config: "VllmConfig"):
     # Qwix quantization config accordingly
     # NOTE: if a Qwix config is provided (via the`additional_config`), we'll
     # use that instead
-    model_type = vllm_config.model_config.hf_config.model_type.lower(
-    ) if hasattr(vllm_config.model_config.hf_config, "model_type") else None
-    quant_method = vllm_config.model_config.hf_config.quantization_config[
-        "quant_method"] if hasattr(vllm_config.model_config.hf_config,
-                                   "quantization_config") else None
+    hf_config = vllm_config.model_config.hf_config
     default_quantization_config = get_default_qwix_quantization_config(
-        model_type, quant_method,
-        vllm_config.additional_config.get("skip_quantization", False))
+        hf_config, vllm_config.additional_config.get("skip_quantization",
+                                                     False))
 
     maybe_existing_quantization_config = vllm_config.additional_config.get(
         "quantization")
@@ -502,7 +557,14 @@ def get_random_sharded_array(key: PRNGKey, mesh: Mesh, param: nnx.Param,
         maxval = jnp.array(jnp.iinfo(dtype).max, dtype=dtype)
         weight = jax.random.randint(key, param_shape, minval, maxval, dtype)
     else:
-        weight = jax.random.normal(key, param_shape, dtype)
+        # NOTE: _uniform() in random.py does not accept float4_e2m1fn
+        # Error: "TypeError: uniform only accepts 8-, 16-, 32-, or 64-bit dtypesgot float4_e2m1fn."
+        # Workaround: call function with dtype jnp.float8_e4m3fn and cast back to float4_e2m1fn
+        if dtype != "float4_e2m1fn":
+            weight = jax.random.normal(key, param_shape, dtype)
+        else:
+            weight = jax.random.normal(key, param_shape,
+                                       jnp.float8_e4m3fn).astype(dtype)
 
     def get_slice(index):
         return weight[index]
@@ -537,18 +599,16 @@ def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
     logger.info("Initializing Qwix-quantized model with random weights...")
     # TODO (jacobplatin): clean up this logic
     scale_dtype = model.weight_loader.scale_dtype
-    scale_shape_map = model.weight_loader.scale_shap_map_for_random_weight_loading if hasattr(
+    scale_shape_map = model.weight_loader.scale_shape_map_for_random_weight_loading if hasattr(
         model.weight_loader,
-        'scale_shap_map_for_random_weight_loading') else {}
+        'scale_shape_map_for_random_weight_loading') else {}
     quantization_block_sizes = quantization_config["weight_block_size"]
     assert len(
         quantization_block_sizes
     ) == 2, f"Expected only 2 quantization block sizes but got {quantization_block_sizes}"
-    quantization_block_size_n, _ = quantization_block_sizes[
-        0], quantization_block_sizes[1]
 
     # Iterate through all variables and initialize them
-    prev_param_shape = None
+
     for path, param in nnx.iter_graph(model):
         if not isinstance(param, nnx.Variable):
             continue
@@ -558,16 +618,17 @@ def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
         is_qwix_scale = (path[-1] == 'scale' and path[-2] == "array")
         param_dtype = scale_dtype if is_qwix_scale else param.value.dtype
         param_shape = param.value.shape
-        # TODO (jacobplatin): clean this up
         if is_qwix_scale:
-            param_shape = scale_shape_map.get(
-                path[3],
-                tuple(dim // quantization_block_size_n
-                      for dim in prev_param_shape))
+            key = f"{path[2]}.{path[3]}"
+
+            if key in scale_shape_map:
+                param_shape = scale_shape_map[key]
+            else:
+                raise ValueError(
+                    f"Scale shape for {key} not found in scale_shape_map.")
         param.value = get_random_sharded_array(
             rng, mesh, param, param_shape, param_dtype,
             ".".join([str(x) for x in path]))
-        prev_param_shape = param_shape
 
     # Handles the DeepSeek case, where this needs to be called to make the cache weights
     # concrete

@@ -28,7 +28,7 @@ from qwix._src.providers import ptq
 
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
-from tpu_inference.layers.jax.moe.moe import MoE
+from tpu_inference.layers.jax.moe.moe import CombineExperts, MoE
 from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     manually_quantize_qwix_activation, manually_quantize_qwix_weight)
 
@@ -164,6 +164,7 @@ class SparseMoE(MoE):
 
     def __post_init__(self, rngs: nnx.Rngs):
         super().__post_init__(rngs)
+        self.combine_experts = CombineExperts(dtype=self.dtype)
 
         # Derive the expert sharding
         self.expert_axis_name = self.edf_sharding[0]
@@ -345,15 +346,7 @@ class SparseMoE(MoE):
                 processed_tokens, jnp.argsort(sort_indices))
             reshaped_tokens_TXD = unsorted_tokens_tD.reshape(
                 -1, self.num_experts_per_tok, self.hidden_size)
-        with jax.named_scope("combine_weights"):
-            output_TD = jnp.einsum(
-                "TXD,TX -> TD",
-                reshaped_tokens_TXD.astype(jnp.float32),
-                router_weights_TX.astype(jnp.float32),
-                precision='float32',
-            )
-
-        return output_TD.astype(self.dtype)
+        return self.combine_experts(reshaped_tokens_TXD, router_weights_TX)
 
     def _gmm(self, inputs, kernel, group_sizes):
         """Performs Grouped Matrix Multiply."""
