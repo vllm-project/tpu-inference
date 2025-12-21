@@ -22,7 +22,6 @@ from flax.typing import Sharding
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
-from tpu_inference import utils
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     ragged_paged_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
@@ -30,6 +29,7 @@ from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.rope_interface import apply_rope
+from tpu_inference.utils.dtype_utils import to_jax_dtype
 
 KVCache = Tuple[jax.Array, jax.Array]
 
@@ -103,8 +103,7 @@ class Attention(nnx.Module):
                                               random_init=self.random_init)
 
         if self.kv_cache_dtype != "auto":
-            self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
-                self.kv_cache_dtype)
+            self.kv_cache_quantized_dtype = to_jax_dtype(self.kv_cache_dtype)
 
     def __call__(self,
                  x,

@@ -31,7 +31,7 @@ from tpu_inference.layers.jax.sample.sampling_metadata import \
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
-from tpu_inference.utils import device_array
+from tpu_inference.utils.device_utils import device_array
 
 if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner

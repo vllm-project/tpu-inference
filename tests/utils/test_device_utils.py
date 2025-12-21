@@ -1,15 +1,24 @@
-# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import os
 from unittest.mock import MagicMock, patch
 
-import jax.numpy as jnp
-import pytest
-
 # Import the functions to be tested
-from tpu_inference.utils import (GBYTES, enable_megacore,
-                                 get_jax_dtype_from_str_dtype, get_megacore,
-                                 get_padded_head_dim, hbm_usage_bytes,
-                                 hbm_usage_gb)
+from tpu_inference.utils.device_utils import (GBYTES, enable_megacore,
+                                              get_megacore, hbm_usage_bytes,
+                                              hbm_usage_gb)
 
 
 def test_enable_and_get_megacore():
@@ -162,32 +171,3 @@ def test_hbm_usage_bytes_pathways_no_arrays(mock_devices, mock_live_arrays):
     # HBM limit for TPU v6e is 32 GB
     expected_usage = [(0, 32 * GBYTES), (0, 32 * GBYTES)]
     assert usage == expected_usage
-
-
-@pytest.mark.parametrize(
-    "head_dim, expected_padded_head_dim",
-    [
-        (1, 128),
-        (64, 64),
-        (127, 128),
-        (128, 128),
-        (129, 256),
-        (255, 256),
-        (256, 256),
-        (0, 0),  # Although head_dim is usually positive, testing boundary
-    ],
-)
-def test_get_padded_head_dim(head_dim, expected_padded_head_dim):
-    """Tests the get_padded_head_dim function."""
-    assert get_padded_head_dim(head_dim) == expected_padded_head_dim
-
-
-def test_get_jax_dtype_from_str_dtype():
-    """
-    Test the get_jax_dtype_from_str_dtype function
-    """
-    assert get_jax_dtype_from_str_dtype("int8") == jnp.int8
-    assert get_jax_dtype_from_str_dtype("bfloat16") == jnp.bfloat16
-    assert get_jax_dtype_from_str_dtype("fp8") == jnp.float8_e4m3fn
-    assert get_jax_dtype_from_str_dtype("fp8_e4m3") == jnp.float8_e4m3fn
-    assert get_jax_dtype_from_str_dtype("fp8_e5m2") == jnp.float8_e5m2

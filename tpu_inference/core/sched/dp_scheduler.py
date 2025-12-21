@@ -37,7 +37,7 @@ from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import time_function
+from tpu_inference.utils.benchmark_utils import time_function
 
 logger = init_logger(__name__)
 

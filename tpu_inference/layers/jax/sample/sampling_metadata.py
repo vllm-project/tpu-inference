@@ -22,7 +22,7 @@ import torch
 from jax.sharding import Mesh
 
 from tpu_inference.runner.input_batch import InputBatch
-from tpu_inference.utils import device_array
+from tpu_inference.utils.device_utils import device_array
 
 DEFAULT_SAMPLING_PARAMS = dict(
     temperature=-1.0,

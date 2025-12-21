@@ -1,4 +1,17 @@
-# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import functools
 import itertools
 import math
@@ -27,13 +40,14 @@ from vllm.v1.engine.core import EngineCoreProc as vLLMEngineCoreProc
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
 
-from tpu_inference import utils as common_utils
 from tpu_inference.core import disagg_executor, disagg_utils
-from tpu_inference.runner.tpu_runner import AsyncTPUModelRunnerOutput
 # ======================================================================================
 # Imports for _DisaggOrchestrator (decoupled from vLLM)
 # ======================================================================================
-from tpu_inference.runner.utils import LatencyTracker
+from tpu_inference.runner.runner_utils import LatencyTracker
+from tpu_inference.runner.tpu_runner import AsyncTPUModelRunnerOutput
+from tpu_inference.utils.device_utils import hbm_usage_bytes
+from tpu_inference.utils.vllm_utils import get_hash_fn_by_name
 
 # This file contains two classes:
 # 1. _DisaggOrchestrator: The clean, decoupled core orchestration logic.
@@ -98,7 +112,7 @@ class _DisaggOrchestrator:
         for idx, engine in enumerate(self._decode_engines):
             # Determine the decode backlog len by remaning hbm dividing max kv cache size of a single request
             runner = engine.model_executor.driver_worker.model_runner
-            hbm_usage = common_utils.hbm_usage_bytes(
+            hbm_usage = hbm_usage_bytes(
                 engine.model_executor.driver_worker.devices)
             if not hbm_usage:
                 self._decode_backlogs[idx] = queue.Queue(
@@ -503,7 +517,7 @@ class DisaggEngineCore(vLLMEngineCore):
                 is not None):
 
             block_size = vllm_config.cache_config.block_size
-            caching_hash_fn = common_utils.get_hash_fn_by_name(
+            caching_hash_fn = get_hash_fn_by_name(
                 vllm_config.cache_config.prefix_caching_hash_algo)
             init_none_hash(caching_hash_fn)
 
@@ -706,7 +720,7 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
                 is not None):
 
             block_size = vllm_config.cache_config.block_size
-            caching_hash_fn = common_utils.get_hash_fn_by_name(
+            caching_hash_fn = get_hash_fn_by_name(
                 vllm_config.cache_config.prefix_caching_hash_algo)
             init_none_hash(caching_hash_fn)
 

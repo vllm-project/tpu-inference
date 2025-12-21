@@ -40,8 +40,7 @@ from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.awq import (VllmAWQConfig,
                                                         VllmAWQLinearMethod)
 from tpu_inference.layers.vllm.quantization.common import JaxCommonLinearConfig
-
-from . import utils as test_utils
+from tpu_inference.utils import test_utils
 
 P = PartitionSpec
 MODELS = ["Qwen/Qwen2.5-1.5B-Instruct-AWQ"]

@@ -42,8 +42,7 @@ from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensor
     VllmCompressedTensorsConfig
 from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import (
     VllmCompressedTensorsW8A8Fp8, requantize_with_max_scale)
-
-from . import utils as test_utils
+from tpu_inference.utils import test_utils
 
 P = PartitionSpec
 MODELS = [

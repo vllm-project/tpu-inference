@@ -27,7 +27,6 @@ from jax.sharding import PartitionSpec as P
 from torchax.ops.mappings import j2t_dtype
 from vllm.config import VllmConfig
 
-from tpu_inference import utils
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
 from tpu_inference.layers.jax.attention.deepseek_v3_attention import MLA
@@ -43,6 +42,7 @@ from tpu_inference.models.jax.utils.qwix.qwix_utils import \
     get_quant_dtype_from_qwix_config
 from tpu_inference.models.jax.utils.weight_utils import (
     get_param, model_weights_generator, print_param_info, reshape_params)
+from tpu_inference.utils.device_utils import hbm_usage_gb
 
 logger = init_logger(__name__)
 
@@ -756,7 +756,7 @@ class DeepSeekV3WeightLoader:
 
         if self.is_verbose:
             logger.info(f"Memory usage after loading in {name}: "
-                        f"hbm={utils.hbm_usage_gb(jax.local_devices())}Gb")
+                        f"hbm={hbm_usage_gb(jax.local_devices())}Gb")
             print_param_info(model_weight, name)
             if scale is not None:
                 print_param_info(base_model_weight.array.scale,

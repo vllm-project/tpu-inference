@@ -39,8 +39,7 @@ from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.unquantized import (
     VllmUnquantizedConfig, VllmUnquantizedFusedMoEMethod,
     VllmUnquantizedLinearMethod)
-
-from . import utils as test_utils
+from tpu_inference.utils import test_utils
 
 P = PartitionSpec
 MODELS = ["Qwen/Qwen2-1.5B-Instruct"]

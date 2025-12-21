@@ -1,23 +1,28 @@
-# SPDX-License-Identifier: Apache-2.0
-import time
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from collections import defaultdict
 from collections.abc import Sequence
-from functools import wraps
-from typing import Any, Callable, List, Tuple
+from typing import Any, List, Tuple
 
 import jax
-import jax.numpy as jnp
 import numpy as np
-import torch
-from jax._src import dtypes
 from jax._src import mesh as mesh_lib
 from jax._src import xla_bridge as xb
 from jax._src.lib import xla_client as xc
-from jax._src.numpy.scalar_types import _ScalarMeta
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from torchax.ops.mappings import j2t_dtype, t2j_dtype
 from vllm import envs as vllm_envs
-from vllm import utils
 
 from tpu_inference import envs
 from tpu_inference.logger import init_logger
@@ -26,42 +31,8 @@ GBYTES = 1024 * 1024 * 1024
 TPU_HEAD_SIZE_ALIGNMENT = 128
 TPU_SECOND_LAST_MINOR = 8
 
-# Map vllm dtype string that doesn't exactly match jax dtype string name.
-_VLLM_DTYPE_STR_TO_JAX_DTYPE = {
-    "fp8": jnp.float8_e4m3fn.dtype,
-    "fp8_e4m3": jnp.float8_e4m3fn.dtype,
-    "fp8_e5m2": jnp.float8_e5m2.dtype,
-}
-
-
-def to_jax_dtype(dtype: str | jnp.dtype | torch.dtype) -> jnp.dtype:
-    if isinstance(dtype, str):
-        if dict_dtype := _VLLM_DTYPE_STR_TO_JAX_DTYPE.get(dtype, None):
-            return dict_dtype
-        return jnp.dtype(dtype)
-    elif isinstance(dtype, torch.dtype):
-        return t2j_dtype(dtype)
-    elif isinstance(dtype, jnp.dtype):
-        return dtype
-    elif isinstance(dtype, _ScalarMeta):
-        return dtype.dtype
-    else:
-        raise ValueError(f"Argument is unsupported data type {type(dtype)}")
-
-
-def to_torch_dtype(dtype: str | jnp.dtype | torch.dtype) -> torch.dtype:
-    # Use jax dtype as an intermediate dtype which we'll be used to convert it
-    # into torch dtype.
-    dtype = to_jax_dtype(dtype)
-    return j2t_dtype(dtype)
-
-
 _megacore = False
 logger = init_logger(__name__)
-
-
-def align_to(unpadded_dim, pad_multiple):
-    return (unpadded_dim + pad_multiple - 1) // pad_multiple * pad_multiple
 
 
 def enable_megacore() -> None:
@@ -71,15 +42,6 @@ def enable_megacore() -> None:
 
 def get_megacore() -> bool:
     return _megacore
-
-
-def get_num_kv_heads_by_tp(num_kv_heads: int, tp_size: int) -> int:
-    if tp_size <= num_kv_heads:
-        assert num_kv_heads % tp_size == 0
-        return num_kv_heads
-    else:
-        assert tp_size % num_kv_heads == 0
-        return tp_size
 
 
 def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
@@ -137,6 +99,21 @@ def get_device_name(num_devices: int | None = None):
     return kind
 
 
+def get_tpu_version() -> int:
+    """Returns the numeric version of the TPU, or -1 if not on TPU."""
+    kind = jax.devices()[0].device_kind
+    if 'TPU' not in kind:
+        return -1
+    if kind.endswith(' lite'):
+        kind = kind[:-len(' lite')]
+    if kind.endswith('p') or kind.endswith('e'):
+        kind = kind[:-1]
+    if kind == 'TPU7x':
+        return 7
+    assert kind[:-1] == 'TPU v', kind
+    return int(kind[-1])
+
+
 def get_device_hbm_limit() -> int:
 
     device_kind = get_device_name()
@@ -171,28 +148,22 @@ def hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
     return usage
 
 
-def get_padded_head_dim(head_dim: int) -> int:
-    """Pads head_dim up to the nearest multiple of 128 for kernel performance."""
-    # When head_dim == 64, we use kernel specificly optimized for it which does
-    # not require any padding.
-    if head_dim == 64:
-        return 64
-    return (head_dim + 127) // 128 * 128
+def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:
+    """
+    Create a device array with the specified mesh and sharding.
 
+    Args:
+        mesh: The JAX mesh to use for device placement
+        *args: Positional arguments to pass to jax.device_put
+        sharding: Optional sharding specification. If None, uses PartitionSpec(None)
+        **kwargs: Keyword arguments to pass to jax.device_put
 
-def get_padded_num_heads(num_heads: int, sharding_size: int) -> int:
-    if num_heads >= sharding_size:
-        assert num_heads % sharding_size == 0
-    else:
-        assert sharding_size % num_heads == 0
-        num_heads = sharding_size
-    return num_heads
-
-
-def get_dtype_packing(dtype):
-    bits = (dtypes.bit_width(dtype)
-            if hasattr(dtypes, "bit_width") else dtypes.itemsize_bits(dtype))
-    return 32 // bits
+    Returns:
+        A JAX array placed on the specified devices
+    """
+    if sharding is None:
+        sharding = NamedSharding(mesh, PartitionSpec(None))
+    return jax.device_put(*args, device=sharding, **kwargs)
 
 
 def make_optimized_mesh(axis_shapes: Sequence[int],
@@ -254,92 +225,3 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
                 return mesh
 
     return jax.make_mesh(axis_shapes, axis_names, devices=devices)
-
-
-def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:
-    """
-    Create a device array with the specified mesh and sharding.
-
-    Args:
-        mesh: The JAX mesh to use for device placement
-        *args: Positional arguments to pass to jax.device_put
-        sharding: Optional sharding specification. If None, uses PartitionSpec(None)
-        **kwargs: Keyword arguments to pass to jax.device_put
-
-    Returns:
-        A JAX array placed on the specified devices
-    """
-    if sharding is None:
-        sharding = NamedSharding(mesh, PartitionSpec(None))
-    return jax.device_put(*args, device=sharding, **kwargs)
-
-
-def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:
-    """
-    A wrapper function of vllm.utils.hashing.get_hash_fn_by_name to support builtin
-    """
-    if hash_fn_name == "builtin":
-        return hash
-    return utils.hashing.get_hash_fn_by_name(hash_fn_name)
-
-
-def quantize_kv(key: jax.Array, value: jax.Array,
-                kv_cache_quantized_dtype: jnp.dtype, k_scale: float,
-                v_scale: float) -> Tuple[jax.Array, jax.Array]:
-    """
-        Quantize the key and value tensors.
-
-        Args:
-            key: The key tensor to quantize.
-            value: The value tensor to quantize.
-            kv_cache_quantized_dtype: The dtype to quantize the key and value tensors to.
-            q_scale: The scale to quantize the key and value tensors by.
-            k_scale: The scale to quantize the key tensor by.
-            v_scale: The scale to quantize the value tensor by.
-
-        Returns:
-            Tuple[jax.Array, jax.Array]: The quantized key and value tensors.
-        """
-    dtype_info = jnp.finfo(kv_cache_quantized_dtype)
-    minval, maxval = float(dtype_info.min), float(dtype_info.max)
-    key = key.astype(jnp.float32) / k_scale
-    key = jnp.clip(key, minval, maxval)
-    key = key.astype(kv_cache_quantized_dtype)
-    value = value.astype(jnp.float32) / v_scale
-    value = jnp.clip(value, minval, maxval)
-    value = value.astype(kv_cache_quantized_dtype)
-
-    return key, value
-
-
-def get_jax_dtype_from_str_dtype(str_dtype: str) -> jnp.dtype:
-    """
-    Get the JAX dtype from a string dtype.
-
-    Args:
-        str_dtype: The string dtype to get the JAX dtype from.
-
-    Returns:
-        jnp.dtype: The JAX dtype.
-    """
-    # TODO(kyuyeunk): Replace all reference of this function into TpuDtype.
-    return to_jax_dtype(str_dtype)
-
-
-def time_function(func):
-    """
-    A decorator to measure the execution time of a function.
-    """
-
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        start_time = time.perf_counter()
-        result = func(*args, **kwargs)
-        end_time = time.perf_counter()
-        execution_time = end_time - start_time
-        logger.debug(
-            f"Function '{func.__name__}' executed in {execution_time:.4f} seconds."
-        )
-        return result
-
-    return wrapper

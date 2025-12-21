@@ -32,7 +32,7 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     apply_qwix_on_abstract_model, apply_qwix_quantization,
     load_random_weights_into_qwix_abstract_model)
-from tpu_inference.utils import to_jax_dtype, to_torch_dtype
+from tpu_inference.utils.dtype_utils import to_jax_dtype, to_torch_dtype
 
 logger = init_logger(__name__)
 

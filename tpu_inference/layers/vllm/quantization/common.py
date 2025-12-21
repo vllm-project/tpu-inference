@@ -27,7 +27,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 
 from tpu_inference.layers.vllm.linear_common import \
     get_model_matmul_fusion_assignment
-from tpu_inference.utils import TPU_SECOND_LAST_MINOR
+from tpu_inference.utils.device_utils import TPU_SECOND_LAST_MINOR
 
 # yapf: enable
 

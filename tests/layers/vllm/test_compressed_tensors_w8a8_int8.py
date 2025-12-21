@@ -40,8 +40,7 @@ from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensor
     VllmCompressedTensorsConfig
 from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_int8 import \
     VllmCompressedTensorsW8A8Int8
-
-from . import utils as test_utils
+from tpu_inference.utils import test_utils
 
 P = PartitionSpec
 MODELS = ["RedHatAI/Qwen2.5-1.5B-quantized.w8a8"]

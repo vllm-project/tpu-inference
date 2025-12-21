@@ -26,7 +26,7 @@ from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.runner.kv_cache import (create_kv_caches,
                                            get_attention_page_size_bytes,
                                            get_kv_cache_shape_with_mesh)
-from tpu_inference.utils import get_dtype_packing
+from tpu_inference.utils.dtype_utils import get_dtype_packing
 
 
 @pytest.fixture
@@ -56,7 +56,7 @@ def test_create_kv_caches(mesh: Mesh):
 
     with patch("tpu_inference.logger.init_logger",
                return_value=MagicMock()), patch(
-                   "tpu_inference.utils.hbm_usage_gb",
+                   "tpu_inference.utils.device_utils.hbm_usage_gb",
                    return_value=[(0.0, 0.0), (0.0, 0.0)]):
         kv_caches = create_kv_caches(
             num_blocks=num_blocks,
@@ -107,7 +107,7 @@ def test_create_kv_caches_mla(mesh: Mesh):
 
     with patch("tpu_inference.logger.init_logger",
                return_value=MagicMock()), patch(
-                   "tpu_inference.utils.hbm_usage_gb",
+                   "tpu_inference.utils.device_utils.hbm_usage_gb",
                    return_value=[(0.0, 0.0), (0.0, 0.0)]):
         kv_caches = create_kv_caches(
             num_blocks=num_blocks,

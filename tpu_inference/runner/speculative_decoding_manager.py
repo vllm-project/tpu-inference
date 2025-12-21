@@ -23,9 +23,9 @@ from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
-from tpu_inference.runner import utils as runner_utils
+from tpu_inference.runner import runner_utils as runner_utils
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
-from tpu_inference.utils import device_array
+from tpu_inference.utils.device_utils import device_array
 
 if TYPE_CHECKING:
     from tpu_inference.layers.common.attention_metadata import \

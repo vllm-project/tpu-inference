@@ -1,5 +1,17 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import functools
 from typing import Optional, Tuple
 
@@ -12,13 +24,13 @@ from torchax.ops.mappings import t2j
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 
-from tpu_inference import utils
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.logger import init_logger
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
+from tpu_inference.utils.dtype_utils import to_jax_dtype
 
 logger = init_logger(__name__)
 
@@ -63,8 +75,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             raise NotImplementedError("Alibi slopes is not supported.")
         self.kv_cache_quantized_dtype = None
         if kv_cache_dtype != "auto":
-            self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
-                kv_cache_dtype)
+            self.kv_cache_quantized_dtype = to_jax_dtype(kv_cache_dtype)
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
