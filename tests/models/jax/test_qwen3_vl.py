@@ -30,6 +30,7 @@ from transformers import Qwen3Config
 if jax.process_index() != 0:
     pytest.skip("Skipping tests on non-primary process", allow_module_level=True)
 
+from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.models.jax.qwen3_vl import (
     Qwen3VLForConditionalGeneration,
@@ -44,6 +45,7 @@ from tpu_inference.models.jax.qwen3_vl import (
     pad_segment_ids_for_attention,
     rotate_half,
 )
+from tpu_inference.runner.kv_cache import create_kv_caches
 
 
 @dataclass(frozen=True)
@@ -98,6 +100,42 @@ def _num_placeholders_for_grid(
 ) -> int:
     t, h, w = grid_thw
     return int(t * (h // spatial_merge_size) * (w // spatial_merge_size))
+
+
+def _make_attention_metadata(seq_len: int) -> AttentionMetadata:
+    num_reqs = 1
+    max_num_blocks_per_req = 4
+    positions = jnp.broadcast_to(
+        jnp.arange(seq_len, dtype=jnp.int32)[None, :], (3, seq_len)
+    )
+    block_tables = jnp.zeros((num_reqs, max_num_blocks_per_req),
+                             dtype=jnp.int32).reshape(-1)
+    seq_lens = jnp.array([seq_len], dtype=jnp.int32)
+    query_start_loc = jnp.array([0, seq_len], dtype=jnp.int32)
+    request_distribution = jnp.array([0, 0, num_reqs], dtype=jnp.int32)
+    return AttentionMetadata(
+        input_positions=positions,
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        query_start_loc=query_start_loc,
+        request_distribution=request_distribution,
+    )
+
+
+def _make_kv_caches(model: Qwen3VLForConditionalGeneration,
+                    mesh: Mesh) -> list[jax.Array]:
+    num_kv_heads = model.config.num_key_value_heads
+    head_dim = model.language_model.layers[0].self_attn.head_dim
+    layer_names = ["layer"] * model.config.num_hidden_layers
+    return create_kv_caches(
+        num_blocks=4,
+        block_size=32,
+        num_kv_heads=num_kv_heads,
+        head_size=head_dim,
+        mesh=mesh,
+        layer_names=layer_names,
+        cache_dtype=jnp.bfloat16,
+    )
 
 
 @pytest.fixture(scope="module")
@@ -702,13 +740,18 @@ class TestServingIntegration:
         self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
         model = Qwen3VLForConditionalGeneration(vllm_config, rng, mesh)
-        input_ids_1 = jnp.array([[1, 2, 3, 4, 5, 6]], dtype=jnp.int32)
-        input_ids_2 = jnp.array([[1, 2, 3, 4, 5, 7]], dtype=jnp.int32)
+        input_ids_1 = jnp.array([1, 2, 3, 4, 5, 6], dtype=jnp.int32)
+        input_ids_2 = jnp.array([1, 2, 3, 4, 5, 7], dtype=jnp.int32)
 
-        out_1 = model(input_ids=input_ids_1)
-        out_2 = model(input_ids=input_ids_2)
+        attn_meta = _make_attention_metadata(input_ids_1.shape[0])
+
+        kv_caches_1 = _make_kv_caches(model, mesh)
+        kv_caches_2 = _make_kv_caches(model, mesh)
+
+        _, out_1, _ = model(kv_caches_1, input_ids_1, attn_meta)
+        _, out_2, _ = model(kv_caches_2, input_ids_2, attn_meta)
         np.testing.assert_allclose(
-            np.array(out_1)[:, :-1, :], np.array(out_2)[:, :-1, :], rtol=0, atol=0
+            np.array(out_1)[:-1, :], np.array(out_2)[:-1, :], rtol=0, atol=0
         )
 
     def test_get_mrope_input_positions_wrapper_signature_and_slicing(
@@ -931,8 +974,10 @@ class TestServingIntegration:
         input_ids = jnp.array(
             [1, model.vision_start_token_id] + [model.image_token_id] * n_img,
             dtype=jnp.int32
-        ).reshape(1, -1)
-        _ = model(input_ids=input_ids)
+        )
+        attn_meta = _make_attention_metadata(input_ids.shape[0])
+        kv_caches = _make_kv_caches(model, mesh)
+        _ = model(kv_caches, input_ids, attn_meta)
 
         # Cache should be cleared after use
         assert model._deepstack_cache is None
