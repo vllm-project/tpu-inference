@@ -27,7 +27,6 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig)
 from vllm.config import VllmConfig
 
-from tpu_inference import utils as utils
 from tpu_inference.layers.common.attention_interface import \
     sharded_flash_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
@@ -38,6 +37,8 @@ from tpu_inference.models.jax.utils.multi_modal_utils import (
     MultiModalEmbeddings, merge_multimodal_embeddings)
 from tpu_inference.models.jax.utils.weight_utils import (get_default_maps,
                                                          load_hf_weights)
+from tpu_inference.utils.padding_utils import (get_padded_head_dim,
+                                               get_padded_num_heads)
 
 logger = init_logger(__name__)
 
@@ -210,11 +211,10 @@ class Qwen2_5_VisionAttention(nnx.Module):
         self.head_dim_original = self.hidden_size // self.num_heads
 
         sharding_size = mesh.shape["model"]
-        self.num_heads = utils.get_padded_num_heads(self.num_heads,
-                                                    sharding_size)
-        self.num_kv_heads = utils.get_padded_num_heads(self.num_kv_heads,
-                                                       sharding_size)
-        self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
+        self.num_heads = get_padded_num_heads(self.num_heads, sharding_size)
+        self.num_kv_heads = get_padded_num_heads(self.num_kv_heads,
+                                                 sharding_size)
+        self.head_dim = get_padded_head_dim(self.head_dim_original)
 
         # TODO: Wenlong: Do not consider padding for now
         self.head_dim = self.head_dim_original

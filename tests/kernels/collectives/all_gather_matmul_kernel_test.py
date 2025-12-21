@@ -1,4 +1,16 @@
-# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import os
 
@@ -7,8 +19,8 @@ import jax.numpy as jnp
 from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
 
-from tpu_inference import utils
 from tpu_inference.kernels.collectives import all_gather_matmul
+from tpu_inference.utils.device_utils import make_optimized_mesh
 
 jax.config.parse_flags_with_absl()
 
@@ -31,7 +43,7 @@ class AllGatherMatmulTest(jtu.JaxTestCase):
 
         axis_name = 'x'
         num_devices = jax.device_count()
-        mesh = utils.make_optimized_mesh((num_devices, ), (axis_name, ))
+        mesh = make_optimized_mesh((num_devices, ), (axis_name, ))
         bk, bn = 1024, 1024
         m, k, n = 1024, bk * grid_k, bn * grid_n * num_devices
 

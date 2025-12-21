@@ -138,7 +138,7 @@ class TestQwixQuantizeNnxModel(unittest.TestCase):
                 "tpu_inference.models.jax.utils.qwix.qwix_utils.init_logger",
                 return_value=MagicMock()
         ), patch(
-                "tpu_inference.utils.hbm_usage_gb",
+                "tpu_inference.utils.device_utils.hbm_usage_gb",
                 return_value=[(0.0, 0.0), (0.0, 0.0)]
         ), patch(
                 "tpu_inference.models.jax.utils.qwix.qwix_utils.create_kv_caches",

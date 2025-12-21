@@ -1,5 +1,17 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import functools
 import os
 from typing import TYPE_CHECKING, Callable, List
@@ -19,12 +31,14 @@ from qwix._src.providers import ptq
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-from tpu_inference import utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.kv_cache import (DEFAULT_KV_CACHE_DTYPE,
                                            create_kv_caches)
-from tpu_inference.utils import device_array
+from tpu_inference.utils.device_utils import device_array, hbm_usage_gb
+from tpu_inference.utils.dtype_utils import to_jax_dtype
+from tpu_inference.utils.padding_utils import (get_padded_head_dim,
+                                               get_padded_num_heads)
 
 logger = init_logger(__name__)
 
@@ -152,10 +166,10 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
     qwix_rules = parse_qwix_config_to_rules(qwix_config)
     logger.info(f"Qwix rules: {qwix_rules}")
     logger.info(f"Memory usage before applying quantization of params: "
-                f"hbm={utils.hbm_usage_gb(jax.local_devices())}Gb")
+                f"hbm={hbm_usage_gb(jax.local_devices())}Gb")
 
     if kv_cache_dtype != "auto":
-        kv_cache_jnp_dtype = utils.to_jax_dtype(kv_cache_dtype)
+        kv_cache_jnp_dtype = to_jax_dtype(kv_cache_dtype)
     else:
         kv_cache_jnp_dtype = DEFAULT_KV_CACHE_DTYPE
 
@@ -306,12 +320,12 @@ def apply_qwix_quantization(
     model_config = vllm_config.model_config
 
     # Pad num_kv_heads to multiple of TP size
-    num_kv_heads = utils.get_padded_num_heads(
-        model_config.get_total_num_kv_heads(), mesh.shape["model"])
+    num_kv_heads = get_padded_num_heads(model_config.get_total_num_kv_heads(),
+                                        mesh.shape["model"])
 
     # Pad head_dim to multiple of 128
     head_size = model_config.get_head_size()
-    head_size = utils.get_padded_head_dim(head_size)
+    head_size = get_padded_head_dim(head_size)
 
     kv_cache_dtype = vllm_config.cache_config.cache_dtype
 

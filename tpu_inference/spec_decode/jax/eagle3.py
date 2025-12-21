@@ -27,8 +27,8 @@ from vllm.config import VllmConfig
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import get_model
-from tpu_inference.runner import utils as runner_utils
-from tpu_inference.utils import device_array
+from tpu_inference.runner import runner_utils as runner_utils
+from tpu_inference.utils.device_utils import device_array
 
 logger = init_logger(__name__)
 

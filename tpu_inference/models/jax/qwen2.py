@@ -21,13 +21,16 @@ from jax.sharding import Mesh
 from transformers import Qwen2Config, modeling_flax_utils
 from vllm.config import VllmConfig
 
-from tpu_inference import utils
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (get_default_maps,
                                                          load_hf_weights)
+from tpu_inference.utils.dtype_utils import to_jax_dtype
+from tpu_inference.utils.padding_utils import (get_padded_head_dim,
+                                               get_padded_num_heads)
 
 logger = init_logger(__name__)
 
@@ -87,13 +90,12 @@ class Qwen2Attention(nnx.Module):
 
         self.head_dim_original = getattr(config, "head_dim",
                                          self.hidden_size // self.num_heads)
-        self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
+        self.head_dim = get_padded_head_dim(self.head_dim_original)
 
         sharding_size = mesh.shape["model"]
-        self.num_heads = utils.get_padded_num_heads(self.num_heads,
-                                                    sharding_size)
-        self.num_kv_heads = utils.get_padded_num_heads(self.num_kv_heads,
-                                                       sharding_size)
+        self.num_heads = get_padded_num_heads(self.num_heads, sharding_size)
+        self.num_kv_heads = get_padded_num_heads(self.num_kv_heads,
+                                                 sharding_size)
 
         self.mesh = mesh
 
@@ -137,8 +139,7 @@ class Qwen2Attention(nnx.Module):
         self._v_scale = 1.0
         self.kv_cache_quantized_dtype = None
         if kv_cache_dtype != "auto":
-            self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
-                kv_cache_dtype)
+            self.kv_cache_quantized_dtype = to_jax_dtype(kv_cache_dtype)
 
     def __call__(
         self,
@@ -166,8 +167,8 @@ class Qwen2Attention(nnx.Module):
             # q_scale = self._q_scale
             k_scale = self._k_scale
             v_scale = self._v_scale
-            k, v = utils.quantize_kv(k, v, self.kv_cache_quantized_dtype,
-                                     k_scale, v_scale)
+            k, v = quantize_kv(self.kv_cache_quantized_dtype, k, v, k_scale,
+                               v_scale)
         new_kv_cache, outputs = attention(
             kv_cache,
             q,

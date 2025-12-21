@@ -31,7 +31,7 @@ import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
 from tpu_inference.kernels.flash_attention.kernel import flash_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.utils import get_megacore
+from tpu_inference.utils.device_utils import get_megacore
 
 MAX_ALLOWED_PAGE_INDICES_N = (
     128 * 1024

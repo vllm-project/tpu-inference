@@ -1,4 +1,16 @@
-# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import os
 import tempfile
@@ -24,7 +36,7 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 
-from tpu_inference import envs, utils
+from tpu_inference import envs
 from tpu_inference.distributed import jax_parallel_state
 from tpu_inference.distributed.utils import (get_device_topology_order_id,
                                              get_host_ip, get_kv_transfer_port)
@@ -34,6 +46,8 @@ from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.runner.kv_cache import get_attention_page_size_bytes
 from tpu_inference.runner.tpu_runner import TPUModelRunner
+from tpu_inference.utils.device_utils import (GBYTES, hbm_usage_bytes,
+                                              hbm_usage_gb)
 
 logger = init_logger(__name__)
 
@@ -252,7 +266,7 @@ class TPUWorker:
                     f"is_last_rank={is_last_rank} | "
                     f"topology_order_id={self.topology_order_id} | "
                     f"is_driver_worker={self.is_driver_worker} | "
-                    f"hbm={utils.hbm_usage_gb(self.devices)}GiB |"
+                    f"hbm={hbm_usage_gb(self.devices)}GiB |"
                     f"self.devices={self.devices} | "
                     f"total devices={jax.devices()} | "
                     f"local_devices={jax.local_devices()}")
@@ -266,7 +280,7 @@ class TPUWorker:
 
     def determine_available_memory(self) -> int:
         gpu_memory_utilization = self.cache_config.gpu_memory_utilization
-        hbm_usage = utils.hbm_usage_bytes(self.devices)
+        hbm_usage = hbm_usage_bytes(self.devices)
         total_hbm_limit = total_hbm_used = 0
         for used, limit in hbm_usage:
             total_hbm_used += used
@@ -275,10 +289,10 @@ class TPUWorker:
         total_hbm_limit_cap = total_hbm_limit * gpu_memory_utilization
         total_hbm_avail = int(total_hbm_limit_cap - total_hbm_used)
 
-        total_hbm_limit_gb = round(total_hbm_limit / utils.GBYTES, 2)
-        total_hbm_limit_cap_gb = round(total_hbm_limit_cap / utils.GBYTES, 2)
-        total_hbm_used_gb = round(total_hbm_used / utils.GBYTES, 2)
-        total_hbm_avail_gb = round(total_hbm_avail / utils.GBYTES, 2)
+        total_hbm_limit_gb = round(total_hbm_limit / GBYTES, 2)
+        total_hbm_limit_cap_gb = round(total_hbm_limit_cap / GBYTES, 2)
+        total_hbm_used_gb = round(total_hbm_used / GBYTES, 2)
+        total_hbm_avail_gb = round(total_hbm_avail / GBYTES, 2)
 
         logger.info(f"Memory statistics | "
                     f"{total_hbm_limit_gb=}GiB | "

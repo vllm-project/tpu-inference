@@ -48,7 +48,6 @@ from vllm.v1.worker.kv_connector_model_runner_mixin import \
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 import tpu_inference.envs as envs
-from tpu_inference import utils as common_utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   MESH_AXIS_NAMES_2D,
@@ -65,7 +64,7 @@ from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.jax.utils.weight_utils import (
     shard_put, transfer_state_with_mappings)
-from tpu_inference.runner import utils as runner_utils
+from tpu_inference.runner import runner_utils as runner_utils
 from tpu_inference.runner.compilation_manager import CompilationManager
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
 from tpu_inference.runner.kv_cache_manager import KVCacheManager
@@ -78,8 +77,10 @@ from tpu_inference.runner.speculative_decoding_manager import (
 from tpu_inference.runner.structured_decoding_manager import \
     StructuredDecodingManager
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
-from tpu_inference.utils import (device_array, make_optimized_mesh,
-                                 time_function, to_jax_dtype, to_torch_dtype)
+from tpu_inference.utils.benchmark_utils import time_function
+from tpu_inference.utils.device_utils import (device_array, hbm_usage_gb,
+                                              make_optimized_mesh)
+from tpu_inference.utils.dtype_utils import to_jax_dtype, to_torch_dtype
 
 logger = init_logger(__name__)
 
@@ -531,7 +532,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             != "Llama4ForConditionalGeneration")
 
         logger.info(f"Init model | "
-                    f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")
+                    f"hbm={hbm_usage_gb(self.devices)}GiB")
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return ("generate", )

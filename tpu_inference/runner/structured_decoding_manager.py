@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Tuple
 import jax
 import jax.numpy as jnp
 
-from tpu_inference.utils import device_array
+from tpu_inference.utils.device_utils import device_array
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput

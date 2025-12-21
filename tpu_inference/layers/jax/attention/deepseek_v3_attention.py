@@ -23,17 +23,18 @@ from flax.typing import Sharding
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
-from tpu_inference import utils
 from tpu_inference.kernels.mla.v1.kernel import mla_ragged_paged_attention
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     ragged_paged_attention
 from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import \
     get_tuned_block_sizes
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import RMSNorm
 from tpu_inference.layers.jax.rope import DeepseekScalingRotaryEmbedding
+from tpu_inference.utils.dtype_utils import to_jax_dtype
 
 KVCache = Tuple[jax.Array, jax.Array]
 
@@ -189,8 +190,7 @@ class MLA(nnx.Module):
 
         self.kv_cache_quantized_dtype = None
         if self.kv_cache_dtype != "auto":
-            self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
-                self.kv_cache_dtype)
+            self.kv_cache_quantized_dtype = to_jax_dtype(self.kv_cache_dtype)
 
     def __call__(self,
                  x,
@@ -300,9 +300,8 @@ class MLA(nnx.Module):
                     # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
                     k_scale = self._k_scale
                     v_scale = self._v_scale
-                    k_SNH, v_SNH = utils.quantize_kv(
-                        k_SNH, v_SNH, self.kv_cache_quantized_dtype, k_scale,
-                        v_scale)
+                    k_SNH, v_SNH = quantize_kv(self.kv_cache_quantized_dtype,
+                                               k_SNH, v_SNH, k_scale, v_scale)
 
                 new_kv_cache, outputs_TNH = self.attention(
                     is_prefill,

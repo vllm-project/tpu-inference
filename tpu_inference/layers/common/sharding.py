@@ -21,10 +21,11 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import Mesh
 
-from tpu_inference import envs, utils
+from tpu_inference import envs
+from tpu_inference.utils.dtype_utils import to_jax_dtype
 
 if TYPE_CHECKING:
-    from vllm.v1.configs.vllm_config import VllmConfig
+    from vllm.config import VllmConfig
 
 MESH_AXIS_NAMES = ("data", "attn_dp", "expert", "model")
 MESH_AXIS_NAMES_2D = ('data', 'model')
@@ -138,8 +139,7 @@ class ShardingConfigManager:
             cache_dtype = vllm_config.cache_config.cache_dtype
             if cache_dtype == 'auto':
                 cache_dtype = vllm_config.model_config.dtype
-            kv_dtype = utils.get_jax_dtype_from_str_dtype(
-                cache_dtype) or jnp.bfloat16
+            kv_dtype = to_jax_dtype(cache_dtype)
             packing = 4 // jnp.dtype(kv_dtype).itemsize
             # When num_kv_heads * 2 / packing < TP, tensor parallelism would
             # duplicate KV heads across devices, wasting kv cache memory.

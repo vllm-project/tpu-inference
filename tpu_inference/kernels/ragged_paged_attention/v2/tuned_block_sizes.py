@@ -16,6 +16,8 @@
 import jax
 import jax.numpy as jnp
 
+from tpu_inference.utils.device_utils import get_device_name
+
 # The page size is too small. We only have 32 SREGs in TC. If the pages
 # per seq is too large, SREGs will spill.
 MAX_PAGES_PER_SEQ = 16
@@ -1428,13 +1430,6 @@ def get_tpu_version() -> int:
         kind = kind[:-len(' lite')]
     assert kind[:-1] == 'TPU v', kind
     return int(kind[-1])
-
-
-def get_device_name(num_devices: int | None = None):
-    name = ' '.join(jax.devices()[0].device_kind.split()[:2])
-    if num_devices is not None:
-        name += f'-{num_devices}'
-    return name
 
 
 def get_tuned_block_sizes(

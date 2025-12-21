@@ -10,7 +10,8 @@ from jax.experimental.pallas import tpu as pltpu
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
-from tpu_inference.utils import TPU_HEAD_SIZE_ALIGNMENT, get_dtype_packing
+from tpu_inference.utils.device_utils import TPU_HEAD_SIZE_ALIGNMENT
+from tpu_inference.utils.dtype_utils import get_dtype_packing
 
 
 def _ceil_div(a, b):

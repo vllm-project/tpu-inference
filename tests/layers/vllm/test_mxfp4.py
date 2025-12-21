@@ -32,8 +32,7 @@ from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.mxfp4 import (VllmMxfp4Config,
                                                           VllmMxfp4MoEMethod)
-
-from . import utils as test_utils
+from tpu_inference.utils import test_utils
 
 P = PartitionSpec
 MODELS = ["openai/gpt-oss-20b"]

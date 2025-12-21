@@ -33,9 +33,10 @@ from jax.sharding import PartitionSpec as P
 from safetensors import safe_open
 from vllm.config import VllmConfig
 
-from tpu_inference import envs, utils
+from tpu_inference import envs
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils import file_utils
+from tpu_inference.utils.padding_utils import get_padded_head_dim
 
 logger = init_logger(__name__)
 
@@ -309,7 +310,7 @@ def _load_and_shard_weight(vllm_config,
 
     # Pad head_dim for kernel performance.
     head_dim_original = model_config.get_head_size()
-    head_dim = utils.get_padded_head_dim(head_dim_original)
+    head_dim = get_padded_head_dim(head_dim_original)
     head_dim_pad = head_dim - head_dim_original
 
     # Check if the key should retain its original dtype

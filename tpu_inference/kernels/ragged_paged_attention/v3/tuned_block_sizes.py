@@ -18,7 +18,7 @@ import jax.numpy as jnp
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (
     align_to, get_dtype_packing, get_tpu_version, next_power_of_2)
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import get_device_name
+from tpu_inference.utils.device_utils import get_device_name
 
 logger = init_logger(__name__)
 

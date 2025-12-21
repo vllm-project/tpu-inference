@@ -29,9 +29,10 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         MLAAttentionSpec, SlidingWindowSpec)
 from vllm.v1.request import Request
 
-from tpu_inference import utils as common_utils
 from tpu_inference.runner.input_batch import CachedRequestState
 from tpu_inference.runner.tpu_runner import TPUModelRunner
+from tpu_inference.utils.padding_utils import (get_padded_head_dim,
+                                               get_padded_num_heads)
 
 
 class TestKVCacheManager:
@@ -271,15 +272,15 @@ class TestKVCacheManager:
 
         expected_full_attn_spec = FullAttentionSpec(
             block_size=self.runner.vllm_config.cache_config.block_size,
-            num_kv_heads=common_utils.get_padded_num_heads(
-                num_kv_heads, self.runner.mesh.shape["model"]),
-            head_size=common_utils.get_padded_head_dim(head_size),
+            num_kv_heads=get_padded_num_heads(num_kv_heads,
+                                              self.runner.mesh.shape["model"]),
+            head_size=get_padded_head_dim(head_size),
             dtype=torch.bfloat16)
         expected_sliding_window_spec = SlidingWindowSpec(
             block_size=self.runner.vllm_config.cache_config.block_size,
-            num_kv_heads=common_utils.get_padded_num_heads(
-                num_kv_heads, self.runner.mesh.shape["model"]),
-            head_size=common_utils.get_padded_head_dim(head_size),
+            num_kv_heads=get_padded_num_heads(num_kv_heads,
+                                              self.runner.mesh.shape["model"]),
+            head_size=get_padded_head_dim(head_size),
             dtype=torch.bfloat16,
             sliding_window=sliding_window)
         assert len(kv_cache_spec) == 20
@@ -344,9 +345,9 @@ class TestKVCacheManager:
         assert len(kv_cache_spec) == num_layers
         expected_full_attn_spec = FullAttentionSpec(
             block_size=self.runner.vllm_config.cache_config.block_size,
-            num_kv_heads=common_utils.get_padded_num_heads(
-                num_kv_heads, self.runner.mesh.shape["model"]),
-            head_size=common_utils.get_padded_head_dim(head_size),
+            num_kv_heads=get_padded_num_heads(num_kv_heads,
+                                              self.runner.mesh.shape["model"]),
+            head_size=get_padded_head_dim(head_size),
             dtype=torch.bfloat16)
         for i in range(num_layers):
             assert kv_cache_spec[f'layer.{i}'] == expected_full_attn_spec
@@ -454,9 +455,9 @@ class TestKVCacheManager:
         draft_spec = kv_cache_spec["draft_layer.0"]
         assert isinstance(draft_spec, FullAttentionSpec)
         assert draft_spec.block_size == self.runner.vllm_config.cache_config.block_size
-        assert draft_spec.num_kv_heads == common_utils.get_padded_num_heads(
+        assert draft_spec.num_kv_heads == get_padded_num_heads(
             4, self.runner.mesh.shape["model"])
-        assert draft_spec.head_size == common_utils.get_padded_head_dim(128)
+        assert draft_spec.head_size == get_padded_head_dim(128)
         assert draft_spec.dtype == torch.bfloat16
 
     def test_get_kv_cache_spec_with_eagle3_mla(self):

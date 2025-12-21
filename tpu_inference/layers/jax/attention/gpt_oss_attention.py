@@ -22,12 +22,13 @@ from flax.typing import Sharding
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
-from tpu_inference import utils
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 import \
     ragged_paged_attention_hd64
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.rope import GptOssRotaryEmbedding
+from tpu_inference.utils.dtype_utils import to_jax_dtype
 
 KVCache = Tuple[jax.Array, jax.Array]
 
@@ -153,8 +154,7 @@ class GptOssAttention(nnx.Module):
             rope_ntk_beta=self.rope_ntk_beta)
 
         if self.kv_cache_dtype != "auto":
-            self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
-                self.kv_cache_dtype)
+            self.kv_cache_quantized_dtype = to_jax_dtype(self.kv_cache_dtype)
 
     def attention(
         self,
@@ -248,9 +248,8 @@ class GptOssAttention(nnx.Module):
             # q_scale = self._q_scale
             k_scale = self._k_scale
             v_scale = self._v_scale
-            k_TKH, v_TKH = utils.quantize_kv(k_TKH, v_TKH,
-                                             self.kv_cache_quantized_dtype,
-                                             k_scale, v_scale)
+            k_TKH, v_TKH = quantize_kv(self.kv_cache_quantized_dtype, k_TKH,
+                                       v_TKH, k_scale, v_scale)
 
         with jax.named_scope("attn_op"):
             new_kv_cache, attn_out_TNH = self.attention(
