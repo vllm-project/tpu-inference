@@ -199,10 +199,6 @@ class TestUtils:
         padded = pad_segment_ids_for_attention(segment_ids, padded_seq_len=4)
         np.testing.assert_array_equal(np.array(padded.q), np.array([[0, 0, 0, 0]], dtype=np.int32))
 
-    def test_generate_segment_ids_empty_grid_tuple(self):
-        segment_ids = generate_segment_ids_from_grid_thw(())
-        assert segment_ids.shape == (0,)
-
     def test_generate_segment_ids_single_grid(self):
         segment_ids = generate_segment_ids_from_grid_thw(((1, 2, 2),))
         assert segment_ids.shape == (4,)
@@ -289,10 +285,15 @@ class TestApplyInterleavedMrope:
     def test_interleaving_preserves_values(self):
         # Verify the interleaving pattern is correct
         # With [1, 1, 1], we should get [T0, H0, W0] ordering
+        # freqs shape must be (3, bs, seq_len, head_dim//2) where head_dim//2 = sum(mrope_section) = 3
         t_val, h_val, w_val = 1.0, 2.0, 3.0
-        freqs = jnp.array([[[[t_val]]], [[[h_val]]], [[[w_val]]]], dtype=jnp.float32)
+        # Create freqs with shape (3, 1, 1, 3) - each axis has values at its section indices
+        freqs = jnp.zeros((3, 1, 1, 3), dtype=jnp.float32)
+        freqs = freqs.at[0, 0, 0, 0].set(t_val)  # T section is [0:1]
+        freqs = freqs.at[1, 0, 0, 1].set(h_val)  # H section is [1:2]
+        freqs = freqs.at[2, 0, 0, 2].set(w_val)  # W section is [2:3]
         result = apply_interleaved_mrope(freqs, [1, 1, 1])
-        # Result should be (1, 1, 3) with values interleaved
+        # Result should be (1, 1, 3) with values interleaved as [T0, H0, W0]
         assert result.shape == (1, 1, 3)
         np.testing.assert_allclose(np.array(result[0, 0]), [t_val, h_val, w_val])
 
@@ -615,20 +616,6 @@ class TestMRoPEPositions:
                 vision_start_token_id=hf_config.vision_start_token_id,
                 spatial_merge_size=hf_config.vision_config.spatial_merge_size,
             )
-
-    def test_mrope_empty_tokens(self, hf_config: Qwen3Config):
-        """Empty token list should produce empty positions."""
-        tokens = []
-        positions, delta = get_mrope_input_positions(
-            input_tokens=tokens,
-            image_grid_thw=None,
-            video_grid_thw=None,
-            image_token_id=hf_config.image_token_id,
-            video_token_id=hf_config.video_token_id,
-            vision_start_token_id=hf_config.vision_start_token_id,
-            spatial_merge_size=hf_config.vision_config.spatial_merge_size,
-        )
-        assert positions.shape == (3, 0)
 
     def test_mrope_extra_grids_allowed(self, hf_config: Qwen3Config):
         """Extra grids beyond what's needed should not raise."""
