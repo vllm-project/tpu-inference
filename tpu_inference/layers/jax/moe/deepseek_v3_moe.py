@@ -589,11 +589,11 @@ class SparseMoE(MoE):
         )
         out_specs = PartitionSpec(*self.activation_ffw_td)
 
-        mapped_moe_fwd = partial(jax.experimental.shard_map.shard_map,
+        mapped_moe_fwd = partial(jax.shard_map,
                                  mesh=self.mesh,
                                  in_specs=in_specs,
                                  out_specs=out_specs,
-                                 check_rep=False)(
+                                 check_vma=False)(
                                      SparseMoE._distributed_sparse_moe_fwd)
 
         kernel_gating_EDF = self.kernel_gating_EDF.value

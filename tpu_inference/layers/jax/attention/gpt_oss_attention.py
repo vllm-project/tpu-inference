@@ -19,7 +19,6 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from flax.typing import Sharding
-from jax.experimental import shard_map
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
@@ -199,12 +198,12 @@ class GptOssAttention(nnx.Module):
             )
 
         output_TNH, kv_cache = jax.jit(
-            shard_map.shard_map(
+            jax.shard_map(
                 _ragged_paged_attention_wrapper,
                 mesh=mesh,
                 in_specs=in_specs,
                 out_specs=out_specs,
-                check_rep=False,
+                check_vma=False,
             ))(
                 q_TNH,
                 k_SKH,
