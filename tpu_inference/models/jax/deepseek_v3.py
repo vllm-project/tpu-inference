@@ -39,7 +39,7 @@ from tpu_inference.layers.jax.moe.moe import MoE
 from tpu_inference.layers.jax.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.utils.quantization.quantization_utils import \
+from tpu_inference.models.jax.utils.qwix.qwix_utils import \
     get_quant_dtype_from_qwix_config
 from tpu_inference.models.jax.utils.weight_utils import (
     get_param, model_weights_generator, print_param_info, reshape_params)

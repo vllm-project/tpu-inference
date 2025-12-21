@@ -380,10 +380,8 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         if self.use_kernel:
             actual_hidden_size = x.shape[-1]
-            padded_hidden_size = align_to(actual_hidden_size, 256)
-            x = jnp.pad(x,
-                        ((0, 0), (0, padded_hidden_size - actual_hidden_size)),
-                        constant_values=0)
+            padding_size = w13_weight.shape[-2] - actual_hidden_size
+            x = jnp.pad(x, ((0, 0), (0, padding_size)))
             output = fused_ep_moe(
                 mesh=self.mesh,
                 tokens=x,
