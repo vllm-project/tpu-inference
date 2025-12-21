@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import math
 from dataclasses import InitVar, dataclass
 from typing import Any, Tuple
@@ -6,7 +20,6 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from flax.typing import Sharding
-from jax.experimental import shard_map
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
@@ -52,9 +65,8 @@ class MLA(nnx.Module):
     rms_norm_eps: float
 
     # Sharding attributes
-    cd_sharding: Sharding = ()
+    nhd_sharding: Sharding = ()
     q_da_sharding: Sharding = ()
-    ac_sharding: Sharding = ()
     anh_sharding: Sharding = ()
     kv_da_sharding: Sharding = ()
 
@@ -114,10 +126,10 @@ class MLA(nnx.Module):
                                                   self.q_da_sharding,
                                                   self.dtype,
                                                   random_init=self.random_init)
-        self.kernel_q_up_proj_AC = create_param(
+        self.kernel_q_up_proj_ANH = create_param(
             rngs,
-            (self.q_lora_rank, self.N * self.qk_head_dim),
-            self.ac_sharding,
+            (self.q_lora_rank, self.N, self.qk_head_dim),
+            self.anh_sharding,
             self.dtype,
             random_init=self.random_init,
         )
@@ -128,10 +140,6 @@ class MLA(nnx.Module):
             self.dtype,
             random_init=self.random_init,
         )
-        # NOTE (jacobplatin): we are keeping these variables as 3D because
-        # we would need to reshape them before the below projection,
-        # which caused issues as Qwix wasn't quantizing it correctly
-        # on the abstract pass
         if self.use_mla_kernel:
             self.kernel_k_up_proj_ANH = create_param(
                 rngs,
@@ -148,17 +156,17 @@ class MLA(nnx.Module):
                 random_init=self.random_init,
             )
         else:
-            self.kernel_kv_up_proj_AC = create_param(
+            self.kernel_kv_up_proj_ANH = create_param(
                 rngs,
-                (self.kv_lora_rank, self.N *
-                 (self.qk_nope_head_dim + self.v_head_dim)),
-                self.ac_sharding,
+                (self.kv_lora_rank, self.N,
+                 self.qk_nope_head_dim + self.v_head_dim),
+                self.anh_sharding,
                 self.dtype,
                 random_init=self.random_init,
             )
-        self.kernel_o_proj_CD = create_param(
-            rngs, (self.N * self.v_head_dim, self.D),
-            self.cd_sharding,
+        self.kernel_o_proj_NHD = create_param(
+            rngs, (self.N, self.v_head_dim, self.D),
+            self.nhd_sharding,
             self.dtype,
             random_init=self.random_init)
         self.q_rms_norm = RMSNorm(
@@ -214,10 +222,9 @@ class MLA(nnx.Module):
             q_TA = jnp.einsum("TD,DA -> TA", x_q_TD,
                               self.kernel_q_down_proj_DA.value)
             q_TA = self.q_rms_norm(q_TA)
-            # Query up projection, then reshape to TNH.
-            q_TC = jnp.einsum("TA,AC -> TC", q_TA,
-                              self.kernel_q_up_proj_AC.value)
-            q_TNH = q_TC.reshape(q_TA.shape[0], self.N, self.qk_head_dim)
+            # Query up projection.
+            q_TNH = jnp.einsum("TA,ANH -> TNH", q_TA,
+                               self.kernel_q_up_proj_ANH.value)
             # Split the query into nope and rope.
             q_nope_TNH = q_TNH[..., :self.qk_nope_head_dim]
             q_rope_TNH = q_TNH[..., self.qk_nope_head_dim:]
@@ -253,12 +260,9 @@ class MLA(nnx.Module):
                 k_rope_SNH = jnp.broadcast_to(
                     k_rope_SNH,
                     (k_rope_SNH.shape[0], self.N, self.qk_rope_head_dim))
-                # KV up projection, then reshape to SN(Hk+Hv).
-                kv_SNC = jnp.einsum("SA,AC -> SC", kv_SA,
-                                    self.kernel_kv_up_proj_AC.value)
-                kv_nope_SNH = kv_SNC.reshape(
-                    kv_SA.shape[0], self.N,
-                    self.qk_nope_head_dim + self.v_head_dim)
+                # KV up projection.
+                kv_nope_SNH = jnp.einsum("SA,ANH -> SNH", kv_SA,
+                                         self.kernel_kv_up_proj_ANH.value)
                 # Split the latent kv vector into k nope vector and v vector.
                 k_nope_SNH = kv_nope_SNH[..., :self.qk_nope_head_dim]
                 v_SNH = kv_nope_SNH[..., self.qk_nope_head_dim:]
@@ -332,10 +336,8 @@ class MLA(nnx.Module):
             with jax.named_scope("o_proj"):
                 outputs_TNH = nnx.with_sharding_constraint(
                     outputs_TNH, self.activation_attention_out_td)
-                outputs_TC = outputs_TNH.reshape(outputs_TNH.shape[0],
-                                                 self.N * self.v_head_dim)
-                o_TD = jnp.einsum("TC,CD -> TD", outputs_TC,
-                                  self.kernel_o_proj_CD.value)
+                o_TD = jnp.einsum("TNH,NHD -> TD", outputs_TNH,
+                                  self.kernel_o_proj_NHD.value)
 
             return new_kv_cache, o_TD
 
@@ -402,12 +404,12 @@ class MLA(nnx.Module):
             return outputs
 
         output_TNH, kv_cache = jax.jit(
-            shard_map.shard_map(
+            jax.shard_map(
                 _ragged_paged_attention,
                 mesh=mesh,
                 in_specs=in_specs,
                 out_specs=out_specs,
-                check_rep=False,
+                check_vma=False,
             ))(
                 q_TNH,
                 k_SKH,
@@ -513,12 +515,12 @@ class MLA(nnx.Module):
             return kv_cache, output
 
         kv_cache, output_TNH = jax.jit(
-            shard_map.shard_map(
+            jax.shard_map(
                 _mla_ragged_paged_attention,
                 mesh=mesh,
                 in_specs=in_specs,
                 out_specs=out_specs,
-                check_rep=False,
+                check_vma=False,
             ), )(
                 q_TNA,
                 q_rope_TNH,

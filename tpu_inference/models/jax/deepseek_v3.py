@@ -28,7 +28,7 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.quantization.mxfp4_utils import \
     unpack_mxfp4
 from tpu_inference.models.jax.utils.weight_utils import (
-    get_param, model_weights_generator, print_param_info)
+    get_param, model_weights_generator, print_param_info, reshape_params)
 
 logger = init_logger(__name__)
 
@@ -171,10 +171,9 @@ class DeepSeekV3(nnx.Module):
                 activation_attention_out_td=(None, None),
                 attn_o_tnh=attn_o_tnh_spec,
                 q_da_sharding=(None, ShardingAxisName.VOCAB),
-                ac_sharding=(None, ShardingAxisName.MLP_TENSOR),
                 anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None),
                 kv_da_sharding=(None, ShardingAxisName.VOCAB),
-                cd_sharding=(ShardingAxisName.MLP_TENSOR, None))
+                nhd_sharding=(ShardingAxisName.MLP_TENSOR, None, None))
 
         for i in range(first_k_dense_replace):
             block = TransformerBlock(
@@ -425,12 +424,12 @@ class DeepSeekV3WeightLoader:
             r"mlp\.up_proj": (1, 0),
             # mla
             r"q_a_proj": (1, 0),
-            r"q_b_proj": (1, 0),
+            r"q_b_proj": (2, 0, 1),
             r"kv_a_proj_with_mqa": (1, 0),
-            r"kv_b_proj": (1, 0),
+            r"kv_b_proj": (2, 0, 1),
             r"k_b_proj": (2, 0, 1),  # used for MLA kernel
             r"v_b_proj": (2, 0, 1),  # used for MLA kernel
-            r"o_proj": (1, 0),
+            r"o_proj": (1, 2, 0),
             # moe
             r"mlp\.gate\.weight": (1, 0),
             r"mlp\.experts\.\d+\.gate_proj": (0, 2, 1),
@@ -441,6 +440,26 @@ class DeepSeekV3WeightLoader:
             r"mlp\.shared_experts\.up_proj": (1, 0),
             # lm_head
             r"lm_head\.weight": (1, 0)
+        }
+
+        self._weight_shape_map = {
+            "q_b_proj":
+            (attn_heads, qk_nope_head_dim + qk_rope_head_dim, q_lora_rank),
+            "kv_b_proj": (
+                attn_heads,
+                qk_nope_head_dim + v_head_dim,
+                kv_lora_rank,
+            ),
+            "o_proj": (hidden_size, attn_heads, v_head_dim),
+        }
+
+        self._scale_shape_map = {
+            "q_b_proj": (attn_heads, qk_nope_head_dim + qk_rope_head_dim,
+                         max(1, q_lora_rank // 256)),
+            "kv_b_proj": (attn_heads, qk_nope_head_dim + v_head_dim,
+                          max(1, kv_lora_rank // 256)),
+            "o_proj": (hidden_size, attn_heads, 1),
+            # "o_proj": (hidden_size, attn_heads, v_head_dim)
         }
 
         # Set the mappings from loaded parameter keys to standardized names.
@@ -466,13 +485,13 @@ class DeepSeekV3WeightLoader:
             "model.layers.*.self_attn.q_a_proj.weight":
             "layers.*.attn.kernel_q_down_proj_DA",
             "model.layers.*.self_attn.q_b_proj.weight":
-            "layers.*.attn.kernel_q_up_proj_AC",
+            "layers.*.attn.kernel_q_up_proj_ANH",
             "model.layers.*.self_attn.kv_a_proj_with_mqa.weight":
             "layers.*.attn.kernel_kv_down_proj_DA",
             "model.layers.*.self_attn.kv_b_proj.weight":
-            "layers.*.attn.kernel_kv_up_proj_AC",
+            "layers.*.attn.kernel_kv_up_proj_ANH",
             "model.layers.*.self_attn.o_proj.weight":
-            "layers.*.attn.kernel_o_proj_CD",
+            "layers.*.attn.kernel_o_proj_NHD",
             # Dense ffw
             "model.layers.*.mlp.gate_proj.weight":
             "layers.*.custom_module.kernel_gating_DF",
@@ -650,6 +669,14 @@ class DeepSeekV3WeightLoader:
                 scale = scale.to(torch.float32).numpy().astype(
                     self.scale_dtype)
 
+        weight_np = reshape_params(name, weight_np, self._weight_shape_map)
+        if scale is not None:
+            # if the product of the scale shape is 458752
+            if scale.shape[0] * scale.shape[1] == 458752:
+                # repeat along first axis by 2x
+                scale = jnp.repeat(scale, 2, axis=0)
+            scale = reshape_params(name, scale, self._scale_shape_map)
+
         weight_np = self._transpose_params(name, weight_np)
         if scale is not None:
             scale = self._transpose_params(name, scale)
@@ -692,6 +719,10 @@ class DeepSeekV3WeightLoader:
             weight_np.shape, NamedSharding(model_mesh, P(*sharding)),
             get_slice)
 
+        print(
+            f"Loading weight with {name} and {mapped_name} and shape {weight_np.shape} and dtype {weight_np.dtype}"
+        )
+
         if scale is not None:
             maybe_sharded_scale = scale
             # Since, by default, we'll use the same sharding as the weights, we might
@@ -699,6 +730,9 @@ class DeepSeekV3WeightLoader:
             # by the parallel size
             # NOTE: Qwix expert dangyi@ mentioned that we don't need to worry about accuracy
             # impacts when sharing scales
+            print(
+                f"Loading weight with {name} and {mapped_name} and shape {weight_np.shape} and dtype {weight_np.dtype} and scale {scale.shape} and dtype {scale.dtype}"
+            )
             try:
                 maybe_sharded_scale = jax.make_array_from_callback(
                     scale.shape, NamedSharding(model_mesh, P(*sharding)),
