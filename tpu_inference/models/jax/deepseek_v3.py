@@ -171,10 +171,10 @@ class DeepSeekV3(nnx.Module):
                 activation_attention_out_td=(None, None),
                 attn_o_tnh=attn_o_tnh_spec,
                 q_da_sharding=(None, ShardingAxisName.VOCAB),
-                ac_sharding=(None, ShardingAxisName.MLP_TENSOR),
+                ap_sharding=(None, ShardingAxisName.MLP_TENSOR),
                 anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None),
                 kv_da_sharding=(None, ShardingAxisName.VOCAB),
-                cd_sharding=(ShardingAxisName.MLP_TENSOR, None))
+                rd_sharding=(ShardingAxisName.MLP_TENSOR, None))
 
         for i in range(first_k_dense_replace):
             block = TransformerBlock(
@@ -466,13 +466,13 @@ class DeepSeekV3WeightLoader:
             "model.layers.*.self_attn.q_a_proj.weight":
             "layers.*.attn.kernel_q_down_proj_DA",
             "model.layers.*.self_attn.q_b_proj.weight":
-            "layers.*.attn.kernel_q_up_proj_AC",
+            "layers.*.attn.kernel_q_up_proj_AP",
             "model.layers.*.self_attn.kv_a_proj_with_mqa.weight":
             "layers.*.attn.kernel_kv_down_proj_DA",
             "model.layers.*.self_attn.kv_b_proj.weight":
-            "layers.*.attn.kernel_kv_up_proj_AC",
+            "layers.*.attn.kernel_kv_up_proj_AL",
             "model.layers.*.self_attn.o_proj.weight":
-            "layers.*.attn.kernel_o_proj_CD",
+            "layers.*.attn.kernel_o_proj_RD",
             # Dense ffw
             "model.layers.*.mlp.gate_proj.weight":
             "layers.*.custom_module.kernel_gating_DF",
@@ -517,7 +517,7 @@ class DeepSeekV3WeightLoader:
             # because the scales that Qwix configures by default don't necessarily match the
             # scales in practice
             # TODO (jacobplatin): remove or clean this up
-            self.scale_shap_map_for_random_weight_loading = {
+            self.scale_shape_map_for_random_weight_loading = {
                 # MoE experts (3D)
                 "custom_module.kernel_down_proj_EFD": (256, 8, 7168),
                 "custom_module.kernel_gating_EDF": (256, 28, 2048),
@@ -532,10 +532,10 @@ class DeepSeekV3WeightLoader:
                 "custom_module.kernel_down_proj_FD": (72, 7168),
                 # Attention (3D for MLA, 2D for the rest)
                 "attn.kernel_q_down_proj_DA": (28, 1536),
-                "attn.kernel_q_up_proj_AC": (6, 24576),
+                "attn.kernel_q_up_proj_AP": (6, 24576),
                 "attn.kernel_kv_down_proj_DA": (28, 576),
-                "attn.kernel_kv_up_proj_AC": (2, 32768),
-                "attn.kernel_o_proj_CD": (64, 7168),
+                "attn.kernel_kv_up_proj_AL": (2, 32768),
+                "attn.kernel_o_proj_RD": (64, 7168),
                 "attn.kernel_k_up_proj_ANH": (2, 128, 128),  # MLA
                 "attn.kernel_v_up_proj_ANH": (2, 128, 128),  # MLA
             }
@@ -658,22 +658,20 @@ class DeepSeekV3WeightLoader:
             scale_shape = scale.shape
             if len(weight_shape) == len(scale_shape):
                 new_scale = scale
-                for idx, (wdim,
-                          sdim) in enumerate(zip(weight_shape, scale_shape)):
-                    # If divisible, leave scale as-is for this axis
-                    if (wdim % sdim == 0):
-                        continue
-                    # Otherwise repeat and then truncate to match weight dim
-                    reps = max(1, (wdim + sdim - 1) // sdim)
-                    new_scale = jnp.repeat(new_scale, reps, axis=idx)
-                    slicers = [slice(None)] * len(weight_shape)
-                    slicers[idx] = slice(0, wdim)
-                    new_scale = new_scale[tuple(slicers)]
+                for wdim, sdim in zip(weight_shape, scale_shape):
+                    if (wdim % sdim != 0):
+                        raise ValueError(
+                            f"Weight dim {wdim} is not divisible by scale dim {sdim} for weight {name} with shape {weight_shape} and scale {scale_shape}!"
+                        )
                 if scale_shape != new_scale.shape:
                     logger.warning(
                         f"Adjusted scale shape {scale_shape} to {new_scale.shape} to match weight {weight_shape}"
                     )
                 scale = new_scale
+            else:
+                raise ValueError(
+                    f"Scale rank {scale_shape} does not match weight rank {weight_shape}"
+                )
 
         if model_weight.value.shape != weight_np.shape:
             raise ValueError(

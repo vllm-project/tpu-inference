@@ -52,9 +52,9 @@ class MLA(nnx.Module):
     rms_norm_eps: float
 
     # Sharding attributes
-    cd_sharding: Sharding = ()
+    rd_sharding: Sharding = ()
     q_da_sharding: Sharding = ()
-    ac_sharding: Sharding = ()
+    ap_sharding: Sharding = ()
     anh_sharding: Sharding = ()
     kv_da_sharding: Sharding = ()
 
@@ -114,10 +114,10 @@ class MLA(nnx.Module):
                                                   self.q_da_sharding,
                                                   self.dtype,
                                                   random_init=self.random_init)
-        self.kernel_q_up_proj_AC = create_param(
+        self.kernel_q_up_proj_AP = create_param(
             rngs,
             (self.q_lora_rank, self.N * self.qk_head_dim),
-            self.ac_sharding,
+            self.ap_sharding,
             self.dtype,
             random_init=self.random_init,
         )
@@ -148,17 +148,18 @@ class MLA(nnx.Module):
                 random_init=self.random_init,
             )
         else:
-            self.kernel_kv_up_proj_AC = create_param(
+            self.kernel_kv_up_proj_AL = create_param(
                 rngs,
                 (self.kv_lora_rank, self.N *
                  (self.qk_nope_head_dim + self.v_head_dim)),
-                self.ac_sharding,
+                self.
+                ap_sharding,  # NOTE: we use the same sharding for kv_up_proj_AL and kernel_q_up_proj_AP
                 self.dtype,
                 random_init=self.random_init,
             )
-        self.kernel_o_proj_CD = create_param(
+        self.kernel_o_proj_RD = create_param(
             rngs, (self.N * self.v_head_dim, self.D),
-            self.cd_sharding,
+            self.rd_sharding,
             self.dtype,
             random_init=self.random_init)
         self.q_rms_norm = RMSNorm(
@@ -215,9 +216,9 @@ class MLA(nnx.Module):
                               self.kernel_q_down_proj_DA.value)
             q_TA = self.q_rms_norm(q_TA)
             # Query up projection, then reshape to TNH.
-            q_TC = jnp.einsum("TA,AC -> TC", q_TA,
-                              self.kernel_q_up_proj_AC.value)
-            q_TNH = q_TC.reshape(q_TA.shape[0], self.N, self.qk_head_dim)
+            q_TP = jnp.einsum("TA,AP -> TP", q_TA,
+                              self.kernel_q_up_proj_AP.value)
+            q_TNH = q_TP.reshape(q_TA.shape[0], self.N, self.qk_head_dim)
             # Split the query into nope and rope.
             q_nope_TNH = q_TNH[..., :self.qk_nope_head_dim]
             q_rope_TNH = q_TNH[..., self.qk_nope_head_dim:]
@@ -254,9 +255,9 @@ class MLA(nnx.Module):
                     k_rope_SNH,
                     (k_rope_SNH.shape[0], self.N, self.qk_rope_head_dim))
                 # KV up projection, then reshape to SN(Hk+Hv).
-                kv_SNC = jnp.einsum("SA,AC -> SC", kv_SA,
-                                    self.kernel_kv_up_proj_AC.value)
-                kv_nope_SNH = kv_SNC.reshape(
+                kv_SL = jnp.einsum("SA,AL -> SL", kv_SA,
+                                   self.kernel_kv_up_proj_AL.value)
+                kv_nope_SNH = kv_SL.reshape(
                     kv_SA.shape[0], self.N,
                     self.qk_nope_head_dim + self.v_head_dim)
                 # Split the latent kv vector into k nope vector and v vector.
@@ -332,10 +333,10 @@ class MLA(nnx.Module):
             with jax.named_scope("o_proj"):
                 outputs_TNH = nnx.with_sharding_constraint(
                     outputs_TNH, self.activation_attention_out_td)
-                outputs_TC = outputs_TNH.reshape(outputs_TNH.shape[0],
+                outputs_TR = outputs_TNH.reshape(outputs_TNH.shape[0],
                                                  self.N * self.v_head_dim)
-                o_TD = jnp.einsum("TC,CD -> TD", outputs_TC,
-                                  self.kernel_o_proj_CD.value)
+                o_TD = jnp.einsum("TR,RD -> TD", outputs_TR,
+                                  self.kernel_o_proj_RD.value)
 
             return new_kv_cache, o_TD
 

@@ -464,9 +464,9 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
         # Mock model structure
         self.model = MagicMock(spec=['weight_loader', 'initialize_cache'])
         self.model.weight_loader = MagicMock(
-            spec=['scale_dtype', 'scale_shap_map_for_random_weight_loading'])
+            spec=['scale_dtype', 'scale_shape_map_for_random_weight_loading'])
         self.model.weight_loader.scale_dtype = jnp.float16
-        self.model.weight_loader.scale_shap_map_for_random_weight_loading = {}
+        self.model.weight_loader.scale_shape_map_for_random_weight_loading = {}
 
     @patch(
         'tpu_inference.models.jax.utils.quantization.quantization_utils.nnx.iter_graph'
@@ -557,7 +557,7 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
 
         expected_scale_shape = (55, 34)
 
-        self.model.weight_loader.scale_shap_map_for_random_weight_loading = {
+        self.model.weight_loader.scale_shape_map_for_random_weight_loading = {
             'wq': expected_scale_shape
         }
 

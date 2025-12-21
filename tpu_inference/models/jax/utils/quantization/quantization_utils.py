@@ -599,9 +599,9 @@ def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
     logger.info("Initializing Qwix-quantized model with random weights...")
     # TODO (jacobplatin): clean up this logic
     scale_dtype = model.weight_loader.scale_dtype
-    scale_shape_map = model.weight_loader.scale_shap_map_for_random_weight_loading if hasattr(
+    scale_shape_map = model.weight_loader.scale_shape_map_for_random_weight_loading if hasattr(
         model.weight_loader,
-        'scale_shap_map_for_random_weight_loading') else {}
+        'scale_shape_map_for_random_weight_loading') else {}
     quantization_block_sizes = quantization_config["weight_block_size"]
     assert len(
         quantization_block_sizes
