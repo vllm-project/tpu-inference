@@ -288,10 +288,20 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
 
+        weights = FusedMoEWeights(
+            w13_weight=jax_view(layer.w13_weight),
+            w13_weight_scale=None,
+            w13_bias=jax_view(layer.w13_bias) if layer.moe.has_bias else None,
+            w2_weight=jax_view(layer.w2_weight),
+            w2_weight_scale=None,
+            w2_bias=jax_view(layer.w2_bias) if self.moe.has_bias else None,
+        )
+
         return fused_moe_apply(
             layer,
             x,
             router_logits,
+            weights,
             self.moe_backend,
             self.mesh,
             self.extra_backend_kwargs,

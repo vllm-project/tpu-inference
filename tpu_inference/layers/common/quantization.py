@@ -239,8 +239,9 @@ def quantize_tensor(
 
     abs_max = jnp.max(jnp.abs(tensor), axis=axis, keepdims=True)
     scale = abs_max / dtype_max
+    scale_inv = jnp.nan_to_num(1 / scale, jnp.inf)
 
-    tensor_q = jnp.clip(tensor / scale, dtype_min, dtype_max)
+    tensor_q = jnp.clip(tensor * scale_inv, dtype_min, dtype_max)
     tensor_q = tensor_q.reshape(orig_shape)
     tensor_q = tensor_q.astype(dtype)
 
