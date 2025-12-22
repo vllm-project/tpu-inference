@@ -474,8 +474,8 @@ def load_hf_weights(
     except TypeError:
         shardings = params
     weights_iterator = None
-    if hasattr(vllm_config.model_config, "model_weights_iterator"):
-        weights_iterator = vllm_config.model_config.model_weights_iterator
+    if hasattr(vllm_config.model_config, "runai_model_weights_iterator"):
+        weights_iterator = vllm_config.model_config.runai_model_weights_iterator
     env = torchax.default_env()
     # The weights_iterator is used in RunAI model streamer integration.
     if weights_iterator is not None:
@@ -619,3 +619,46 @@ def transfer_state_with_mappings(src_state,
 
     tgt_state = tgt_state.from_flat_path(tgt_flat)
     return tgt_state
+
+
+class BaseWeightLoader:
+
+    def __init__(self, vllm_config: VllmConfig, **kwargs):
+        self.vllm_config = vllm_config
+        self.names_and_weights_generator = model_weights_generator(
+            model_name_or_path=vllm_config.model_config.model,
+            download_dir=vllm_config.load_config.download_dir,
+            **kwargs,
+        )
+
+    def get_weights_iterator(self):
+        weights_iterator = getattr(self.vllm_config.model_config,
+                                   "runai_model_weights_iterator", None)
+        if weights_iterator:
+            return weights_iterator
+        else:
+            return self.names_and_weights_generator
+
+
+class StandardWeightLoader(BaseWeightLoader):
+
+    def __init__(self, vllm_config: VllmConfig, mesh: Mesh):
+        super().__init__(vllm_config, framework="pt")
+        self.vllm_config = vllm_config
+        self.mesh = mesh
+
+    def load_weights(self, model: nnx.Module, mappings: dict):
+        """
+        Calls the generic load_hf_weights utility, passing the correct
+        weights iterator.
+        """
+        # The logic to get metadata_map and call load_hf_weights moves here.
+        metadata_map = get_default_maps(self.vllm_config.model_config,
+                                        self.mesh, mappings)
+
+        load_hf_weights(vllm_config=self.vllm_config,
+                        model=model,
+                        metadata_map=metadata_map,
+                        mesh=self.mesh,
+                        pp_missing_layers=getattr(model, 'pp_missing_layers',
+                                                  []))
