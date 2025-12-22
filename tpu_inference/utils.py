@@ -283,35 +283,6 @@ def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:
     return utils.hashing.get_hash_fn_by_name(hash_fn_name)
 
 
-def quantize_kv(key: jax.Array, value: jax.Array,
-                kv_cache_quantized_dtype: jnp.dtype, k_scale: float,
-                v_scale: float) -> Tuple[jax.Array, jax.Array]:
-    """
-        Quantize the key and value tensors.
-
-        Args:
-            key: The key tensor to quantize.
-            value: The value tensor to quantize.
-            kv_cache_quantized_dtype: The dtype to quantize the key and value tensors to.
-            q_scale: The scale to quantize the key and value tensors by.
-            k_scale: The scale to quantize the key tensor by.
-            v_scale: The scale to quantize the value tensor by.
-
-        Returns:
-            Tuple[jax.Array, jax.Array]: The quantized key and value tensors.
-        """
-    dtype_info = jnp.finfo(kv_cache_quantized_dtype)
-    minval, maxval = float(dtype_info.min), float(dtype_info.max)
-    key = key.astype(jnp.float32) / k_scale
-    key = jnp.clip(key, minval, maxval)
-    key = key.astype(kv_cache_quantized_dtype)
-    value = value.astype(jnp.float32) / v_scale
-    value = jnp.clip(value, minval, maxval)
-    value = value.astype(kv_cache_quantized_dtype)
-
-    return key, value
-
-
 def get_jax_dtype_from_str_dtype(str_dtype: str) -> jnp.dtype:
     """
     Get the JAX dtype from a string dtype.
