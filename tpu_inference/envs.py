@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     TPU_OFFLOAD_DECODE_SAVE: bool = False
     TPU_OFFLOAD_NUM_CPU_CHUNKS: int = 1024
     TPU_OFFLOAD_NUM_STAGING_BLOCKS: int = 128
+    TPU_OFFLOAD_SAVE_THREADS: int = 1
 
 
 def env_with_choices(
@@ -142,6 +143,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # kv offload to dram: size of staging buffer (hbm) for swap
     "TPU_OFFLOAD_NUM_STAGING_BLOCKS":
     lambda: int(os.getenv("TPU_OFFLOAD_NUM_STAGING_BLOCKS", "128")),
+    # kv offload to dram: number of threads for asynchronous TPU -> CPU data transfer
+    "TPU_OFFLOAD_SAVE_THREADS":
+    lambda: int(os.getenv("TPU_OFFLOAD_SAVE_THREADS", "1")),
 }
 
 
