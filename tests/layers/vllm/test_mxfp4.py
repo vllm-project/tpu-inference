@@ -119,17 +119,22 @@ def test_quant_override(model, mesh):
     assert quant_config.mesh == mesh
 
 
-@pytest.mark.parametrize(
-    "mesh", [test_utils.get_spmd_mesh(1),
-             test_utils.get_spmd_mesh(2)])
+@pytest.mark.parametrize("num_devices", [1, 2])
 @pytest.mark.parametrize("num_tokens", [8])
 @pytest.mark.parametrize("intermediate_size", [1024])
 @pytest.mark.parametrize("hidden_size", [128])
 @pytest.mark.parametrize("num_experts", [8])
 @pytest.mark.parametrize("topk", [2])
 @pytest.mark.parametrize("use_ep", [True, False])
-def test_mxfp4_fused_moe(mesh, num_tokens, intermediate_size, hidden_size,
-                         num_experts, topk, use_ep):
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+def test_mxfp4_fused_moe(num_devices, num_tokens, intermediate_size,
+                         hidden_size, num_experts, topk, use_ep,
+                         enable_attn_dp):
+    # Skip if enable_attn_dp is True but we don't have enough devices
+    if enable_attn_dp and num_devices < 2:
+        pytest.skip("enable_attn_dp requires at least 2 devices")
+
+    mesh = test_utils.get_spmd_mesh(num_devices, enable_attn_dp)
     torch.manual_seed(42)
     dtype = torch.bfloat16
 
@@ -201,16 +206,26 @@ def test_mxfp4_fused_moe(mesh, num_tokens, intermediate_size, hidden_size,
                                    rtol=1e-1)
 
 
-@pytest.mark.parametrize(
-    "mesh", [test_utils.get_spmd_mesh(1),
-             test_utils.get_spmd_mesh(2)])
+@pytest.mark.parametrize("num_devices", [1, 2])
 @pytest.mark.parametrize("num_tokens", [8])
 @pytest.mark.parametrize("intermediate_size", [512])
 @pytest.mark.parametrize("hidden_size", [1024])
 @pytest.mark.parametrize("num_experts", [8])
 @pytest.mark.parametrize("topk", [2])
-def test_mxfp4_fused_moe_use_kernel(mesh, num_tokens, intermediate_size,
-                                    hidden_size, num_experts, topk):
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+def test_mxfp4_fused_moe_use_kernel(num_devices, num_tokens, intermediate_size,
+                                    hidden_size, num_experts, topk,
+                                    enable_attn_dp):
+    # Skip if enable_attn_dp is True but we don't have enough devices
+    if enable_attn_dp and num_devices < 2:
+        pytest.skip("enable_attn_dp requires at least 2 devices")
+
+    # Skip attn_dp tests for fused_moe_use_kernel since the kernel only supports 2D mesh
+    if enable_attn_dp:
+        pytest.skip(
+            "fused_moe kernel does not support attn_dp (requires 2D mesh)")
+
+    mesh = test_utils.get_spmd_mesh(num_devices, enable_attn_dp)
 
     torch.manual_seed(42)
     dtype = torch.bfloat16

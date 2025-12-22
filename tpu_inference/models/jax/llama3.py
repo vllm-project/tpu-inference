@@ -35,6 +35,7 @@ from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.jax.utils.weight_utils import (get_default_maps,
                                                          load_hf_weights)
+from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
 
@@ -99,7 +100,8 @@ class LlamaAttention(nnx.Module):
                                          self.hidden_size // self.num_heads)
         self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
 
-        sharding_size = mesh.shape["model"] * mesh.shape.get("attn_dp", 1)
+        sharding_size = get_mesh_shape_product(mesh,
+                                               ShardingAxisName.MLP_TENSOR)
         self.num_heads = utils.get_padded_num_heads(self.num_heads,
                                                     sharding_size)
         self.num_kv_heads = utils.get_padded_num_heads(self.num_kv_heads,

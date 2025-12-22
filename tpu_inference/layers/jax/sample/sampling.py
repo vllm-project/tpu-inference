@@ -42,7 +42,7 @@ def sample(
     if tpu_sampling_metadata.do_sampling:
         # Unshard the logits explicity to avoid latency increase.
         logits = jax.lax.with_sharding_constraint(
-            logits, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
+            logits, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
     greedy_sampled = jnp.argmax(logits, axis=-1)
     if not tpu_sampling_metadata.do_sampling:
         return greedy_sampled

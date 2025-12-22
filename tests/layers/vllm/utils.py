@@ -16,12 +16,27 @@ import jax
 import torch
 import torch.nn.functional as F
 
+from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
+                                                  MESH_AXIS_NAMES_2D)
 
-def get_spmd_mesh(num_devices: int = 1):
-    axis_names = ("data", "model")
+
+def get_spmd_mesh(num_devices: int = 1, enable_attn_dp: bool = False):
     devices = sorted(jax.devices(), key=lambda d: d.id)[0:num_devices]
-    mesh_shape = (1, len(devices))
-    return jax.make_mesh(mesh_shape, axis_names, devices=devices)
+
+    if enable_attn_dp:
+        if num_devices < 2:
+            raise ValueError(
+                f"enable_attn_dp requires at least 2 devices, got {num_devices}"
+            )
+        axis_names = MESH_AXIS_NAMES
+        attn_dp_size = 2
+        model_size = num_devices // attn_dp_size
+        mesh_shape = (1, attn_dp_size, 1, model_size)
+        return jax.make_mesh(mesh_shape, axis_names, devices=devices)
+    else:
+        axis_names = MESH_AXIS_NAMES_2D
+        mesh_shape = (1, len(devices))
+        return jax.make_mesh(mesh_shape, axis_names, devices=devices)
 
 
 def find_all_layer_type(module: torch.nn.Module, layer_type: torch.nn.Module):
