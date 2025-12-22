@@ -461,9 +461,9 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
         # Mock model structure
         self.model = MagicMock(spec=['weight_loader', 'initialize_cache'])
         self.model.weight_loader = MagicMock(
-            spec=['scale_dtype', 'scale_shap_map_for_random_weight_loading'])
+            spec=['scale_dtype', 'scale_shape_map_for_random_weight_loading'])
         self.model.weight_loader.scale_dtype = jnp.float16
-        self.model.weight_loader.scale_shap_map_for_random_weight_loading = {}
+        self.model.weight_loader.scale_shape_map_for_random_weight_loading = {}
 
     @patch('tpu_inference.models.jax.utils.qwix.qwix_utils.nnx.iter_graph')
     @patch(
@@ -479,6 +479,10 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
         mock_rng_var = nnx.Variable(jax.random.PRNGKey(0))
         mock_random_array = jax.numpy.ones(1)
         mock_get_random_array.return_value = mock_random_array
+
+        self.model.weight_loader.scale_shape_map_for_random_weight_loading = {
+            'attention.wq': (1, 1)
+        }
 
         mock_iter_graph.return_value = [
             (('layers', '0', 'attention', 'wq', 'kernel'), mock_weight_param),
@@ -521,22 +525,9 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
              mock_scale_var),
         ]
 
-        quantize_qwix.load_random_weights_into_qwix_abstract_model(
-            self.rng, self.model, self.mesh, self.quantization_config)
-
-        new_weight_param_val = mock_weight_param.value
-        new_scale_var_val = mock_scale_var.value
-
-        expected_scale_shape = (128 // 64, 64 // 64)
-        actual_scale_shape = new_scale_var_val.shape
-
-        expected_weight_shape = (128, 64)
-        actual_weight_shape = new_weight_param_val.shape
-
-        self.assertEqual(expected_scale_shape, actual_scale_shape)
-        self.assertEqual(expected_weight_shape, actual_weight_shape)
-        self.assertNotEqual(old_scale_var_val.shape, new_scale_var_val.shape)
-        assert jnp.not_equal(old_weight_param_val, new_weight_param_val).all()
+        with self.assertRaises(ValueError):
+            quantize_qwix.load_random_weights_into_qwix_abstract_model(
+                self.rng, self.model, self.mesh, self.quantization_config)
 
     @patch('tpu_inference.models.jax.utils.qwix.qwix_utils.nnx.iter_graph')
     def test_param_shape_setting_with_scale_map(self, mock_iter_graph):
@@ -548,8 +539,8 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
 
         expected_scale_shape = (55, 34)
 
-        self.model.weight_loader.scale_shap_map_for_random_weight_loading = {
-            'wq': expected_scale_shape
+        self.model.weight_loader.scale_shape_map_for_random_weight_loading = {
+            'attention.wq': expected_scale_shape
         }
 
         mock_iter_graph.return_value = [
@@ -820,6 +811,158 @@ class TestGetQuantDtypeFromQwixConfig(unittest.TestCase):
             self.mock_vllm_config)
         self.assertEqual(scale_dtype, jnp.float16)
         self.assertIsNone(quant_dtype)
+
+
+class TestGetDefaultQwixQuantizationConfig(unittest.TestCase):
+    """Tests for the get_default_qwix_quantization_config function."""
+
+    def setUp(self):
+        # Mocking the default configs that the function expects to find in the module
+        self.mock_deepseek_config = {
+            "qwix": {
+                "rules": [{
+                    "module_path": ".*",
+                    "tile_size": 0
+                }]
+            }
+        }
+        self.mock_llama_config = {"qwix": {"rules": [{"name": "llama_rule"}]}}
+        self.mock_gpt_oss_config = {"qwix": {"rules": [{"name": "gpt_rule"}]}}
+
+        # Patch the constants in the module where the function resides
+        self.patchers = [
+            patch(
+                "tpu_inference.models.jax.utils.qwix.qwix_utils.DEFAULT_DEEPSEEK_FP8_CONFIG",
+                self.mock_deepseek_config),
+            patch(
+                "tpu_inference.models.jax.utils.qwix.qwix_utils.DEFAULT_LLAMA4_FP8_CONFIG",
+                self.mock_llama_config),
+            patch(
+                "tpu_inference.models.jax.utils.qwix.qwix_utils.DEFAULT_GPT_OSS_FP4_CONFIG",
+                self.mock_gpt_oss_config),
+            patch("tpu_inference.models.jax.utils.qwix.qwix_utils.logger",
+                  MagicMock())
+        ]
+        for p in self.patchers:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patchers:
+            p.stop()
+
+    def test_skip_quantization_returns_none(self):
+        """Test that skip_quantization=True returns None immediately."""
+        result = quantize_qwix.get_default_qwix_quantization_config(
+            MagicMock(), True)
+        self.assertIsNone(result)
+
+    def test_unsupported_model_returns_none(self):
+        """Test that an unknown model type returns None."""
+        hf_config = MagicMock()
+        hf_config.model_type = "unknown_model"
+        result = quantize_qwix.get_default_qwix_quantization_config(
+            hf_config, False)
+        self.assertIsNone(result)
+
+    def test_deepseek_v3_success(self):
+        """Test DeepSeek V3 config with valid weight_block_size."""
+        hf_config = MagicMock()
+        hf_config.model_type = "DeepSeek_V3"
+        hf_config.quantization_config = {
+            "quant_method": "fp8",
+            "weight_block_size": [1, 128]
+        }
+
+        result = quantize_qwix.get_default_qwix_quantization_config(
+            hf_config, False)
+
+        # Check if tile_size was updated from 0 to 128
+        self.assertEqual(result["qwix"]["rules"][0]["tile_size"], 128)
+        # Ensure it's a deep copy (original mock shouldn't change)
+        self.assertEqual(
+            self.mock_deepseek_config["qwix"]["rules"][0]["tile_size"], 0)
+
+    def test_deepseek_v3_invalid_block_size(self):
+        """Test DeepSeek V3 raises ValueError on invalid block size format."""
+        hf_config = MagicMock()
+        hf_config.model_type = "deepseek_v3"
+        hf_config.quantization_config = {
+            "quant_method": "fp8",
+            "weight_block_size": [128]
+        }
+
+        with self.assertRaisesRegex(ValueError, "Invalid weight_block_size"):
+            quantize_qwix.get_default_qwix_quantization_config(
+                hf_config, False)
+
+    def test_deepseek_v3_invalid_block_size_2d_subchannel(self):
+        """Test DeepSeek V3 raises ValueError on invalid block size format."""
+        hf_config = MagicMock()
+        hf_config.model_type = "deepseek_v3"
+        hf_config.quantization_config = {
+            "quant_method": "fp8",
+            "weight_block_size": [512, 512]
+        }
+
+        with self.assertRaisesRegex(AssertionError,
+                                    "Expected first dimension to be 1"):
+            quantize_qwix.get_default_qwix_quantization_config(
+                hf_config, False)
+
+    def test_deepseek_v3_no_weight_block_size(self):
+        """Test DeepSeek V3 config with valid weight_block_size."""
+        hf_config = MagicMock()
+        hf_config.model_type = "DeepSeek_V3"
+        hf_config.quantization_config = {
+            "quant_method": "fp8",
+        }
+
+        with self.assertRaisesRegex(
+                AssertionError,
+                "Expected weight_block_size in quantization_config"):
+
+            quantize_qwix.get_default_qwix_quantization_config(
+                hf_config, False)
+
+    def test_deepseek_v3_tile_size_assertion(self):
+        """Test DeepSeek V3 raises AssertionError if tile_size is <= 1."""
+        hf_config = MagicMock()
+        hf_config.model_type = "deepseek_v3"
+        hf_config.quantization_config = {
+            "quant_method": "fp8",
+            "weight_block_size": [1, 1]
+        }
+
+        with self.assertRaises(AssertionError):
+            quantize_qwix.get_default_qwix_quantization_config(
+                hf_config, False)
+
+    def test_llama4_success(self):
+        """Test Llama 4 default config path."""
+        hf_config = MagicMock()
+        hf_config.model_type = "llama4"
+        hf_config.quantization_config = {"quant_method": "compressed-tensors"}
+
+        result = quantize_qwix.get_default_qwix_quantization_config(
+            hf_config, False)
+        self.assertEqual(result, self.mock_llama_config)
+
+    def test_gpt_oss_success(self):
+        """Test GPT-OSS default config path."""
+        hf_config = MagicMock()
+        hf_config.model_type = "gpt_oss"
+        hf_config.quantization_config = {"quant_method": "mxfp4"}
+
+        result = quantize_qwix.get_default_qwix_quantization_config(
+            hf_config, False)
+        self.assertEqual(result, self.mock_gpt_oss_config)
+
+    def test_missing_attributes_handled(self):
+        """Test that function handles hf_config objects missing model_type safely."""
+        hf_config = object()  # No attributes
+        result = quantize_qwix.get_default_qwix_quantization_config(
+            hf_config, False)
+        self.assertIsNone(result)
 
 
 if __name__ == '__main__':
