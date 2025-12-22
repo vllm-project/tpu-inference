@@ -510,8 +510,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             "precompile_vision_encoder_fn", None)
         self.get_multimodal_embeddings_fn = multimodal_fns.get(
             "get_multimodal_embeddings_fn", None)
-        self.get_input_embeddings_fn = multimodal_fns.get(
-            "get_input_embeddings_fn", None)
+        self.embed_input_ids_fn = multimodal_fns.get("embed_input_ids_fn",
+                                                     None)
         self.get_mrope_input_positions_fn = multimodal_fns.get(
             "get_mrope_input_positions_fn", None)
 
@@ -1680,7 +1680,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def _get_input_ids_embeds(self, input_ids: jax.Array,
                               mm_embeds: list[jax.Array]):
         if self.is_multimodal_model:
-            inputs_embeds = self.get_input_embeddings_fn(
+            inputs_embeds = self.embed_input_ids_fn(
                 self.state,
                 input_ids,
                 mm_embeds,

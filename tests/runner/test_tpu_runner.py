@@ -88,7 +88,7 @@ class TestTPUJaxRunner:
 
         # Mock the embedding function
         self.mock_get_input_embed_fn = MagicMock()
-        self.runner.get_input_embeddings_fn = self.mock_get_input_embed_fn
+        self.runner.embed_input_ids_fn = self.mock_get_input_embed_fn
         self.mock_get_input_embed_fn.return_value = dummy_final_embeds
         self.runner.state = MagicMock()
 
@@ -126,7 +126,7 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
         device_array = np.array(jax.devices()[:1]).reshape(1, 1, 1, -1)
         self.mock_mesh = jax.make_mesh(device_array.shape,
                                        ('data', 'attn_dp', 'expert', 'model'))
-        # Setup the runner with the model_config.is_multimodal_model set to True but get_model returning None for get_multimodal_embeddings_fn and get_input_embeddings_fn.
+        # Setup the runner with the model_config.is_multimodal_model set to True but get_model returning None for get_multimodal_embeddings_fn and embed_input_ids_fn.
         with patch('jax.devices', return_value=self.mock_devices), \
              patch('jax.make_mesh', return_value=self.mock_mesh), \
              patch('jax.random.key', return_value=self.mock_rng_key), \
@@ -173,7 +173,7 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
         mock_multimodal_fns = {
             "precompile_vision_encoder_fn": None,
             "get_multimodal_embeddings_fn": None,
-            "get_input_embeddings_fn": None,
+            "embed_input_ids_fn": None,
             "get_mrope_input_positions_fn": None
         }
         return (
@@ -195,8 +195,8 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
 
         assert not self.runner.is_multimodal_model
 
-        self.runner.get_input_embeddings_fn = MagicMock()
+        self.runner.embed_input_ids_fn = MagicMock()
         dummy_input_ids = jnp.array([1, 2, 3])
         dummy_mm_embeds = jnp.ones((10, 128))
         _ = self.runner._get_input_ids_embeds(dummy_input_ids, dummy_mm_embeds)
-        self.runner.get_input_embeddings_fn.assert_not_called()
+        self.runner.embed_input_ids_fn.assert_not_called()
