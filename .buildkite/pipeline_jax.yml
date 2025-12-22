@@ -99,14 +99,8 @@ steps:
        queue: tpu_v6e_queue
      commands:
        - |
-         if [[ "$$NIGHTLY" == "1" ]]; then
            .buildkite/scripts/run_in_docker.sh \
              bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py'
-         else
-           echo "Skipping: NIGHTLY environment variable not set"
-           exit 0
-         fi
-
 
    - label: "JAX unit tests"
      key: test_7

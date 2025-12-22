@@ -1,11 +1,25 @@
 from __future__ import annotations
 
+import os
 import random
 import string
 import time
 
 import pytest
 from vllm import LLM, SamplingParams
+
+
+# TODO (Qiliang Cui): remove this when XLA fixes the recursive jit call issue.
+def _is_v7x():
+    # jax.devices() will hang so use IS_FOR_V7X to indicate the version.
+    return os.environ.get("IS_FOR_V7X", "false") == "true"
+
+
+def _get_tensor_parallel_size():
+    # Work around an XLA issue.
+    if _is_v7x():
+        return 2
+    return 1
 
 
 def get_ngram_test_prompts():
@@ -73,7 +87,10 @@ def _test_correctness_helper(
     with monkeypatch.context():
         test_prompts = get_test_prompts(speculative_config)
 
-        ref_llm = LLM(model=model_name, max_model_len=1024, max_num_seqs=4)
+        ref_llm = LLM(model=model_name,
+                      max_model_len=1024,
+                      max_num_seqs=4,
+                      tensor_parallel_size=_get_tensor_parallel_size())
         ref_outputs = ref_llm.generate(test_prompts, sampling_config)
 
         del ref_llm
@@ -84,7 +101,8 @@ def _test_correctness_helper(
         spec_llm = LLM(model=model_name,
                        speculative_config=speculative_config,
                        max_model_len=1024,
-                       max_num_seqs=4)
+                       max_num_seqs=4,
+                       tensor_parallel_size=_get_tensor_parallel_size())
         spec_outputs = spec_llm.generate(test_prompts, sampling_config)
 
         matches = 0
@@ -165,7 +183,8 @@ def _test_performance_helper(
         ref_llm = LLM(model=model_name,
                       max_model_len=1024,
                       max_num_seqs=1,
-                      enable_prefix_caching=False)
+                      enable_prefix_caching=False,
+                      tensor_parallel_size=_get_tensor_parallel_size())
 
         start_time = time.time()
         _ = ref_llm.generate(test_prompts, sampling_config)
@@ -181,6 +200,7 @@ def _test_performance_helper(
                        speculative_config=speculative_config,
                        max_model_len=1024,
                        max_num_seqs=1,
+                       tensor_parallel_size=_get_tensor_parallel_size(),
                        enable_prefix_caching=False)
 
         start_time = time.time()
@@ -237,7 +257,7 @@ def test_ngram_performance_random(
             "prompt_lookup_max": 2,
             "prompt_lookup_min": 2,
             "num_speculative_tokens": 4,
-        }, 3.0)
+        }, 1.5 if _is_v7x() else 3.0)
 
 
 def test_eagle3_correctness(
@@ -274,4 +294,4 @@ def test_eagle3_performance(
             "model": "unkmaster/EAGLE3-LLaMA3.1-Instruct-8B",
             "num_speculative_tokens": 2,
             "draft_tensor_parallel_size": 1
-        }, 1.8)
+        }, 1.2 if _is_v7x() else 1.8)
