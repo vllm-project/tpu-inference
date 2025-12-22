@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# EP
-# parallelism support matrix
+# pipeline-name: EP
+# pipeline-type: parallelism support matrix
 steps:
   - label: "Correctness tests for EP"
     key: "EP_CorrectnessTest"

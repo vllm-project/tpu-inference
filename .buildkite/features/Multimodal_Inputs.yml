@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Multimodal Inputs
-# feature support matrix
+# pipeline-name: Multimodal Inputs
+# pipeline-type: feature support matrix
 steps:
   - label: "Correctness tests for Multimodal Inputs"
     key: "Multimodal_Inputs_CorrectnessTest"

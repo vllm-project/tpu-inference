@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# runai_model_streamer_loader
+# pipeline-name: runai_model_streamer_loader
+# pipeline-type: feature support matrix
 # The RunAI Model Streamer is a high-performance model loader that serves as an
 # alternative to the default Hugging Face loader. Instead of downloading a model
 # to local disk, it streams the weights from object storage (like GCS) into

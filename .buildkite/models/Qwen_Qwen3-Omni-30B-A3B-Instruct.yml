@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Qwen/Qwen3-Omni-30B-A3B-Instruct
-# multimodal
+# pipeline-name: Qwen/Qwen3-Omni-30B-A3B-Instruct
+# pipeline-type: multimodal
 steps:
   - label: "Unit tests for Qwen/Qwen3-Omni-30B-A3B-Instruct"
     key: "Qwen_Qwen3-Omni-30B-A3B-Instruct_UnitTest"

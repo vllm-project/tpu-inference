@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Quantized KV Cache
-# kernel support matrix
+# pipeline-name: Quantized KV Cache
+# pipeline-type: kernel support matrix
 steps:
   - label: "Correctness tests for Quantized KV Cache"
     key: "Quantized_KV_Cache_CorrectnessTest"

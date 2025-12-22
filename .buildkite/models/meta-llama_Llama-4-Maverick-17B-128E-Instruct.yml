@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# meta-llama/Llama-4-Maverick-17B-128E-Instruct
-# multimodal
+# pipeline-name: meta-llama/Llama-4-Maverick-17B-128E-Instruct
+# pipeline-type: multimodal
 steps:
   - label: "Unit tests for meta-llama/Llama-4-Maverick-17B-128E-Instruct"
     key: "meta-llama_Llama-4-Maverick-17B-128E-Instruct_UnitTest"

@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# async scheduler
-# feature support matrix
+# pipeline-name: async scheduler
+# pipeline-type: feature support matrix
 steps:
   - label: "Correctness tests for async scheduler"
     key: "async_scheduler_CorrectnessTest"

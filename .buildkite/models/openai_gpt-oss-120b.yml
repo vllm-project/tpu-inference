@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# openai/gpt-oss-120b
-# text-only
+# pipeline-name: openai/gpt-oss-120b
+# pipeline-type: text-only
 steps:
   - label: "Unit tests for openai/gpt-oss-120b"
     key: "openai_gpt-oss-120b_UnitTest"

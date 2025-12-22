@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# MLA
-# kernel support matrix
+# pipeline-name: MLA
+# pipeline-type: kernel support matrix
 steps:
   - label: "Correctness tests for MLA"
     key: "MLA_CorrectnessTest"

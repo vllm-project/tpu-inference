@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# structured_decoding
+# pipeline-name: structured_decoding
+# pipeline-type: feature support matrix
 # Structured decoding allows constraining the model's output to follow a
 # specific format, such as choosing from a predefined set of options or
 # following a JSON schema. This is useful for classification tasks,

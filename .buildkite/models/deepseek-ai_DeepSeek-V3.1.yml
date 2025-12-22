@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# deepseek-ai/DeepSeek-V3.1
-# text-only
+# pipeline-name: deepseek-ai/DeepSeek-V3.1
+# pipeline-type: text-only
 steps:
   - label: "Unit tests for deepseek-ai/DeepSeek-V3.1"
     key: "deepseek-ai_DeepSeek-V3_1_UnitTest"

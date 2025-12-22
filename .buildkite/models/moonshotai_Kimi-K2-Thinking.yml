@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# moonshotai/Kimi-K2-Thinking
-# text-only
+# pipeline-name: moonshotai/Kimi-K2-Thinking
+# pipeline-type: text-only
 steps:
   - label: "Unit tests for moonshotai/Kimi-K2-Thinking"
     key: "moonshotai_Kimi-K2-Thinking_UnitTest"
