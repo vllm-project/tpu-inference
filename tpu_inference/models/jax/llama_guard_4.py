@@ -256,7 +256,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                             self.lm_head.input_embedding_table_DV.value)
         return logits_TV
 
-    def get_input_embeddings(
+    def embed_input_ids(
             self,
             input_ids: jax.Array,
             multimodal_embeddings: Optional[List[jax.Array]] = None

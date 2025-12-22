@@ -514,9 +514,9 @@ class TestQwen2_5_VLForConditionalGeneration:
         assert len(mm_embeds_none) == 0
 
     @patch('tpu_inference.models.jax.qwen2_5_vl.merge_multimodal_embeddings')
-    def test_get_input_embeddings(self, mock_merge_embeddings: MagicMock,
-                                  model: Qwen2_5_VLForConditionalGeneration,
-                                  rng: PRNGKey):
+    def test_embed_input_ids(self, mock_merge_embeddings: MagicMock,
+                             model: Qwen2_5_VLForConditionalGeneration,
+                             rng: PRNGKey):
         input_ids = jax.random.randint(rng, (1, 10), 0,
                                        model.config.vocab_size)
         mock_text_embeds = jnp.ones((1, 10, model.config.hidden_size))
@@ -524,12 +524,12 @@ class TestQwen2_5_VLForConditionalGeneration:
         model.language_model.model.embed = MagicMock(
             return_value=mock_text_embeds)
 
-        embeds = model.get_input_embeddings(input_ids, None)
+        embeds = model.embed_input_ids(input_ids, None)
         np.testing.assert_array_equal(embeds, mock_text_embeds)
         mock_merge_embeddings.assert_not_called()
 
         empty_mm = jnp.ones((0, model.config.hidden_size), )
-        embeds_empty_mm = model.get_input_embeddings(input_ids, empty_mm)
+        embeds_empty_mm = model.embed_input_ids(input_ids, empty_mm)
         np.testing.assert_array_equal(embeds_empty_mm, mock_text_embeds)
         mock_merge_embeddings.assert_not_called()
 
@@ -537,7 +537,7 @@ class TestQwen2_5_VLForConditionalGeneration:
         mock_merged = jnp.ones((1, 15, model.config.hidden_size))
         mock_merge_embeddings.return_value = mock_merged
 
-        embeds_mm = model.get_input_embeddings(input_ids, mm_embeds)
+        embeds_mm = model.embed_input_ids(input_ids, mm_embeds)
         np.testing.assert_array_equal(embeds_mm, mock_merged)
         mock_merge_embeddings.assert_called_once_with(
             input_ids, mock_text_embeds, mm_embeds,

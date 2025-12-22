@@ -127,7 +127,7 @@ class CompilationManager:
 
             self._run_compilation(
                 "input_embeddings_merger",
-                self.runner.get_input_embeddings_fn,
+                self.runner.embed_input_ids_fn,
                 self.runner.state,
                 dummy_input_ids,
                 dummy_multimodal_embeddings,
@@ -136,7 +136,7 @@ class CompilationManager:
 
             self._run_compilation(
                 "input_embeddings_merger_text_only",
-                self.runner.get_input_embeddings_fn,
+                self.runner.embed_input_ids_fn,
                 self.runner.state,
                 dummy_input_ids,
                 None,

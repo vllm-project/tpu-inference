@@ -218,9 +218,9 @@ def test_register_model_vllm_wrapper_methods():
     with pytest.raises(NotImplementedError, match="JAX model"):
         instance.forward(input_ids=None, positions=None)
 
-    # `get_input_embeddings` should be unimplemented.
+    # `embed_input_ids` should be unimplemented.
     with pytest.raises(NotImplementedError, match="JAX model"):
-        instance.get_input_embeddings(input_ids=None, positions=None)
+        instance.embed_input_ids(input_ids=None, positions=None)
 
     # `load_weights` should be a no-op that returns None.
     assert instance.load_weights() is None
