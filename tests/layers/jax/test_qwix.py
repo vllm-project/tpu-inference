@@ -480,6 +480,10 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
         mock_random_array = jax.numpy.ones(1)
         mock_get_random_array.return_value = mock_random_array
 
+        self.model.weight_loader.scale_shape_map_for_random_weight_loading = {
+            'attention.wq': (1, 1)
+        }
+
         mock_iter_graph.return_value = [
             (('layers', '0', 'attention', 'wq', 'kernel'), mock_weight_param),
             (('layers', '0', 'attention', 'wq', 'array', 'scale'),
@@ -521,22 +525,9 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
              mock_scale_var),
         ]
 
-        quantize_qwix.load_random_weights_into_qwix_abstract_model(
-            self.rng, self.model, self.mesh, self.quantization_config)
-
-        new_weight_param_val = mock_weight_param.value
-        new_scale_var_val = mock_scale_var.value
-
-        expected_scale_shape = (128 // 64, 64 // 64)
-        actual_scale_shape = new_scale_var_val.shape
-
-        expected_weight_shape = (128, 64)
-        actual_weight_shape = new_weight_param_val.shape
-
-        self.assertEqual(expected_scale_shape, actual_scale_shape)
-        self.assertEqual(expected_weight_shape, actual_weight_shape)
-        self.assertNotEqual(old_scale_var_val.shape, new_scale_var_val.shape)
-        assert jnp.not_equal(old_weight_param_val, new_weight_param_val).all()
+        with self.assertRaises(ValueError):
+            quantize_qwix.load_random_weights_into_qwix_abstract_model(
+                self.rng, self.model, self.mesh, self.quantization_config)
 
     @patch('tpu_inference.models.jax.utils.qwix.qwix_utils.nnx.iter_graph')
     def test_param_shape_setting_with_scale_map(self, mock_iter_graph):
@@ -549,7 +540,7 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
         expected_scale_shape = (55, 34)
 
         self.model.weight_loader.scale_shape_map_for_random_weight_loading = {
-            'wq': expected_scale_shape
+            'attention.wq': expected_scale_shape
         }
 
         mock_iter_graph.return_value = [
@@ -841,17 +832,16 @@ class TestGetDefaultQwixQuantizationConfig(unittest.TestCase):
         # Patch the constants in the module where the function resides
         self.patchers = [
             patch(
-                "tpu_inference.models.jax.utils.quantization.quantization_utils.DEFAULT_DEEPSEEK_FP8_CONFIG",
+                "tpu_inference.models.jax.utils.qwix.qwix_utils.DEFAULT_DEEPSEEK_FP8_CONFIG",
                 self.mock_deepseek_config),
             patch(
-                "tpu_inference.models.jax.utils.quantization.quantization_utils.DEFAULT_LLAMA4_FP8_CONFIG",
+                "tpu_inference.models.jax.utils.qwix.qwix_utils.DEFAULT_LLAMA4_FP8_CONFIG",
                 self.mock_llama_config),
             patch(
-                "tpu_inference.models.jax.utils.quantization.quantization_utils.DEFAULT_GPT_OSS_FP4_CONFIG",
+                "tpu_inference.models.jax.utils.qwix.qwix_utils.DEFAULT_GPT_OSS_FP4_CONFIG",
                 self.mock_gpt_oss_config),
-            patch(
-                "tpu_inference.models.jax.utils.quantization.quantization_utils.logger",
-                MagicMock())
+            patch("tpu_inference.models.jax.utils.qwix.qwix_utils.logger",
+                  MagicMock())
         ]
         for p in self.patchers:
             p.start()

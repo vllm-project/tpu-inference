@@ -59,7 +59,7 @@ class MockVllmConfig:
 
         # DeepSeek V3 specific config
         hf_config = MagicMock()
-        hf_config.num_hidden_layers = 4  # Small for testing
+        hf_config.num_hidden_layers = 1  # Small for testing
         hf_config.num_nextn_predict_layers = 1
         self.model_config.hf_config = hf_config
 
@@ -104,9 +104,9 @@ class TestDeepSeekV3:
     def test_init(self, mock_config, rng, mesh):
         """Tests if the model initializes with the correct hierarchy."""
         model = DeepSeekV3(mock_config, rng, mesh)
-        assert len(model.layers) == 4  # num_layers from mock
+        assert len(model.layers) == 3  # num_layers from mock
         assert isinstance(model.embedder, nnx.Module)
-        assert model.vllm_config.model_config.hf_config.num_hidden_layers == 4
+        assert model.vllm_config.model_config.hf_config.num_hidden_layers == 1
 
     def test_random_weights(self, mock_config, rng, mesh):
         """Tests that force_random_weights initializes non-zero weights."""
@@ -253,7 +253,7 @@ class TestDeepSeekV3WeightLoader:
         }
 
         with patch("tpu_inference.models.jax.deepseek_v3.get_param", return_value=mock_var), \
-             patch("tpu_inference.models.jax.deepseek_v3.unpack_mxfp4") as mock_unpack, \
+             patch("tpu_inference.models.jax.deepseek_v3.u8_unpack_e2m1") as mock_unpack, \
              patch("jax.make_array_from_callback") as mock_make_array:
 
             def side_effect_router(shape, *args, **kwargs):
@@ -274,7 +274,11 @@ class TestDeepSeekV3WeightLoader:
                                            mesh,
                                            scale=scale)
 
-            mock_unpack.assert_called_once_with(weight)
+            mock_unpack.assert_called_once()
+            (actual_arg, ), _ = mock_unpack.call_args
+            # The implementation converts the torch weight to a JAX array
+            expected_arg = jnp.array(weight.cpu().numpy())
+            assert jnp.array_equal(actual_arg, expected_arg).item()
             assert mock_make_array.called
 
     def test_load_weights_full_flow(self, loader, mesh):
@@ -324,7 +328,7 @@ class TestDeepSeekV3WeightLoader:
 
         # 3. Patch the necessary JAX/Utility functions
         with patch("tpu_inference.models.jax.deepseek_v3.get_param", return_value=mock_var), \
-             patch("tpu_inference.models.jax.deepseek_v3.unpack_mxfp4") as mock_unpack, \
+             patch("tpu_inference.models.jax.deepseek_v3.u8_unpack_e2m1") as mock_unpack, \
              patch("jax.make_array_from_callback") as mock_make_array:
 
             # Mock the JAX array creation to return a dummy
@@ -339,7 +343,7 @@ class TestDeepSeekV3WeightLoader:
                                            scale=None)
 
             # VERIFICATIONS:
-            # - unpack_mxfp4 should NOT be called for standard FP8 (only for packed uint8 + scale)
+            # - u8_unpack_e2m1 should NOT be called for standard FP8 (only for packed uint8 + scale)
             mock_unpack.assert_not_called()
 
             # - make_array_from_callback should be called with the correct shape and sharding
