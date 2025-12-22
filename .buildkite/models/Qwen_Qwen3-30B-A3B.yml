@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Qwen/Qwen3-30B-A3B
-# text-only
+# pipeline-name: Qwen/Qwen3-30B-A3B
+# pipeline-type: text-only
 steps:
   - label: "Unit tests for Qwen/Qwen3-30B-A3B"
     key: "Qwen_Qwen3-30B-A3B_UnitTest"

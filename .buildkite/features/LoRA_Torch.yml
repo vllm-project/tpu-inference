@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# LoRA_Torch
-# feature support matrix
+# pipeline-name: LoRA_Torch
+# pipeline-type: feature support matrix
 steps:
   - label: "Correctness tests for LoRA_Torch"
     key: "LoRA_Torch_CorrectnessTest"

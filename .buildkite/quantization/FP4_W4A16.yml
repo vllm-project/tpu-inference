@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# FP4 W4A16
-# quantization support matrix
+# pipeline-name: FP4 W4A16
+# pipeline-type: quantization support matrix
 steps:
   - label: "Correctness tests for FP4 W4A16"
     key: "FP4_W4A16_CorrectnessTest"

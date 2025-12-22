@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# sampling_params
+# pipeline-name: sampling_params
+# pipeline-type: feature support matrix
 # Sampling parameters control how the model selects tokens during generation.
 # These tests verify that temperature, top_p, top_k, and logprobs work correctly.
 steps:

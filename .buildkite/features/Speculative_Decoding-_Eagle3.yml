@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Speculative Decoding: Eagle3
-# feature support matrix
+# pipeline-name: Speculative Decoding: Eagle3
+# pipeline-type: feature support matrix
 steps:
   - label: "Correctness tests for Speculative Decoding: Eagle3"
     key: "Speculative_Decoding-_Eagle3_CorrectnessTest"

@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Out-of-tree model support
-# feature support matrix
+# pipeline-name: Out-of-tree model support
+# pipeline-type: feature support matrix
 steps:
   - label: "Correctness tests for Out-of-tree model support"
     key: "out_of_tree_model_support_CorrectnessTest"

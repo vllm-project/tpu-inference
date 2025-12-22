@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# google/gemma-3-27b-it
-# text-only
+# pipeline-name: google/gemma-3-27b-it
+# pipeline-type: text-only
 steps:
   - label: "Unit tests for google/gemma-3-27b-it"
     key: "google_gemma-3-27b-it_UnitTest"

@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# AWQ INT4
-# quantization support matrix
+# pipeline-name: AWQ INT4
+# pipeline-type: quantization support matrix
 steps:
   - label: "Correctness tests for AWQ INT4"
     key: "AWQ_INT4_CorrectnessTest"

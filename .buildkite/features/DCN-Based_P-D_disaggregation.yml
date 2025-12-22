@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# DCN-based P/D disaggregation
-# feature support matrix
+# pipeline-name: DCN-based P/D disaggregation
+# pipeline-type: feature support matrix
 steps:
   - label: "Correctness tests for DCN-based P/D disaggregation"
     key: "DCN_based_P-D_disaggregation_CorrectnessTest"

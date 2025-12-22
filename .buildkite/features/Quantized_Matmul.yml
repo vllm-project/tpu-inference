@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Quantized Matmul
-# kernel support matrix
+# pipeline-name: Quantized Matmul
+# pipeline-type: kernel support matrix
 steps:
   - label: "Correctness tests for Quantized Matmul"
     key: "Quantized_Matmul_CorrectnessTest"
