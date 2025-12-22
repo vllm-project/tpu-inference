@@ -211,9 +211,9 @@ def _get_nnx_model(
                 # a TypeError at runtime if you use the RunaiModelStreamerLoader with any
                 # flax_nnx model whose load_weights function does not accept the
                 # weights_iterator keyword argument.
-                vllm_config.model_config.model_weights_iterator = weights_iterator
+                vllm_config.model_config.runai_model_weights_iterator = weights_iterator
                 model.load_weights(rng)
-                del vllm_config.model_config.model_weights_iterator
+                del vllm_config.model_config.runai_model_weights_iterator
             else:
                 model.load_weights(rng)
             jit_model = create_jit_model(
@@ -365,16 +365,8 @@ def get_model(
 ) -> Any:
     impl = envs.MODEL_IMPL_TYPE
     logger.info(f"Loading model with MODEL_IMPL_TYPE={impl}")
-
     if impl == "auto":
-        # Resolve "auto" based on architecture
-        architectures = getattr(vllm_config.model_config.hf_config,
-                                "architectures", [])
-        assert len(architectures) == 1, (
-            f"Expected exactly one architecture, got {len(architectures)}: "
-            f"{architectures}")
-        arch = architectures[0]
-        impl = "vllm" if arch in _VLLM_PREFERRED_ARCHITECTURES else "flax_nnx"
+        impl = resolve_model_artchitecture(vllm_config)
         logger.info(f"Resolved MODEL_IMPL_TYPE 'auto' to '{impl}'")
 
     match impl:
@@ -399,6 +391,51 @@ def get_model(
             return get_vllm_model(vllm_config, rng, mesh)
         case _:
             raise NotImplementedError(f"Unsupported MODEL_IMPL_TYPE: {impl}")
+
+
+
+def resolve_model_artchitecture(vllm_config: VllmConfig) -> str:
+    """Resolves the model implementation type.
+
+    This function determines which model implementation to use based on the model
+    architecture and whether the RunAI model streamer is active.
+
+    When the RunAI model streamer is used, this function falls back to the 'vllm'
+    implementation if either of the following is true:
+    1. The model does not have a `WeightLoader` attribute.
+    2. The model's `WeightLoader` is not a subclass of `BaseWeightLoader`.
+
+    Otherwise, it resolves the implementation based on whether the model's
+    architecture is in the `_VLLM_PREFERRED_ARCHITECTURES` list.
+    Args:
+        vllm_config: The VllmConfig object containing the model and load
+            configuration.
+
+    Returns:
+        The model implementation type.
+    """
+    from tpu_inference.models.jax.utils.weight_utils import BaseWeightLoader
+
+    is_runai_streamer = vllm_config.load_config.load_format == "runai_streamer"
+    if is_runai_streamer:
+        model_class = _get_model_architecture(
+            vllm_config.model_config.hf_config)
+        # Fall back to "vllm" if the model does not support RunAI
+        # model streamer loading.
+        if not hasattr(model_class, "WeightLoader") or not issubclass(
+                getattr(model_class, "WeightLoader", object),
+                BaseWeightLoader):
+            return "vllm"
+
+    # Resolve "auto" based on architecture
+    architectures = getattr(vllm_config.model_config.hf_config,
+                            "architectures", [])
+    assert len(architectures) == 1, (
+        f"Expected exactly one architecture, got {len(architectures)}: "
+        f"{architectures}")
+    arch = architectures[0]
+    impl = "vllm" if arch in _VLLM_PREFERRED_ARCHITECTURES else "flax_nnx"
+    return impl
 
 
 def _validate_model_interface(model: Any) -> None:
