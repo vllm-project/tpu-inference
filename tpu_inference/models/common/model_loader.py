@@ -280,9 +280,9 @@ def get_flax_model(
         jax.jit,
         out_shardings=(embed_sharding),
     )
-    def run_get_input_embeddings(graphdef, state, *args, **kwargs):
+    def run_embed_input_ids(graphdef, state, *args, **kwargs):
         model = nnx.merge(graphdef, state)
-        return model.get_input_embeddings(*args, **kwargs)
+        return model.embed_input_ids(*args, **kwargs)
 
     # For models that want to work with EAGLE-3 speculative decoding
     @functools.partial(
@@ -300,8 +300,7 @@ def get_flax_model(
     compute_logits_fn = functools.partial(run_compute_logits, graphdef)
     get_multimodal_embeddings_fn = functools.partial(
         run_get_multimodal_embeddings, graphdef)
-    get_input_embeddings_fn = functools.partial(run_get_input_embeddings,
-                                                graphdef)
+    embed_input_ids_fn = functools.partial(run_embed_input_ids, graphdef)
     lora_manager, model = None, None
     combine_hidden_states_fn = functools.partial(combine_hidden_states,
                                                  graphdef)
@@ -313,7 +312,7 @@ def get_flax_model(
     multimodal_fns = {
         "precompile_vision_encoder_fn": precompile_vision_encoder_fn,
         "get_multimodal_embeddings_fn": get_multimodal_embeddings_fn,
-        "get_input_embeddings_fn": get_input_embeddings_fn,
+        "embed_input_ids_fn": embed_input_ids_fn,
         "get_mrope_input_positions_fn": get_mrope_input_positions_fn,
     }
 
@@ -471,14 +470,14 @@ def register_model(arch: str, model: Any) -> None:
         )
 
     # Same as `forward`, this is a dummy method to satisfy vLLM's type checks.
-    def unimplemented_get_input_embeddings(
+    def unimplemented_embed_input_ids(
         self,
         input_ids: "torch.Tensor",
         positions: "torch.Tensor",
         inputs_embeds: Optional["torch.Tensor"] = None,
     ) -> "torch.Tensor":
         raise NotImplementedError(
-            "This is a JAX model and does not implement the PyTorch get_input_embeddings method."
+            "This is a JAX model and does not implement the PyTorch embed_input_ids method."
         )
 
     # We need a custom __init__ that only calls torch.nn.Module's init,
@@ -494,7 +493,7 @@ def register_model(arch: str, model: Any) -> None:
         {
             "__init__": wrapper_init,
             "forward": unimplemented_forward,
-            "get_input_embeddings": unimplemented_get_input_embeddings,
+            "embed_input_ids": unimplemented_embed_input_ids,
             # Prevent vLLM from trying to load weights into this dummy class.
             "load_weights": lambda self, *args, **kwargs: None,
         })
