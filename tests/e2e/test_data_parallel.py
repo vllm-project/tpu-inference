@@ -229,7 +229,7 @@ def test_attention_data_parallelism(
     _check_correctness("Attention data parallelism", baseline_outputs,
                        dp_outputs)
 
-    # Different hardware gives different performance. This test runs on v6e_8    
+    # Different hardware gives different performance. This test runs on v6e_8
     _check_performance("Attention data parallelism",
                        baseline_time,
                        dp_time,
