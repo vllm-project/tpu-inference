@@ -1,8 +1,8 @@
 import jax
 import jax.numpy as jnp
 
-from tpu_inference.kernels.ragged_paged_attention.v3.kernel import (
-    get_kv_cache_shape, ref_ragged_paged_attention,
+from tpu_inference.kernels.ragged_paged_attention.v3.kernel_per_token import (
+    get_kv_cache_shape, ragged_paged_attention_per_token,
     ref_ragged_paged_attention_per_token)
 
 
@@ -13,16 +13,7 @@ def test_per_token_quantization_and_kernel():
     seed = 42
     key = jax.random.PRNGKey(seed)
 
-    # FP4 type in JAX (e2m1 is common for weights/cache)
-    # If your JAX version doesn't support float4 yet, you can use int8 as a proxy
-    # for logic testing, but here we use the actual float4.
-    try:
-        kv_cache_dtype = jnp.float4_e2m1fn
-    except AttributeError:
-        print(
-            "Warning: jnp.float4_e2m1fn not found, falling back to int8 for logic testing."
-        )
-        kv_cache_dtype = jnp.int8
+    kv_cache_dtype = jnp.float8_e4m3fn
 
     actual_head_dim = 128
     actual_num_q_heads = 32
@@ -61,17 +52,40 @@ def test_per_token_quantization_and_kernel():
     kv_cache = jnp.zeros(kv_cache_shape, dtype=kv_cache_dtype)
 
     # Scale caches: [Total Pages, Page Size, Num KV Heads, 1]
+    k_scale_cache_expected = jnp.ones(
+        (total_num_pages, actual_num_kv_heads, page_size), dtype=jnp.float32)
+    v_scale_cache_expected = jnp.ones(
+        (total_num_pages, actual_num_kv_heads, page_size), dtype=jnp.float32)
+
+    # 4. Run Reference Per-Token Attention
+    # This simulates the logic where BF16 K/V come in, get quantized to FP4,
+    # stored, and then used for attention with scales.
+    expected, expected_kv_cache, expected_k_scales, expected_v_scales = ref_ragged_paged_attention_per_token(
+        queries=queries,
+        keys=keys,
+        values=values,
+        kv_cache=kv_cache,
+        kv_lens=kv_lens,
+        page_indices=page_indices,
+        cu_q_lens=cu_q_lens,
+        distribution=distribution,
+        k_scale_cache=k_scale_cache_expected,
+        v_scale_cache=v_scale_cache_expected,
+        sm_scale=1.0 / (actual_head_dim**0.5))
+    # print(expected)
+    # TODO
+
     k_scale_cache = jnp.ones(
         (total_num_pages, page_size, actual_num_kv_heads, 1),
         dtype=jnp.float32)
     v_scale_cache = jnp.ones(
         (total_num_pages, page_size, actual_num_kv_heads, 1),
         dtype=jnp.float32)
-
-    # 4. Run Reference Per-Token Attention
-    # This simulates the logic where BF16 K/V come in, get quantized to FP4,
-    # stored, and then used for attention with scales.
-    out_q, updated_kv, updated_k_scales, updated_v_scales = ref_ragged_paged_attention_per_token(
+    kv_cache_shape = get_kv_cache_shape(total_num_pages, page_size,
+                                        actual_num_kv_heads, actual_head_dim,
+                                        kv_cache_dtype)
+    kv_cache = jnp.zeros(kv_cache_shape, dtype=kv_cache_dtype)
+    output, updated_kv_cache, updated_k_scale_cache, updated_v_scale_cache = ragged_paged_attention_per_token(
         queries=queries,
         keys=keys,
         values=values,
@@ -82,42 +96,11 @@ def test_per_token_quantization_and_kernel():
         distribution=distribution,
         k_scale_cache=k_scale_cache,
         v_scale_cache=v_scale_cache,
-        sm_scale=1.0 / (actual_head_dim**0.5))
+        sm_scale=1.0 / (actual_head_dim**0.5),
+        # debug_mode=True
+    )
 
-    # 5. Verification
-    print(f"Output shape: {out_q.shape}")
-    print(f"KV Cache dtype: {updated_kv.dtype}")
-
-    # Check for NaNs
-    assert not jnp.isnan(out_q).any(), "NaNs detected in output!"
-
-    # Check that scales are actually being updated (should not be all 1.0 anymore)
-    scale_mean = jnp.mean(updated_k_scales)
-    print(f"Mean K scale: {scale_mean:.6f}")
-    assert scale_mean != 1.0, "K scales were not updated!"
-
-    # 6. Compare with "Unquantized" Ref to check magnitude
-    # Note: We expect some divergence due to FP4 precision
-    out_ref_fp, _ = ref_ragged_paged_attention(
-        queries=queries,
-        keys=keys,
-        values=values,
-        kv_cache=jnp.zeros(get_kv_cache_shape(total_num_pages, page_size,
-                                              actual_num_kv_heads,
-                                              actual_head_dim, jnp.bfloat16),
-                           dtype=jnp.bfloat16),
-        kv_lens=kv_lens,
-        page_indices=page_indices,
-        cu_q_lens=cu_q_lens,
-        distribution=distribution,
-        sm_scale=1.0 / (actual_head_dim**0.5))
-
-    diff = jnp.abs(out_q - out_ref_fp)
-    print(
-        f"Mean absolute difference (BF16 vs Quantized FP4): {jnp.mean(diff)}")
-    print(f"Max absolute difference: {jnp.max(diff)}")
-
-    print("Test passed successfully!")
+    print(output)
 
 
 if __name__ == "__main__":

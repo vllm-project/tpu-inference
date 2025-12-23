@@ -68,8 +68,6 @@ def ref_ragged_paged_attention(
     actual_num_q_heads = queries.shape[1]
     actual_num_kv_heads = keys.shape[1]
     merged_kv = merge_kv(keys, values)
-    print(merged_kv.shape, kv_cache.shape, keys.shape, values.shape,
-          keys.dtype, values.dtype, kv_cache.dtype, merged_kv.dtype)
     assert merged_kv.shape[-3:] == kv_cache.shape[-3:]
 
     _, page_size, num_kv_heads_x2_per_kv_packing, kv_packing, head_dim = (
@@ -131,7 +129,6 @@ def ref_ragged_paged_attention(
                           q,
                           k,
                           preferred_element_type=jnp.float32)
-        # print("attn", attn, attn.shape)
         attn *= sm_scale
         if k_scale is not None:
             attn *= k_scale

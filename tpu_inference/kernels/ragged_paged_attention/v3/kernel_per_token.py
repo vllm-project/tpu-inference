@@ -35,7 +35,10 @@ def quantize_kv_per_token(key: jax.Array, value: jax.Array,
         kv_cache_quantized_dtype: The dtype to quantize the key and value tensors to.
 
     Returns:
-        Tuple[jax.Array, jax.Array]: The quantized key and value tensors, each of shape [max_num_tokens, actual_num_kv_heads, 1].
+        key_q: The quantized key tensor of shape [max_num_tokens, actual_num_kv_heads, actual_head_dim].
+        value_q: The quantized value tensor of shape [max_num_tokens, actual_num_kv_heads, actual_head_dim].
+        k_scale: The scale to quantize the key tensor by of shape [max_num_tokens, actual_num_kv_heads, 1]
+        v_scale: The scale to quantize the value tensor by of shape [max_num_tokens, actual_num_kv_heads, 1]
     """
     dtype_info = jnp.finfo(kv_cache_quantized_dtype)
     minval, maxval = float(dtype_info.min), float(dtype_info.max)
@@ -112,10 +115,12 @@ def ref_ragged_paged_attention_per_token(
     actual_num_q_heads = queries.shape[1]
     actual_num_kv_heads = keys.shape[1]
 
-    merged_k_q, merged_v_q, merged_k_scale, merged_v_scale = \
+    # k/v_q have shape [max_num_tokens, actual_num_kv_heads, head_dim]
+    # k_scale/v_scale have shape [max_num_tokens, actual_num_kv_heads, 1]
+    k_q, v_q, k_scale, v_scale = \
         quantize_kv_per_token(keys, values, kv_cache.dtype)
 
-    merged_kv = merge_kv(merged_k_q, merged_v_q)
+    merged_kv = merge_kv(k_q, v_q)
 
     assert merged_kv.shape[-3:] == kv_cache.shape[-3:]
 
@@ -162,7 +167,7 @@ def ref_ragged_paged_attention_per_token(
         gathered_k_scales = gathered_k_scales.reshape(-1, *g_k_shape[-2:])
 
         gathered_k_scales = gathered_k_scales.at[kv_len - q_len:kv_len].set(
-            merged_k_scale[q_start:q_end])
+            k_scale[q_start:q_end])
         k_scale_cache = k_scale_cache.at[indices].set(
             gathered_k_scales.reshape(g_k_shape))
 
@@ -171,7 +176,7 @@ def ref_ragged_paged_attention_per_token(
         g_v_shape = gathered_v_scales.shape
         gathered_v_scales = gathered_v_scales.reshape(-1, *g_v_shape[-2:])
         gathered_v_scales = gathered_v_scales.at[kv_len - q_len:kv_len].set(
-            merged_v_scale[q_start:q_end])
+            v_scale[q_start:q_end])
         v_scale_cache = v_scale_cache.at[indices].set(
             gathered_v_scales.reshape(g_v_shape))
 
@@ -196,32 +201,18 @@ def ref_ragged_paged_attention_per_token(
                                      actual_num_q_heads_per_kv_head,
                                      axis=1)
 
-        # if q_scale is not None:
-        #     q = q / q_scale
-        #     if jnp.issubdtype(k.dtype, jnp.floating):
-        #         dtype_info = jnp.finfo(k.dtype)
-        #         minval = float(dtype_info.min)
-        #         maxval = float(dtype_info.max)
-        #         q = jnp.clip(q, min=minval, max=maxval)
-        #     q = q.astype(k.dtype)
-        # bt, num_q_heads, head_dim = q.shape
-        # bt, num_kv_heads, head_dim = k.shape
+        # TODO: add q_scale
         attn = jnp.einsum("qhd,khd->hqk",
                           q,
                           k,
                           preferred_element_type=jnp.float32)
+        print(k_scales_active.shape, attn.shape, q.shape, k.shape)
+        # the attn output will have shape [num_q_heads, q_len, kv_len]
+        # but the k_scales_active will have shape [kv_len, num_q_heads, 1]
+        # so transpose so that the scale will have shape [num_q_heads, 1, kv_len]
         k_scales_T = jnp.transpose(k_scales_active, (1, 2, 0))
 
-        # print("attn", attn, attn.shape)
-
         attn = attn * k_scales_T * sm_scale
-        # attn *= sm_scale
-        # if k_scale is not None:
-        #     attn *= k_scale
-        # if q_scale is not None:
-        #     attn *= q_scale
-
-        # print("attnafterscale", attn, attn.shape)
 
         q_span = (kv_len - q_len) + jax.lax.broadcasted_iota(
             jnp.int32, attn.shape, 1)
@@ -238,16 +229,8 @@ def ref_ragged_paged_attention_per_token(
         v = v.astype(attn.dtype)
 
         out = jnp.einsum("hqk,khd->qhd", attn, v).astype(queries.dtype)
-        # print(attn, v, queries.dtype)
-
-        # out *= v_scales_active
-        # if v_scale is not None:
-        #     out *= v_scale
-
-        # outputs.append(out)
         result = result.at[q_start:q_end].set(out)
 
-    # result = jnp.concatenate(outputs, axis=0)
     return result, kv_cache, k_scale_cache, v_scale_cache
 
 
