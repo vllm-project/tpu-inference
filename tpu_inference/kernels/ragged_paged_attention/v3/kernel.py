@@ -68,8 +68,6 @@ def ref_ragged_paged_attention(
     actual_num_q_heads = queries.shape[1]
     actual_num_kv_heads = keys.shape[1]
     merged_kv = merge_kv(keys, values)
-    print(merged_kv.shape, kv_cache.shape, keys.shape, values.shape,
-          keys.dtype, values.dtype, kv_cache.dtype, merged_kv.dtype)
     assert merged_kv.shape[-3:] == kv_cache.shape[-3:]
 
     _, page_size, num_kv_heads_x2_per_kv_packing, kv_packing, head_dim = (
@@ -131,7 +129,6 @@ def ref_ragged_paged_attention(
                           q,
                           k,
                           preferred_element_type=jnp.float32)
-        # print("attn", attn, attn.shape)
         attn *= sm_scale
         if k_scale is not None:
             attn *= k_scale
@@ -424,9 +421,11 @@ def _ragged_paged_attention_kernel(
 
     def _fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx, *, wait=False):
         sem = sems.at[0, bkv_sem_idx]
+        # double buffered so we have a semaphore to indicate which buffer to use
         vmem_ref = bkv_x2_ref.at[bkv_sem_idx]
 
         cache_hbm_shape = kv_cache_hbm_ref.shape
+        # Squeeze from (num_pages, page_size, ...) to (tokens, ...)
         cache_hbm_ref = kv_cache_hbm_ref.reshape(
             cache_hbm_shape[0] * cache_hbm_shape[1], *cache_hbm_shape[2:])
         kv_len = kv_lens_ref[seq_idx]
@@ -467,6 +466,9 @@ def _ragged_paged_attention_kernel(
             # Fetch effective kv from kv cache.
             def loop_body(i, offset):
                 sz = jnp.minimum(page_size, kv_left_frm_cache - i * page_size)
+                # cache_hbm_ref is of shape (tokens, num_kv_heads_x2 // kv_packing, kv_packing, head_dim)
+                #
+                print(cache_hbm_ref.shape)
                 _async_copy(
                     cache_hbm_ref.at[pl.ds(
                         page_indices_ref[page_indices_offset + i] * page_size,
@@ -475,6 +477,10 @@ def _ragged_paged_attention_kernel(
                     sem,
                     wait=False,
                 )
+                print(cache_hbm_ref.at[pl.ds(
+                    page_indices_ref[page_indices_offset + i] * page_size,
+                    sz)].shape)
+                raise ValueError
                 debug_print("[RPA debug] loop_body i={}, sz={}", i, sz)
                 return offset + sz
 
@@ -525,6 +531,7 @@ def _ragged_paged_attention_kernel(
         page_indices_offset = seq_idx * pages_per_seq + kv_p_start
 
         cache_hbm_shape = updated_kv_cache_hbm_ref.shape
+        # Shape the cache back from (tokens, ..) to (num_pages, page_size, ...)
         cache_hbm_ref = updated_kv_cache_hbm_ref.reshape(
             cache_hbm_shape[0] * cache_hbm_shape[1], *cache_hbm_shape[2:])
 
