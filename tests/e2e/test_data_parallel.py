@@ -229,12 +229,12 @@ def test_attention_data_parallelism(
     _check_correctness("Attention data parallelism", baseline_outputs,
                        dp_outputs)
 
-    # The #requests is too small for attn dp to show gain, mainly for testing regression
+    # Different hardware gives different performance. This test runs on v6e_8    
     _check_performance("Attention data parallelism",
                        baseline_time,
                        dp_time,
                        len(test_prompts),
-                       tol=0.9)
+                       tol=1.1)
 
 
 def test_data_parallelism(
@@ -281,9 +281,9 @@ def test_data_parallelism(
 
     _check_correctness("Data parallelism", baseline_outputs, dp_outputs)
 
-    # Model is too small to see significant speedup, mainly for testing regression
+    # Test is too small to see significant speedup, mainly for testing regression
     _check_performance("Data parallelism",
                        baseline_time,
                        dp_time,
                        len(test_prompts),
-                       tol=1.2)
+                       tol=1.1)

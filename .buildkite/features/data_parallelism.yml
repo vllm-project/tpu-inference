@@ -23,7 +23,7 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
-          bash -c 'NEW_MODEL_DESIGN=1 python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_data_parallel.py -k test_data_parallelism_correctness'
+          bash -c 'NEW_MODEL_DESIGN=1 python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_data_parallel.py'
   - label: "Record correctness test result for data_parallelism"
     key: "record_data_parallelism_CorrectnessTest"
     depends_on: "data_parallelism_CorrectnessTest"
