@@ -309,9 +309,9 @@ class TestApplyInterleavedMrope:
         assert result.shape == (1, 1, 12)
 
     def test_typical_qwen3vl_section(self):
-        # Default Qwen3VL uses [16, 24, 24] for head_dim=128 (half=64)
+        # Default Qwen3VL dense uses [24, 20, 20] for head_dim=128 (half=64)
         freqs = jnp.ones((3, 2, 16, 64), dtype=jnp.float32)
-        result = apply_interleaved_mrope(freqs, [16, 24, 24])
+        result = apply_interleaved_mrope(freqs, [24, 20, 20])
         assert result.shape == (2, 16, 64)
 
     def test_small_section_values(self):
