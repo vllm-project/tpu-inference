@@ -230,10 +230,12 @@ class TestUtils:
     def test_generate_segment_ids_from_grid_thw(self):
         grid_thw = ((1, 4, 4), (2, 4, 4))
         segment_ids = generate_segment_ids_from_grid_thw(grid_thw)
-        # (1,4,4) -> 16 tokens (t*h*w), (2,4,4) -> 32 tokens.
+        # (1,4,4) -> 16 tokens (1 frame), (2,4,4) -> 32 tokens (2 frames).
+        # Each frame gets a unique segment ID to prevent cross-frame attention.
         assert segment_ids.shape == (48,)
-        np.testing.assert_array_equal(segment_ids[:16], np.ones(16, dtype=np.int32))
-        np.testing.assert_array_equal(segment_ids[16:], np.full(32, 2, dtype=np.int32))
+        np.testing.assert_array_equal(segment_ids[:16], np.ones(16, dtype=np.int32))      # image frame
+        np.testing.assert_array_equal(segment_ids[16:32], np.full(16, 2, dtype=np.int32)) # video frame 1
+        np.testing.assert_array_equal(segment_ids[32:], np.full(16, 3, dtype=np.int32))   # video frame 2
 
     def test_pad_segment_ids_for_attention(self):
         segment_ids = jnp.array([1, 1, 2, 2], dtype=jnp.int32)

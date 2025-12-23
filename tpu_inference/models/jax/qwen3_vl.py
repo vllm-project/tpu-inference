@@ -1,5 +1,3 @@
-# Experimental batch support!!
-
 import math
 from functools import partial
 from typing import List, NamedTuple, Optional, Tuple
@@ -68,23 +66,27 @@ def generate_segment_ids_from_grid_thw(
 ) -> jax.Array:
     """Generate segment IDs from grid dimensions for variable-length attention.
 
-    Each image/video in grid_thw gets a unique segment ID (starting from 1).
-    This ensures tokens from different images cannot attend to each other.
+    Each frame gets a unique segment ID (starting from 1). For images (t=1),
+    this means one segment ID per image. For videos (t>1), each temporal frame
+    gets its own segment ID, preventing cross-frame attention. Temporal order
+    is preserved through separate tokens that annotate frame positions.
 
     Args:
         grid_thw: Tuple of (T, H, W) for each image/video
-        spatial_merge_size: Spatial merge size from vision config
 
     Returns:
-        segment_ids: (total_tokens,) array with segment IDs per token
+        segment_ids: (total_tokens,) array with segment IDs per frame
     """
-    segment_ids_list = []
-    for idx, (t, h, w) in enumerate(grid_thw):
-        num_tokens = t * h * w
-        # Segment IDs start from 1 (0 is reserved for padding)
-        segment_ids_list.append(jnp.full(num_tokens, idx + 1, dtype=jnp.int32))
+    segments = []
+    seg_id = 1 # start for 1 to make padding 0
 
-    return jnp.concatenate(segment_ids_list, axis=0)
+    for (t, h, w) in grid_thw:
+        frame_size = h * w
+        for _ in range(t):
+            segments.append(jnp.full((frame_size,), seg_id, dtype=jnp.int32))
+            seg_id += 1
+
+    return jnp.concatenate(segments, axis=0) if segments else jnp.zeros((0,), dtype=jnp.int32)
 
 
 def pad_segment_ids_for_attention(
@@ -312,7 +314,7 @@ def apply_interleaved_mrope(
     result = freqs[0].copy()
 
     h_indices = jnp.arange(1, h * 3, 3)
-    result = result.at[..., h_indices].set(freqs[1] [..., h_indices])
+    result = result.at[..., h_indices].set(freqs[1][..., h_indices])
 
     w_indices = jnp.arange(2, w * 3, 3)  # [2, 5, 8, ..., 59]
     result = result.at[..., w_indices].set(freqs[2][..., w_indices])
@@ -347,34 +349,38 @@ def rotate_half(x: jax.Array) -> jax.Array:
     return jnp.concatenate([-x2, x1], axis=-1)
 
 
-def apply_rotary_pos_emb(
-    q: jax.Array,
-    k: jax.Array,
-    cos: jax.Array,
-    sin: jax.Array,
-    unsqueeze_dim: int = 1,
-) -> Tuple[jax.Array, jax.Array]:
-    """Apply Rotary Position Embedding to query and key tensors (for text model).
+def apply_rotary_pos_emb_thd_padded(
+    x: jax.Array,          # (T, H, padded_dim)
+    cos: jax.Array,        # (bs, T, head_dim) or (T, head_dim)
+    sin: jax.Array,        # (bs, T, head_dim) or (T, head_dim)
+    head_dim: int,         # head_dim_original
+) -> jax.Array:
+    """Match HF/PyTorch RoPE application on Q/K, but with padded head_dim support. The batch size is fake, so packing would be required?"""
+    x_dtype = x.dtype
+    x_f = x.astype(jnp.float32)
 
-    Args:
-        q: Query tensor of shape (batch, num_heads, seq_len, head_dim)
-        k: Key tensor of shape (batch, num_kv_heads, seq_len, head_dim)
-        cos: Cosine component of RoPE, shape (batch, seq_len, head_dim)
-        sin: Sine component of RoPE, shape (batch, seq_len, head_dim)
-        unsqueeze_dim: Dimension to unsqueeze cos/sin for broadcasting (default: 1)
+    # Normalize cos/sin shapes to (T, head_dim)
+    if cos.ndim == 3:
+        # (bs, T, head_dim) -> (T, head_dim) ; your pipeline is effectively bs=1
+        cos = cos[0]
+        sin = sin[0]
 
-    Returns:
-        Tuple of (q_embed, k_embed) with rotary embeddings applied
-    """
-    # Expand cos/sin to match q/k shape: (batch, 1, seq_len, head_dim)
-    cos = jnp.expand_dims(cos, axis=unsqueeze_dim)
-    sin = jnp.expand_dims(sin, axis=unsqueeze_dim)
+    cos_f = cos.astype(jnp.float32)[:, None, :]  # (T, 1, head_dim)
+    sin_f = sin.astype(jnp.float32)[:, None, :]  # (T, 1, head_dim)
 
-    # Apply rotation
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
+    # Rotate only the real (unpadded) head_dim
+    x_main = x_f[..., :head_dim]  # (T, H, head_dim)
+    x_rot = rotate_half(x_main)   # uses split-half rotate like HF
+    out_main = (x_main * cos_f) + (x_rot * sin_f)
 
-    return q_embed, k_embed
+    # Reconstruct padded output: padded dims must be zeros (equivalent to "no dims exist" in PyTorch)
+    if x.shape[-1] > head_dim:
+        out = jnp.zeros_like(x_f)
+        out = out.at[..., :head_dim].set(out_main)
+    else:
+        out = out_main
+
+    return out.astype(x_dtype)
 
 
 class Qwen3VLTextRotaryEmbedding(nnx.Module):
@@ -477,6 +483,18 @@ class Qwen3VLTextAttention(nnx.Module):
                                          self.num_heads)
         self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
 
+        mrope_section = None
+        if self.rope_scaling is not None:
+            mrope_section = self.rope_scaling.get("mrope_section", [24, 20, 20]) # should be this always for dense
+
+        self.rotary_emb = Qwen3VLTextRotaryEmbedding(
+            dim=self.head_dim_original,
+            max_position_embeddings=getattr(config, "max_position_embeddings", 128000),
+            rope_theta=self.rope_theta,
+            rope_type="default",
+            mrope_section=mrope_section,
+        )
+
         sharding_size = mesh.shape["model"]
         self.num_heads = utils.get_padded_num_heads(self.num_heads,
                                                     sharding_size)
@@ -492,9 +510,8 @@ class Qwen3VLTextAttention(nnx.Module):
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rngs,
         )
-        self.q_norm = Qwen3VLTextRMSNorm(self.head_dim,
-                                         eps=self.rms_norm_eps,
-                                         dtype=dtype)
+        self.q_norm = Qwen3VLTextRMSNorm(self.head_dim_original, eps=self.rms_norm_eps, dtype=dtype)
+
         self.k_proj = nnx.Einsum(
             "TD,DKH->TKH",
             (self.hidden_size, self.num_kv_heads, self.head_dim),
@@ -502,9 +519,8 @@ class Qwen3VLTextAttention(nnx.Module):
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rngs,
         )
-        self.k_norm = Qwen3VLTextRMSNorm(self.head_dim,
-                                         eps=self.rms_norm_eps,
-                                         dtype=dtype)
+        self.k_norm = Qwen3VLTextRMSNorm(self.head_dim_original, eps=self.rms_norm_eps, dtype=dtype)
+
         self.v_proj = nnx.Einsum(
             "TD,DKH->TKH",
             (self.hidden_size, self.num_kv_heads, self.head_dim),
@@ -537,13 +553,20 @@ class Qwen3VLTextAttention(nnx.Module):
         md = attention_metadata
         q = self.q_proj(hidden_states)
         q = self.q_norm(q)
-        q = apply_rope(q, md.input_positions, self.head_dim_original,
-                       self.rope_theta, self.rope_scaling)
 
         k = self.k_proj(hidden_states)
         k = self.k_norm(k)
-        k = apply_rope(k, md.input_positions, self.head_dim_original,
-                       self.rope_theta, self.rope_scaling)
+
+        # Ensure positions are treated as Qwen3-VL does: always 3D positions for MRoPE
+        pos = md.input_positions
+        if pos.ndim == 1:
+            # Expand vanilla positions to (3, T) for text-only
+            pos = jnp.broadcast_to(pos[None, :], (3, pos.shape[0]))
+
+        cos, sin = self.rotary_emb(pos)  # (bs, T, head_dim_original)
+
+        q = apply_rotary_pos_emb_thd_padded(q, cos, sin, self.head_dim_original)
+        k = apply_rotary_pos_emb_thd_padded(k, cos, sin, self.head_dim_original)
 
         v = self.v_proj(hidden_states)
         q_scale = k_scale = v_scale = None
