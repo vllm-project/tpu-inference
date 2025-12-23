@@ -35,7 +35,7 @@ DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS = 512
 DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS = 256
 DEFAULT_MAX_NUM_BLOCKS_PER_REQ = 16
 
-DEFAULT_DEEPSEEK_FP8_CONFIG = {
+DEFAULT_DEEPSEEK_FP4_MLP_MOE_FP8_ATTN_CONFIG = {
     "qwix": {
         "use_abstract_model":
         True,
@@ -452,7 +452,7 @@ def get_default_qwix_quantization_config(
     # NOTE (jacobplatin): we'll default to mixed FP8 (attention) + FP4 (MoE experts)
     # for DeepSeek
     if model_type == "deepseek_v3" and quant_method == "fp8":
-        config = copy.deepcopy(DEFAULT_DEEPSEEK_FP8_CONFIG)
+        config = copy.deepcopy(DEFAULT_DEEPSEEK_FP4_MLP_MOE_FP8_ATTN_CONFIG)
 
         # Dynamically fetch block size from HF config if available
         # Config fmt: 'weight_block_size': [1, 512] -> we want the 2nd dim for tile_size
@@ -462,7 +462,7 @@ def get_default_qwix_quantization_config(
         block_size = hf_quant_config["weight_block_size"]
         if isinstance(block_size, (list, tuple)) and len(block_size) == 2:
             assert block_size[
-                0] == 1, f"Expected first dimension to be 1 (unchanneled), but got {block_size[0]}!"
+                0] == 1, f"Expected first dimension to be 1 (unchanneled), but got {block_size[0]}! If you are trying to run quantized DeepSeek, we currently only support 1D-subchannel quantization and those models can be found here: https://huggingface.co/collections/jrplatin/deepseek-r1-1d-subchannel"
             tile_size = block_size[1]
             assert tile_size > 1, f"Expected tile_size > 1 for DeepSeek, but got {tile_size}"
             logger.info(
