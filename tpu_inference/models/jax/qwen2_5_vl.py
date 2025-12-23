@@ -1010,9 +1010,9 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         split_indices = np.cumsum(sizes)[:-1]
         return tuple(jnp.split(image_embeds, split_indices))
 
-    def get_multimodal_embeddings(self, image_grid_thw: tuple[tuple[int, int,
-                                                                    int], ...],
-                                  **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, image_grid_thw: tuple[tuple[int, int, int],
+                                                     ...],
+                         **kwargs: object) -> MultiModalEmbeddings:
 
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(
             image_grid_thw, **kwargs)

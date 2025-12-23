@@ -148,7 +148,7 @@ class MultiModalManager:
             # 2. A list or tuple (length: num_items) of tensors, each of shape
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
-            curr_group_outputs = self.runner.get_multimodal_embeddings_fn(
+            curr_group_outputs = self.runner.embed_multimodal_fn(
                 self.runner.state, image_grid_thw, **batched_mm_inputs)
 
             sanity_check_mm_encoder_outputs(

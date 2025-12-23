@@ -283,10 +283,9 @@ def get_flax_model(
 
     # Multi-modal support only
     # This function calculates the image token's embeddings by VIT
-    def run_get_multimodal_embeddings(graphdef, state, image_grid_thw,
-                                      **kwargs):
+    def run_embed_multimodal(graphdef, state, image_grid_thw, **kwargs):
         model = nnx.merge(graphdef, state)
-        return model.get_multimodal_embeddings(image_grid_thw, **kwargs)
+        return model.embed_multimodal(image_grid_thw, **kwargs)
 
     embed_sharding = NamedSharding(mesh, PartitionSpec(None))
     # This function will calculates the embeddings of input texts and then merge with the image embeddings
@@ -312,8 +311,7 @@ def get_flax_model(
                                            None)
     model_fn = functools.partial(run_model, graphdef)
     compute_logits_fn = functools.partial(run_compute_logits, graphdef)
-    get_multimodal_embeddings_fn = functools.partial(
-        run_get_multimodal_embeddings, graphdef)
+    embed_multimodal_fn = functools.partial(run_embed_multimodal, graphdef)
     embed_input_ids_fn = functools.partial(run_embed_input_ids, graphdef)
     lora_manager, model = None, None
     combine_hidden_states_fn = functools.partial(combine_hidden_states,
@@ -325,7 +323,7 @@ def get_flax_model(
 
     multimodal_fns = {
         "precompile_vision_encoder_fn": precompile_vision_encoder_fn,
-        "get_multimodal_embeddings_fn": get_multimodal_embeddings_fn,
+        "embed_multimodal_fn": embed_multimodal_fn,
         "embed_input_ids_fn": embed_input_ids_fn,
         "get_mrope_input_positions_fn": get_mrope_input_positions_fn,
     }

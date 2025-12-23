@@ -508,8 +508,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         multimodal_fns = multimodal_fns or {}
         self.precompile_vision_encoder_fn = multimodal_fns.get(
             "precompile_vision_encoder_fn", None)
-        self.get_multimodal_embeddings_fn = multimodal_fns.get(
-            "get_multimodal_embeddings_fn", None)
+        self.embed_multimodal_fn = multimodal_fns.get("embed_multimodal_fn",
+                                                      None)
         self.embed_input_ids_fn = multimodal_fns.get("embed_input_ids_fn",
                                                      None)
         self.get_mrope_input_positions_fn = multimodal_fns.get(
@@ -523,7 +523,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             jax.random.key(self.model_config.seed)).params()
         self.is_multimodal_model = (
             self.model_config.is_multimodal_model
-            and self.get_multimodal_embeddings_fn is not None and hasattr(
+            and self.embed_multimodal_fn is not None and hasattr(
                 self.model_config.hf_config, "architectures"
             )  #TODO: Remove Llama Guard 4 specific condition once the LG4 Vision portion is implemented
             and len(self.model_config.hf_config.architectures) >= 1

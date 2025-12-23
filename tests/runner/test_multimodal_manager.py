@@ -88,7 +88,7 @@ class TestMultiModalManager:
         # 1. ===== Setup =====
         self.runner.is_multimodal_model = True
         self.mock_get_mm_embed_fn = MagicMock()
-        self.runner.get_multimodal_embeddings_fn = self.mock_get_mm_embed_fn
+        self.runner.embed_multimodal_fn = self.mock_get_mm_embed_fn
 
         self.runner.state = MagicMock()
         # Mock scheduler output
@@ -139,7 +139,7 @@ class TestMultiModalManager:
         np.testing.assert_array_equal(np.asarray(cached_embedding),
                                       np.asarray(dummy_embedding))
 
-        # Check if get_multimodal_embeddings_fn was called with correct args
+        # Check if embed_multimodal_fn was called with correct args
         self.mock_get_mm_embed_fn.assert_called_once()
         call_args = self.mock_get_mm_embed_fn.call_args
 
@@ -169,7 +169,7 @@ class TestMultiModalManager:
         # 1. ===== Setup =====
         self.runner.is_multimodal_model = True
         self.mock_get_mm_embed_fn = MagicMock()
-        self.runner.get_multimodal_embeddings_fn = self.mock_get_mm_embed_fn
+        self.runner.embed_multimodal_fn = self.mock_get_mm_embed_fn
 
         self.runner.state = MagicMock()
         # Mock scheduler output for two requests

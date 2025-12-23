@@ -126,7 +126,7 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
         device_array = np.array(jax.devices()[:1]).reshape(1, 1, 1, -1)
         self.mock_mesh = jax.make_mesh(device_array.shape,
                                        ('data', 'attn_dp', 'expert', 'model'))
-        # Setup the runner with the model_config.is_multimodal_model set to True but get_model returning None for get_multimodal_embeddings_fn and embed_input_ids_fn.
+        # Setup the runner with the model_config.is_multimodal_model set to True but get_model returning None for embed_multimodal_fn and embed_input_ids_fn.
         with patch('jax.devices', return_value=self.mock_devices), \
              patch('jax.make_mesh', return_value=self.mock_mesh), \
              patch('jax.random.key', return_value=self.mock_rng_key), \
@@ -172,7 +172,7 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
     def _model_get_model(self):
         mock_multimodal_fns = {
             "precompile_vision_encoder_fn": None,
-            "get_multimodal_embeddings_fn": None,
+            "embed_multimodal_fn": None,
             "embed_input_ids_fn": None,
             "get_mrope_input_positions_fn": None
         }
@@ -190,8 +190,8 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
         # Precondition: make sure the model_config claims the model supports MM.
         assert self.runner.model_config.is_multimodal_model
 
-        # Precondition: load the model and returns get_multimodal_embeddings_fn as None.
-        assert self.runner.get_multimodal_embeddings_fn is None
+        # Precondition: load the model and returns embed_multimodal_fn as None.
+        assert self.runner.embed_multimodal_fn is None
 
         assert not self.runner.is_multimodal_model
 
