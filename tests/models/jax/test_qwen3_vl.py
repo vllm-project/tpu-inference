@@ -64,6 +64,24 @@ class VisionTestConfig:
     deepstack_visual_indexes: Tuple[int, ...] = (0,)
     tokens_per_second: float = 1.0
 
+    def to_dict(self) -> dict:
+        """Return dict for HuggingFace config JSON serialization."""
+        return {
+            "hidden_size": self.hidden_size,
+            "intermediate_size": self.intermediate_size,
+            "patch_size": self.patch_size,
+            "image_size": self.image_size,
+            "temporal_patch_size": self.temporal_patch_size,
+            "in_channels": self.in_channels,
+            "spatial_merge_size": self.spatial_merge_size,
+            "out_hidden_size": self.out_hidden_size,
+            "depth": self.depth,
+            "num_heads": self.num_heads,
+            "num_position_embeddings": self.num_position_embeddings,
+            "deepstack_visual_indexes": list(self.deepstack_visual_indexes),
+            "tokens_per_second": self.tokens_per_second,
+        }
+
 
 @dataclass(frozen=True)
 class TestModelConfig:
