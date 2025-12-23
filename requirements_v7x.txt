@@ -7,3 +7,4 @@ jax==0.8.1
 jaxlib==0.8.1
 jaxtyping==0.3.2
 libtpu==0.0.31
+requests
