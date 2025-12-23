@@ -116,6 +116,65 @@ class TestTPUJaxRunner:
                                       np.asarray(dummy_input_ids))
         self.mock_get_input_embed_fn.assert_not_called()
 
+    @patch('tpu_inference.runner.tpu_runner.TPUSupportedSamplingMetadata')
+    def test_prepare_inputs_hybrid_kvcache(self, mock_sampling_metadata):
+        # create hybrid kv cache config
+        # 20 layers, 10 full attn + 10 sw attn
+        self._create_mock_hybrid_kv_cache_config()
+
+        # Mock scheduler output.
+        scheduler_output = MagicMock()
+        scheduler_output.total_num_scheduled_tokens = 10
+        scheduler_output.num_scheduled_tokens = {'req1': 10}
+        scheduler_output.scheduled_spec_decode_tokens = {}
+        scheduler_output.grammar_bitmask = None
+
+        # Mock input_batch
+        self.runner.input_batch = MagicMock()
+        self.runner.input_batch.num_reqs = 1
+        self.runner.input_batch.req_ids = ['req1']
+        self.runner.input_batch.req_id_to_index = {'req1': 0}
+        self.runner.input_batch.num_computed_tokens_cpu = np.array([10])
+        self.runner.input_batch.token_ids_cpu = np.random.randint(
+            0, 1000, (8, 64), dtype=np.int32)
+
+        # Mock block tables
+        # there will be 2 block tables since there are 2 kv cache groups
+        mock_block_table = MagicMock()
+        mock_block_table.get_cpu_tensor.return_value = np.zeros(
+            self.runner.block_tables_cpu[0].shape)
+        self.runner.input_batch.block_table = [
+            mock_block_table, mock_block_table
+        ]
+        self.runner.block_tables_cpu = [
+            np.zeros(self.runner.block_tables_cpu[0].shape, dtype=np.int32),
+            np.zeros(self.runner.block_tables_cpu[0].shape, dtype=np.int32)
+        ]
+
+        mock_sampling_instance = MagicMock()
+        mock_sampling_metadata.from_input_batch.return_value = mock_sampling_instance
+
+        output = self.runner._prepare_inputs_non_dp(scheduler_output)
+        assert len(output) == 8
+        input_ids, positions, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs = output
+        # assert it will create attention metadata for each layer.
+        assert isinstance(attention_metadata, dict)
+        assert len(attention_metadata) == 20
+
+    def _create_mock_hybrid_kv_cache_config(self):
+        mock_kv_cache_config = MagicMock()
+        mock_kv_cache_group1 = MagicMock()
+        mock_kv_cache_group1.layer_names = [f'layer.{i}' for i in range(10)]
+        mock_kv_cache_group2 = MagicMock()
+        mock_kv_cache_group2.layer_names = [
+            f'layer.{i}' for i in range(10, 20)
+        ]
+        mock_kv_cache_config.kv_cache_groups = [
+            mock_kv_cache_group1, mock_kv_cache_group2
+        ]
+        self.runner.kv_cache_config = mock_kv_cache_config
+        self.runner.use_hybrid_kvcache = True
+
 
 class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
 
