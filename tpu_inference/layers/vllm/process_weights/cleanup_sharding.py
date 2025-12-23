@@ -12,10 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-
 import jax
-import jax.numpy as jnp
 import torch
 import torchax
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
@@ -23,6 +20,7 @@ from torch.nn import Parameter
 from torch.utils import _pytree as pytree
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
+from vllm import envs as vllm_envs
 from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLoRA,
@@ -36,16 +34,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from tpu_inference import envs
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
+from tpu_inference.utils import to_jax_dtype
 
 P = PartitionSpec
 
 logger = init_logger(__name__)
-
-TORCH_TO_JAX_DTYPE_MAP = {
-    torch.float32: jnp.float32,
-    torch.float16: jnp.float16,
-    torch.bfloat16: jnp.bfloat16,
-}
 
 
 def shard_model_to_tpu(model: torch.nn.Module,
@@ -103,10 +96,9 @@ def _tensor_is_in_cpu(tensor: torch.tensor) -> bool:
 
 def _convert_to_torchax_and_shard(tensor: torch.Tensor,
                                   sharding: NamedSharding) -> torch.Tensor:
-    if os.getenv("VLLM_TPU_USING_PATHWAYS", False) and isinstance(
-            tensor, torch.Tensor):
+    if vllm_envs.VLLM_TPU_USING_PATHWAYS and isinstance(tensor, torch.Tensor):
         np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
-        dtype = TORCH_TO_JAX_DTYPE_MAP.get(tensor.dtype, jnp.float32)
+        dtype = to_jax_dtype(tensor.dtype)
         return torch_view(jax.device_put(np_tensor, sharding).astype(dtype))
     else:
         if isinstance(tensor, torchax.tensor.Tensor):

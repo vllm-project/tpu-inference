@@ -52,7 +52,7 @@ def quantize_tensor_to_mxfp4_packed(
 
 
 def u8_unpack_e2m1(u8_packed_e2m1: jax.Array) -> jax.Array:
-    """Unpack e2m1 tensor packed into u8."""
+    """Unpack e2m1 tensor that was packed into u8."""
     assert u8_packed_e2m1.dtype == jnp.uint8
     e2m1 = jax.lax.bitcast_convert_type(u8_packed_e2m1, jnp.float4_e2m1fn)
     # bitcast creates one more dimension that splits 8 bits into two e2m1.
@@ -61,13 +61,25 @@ def u8_unpack_e2m1(u8_packed_e2m1: jax.Array) -> jax.Array:
 
 
 def e8m0_to_fp32(u8: jax.Array) -> jax.Array:
-    """Convert e8m0 (that was bitcasted to u8) into fp32"""
+    """Convert e8m0 (that was bitcasted to u8) into fp32."""
     assert u8.dtype == jnp.uint8
 
     e8_finfo = jnp.finfo(jnp.float8_e8m0fnu)
     exponents = u8.astype(jnp.int32) + e8_finfo.minexp
     ones = jnp.ones_like(u8, dtype=jnp.float32)
     return jnp.ldexp(ones, exponents)
+
+
+def awq_u32_unpack_u4(awq_u32_packed: jax.Array) -> jax.Array:
+    """Unpack u4 tensor that was packed into u32 in awq ordering."""
+
+    awq_u4 = jax.lax.bitcast_convert_type(awq_u32_packed, jnp.uint4)
+
+    # AWQ packs 8 uint4 into 32-bits in this order: (0, 2, 4, 6, 1, 3, 5, 7).
+    # Following list maps the order used by AWQ into an ascending order.
+    reverse_awq_order = (0, 4, 1, 5, 2, 6, 3, 7)
+    u4 = awq_u4[..., reverse_awq_order]
+    return jnp.reshape(u4, u4.shape[:-2] + (-1, ))
 
 
 def dequantize_tensor(

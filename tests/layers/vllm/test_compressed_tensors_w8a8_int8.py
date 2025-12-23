@@ -185,7 +185,7 @@ def test_row_parallel_linear(model, bias, num_devices, enable_sp,
     if bias:
         jax_row_linear.bias.data = bias_data
 
-    input_tensor = torch.rand(10, 4096, dtype=dtype) / 10
+    input_tensor = torch.rand(10, jax_row_linear.input_size, dtype=dtype) / 10
     input_tensor = input_tensor.to('cpu')
 
     jax_input_tensor = torch_view(t2j(input_tensor, use_dlpack=False))
@@ -259,7 +259,8 @@ def test_column_parallel_linear(model, bias, num_devices, enable_sp,
     if bias:
         jax_column_linear.bias.data = bias_data
 
-    input_tensor = torch.rand(10, 4096, dtype=dtype) / 10
+    input_tensor = torch.rand(10, jax_column_linear.input_size,
+                              dtype=dtype) / 10
     input_tensor = input_tensor.to('cpu')
 
     jax_input_tensor = torch_view(t2j(input_tensor, use_dlpack=False))
@@ -338,7 +339,7 @@ def test_qkv_parallel_linear(model, bias, num_devices, enable_sp, fuse_matmuls,
     if bias:
         jax_qkv_linear.bias.data = bias_data
 
-    input_tensor = torch.rand(10, 4096, dtype=dtype) / 10
+    input_tensor = torch.rand(10, jax_qkv_linear.input_size, dtype=dtype) / 10
     input_tensor = input_tensor.to('cpu')
 
     jax_input_tensor = torch_view(t2j(input_tensor, use_dlpack=False))
@@ -414,7 +415,8 @@ def test_merged_column_parallel_linear(model, bias, num_devices, fuse_matmuls,
     if bias:
         jax_merged_column_linear.bias.data = bias_data
 
-    input_tensor = torch.rand(10, 4096, dtype=dtype) / 10
+    input_tensor = torch.rand(
+        10, jax_merged_column_linear.input_size, dtype=dtype) / 10
     input_tensor = input_tensor.to('cpu')
 
     jax_input_tensor = torch_view(t2j(input_tensor, use_dlpack=False))

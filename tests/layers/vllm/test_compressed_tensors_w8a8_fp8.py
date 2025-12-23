@@ -16,6 +16,7 @@ import tempfile
 from typing import Optional
 
 import jax
+import jax.numpy as jnp
 import pytest
 import torch
 import torchax
@@ -36,12 +37,15 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsLinearMethod
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 
+from tpu_inference.layers.common.quantization import (dequantize_tensor,
+                                                      quantize_tensor)
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
-from tpu_inference.layers.vllm.quantization.common import JaxCommonLinearConfig
 from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors import \
     VllmCompressedTensorsConfig
-from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import (
-    VllmCompressedTensorsW8A8Fp8, requantize_with_max_scale)
+from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import \
+    VllmCompressedTensorsW8A8Fp8
+from tpu_inference.layers.vllm.quantization.configs import \
+    VllmQuantLinearConfig
 
 from . import utils as test_utils
 
@@ -98,8 +102,8 @@ def return_ref_and_layer_output(layer: torch.nn.Module, batch_size: int = 16):
     assert isinstance(layer, LinearBase)
     scheme = layer.scheme
     assert isinstance(scheme, VllmCompressedTensorsW8A8Fp8)
-    quant_config = scheme.jax_config
-    assert isinstance(quant_config, JaxCommonLinearConfig)
+    quant_config = scheme.linear_config
+    assert isinstance(quant_config, VllmQuantLinearConfig)
     quant_method = layer.quant_method
     assert isinstance(quant_method, CompressedTensorsLinearMethod)
     per_tensor = scheme.strategy == QuantizationStrategy.TENSOR
@@ -114,8 +118,27 @@ def return_ref_and_layer_output(layer: torch.nn.Module, batch_size: int = 16):
     # For per_tensor with merged layers, vLLM requenzites them so all merged
     # layers shared the same scale values.
     if per_tensor:
-        weight_scale, weight = requantize_with_max_scale(
-            layer.weight, layer.weight_scale, quant_config.output_sizes)
+        dtype = weight.dtype
+
+        weight = t2j(weight)
+        weight_scale = t2j(weight_scale)
+        weights = []
+        start = 0
+        # Multiple weights may have been concatenated. Loop through
+        # each weight and perform dequantization.
+        for i, output_size in enumerate(quant_config.output_sizes):
+            end = start + output_size
+            weights.append(
+                dequantize_tensor(weight[start:end], weight_scale[i]))
+            start = end
+        weight = jnp.concat(weights, axis=0)
+        weight, weight_scale = quantize_tensor(
+            jnp.float8_e4m3fn,
+            weight,
+            None,
+        )
+        weight = j2t(weight.astype(jnp.float32)).to(dtype)
+        weight_scale = j2t(weight_scale)
         if input_scale is not None:
             input_scale = input_scale.max()
 
@@ -151,8 +174,8 @@ def initialize_layer_weights(layer: torch.nn.Module):
     assert isinstance(layer, LinearBase)
     scheme = layer.scheme
     assert isinstance(scheme, VllmCompressedTensorsW8A8Fp8)
-    quant_config = scheme.jax_config
-    assert isinstance(quant_config, JaxCommonLinearConfig)
+    quant_config = scheme.linear_config
+    assert isinstance(quant_config, VllmQuantLinearConfig)
     per_tensor = scheme.strategy == QuantizationStrategy.TENSOR
 
     weight_list = []
