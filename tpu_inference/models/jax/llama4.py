@@ -961,14 +961,9 @@ class JAXLlama4VisionMLP2(nnx.Module):
                 nnx.initializers.glorot_uniform(), ("model", None)),
             rngs=rngs,
         )
-        # Dropout is not strictly nnx module, but its rate is needed
+        # Store the full Rngs stream and dropout rate
+        self.rngs = rngs
         self.dropout_rate = cfg.projector_dropout
-        self.dropout_rng = rngs.dropout
-        if self.dropout_rate > 0:
-            key = self.dropout_rng()
-            if key.dtype == jnp.uint32:
-                key = key.astype(jnp.int32)
-            self.dropout_rng = nnx.Rngs(dropout=key)
 
     def __call__(self,
                  hidden_states: jax.Array,
@@ -977,10 +972,10 @@ class JAXLlama4VisionMLP2(nnx.Module):
         hidden_states = self.fc1(hidden_states)
         hidden_states = gelu_jax(hidden_states)
 
-        # Apply dropout
+        # Apply dropout using the stored Rngs object
         if self.dropout_rate > 0 and not deterministic:
             hidden_states = nnx.Dropout(self.dropout_rate,
-                                        rngs=self.dropout_rng)(hidden_states)
+                                        rngs=self.rngs)(hidden_states)
 
         # Second linear layer with GELU activation
         hidden_states = self.fc2(hidden_states)
@@ -1040,17 +1035,10 @@ class JAXLlama4VisionModel(nnx.Module):
                                                     random_init=random_init)
 
         # 2. Embeddings (HF: nn.Parameter)
-        # 1. Get the raw JAX PRNGKey array from the RngStream's internal RngKey
-        raw_key = rngs.params()
+        # Correctly acquire a new typed key from the stream for each random initialization.
+        key_cls = rngs.params()
+        key_pos = rngs.params()
 
-        # Force raw_key to a safe integer type immediately before splitting
-        if raw_key.dtype == jnp.uint32:  # <--- New Safety Check
-            raw_key = raw_key.astype(jnp.int32)
-
-        # 2. Split the raw key three times: for class_embedding, positional_embedding, and the remaining stream
-        key_cls, key_pos, unused_key = jax.random.split(raw_key, 3)
-
-        # 3. Initialize nnx.Param using the raw jax.random function and the split keys
         self.class_embedding = nnx.Param(
             self.scale *
             jax.random.normal(key_cls, (self.hidden_size, ), dtype=dtype),

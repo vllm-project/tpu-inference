@@ -3,11 +3,9 @@ from typing import Any, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 import torch
 from flax import nnx
 from flax.typing import PRNGKey
-from jax import device_get
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
@@ -23,6 +21,8 @@ from tpu_inference.layers.jax.transformer_block import TransformerBlock
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.llama4 import (JAXLlama4MultiModalProjector,
                                              JAXLlama4VisionModel)
+from tpu_inference.models.jax.utils.multi_modal_utils import \
+    merge_multimodal_embeddings
 from tpu_inference.models.jax.utils.weight_utils import (
     get_param, model_weights_generator, print_param_info, reshape_params,
     transpose_params)
@@ -79,6 +79,11 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         self.rope_theta_text = getattr(self.text_config, "rope_theta",
                                        500000.0)
         self.rope_scaling = getattr(self.text_config, "rope_scaling")
+
+        self.image_token_id = getattr(self.model_config.hf_config,
+                                      "image_token_index")
+
+        print("This is self.image_token_id: ", self.image_token_id)
 
         if rng.dtype == jnp.uint32:
             rng = rng.astype(jnp.int32)
@@ -261,6 +266,9 @@ class LlamaGuard4ForCausalLM(nnx.Module):
     ) -> Tuple[List[KVCacheType], jax.Array]:
         is_prefill = False
 
+        if self.rng.default.key.dtype == jnp.uint32:
+            self.rng.default.key = self.rng.default.key.astype(jnp.int32)
+
         if inputs_embeds is not None:
             x_TD = inputs_embeds
         elif input_ids is not None:
@@ -289,12 +297,20 @@ class LlamaGuard4ForCausalLM(nnx.Module):
     def get_input_embeddings(
             self,
             input_ids: jax.Array,
-            multimodal_embeddings: Optional[List[jax.Array]] = None
-    ) -> jax.Array:
+            multimodal_embeddings: Optional[jax.Array] = None) -> jax.Array:
         """
-        Computes the embeddings for text input (used for input to fusion).
+        Computes the embeddings for text input and merges them with multimodal embeddings.
         """
-        return self.embedder.encode(input_ids)
+        inputs_embeds = self.embedder.encode(input_ids)
+
+        if multimodal_embeddings is not None and multimodal_embeddings.shape[
+                0] > 0:
+            # NOTE (jiries): Not sure if self.image_token_id is correct from the config (defined above in init)
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, multimodal_embeddings,
+                [self.image_token_id])
+
+        return inputs_embeds
 
     # TODO: This function definitely needs work
     def get_multimodal_embeddings(
@@ -307,17 +323,6 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         """
         Computes the final projected embeddings for multimodal input.
         """
-        # --- 1. METADATA CORRECTION MAP (The Core Fix) ---
-        # Maps unreliable scheduler metadata length (e.g., 2322) to the true mask size (e.g., 2304).
-        TRUE_MASK_SIZE_MAP = {
-            2322: 2304,
-            147: 144,
-            1307: 1296,
-            2467: 2448,
-            727: 720,
-            1597: 1584
-        }
-
         # 2. Forward Pass: JAX Array in
         pixel_values = kwargs.pop("pixel_values")
 
@@ -328,66 +333,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         projected_vision_features = self.multi_modal_projector(
             self.vision_model(pixel_values))
 
-        # 3. Batch Correction
-        batch_size_produced = projected_vision_features.shape[0]
-        num_images_required = required_lengths.shape[0]
-
-        if batch_size_produced != num_images_required:
-            # Surgically slice the batch dimension if the pre-processor stacked too many items (e.g., 17 -> 3)
-            projected_vision_features = projected_vision_features[:
-                                                                  num_images_required]
-
-        # 4. Dynamic Dimensional Adjustment (Per Image)
-        output_embeddings = []
-
-        for i in range(num_images_required):
-            # A. Determine the true target length (S_mask)
-            required_len_meta = required_lengths[i].item()
-            target_mask_len = TRUE_MASK_SIZE_MAP.get(required_len_meta,
-                                                     required_len_meta)
-
-            # B. Extract current image features and convert to NumPy
-            final_array = np.asarray(device_get(projected_vision_features[i]),
-                                     dtype=np.float32)
-            initial_tokens_produced = final_array.shape[0]
-
-            # --- Adjustment Logic (Tiling/Slicing/Padding) ---
-
-            # Case 1: TILING (For clean multiples that underproduce, e.g., 144 -> 720)
-            if target_mask_len % initial_tokens_produced == 0 and target_mask_len > initial_tokens_produced:
-                factor = target_mask_len // initial_tokens_produced
-                final_array = np.repeat(final_array, factor, axis=0)
-
-            # Case 2/3: FINAL SURGICAL SLICE/PAD (Catch-all for all remaining discrepancies)
-            final_output_size = final_array.shape[0]
-
-            if final_output_size != target_mask_len:
-                if final_output_size > target_mask_len:
-                    # Slice down the excess (e.g., 727 -> 720 or 11520 -> 2304)
-                    final_array = final_array[:target_mask_len, :]
-
-                elif final_output_size < target_mask_len:
-                    # Pad the deficit (e.g., 144 -> 720 if Case 1 was skipped)
-                    padding_needed = target_mask_len - final_output_size
-                    padding_config = ((0, padding_needed), (0, 0))
-                    final_array = np.pad(final_array,
-                                         padding_config,
-                                         mode='constant',
-                                         constant_values=0.0)
-
-            jax.debug.print(
-                "\nMM_DEBUG - Image {i}: Metadata={m}, Target Mask={t}, Produced={p}, Final={f}",
-                i=i,
-                m=required_len_meta,
-                t=target_mask_len,
-                p=initial_tokens_produced,
-                f=final_array.shape[0])
-
-            # 5. Final Conversion: NumPy -> PyTorch Tensor
-            output_embeddings.append(
-                torch.from_numpy(final_array).to(torch.bfloat16))
-
-        return tuple(output_embeddings)
+        return projected_vision_features
 
 
 class LlamaGuard4WeightLoader:

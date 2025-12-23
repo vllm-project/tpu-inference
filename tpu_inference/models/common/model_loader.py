@@ -104,6 +104,12 @@ def _get_nnx_model(
                                             rng,
                                             mesh,
                                             apply_to_abstract_model=False)
+
+        for i, (path, value) in enumerate(nnx.state(model).flat_state()):
+            if i == 991:
+                print(f"DEBUG: model.states[0][991] path is: {path}")
+                print(f"DEBUG: model.states[0][991] value is: {value}")
+
         return model
 
     if vllm_config.load_config.load_format == "dummy":
@@ -197,33 +203,6 @@ def _get_nnx_model(
                 del vllm_config.model_config.model_weights_iterator
             else:
                 model.load_weights(rng)
-
-            # Definitive patch for concretizing abstract RNG state after eval_shape.
-            graphdef, state = nnx.split(model)
-            flat_state = state.flat_state()
-            master_rng_key = rng
-
-            for i, (path, value) in enumerate(flat_state):
-                # The `value` is the leaf, which will be a ShapeDtypeStruct for abstract parts.
-                if isinstance(value, jax.ShapeDtypeStruct):
-                    # Concretize RNG counters
-                    if path[-1] == 'count' and 'rng' in path[-2]:
-                        logger.info(
-                            f"Concretizing abstract RNG counter at: {path}")
-                        flat_state._values[i] = jax.numpy.array(
-                            0, dtype=jax.numpy.int32)
-                    # Concretize RNG keys
-                    elif path[-1] == 'key' and 'rng' in path[-2]:
-                        logger.info(
-                            f"Concretizing abstract RNG key at: {path}")
-                        master_rng_key, new_concrete_key = jax.random.split(
-                            master_rng_key)
-                        flat_state._values[i] = new_concrete_key
-
-            # Reconstruct state from the modified leaves and create a new model
-            new_state = flat_state.to_nested_state()
-            model = nnx.merge(graphdef, new_state)
-
             jit_model = create_jit_model(
                 model,
                 use_qwix_on_abstract_model=should_apply_qwix_on_abstract_model)
