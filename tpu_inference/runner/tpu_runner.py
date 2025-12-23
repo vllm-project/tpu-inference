@@ -282,6 +282,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self._substitute_placeholder_token_fn = _substitute_placeholder_token
         self.execute_model_state: ExecuteModelState | None = None
 
+        self.kv_caches: list[jax.Array] = []
+        self.layer_name_to_kvcache_index: dict[str, int] = {}
+
     def _init_random(self):
         if self.model_config.seed is None:
             self.model_config.seed = 0
@@ -545,7 +548,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.topology_order_id = topology_order_id
         self.kv_cache_config = kv_cache_config
         self.use_hybrid_kvcache = len(kv_cache_config.kv_cache_groups) > 1
-        self.kv_caches = []
         self.kv_cache_manager.initialize_kv_cache(kv_cache_config)
         if has_kv_transfer_group():
             get_kv_transfer_group().register_runner(self)

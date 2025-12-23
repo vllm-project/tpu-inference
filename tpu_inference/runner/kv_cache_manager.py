@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import functools
-from typing import TYPE_CHECKING, Dict, List
+from typing import TYPE_CHECKING, List
 
 import jax
 import jax.numpy as jnp
@@ -212,7 +212,6 @@ class KVCacheManager:
         # uniform page size.
         representative_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
         page_size_bytes = representative_spec.page_size_bytes
-        self.runner.layer_name_to_kvcache_index: Dict[str, int] = {}
         kv_caches = self.runner.kv_caches
         num_blocks_list = []
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
