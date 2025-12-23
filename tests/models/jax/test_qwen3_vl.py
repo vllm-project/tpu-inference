@@ -559,8 +559,6 @@ class TestMRoPEPositions:
             video_token_id=hf_config.video_token_id,
             vision_start_token_id=hf_config.vision_start_token_id,
             spatial_merge_size=hf_config.vision_config.spatial_merge_size,
-            second_per_grid_ts=[2.0],  # make temporal positions clearly differ
-            tokens_per_second=1.0,
         )
         assert positions.shape == (3, len(tokens))
 
