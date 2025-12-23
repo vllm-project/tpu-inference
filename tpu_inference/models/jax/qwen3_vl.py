@@ -160,8 +160,6 @@ def get_mrope_input_positions(
         video_token_id: Token ID for video placeholders
         vision_start_token_id: Token ID marking start of vision tokens
         spatial_merge_size: Spatial merge size from vision config
-        second_per_grid_ts: Optional list of temporal spacing for videos
-        tokens_per_second: Tokens per second for video temporal positions
 
     Returns:
         llm_positions: (3, seq_len) position IDs for [T, H, W]
@@ -186,6 +184,15 @@ def get_mrope_input_positions(
         raise ValueError("image_grid_thw must be provided when image tokens are present.")
     if video_nums > 0 and not video_grid_thw:
         raise ValueError("video_grid_thw must be provided when video tokens are present.")
+    # Validate grid counts match token counts
+    if image_grid_thw and len(image_grid_thw) < image_nums:
+        raise ValueError(
+            f"image_grid_thw requires {image_nums} entries but found {len(image_grid_thw)}"
+        )
+    if video_grid_thw and len(video_grid_thw) < video_nums:
+        raise ValueError(
+            f"video_grid_thw requires {video_nums} entries but found {len(video_grid_thw)}"
+        )
     llm_pos_ids_list = []
     st = 0
     remain_images, remain_videos = image_nums, video_nums
@@ -285,16 +292,30 @@ def apply_interleaved_mrope(
     :param mrope_section: How MRoPE would be placed.
     :return: A final interleaved MRoPE frequency. (bs, seq, 64)
     """
+    # Validate mrope_section
+    if len(mrope_section) != 3:
+        raise ValueError(
+            f"mrope_section must have length 3, got {len(mrope_section)}"
+        )
+    if any(s < 0 for s in mrope_section):
+        raise ValueError(
+            f"mrope_section values must be non-negative, got {mrope_section}"
+        )
+    head_dim_half = freqs.shape[-1]
+    if sum(mrope_section) != head_dim_half:
+        raise ValueError(
+            f"mrope_section must sum to {head_dim_half}, got {sum(mrope_section)}"
+        )
 
     t, h, w = mrope_section # 24, 20, 20
 
     result = freqs[0].copy()
 
     h_indices = jnp.arange(1, h * 3, 3)
-    result = result.at[..., h_indices].set(freqs[1, ..., h_indices])
+    result = result.at[..., h_indices].set(freqs[1] [..., h_indices])
 
     w_indices = jnp.arange(2, w * 3, 3)  # [2, 5, 8, ..., 59]
-    result = result.at[..., w_indices].set(freqs[2, ..., w_indices])
+    result = result.at[..., w_indices].set(freqs[2][..., w_indices])
 
     return result
 
@@ -1716,7 +1737,7 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         hf_config=None,
         image_grid_thw=None,
         video_grid_thw=None,
-        second_per_grid_ts: Optional[List[float]] = None,
+        # TODO: check if second_per_grid_ts is required for multimodal
         context_len: int = 0,
         seq_len: Optional[int] = None,
         audio_feature_lengths=None,
@@ -1729,21 +1750,20 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
 
         Args:
             input_tokens: List of token IDs for the sequence
+            hf_config: Optional HF config (defaults to self.config)
             image_grid_thw: List of (T, H, W) tuples for each image
             video_grid_thw: List of (T, H, W) tuples for each video
-            second_per_grid_ts: Optional list of temporal spacing for videos
+            context_len: Context length for slicing positions
+            seq_len: Sequence length for slicing positions
 
         Returns:
-            llm_positions: (3, seq_len) position IDs for [T, H, W]
+            llm_positions: (3, sliced_seq_len) position IDs for [T, H, W]
             mrope_position_delta: Delta for rope calculation
         """
         del audio_feature_lengths, use_audio_in_video
 
         if hf_config is None:
             hf_config = self.config
-
-        tokens_per_second = getattr(getattr(hf_config, "vision_config", None),
-                                    "tokens_per_second", 1.0)
 
         llm_positions, mrope_position_delta = get_mrope_input_positions(
             input_tokens=input_tokens,
@@ -1754,8 +1774,6 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
             vision_start_token_id=getattr(hf_config, "vision_start_token_id",
                                           self.vision_start_token_id),
             spatial_merge_size=hf_config.vision_config.spatial_merge_size,
-            second_per_grid_ts=second_per_grid_ts,
-            tokens_per_second=tokens_per_second,
         )
 
         llm_positions = llm_positions[:, context_len:seq_len]

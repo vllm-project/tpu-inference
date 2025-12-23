@@ -766,7 +766,6 @@ class TestServingIntegration:
             hf_config=model.config,
             image_grid_thw=[grid],
             video_grid_thw=None,
-            second_per_grid_ts=None,
             context_len=2,
             seq_len=len(tokens) - 1,
             audio_feature_lengths=[0],
@@ -832,7 +831,6 @@ class TestServingIntegration:
             hf_config=model.config,
             image_grid_thw=[img_grid],
             video_grid_thw=[vid_grid],
-            second_per_grid_ts=[1.0],
             context_len=0,
             seq_len=len(input_ids_list),
         )
