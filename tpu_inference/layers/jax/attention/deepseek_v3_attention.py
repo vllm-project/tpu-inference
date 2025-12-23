@@ -30,6 +30,7 @@ from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
 from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import \
     get_tuned_block_sizes
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import RMSNorm
@@ -310,9 +311,8 @@ class MLA(nnx.Module):
                     # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
                     k_scale = self._k_scale
                     v_scale = self._v_scale
-                    k_SNH, v_SNH = utils.quantize_kv(
-                        k_SNH, v_SNH, self.kv_cache_quantized_dtype, k_scale,
-                        v_scale)
+                    k_SNH, v_SNH = quantize_kv(self.kv_cache_quantized_dtype,
+                                               k_SNH, v_SNH, k_scale, v_scale)
 
                 new_kv_cache, outputs_TNH = self.attention(
                     is_prefill,
