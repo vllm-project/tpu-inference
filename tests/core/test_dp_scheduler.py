@@ -116,12 +116,12 @@ class TestDPScheduler:
 
                 # Mock the queues - need to mock the .get() method to return the value
                 scheduler.input_queues = [MagicMock(), MagicMock()]
-                
+
                 mock_queue_0 = MagicMock()
                 mock_queue_0.get.return_value = 30
                 mock_queue_1 = MagicMock()
                 mock_queue_1.get.return_value = 15
-                
+
                 scheduler.output_queues = {
                     (0, "get_token_count"): mock_queue_0,
                     (1, "get_token_count"): mock_queue_1,
@@ -157,7 +157,7 @@ class TestDPScheduler:
 
                 # Mock the queues with tuple keys (rank, command)
                 scheduler.input_queues = [MagicMock(), MagicMock()]
-                
+
                 # Create proper mocks for queue.get() calls
                 mock_queue_get_token_0 = MagicMock()
                 mock_queue_get_token_0.get.return_value = 100
@@ -167,7 +167,7 @@ class TestDPScheduler:
                 mock_queue_computed_0.get.return_value = ([], 10)
                 mock_queue_computed_1 = MagicMock()
                 mock_queue_computed_1.get.return_value = ([], 25)
-                
+
                 scheduler.output_queues = {
                     (0, "get_token_count"): mock_queue_get_token_0,
                     (1, "get_token_count"): mock_queue_get_token_1,
@@ -199,7 +199,7 @@ class TestDPScheduler:
 
                 # Mock the queues with tuple keys (rank, command)
                 scheduler.input_queues = [MagicMock(), MagicMock()]
-                
+
                 # Create proper mocks for queue.get() calls
                 mock_queue_get_token_0 = MagicMock()
                 mock_queue_get_token_0.get.return_value = 100
@@ -209,7 +209,7 @@ class TestDPScheduler:
                 mock_queue_computed_0.get.return_value = ([], 0)
                 mock_queue_computed_1 = MagicMock()
                 mock_queue_computed_1.get.return_value = ([], 0)
-                
+
                 scheduler.output_queues = {
                     (0, "get_token_count"): mock_queue_get_token_0,
                     (1, "get_token_count"): mock_queue_get_token_1,
@@ -261,7 +261,8 @@ class TestDPScheduler:
                     (SchedulerCommand.ADD_REQUEST, mock_request))
 
                 # Verify we waited for completion
-                scheduler.output_queues[(1, "add_request")].get.assert_called_once()
+                scheduler.output_queues[(
+                    1, "add_request")].get.assert_called_once()
 
     def test_schedule_sends_commands_and_combines_output(
             self, mock_vllm_config, mock_kv_cache_config,
@@ -323,7 +324,7 @@ class TestDPScheduler:
                 mock_queue_0.get.return_value = mock_output_0
                 mock_queue_1 = MagicMock()
                 mock_queue_1.get.return_value = mock_output_1
-                
+
                 scheduler.output_queues = {
                     (0, "schedule"): mock_queue_0,
                     (1, "schedule"): mock_queue_1,
@@ -442,13 +443,13 @@ class TestDPScheduler:
                 )
 
                 scheduler.input_queues = [MagicMock(), MagicMock()]
-                
+
                 # Create proper mocks for queue.get() calls
                 mock_queue_0 = MagicMock()
                 mock_queue_0.get.return_value = 5
                 mock_queue_1 = MagicMock()
                 mock_queue_1.get.return_value = 3
-                
+
                 scheduler.output_queues = {
                     (0, "get_num_unfinished_requests"): mock_queue_0,
                     (1, "get_num_unfinished_requests"): mock_queue_1,
@@ -480,13 +481,13 @@ class TestDPScheduler:
                 )
 
                 scheduler.input_queues = [MagicMock(), MagicMock()]
-                
+
                 # Create proper mocks for queue.get() calls
                 mock_queue_0 = MagicMock()
                 mock_queue_0.get.return_value = False
                 mock_queue_1 = MagicMock()
                 mock_queue_1.get.return_value = True
-                
+
                 scheduler.output_queues = {
                     (0, "has_finished_requests"): mock_queue_0,
                     (1, "has_finished_requests"): mock_queue_1,
@@ -517,13 +518,13 @@ class TestDPScheduler:
                 )
 
                 scheduler.input_queues = [MagicMock(), MagicMock()]
-                
+
                 # Create proper mocks for queue.get() calls
                 mock_queue_0 = MagicMock()
                 mock_queue_0.get.return_value = (2, 1)
                 mock_queue_1 = MagicMock()
                 mock_queue_1.get.return_value = (1, 3)
-                
+
                 scheduler.output_queues = {
                     (0, "get_request_counts"): mock_queue_0,
                     (1, "get_request_counts"): mock_queue_1,
@@ -555,13 +556,13 @@ class TestDPScheduler:
                 )
 
                 scheduler.input_queues = [MagicMock(), MagicMock()]
-                
+
                 # Create proper mocks for queue.get() calls
                 mock_queue_0 = MagicMock()
                 mock_queue_0.get.return_value = True
                 mock_queue_1 = MagicMock()
                 mock_queue_1.get.return_value = True
-                
+
                 scheduler.output_queues = {
                     (0, "reset_prefix_cache"): mock_queue_0,
                     (1, "reset_prefix_cache"): mock_queue_1,
@@ -633,7 +634,7 @@ class TestDPScheduler:
                 mock_queue_0.get.return_value = stats_0
                 mock_queue_1 = MagicMock()
                 mock_queue_1.get.return_value = stats_1
-                
+
                 scheduler.output_queues = {
                     (0, "make_stats"): mock_queue_0,
                     (1, "make_stats"): mock_queue_1,
