@@ -124,7 +124,7 @@ steps:
      commands:
        - |
            .buildkite/scripts/run_in_docker.sh \
-             bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py'         
+             bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py'
 
    - label: "TPU7x JAX unit tests"
      key: tpu7x_test_7
@@ -231,7 +231,7 @@ steps:
      commands:
        - |
          if [[ "$$NIGHTLY" == "1" ]]; then
-           .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh -m deepseek-ai/DeepSeek-R1-0528 --use-dummy-weights
+           .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh -m jrplatin/DeepSeek-R1-1D-Subchannel-256  --use-dummy-weights
          else
            echo "Skipping: NIGHTLY environment variable not set"
            exit 0

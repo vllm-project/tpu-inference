@@ -832,7 +832,7 @@ class TestGetDefaultQwixQuantizationConfig(unittest.TestCase):
         # Patch the constants in the module where the function resides
         self.patchers = [
             patch(
-                "tpu_inference.models.jax.utils.qwix.qwix_utils.DEFAULT_DEEPSEEK_FP8_CONFIG",
+                "tpu_inference.models.jax.utils.qwix.qwix_utils.DEFAULT_DEEPSEEK_FP4_MLP_MOE_FP8_ATTN_CONFIG",
                 self.mock_deepseek_config),
             patch(
                 "tpu_inference.models.jax.utils.qwix.qwix_utils.DEFAULT_LLAMA4_FP8_CONFIG",

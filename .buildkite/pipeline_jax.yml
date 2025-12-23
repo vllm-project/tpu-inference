@@ -198,24 +198,25 @@ steps:
            exit 0
          fi
 
-   - label: "E2E MLperf tests for DeepSeek-R1 (no accuracy, 12-decoder layers only)"
-     key: test_12
-     soft_fail: true
-     env:
-       NEW_MODEL_DESIGN: "1"
-       USE_V6E8_QUEUE: "True"
-       SKIP_ACCURACY_TESTS: "True"
-       VLLM_MLA_DISABLE: "1"
-     agents:
-       queue: tpu_v6e_8_queue
-     commands:
-       - |
-         if [[ "$$NIGHTLY" == "1" ]]; then
-           .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh -m deepseek-ai/DeepSeek-R1-0528 --use-dummy-weights
-         else
-           echo "Skipping: NIGHTLY environment variable not set"
-           exit 0
-         fi
+  # TODO (jacobplatin): re-enable this after b/467105149 is fixed
+  #  - label: "E2E MLperf tests for DeepSeek-R1 (no accuracy, 12-decoder layers only)"
+  #    key: test_12
+  #    soft_fail: true
+  #    env:
+  #      NEW_MODEL_DESIGN: "1"
+  #      USE_V6E8_QUEUE: "True"
+  #      SKIP_ACCURACY_TESTS: "True"
+  #      VLLM_MLA_DISABLE: "1"
+  #    agents:
+  #      queue: tpu_v6e_8_queue
+  #    commands:
+  #      - |
+  #        if [[ "$$NIGHTLY" == "1" ]]; then
+  #          .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh -m jrplatin/DeepSeek-R1-1D-Subchannel-256  --use-dummy-weights
+  #        else
+  #          echo "Skipping: NIGHTLY environment variable not set"
+  #          exit 0
+  #        fi
 
    - label: "lora e2e tests for JAX + vLLM models multi chips"
      key: test_13
@@ -282,13 +283,15 @@ steps:
        - test_9
        - test_10
        - test_11
-       - test_12
+      # TODO (jacobplatin): re-enable this after b/467105149 is fixed
+      #  - test_12
        - test_13
        - test_15
        - test_16
      agents:
        queue: cpu
+      # TODO (jacobplatin): re-enable test12 this after b/467105149 is fixed
      commands:
        - |
          .buildkite/scripts/check_results.sh \
-           "TPU JAX Tests Failed" test_0 test_1 test_2 test_3 test_4 test_5 test_6 test_7 test_8 test_9 test_10 test_11 test_12 test_13 test_15 test_16
+           "TPU JAX Tests Failed" test_0 test_1 test_2 test_3 test_4 test_5 test_6 test_7 test_8 test_9 test_10 test_11 test_13 test_15 test_16
