@@ -827,7 +827,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         sharding = None
         if self.dp_size > 1:
             sharding = NamedSharding(self.mesh,
-                                     PartitionSpec(ShardingAxisName.ATTN_DATA))
+                                     PartitionSpec(ShardingAxisName.MLP_DATA))
 
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
             self.mesh, self.input_batch, padded_num_reqs, sharding=sharding)
@@ -1390,7 +1390,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.mesh,
             self.input_batch,
             padded_num_reqs,
-            sharding=data_parallel_attn_sharding,
+            sharding=NamedSharding(self.mesh,
+                                   PartitionSpec(ShardingAxisName.MLP_DATA)),
         )
         if self.uses_mrope:
             positions = mrope_positions

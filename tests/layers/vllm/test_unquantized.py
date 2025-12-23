@@ -118,12 +118,16 @@ def test_loading_model(model, mesh):
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("mesh", [
-    test_utils.get_spmd_mesh(1),
-    test_utils.get_spmd_mesh(jax.local_device_count())
-])
+@pytest.mark.parametrize("num_devices", [1, jax.local_device_count()])
 @pytest.mark.parametrize("enable_sp", [False, True])
-def test_row_parallel_linear(model, bias, mesh, enable_sp):
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+def test_row_parallel_linear(model, bias, num_devices, enable_sp,
+                             enable_attn_dp):
+    # Skip if enable_attn_dp is True but we don't have enough devices
+    if enable_attn_dp and num_devices < 2:
+        pytest.skip("enable_attn_dp requires at least 2 devices")
+
+    mesh = test_utils.get_spmd_mesh(num_devices, enable_attn_dp)
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
@@ -191,12 +195,16 @@ def test_row_parallel_linear(model, bias, mesh, enable_sp):
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("mesh", [
-    test_utils.get_spmd_mesh(1),
-    test_utils.get_spmd_mesh(jax.local_device_count())
-])
+@pytest.mark.parametrize("num_devices", [1, jax.local_device_count()])
 @pytest.mark.parametrize("enable_sp", [False, True])
-def test_column_parallel_linear(model, bias, mesh, enable_sp):
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+def test_column_parallel_linear(model, bias, num_devices, enable_sp,
+                                enable_attn_dp):
+    # Skip if enable_attn_dp is True but we don't have enough devices
+    if enable_attn_dp and num_devices < 2:
+        pytest.skip("enable_attn_dp requires at least 2 devices")
+
+    mesh = test_utils.get_spmd_mesh(num_devices, enable_attn_dp)
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
@@ -263,13 +271,17 @@ def test_column_parallel_linear(model, bias, mesh, enable_sp):
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("mesh", [
-    test_utils.get_spmd_mesh(1),
-    test_utils.get_spmd_mesh(jax.local_device_count())
-])
+@pytest.mark.parametrize("num_devices", [1, jax.local_device_count()])
 @pytest.mark.parametrize("enable_sp", [False, True])
 @pytest.mark.parametrize("fuse_matmuls", [False, True])
-def test_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+def test_qkv_parallel_linear(model, bias, num_devices, enable_sp, fuse_matmuls,
+                             enable_attn_dp):
+    # Skip if enable_attn_dp is True but we don't have enough devices
+    if enable_attn_dp and num_devices < 2:
+        pytest.skip("enable_attn_dp requires at least 2 devices")
+
+    mesh = test_utils.get_spmd_mesh(num_devices, enable_attn_dp)
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
@@ -341,14 +353,17 @@ def test_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("mesh", [
-    test_utils.get_spmd_mesh(1),
-    test_utils.get_spmd_mesh(jax.local_device_count())
-])
+@pytest.mark.parametrize("num_devices", [1, jax.local_device_count()])
 @pytest.mark.parametrize("fuse_matmuls", [False, True])
 @pytest.mark.parametrize("enable_sp", [False, True])
-def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
-                                       enable_sp):
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+def test_merged_column_parallel_linear(model, bias, num_devices, fuse_matmuls,
+                                       enable_sp, enable_attn_dp):
+    # Skip if enable_attn_dp is True but we don't have enough devices
+    if enable_attn_dp and num_devices < 2:
+        pytest.skip("enable_attn_dp requires at least 2 devices")
+
+    mesh = test_utils.get_spmd_mesh(num_devices, enable_attn_dp)
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
@@ -418,10 +433,7 @@ def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
 
 
 @pytest.mark.parametrize("use_ep", [True, False])
-@pytest.mark.parametrize("mesh", [
-    test_utils.get_spmd_mesh(1),
-    test_utils.get_spmd_mesh(jax.local_device_count())
-])
+@pytest.mark.parametrize("num_devices", [1, jax.local_device_count()])
 @pytest.mark.parametrize("num_tokens", [8])
 @pytest.mark.parametrize("intermediate_size", [1024, 2048])
 @pytest.mark.parametrize("hidden_size", [128, 512])
@@ -429,8 +441,15 @@ def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
 @pytest.mark.parametrize("topk", [2])
 @pytest.mark.parametrize("has_bias", [False, True])
 @pytest.mark.parametrize("activation", ["silu", "swigluoai"])
-def test_fused_moe(use_ep, mesh, num_tokens, intermediate_size, hidden_size,
-                   num_experts, topk, has_bias, activation):
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+def test_fused_moe(use_ep, num_devices, num_tokens, intermediate_size,
+                   hidden_size, num_experts, topk, has_bias, activation,
+                   enable_attn_dp):
+    # Skip if enable_attn_dp is True but we don't have enough devices
+    if enable_attn_dp and num_devices < 2:
+        pytest.skip("enable_attn_dp requires at least 2 devices")
+
+    mesh = test_utils.get_spmd_mesh(num_devices, enable_attn_dp)
 
     torch.manual_seed(42)
     dtype = torch.bfloat16
@@ -502,16 +521,27 @@ def test_fused_moe(use_ep, mesh, num_tokens, intermediate_size, hidden_size,
                                    rtol=1e-1)
 
 
-@pytest.mark.parametrize("mesh",
-                         [test_utils.get_spmd_mesh(jax.local_device_count())])
+@pytest.mark.parametrize("num_devices", [jax.local_device_count()])
 @pytest.mark.parametrize("num_tokens", [128, 512])
 @pytest.mark.parametrize("intermediate_size", [512])
 @pytest.mark.parametrize("hidden_size", [512])
 @pytest.mark.parametrize("num_experts", [32])
 @pytest.mark.parametrize("topk", [8])
 @pytest.mark.parametrize("has_bias", [False, True])
-def test_fused_moe_use_kernel(mesh, num_tokens, intermediate_size, hidden_size,
-                              num_experts, topk, has_bias):
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+def test_fused_moe_use_kernel(num_devices, num_tokens, intermediate_size,
+                              hidden_size, num_experts, topk, has_bias,
+                              enable_attn_dp):
+    # Skip if enable_attn_dp is True but we don't have enough devices
+    if enable_attn_dp and num_devices < 2:
+        pytest.skip("enable_attn_dp requires at least 2 devices")
+
+    # Skip attn_dp tests for fused_moe_use_kernel since the kernel only supports 2D mesh
+    if enable_attn_dp:
+        pytest.skip(
+            "fused_moe kernel does not support attn_dp (requires 2D mesh)")
+
+    mesh = test_utils.get_spmd_mesh(num_devices, enable_attn_dp)
 
     # TODO(Qiliang Cui): Remove when issue is resolved.
     if not jtu.is_device_tpu_at_least(version=7):

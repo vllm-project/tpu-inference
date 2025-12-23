@@ -3,7 +3,7 @@ import time
 from collections import defaultdict
 from collections.abc import Sequence
 from functools import wraps
-from typing import Any, Callable, List, Tuple
+from typing import Any, Callable, List, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -295,6 +295,36 @@ def get_jax_dtype_from_str_dtype(str_dtype: str) -> jnp.dtype:
     """
     # TODO(kyuyeunk): Replace all reference of this function into TpuDtype.
     return to_jax_dtype(str_dtype)
+
+
+def get_mesh_shape_product(
+    mesh: Mesh,
+    axes: Union[str, list[str], None],
+) -> int:
+    """
+    Get the product of mesh dimensions for one or more axes.
+
+    Examples:
+        # Single axis (defaults to 1 if not present)
+        get_mesh_shape_product(mesh, "model")
+
+        # Multiple axes - computes product of their sizes
+        get_mesh_shape_product(mesh, ["model", "attn_dp"])
+
+        # None means no sharding on this dimension
+        get_mesh_shape_product(mesh, None)  # returns 1
+    """
+    if axes is None:
+        return 1
+
+    if isinstance(axes, str):
+        axes = [axes]
+
+    product = 1
+    for axis in axes:
+        product *= mesh.shape.get(axis, 1)
+
+    return product
 
 
 def time_function(func):

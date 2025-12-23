@@ -40,7 +40,7 @@ class ShardingAxisNameBase:
     MLP_TENSOR = ('attn_dp', 'model', 'expert')
     MOE_TENSOR = ('attn_dp', 'model')
     EXPERT = ('attn_dp', 'expert', 'model')
-    VOCAB = ('expert', 'model')
+    VOCAB = ('expert', 'attn_dp', 'model')
 
 
 class ShardingAxisName2D:
@@ -141,6 +141,11 @@ class ShardingConfigManager:
             kv_dtype = utils.get_jax_dtype_from_str_dtype(
                 cache_dtype) or jnp.bfloat16
             packing = 4 // jnp.dtype(kv_dtype).itemsize
+
+            # The default head dim is 128 but 64 is also supported as a special case.
+            if vllm_config.model_config.get_head_size() == 64:
+                packing *= 2
+
             # When num_kv_heads * 2 / packing < TP, tensor parallelism would
             # duplicate KV heads across devices, wasting kv cache memory.
             # Use attention DP instead to reduce per-device num_kv_heads and
@@ -186,8 +191,8 @@ class ShardingConfigManager:
         if sharding_strategy.attention_data_parallelism > 1:
             if not envs.NEW_MODEL_DESIGN:
                 raise ValueError(
-                    "Must run Attention DP with NEW_MODEL_DESIGN enabled. Please set the "
-                    "NEW_MODEL_DESIGN=True.")
+                    "Must run Attention DP with NEW_MODEL_DESIGN enabled. Please set "
+                    "NEW_MODEL_DESIGN=True")
 
     @property
     def total_dp_size(self) -> int:

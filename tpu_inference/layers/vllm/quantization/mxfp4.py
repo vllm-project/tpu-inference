@@ -44,12 +44,14 @@ from tpu_inference.layers.common.quant_methods import (MXFP4,
                                                        get_tpu_quant_method)
 from tpu_inference.layers.common.quantization import (
     dequantize_tensor_from_mxfp4_packed, quantize_tensor)
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.fused_moe import fused_moe_func
 from tpu_inference.layers.vllm.linear_common import \
     reorder_concatenated_tensor_for_sharding
 from tpu_inference.layers.vllm.quantization.common import JaxCommonConfig
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedLinearMethod
+from tpu_inference.utils import get_mesh_shape_product
 
 REQUANTIZED_BLOCK_SIZE = 512
 
@@ -256,7 +258,8 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
                 w2_bias = jnp.expand_dims(w2_bias, 1)
 
                 if layer.use_ep:
-                    ep_sharding = NamedSharding(self.mesh, P("model"))
+                    ep_sharding = NamedSharding(self.mesh,
+                                                P(ShardingAxisName.EXPERT))
 
                     w13_weight = jax.lax.with_sharding_constraint(
                         w13_weight, ep_sharding)
@@ -275,7 +278,8 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
 
                 else:
                     output_sizes = [intermediate_size, intermediate_size]
-                    n_shards = self.mesh.shape["model"]
+                    n_shards = get_mesh_shape_product(
+                        self.mesh, ShardingAxisName.MLP_TENSOR)
                     assert intermediate_size % n_shards == 0
 
                     # Reorder w13 weights so that splitting w1 and w3 output
@@ -301,19 +305,29 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
 
                     w13_weight = jax.lax.with_sharding_constraint(
                         w13_weight,
-                        NamedSharding(self.mesh, P(None, "model", None)))
+                        NamedSharding(
+                            self.mesh,
+                            P(None, ShardingAxisName.MLP_TENSOR, None)))
                     w2_weight = jax.lax.with_sharding_constraint(
                         w2_weight,
-                        NamedSharding(self.mesh, P(None, None, "model")))
+                        NamedSharding(
+                            self.mesh,
+                            P(None, None, ShardingAxisName.MLP_TENSOR)))
                     w13_weight_scale = jax.lax.with_sharding_constraint(
                         w13_weight_scale,
-                        NamedSharding(self.mesh, P(None, None, None, "model")))
+                        NamedSharding(
+                            self.mesh,
+                            P(None, None, None, ShardingAxisName.MLP_TENSOR)))
                     w2_weight_scale = jax.lax.with_sharding_constraint(
                         w2_weight_scale,
-                        NamedSharding(self.mesh, P(None, "model", None, None)))
+                        NamedSharding(
+                            self.mesh,
+                            P(None, ShardingAxisName.MLP_TENSOR, None, None)))
                     w13_bias = jax.lax.with_sharding_constraint(
                         w13_bias,
-                        NamedSharding(self.mesh, P(None, None, "model")))
+                        NamedSharding(
+                            self.mesh,
+                            P(None, None, ShardingAxisName.MLP_TENSOR)))
                     w2_bias = jax.lax.with_sharding_constraint(
                         w2_bias, NamedSharding(self.mesh, P(None, None, None)))
 
