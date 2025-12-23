@@ -168,12 +168,12 @@ class TpuPlatform(Platform):
         multihost_backend = envs.TPU_MULTIHOST_BACKEND
         if not multihost_backend:  # Single host
             if parallel_config.pipeline_parallel_size == 1:
-                logger.info("Force using UniProcExecutor for JAX on \
-                        single host without pipeline parallelism.")
+                logger.info("Force using UniProcExecutor for JAX on "
+                            "single host without pipeline parallelism.")
                 parallel_config.distributed_executor_backend = "uni"
             else:
-                logger.info("Force using MultiprocExecutor for JAX on \
-                        single host with pipeline parallelism.")
+                logger.info("Force using MultiprocExecutor for JAX on "
+                            "single host with pipeline parallelism.")
                 parallel_config.distributed_executor_backend = "mp"
         elif multihost_backend == "ray":
             from tpu_inference.executors.ray_distributed_executor import \
@@ -189,9 +189,9 @@ class TpuPlatform(Platform):
 
         if scheduler_config.is_multimodal_model and not \
             scheduler_config.disable_chunked_mm_input:
-            logger.warning("TPU does not support running Multimodal models"\
-            " without setting `--disable_chunked_mm_input`. " \
-            "Forcing --disable_chunked_mm_input.")
+            logger.warning("TPU does not support running Multimodal models"
+                           " without setting `--disable_chunked_mm_input`. "
+                           "Forcing --disable_chunked_mm_input.")
             scheduler_config.disable_chunked_mm_input = True
 
         kv_transfer_config = vllm_config.kv_transfer_config
