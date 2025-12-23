@@ -30,8 +30,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
 from tpu_inference.layers.common.quant_methods import FP8, get_tpu_quant_method
-from tpu_inference.layers.vllm.quantization.common import (
-    JaxCommonConfig, JaxCommonLinearConfig)
+from tpu_inference.layers.vllm.quantization.configs import (
+    VllmQuantConfig, VllmQuantLinearConfig)
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedLinearMethod
 
@@ -40,7 +40,7 @@ logger = init_logger(__name__)
 
 
 @register_quantization_config(get_tpu_quant_method(FP8))
-class VllmFp8Config(Fp8Config, JaxCommonConfig):
+class VllmFp8Config(Fp8Config, VllmQuantConfig):
 
     @classmethod
     def get_name(cls):
@@ -66,7 +66,7 @@ class VllmFp8Config(Fp8Config, JaxCommonConfig):
 class VllmFp8LinearMethod(Fp8LinearMethod):
 
     def __init__(self, quant_config: VllmFp8Config,
-                 jax_config: JaxCommonLinearConfig):
+                 jax_config: VllmQuantLinearConfig):
         super().__init__(quant_config)
         self.jax_config = jax_config
         self._configure_sharding()

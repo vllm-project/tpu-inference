@@ -15,26 +15,27 @@
 from typing import Union
 
 import jax
-import jax.numpy as jnp
 import torch
 from compressed_tensors.quantization import QuantizationArgs
-from jax.experimental.layout import Format, Layout
-from jax.sharding import Mesh, NamedSharding
-from jax.sharding import PartitionSpec as P
+from jax.sharding import Mesh
 from torch.nn.parameter import Parameter
-from torchax.interop import jax_view, torch_view
+from torchax.interop import torch_view
 from torchax.ops.mappings import t2j
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
     CompressedTensorsMoEMethod, CompressedTensorsW8A8Fp8MoEMethod)
 
-from tpu_inference.layers.vllm.fused_moe import fused_moe_func
-from tpu_inference.layers.vllm.linear_common import \
-    reorder_concatenated_tensor_for_sharding
-from tpu_inference.layers.vllm.quantization.common import JaxCommonConfig
+from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.vllm.fused_moe import (FusedMoEBackend,
+                                                 fused_moe_apply,
+                                                 select_moe_backend)
+from tpu_inference.layers.vllm.process_weights.fused_moe_weights import (
+    process_moe_weights, shard_moe_weights)
+from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedFusedMoEMethod
+from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
 
@@ -83,7 +84,7 @@ class VllmCompressedTensorsMoEMethod(CompressedTensorsMoEMethod):
 
 
 class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
-                                            JaxCommonConfig):
+                                            VllmQuantConfig):
 
     def __init__(
         self,
@@ -91,9 +92,18 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         input_quant: QuantizationArgs,
         moe: FusedMoEConfig,
         mesh: Mesh,
+        sharding_axis: str = "model",
     ):
         super().__init__(weight_quant, input_quant, moe)
+
         self.mesh = mesh
+        self.moe_backend = select_moe_backend(self.moe)
+
+        self.extra_backend_kwargs = {}
+        if self.moe_backend == FusedMoEBackend.FUSED_MOE:
+            raise NotImplementedError(
+                "Per-channel quantization is not supported in FusedMoE kernel."
+            )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """
@@ -115,115 +125,64 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         """
         assert isinstance(layer, FusedMoE)
 
-        # Read weights from layer object
-        w13_weight = t2j(
-            layer.w13_weight, use_dlpack=False
-        )  # float8_e4m3fn shape: (num_experts, 2 x intermediate_size, input_size)
-        w13_weight_scale = t2j(
-            layer.w13_weight_scale, use_dlpack=False
-        )  # FP32 shape: (num_experts, 2 x intermediate_size, 1)
-        w2_weight = t2j(
-            layer.w2_weight, use_dlpack=False
-        )  # float8_e4m3fn shape: (num_experts, output_size, intermediate_size)
+        w13_weight = t2j(layer.w13_weight, use_dlpack=False)
+        w13_weight_scale = t2j(layer.w13_weight_scale, use_dlpack=False)
+        w2_weight = t2j(layer.w2_weight, use_dlpack=False)
         w2_weight_scale = t2j(layer.w2_weight_scale, use_dlpack=False)
-        w13_weight_scale = w13_weight_scale.astype(jnp.bfloat16)
-        w2_weight_scale = w2_weight_scale.astype(jnp.bfloat16)
-        intermediate_size = layer.w13_weight.shape[1] // 2
-        assert intermediate_size == w2_weight.shape[-1]
-        n_shards = self.mesh.shape["model"]
-        assert intermediate_size % n_shards == 0
-        num_experts, hidden_size, intermediate_size = w2_weight.shape
-        assert w2_weight_scale.shape == (num_experts, hidden_size, 1)
-        assert w13_weight.shape == (num_experts, 2 * intermediate_size,
-                                    hidden_size)
-        assert w13_weight_scale.shape == (num_experts, 2 * intermediate_size,
-                                          1)
 
-        if not layer.use_ep:
-            # Interleave concat w13 weights
-            w13_weight = reorder_concatenated_tensor_for_sharding(
-                w13_weight,
-                split_sizes=(intermediate_size, intermediate_size),
-                dim=1,
-                n_shards=n_shards,
-            )
-            # Interleave concat w13 weight scales
-            w13_weight_scale = reorder_concatenated_tensor_for_sharding(
-                w13_weight_scale,
-                split_sizes=(intermediate_size, intermediate_size),
-                dim=1,
-                n_shards=n_shards,
-            )
-
-        # 160,5120,1 -> 160,1,5120
-        w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
-        # 160,1,5120 -> 160, 1, 1, 5120   (num_experts, num_blocks, 1, outer_dim)
-        w13_weight_scale = jnp.expand_dims(w13_weight_scale, 2)
-        w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
-        w2_weight_scale = jnp.expand_dims(w2_weight_scale, 2)
-
-        if layer.use_ep:
-            # Apply EP sharding
-            ep_sharding = NamedSharding(self.mesh, P("model"))
-
-            w13_weight = jax.lax.with_sharding_constraint(
-                w13_weight, ep_sharding)
-            w2_weight = jax.lax.with_sharding_constraint(
-                w2_weight, ep_sharding)
-
-            w13_weight_scale = jax.lax.with_sharding_constraint(
-                w13_weight_scale, ep_sharding)
-            w2_weight_scale = jax.lax.with_sharding_constraint(
-                w2_weight_scale, ep_sharding)
-
+        if self.moe.has_bias:
+            w13_bias = t2j(layer.w13_bias, use_dlpack=False)
+            w2_bias = t2j(layer.w2_bias, use_dlpack=False)
         else:
-            # Shard weights for tp (rowwise w13, colwise w2)
-            w13_format = Format(
-                Layout((0, 1, 2)),  # expert, 2xintermed, input
-                NamedSharding(self.mesh, P(None, "model", None)),
-            )  # rowwise sharding on intermed dim
+            w13_bias = w2_bias = None
 
-            w13_scale_format = Format(
-                Layout(
-                    (0, 1, 2, 3)),  #  (num_experts, num_blocks, 1, outer_dim)
-                NamedSharding(self.mesh, P(None, None, None, "model")),
-            )  # col wise GMM sharding on intermed dim
+        @jax.jit
+        def wrapper(w13_weight, w13_weight_scale, w13_bias, w2_weight,
+                    w2_weight_scale, w2_bias):
+            w13_interleave = layer.activation == "swigluoai"
+            w13_reorder_size = get_mesh_shape_product(
+                self.mesh, ShardingAxisName.MLP_TENSOR)
 
-            # Local shard shape: (num_experts, 2 x (intermediate_size // n_shards), input_size)
-            w13_weight = jax.lax.with_sharding_constraint(
-                w13_weight, w13_format)
-            # Local shard shape: (num_experts, (intermediate_size // n_shards), 1)
-            w13_weight_scale = jax.lax.with_sharding_constraint(
-                w13_weight_scale, w13_scale_format)
-
-            # Shard weights for tp (colwise w2)
-            w2_format = Format(
-                Layout((0, 1, 2)),  # expert, intermed, hidden
-                NamedSharding(self.mesh, P(None, None, "model")),
+            return process_moe_weights(
+                moe_backend=self.moe_backend,
+                w13_weight=w13_weight,
+                w13_weight_scale=w13_weight_scale,
+                w13_bias=w13_bias,
+                w2_weight=w2_weight,
+                w2_weight_scale=w2_weight_scale,
+                w2_bias=w2_bias,
+                w13_reorder_size=w13_reorder_size,
+                w13_interleave=w13_interleave,
             )
-            # Local shard shape: (num_experts, hidden, (intermediate_size // n_shards))
-            # #  (num_experts, num_blocks, 1, outer_dim)
-            w2_weight = jax.lax.with_sharding_constraint(w2_weight, w2_format)
 
-            w2_scale_format = Format(
-                Layout((0, 1, 2, 3)),  # expert, intermed, 1
-                NamedSharding(self.mesh, P(None, None, None, None)),
-            )
-            # Local shard shape: (num_experts, intermediate_size // n_shards, 1)
-            w2_weight_scale = jax.lax.with_sharding_constraint(
-                w2_weight_scale, w2_scale_format)
+        weights = wrapper(w13_weight, w13_weight_scale, w13_bias, w2_weight,
+                          w2_weight_scale, w2_bias)
 
-        w13_weight = Parameter(torch_view(w13_weight), requires_grad=False)
-        w13_weight_scale = Parameter(torch_view(w13_weight_scale),
-                                     requires_grad=False)
-        w2_weight = Parameter(torch_view(w2_weight), requires_grad=False)
-        w2_weight_scale = Parameter(torch_view(w2_weight_scale),
-                                    requires_grad=False)
+        (
+            w13_weight,
+            w13_weight_scale,
+            w13_bias,
+            w2_weight,
+            w2_weight_scale,
+            w2_bias,
+        ) = torch_view(
+            shard_moe_weights(
+                weights,
+                moe_backend=self.moe_backend,
+                mesh=self.mesh,
+                per_channel=True,
+            ))
 
-        layer.w13_weight = w13_weight
-        layer.w13_weight_scale = w13_weight_scale
-        layer.w2_weight = w2_weight
-        layer.w2_weight_scale = w2_weight_scale
+        layer.w13_weight = Parameter(w13_weight, requires_grad=False)
+        layer.w2_weight = Parameter(w2_weight, requires_grad=False)
+
+        layer.w13_weight_scale = Parameter(w13_weight_scale,
+                                           requires_grad=False)
+        layer.w2_weight_scale = Parameter(w2_weight_scale, requires_grad=False)
+
+        if self.moe.has_bias:
+            layer.w13_bias = Parameter(w13_bias, requires_grad=False)
+            layer.w2_bias = Parameter(w2_bias, requires_grad=False)
 
     def apply(
         self,
@@ -231,36 +190,11 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        assert isinstance(layer, FusedMoE)
-        if layer.activation != "silu":
-            raise NotImplementedError(
-                "Only silu is supported for activation function.")
-        if layer.scoring_func != "softmax":
-            raise NotImplementedError(
-                "Only softmax is supported for scoring_func")
-
-        # TODO: Use MoE kernel when it supports fp8
-        x = jax_view(x)
-        w13_weight = jax_view(layer.w13_weight)
-        w2_weight = jax_view(layer.w2_weight)
-        w13_weight_scale = jax_view(layer.w13_weight_scale)
-        w2_weight_scale = jax_view(layer.w2_weight_scale)
-        gating_output = jax_view(router_logits)
-        out = torch_view(
-            fused_moe_func(
-                hidden_states=x,
-                w1=w13_weight,
-                w2=w2_weight,
-                w1_scale=w13_weight_scale,
-                w2_scale=w2_weight_scale,
-                w1_bias=None,
-                w2_bias=None,
-                gating_output=gating_output,
-                topk=layer.top_k,
-                renormalize=layer.renormalize,
-                mesh=self.mesh,
-                use_ep=layer.use_ep,
-                activation=layer.activation,
-            ))
-
-        return out
+        return fused_moe_apply(
+            layer,
+            x,
+            router_logits,
+            self.moe_backend,
+            self.mesh,
+            self.extra_backend_kwargs,
+        )

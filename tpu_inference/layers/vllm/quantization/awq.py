@@ -17,8 +17,10 @@ from typing import Optional, Union
 import jax
 import jax.numpy as jnp
 import torch
-from jax.sharding import NamedSharding, PartitionSpec
+from jax.sharding import PartitionSpec
+from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
+from torchax.ops.mappings import t2j
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
@@ -33,10 +35,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.scalar_type import scalar_types
 
 from tpu_inference.layers.common.quant_methods import AWQ, get_tpu_quant_method
-from tpu_inference.layers.vllm.linear_common import (
-    slice_sharded_tensor_for_concatenation, torch_to_jax_param)
-from tpu_inference.layers.vllm.quantization.common import (
-    JaxCommonConfig, JaxCommonLinearConfig)
+from tpu_inference.layers.common.utils import \
+    slice_sharded_tensor_for_concatenation
+from tpu_inference.layers.vllm.process_weights.linear_weights import (
+    process_lienar_weights, shard_linear_weights, to_parameter_list)
+from tpu_inference.layers.vllm.quantization.configs import (
+    VllmQuantConfig, VllmQuantLinearConfig)
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedLinearMethod
 
@@ -45,7 +49,7 @@ logger = init_logger(__name__)
 
 
 @register_quantization_config(get_tpu_quant_method(AWQ))
-class VllmAWQConfig(AWQConfig, JaxCommonConfig):
+class VllmAWQConfig(AWQConfig, VllmQuantConfig):
 
     @classmethod
     def get_name(cls):
@@ -74,72 +78,71 @@ class VllmAWQConfig(AWQConfig, JaxCommonConfig):
 class VllmAWQLinearMethod(AWQLinearMethod):
 
     def __init__(self, quant_config: VllmAWQConfig,
-                 jax_config: JaxCommonLinearConfig):
+                 linear_config: VllmQuantLinearConfig):
         super().__init__(quant_config)
-        self.jax_config = jax_config
-
-        out_sharding, in_sharding = self.jax_config.weight_sharding[:]
-        self.jax_config.weight_sharding = P(in_sharding, None, out_sharding)
-        self.jax_config.scale_sharding = P(in_sharding, out_sharding)
+        self.linear_config = linear_config
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         qweight = layer.qweight
         qweight = unpack_awq_weight(qweight, qweight.packed_dim)
-
         group_size = self.quant_config.group_size
-        # Reshape so that each qweight[i] were quantized with same scales[i].
         qweight = qweight.reshape((-1, group_size, layer.output_size))
-        qweight = torch_to_jax_param(qweight,
-                                     NamedSharding(
-                                         self.jax_config.mesh,
-                                         self.jax_config.weight_sharding),
-                                     self.jax_config.output_sizes,
-                                     self.jax_config.n_shards,
-                                     self.jax_config.fuse_matmuls,
-                                     dim=2,
-                                     jax_dtype=jnp.uint4)
+
+        weight = t2j(qweight, use_dlpack=False)
         delattr(layer, "qweight")
-        layer.qweight = qweight
+
+        weight_scale = t2j(layer.scales, use_dlpack=False)
+        delattr(layer, "scales")
 
         qzeros = layer.qzeros
         qzeros = unpack_awq_weight(qzeros, qzeros.packed_dim)
-        qzeros = torch_to_jax_param(qzeros,
-                                    NamedSharding(
-                                        self.jax_config.mesh,
-                                        self.jax_config.scale_sharding),
-                                    self.jax_config.output_sizes,
-                                    self.jax_config.n_shards,
-                                    self.jax_config.fuse_matmuls,
-                                    dim=1,
-                                    jax_dtype=jnp.uint4)
+        zero_point = t2j(qzeros, use_dlpack=False)
         delattr(layer, "qzeros")
-        layer.qzeros = qzeros
-
-        scales = torch_to_jax_param(layer.scales,
-                                    NamedSharding(
-                                        self.jax_config.mesh,
-                                        self.jax_config.scale_sharding),
-                                    self.jax_config.output_sizes,
-                                    self.jax_config.n_shards,
-                                    self.jax_config.fuse_matmuls,
-                                    dim=1)
-        delattr(layer, "scales")
-        layer.scales = scales
 
         if layer.bias is not None and not layer.skip_bias_add:
             if layer.return_bias:
                 logger.warning_once("Bias might return incorrect value.")
-
-            bias = torch_to_jax_param(
-                layer.bias,
-                NamedSharding(self.jax_config.mesh,
-                              self.jax_config.bias_sharding),
-                self.jax_config.output_sizes,
-                self.jax_config.n_shards,
-                self.jax_config.fuse_matmuls,
-            )
+            bias = t2j(layer.bias, use_dlpack=False)
             delattr(layer, "bias")
-            layer.bias = bias
+        else:
+            bias = None
+
+        # TODO: Use jit to speedup weight loading.
+        # @jax.jit
+        def wrapper(weight, weight_scale, zero_point, bias):
+            return process_lienar_weights(
+                weight,
+                weight_scale,
+                zero_point,
+                bias,
+                fused=self.linear_config.fuse_matmuls,
+                output_sizes=self.linear_config.output_sizes,
+                reorder_size=self.linear_config.n_shards,
+                transposed=False,
+            )
+
+        weights = wrapper(weight, weight_scale, zero_point, bias)
+        weight, weight_scale, zero_point, bias = torch_view(
+            shard_linear_weights(
+                weights,
+                mesh=self.linear_config.mesh,
+                weight_p_spec=self.linear_config.weight_sharding,
+                bias_p_spec=self.linear_config.bias_sharding,
+                transposed=False,
+            ))
+
+        if self.linear_config.fuse_matmuls:
+            layer.qweight = Parameter(weight, requires_grad=False)
+            layer.scales = Parameter(weight_scale, requires_grad=False)
+            layer.qzeros = Parameter(zero_point, requires_grad=False)
+            if bias is not None:
+                layer.bias = Parameter(bias, requires_grad=False)
+        else:
+            layer.qweight = to_parameter_list(weight)
+            layer.scales = to_parameter_list(weight_scale)
+            layer.qzeros = to_parameter_list(zero_point)
+            if bias is not None:
+                layer.bias = to_parameter_list(bias)
 
     def apply(self,
               layer: torch.nn.Module,
@@ -147,7 +150,7 @@ class VllmAWQLinearMethod(AWQLinearMethod):
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
         with jax.named_scope(layer._get_name()):
-            if self.jax_config.fuse_matmuls:
+            if self.linear_config.fuse_matmuls:
                 out = self._apply_fused(layer, x, bias)
             else:
                 out = self._apply_split(layer, x, bias)
@@ -175,7 +178,7 @@ class VllmAWQLinearMethod(AWQLinearMethod):
             outs += bias.jax()
 
         outs = slice_sharded_tensor_for_concatenation(
-            outs, self.jax_config.output_sizes, self.jax_config.n_shards)
+            outs, self.linear_config.output_sizes, self.linear_config.n_shards)
         out = jnp.concatenate(outs, axis=-1)
         return torch_view(out)
 

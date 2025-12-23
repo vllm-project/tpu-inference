@@ -39,7 +39,8 @@ from vllm.scalar_type import scalar_types
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.awq import (VllmAWQConfig,
                                                         VllmAWQLinearMethod)
-from tpu_inference.layers.vllm.quantization.common import JaxCommonLinearConfig
+from tpu_inference.layers.vllm.quantization.configs import \
+    VllmQuantLinearConfig
 
 from . import utils as test_utils
 
@@ -103,8 +104,8 @@ def return_ref_and_layer_output(
     assert isinstance(quant_method, VllmAWQLinearMethod)
     quant_config = quant_method.quant_config
     assert isinstance(quant_config, VllmAWQConfig)
-    jax_config = quant_method.jax_config
-    assert isinstance(jax_config, JaxCommonLinearConfig)
+    jax_config = quant_method.linear_config
+    assert isinstance(jax_config, VllmQuantLinearConfig)
 
     input_tensor = torch.rand(
         batch_size, layer.input_size, dtype=torch.bfloat16) / 10
@@ -134,8 +135,8 @@ def initialize_and_return_layer_weights(layer: torch.nn.Module):
     assert isinstance(quant_method, VllmAWQLinearMethod)
     quant_config = quant_method.quant_config
     assert isinstance(quant_config, VllmAWQConfig)
-    jax_config = quant_method.jax_config
-    assert isinstance(jax_config, JaxCommonLinearConfig)
+    jax_config = quant_method.linear_config
+    assert isinstance(jax_config, VllmQuantLinearConfig)
 
     # torch.rand returns value in the range of [0, 1). We subtract by 0.2 to
     # simulate asymmetry
@@ -168,7 +169,7 @@ def initialize_and_return_layer_weights(layer: torch.nn.Module):
 
 
 @pytest.fixture(autouse=True)
-def setup_environment():
+def vllm_config():
     # This is a fake config used for init dist env.
     # RowParallelLinear needs dist env to be initialized.
     engine_args = EngineArgs(

@@ -37,11 +37,12 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
-from tpu_inference.layers.vllm.quantization.common import JaxCommonLinearConfig
 from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors import \
     VllmCompressedTensorsConfig
 from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import (
     VllmCompressedTensorsW8A8Fp8, requantize_with_max_scale)
+from tpu_inference.layers.vllm.quantization.configs import \
+    VllmQuantLinearConfig
 
 from . import utils as test_utils
 
@@ -98,8 +99,8 @@ def return_ref_and_layer_output(layer: torch.nn.Module, batch_size: int = 16):
     assert isinstance(layer, LinearBase)
     scheme = layer.scheme
     assert isinstance(scheme, VllmCompressedTensorsW8A8Fp8)
-    quant_config = scheme.jax_config
-    assert isinstance(quant_config, JaxCommonLinearConfig)
+    quant_config = scheme.linear_config
+    assert isinstance(quant_config, VllmQuantLinearConfig)
     quant_method = layer.quant_method
     assert isinstance(quant_method, CompressedTensorsLinearMethod)
     per_tensor = scheme.strategy == QuantizationStrategy.TENSOR
@@ -151,8 +152,8 @@ def initialize_layer_weights(layer: torch.nn.Module):
     assert isinstance(layer, LinearBase)
     scheme = layer.scheme
     assert isinstance(scheme, VllmCompressedTensorsW8A8Fp8)
-    quant_config = scheme.jax_config
-    assert isinstance(quant_config, JaxCommonLinearConfig)
+    quant_config = scheme.linear_config
+    assert isinstance(quant_config, VllmQuantLinearConfig)
     per_tensor = scheme.strategy == QuantizationStrategy.TENSOR
 
     weight_list = []
