@@ -491,8 +491,7 @@ class TestQwen2_5_VLForConditionalGeneration:
         assert embeddings[1].shape == (tokens_per_image, vc.out_hidden_size)
         assert model.visual.call_count == 2
 
-    def test_get_multimodal_embeddings(
-            self, model: Qwen2_5_VLForConditionalGeneration):
+    def test_embed_multimodal(self, model: Qwen2_5_VLForConditionalGeneration):
         grid_thw = ((2, 28, 28), )
         vc = model.config.vision_config
         patch_dim = vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size
@@ -503,14 +502,14 @@ class TestQwen2_5_VLForConditionalGeneration:
         with patch.object(model,
                           '_process_image_input',
                           return_value=(mock_vision_output, )) as mock_process:
-            mm_embeds = model.get_multimodal_embeddings(
-                grid_thw, pixel_values=pixel_values)
+            mm_embeds = model.embed_multimodal(grid_thw,
+                                               pixel_values=pixel_values)
             mock_process.assert_called_once()
             assert isinstance(mm_embeds, tuple)
             assert len(mm_embeds) == 1
             assert mm_embeds[0].shape == (tokens_per_image, vc.out_hidden_size)
 
-        mm_embeds_none = model.get_multimodal_embeddings(grid_thw)
+        mm_embeds_none = model.embed_multimodal(grid_thw)
         assert len(mm_embeds_none) == 0
 
     @patch('tpu_inference.models.jax.qwen2_5_vl.merge_multimodal_embeddings')
