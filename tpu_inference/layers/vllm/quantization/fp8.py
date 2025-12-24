@@ -127,7 +127,7 @@ class VllmFp8LinearMethod(Fp8LinearMethod):
         @jax.jit
         def wrapper(weight, weight_scale, bias):
             weight = dequantize_tensor(weight, weight_scale, (0, 1))
-            weight, weight_scale = quantize_tensor(jnp.float8_e4m3fn, weight)
+            weight, weight_scale = quantize_tensor(jnp.float8_e4m3fn, weight, block_size=512)
 
             return process_lienar_weights(
                 weight,
@@ -172,10 +172,11 @@ class VllmFp8LinearMethod(Fp8LinearMethod):
         x_jax = jax_view(x)
         weight_jax = jax_view(layer.weight)
         weight_scale_jax = jax_view(layer.weight_scale)
+        #weight_scale_jax = jnp.expand_dims(weight_scale_jax, axis=1)
 
         outs = sharded_quantized_matmul(x_jax, weight_jax, weight_scale_jax,
                                         self.linear_config.mesh,
-                                        self.linear_config.weight_sharding)
+                                        self.linear_config.weight_sharding, sc_size=512)
 
         if bias is not None and not layer.skip_bias_add:
             outs += jax_view(bias)
@@ -194,6 +195,7 @@ class VllmFp8LinearMethod(Fp8LinearMethod):
             weight_jax = jax_view(weight)
             weight_scale_jax = jax_view(weight_scale)
 
+            #print("Printing quantized matmul 2")
             out = sharded_quantized_matmul(x_jax, weight_jax, weight_scale_jax,
                                            self.linear_config.mesh,
                                            self.linear_config.weight_sharding)
@@ -314,4 +316,4 @@ class VllmFp8MoEMethod(Fp8MoEMethod):
             self.moe_backend,
             self.mesh,
             self.extra_backend_kwargs,
-        )
+        weight.shape, scale.shape)

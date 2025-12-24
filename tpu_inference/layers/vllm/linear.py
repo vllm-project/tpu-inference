@@ -22,7 +22,7 @@ from tpu_inference.kernels.quantized_matmul.kernel import (
 
 
 def sharded_quantized_matmul(x: jax.Array, w_q: jax.Array, w_s: jax.Array,
-                             mesh: Mesh, weight_sharding: P) -> jax.Array:
+                             mesh: Mesh, weight_sharding: P, sc_size = None) -> jax.Array:
     """
     Wrapper around the quantized matmul kernel.
 
@@ -39,17 +39,17 @@ def sharded_quantized_matmul(x: jax.Array, w_q: jax.Array, w_s: jax.Array,
 
     # NOTE (jacobplatin/kyuyeunk) there have been numeric issues (concerning) NaNs
     # with the kernel and thus we disable it for now.
-    if envs.ENABLE_QUANTIZED_MATMUL_KERNEL:
+    if True:
         out_axis, in_axis = weight_sharding
         x_sharding = P(None, in_axis)
-        scale_sharding = P(out_axis, )
+        scale_sharding = P(out_axis, in_axis, )
         out_sharding = P(None, out_axis)
 
         x = jax.lax.with_sharding_constraint(x,
                                              NamedSharding(mesh, x_sharding))
 
         def wrapper(x, w_q, w_s):
-            output = quantized_matmul_kernel(x, w_q, w_s, x_q_dtype=w_q.dtype)
+            output = quantized_matmul_kernel(x, w_q, w_s, x_q_dtype=w_q.dtype, sc_size=sc_size)
             if in_axis:
                 output = jax.lax.psum(output, axis_name=in_axis)
             return output
