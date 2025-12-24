@@ -193,7 +193,6 @@ def ref_ragged_paged_attention_per_token(
                                                     1)[:kv_len]
         v_scales_active = gathered_v_scales.reshape(-1, actual_num_kv_heads,
                                                     1)[:kv_len]
-
         k_scales_active = jnp.repeat(k_scales_active,
                                      actual_num_q_heads_per_kv_head,
                                      axis=1)

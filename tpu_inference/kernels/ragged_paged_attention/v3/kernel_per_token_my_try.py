@@ -23,7 +23,7 @@ DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
 DEFAULT_VMEM_LIMIT_BYTES = 100 * 1024 * 1024
 
 
-def ref_ragged_paged_attention(
+def ref_ragged_paged_attention_per_token(
     queries: jax.
     Array,  # [max_num_tokens, actual_num_q_heads, actual_head_dim]
     keys: jax.Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim]
@@ -35,14 +35,13 @@ def ref_ragged_paged_attention(
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
+    scale_cache: jax.
+    Array,  # [total_num_pages, page_size, 2 * num_kv_heads, 128]
     *,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
     mask_value: float | None = DEFAULT_MASK_VALUE,
-    q_scale: float | None = None,
-    k_scale: float | None = None,
-    v_scale: float | None = None,
 ):
     if mask_value is None:
         mask_value = DEFAULT_MASK_VALUE
@@ -67,7 +66,10 @@ def ref_ragged_paged_attention(
     actual_head_dim = queries.shape[2]
     actual_num_q_heads = queries.shape[1]
     actual_num_kv_heads = keys.shape[1]
-    merged_kv = merge_kv(keys, values)
+    k_q, v_q, k_scale, v_scale = quantize_kv_per_token(keys, values,
+                                                       kv_cache.dtype)
+    merged_kv_scale = merge_scales(k_scale, v_scale)
+    merged_kv = merge_kv(k_q, v_q)
     assert merged_kv.shape[-3:] == kv_cache.shape[-3:]
 
     _, page_size, num_kv_heads_x2_per_kv_packing, kv_packing, head_dim = (
@@ -107,6 +109,14 @@ def ref_ragged_paged_attention(
         kv_cache = kv_cache.at[indices].set(
             gathered_kv.reshape(gathered_shape))
 
+        gathered_scales = scale_cache[indices]
+        g_scales_shape = gathered_scales.shape
+        gathered_scales = gathered_scales.reshape(-1, *g_scales_shape[-2:])
+
+        gathered_scales = gathered_scales.at[kv_len - q_len:kv_len].set(
+            merged_kv_scale[q_start:q_end])
+        scale_cache = scale_cache.at[indices].set(
+            gathered_scales.reshape(g_scales_shape))
         kv = gathered_kv.reshape(
             -1, num_kv_heads_x2,
             head_dim)[:, :actual_num_kv_heads * 2, :].reshape(
@@ -116,24 +126,26 @@ def ref_ragged_paged_attention(
         k = jnp.repeat(k, actual_num_q_heads_per_kv_head, axis=1)
         v = jnp.repeat(v, actual_num_q_heads_per_kv_head, axis=1)
 
-        if q_scale is not None:
-            q = q / q_scale
-            if jnp.issubdtype(k.dtype, jnp.floating):
-                dtype_info = jnp.finfo(k.dtype)
-                minval = float(dtype_info.min)
-                maxval = float(dtype_info.max)
-                q = jnp.clip(q, min=minval, max=maxval)
-            q = q.astype(k.dtype)
+        print(gathered_scales.shape, merged_kv_scale.shape)
+
+        scales_flat = gathered_scales[:kv_len, :actual_num_kv_heads * 2]
+        scales_unpacked = scales_flat.reshape(-1, actual_num_kv_heads, 2)
+
+        k_s_cached = scales_unpacked[:, :, 0]  # [tokens, heads]
+        v_s_cached = scales_unpacked[:, :, 1]  # [tokens, heads]
 
         attn = jnp.einsum("qhd,khd->hqk",
                           q,
                           k,
                           preferred_element_type=jnp.float32)
+
+        k_s_expanded = jnp.repeat(k_s_cached,
+                                  actual_num_q_heads_per_kv_head,
+                                  axis=1)  # [K, H]
+        k_s_expanded = k_s_expanded.T[:, None, :]  # [H, 1, K]
+
+        attn = attn * k_s_expanded
         attn *= sm_scale
-        if k_scale is not None:
-            attn *= k_scale
-        if q_scale is not None:
-            attn *= q_scale
 
         # print("attnafterscale", attn, attn.shape)
 
@@ -148,6 +160,14 @@ def ref_ragged_paged_attention(
         attn += jnp.where(mask, mask_value, 0.0)
         attn = jax.nn.softmax(attn, axis=-1).astype(v.dtype)
 
+        v_s_expanded = jnp.repeat(v_s_cached,
+                                  actual_num_q_heads_per_kv_head,
+                                  axis=1)
+        v_s_expanded = v_s_expanded[:, :, None]  # [K, H, 1]
+
+        v = v.astype(jnp.float32) * v_s_expanded
+        v = v.astype(attn.dtype)
+
         out = jnp.einsum("hqk,khd->qhd", attn, v).astype(queries.dtype)
         if v_scale is not None:
             out *= v_scale
@@ -156,7 +176,7 @@ def ref_ragged_paged_attention(
         result = result.at[q_start:q_end].set(out)
 
     # result = jnp.concatenate(result, axis=0)
-    return result, kv_cache
+    return result, kv_cache, scale_cache
 
 
 def get_smem_estimate_bytes(max_num_seqs, pages_per_seq):
@@ -239,12 +259,16 @@ def _ragged_paged_attention_kernel(
     # Input
     q_hbm_ref,  # [actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
     kv_hbm_ref,  # [max_num_tokens, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
+    kv_scale_hbm_ref,  # [max_num_tokens, num_kv_heads_x2]
     kv_cache_hbm_ref,  # [total_num_pages, page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
+    kv_scale_cache_hbm_ref,  # [total_num_pages, page_size, num_kv_heads_x2]
     # Output
     o_hbm_ref,  # [actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
     updated_kv_cache_hbm_ref,  # [total_num_pages, page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
+    updated_kv_scale_cache_hbm_ref,  # [total_num_pages, page_size, num_kv_heads_x2]
     # Scratch
     bkv_x2_ref,  # [2, bkv_sz, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
+    bkv_scale_x2_ref,  # [2, bkv_sz, num_kv_heads_x2]
     bq_x2_ref,  # [2, actual_num_kv_heads, bq_sz, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
     bo_x2_ref,  # [2, actual_num_kv_heads, bq_sz, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
     sems,  # [4, 2]
@@ -423,11 +447,18 @@ def _ragged_paged_attention_kernel(
         sem = sems.at[0, bkv_sem_idx]
         # double buffered so we have a semaphore to indicate which buffer to use
         vmem_ref = bkv_x2_ref.at[bkv_sem_idx]
+        # this will have shape [bkv_sz, num_kv_heads_x2]
+        vmem_scale_ref = bkv_scale_x2_ref.at[bkv_sem_idx]
 
         cache_hbm_shape = kv_cache_hbm_ref.shape
+        scale_hbm_shape = kv_scale_cache_hbm_ref.shape
         # Squeeze from (num_pages, page_size, ...) to (tokens, ...)
         cache_hbm_ref = kv_cache_hbm_ref.reshape(
             cache_hbm_shape[0] * cache_hbm_shape[1], *cache_hbm_shape[2:])
+        # Squeeze from (num_pages, page_size, ...) to (tokens, ...)
+        scale_hbm_ref = kv_scale_cache_hbm_ref.reshape(
+            scale_hbm_shape[0] * scale_hbm_shape[1], *scale_hbm_shape[2:])
+
         kv_len = kv_lens_ref[seq_idx]
         kv_len_start = bkv_idx * bkv_sz
         kv_p_start = bkv_idx * bkv_p
@@ -478,9 +509,16 @@ def _ragged_paged_attention_kernel(
                     sem,
                     wait=False,
                 )
-                print(cache_hbm_ref.at[pl.ds(
-                    page_indices_ref[page_indices_offset + i] * page_size,
-                    sz)].shape)
+
+                _async_copy(
+                    scale_hbm_ref.at[pl.ds(
+                        page_indices_ref[page_indices_offset + i] * page_size,
+                        sz)],
+                    vmem_scale_ref.at[pl.ds(i * page_size, sz)],
+                    sem,
+                    wait=False,
+                )
+
                 debug_print("[RPA debug] loop_body i={}, sz={}", i, sz)
                 return offset + sz
 
@@ -503,10 +541,26 @@ def _ragged_paged_attention_kernel(
                 wait,
             )
 
+            _async_copy(
+                kv_scale_hbm_ref.at[pl.ds(new_kv_len_start, size)],
+                vmem_scale_ref.at[pl.ds(offset, size)],
+                sem,
+                wait,
+            )
+
             return kv_len_start + offset, bkv_sz_frm_new
         else:
             offset = jnp.minimum(kv_left_frm_cache, page_size * bkv_p)
             dst = vmem_ref.at[pl.ds(0, offset + bkv_sz_frm_new)]
+            _async_copy(
+                src=dst,
+                dst=dst,
+                sem=sem,
+                wait=True,
+            )
+
+            # do the same for scales
+            dst = vmem_scale_ref.at[pl.ds(0, offset + bkv_sz_frm_new)]
             _async_copy(
                 src=dst,
                 dst=dst,
@@ -523,6 +577,7 @@ def _ragged_paged_attention_kernel(
                          wait=False):
         sem = sems.at[3, bkv_sem_idx]
         vmem_ref = bkv_x2_ref.at[bkv_sem_idx]
+        scale_vmem_ref = bkv_scale_x2_ref.at[bkv_sem_idx]
         bkv_id = offset // bkv_sz
         kv_p_start = offset // page_size
         kv_p_end = cdiv(offset + update_sz, page_size)
@@ -534,6 +589,12 @@ def _ragged_paged_attention_kernel(
         # Shape the cache back from (tokens, ..) to (num_pages, page_size, ...)
         cache_hbm_ref = updated_kv_cache_hbm_ref.reshape(
             cache_hbm_shape[0] * cache_hbm_shape[1], *cache_hbm_shape[2:])
+
+        scale_cache_hbm_shape = updated_kv_scale_cache_hbm_ref.shape
+        # Shape the cache back from (tokens, ..) to (num_pages, page_size, ...)
+        scale_cache_hbm_ref = updated_kv_scale_cache_hbm_ref.reshape(
+            scale_cache_hbm_shape[0] * scale_cache_hbm_shape[1],
+            *scale_cache_hbm_shape[2:])
 
         debug_print(
             "[RPA debug]"
@@ -568,6 +629,18 @@ def _ragged_paged_attention_kernel(
                     wait=False,
                 )
                 debug_print("[RPA debug] loop_body i={}, sz={}", i, sz)
+                _async_copy(
+                    scale_vmem_ref.at[pl.ds(
+                        (p_ignore + i) * page_size + ignore, sz)],
+                    scale_cache_hbm_ref.at[pl.ds(
+                        page_indices_ref[page_indices_offset + i] * page_size +
+                        ignore,
+                        sz,
+                    )],
+                    sem,
+                    wait=False,
+                )
+                debug_print("[RPA debug] loop_body i={}, sz={}", i, sz)
                 return update_sz - sz, 0
 
             lax.fori_loop(
@@ -579,6 +652,15 @@ def _ragged_paged_attention_kernel(
             )
         else:
             dst = cache_hbm_ref.at[pl.ds(0, update_sz)]
+            _async_copy(
+                src=dst,
+                dst=dst,
+                sem=sem,
+                wait=True,
+            )
+
+            # do the same for the scales
+            dst = scale_cache_hbm_ref.at[pl.ds(0, update_sz)]
             _async_copy(
                 src=dst,
                 dst=dst,
@@ -709,6 +791,9 @@ def _ragged_paged_attention_kernel(
         kv_ref = (bkv_x2_ref.bitcast(jnp.uint32).at[bkv_sem_idx].reshape(
             bkv_sz * step, head_dim))
 
+        scale_ref = bkv_scale_x2_ref.at[bkv_sem_idx]
+        scale_start_idx = start
+
         if kv_packing == 1:
             k = strided_load(kv_ref, start, step)
             v = strided_load(kv_ref, start + 1, step)
@@ -719,7 +804,11 @@ def _ragged_paged_attention_kernel(
 
             k = pltpu.bitcast(k, kv_dtype)
             v = pltpu.bitcast(v, kv_dtype)
-            return [(k, v)]
+
+            k_s = scale_ref[:, scale_start_idx]  # [bkv_sz]
+            v_s = scale_ref[:, scale_start_idx + 1]  # [bkv_sz]
+
+            return [(k, v, k_s, v_s)]
 
         kv = strided_load(kv_ref, start, step)
         # bkv_mask holds information about where each row of bkv is valid.  Because
@@ -1020,13 +1109,83 @@ def merge_kv(
     return kv
 
 
-def prepare_inputs(
-        q: jax.Array,  # [max_num_tokens, actual_num_q_heads, actual_head_dim],
-        k: jax.
-    Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim],
-        v: jax.
-    Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim],
+def merge_scales(
+        k_scale: jax.Array,  # [max_num_tokens, actual_num_kv_heads, 1]
+        v_scale: jax.Array,  # [max_num_tokens, actual_num_kv_heads, 1]
 ):
+    """Interleaves K and V scales to match the merged KV layout."""
+    num_tokens, num_kv_heads, _ = k_scale.shape
+
+    # 1. Interleave: [k0, v0, k1, v1...]
+    # Shape: [num_tokens, num_kv_heads * 2]
+    merged = jnp.stack([k_scale.squeeze(-1), v_scale.squeeze(-1)], axis=-1)
+    merged = merged.reshape(num_tokens, num_kv_heads * 2)
+
+    # 2. Calculate padding (align to 128 bytes)
+    # float32 is 4 bytes, so we need multiples of 32 elements.
+    raw_dim = num_kv_heads * 2
+    padded_dim = align_to(raw_dim, 128)
+
+    # 3. Pad if necessary
+    if padded_dim > raw_dim:
+        merged = jnp.pad(merged, ((0, 0), (0, padded_dim - raw_dim)))
+
+    return merged
+
+
+def quantize_kv_per_token(key: jax.Array, value: jax.Array,
+                          kv_cache_quantized_dtype: jnp.dtype):
+    """
+    Quantizes K and V dynamically per token.
+    Returns the quantized tensors AND the scales needed to dequantize them.
+
+    Args:
+        key: The key tensor to quantize of shape [max_num_tokens, actual_num_kv_heads, actual_head_dim].
+        value: The value tensor to quantize of shape [max_num_tokens, actual_num_kv_heads, actual_head_dim].
+        kv_cache_quantized_dtype: The dtype to quantize the key and value tensors to.
+
+    Returns:
+        key_q: The quantized key tensor of shape [max_num_tokens, actual_num_kv_heads, actual_head_dim].
+        value_q: The quantized value tensor of shape [max_num_tokens, actual_num_kv_heads, actual_head_dim].
+        k_scale: The scale to quantize the key tensor by of shape [max_num_tokens, actual_num_kv_heads, 1]
+        v_scale: The scale to quantize the value tensor by of shape [max_num_tokens, actual_num_kv_heads, 1]
+    """
+    dtype_info = jnp.finfo(kv_cache_quantized_dtype)
+    minval, maxval = float(dtype_info.min), float(dtype_info.max)
+    q_max = float(dtype_info.max)  # e.g., 127 for int8
+
+    # 1. Calculate max absolute value per token (keepdims to broadcast later)
+    # Shape becomes: [Batch, Seq, Heads, 1]
+    k_abs_max = jnp.max(jnp.abs(key), axis=-1, keepdims=True)
+    v_abs_max = jnp.max(jnp.abs(value), axis=-1, keepdims=True)
+
+    # 2. Calculate Scale (add epsilon to avoid div by zero)
+    # Formula: Scale = Max_Val / Q_Max
+    epsilon = 1e-5
+    k_scale = jnp.maximum(k_abs_max, epsilon) / q_max
+    v_scale = jnp.maximum(v_abs_max, epsilon) / q_max
+
+    # 3. Quantize
+    # K_quant = Clip(Round(K_float / K_scale))
+    key = key.astype(jnp.float32)
+    key_q = key / k_scale
+    key_q = jnp.clip(key_q, minval, maxval)
+    key_q = key_q.astype(kv_cache_quantized_dtype)
+
+    value = value.astype(jnp.float32)
+    value_q = value / v_scale
+    value_q = jnp.clip(value_q, minval, maxval)
+    value_q = value_q.astype(kv_cache_quantized_dtype)
+
+    return key_q, value_q, k_scale.astype(jnp.float32), v_scale.astype(
+        jnp.float32)
+
+
+def prepare_inputs(
+    q: jax.Array,  # [max_num_tokens, actual_num_q_heads, actual_head_dim],
+    k: jax.Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim],
+    v: jax.Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim],
+    kv_cache_dtype: jnp.dtype):
     max_num_tokens, actual_num_q_heads, actual_head_dim = q.shape
     actual_num_kv_heads = k.shape[1]
     assert actual_num_q_heads % actual_num_kv_heads == 0
@@ -1035,6 +1194,7 @@ def prepare_inputs(
     num_q_heads_per_kv_head = align_to(actual_num_q_heads_per_kv_head,
                                        q_packing)
     head_dim = align_to(actual_head_dim, 128)
+    k, v, k_scale, v_scale = quantize_kv_per_token(k, v, kv_cache_dtype)
     q = (
         jnp.pad(
             q.reshape(
@@ -1061,7 +1221,8 @@ def prepare_inputs(
         .swapaxes(0, 1))
     # TODO(kyuyeunk, chengjiyao): Add kv quantization here.
     kv = merge_kv(k, v)
-    return q, kv
+    merged_kv_scale = merge_scales(k_scale, v_scale)
+    return q, kv, merged_kv_scale
 
 
 def prepare_outputs(
@@ -1330,9 +1491,9 @@ def static_validate_inputs(
         "vmem_limit_bytes",
         "debug_mode",
     ),
-    donate_argnames=("kv_cache", ),
+    donate_argnames=("kv_cache", "kv_scales_cache"),
 )
-def ragged_paged_attention(
+def ragged_paged_attention_per_token(
     queries: jax.
     Array,  # [max_num_tokens, actual_num_q_heads, actual_head_dim]
     keys: jax.Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim]
@@ -1340,6 +1501,8 @@ def ragged_paged_attention(
     Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim]
     kv_cache: jax.
     Array,  # [total_num_pages, page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
+    kv_scales_cache: jax.
+    Array,  # [total_num_pages, page_size, align_to(actual_num_kv_heads * 2, 128)]
     kv_lens: jax.Array,  # i32[max_num_seqs]
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
@@ -1395,34 +1558,34 @@ def ragged_paged_attention(
     The output of the attention.
   """
     q, k, v = queries, keys, values
-    static_validate_inputs(
-        q,
-        k,
-        v,
-        kv_cache,
-        kv_lens,
-        page_indices,
-        cu_q_lens,
-        distribution,
-        sm_scale=sm_scale,
-        sliding_window=sliding_window,
-        soft_cap=soft_cap,
-        mask_value=mask_value,
-        q_scale=q_scale,
-        k_scale=k_scale,
-        v_scale=v_scale,
-        chunk_prefill_size=chunk_prefill_size,
-        num_kv_pages_per_block=num_kv_pages_per_block,
-        num_queries_per_block=num_queries_per_block,
-        vmem_limit_bytes=vmem_limit_bytes,
-    )
+    # static_validate_inputs(
+    #     q,
+    #     k,
+    #     v,
+    #     kv_cache,
+    #     kv_lens,
+    #     page_indices,
+    #     cu_q_lens,
+    #     distribution,
+    #     sm_scale=sm_scale,
+    #     sliding_window=sliding_window,
+    #     soft_cap=soft_cap,
+    #     mask_value=mask_value,
+    #     q_scale=q_scale,
+    #     k_scale=k_scale,
+    #     v_scale=v_scale,
+    #     chunk_prefill_size=chunk_prefill_size,
+    #     num_kv_pages_per_block=num_kv_pages_per_block,
+    #     num_queries_per_block=num_queries_per_block,
+    #     vmem_limit_bytes=vmem_limit_bytes,
+    # )
 
     actual_num_q_heads = q.shape[1]
     actual_head_dim = q.shape[2]
     actual_num_kv_heads = k.shape[1]
 
     actual_num_q_heads_per_kv_head = actual_num_q_heads // actual_num_kv_heads
-    q, kv = prepare_inputs(q, k, v)
+    q, kv, merged_kv_scales = prepare_inputs(q, k, v, kv_cache.dtype)
     (
         _,
         max_num_tokens,
@@ -1458,14 +1621,17 @@ def ragged_paged_attention(
     grid = (distribution[2], )
 
     in_specs = [
-        pl.BlockSpec(memory_space=pltpu.HBM),
-        pl.BlockSpec(memory_space=pltpu.HBM),
-        pl.BlockSpec(memory_space=pltpu.HBM),
+        pl.BlockSpec(memory_space=pltpu.HBM),  # q
+        pl.BlockSpec(memory_space=pltpu.HBM),  # kv
+        pl.BlockSpec(memory_space=pltpu.HBM),  # kv cache
+        pl.BlockSpec(memory_space=pltpu.HBM),  # kv scales
+        pl.BlockSpec(memory_space=pltpu.HBM),  # kv scales cache
     ]
 
     out_specs = [
-        pl.BlockSpec(memory_space=pltpu.HBM),
-        pl.BlockSpec(memory_space=pltpu.HBM),
+        pl.BlockSpec(memory_space=pltpu.HBM),  # oref
+        pl.BlockSpec(memory_space=pltpu.HBM),  # updated kv cache
+        pl.BlockSpec(memory_space=pltpu.HBM),  # kv scales cache
     ]
 
     bkv_double_buf = pltpu.VMEM(
@@ -1476,6 +1642,11 @@ def ragged_paged_attention(
     bq_double_buf = pltpu.VMEM(
         (2, actual_num_kv_heads, bq_sz, *q.shape[2:]),
         q.dtype,
+    )
+
+    bkv_scale_double_buf = pltpu.VMEM(
+        (2, bkv_sz, 128),
+        merged_kv_scales.dtype,
     )
 
     bo_double_buf = bq_double_buf
@@ -1493,6 +1664,7 @@ def ragged_paged_attention(
 
     scratch_shapes = [
         bkv_double_buf,  # Double buffering for kv block.
+        bkv_scale_double_buf,  # Double buffering for kv scales block.
         bq_double_buf,  # Double buffering for q block.
         bo_double_buf,  # Double buffering for output block.
         # Semaphores for double buffering of bkv, bq, bo and bkv_update.
@@ -1551,17 +1723,20 @@ def ragged_paged_attention(
                 jax.ShapeDtypeStruct(shape=q.shape, dtype=q.dtype),
                 jax.ShapeDtypeStruct(shape=kv_cache.shape,
                                      dtype=kv_cache.dtype),
+                jax.ShapeDtypeStruct(shape=kv_scales_cache.shape,
+                                     dtype=kv_scales_cache.dtype),
             ],
+            # TODO: update the aliases for the output?
             input_output_aliases={
                 7: 0,
-                9: 1
+                10: 1,
+                11: 2
             },
             name=scope_name,
         ))
 
-    output, updated_kv_cache = kernel(*scalar_prefetches, q, kv, kv_cache)
-    return (
-        prepare_outputs(output, actual_num_q_heads_per_kv_head,
-                        actual_head_dim),
-        updated_kv_cache,
-    )
+    output, updated_kv_cache, updated_kv_scales_cache = kernel(
+        *scalar_prefetches, q, kv, merged_kv_scales, kv_cache, kv_scales_cache)
+    return (prepare_outputs(output, actual_num_q_heads_per_kv_head,
+                            actual_head_dim), updated_kv_cache,
+            updated_kv_scales_cache)
