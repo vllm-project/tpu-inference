@@ -81,9 +81,6 @@ class MultiModalManager:
         mm_kwargs = list[MultiModalKwargsItem]()
         # List of tuple (mm_hash, pos_info)
         mm_hashes_pos = list[tuple[str, PlaceholderRange]]()
-        # --- NEW: Array for Required Lengths ---
-        required_lengths = []
-        # ----
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
             req_state = self.runner.requests[req_id]
             for mm_input_id in encoder_input_ids:
@@ -91,10 +88,6 @@ class MultiModalManager:
                 mm_hash = mm_feature.identifier
                 mm_kwargs.append(mm_feature.data)
                 mm_hashes_pos.append((mm_hash, mm_feature.mm_position))
-
-                # --- NEW: Collect the required length ---
-                required_lengths.append(mm_feature.mm_position.length)
-                # ------------------------------------------
 
         # Batch mm inputs as much as we can: if a request in the batch has
         # multiple modalities or a different modality than the previous one,
@@ -104,7 +97,6 @@ class MultiModalManager:
         # multimodal inputs. The proper solution should be reordering the
         # encoder outputs.
         encoder_outputs = []
-        mm_item_idx = 0
         for _, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
                 mm_kwargs, merge_by_field_config=False):
             batched_mm_inputs = mm_kwargs_group
@@ -142,20 +134,8 @@ class MultiModalManager:
             # 2. A list or tuple (length: num_items) of tensors, each of shape
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
-            # curr_group_outputs = self.runner.get_multimodal_embeddings_fn(
-            #     self.runner.state, image_grid_thw, **batched_mm_inputs)
-
-            print("This is batched_mm_inputs: ", batched_mm_inputs)
-
-            # --- NEW: Slice out the required lengths for this group ---
-            group_required_lengths = jnp.array(
-                required_lengths[mm_item_idx:mm_item_idx + num_items],
-                dtype=jnp.int32)
-
             curr_group_outputs = self.runner.get_multimodal_embeddings_fn(
-                self.runner.state,
-                group_required_lengths,  # <-- NEW POSITIONAL ARGUMENT
-                **batched_mm_inputs)
+                self.runner.state, **batched_mm_inputs)
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
@@ -164,8 +144,6 @@ class MultiModalManager:
 
             for output in curr_group_outputs:
                 encoder_outputs.append(output)
-
-            mm_item_idx += num_items
 
         # Cache the encoder outputs.
         for (mm_hash, pos_info), output in zip(

@@ -84,21 +84,17 @@ def apply_rope(
 
     elif positions.ndim >= 2 and positions.shape[-1] == 2:  #VISION RoPE
         # positions = freqs_cis_stacked: (S, D_rot, 2)
-        # Unstack to get the complex rotation factors (cos + i*sin)
-        cos = positions[..., 0]
-        sin = positions[..., 1]
+        # Unstack to get the complex rotation factors (cos + i*sin) in a trace-compatible way.
+        cos = jax.lax.slice_in_dim(positions, 0, 1, axis=-1)
+        sin = jax.lax.slice_in_dim(positions, 1, 2, axis=-1)
 
-        # ----------------------------------------------------
-        # The Problem: This reshapes to (S, 1, D_rot)
+        # Squeeze the trailing 1 dimension to get (S, D_rot)
+        cos = jnp.squeeze(cos, axis=-1)
+        sin = jnp.squeeze(sin, axis=-1)
+
+        # Reshape to (S, 1, D_rot) for broadcasting over heads
         cos = cos[:, jnp.newaxis, :]
         sin = sin[:, jnp.newaxis, :]
-        # ----------------------------------------------------
-
-        # --- NEW TRACE POINT A_cos/A_sin (RoPE Factors) ---
-        # Grab the first 5 elements for the first token (index 0, newaxis=0, :5)
-        jax.debug.print("JAX TRACE A_cos (RoPE Factor): {}", cos[0, 0, :5])
-        jax.debug.print("JAX TRACE A_sin (RoPE Factor): {}", sin[0, 0, :5])
-        # ---------------------------------------------------
 
         inputs_f32 = inputs.astype(jnp.float32)
 
@@ -108,32 +104,6 @@ def apply_rope(
 
         cos_f32 = cos.astype(jnp.float32)
         sin_f32 = sin.astype(jnp.float32)
-
-        # # --- FIX: Reshape to correctly broadcast over the flattened input ---
-        # # The input is (Total_Tokens, Num_Heads, Half_Head_Dim) -> (9232, 16, 44)
-        # # We need the RoPE factors to match: (Total_Tokens, 1, Half_Head_Dim)
-
-        # # 1. Tile the positional frequencies (S, D_rot) by the Batch Size (B=16)
-        # #    to match the (B*S) = 9232 dimension.
-        # batch_size = inputs_real.shape[0] // cos.shape[0]  # 9232 // 577 = 16
-
-        # cos_tiled = jnp.tile(
-        #     cos, (batch_size, 1))  # Shape (B*S, D_rot) -> (9232, 44)
-        # sin_tiled = jnp.tile(
-        #     sin, (batch_size, 1))  # Shape (B*S, D_rot) -> (9232, 44)
-
-        # # 2. Add the Num_Heads dimension (H=16) for broadcasting
-        # # The target shape for cos/sin is (B*S, 1, D_rot) -> (9232, 1, 44)
-        # cos = cos_tiled[:, jnp.newaxis, :]  # Shape (9232, 1, 44)
-        # sin = sin_tiled[:, jnp.newaxis, :]  # Shape (9232, 1, 44)
-        # -------------------------------------------------------------------
-
-        print("This is the shape of input: ", inputs.shape)
-        print("This is the shape of positions: ", positions.shape)
-        print("This is the shape of inputs_real: ", inputs_real.shape)
-        print("This is the shape of cos after broadcast: ", cos.shape)
-        print("This is the shape of inputs_imag: ", inputs_imag.shape)
-        print("This is the shape of sin after broadcast: ", sin.shape)
 
         outputs_real = inputs_real * cos_f32 - inputs_imag * sin_f32
         outputs_imag = inputs_real * sin_f32 + inputs_imag * cos_f32

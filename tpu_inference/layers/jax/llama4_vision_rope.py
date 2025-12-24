@@ -92,7 +92,7 @@ class Llama4VisionRotaryEmbedding(nnx.Module):
         freqs_cis_stacked = jnp.where(cls_mask, 0, freqs_cis_stacked)
 
         # Store as parameter/attribute for checkpointing
-        self.freqs_ci = nnx.Param(freqs_cis_stacked.astype(self.dtype))
+        self.freqs_cis_stacked = freqs_cis_stacked.astype(self.dtype)
 
     def __call__(self) -> jax.Array:
-        return self.freqs_ci.value
+        return self.freqs_cis_stacked

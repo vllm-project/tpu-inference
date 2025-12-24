@@ -802,6 +802,8 @@ class JAXLlama4VisionEncoderLayer(nnx.Module):
     def __call__(self, hidden_state: jax.Array, freqs_ci_stacked: jax.Array,
                  **kwargs) -> jax.Array:
 
+        print(f"DEBUG: freqs_ci_stacked type: {type(freqs_ci_stacked)}")
+
         jax.debug.print("TRACE 0 (Input): Hidden State Slice: {}",
                         hidden_state[0, 0, :5])
 
@@ -961,9 +963,14 @@ class JAXLlama4VisionMLP2(nnx.Module):
                 nnx.initializers.glorot_uniform(), ("model", None)),
             rngs=rngs,
         )
-        # Store the full Rngs stream and dropout rate
-        self.rngs = rngs
+
         self.dropout_rate = cfg.projector_dropout
+
+        # Instead of storing self.rngs, initialize the Dropout layer here
+        if self.dropout_rate > 0:
+            self.dropout = nnx.Dropout(self.dropout_rate, rngs=rngs)
+        else:
+            self.dropout = nnx.Dropout(0.0)  # No RNG required for 0% dropout
 
     def __call__(self,
                  hidden_states: jax.Array,
@@ -972,10 +979,9 @@ class JAXLlama4VisionMLP2(nnx.Module):
         hidden_states = self.fc1(hidden_states)
         hidden_states = gelu_jax(hidden_states)
 
-        # Apply dropout using the stored Rngs object
-        if self.dropout_rate > 0 and not deterministic:
-            hidden_states = nnx.Dropout(self.dropout_rate,
-                                        rngs=self.rngs)(hidden_states)
+        # Apply dropout
+        hidden_states = self.dropout(hidden_states,
+                                     deterministic=deterministic)
 
         # Second linear layer with GELU activation
         hidden_states = self.fc2(hidden_states)

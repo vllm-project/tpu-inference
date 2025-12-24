@@ -106,6 +106,9 @@ def _get_nnx_model(
                                             apply_to_abstract_model=False)
 
         for i, (path, value) in enumerate(nnx.state(model).flat_state()):
+            if i == 989:
+                print(f"DEBUG: model.states[0][989] path is: {path}")
+                print(f"DEBUG: model.states[0][989] value is: {value}")
             if i == 991:
                 print(f"DEBUG: model.states[0][991] path is: {path}")
                 print(f"DEBUG: model.states[0][991] value is: {value}")
@@ -267,8 +270,7 @@ def get_flax_model(
 
     # Multi-modal support only
     # This function calculates the image token's embeddings by VIT
-    def run_get_multimodal_embeddings(graphdef, state, required_lengths,
-                                      **kwargs):
+    def run_get_multimodal_embeddings(graphdef, state, **kwargs):
         model = nnx.merge(graphdef, state)
 
         safe_kwargs = {}
@@ -281,7 +283,7 @@ def get_flax_model(
         if 'aspect_ratios' in kwargs:
             safe_kwargs['aspect_ratios'] = kwargs['aspect_ratios']
 
-        return model.get_multimodal_embeddings(required_lengths, **safe_kwargs)
+        return model.get_multimodal_embeddings(**safe_kwargs)
 
     embed_sharding = NamedSharding(mesh, PartitionSpec(None))
     # This function will calculates the embeddings of input texts and then merge with the image embeddings

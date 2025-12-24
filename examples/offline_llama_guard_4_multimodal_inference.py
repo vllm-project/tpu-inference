@@ -212,7 +212,7 @@ def main(args: dict):
     llm = LLM(**args)
 
     # Setting this to False manually to get past error
-    llm.llm_engine.processor.model_config.processor_return_mm_hashes = False
+    llm.llm_engine.processor.model_config.processor_return_mm_hashes = True
 
     # The multimodal flow requires a different input format than the text-only one
     # We will use the vLLM dict-style input for multimodal data.

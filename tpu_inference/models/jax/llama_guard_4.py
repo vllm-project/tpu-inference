@@ -85,9 +85,6 @@ class LlamaGuard4ForCausalLM(nnx.Module):
 
         print("This is self.image_token_id: ", self.image_token_id)
 
-        if rng.dtype == jnp.uint32:
-            rng = rng.astype(jnp.int32)
-
         self.rng = nnx.Rngs(rng)
 
         self.embedder = Embedder(
@@ -242,8 +239,6 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         nnx.display(self.lm_head)
 
     def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
-        if rng.dtype == jnp.uint32:
-            rng = rng.astype(jnp.int32)
         self.rng = nnx.Rngs(rng)
 
         weight_loader = LlamaGuard4WeightLoader(
@@ -265,9 +260,6 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         *args,
     ) -> Tuple[List[KVCacheType], jax.Array]:
         is_prefill = False
-
-        if self.rng.default.key.dtype == jnp.uint32:
-            self.rng.default.key = self.rng.default.key.astype(jnp.int32)
 
         if inputs_embeds is not None:
             x_TD = inputs_embeds
@@ -301,6 +293,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         """
         Computes the embeddings for text input and merges them with multimodal embeddings.
         """
+        print("DEBUG: We entered get_input_embeddings")
         inputs_embeds = self.embedder.encode(input_ids)
 
         if multimodal_embeddings is not None and multimodal_embeddings.shape[
@@ -313,25 +306,28 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         return inputs_embeds
 
     # TODO: This function definitely needs work
-    def get_multimodal_embeddings(
-        self,
-        required_lengths: jax.Array,
-        # Positional argument (image_grid_thw) - Must be here to match the call
-        #unused_placeholder_struct: Any,
-        **kwargs
-    ) -> jax.Array:
+    def get_multimodal_embeddings(self, **kwargs) -> jax.Array:
         """
         Computes the final projected embeddings for multimodal input.
         """
+        print("DEBUG: We entered get_multimodal_embeddings")
+
         # 2. Forward Pass: JAX Array in
         pixel_values = kwargs.pop("pixel_values")
+
+        print("DEBUG: these are pixel_values BEFORE asarray: ", pixel_values)
 
         # Ensure pixel values are JAX-compatible
         pixel_values = jnp.asarray(pixel_values, dtype=jnp.bfloat16)
 
+        print("DEBUG: these are pixel_values AFTER asarray: ", pixel_values)
+
         # Run Vision Encoder and Projector
         projected_vision_features = self.multi_modal_projector(
             self.vision_model(pixel_values))
+
+        print("DEBUG: these are projected_vision_features: ",
+              projected_vision_features)
 
         return projected_vision_features
 
