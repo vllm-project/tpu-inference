@@ -540,12 +540,16 @@ def get_vmem_estimate_bytes(
     """Returns the total vmem bytes used by the kernel."""
     m_per_device = m // tp_size
     n_per_device = n // tp_size
-    y_vmem_bytes = n_per_device * k * dtypes.bit_width(y_dtype) // 8
+    y_vmem_bytes = (n_per_device * k * (dtypes.bit_width(y_dtype) if hasattr(
+        dtypes, "bit_width") else dtypes.itemsize_bits(y_dtype)) // 8)
     total_bytes = (
-        2 * m_per_device * k * dtypes.bit_width(x_dtype) //
-        8  # x_vmem_scratch_ref
+        2 * m_per_device * k *
+        (dtypes.bit_width(x_dtype) if hasattr(dtypes, "bit_width") else
+         dtypes.itemsize_bits(x_dtype)) // 8  # x_vmem_scratch_ref
         + y_vmem_bytes  # y_vmem_scratch_ref
-        + 2 * m * bn * dtypes.bit_width(out_dtype) // 8  # o_vmem_scratch_ref
+        + 2 * m * bn *
+        (dtypes.bit_width(out_dtype) if hasattr(dtypes, "bit_width") else
+         dtypes.itemsize_bits(out_dtype)) // 8  # o_vmem_scratch_ref
         + acc_bytes  # acc_vmem_scratch_ref, jnp.float32
     )
     return total_bytes
@@ -639,8 +643,10 @@ def all_gather_matmul(
     # NOTE(chengjiyao): acc buffer is not used in the grid_k == 1 case.
     if grid_k == 1:
         acc_shape = (8, 128)
-    acc_bytes = acc_shape[0] * acc_shape[1] * dtypes.bit_width(
-        jnp.float32) // 8
+    acc_bytes = (
+        acc_shape[0] *
+        acc_shape[1] * (dtypes.bit_width(jnp.float32) if hasattr(
+            dtypes, "bit_width") else dtypes.itemsize_bits(jnp.float32)) // 8)
     y_vmem_shape = (n_per_device, k) if rhs_transpose else (k, n_per_device)
     estimated_vmem_bytes = get_vmem_estimate_bytes(
         m,

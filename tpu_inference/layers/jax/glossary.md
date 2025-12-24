@@ -17,3 +17,7 @@
 | **G** | Number of Groups | The number of groups for grouped-query attention. |
 | **E** | Total Experts | The total number of experts in the MoE layer. |
 | **M** | Experts per Group | The number of experts within each group, where $M = E/G$. |
+| **A** | Q Lora Rank | Used for DeepSeek models.
+| **L** | Product of QK NoPE Head Dim and V Head Dim | Used for DeepSeek models.
+| **P** | Product of Total (NoPE + RoPE) QK Head Dim and V Head Dim | Used for DeepSeek models.
+| **R** | Product of Number of Attention Heads and V Head Dim | Used for DeepSeek models.

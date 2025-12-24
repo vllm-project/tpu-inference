@@ -1,4 +1,18 @@
 #!/bin/bash
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 
 # This script, by default, will test running Llama3.1-8B-Instruct on 10 prompts on the MLPerf dataset to check that the ROUGE score and overall throughput are reasonable.
 # Specifically, it will do the following:
@@ -134,6 +148,19 @@ if [ "$use_dummy_weights" = true ]; then
     extra_serve_args+=("--load-format=dummy")
 fi
 
+if [ "$USE_V6E8_QUEUE" == "True" ]; then
+    # Set to 8 if job is in 8 chips queue.
+    # TODO (Qiliang Cui) Rename USE_V6E8_QUEUE to USE_8_CHIPS_QUEUE
+    extra_serve_args+=(--tensor-parallel-size 8)
+elif [ "$IS_FOR_V7X" == "true" ]; then
+    # Set the default value to 2 for tpu v7x
+    # TODO (Qiliang Cui) Investigate why tensor-parallel-size=1 breaks in tpu7x
+    extra_serve_args+=(--tensor-parallel-size 2)
+else
+    extra_serve_args+=(--tensor-parallel-size 1)
+fi
+
+
 echo extra_serve_args: "${extra_serve_args[@]}"
 
 
@@ -170,8 +197,8 @@ checkThroughputAndRouge() {
     # Extract ROUGE1 score
     actual_rouge1=$(grep -oP "'rouge1': \K[0-9.]+" "$BENCHMARK_LOG_FILE")
 
-    # Extract Total Token throughput
-    actual_throughput=$(awk '/Total Token throughput \(tok\/s\):/ {print $NF}' "$BENCHMARK_LOG_FILE")
+    # Extract Total token throughput
+    actual_throughput=$(awk '/Total token throughput \(tok\/s\):/ {print $NF}' "$BENCHMARK_LOG_FILE")
 
     echo "--- Extracted Values ---"
     if [ "$SKIP_ACCURACY_TESTS" = "True" ]; then
@@ -197,15 +224,15 @@ checkThroughputAndRouge() {
     echo
 
     if [ -z "$actual_throughput" ]; then
-        echo "Total Token throughput: NOT FOUND"
+        echo "Total token throughput: NOT FOUND"
         throughput_pass=0
     else
-        echo "Total Token throughput: $actual_throughput"
+        echo "Total token throughput: $actual_throughput"
         if awk -v actual="$actual_throughput" -v target="$TARGET_THROUGHPUT" 'BEGIN { exit !(actual >= target) }'; then
-            echo "Total Token throughput comparison (>= $TARGET_THROUGHPUT): PASSED"
+            echo "Total token throughput comparison (>= $TARGET_THROUGHPUT): PASSED"
             throughput_pass=1
         else
-            echo "Total Token throughput comparison (>= $TARGET_THROUGHPUT): FAILED"
+            echo "Total token throughput comparison (>= $TARGET_THROUGHPUT): FAILED"
             throughput_pass=0
         fi
     fi
@@ -251,11 +278,10 @@ for model_name in $model_list; do
     current_serve_args=("${extra_serve_args[@]}")
     max_batched_tokens=8192
     if [ "$USE_V6E8_QUEUE" == "True" ]; then
-        current_serve_args+=(--tensor-parallel-size 8)
         max_batched_tokens=1024
         if [ "$model_name" == "meta-llama/Llama-4-Scout-17B-16E-Instruct" ]; then
             current_serve_args+=(--hf-overrides '{"architectures": ["Llama4ForCausalLM"]}')
-        elif [ "$model_name" == "deepseek-ai/DeepSeek-R1-0528" ]; then
+        elif [ "$model_name" == "jrplatin/DeepSeek-R1-1D-Subchannel-256" ]; then
             current_serve_args+=(--hf_overrides '{"num_hidden_layers": 12}')
         fi
     fi

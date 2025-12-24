@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import functools
-
 import jax
 import jax.numpy as jnp
 from absl.testing import absltest, parameterized
@@ -10,42 +8,12 @@ from jax._src import test_util as jtu
 from tpu_inference.kernels.quantized_matmul import (kernel, tuned_block_sizes,
                                                     util)
 
+xla_quantized_matmul = kernel.xla_quantized_matmul
 quantized_matmul_kernel = kernel.quantized_matmul_kernel
 quantize_tensor = util.quantize_tensor
 get_tuned_block_sizes = tuned_block_sizes.get_tuned_block_sizes
 
 jax.config.parse_flags_with_absl()
-
-
-@functools.partial(jax.jit, static_argnames=["quantize_activation"])
-def reference_quantized_matmul(
-    x: jax.Array,
-    w_q: jax.Array,
-    w_scale: jax.Array,
-    quantize_activation=True,
-):
-    if quantize_activation:
-        acc_dtype = jnp.float32
-        if quantize_activation and jnp.issubdtype(w_q.dtype, jnp.integer):
-            acc_dtype = jnp.int32
-
-        x_q, x_scale = quantize_tensor(x, w_q.dtype)
-        out = jax.lax.dot_general(
-            x_q,
-            w_q,
-            dimension_numbers=(((1, ), (1, )), ((), ())),
-            preferred_element_type=acc_dtype,
-        ).astype(jnp.float32)
-        out *= x_scale
-    else:
-        out = jax.lax.dot_general(
-            x,
-            w_q,
-            dimension_numbers=(((1, ), (1, )), ((), ())),
-            preferred_element_type=jnp.float32,
-        )
-    out *= jnp.expand_dims(w_scale, 0)
-    return out.astype(x.dtype)
 
 
 @jtu.with_config(jax_numpy_dtype_promotion="standard")
@@ -94,7 +62,7 @@ class QuantizedMatmulKernelTest(jtu.JaxTestCase):
             x_q_dtype=x_q_dtype,
             tuned_value=tuned_value,
         )
-        expected = reference_quantized_matmul(
+        expected = xla_quantized_matmul(
             x, w_q, w_scale, quantize_activation=quantize_activation)
 
         self.assertAllClose(output,

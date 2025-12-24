@@ -9,11 +9,57 @@ from jax._src import dtypes
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+from tpu_inference.kernels.quantized_matmul import util
 from tpu_inference.kernels.quantized_matmul.tuned_block_sizes import (
     TunedValue, get_device_vmem_limit, get_tuned_block_sizes)
 from tpu_inference.kernels.quantized_matmul.util import (get_kernel_name,
                                                          next_multiple,
                                                          unfold_args)
+
+quantize_tensor = util.quantize_tensor
+
+
+def xla_quantized_matmul(
+    x: jax.Array,
+    w_q: jax.Array,
+    w_scale: jax.Array,
+    quantize_activation=True,
+) -> jax.Array:
+    """
+    Reference (pure JAX) implementation of the quantized matmul kernel below.
+
+    Args:
+        x:  Activation.
+        w_q: Weight quantized array. [n_output_features, n_input_features]
+        w_s: Weight quantization scale. [n_output_features]
+        mesh: Mesh to shard on.
+        weight_sharding: PartitionSpec for the weight tensor.
+
+    Returns:
+        Output of the quantized matmul.
+    """
+    if quantize_activation:
+        acc_dtype = jnp.float32
+        if quantize_activation and jnp.issubdtype(w_q.dtype, jnp.integer):
+            acc_dtype = jnp.int32
+
+        x_q, x_scale = quantize_tensor(x, w_q.dtype)
+        out = jax.lax.dot_general(
+            x_q,
+            w_q,
+            dimension_numbers=(((1, ), (1, )), ((), ())),
+            preferred_element_type=acc_dtype,
+        ).astype(jnp.float32)
+        out *= x_scale
+    else:
+        out = jax.lax.dot_general(
+            x,
+            w_q,
+            dimension_numbers=(((1, ), (1, )), ((), ())),
+            preferred_element_type=jnp.float32,
+        )
+    out *= jnp.expand_dims(w_scale, 0)
+    return out.astype(x.dtype)
 
 
 def quantize_array(
@@ -50,11 +96,20 @@ def get_vmem_limit(
     """Calculate VMEM limit for the kernel."""
 
     # Calculate in/out VMEM size.
-    x_size = batch_block_size * in_block_size * dtypes.bit_width(x_dtype)
-    x_abs_max_size = batch_block_size * dtypes.bit_width(scale_dtype)
-    w_q_size = out_block_size * in_block_size * dtypes.bit_width(w_q_dtype)
-    w_scale_size = out_block_size * dtypes.bit_width(scale_dtype)
-    out_size = batch_block_size * out_block_size * dtypes.bit_width(out_dtype)
+    x_size = (batch_block_size *
+              in_block_size * (dtypes.bit_width(x_dtype) if hasattr(
+                  dtypes, "bit_width") else dtypes.itemsize_bits(x_dtype)))
+    x_abs_max_size = (
+        batch_block_size * (dtypes.bit_width(scale_dtype) if hasattr(
+            dtypes, "bit_width") else dtypes.itemsize_bits(scale_dtype)))
+    w_q_size = (out_block_size *
+                in_block_size * (dtypes.bit_width(w_q_dtype) if hasattr(
+                    dtypes, "bit_width") else dtypes.itemsize_bits(w_q_dtype)))
+    w_scale_size = (out_block_size * (dtypes.bit_width(scale_dtype) if hasattr(
+        dtypes, "bit_width") else dtypes.itemsize_bits(scale_dtype)))
+    out_size = (batch_block_size *
+                out_block_size * (dtypes.bit_width(out_dtype) if hasattr(
+                    dtypes, "bit_width") else dtypes.itemsize_bits(out_dtype)))
 
     vmem_in_out = x_size + x_abs_max_size + w_q_size + w_scale_size + out_size
     vmem_in_out *= 2  # Account for compute and vreg spills.
@@ -68,9 +123,15 @@ def get_vmem_limit(
     vmem_in_out += out_size if (n_batch > 1 or n_out > 1) else 0
 
     # Calculate scratch VMEM size.
-    acc_size = batch_block_size * out_block_size * dtypes.bit_width(acc_dtype)
-    x_q_size = batch_block_size * in_block_size * dtypes.bit_width(x_q_dtype)
-    x_scale_size = batch_block_size * dtypes.bit_width(scale_dtype)
+    acc_size = (batch_block_size *
+                out_block_size * (dtypes.bit_width(acc_dtype) if hasattr(
+                    dtypes, "bit_width") else dtypes.itemsize_bits(acc_dtype)))
+    x_q_size = (batch_block_size *
+                in_block_size * (dtypes.bit_width(x_q_dtype) if hasattr(
+                    dtypes, "bit_width") else dtypes.itemsize_bits(x_q_dtype)))
+    x_scale_size = (
+        batch_block_size * (dtypes.bit_width(scale_dtype) if hasattr(
+            dtypes, "bit_width") else dtypes.itemsize_bits(scale_dtype)))
 
     vmem_scratch = acc_size if save_acc else 0
     vmem_scratch += x_q_size + x_scale_size if save_x_q else 0

@@ -60,6 +60,7 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("SKIP_JAX_PRECOMPILE", "0")
     monkeypatch.setenv("VLLM_XLA_CHECK_RECOMPILATION", "0")
     monkeypatch.setenv("NEW_MODEL_DESIGN", "0")
+    monkeypatch.setenv("ENABLE_QUANTIZED_MATMUL_KERNEL", "0")
     monkeypatch.setenv("USE_MOE_EP_KERNEL", "0")
 
     # Test SKIP_JAX_PRECOMPILE (default False)
@@ -85,6 +86,82 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     assert envs.USE_MOE_EP_KERNEL is False
     monkeypatch.setenv("USE_MOE_EP_KERNEL", "1")
     assert envs.USE_MOE_EP_KERNEL is True
+
+    # Test ENABLE_QUANTIZED_MATMUL_KERNEL (default False)
+    assert envs.ENABLE_QUANTIZED_MATMUL_KERNEL is False
+    monkeypatch.setenv("ENABLE_QUANTIZED_MATMUL_KERNEL", "1")
+    assert envs.ENABLE_QUANTIZED_MATMUL_KERNEL is True
+
+
+def test_boolean_env_vars_string_values(monkeypatch: pytest.MonkeyPatch):
+    """Test that boolean env vars accept string values like 'True' and 'False'"""
+
+    # Test NEW_MODEL_DESIGN with string "True"
+    monkeypatch.setenv("NEW_MODEL_DESIGN", "True")
+    assert envs.NEW_MODEL_DESIGN is True
+
+    monkeypatch.setenv("NEW_MODEL_DESIGN", "true")
+    assert envs.NEW_MODEL_DESIGN is True
+
+    monkeypatch.setenv("NEW_MODEL_DESIGN", "False")
+    assert envs.NEW_MODEL_DESIGN is False
+
+    monkeypatch.setenv("NEW_MODEL_DESIGN", "false")
+    assert envs.NEW_MODEL_DESIGN is False
+
+    # Test SKIP_JAX_PRECOMPILE with string values
+    monkeypatch.setenv("SKIP_JAX_PRECOMPILE", "True")
+    assert envs.SKIP_JAX_PRECOMPILE is True
+
+    monkeypatch.setenv("SKIP_JAX_PRECOMPILE", "false")
+    assert envs.SKIP_JAX_PRECOMPILE is False
+
+    # Test VLLM_XLA_CHECK_RECOMPILATION with string values
+    monkeypatch.setenv("VLLM_XLA_CHECK_RECOMPILATION", "TRUE")
+    assert envs.VLLM_XLA_CHECK_RECOMPILATION is True
+
+    monkeypatch.setenv("VLLM_XLA_CHECK_RECOMPILATION", "FALSE")
+    assert envs.VLLM_XLA_CHECK_RECOMPILATION is False
+
+    # Test USE_MOE_EP_KERNEL with string values
+    monkeypatch.setenv("USE_MOE_EP_KERNEL", "true")
+    assert envs.USE_MOE_EP_KERNEL is True
+
+    monkeypatch.setenv("USE_MOE_EP_KERNEL", "False")
+    assert envs.USE_MOE_EP_KERNEL is False
+
+
+def test_boolean_env_vars_invalid_values(monkeypatch: pytest.MonkeyPatch):
+    """Test that boolean env vars raise errors for invalid values"""
+
+    # Test invalid value for NEW_MODEL_DESIGN
+    monkeypatch.setenv("NEW_MODEL_DESIGN", "yes")
+    with pytest.raises(
+            ValueError,
+            match="Invalid boolean value 'yes' for NEW_MODEL_DESIGN"):
+        _ = envs.NEW_MODEL_DESIGN
+
+    monkeypatch.setenv("NEW_MODEL_DESIGN", "2")
+    with pytest.raises(ValueError,
+                       match="Invalid boolean value '2' for NEW_MODEL_DESIGN"):
+        _ = envs.NEW_MODEL_DESIGN
+
+    # Test invalid value for SKIP_JAX_PRECOMPILE
+    monkeypatch.setenv("SKIP_JAX_PRECOMPILE", "invalid")
+    with pytest.raises(
+            ValueError,
+            match="Invalid boolean value 'invalid' for SKIP_JAX_PRECOMPILE"):
+        _ = envs.SKIP_JAX_PRECOMPILE
+
+
+def test_boolean_env_vars_empty_string(monkeypatch: pytest.MonkeyPatch):
+    """Test that empty string returns default value"""
+
+    monkeypatch.setenv("NEW_MODEL_DESIGN", "")
+    assert envs.NEW_MODEL_DESIGN is False  # Should return default
+
+    monkeypatch.setenv("SKIP_JAX_PRECOMPILE", "")
+    assert envs.SKIP_JAX_PRECOMPILE is False  # Should return default
 
 
 def test_integer_env_vars(monkeypatch: pytest.MonkeyPatch):
@@ -179,7 +256,7 @@ def test_disaggregated_serving_env_vars(monkeypatch: pytest.MonkeyPatch):
 
 def test_model_impl_type_default(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("MODEL_IMPL_TYPE", raising=False)
-    assert envs.MODEL_IMPL_TYPE == "flax_nnx"
+    assert envs.MODEL_IMPL_TYPE == "auto"
 
 
 def test_cache_preserves_values_across_env_changes(

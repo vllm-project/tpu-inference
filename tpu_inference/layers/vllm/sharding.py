@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import os
 
 import jax
@@ -20,6 +34,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 
 from tpu_inference import envs
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 
 P = PartitionSpec
@@ -109,7 +124,8 @@ def _shard_tensor_to_tpu_replicated(tensor: torch.Tensor,
 def _shard_vocab_parallel_embedding(layer: VocabParallelEmbedding,
                                     mesh: Mesh) -> None:
     weight = _convert_to_torchax_and_shard(
-        layer.weight, NamedSharding(mesh, P('model', None)))
+        layer.weight, NamedSharding(mesh, P(ShardingAxisName.MLP_TENSOR,
+                                            None)))
     layer.weight = Parameter(weight, requires_grad=False)
 
 
@@ -118,11 +134,12 @@ def _shard_lm_head(layer: ParallelLMHead, mesh: Mesh):
     # if that config is set, then we should not create new weights but reuse the
     # weight from VocabParallelEmbedding
     weight = _convert_to_torchax_and_shard(
-        layer.weight, NamedSharding(mesh, P('model', None)))
+        layer.weight, NamedSharding(mesh, P(ShardingAxisName.MLP_TENSOR,
+                                            None)))
     layer.weight = Parameter(weight, requires_grad=False)
     if layer.bias is not None:
-        bias = _convert_to_torchax_and_shard(layer.bias,
-                                             NamedSharding(mesh, P('model')))
+        bias = _convert_to_torchax_and_shard(
+            layer.bias, NamedSharding(mesh, P(ShardingAxisName.MLP_TENSOR)))
         layer.bias = Parameter(bias, requires_grad=False)
 
 

@@ -426,7 +426,7 @@ async def benchmark(
                                         metrics.request_goodput))
     print("{:<40} {:<10.2f}".format("Output token throughput (tok/s):",
                                     metrics.output_throughput))
-    print("{:<40} {:<10.2f}".format("Total Token throughput (tok/s):",
+    print("{:<40} {:<10.2f}".format("Total token throughput (tok/s):",
                                     metrics.total_token_throughput))
 
     result = {

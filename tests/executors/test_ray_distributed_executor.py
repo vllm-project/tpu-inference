@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -10,7 +24,7 @@ class MockVllmConfig:
         self.parallel_config = MagicMock()
         self.parallel_config.world_size = 4
         self.parallel_config.tensor_parallel_size = 2
-        self.parallel_config.pipeline_parallel_size = 2
+        self.parallel_config.pipeline_parallel_size = 1
         self.parallel_config.ray_workers_use_nsight = False
         self.parallel_config.placement_group = None
         self.parallel_config.max_parallel_loading_workers = None

@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import tempfile
 from typing import Optional
 
@@ -5,7 +19,6 @@ import jax
 import pytest
 import torch
 import torchax
-import utils as test_utils
 from jax.sharding import PartitionSpec
 from torchax.interop import torch_view
 from torchax.ops.mappings import j2t, t2j
@@ -27,6 +40,8 @@ from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.awq import (VllmAWQConfig,
                                                         VllmAWQLinearMethod)
 from tpu_inference.layers.vllm.quantization.common import JaxCommonLinearConfig
+
+from . import utils as test_utils
 
 P = PartitionSpec
 MODELS = ["Qwen/Qwen2.5-1.5B-Instruct-AWQ"]
@@ -245,7 +260,7 @@ def test_row_parallel_linear(model, bias, mesh, enable_sp):
         max_num_seqs=4,
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sequence_parallelism = enable_sp
+    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
 
     vllm_config.model_config.dtype = dtype
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
@@ -283,7 +298,7 @@ def test_column_parallel_linear(model, bias, mesh, enable_sp):
         max_num_seqs=4,
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sequence_parallelism = enable_sp
+    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
 
     # Call tpu_inference code
     vllm_config.model_config.dtype = torch.bfloat16
@@ -323,7 +338,7 @@ def test_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
         max_num_seqs=4,
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sequence_parallelism = enable_sp
+    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
 
     # Call tpu_inference code
     vllm_config.model_config.dtype = torch.bfloat16
@@ -367,7 +382,7 @@ def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
         max_num_seqs=4,
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sequence_parallelism = enable_sp
+    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
 
     # Call tpu_inference code
     vllm_config.model_config.dtype = torch.bfloat16

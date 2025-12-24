@@ -1,4 +1,18 @@
 #!/bin/bash
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 #
 # .buildkite/run_in_docker.sh
 # ---------------------------
@@ -48,6 +62,9 @@ else
   exit 1
 fi
 
+# Some test scripts set tp=2 on IS_FOR_V7X=true to mitigate test failures.
+# TODO (Qiliang Cui) Investigate why tensor-parallel-size=1 breaks in tpu7x.
+
 exec docker run \
   --privileged \
   --net host \
@@ -63,6 +80,7 @@ exec docker run \
   ${QUANTIZATION:+-e QUANTIZATION="$QUANTIZATION"} \
   ${NEW_MODEL_DESIGN:+-e NEW_MODEL_DESIGN="$NEW_MODEL_DESIGN"} \
   ${USE_V6E8_QUEUE:+-e USE_V6E8_QUEUE="$USE_V6E8_QUEUE"} \
+  ${IS_FOR_V7X:+-e IS_FOR_V7X="$IS_FOR_V7X"} \
   ${SKIP_ACCURACY_TESTS:+-e SKIP_ACCURACY_TESTS="$SKIP_ACCURACY_TESTS"} \
   ${VLLM_MLA_DISABLE:+-e VLLM_MLA_DISABLE="$VLLM_MLA_DISABLE"} \
   "${IMAGE_NAME}:${BUILDKITE_COMMIT}" \

@@ -1,3 +1,18 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from itertools import islice
 from typing import List, Optional, Tuple
 
 import jax
@@ -8,13 +23,19 @@ from transformers import LlamaConfig, modeling_flax_utils
 from vllm.config import VllmConfig
 
 from tpu_inference import utils
+from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.jax_intermediate_tensor import \
+    JaxIntermediateTensors
 from tpu_inference.models.jax.utils.weight_utils import (get_default_maps,
                                                          load_hf_weights)
+from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
 
@@ -79,7 +100,8 @@ class LlamaAttention(nnx.Module):
                                          self.hidden_size // self.num_heads)
         self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
 
-        sharding_size = mesh.shape["model"] * mesh.shape.get("attn_dp", 1)
+        sharding_size = get_mesh_shape_product(mesh,
+                                               ShardingAxisName.MLP_TENSOR)
         self.num_heads = utils.get_padded_num_heads(self.num_heads,
                                                     sharding_size)
         self.num_kv_heads = utils.get_padded_num_heads(self.num_kv_heads,
@@ -152,8 +174,8 @@ class LlamaAttention(nnx.Module):
             # q_scale = self._q_scale
             k_scale = self._k_scale
             v_scale = self._v_scale
-            k, v = utils.quantize_kv(k, v, self.kv_cache_quantized_dtype,
-                                     k_scale, v_scale)
+            k, v = quantize_kv(self.kv_cache_quantized_dtype, k, v, k_scale,
+                               v_scale)
         new_kv_cache, outputs = attention(
             kv_cache,
             q,
@@ -235,38 +257,52 @@ class LlamaModel(nnx.Module):
         rms_norm_eps = hf_config.rms_norm_eps
         hidden_size = hf_config.hidden_size
 
-        self.embed = nnx.Embed(
-            num_embeddings=vocab_size,
-            features=hidden_size,
-            param_dtype=dtype,
-            embedding_init=nnx.with_partitioning(
-                init_fn, (ShardingAxisName.VOCAB, None)),
-            rngs=rng,
-        )
-        self.layers = [
-            LlamaDecoderLayer(
+        self.is_first_rank = get_pp_group().is_first_rank
+        self.is_last_rank = get_pp_group().is_last_rank
+
+        if self.is_first_rank or (hf_config.tie_word_embeddings
+                                  and self.is_last_rank):
+            self.embed = nnx.Embed(
+                num_embeddings=vocab_size,
+                features=hidden_size,
+                param_dtype=dtype,
+                embedding_init=nnx.with_partitioning(
+                    init_fn, (ShardingAxisName.VOCAB, None)),
+                rngs=rng,
+            )
+        else:
+            self.embed = PPMissingLayer()
+
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            hf_config.num_hidden_layers,
+            lambda: LlamaDecoderLayer(
                 config=hf_config,
                 dtype=dtype,
                 rng=rng,
                 mesh=mesh,
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
-                kv_cache_dtype=vllm_config.cache_config.cache_dtype)
-            for _ in range(hf_config.num_hidden_layers)
-        ]
-        self.norm = nnx.RMSNorm(
-            hidden_size,
-            epsilon=rms_norm_eps,
-            param_dtype=dtype,
-            scale_init=nnx.with_partitioning(init_fn, (None, )),
-            rngs=rng,
-        )
-        if model_config.hf_config.tie_word_embeddings:
-            self.lm_head = self.embed.embedding
-        else:
-            self.lm_head = nnx.Param(
-                init_fn(rng.params(), (hidden_size, vocab_size), dtype),
-                sharding=(None, ShardingAxisName.VOCAB),
+                kv_cache_dtype=vllm_config.cache_config.cache_dtype))
+        if self.is_last_rank:
+            self.norm = nnx.RMSNorm(
+                hidden_size,
+                epsilon=rms_norm_eps,
+                param_dtype=dtype,
+                scale_init=nnx.with_partitioning(init_fn, (None, )),
+                rngs=rng,
             )
+        else:
+            self.norm = PPMissingLayer()
+
+        if self.is_last_rank:
+            if model_config.hf_config.tie_word_embeddings:
+                self.lm_head = self.embed.embedding
+            else:
+                self.lm_head = nnx.Param(
+                    init_fn(rng.params(), (hidden_size, vocab_size), dtype),
+                    sharding=(None, ShardingAxisName.VOCAB),
+                )
+        else:
+            self.lm_head = PPMissingLayer()
 
         self.aux_hidden_state_layers = []
         if vllm_config.speculative_config and vllm_config.speculative_config.method == "eagle3":
@@ -282,10 +318,18 @@ class LlamaModel(nnx.Module):
         kv_caches: List[jax.Array],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
-    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
-        x = self.embed(input_ids)
+        intermediate_tensors: JaxIntermediateTensors | None,
+    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]] | Tuple[
+            List[jax.Array], JaxIntermediateTensors]:
+        if self.is_first_rank:
+            x = self.embed(input_ids)
+        else:
+            assert intermediate_tensors is not None
+            x = intermediate_tensors["hidden_states"]
+
         aux_hidden_states = []
-        for i, layer in enumerate(self.layers):
+        for i, layer in enumerate(
+                islice(self.layers, self.start_layer, self.end_layer)):
             if i in self.aux_hidden_state_layers:
                 aux_hidden_states.append(x)
             kv_cache = kv_caches[i]
@@ -295,6 +339,10 @@ class LlamaModel(nnx.Module):
                 attention_metadata,
             )
             kv_caches[i] = kv_cache
+        if not self.is_last_rank:
+            # Note: add aux_hidden_states to make the output spec consistent.
+            return kv_caches, JaxIntermediateTensors({"hidden_states":
+                                                      x}), aux_hidden_states
         x = self.norm(x)
         return kv_caches, x, aux_hidden_states
 
@@ -313,19 +361,33 @@ class LlamaForCausalLM(nnx.Module):
             mesh=mesh,
         )
 
+        self.pp_missing_layers = []
+        for path, module in nnx.iter_graph(self.model):
+            if isinstance(module, PPMissingLayer):
+                # the path should be sth like ('layers', '0')
+                self.pp_missing_layers.append('.'.join([str(s) for s in path]))
+
     def __call__(
         self,
         kv_caches: List[jax.Array],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
+        _input_embeds=None,
+        _input_positions=None,
+        _layer_name_to_kv_cache=None,
+        _lora_metadata=None,
+        intermediate_tensors: JaxIntermediateTensors | None = None,
+        _is_first_rank: bool | None = None,
+        _is_last_rank: bool | None = None,
         *args,
-    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
-        kv_caches, x, aux_hidden_states = self.model(
+    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]] | Tuple[
+            List[jax.Array], JaxIntermediateTensors]:
+        return self.model(
             kv_caches,
             input_ids,
             attention_metadata,
+            intermediate_tensors,
         )
-        return kv_caches, x, aux_hidden_states
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         if self.vllm_config.model_config.hf_config.tie_word_embeddings:
@@ -373,4 +435,5 @@ class LlamaForCausalLM(nnx.Module):
         load_hf_weights(vllm_config=self.vllm_config,
                         model=self,
                         metadata_map=metadata_map,
-                        mesh=self.mesh)
+                        mesh=self.mesh,
+                        pp_missing_layers=self.pp_missing_layers)

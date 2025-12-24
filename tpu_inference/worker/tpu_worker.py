@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional, Tuple
 
 import jax
-import jax.numpy as jnp
 import jaxlib
 import jaxtyping
 import vllm.envs as vllm_envs
@@ -19,15 +18,16 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
 from vllm.v1 import utils as vllm_utils
-from vllm.v1.core.kv_cache_utils import get_num_blocks, get_uniform_page_size
+from vllm.v1.core.kv_cache_utils import (get_kv_cache_groups, get_num_blocks,
+                                         get_uniform_page_size)
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 
 from tpu_inference import envs, utils
 from tpu_inference.distributed import jax_parallel_state
-from tpu_inference.distributed.utils import (get_host_ip, get_kv_transfer_port,
-                                             get_node_id)
+from tpu_inference.distributed.utils import (get_device_topology_order_id,
+                                             get_host_ip, get_kv_transfer_port)
 from tpu_inference.layers.common.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
@@ -36,12 +36,6 @@ from tpu_inference.runner.kv_cache import get_attention_page_size_bytes
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 logger = init_logger(__name__)
-
-_DTYPE: dict[str, jnp.dtype] = {
-    "bfloat16": jnp.bfloat16,
-    "float": jnp.float32,
-    "float32": jnp.float32,
-}
 
 
 @dataclass
@@ -77,21 +71,6 @@ class TPUWorker:
         ip: str = "localhost",
         prev_worker_ip: str = "localhost",
     ):
-        # If we use vLLM's model implementation in PyTorch, we should set it
-        # with torch version of the dtype.
-        impl = envs.MODEL_IMPL_TYPE
-        if impl != "vllm":  # vllm-pytorch implementation does not need this conversion
-
-            # NOTE(wenlong): because sometimes mm needs to use torch for preprocessing
-            if not isinstance(vllm_config.model_config.dtype, str):
-                logger.warning(
-                    "The model dtype is not properly set for JAX backend. "
-                    "Overwriting it to jnp.bfloat16")
-                vllm_config.model_config.dtype = jnp.bfloat16
-            else:
-                vllm_config.model_config.dtype = _DTYPE.get(
-                    vllm_config.model_config.dtype, jnp.bfloat16)
-
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.parallel_config = vllm_config.parallel_config
@@ -253,9 +232,16 @@ class TPUWorker:
 
         is_first_rank = True
         is_last_rank = True
+        self.topology_order_id = self.rank
         if self.parallel_config.pipeline_parallel_size > 1:
             is_first_rank = self.rank == 0
             is_last_rank = self.rank == self.pp_config.pp_world_size - 1
+        else:
+            # topology_order_id is used to determine the KV cache
+            # mapping between P/D workers
+            if multihost_backend == "ray":
+                self.topology_order_id = get_device_topology_order_id(
+                    jax.local_devices(), jax.devices())
 
         self.model_runner = TPUModelRunner(self.vllm_config, self.devices,
                                            self.rank, is_first_rank,
@@ -264,9 +250,12 @@ class TPUWorker:
                     f"rank={self.rank} | "
                     f"is_first_rank={is_first_rank} | "
                     f"is_last_rank={is_last_rank} | "
-                    f"node_id={get_node_id()} | "
+                    f"topology_order_id={self.topology_order_id} | "
                     f"is_driver_worker={self.is_driver_worker} | "
-                    f"hbm={utils.hbm_usage_gb(self.devices)}GiB")
+                    f"hbm={utils.hbm_usage_gb(self.devices)}GiB |"
+                    f"self.devices={self.devices} | "
+                    f"total devices={jax.devices()} | "
+                    f"local_devices={jax.local_devices()}")
         vllm_utils.report_usage_stats(self.vllm_config)
 
     def initialize_pp_transfer_connect(self):
@@ -404,46 +393,56 @@ class TPUWorker:
         # responsible for this translation. When vLLM can be modified, this
         # method should be changed to return `dict[str, AbstractKVCacheSpec]`,
         # and the vLLM side should be updated to handle the translation.
-        kv_cache_specs = self.model_runner.get_kv_cache_spec()
+        kv_cache_spec = self.model_runner.get_kv_cache_spec()
 
-        if len(kv_cache_specs) == 0:
-            return kv_cache_specs
+        if len(kv_cache_spec) == 0:
+            return kv_cache_spec
 
         # TODO(kyuyeunk): Instead of checking page_size_bytes here, introduce
         # feature that allows overriding page_size_bytes of KVCacheSpec.
         vllm_page_size_bytes = get_uniform_page_size(
-            list(kv_cache_specs.values()))
+            list(kv_cache_spec.values()))
         attention_page_size_bytes = get_attention_page_size_bytes(
-            self.model_runner.mesh, kv_cache_specs)
+            self.model_runner.mesh, kv_cache_spec)
 
         if vllm_page_size_bytes != attention_page_size_bytes:
             logger.info(
-                f"KV cache page size calculated by vLLM "
-                f"({vllm_page_size_bytes} Bytes) does not match with actual "
-                f"page size used by Attention kernel ({attention_page_size_bytes} Bytes). "
-                f"Recalculating number of KV blocks using actual page size.")
+                f"Page size calculated by vLLM ({vllm_page_size_bytes} Bytes) "
+                f"does not match with actual page size used by the kernel "
+                f"({attention_page_size_bytes} Bytes). Recalculating number of "
+                f"KV blocks using actual page size.")
 
+            kv_cache_groups = get_kv_cache_groups(self.vllm_config,
+                                                  kv_cache_spec)
+            group_size = max(
+                len(group.layer_names) for group in kv_cache_groups)
             available_memory = self.determine_available_memory()
-            num_blocks = get_num_blocks(self.vllm_config, len(kv_cache_specs),
+            num_blocks = get_num_blocks(self.vllm_config, group_size,
                                         available_memory,
                                         attention_page_size_bytes)
             cache_config = self.vllm_config.cache_config
             cache_config.num_gpu_blocks_override = num_blocks
 
-        return kv_cache_specs
+        return kv_cache_spec
 
     def initialize_from_config(
         self,
         kv_cache_config: KVCacheConfig,
     ) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
-        self.model_runner.initialize_kv_cache(kv_cache_config)
+        # Precompile functions with large vocab_size tensors before allocating KV cache to avoid OOM
+        if not (envs.SKIP_JAX_PRECOMPILE or
+                (hasattr(self.model_runner.model_config, "enforce_eager")
+                 and self.model_runner.model_config.enforce_eager)):
+            self.model_runner.compilation_manager._precompile_sampling()
+            self.model_runner.compilation_manager._precompile_gather_logprobs()
+        self.model_runner.initialize_kv_cache(kv_cache_config,
+                                              self.topology_order_id)
 
     def get_node_kv_ip_port(self) -> tuple[int, str, int]:
-        node_id = get_node_id()
         ip = get_host_ip()
         port = get_kv_transfer_port()
-        return (int(node_id), ip, int(port))
+        return (int(self.topology_order_id), ip, int(port))
 
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.

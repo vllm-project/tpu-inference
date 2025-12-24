@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import torchax
 from jax.sharding import Mesh, PartitionSpec
 from vllm.config import VllmConfig
@@ -11,9 +25,10 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.linear_common import \
     get_model_matmul_fusion_assignment
-from tpu_inference.utils import TPU_SECOND_LAST_MINOR
+from tpu_inference.utils import TPU_SECOND_LAST_MINOR, get_mesh_shape_product
 
 # yapf: enable
 
@@ -31,18 +46,22 @@ class JaxCommonLinearConfig:
         self.output_sizes = [layer.output_size]
         self.weight_sharding = P(None, None)
         self.fuse_matmuls = True
-        self.enable_sequence_parallelism = vllm_config.compilation_config.pass_config.enable_sequence_parallelism
+        self.enable_sp = vllm_config.compilation_config.pass_config.enable_sp
         self.input_sharding = None
         self.output_sharding = None
 
+        self.tp_size = get_mesh_shape_product(self.mesh,
+                                              ShardingAxisName.MLP_TENSOR)
+
         if isinstance(layer, RowParallelLinear):
-            self.weight_sharding = P(None, "model")
-            if self.enable_sequence_parallelism:
-                self.output_sharding = P("model", None)
+            self.weight_sharding = P(None, ShardingAxisName.ATTN_HEAD)
+            if self.enable_sp:
+                self.output_sharding = P(ShardingAxisName.MLP_TENSOR, None)
         elif isinstance(layer, ColumnParallelLinear):
-            self.weight_sharding = P("model", None)
-            if self.enable_sequence_parallelism:
-                self.input_sharding = P("model", None)
+            self.weight_sharding = P(ShardingAxisName.ATTN_HEAD, None)
+
+            if self.enable_sp:
+                self.input_sharding = P(ShardingAxisName.MLP_TENSOR, None)
 
             if isinstance(layer, MergedColumnParallelLinear) or isinstance(
                     layer, QKVParallelLinear):
@@ -61,28 +80,24 @@ class JaxCommonLinearConfig:
                 " bad performance.", type(layer))
 
         self.bias_sharding = P(self.weight_sharding[0])
-        if isinstance(self.weight_sharding[0], tuple):
-            self.n_shards = 1
-            for axis in self.weight_sharding[0]:
-                self.n_shards *= self.mesh.shape.get(axis, 1)
-        else:
-            self.n_shards = self.mesh.shape.get(self.weight_sharding[0], 1)
+        self.n_shards = get_mesh_shape_product(self.mesh,
+                                               self.weight_sharding[0])
 
     def get_input_sharding(self, x: torchax.tensor.Tensor):
-        if self.enable_sequence_parallelism:
+        if self.enable_sp:
             token_num = x.shape[0]
             # NOTE(chengjiyao): make sure the sharded token_num is larger than TPU_SECOND_LAST_MINOR
-            if token_num // self.mesh.shape["model"] >= TPU_SECOND_LAST_MINOR:
+            if token_num // self.tp_size >= TPU_SECOND_LAST_MINOR:
                 return self.input_sharding
             else:
                 return None
         return self.input_sharding
 
     def get_output_sharding(self, x: torchax.tensor.Tensor):
-        if self.enable_sequence_parallelism:
+        if self.enable_sp:
             token_num = x.shape[0]
             # NOTE(chengjiyao): make sure the sharded token_num is larger than TPU_SECOND_LAST_MINOR
-            if token_num // self.mesh.shape["model"] >= TPU_SECOND_LAST_MINOR:
+            if token_num // self.tp_size >= TPU_SECOND_LAST_MINOR:
                 return self.output_sharding
             else:
                 return None

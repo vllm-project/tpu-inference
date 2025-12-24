@@ -1,6 +1,20 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import copy
 import functools
-import os
+import logging
 import random
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -10,12 +24,10 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
-import torch
 import vllm.envs as vllm_envs
 from flax import nnx
 from jax.experimental import mesh_utils
 from jax.sharding import NamedSharding, PartitionSpec
-from torchax.ops.mappings import t2j_dtype
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
@@ -67,9 +79,11 @@ from tpu_inference.runner.structured_decoding_manager import \
     StructuredDecodingManager
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
 from tpu_inference.utils import (device_array, make_optimized_mesh,
-                                 time_function, to_torch_dtype)
+                                 time_function, to_jax_dtype, to_torch_dtype)
 
 logger = init_logger(__name__)
+
+logging.getLogger("torchax.tensor").setLevel(logging.ERROR)
 
 INVALID_TOKEN_ID = -1
 # Smallest output size
@@ -267,6 +281,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self._pre_async_results: AsyncPreResults | None = None
         self._substitute_placeholder_token_fn = _substitute_placeholder_token
         self.execute_model_state: ExecuteModelState | None = None
+
+        self.kv_caches: list[jax.Array] = []
+        self.layer_name_to_kvcache_index: dict[str, int] = {}
 
     def _init_random(self):
         if self.model_config.seed is None:
@@ -494,10 +511,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         multimodal_fns = multimodal_fns or {}
         self.precompile_vision_encoder_fn = multimodal_fns.get(
             "precompile_vision_encoder_fn", None)
-        self.get_multimodal_embeddings_fn = multimodal_fns.get(
-            "get_multimodal_embeddings_fn", None)
-        self.get_input_embeddings_fn = multimodal_fns.get(
-            "get_input_embeddings_fn", None)
+        self.embed_multimodal_fn = multimodal_fns.get("embed_multimodal_fn",
+                                                      None)
+        self.embed_input_ids_fn = multimodal_fns.get("embed_input_ids_fn",
+                                                     None)
         self.get_mrope_input_positions_fn = multimodal_fns.get(
             "get_mrope_input_positions_fn", None)
 
@@ -507,10 +524,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self.rng_params_for_sampling = nnx.Rngs(
             jax.random.key(self.model_config.seed)).params()
-        self.is_multimodal_model = (
-            self.model_config.is_multimodal_model
-            and self.get_multimodal_embeddings_fn is not None
-            and hasattr(self.model_config.hf_config, "architectures"))
+        self.is_multimodal_model = (self.model_config.is_multimodal_model
+                                    and self.embed_multimodal_fn is not None
+                                    and hasattr(self.model_config.hf_config,
+                                                "architectures"))
 
         logger.info(f"Init model | "
                     f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")
@@ -521,10 +538,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def get_kv_cache_spec(self):
         return self.kv_cache_manager.get_kv_cache_spec()
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_kv_cache(self,
+                            kv_cache_config: KVCacheConfig,
+                            topology_order_id: int = 0) -> None:
+        self.topology_order_id = topology_order_id
         self.kv_cache_config = kv_cache_config
         self.use_hybrid_kvcache = len(kv_cache_config.kv_cache_groups) > 1
-        self.kv_caches = []
         self.kv_cache_manager.initialize_kv_cache(kv_cache_config)
         if has_kv_transfer_group():
             get_kv_transfer_group().register_runner(self)
@@ -798,7 +817,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         sharding = None
         if self.dp_size > 1:
             sharding = NamedSharding(self.mesh,
-                                     PartitionSpec(ShardingAxisName.ATTN_DATA))
+                                     PartitionSpec(ShardingAxisName.MLP_DATA))
 
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
             self.mesh, self.input_batch, padded_num_reqs, sharding=sharding)
@@ -1361,7 +1380,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.mesh,
             self.input_batch,
             padded_num_reqs,
-            sharding=data_parallel_attn_sharding,
+            sharding=NamedSharding(self.mesh,
+                                   PartitionSpec(ShardingAxisName.MLP_DATA)),
         )
         if self.uses_mrope:
             positions = mrope_positions
@@ -1651,18 +1671,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def _get_input_ids_embeds(self, input_ids: jax.Array,
                               mm_embeds: list[jax.Array]):
         if self.is_multimodal_model:
-            jax_mm_embeds = []
-            for embed in mm_embeds:
-                embed_f32 = embed.to(torch.float32)
-
-                jax_embed = jnp.asarray(embed_f32, dtype=self.dtype)
-                jax_mm_embeds.append(jax_embed)
-
-            inputs_embeds = self.get_input_embeddings_fn(
+            inputs_embeds = self.embed_input_ids_fn(
                 self.state,
                 input_ids,
-                #mm_embeds,
-                jax_mm_embeds,
+                mm_embeds,
             )
             return None, inputs_embeds
         else:
@@ -1716,8 +1728,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             shard=shard)
 
     def get_intermediate_tensor_spec(self, num_tokens: int):
-        impl = os.getenv("MODEL_IMPL_TYPE", "flax_nnx").lower()
-        jax_dtype = t2j_dtype(self.dtype) if impl == "vllm" else self.dtype
+        jax_dtype = to_jax_dtype(self.dtype)
         num_padded_tokens = runner_utils.get_padded_token_len(
             self.num_tokens_paddings, num_tokens)
         sharding = NamedSharding(self.mesh, PartitionSpec())

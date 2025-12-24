@@ -1,4 +1,18 @@
 #!/bin/bash
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 
 # Example offline benchmark:
 
@@ -56,22 +70,22 @@ checkThroughputAndRouge() {
         return
     fi
 
-    # Extract Total Token throughput
-    actual_throughput=$(awk '/Total Token throughput \(tok\/s\):/ {print $NF}' "$BENCHMARK_LOG_FILE")
+    # Extract Total token throughput
+    actual_throughput=$(awk '/Total token throughput \(tok\/s\):/ {print $NF}' "$BENCHMARK_LOG_FILE")
 
     echo "--- Extracted Values ---"
     echo
 
     if [ -z "$actual_throughput" ]; then
-        echo "Total Token throughput: NOT FOUND"
+        echo "Total token throughput: NOT FOUND"
         throughput_pass=0
     else
-        echo "Total Token throughput: $actual_throughput"
+        echo "Total token throughput: $actual_throughput"
         if awk -v actual="$actual_throughput" -v target="$TARGET_THROUGHPUT" 'BEGIN { exit !(actual >= target) }'; then
-            echo "Total Token throughput comparison (>= $TARGET_THROUGHPUT): PASSED"
+            echo "Total token throughput comparison (>= $TARGET_THROUGHPUT): PASSED"
             throughput_pass=1
         else
-            echo "Total Token throughput comparison (>= $TARGET_THROUGHPUT): FAILED"
+            echo "Total token throughput comparison (>= $TARGET_THROUGHPUT): FAILED"
             throughput_pass=0
         fi
     fi

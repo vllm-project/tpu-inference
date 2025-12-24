@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import tempfile
 from typing import Optional
 
@@ -5,7 +19,6 @@ import jax
 import pytest
 import torch
 import torchax
-import utils as test_utils
 from compressed_tensors.quantization import QuantizationStrategy
 from jax.sharding import PartitionSpec
 from torchax.interop import torch_view
@@ -29,6 +42,8 @@ from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensor
     VllmCompressedTensorsConfig
 from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import (
     VllmCompressedTensorsW8A8Fp8, requantize_with_max_scale)
+
+from . import utils as test_utils
 
 P = PartitionSpec
 MODELS = [
@@ -236,12 +251,16 @@ def test_loading_model(model, mesh):
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("mesh", [
-    test_utils.get_spmd_mesh(1),
-    test_utils.get_spmd_mesh(jax.local_device_count())
-])
+@pytest.mark.parametrize("num_devices", [1, jax.local_device_count()])
 @pytest.mark.parametrize("enable_sp", [False, True])
-def test_row_parallel_linear(model, bias, mesh, enable_sp):
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+def test_row_parallel_linear(model, bias, num_devices, enable_sp,
+                             enable_attn_dp):
+    # Skip if enable_attn_dp is True but we don't have enough devices
+    if enable_attn_dp and num_devices < 2:
+        pytest.skip("enable_attn_dp requires at least 2 devices")
+
+    mesh = test_utils.get_spmd_mesh(num_devices, enable_attn_dp)
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
@@ -251,7 +270,7 @@ def test_row_parallel_linear(model, bias, mesh, enable_sp):
         max_num_seqs=4,
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sequence_parallelism = enable_sp
+    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
 
     vllm_config.model_config.dtype = dtype
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
@@ -272,12 +291,16 @@ def test_row_parallel_linear(model, bias, mesh, enable_sp):
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("mesh", [
-    test_utils.get_spmd_mesh(1),
-    test_utils.get_spmd_mesh(jax.local_device_count())
-])
+@pytest.mark.parametrize("num_devices", [1, jax.local_device_count()])
 @pytest.mark.parametrize("enable_sp", [False, True])
-def test_column_parallel_linear(model, bias, mesh, enable_sp):
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+def test_column_parallel_linear(model, bias, num_devices, enable_sp,
+                                enable_attn_dp):
+    # Skip if enable_attn_dp is True but we don't have enough devices
+    if enable_attn_dp and num_devices < 2:
+        pytest.skip("enable_attn_dp requires at least 2 devices")
+
+    mesh = test_utils.get_spmd_mesh(num_devices, enable_attn_dp)
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
@@ -287,7 +310,7 @@ def test_column_parallel_linear(model, bias, mesh, enable_sp):
         max_num_seqs=4,
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sequence_parallelism = enable_sp
+    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
 
     # Call tpu_inference code
     vllm_config.model_config.dtype = torch.bfloat16
@@ -309,13 +332,17 @@ def test_column_parallel_linear(model, bias, mesh, enable_sp):
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("mesh", [
-    test_utils.get_spmd_mesh(1),
-    test_utils.get_spmd_mesh(jax.local_device_count())
-])
+@pytest.mark.parametrize("num_devices", [1, jax.local_device_count()])
 @pytest.mark.parametrize("enable_sp", [False, True])
 @pytest.mark.parametrize("fuse_matmuls", [False, True])
-def test_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+def test_qkv_parallel_linear(model, bias, num_devices, enable_sp, fuse_matmuls,
+                             enable_attn_dp):
+    # Skip if enable_attn_dp is True but we don't have enough devices
+    if enable_attn_dp and num_devices < 2:
+        pytest.skip("enable_attn_dp requires at least 2 devices")
+
+    mesh = test_utils.get_spmd_mesh(num_devices, enable_attn_dp)
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
@@ -325,7 +352,7 @@ def test_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
         max_num_seqs=4,
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sequence_parallelism = enable_sp
+    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
 
     # Call tpu_inference code
     vllm_config.model_config.dtype = torch.bfloat16
@@ -350,14 +377,17 @@ def test_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("mesh", [
-    test_utils.get_spmd_mesh(1),
-    test_utils.get_spmd_mesh(jax.local_device_count())
-])
+@pytest.mark.parametrize("num_devices", [1, jax.local_device_count()])
 @pytest.mark.parametrize("fuse_matmuls", [False, True])
 @pytest.mark.parametrize("enable_sp", [False, True])
-def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
-                                       enable_sp):
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+def test_merged_column_parallel_linear(model, bias, num_devices, fuse_matmuls,
+                                       enable_sp, enable_attn_dp):
+    # Skip if enable_attn_dp is True but we don't have enough devices
+    if enable_attn_dp and num_devices < 2:
+        pytest.skip("enable_attn_dp requires at least 2 devices")
+
+    mesh = test_utils.get_spmd_mesh(num_devices, enable_attn_dp)
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
@@ -367,7 +397,7 @@ def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
         max_num_seqs=4,
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sequence_parallelism = enable_sp
+    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
 
     # Call tpu_inference code
     vllm_config.model_config.dtype = torch.bfloat16

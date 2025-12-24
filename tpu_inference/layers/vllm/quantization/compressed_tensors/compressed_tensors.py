@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from typing import Optional
 
 import torch
@@ -20,7 +34,7 @@ from tpu_inference.layers.common.quant_methods import (COMPRESSED_TENSORS,
                                                        get_tpu_quant_method)
 from tpu_inference.layers.vllm.quantization.common import JaxCommonConfig
 from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors_moe import \
-    VllmCompressedTensorsW8A8Fp8MoEMethod
+    VllmCompressedTensorsMoEMethod
 from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import \
     VllmCompressedTensorsW8A8Fp8
 from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_int8 import \
@@ -113,8 +127,9 @@ class VllmCompressedTensorsConfig(CompressedTensorsConfig, JaxCommonConfig):
             layer.scheme = scheme
             return CompressedTensorsLinearMethod(self)
         if isinstance(layer, FusedMoE):
-            return VllmCompressedTensorsW8A8Fp8MoEMethod(
-                self, layer.quant_config, self.mesh)
+            layer.moe_config = self.get_moe_config(layer)
+            return VllmCompressedTensorsMoEMethod.get_moe_method(
+                self, layer, layer_name=prefix)
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
         return None

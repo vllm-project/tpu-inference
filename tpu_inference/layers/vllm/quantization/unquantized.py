@@ -1,4 +1,18 @@
-from typing import Any, Callable, Optional, Union
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from typing import Any, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -25,15 +39,21 @@ from tpu_inference import envs
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
 from tpu_inference.layers.common.quant_methods import (UNQUANTIZED,
                                                        get_tpu_quant_method)
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.fused_moe import fused_moe_func
 from tpu_inference.layers.vllm.linear_common import (
     reorder_concatenated_tensor_for_sharding,
     slice_sharded_tensor_for_concatenation, torch_to_jax_param)
 from tpu_inference.layers.vllm.quantization.common import (
     JaxCommonConfig, JaxCommonLinearConfig)
+from tpu_inference.utils import get_mesh_shape_product
 
 P = PartitionSpec
 logger = init_logger(__name__)
+
+
+def align_to(a, b):
+    return (a + b - 1) // b * b
 
 
 @register_quantization_config(get_tpu_quant_method(UNQUANTIZED))
@@ -223,33 +243,74 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             # Current format:
             # w13_weight: (num_experts, 2*intermediate_size, hidden_size)
             # w2_weight: (num_experts, hidden_size, intermediate_size)
+            num_experts = w13_weight.shape[0]
+            intermediate_size = w13_weight.shape[1] // 2
+            hidden_size = w13_weight.shape[2]
 
-            w13_reshaped = w13_weight.reshape(num_experts, 2,
-                                              intermediate_size, hidden_size)
+            padded_intermediate_size = align_to(intermediate_size, 256)
+            padded_hidden_size = align_to(hidden_size, 256)
 
-            # Transpose non-constracting dim to right most dim
-            w13_weight_transposed = jnp.swapaxes(w13_reshaped, 2, 3)
-            w2_weight_transposed = jnp.swapaxes(w2_weight, 1, 2)
+            # Transpose w2_weight to (num_experts, intermediate_size, hidden_size)
+            w13_weight = w13_weight.reshape(num_experts, 2, intermediate_size,
+                                            hidden_size)
+            w13_weight = jnp.swapaxes(w13_weight, 3, 2)
+
+            w2_weight = jnp.swapaxes(w2_weight, 2, 1)
+
+            w13_weight = jnp.pad(
+                w13_weight,
+                ((0, 0), (0, 0), (0, padded_hidden_size - hidden_size),
+                 (0, padded_intermediate_size - intermediate_size)),
+                constant_values=0)
+
+            w2_weight = jnp.pad(
+                w2_weight,
+                ((0, 0), (0, padded_intermediate_size - intermediate_size),
+                 (0, padded_hidden_size - hidden_size)),
+                constant_values=0)
 
             # Apply EP sharding
             ep_sharding = NamedSharding(self.mesh, P("model"))
 
             w13_weight = jax.device_put(
-                w13_weight_transposed, Format(Layout((0, 1, 2, 3)),
-                                              ep_sharding))
-            w2_weight = jax.device_put(w2_weight_transposed,
-                                       Format(Layout((0, 1, 2)), ep_sharding))
+                w13_weight,
+                Format(Layout((0, 1, 2, 3)),
+                       NamedSharding(self.mesh, P("model", None, None, None))))
+            w2_weight = jax.device_put(
+                w2_weight,
+                Format(Layout((0, 1, 2)),
+                       NamedSharding(self.mesh, P("model", None, None))))
 
             if self.moe.has_bias:
-                w13_bias = w13_bias.reshape(num_experts, 2, intermediate_size)
+                w13_bias = w13_bias.astype(jnp.float32).reshape(
+                    num_experts, 2, 1, intermediate_size)
+                w2_bias = w2_bias.astype(jnp.float32).reshape(
+                    num_experts, 1, hidden_size)
+
+                w13_bias = jnp.pad(
+                    w13_bias,
+                    ((0, 0), (0, 0), (0, 0),
+                     (0, padded_intermediate_size - intermediate_size)),
+                    constant_values=0)
+
+                w2_bias = jnp.pad(w2_bias,
+                                  ((0, 0), (0, 0),
+                                   (0, padded_hidden_size - hidden_size)),
+                                  constant_values=0)
+
+                # Apply EP sharding
                 w13_bias = jax.device_put(
-                    w13_bias, Format(Layout((0, 1, 2)), ep_sharding))
-                w2_bias = jax.device_put(w2_bias,
-                                         Format(Layout((0, 1)), ep_sharding))
+                    w13_bias, Format(Layout((0, 1, 2, 3)), ep_sharding))
+                w2_bias = jax.device_put(
+                    w2_bias, Format(Layout((0, 1, 2)), ep_sharding))
         else:
+            if self.moe.has_bias:
+                w13_bias = jnp.expand_dims(w13_bias, 1)
+                w2_bias = jnp.expand_dims(w2_bias, 1)
 
             if layer.use_ep:
-                ep_sharding = NamedSharding(self.mesh, P("model"))
+                ep_sharding = NamedSharding(self.mesh,
+                                            P(ShardingAxisName.EXPERT))
                 w13_weight = jax.device_put(
                     w13_weight, Format(Layout((0, 1, 2)), ep_sharding))
                 w2_weight = jax.device_put(
@@ -257,37 +318,48 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
                 if self.moe.has_bias:
                     w13_bias = jax.device_put(
-                        w13_bias, Format(Layout((0, 1)), ep_sharding))
+                        w13_bias, Format(Layout((0, 1, 2)), ep_sharding))
                     w2_bias = jax.device_put(
-                        w2_bias, Format(Layout((0, 1)), ep_sharding))
+                        w2_bias, Format(Layout((0, 1, 2)), ep_sharding))
 
             else:
                 output_sizes = [intermediate_size, intermediate_size]
-                n_shards = self.mesh.shape["model"]
+                n_shards = get_mesh_shape_product(self.mesh,
+                                                  ShardingAxisName.MLP_TENSOR)
                 assert intermediate_size % n_shards == 0
 
                 w13_weight = reorder_concatenated_tensor_for_sharding(
                     w13_weight, output_sizes, n_shards, dim=1)
                 w13_weight = jax.device_put(
                     w13_weight,
-                    Format(Layout((0, 1, 2)),
-                           NamedSharding(self.mesh, P(None, "model", None))))
+                    Format(
+                        Layout((0, 1, 2)),
+                        NamedSharding(
+                            self.mesh,
+                            P(None, ShardingAxisName.MLP_TENSOR, None))))
                 w2_weight = jax.device_put(
                     w2_weight,
-                    Format(Layout((0, 1, 2)),
-                           NamedSharding(self.mesh, P(None, None, "model"))))
+                    Format(
+                        Layout((0, 1, 2)),
+                        NamedSharding(
+                            self.mesh,
+                            P(None, None, ShardingAxisName.MLP_TENSOR))))
 
                 if self.moe.has_bias:
                     w13_bias = reorder_concatenated_tensor_for_sharding(
-                        w13_bias, output_sizes, n_shards, dim=1)
+                        w13_bias, output_sizes, n_shards, dim=2)
+
                     w13_bias = jax.device_put(
                         w13_bias,
-                        Format(Layout((0, 1)),
-                               NamedSharding(self.mesh, P(None, "model"))))
+                        Format(
+                            Layout((0, 1, 2)),
+                            NamedSharding(
+                                self.mesh,
+                                P(None, None, ShardingAxisName.MLP_TENSOR))))
                     w2_bias = jax.device_put(
                         w2_bias,
-                        Format(Layout((0, 1)),
-                               NamedSharding(self.mesh, P(None, None))))
+                        Format(Layout((0, 1, 2)),
+                               NamedSharding(self.mesh, P(None, None, None))))
 
         layer.w13_weight = Parameter(torch_view(w13_weight),
                                      requires_grad=False)
@@ -303,26 +375,9 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         layer: torch.nn.Module,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
-        global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: Optional[torch.Tensor] = None,
-        logical_to_physical_map: Optional[torch.Tensor] = None,
-        logical_replica_count: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         assert isinstance(layer, FusedMoE)
-        if scoring_func != "softmax":
+        if layer.scoring_func != "softmax":
             raise NotImplementedError(
                 "Only softmax is supported for scoring_func")
 
@@ -335,7 +390,10 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2_bias = jax_view(layer.w2_bias)
         gating_output = jax_view(router_logits)
 
-        if self.use_kernel and layer.use_ep:
+        if self.use_kernel:
+            actual_hidden_size = x.shape[-1]
+            padding_size = w13_weight.shape[-2] - actual_hidden_size
+            x = jnp.pad(x, ((0, 0), (0, padding_size)))
             output = fused_ep_moe(
                 mesh=self.mesh,
                 tokens=x,
@@ -344,25 +402,27 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 b1=w13_bias,
                 b2=w2_bias,
                 gating_output=gating_output,
-                top_k=top_k,
+                top_k=layer.top_k,
                 ep_axis_name=self.ep_axis_name,
-                renormalize_topk_logits=renormalize,
-                act_fn=activation,
+                renormalize_topk_logits=layer.renormalize,
+                act_fn=layer.activation,
                 **self.block_size,
-            )
+            )[:, :actual_hidden_size]
         else:
             output = fused_moe_func(
                 hidden_states=x,
                 w1=w13_weight,
                 w2=w2_weight,
+                w1_scale=None,
+                w2_scale=None,
                 w1_bias=w13_bias,
                 w2_bias=w2_bias,
                 gating_output=gating_output,
-                topk=top_k,
-                renormalize=renormalize,
+                topk=layer.top_k,
+                renormalize=layer.renormalize,
                 mesh=self.mesh,
                 use_ep=layer.use_ep,
-                activation=activation,
+                activation=layer.activation,
             )
 
         return torch_view(output)

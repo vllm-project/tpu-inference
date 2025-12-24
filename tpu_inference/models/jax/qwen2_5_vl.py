@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import math
 from functools import partial
 from typing import (Callable, List, Literal, NamedTuple, Optional, TypedDict,
@@ -996,9 +1010,9 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         split_indices = np.cumsum(sizes)[:-1]
         return tuple(jnp.split(image_embeds, split_indices))
 
-    def get_multimodal_embeddings(self, image_grid_thw: tuple[tuple[int, int,
-                                                                    int], ...],
-                                  **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, image_grid_thw: tuple[tuple[int, int, int],
+                                                     ...],
+                         **kwargs: object) -> MultiModalEmbeddings:
 
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(
             image_grid_thw, **kwargs)
@@ -1022,7 +1036,7 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
 
         return multimodal_embeddings
 
-    def get_input_embeddings(
+    def embed_input_ids(
             self, input_ids: jax.Array,
             multimodal_embeddings: Optional[jax.Array]) -> jax.Array:
 

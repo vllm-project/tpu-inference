@@ -15,6 +15,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from tpu_inference import utils
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.logger import init_logger
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
@@ -117,10 +118,9 @@ class PallasAttentionBackendImpl(AttentionImpl):
         query, key, value = jax_view(query), jax_view(key), jax_view(value)
         q_scale = k_scale = v_scale = None
         if self.kv_cache_quantized_dtype:
-            key, value = utils.quantize_kv(key, value,
-                                           self.kv_cache_quantized_dtype,
-                                           layer._k_scale_float,
-                                           layer._v_scale_float)
+            key, value = quantize_kv(self.kv_cache_quantized_dtype, key, value,
+                                     layer._k_scale_float,
+                                     layer._v_scale_float)
             # TODO(kyuyeunk): Enable w8a8 when VREG spill issue is resolved.
             # q_scale = layer._q_scale_float
             k_scale = layer._k_scale_float

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """All-gather matmul kernel's tuned block sizes."""
 
+import re
+
 import jax
 
 # key:
@@ -32,8 +34,11 @@ def get_tpu_version() -> int:
         return -1
     if kind.endswith(' lite'):
         kind = kind[:-len(' lite')]
-    assert kind[:-1] == 'TPU v', kind
-    return int(kind[-1])
+
+    # v6: "TPU v6"
+    # v7: "TPU7x"
+    assert kind[:3] == 'TPU', kind
+    return int(re.search(r'\d+', kind).group())
 
 
 def get_key(

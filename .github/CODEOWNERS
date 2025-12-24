@@ -31,7 +31,7 @@
 # JAX Model Implementations
 /tpu_inference/models/jax/qwen2_5_vl.py @hfan @kwang3939
 /tpu_inference/models/jax/gpt_oss.py @bzgoogle
-/tpu_inference/models/jax/deepseek_v3.py @bzgoogle
+/tpu_inference/models/jax/deepseek_v3.py @bzgoogle @gpolovets1 @jrplatin
 /tpu_inference/models/vllm/ @kyuyeunk @hfan @vanbasten23
 
 # Runner and Execution

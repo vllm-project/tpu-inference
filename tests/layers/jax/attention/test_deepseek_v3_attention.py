@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import os
 import unittest
 
@@ -74,8 +88,9 @@ class TestMLA(unittest.TestCase):
                 attn_o_tnh=attn_o_tnh_spec,
                 q_da_sharding=(None, ShardingAxisName.VOCAB),
                 anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None),
+                ap_sharding=(None, ShardingAxisName.MLP_TENSOR),
                 kv_da_sharding=(None, ShardingAxisName.VOCAB),
-                nhd_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
+                rd_sharding=(ShardingAxisName.MLP_TENSOR, None),
             )
 
             # Create input tensor
@@ -166,8 +181,9 @@ class TestMLA(unittest.TestCase):
                 attn_o_tnh=attn_o_tnh_spec,
                 q_da_sharding=(None, ShardingAxisName.VOCAB),
                 anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None),
+                ap_sharding=(None, ShardingAxisName.MLP_TENSOR),
                 kv_da_sharding=(None, ShardingAxisName.VOCAB),
-                nhd_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
+                rd_sharding=(ShardingAxisName.MLP_TENSOR, None),
             )
 
             # Create input tensor

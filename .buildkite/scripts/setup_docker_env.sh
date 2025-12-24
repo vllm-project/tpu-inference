@@ -1,4 +1,18 @@
 #!/bin/bash
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 
 # Exit on error, exit on unset variable, fail on pipe errors.
 set -euo pipefail
@@ -17,12 +31,6 @@ setup_environment() {
 
   # shellcheck disable=1091
   source /etc/environment
-
-  if [ -z "${BUILDKITE_COMMIT:-}" ]; then
-    echo "ERROR: BUILDKITE_COMMIT environment variable is not set." >&2
-    echo "This script expects BUILDKITE_COMMIT to tag the Docker image." >&2
-    exit 1
-  fi
 
   # Cleanup of existing containers and images.
   echo "Starting cleanup for ${IMAGE_NAME}..."
@@ -55,13 +63,17 @@ setup_environment() {
 
   echo "Cleanup complete."
 
-  echo "Installing Python dependencies"
-  python3 -m pip install --progress-bar off buildkite-test-collector==0.1.9
-  echo "Python dependencies installed"
-
-  VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH" --default "")
+  if [ -z "${BUILDKITE:-}" ]; then
+      VLLM_COMMIT_HASH=""
+      TPU_INFERENCE_HASH=$(git log -n 1 --pretty="%H")
+  else
+      VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH" --default "")
+      TPU_INFERENCE_HASH="$BUILDKITE_COMMIT"
+  fi
 
   docker build \
       --build-arg VLLM_COMMIT_HASH="${VLLM_COMMIT_HASH}" \
-      --no-cache -f docker/Dockerfile -t "${IMAGE_NAME}:${BUILDKITE_COMMIT}" .
+      --build-arg IS_FOR_V7X="${IS_FOR_V7X:-false}" \
+      --no-cache -f docker/Dockerfile -t "${IMAGE_NAME}:${TPU_INFERENCE_HASH}" .
+
 }

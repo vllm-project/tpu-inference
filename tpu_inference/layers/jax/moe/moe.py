@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from dataclasses import InitVar, dataclass
 
 import jax
@@ -10,6 +24,29 @@ from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
 
 modeling_flax_utils = FlaxUtils()
+
+
+@dataclass(kw_only=True)
+class CombineExperts(nnx.Module):
+    """Combines expert outputs with router weights.
+
+    Supports `TED,TE -> TD` when passed expert outputs, using float32
+    accumulation for numerical stability, then casting back to the target
+    dtype.
+    """
+
+    dtype: jnp.dtype
+
+    def __call__(self, expert_outputs_TED: Float, weights_TE: Float) -> Float:
+        with jax.named_scope("combine_experts"):
+            output_TD = jnp.einsum(
+                "TED,TE -> TD",
+                expert_outputs_TED.astype(jnp.float32),
+                weights_TE.astype(jnp.float32),
+                precision="float32",
+            )
+
+        return output_TD.astype(self.dtype)
 
 
 @dataclass(kw_only=True)
@@ -139,6 +176,9 @@ class MoE(nnx.Module):
                                                  sharding=self.efd_sharding,
                                                  random_init=self.random_init)
 
+        # Shared combine module for combine path
+        self.combine_experts = CombineExperts(dtype=self.dtype)
+
     def _moe_fwd_preapply_router_weights(self, x_TD: jax.Array, weights_TE):
         """Performs the forward pass of the MoE experts with router weights pre-applied to the inputs.
 
@@ -204,6 +244,6 @@ class MoE(nnx.Module):
         with jax.named_scope("down_projection"):
             down_proj_TED = jnp.einsum('TEF,EFD -> TED', fuse_TEF,
                                        self.kernel_down_proj_EFD.value)
-        with jax.named_scope("sum"):
-            output_TD = jnp.einsum('TED,TE -> TD', down_proj_TED, weights)
-        return output_TD.astype(self.dtype)
+        # Combine across experts
+        output_TD = self.combine_experts(down_proj_TED, weights)
+        return output_TD

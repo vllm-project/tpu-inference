@@ -1,4 +1,18 @@
 #!/bin/bash
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 
 BUILDKITE_DIR=".buildkite"
 TARGET_FOLDERS="models features parallelism quantization"
@@ -13,8 +27,7 @@ declare -a feature_list
 
 
 for folder_path in $TARGET_FOLDERS; do
-  folder=$BUILDKITE_DIR/$folder_path
-  # Check if the folder exists
+  folder="$BUILDKITE_DIR/$folder_path"
   if [[ ! -d "$folder" ]]; then
     echo "Warning: Folder '$folder' not found. Skipping."
     continue
@@ -27,24 +40,21 @@ for folder_path in $TARGET_FOLDERS; do
   while IFS= read -r -d '' yml_file; do
     echo "--- handling yml file: ${yml_file}"
 
-    # Get model name or feature name from first line of yml config
-    first_line=$(awk 'NR==1{print $0; exit}' "${yml_file}")
-    # Check if the first line contains the '# ' comment marker
-    if [[ "$first_line" == "# "* ]]; then
-      subject_name=${first_line#\# }
+    # Targeted Extraction: Find the line starting with '# pipeline-name:'
+    subject_name_line=$(awk '/^# ?pipeline-name:/ {print $0; exit}' "${yml_file}")
+
+    if [[ -n "$subject_name_line" ]]; then
+      # Extract value: Remove everything up to and including the colon and optional space
+      subject_name="${subject_name_line#*:[[:space:]]}"
+      # Trim trailing whitespace/carriage returns
+      subject_name="${subject_name%"${subject_name##*[![:space:]]}"}"
 
       case "$folder_path" in
         "models")
-          model_list+=("${subject_name}")
+          model_list+=("$subject_name")
           ;;
-        "features")
-          feature_list+=("${subject_name}")
-          ;;
-        "parallelism")
-          feature_list+=("${subject_name}")
-          ;;
-        "quantization")
-          feature_list+=("${subject_name}")
+        "features"|"parallelism"|"quantization")
+          feature_list+=("$subject_name")
           ;;
       esac
     fi

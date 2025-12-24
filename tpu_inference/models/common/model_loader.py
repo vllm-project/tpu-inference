@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import functools
 from typing import Any, Optional
 
@@ -5,7 +19,6 @@ import jax
 import torch
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from torchax.ops.mappings import j2t_dtype
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 from vllm.model_executor.model_loader import get_model_loader
@@ -16,13 +29,19 @@ from vllm.utils.func_utils import supports_kw
 from tpu_inference import envs
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.utils.quantization.quantization_utils import (
+from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     apply_qwix_on_abstract_model, apply_qwix_quantization,
     load_random_weights_into_qwix_abstract_model)
+from tpu_inference.utils import to_jax_dtype, to_torch_dtype
 
 logger = init_logger(__name__)
 
 _MODEL_REGISTRY = {}
+
+# List of architectures that are preferred to use  "vllm" implementation over
+# "flax_nnx" implementation due to various factors such as performance.
+_VLLM_PREFERRED_ARCHITECTURES: frozenset[str] = frozenset(
+    {"GptOssForCausalLM"})
 
 
 class UnsupportedArchitectureError(ValueError):
@@ -219,6 +238,9 @@ def get_flax_model(
     mesh: Mesh,
     is_draft_model: bool = False,
 ) -> nnx.Module:
+    model_dtype = to_jax_dtype(vllm_config.model_config.dtype)
+    vllm_config.model_config.dtype = model_dtype
+
     if is_draft_model:
         model_class = _get_model_architecture(
             vllm_config.speculative_config.draft_model_config.hf_config)
@@ -270,20 +292,13 @@ def get_flax_model(
 
     # Multi-modal support only
     # This function calculates the image token's embeddings by VIT
-    def run_get_multimodal_embeddings(graphdef, state, **kwargs):
+    def run_embed_multimodal(
+        graphdef, state, **kwargs
+    ):  #HACK: REMOVE image_grid_thw (used to come after state in the arg list)
         model = nnx.merge(graphdef, state)
-
-        safe_kwargs = {}
-        if 'pixel_values' in kwargs:
-            safe_kwargs['pixel_values'] = kwargs['pixel_values']
-
-        if 'patches_per_image' in kwargs:
-            safe_kwargs['patches_per_image'] = kwargs['patches_per_image']
-
-        if 'aspect_ratios' in kwargs:
-            safe_kwargs['aspect_ratios'] = kwargs['aspect_ratios']
-
-        return model.get_multimodal_embeddings(**safe_kwargs)
+        return model.embed_multimodal(
+            **kwargs
+        )  #HACK: REMOVE image_grid_thw (used to be first arg in the function call)
 
     embed_sharding = NamedSharding(mesh, PartitionSpec(None))
     # This function will calculates the embeddings of input texts and then merge with the image embeddings
@@ -291,9 +306,9 @@ def get_flax_model(
         jax.jit,
         out_shardings=(embed_sharding),
     )
-    def run_get_input_embeddings(graphdef, state, *args, **kwargs):
+    def run_embed_input_ids(graphdef, state, *args, **kwargs):
         model = nnx.merge(graphdef, state)
-        return model.get_input_embeddings(*args, **kwargs)
+        return model.embed_input_ids(*args, **kwargs)
 
     # For models that want to work with EAGLE-3 speculative decoding
     @functools.partial(
@@ -309,10 +324,8 @@ def get_flax_model(
                                            None)
     model_fn = functools.partial(run_model, graphdef)
     compute_logits_fn = functools.partial(run_compute_logits, graphdef)
-    get_multimodal_embeddings_fn = functools.partial(
-        run_get_multimodal_embeddings, graphdef)
-    get_input_embeddings_fn = functools.partial(run_get_input_embeddings,
-                                                graphdef)
+    embed_multimodal_fn = functools.partial(run_embed_multimodal, graphdef)
+    embed_input_ids_fn = functools.partial(run_embed_input_ids, graphdef)
     lora_manager, model = None, None
     combine_hidden_states_fn = functools.partial(combine_hidden_states,
                                                  graphdef)
@@ -323,8 +336,8 @@ def get_flax_model(
 
     multimodal_fns = {
         "precompile_vision_encoder_fn": precompile_vision_encoder_fn,
-        "get_multimodal_embeddings_fn": get_multimodal_embeddings_fn,
-        "get_input_embeddings_fn": get_input_embeddings_fn,
+        "embed_multimodal_fn": embed_multimodal_fn,
+        "embed_input_ids_fn": embed_input_ids_fn,
         "get_mrope_input_positions_fn": get_mrope_input_positions_fn,
     }
 
@@ -336,6 +349,8 @@ def get_vllm_model(
     rng: jax.Array,
     mesh: Mesh,
 ):
+    model_dtype = to_torch_dtype(vllm_config.model_config.dtype)
+    vllm_config.model_config.dtype = model_dtype
     from tpu_inference.models.vllm.vllm_model_wrapper import VllmModelWrapper
 
     model = VllmModelWrapper(
@@ -361,24 +376,39 @@ def get_model(
     impl = envs.MODEL_IMPL_TYPE
     logger.info(f"Loading model with MODEL_IMPL_TYPE={impl}")
 
-    if impl == "flax_nnx":
-        try:
-            # Try to load the flax model first
-            return get_flax_model(vllm_config, rng, mesh, is_draft_model)
-        except UnsupportedArchitectureError as e:
-            # Convert the error message to a string to check its contents
-            error_msg = str(e)
+    if impl == "auto":
+        # Resolve "auto" based on architecture
+        architectures = getattr(vllm_config.model_config.hf_config,
+                                "architectures", [])
+        assert len(architectures) == 1, (
+            f"Expected exactly one architecture, got {len(architectures)}: "
+            f"{architectures}")
+        arch = architectures[0]
+        impl = "vllm" if arch in _VLLM_PREFERRED_ARCHITECTURES else "flax_nnx"
+        logger.info(f"Resolved MODEL_IMPL_TYPE 'auto' to '{impl}'")
 
-            logger.warning(error_msg)
+    match impl:
+        case "flax_nnx":
+            if vllm_config.parallel_config.pipeline_parallel_size > 1:
+                logger.warning(
+                    "PP is not fully supported on Jax flax_nnx models yet, fallback to vllm models."
+                )
+                return get_vllm_model(vllm_config, rng, mesh)
+            try:
+                # Try to load the flax model first
+                return get_flax_model(vllm_config, rng, mesh, is_draft_model)
+            except UnsupportedArchitectureError as e:
+                # Convert the error message to a string to check its contents
+                error_msg = str(e)
 
-            # Fall back to the vLLM model and updating the dtype accordingly
-            vllm_config.model_config.dtype = j2t_dtype(
-                vllm_config.model_config.dtype.dtype)
+                logger.warning(error_msg)
+
+                # Fall back to the vLLM model and updating the dtype accordingly
+                return get_vllm_model(vllm_config, rng, mesh)
+        case "vllm":
             return get_vllm_model(vllm_config, rng, mesh)
-    elif impl == "vllm":
-        return get_vllm_model(vllm_config, rng, mesh)
-    else:
-        raise NotImplementedError("Unsupported MODEL_IMPL_TYPE")
+        case _:
+            raise NotImplementedError(f"Unsupported MODEL_IMPL_TYPE: {impl}")
 
 
 def _validate_model_interface(model: Any) -> None:
@@ -465,14 +495,14 @@ def register_model(arch: str, model: Any) -> None:
         )
 
     # Same as `forward`, this is a dummy method to satisfy vLLM's type checks.
-    def unimplemented_get_input_embeddings(
+    def unimplemented_embed_input_ids(
         self,
         input_ids: "torch.Tensor",
         positions: "torch.Tensor",
         inputs_embeds: Optional["torch.Tensor"] = None,
     ) -> "torch.Tensor":
         raise NotImplementedError(
-            "This is a JAX model and does not implement the PyTorch get_input_embeddings method."
+            "This is a JAX model and does not implement the PyTorch embed_input_ids method."
         )
 
     # We need a custom __init__ that only calls torch.nn.Module's init,
@@ -488,7 +518,7 @@ def register_model(arch: str, model: Any) -> None:
         {
             "__init__": wrapper_init,
             "forward": unimplemented_forward,
-            "get_input_embeddings": unimplemented_get_input_embeddings,
+            "embed_input_ids": unimplemented_embed_input_ids,
             # Prevent vLLM from trying to load weights into this dummy class.
             "load_weights": lambda self, *args, **kwargs: None,
         })
