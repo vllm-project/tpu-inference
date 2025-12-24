@@ -1564,6 +1564,8 @@ class Qwen3VLModel(nnx.Module):
         # Find mask indices and add visual embeddings
         # TODO: This assumes `visual_embeds.shape[0] == visual_pos_mask.sum()`.
         mask_indices = jnp.where(flat_mask)[0]
+        if visual_embeds.shape[0] != mask_indices.shape[0]:
+            visual_embeds = visual_embeds[:mask_indices.shape[0]]
         updated = flat_hidden.at[mask_indices].add(visual_embeds)
 
         return updated.reshape(hidden_states.shape)
@@ -1650,9 +1652,6 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         self.vision_start_token_id = getattr(config, "vision_start_token_id", 151652)
         self.spatial_merge_size = config.vision_config.spatial_merge_size
 
-        # DeepStack cache for serving (populated by get_multimodal_embeddings, consumed by __call__)
-        self._deepstack_cache: Optional[List[jax.Array]] = None
-
     def get_input_embeddings(
         self,
         input_ids: jax.Array,
@@ -1683,28 +1682,28 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         self,
         image_grid_thw: Tuple[Tuple[int, int, int], ...],
         **kwargs,
-    ) -> Tuple[jax.Array, ...]:
+    ) -> dict:
         """Get multimodal embeddings from pixel values.
 
         This method is called by the serving infrastructure (multimodal_manager).
-        DeepStack embeddings are cached for later use in __call__.
+        DeepStack embeddings are returned alongside visual embeddings for caching.
 
         Args:
             image_grid_thw: Grid dimensions (T, H, W) for each image
             **kwargs: Contains 'pixel_values' for vision encoder
 
         Returns:
-            Tuple of embeddings, one per image (matching Qwen 2.5 VL format)
+            A dict with:
+              - "embeds": Tuple of embeddings, one per image (Qwen 2.5 VL format)
+              - "deepstack": Optional list of per-image DeepStack embeddings
         """
         pixel_values = kwargs.get("pixel_values")
         if pixel_values is None:
-            return ()
+            return {}
         if not image_grid_thw:
-            return ()
+            return {}
 
         image_embeds, deepstack_embeds = self.visual(pixel_values, image_grid_thw)
-
-        self._deepstack_cache = deepstack_embeds
 
         # Split embeddings per image (matching Qwen 2.5 VL return format)
         sizes = np.array([
@@ -1713,12 +1712,30 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         ])
 
         if sizes.size == 0:
-            return ()
+            return {}
         if sizes.size == 1:
-            return (image_embeds,)
+            image_splits = (image_embeds,)
+            deepstack_by_item = None
+            if deepstack_embeds:
+                deepstack_by_item = [
+                    [layer_embeds for layer_embeds in deepstack_embeds]
+                ]
+            return {"embeds": image_splits, "deepstack": deepstack_by_item}
 
         split_indices = np.cumsum(sizes)[:-1]
-        return tuple(jnp.split(image_embeds, split_indices))
+        image_splits = tuple(jnp.split(image_embeds, split_indices))
+        deepstack_by_item = None
+        if deepstack_embeds:
+            layer_splits = [
+                tuple(jnp.split(layer_embeds, split_indices))
+                for layer_embeds in deepstack_embeds
+            ]
+            deepstack_by_item = []
+            for item_idx in range(len(image_splits)):
+                deepstack_by_item.append(
+                    [layer_split[item_idx] for layer_split in layer_splits]
+                )
+        return {"embeds": image_splits, "deepstack": deepstack_by_item}
 
     def __call__(
         self,
@@ -1731,14 +1748,15 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         """Forward pass for Qwen3VL using KV cache attention."""
         visual_pos_mask = None
         deepstack_embeds = None
+        if args:
+            candidate = args[-1]
+            if isinstance(candidate, (list, tuple)):
+                deepstack_embeds = candidate
 
-        if self._deepstack_cache is not None:
-            deepstack_embeds = self._deepstack_cache
-            self._deepstack_cache = None
-            if input_ids is not None:
-                visual_pos_mask = (input_ids == self.image_token_id) | (
-                    input_ids == self.video_token_id
-                )
+        if deepstack_embeds and input_ids is not None:
+            visual_pos_mask = (input_ids == self.image_token_id) | (
+                input_ids == self.video_token_id
+            )
 
         kv_caches, hidden_states = self.language_model(
             kv_caches=kv_caches,

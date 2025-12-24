@@ -810,10 +810,18 @@ class TestServingIntegration:
         total_patches = int(img_grid[0] * img_grid[1] * img_grid[2] + vid_grid[0] * vid_grid[1] * vid_grid[2])
         pixel_values = jax.random.normal(rng, (total_patches, patch_dim)).astype(model.vllm_config.model_config.dtype)
 
-        embeds = model.get_multimodal_embeddings((img_grid, vid_grid), pixel_values=pixel_values)
+        mm_result = model.get_multimodal_embeddings(
+            (img_grid, vid_grid), pixel_values=pixel_values)
+        assert isinstance(mm_result, dict)
+        embeds = mm_result.get("embeds", ())
+        deepstack = mm_result.get("deepstack")
         assert isinstance(embeds, tuple)
         assert len(embeds) == 2
-        assert model._deepstack_cache is not None
+        assert deepstack is not None
+        assert len(deepstack) == 2
+        assert len(deepstack[0]) == len(deepstack[1]) == 1
+        assert deepstack[0][0].shape[0] == n_img
+        assert deepstack[1][0].shape[0] == n_vid
 
         mm_flat = jnp.concatenate(embeds, axis=0)
         assert mm_flat.shape[0] == (n_img + n_vid)
@@ -870,26 +878,26 @@ class TestServingIntegration:
     def test_get_multimodal_embeddings_none_pixel_values_returns_empty(
         self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
-        """get_multimodal_embeddings with None pixel_values should return empty tuple."""
+        """get_multimodal_embeddings with None pixel_values should return empty dict."""
         model = Qwen3VLForConditionalGeneration(vllm_config, rng, mesh)
         result = model.get_multimodal_embeddings(((1, 4, 4),), pixel_values=None)
-        assert result == ()
+        assert result == {}
 
     def test_get_multimodal_embeddings_empty_grid_returns_empty(
         self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
-        """get_multimodal_embeddings with empty grid should return empty tuple."""
+        """get_multimodal_embeddings with empty grid should return empty dict."""
         model = Qwen3VLForConditionalGeneration(vllm_config, rng, mesh)
         vc = model.config.vision_config
         patch_dim = int(vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size)
         pixel_values = jax.random.normal(rng, (16, patch_dim)).astype(model.vllm_config.model_config.dtype)
         result = model.get_multimodal_embeddings((), pixel_values=pixel_values)
-        assert result == ()
+        assert result == {}
 
     def test_get_multimodal_embeddings_single_image_returns_single_tuple(
         self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
-        """Single image grid should return tuple of length 1."""
+        """Single image grid should return dict with one embed entry."""
         model = Qwen3VLForConditionalGeneration(vllm_config, rng, mesh)
         grid = (1, 4, 4)
         vc = model.config.vision_config
@@ -897,8 +905,13 @@ class TestServingIntegration:
         num_patches = grid[0] * grid[1] * grid[2]
         pixel_values = jax.random.normal(rng, (num_patches, patch_dim)).astype(model.vllm_config.model_config.dtype)
         result = model.get_multimodal_embeddings((grid,), pixel_values=pixel_values)
-        assert isinstance(result, tuple)
-        assert len(result) == 1
+        assert isinstance(result, dict)
+        embeds = result.get("embeds", ())
+        deepstack = result.get("deepstack")
+        assert isinstance(embeds, tuple)
+        assert len(embeds) == 1
+        assert deepstack is not None
+        assert len(deepstack) == 1
 
     def test_get_input_embeddings_empty_multimodal_returns_text_embeds(
         self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
@@ -970,30 +983,49 @@ class TestServingIntegration:
         # seq_len=None means slice [:, 0:None] which is the full array
         assert positions.shape == (3, 4)
 
-    def test_deepstack_cache_cleared_after_forward(
+    def test_kv_cache_updates_after_forward(
         self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
-        """DeepStack cache should be cleared after forward pass."""
+        """KV cache should be updated after a forward pass."""
+        model = Qwen3VLForConditionalGeneration(vllm_config, rng, mesh)
+        input_ids = jnp.array([1, 2, 3, 4], dtype=jnp.int32)
+        attn_meta = _make_attention_metadata(input_ids.shape[0])
+
+        kv_caches = _make_kv_caches(model, mesh)
+        kv_caches = [cache * 0 for cache in kv_caches]
+        before_norm = np.array(jnp.linalg.norm(kv_caches[0]))
+
+        kv_caches, _, _ = model(kv_caches, input_ids, attn_meta)
+        after_norm = np.array(jnp.linalg.norm(kv_caches[0]))
+
+        assert before_norm == 0
+        assert after_norm > 0
+
+    def test_deepstack_injection_changes_placeholder_positions(
+        self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
+    ):
+        """DeepStack embeddings should affect outputs at placeholder positions."""
         model = Qwen3VLForConditionalGeneration(vllm_config, rng, mesh)
         grid = (1, 4, 4)
-        vc = model.config.vision_config
-        patch_dim = int(vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size)
-        num_patches = grid[0] * grid[1] * grid[2]
-        pixel_values = jax.random.normal(rng, (num_patches, patch_dim)).astype(model.vllm_config.model_config.dtype)
-
-        # Call get_multimodal_embeddings to populate cache
-        _ = model.get_multimodal_embeddings((grid,), pixel_values=pixel_values)
-        assert model._deepstack_cache is not None
-
-        # Call forward pass (text-only will still clear cache if set)
         n_img = _num_placeholders_for_grid(grid, model.spatial_merge_size)
         input_ids = jnp.array(
-            [1, model.vision_start_token_id] + [model.image_token_id] * n_img,
-            dtype=jnp.int32
+            [1, model.vision_start_token_id] + [model.image_token_id] * n_img + [2],
+            dtype=jnp.int32,
         )
         attn_meta = _make_attention_metadata(input_ids.shape[0])
-        kv_caches = _make_kv_caches(model, mesh)
-        _ = model(kv_caches, input_ids, attn_meta)
 
-        # Cache should be cleared after use
-        assert model._deepstack_cache is None
+        deepstack = [
+            jnp.full((n_img, model.config.hidden_size), 0.5,
+                     dtype=model.vllm_config.model_config.dtype)
+        ]
+        inputs_embeds = model.get_input_embeddings(input_ids, None)
+
+        kv_caches_base = _make_kv_caches(model, mesh)
+        kv_caches_deep = _make_kv_caches(model, mesh)
+        _, out_base, _ = model(kv_caches_base, input_ids, attn_meta, inputs_embeds)
+        _, out_deep, _ = model(kv_caches_deep, input_ids, attn_meta,
+                               inputs_embeds, deepstack)
+
+        diff = np.abs(np.array(out_deep - out_base))
+        placeholder_mask = np.array(input_ids) == model.image_token_id
+        assert diff[placeholder_mask].max() > 0

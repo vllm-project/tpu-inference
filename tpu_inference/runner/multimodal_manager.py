@@ -97,6 +97,7 @@ class MultiModalManager:
         # multimodal inputs. The proper solution should be reordering the
         # encoder outputs.
         encoder_outputs = []
+        deepstack_outputs = None
         for _, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
                 mm_kwargs, merge_by_field_config=False):
             batched_mm_inputs = mm_kwargs_group
@@ -136,6 +137,10 @@ class MultiModalManager:
             # depending on the input multimodal items.
             curr_group_outputs = self.runner.get_multimodal_embeddings_fn(
                 self.runner.state, image_grid_thw, **batched_mm_inputs)
+            deepstack_group_outputs = None
+            if isinstance(curr_group_outputs, dict):
+                deepstack_group_outputs = curr_group_outputs.get("deepstack")
+                curr_group_outputs = curr_group_outputs.get("embeds", ())
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
@@ -144,23 +149,58 @@ class MultiModalManager:
 
             for output in curr_group_outputs:
                 encoder_outputs.append(output)
+            if deepstack_group_outputs is not None:
+                if len(deepstack_group_outputs) != len(curr_group_outputs):
+                    raise ValueError(
+                        "DeepStack outputs must align with encoder outputs."
+                    )
+                if deepstack_outputs is None:
+                    deepstack_outputs = []
+                deepstack_outputs.extend(deepstack_group_outputs)
+            elif deepstack_outputs is not None:
+                deepstack_outputs.extend([None] * len(curr_group_outputs))
 
         # Cache the encoder outputs.
-        for (mm_hash, pos_info), output in zip(
-                mm_hashes_pos,
-                encoder_outputs,
-        ):
-            if req_id not in self.runner.encoder_cache:
-                self.runner.encoder_cache[req_id] = {}
+        if deepstack_outputs is None:
+            for (mm_hash, pos_info), output in zip(
+                    mm_hashes_pos,
+                    encoder_outputs,
+            ):
+                if req_id not in self.runner.encoder_cache:
+                    self.runner.encoder_cache[req_id] = {}
 
-            self.runner.encoder_cache[mm_hash] = scatter_mm_placeholders(
-                output,
-                is_embed=pos_info.is_embed,
-            )
+                self.runner.encoder_cache[mm_hash] = scatter_mm_placeholders(
+                    output,
+                    is_embed=pos_info.is_embed,
+                )
+        else:
+            for (mm_hash, pos_info), output, deepstack_output in zip(
+                    mm_hashes_pos,
+                    encoder_outputs,
+                    deepstack_outputs,
+            ):
+                if req_id not in self.runner.encoder_cache:
+                    self.runner.encoder_cache[req_id] = {}
+
+                self.runner.encoder_cache[mm_hash] = scatter_mm_placeholders(
+                    output,
+                    is_embed=pos_info.is_embed,
+                )
+                if deepstack_output is not None:
+                    if pos_info.is_embed is not None:
+                        deepstack_output = [
+                            scatter_mm_placeholders(layer_output,
+                                                    is_embed=pos_info.is_embed)
+                            for layer_output in deepstack_output
+                        ]
+                    self.runner.deepstack_cache[mm_hash] = deepstack_output
 
     def gather_mm_embeddings(self, scheduler_output: "VllmSchedulerOutput",
                              target_pad_len: int) -> list[jax.Array]:
         mm_embeds: list[jax.Array] = []
+        deepstack_layers: list[list[jax.Array]] | None = None
+        deepstack_dim = None
+        deepstack_dtype = None
         for req_id in self.runner.input_batch.req_ids:
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
@@ -203,15 +243,47 @@ class MultiModalManager:
                     is_embed=is_embed,
                 )
                 mm_embeds.append(mm_embeds_item)
+                deepstack_output = self.runner.deepstack_cache.get(mm_hash)
+                if deepstack_output is not None:
+                    if deepstack_layers is None:
+                        deepstack_dim = deepstack_output[0].shape[1]
+                        deepstack_dtype = deepstack_output[0].dtype
+                        deepstack_layers = [[] for _ in range(len(deepstack_output))]
+                    for layer_idx, layer_embeds in enumerate(deepstack_output):
+                        layer_slice = layer_embeds[start_idx:end_idx]
+                        layer_item = gather_mm_placeholders(
+                            layer_slice,
+                            is_embed=is_embed,
+                        )
+                        deepstack_layers[layer_idx].append(layer_item)
         if not mm_embeds:
-            return None
+            if deepstack_layers is None:
+                return None
         flattened_embeds = flatten_embeddings(mm_embeds)
         if flattened_embeds.shape[0] == 0:
-            return None
+            if deepstack_layers is None:
+                return None
 
         padding = jnp.zeros((target_pad_len - flattened_embeds.shape[0],
                              flattened_embeds.shape[1]),
                             dtype=flattened_embeds.dtype)
         flattened_embeds = jnp.concatenate([flattened_embeds, padding], axis=0)
 
+        deepstack_embeds = None
+        if deepstack_layers is not None:
+            deepstack_embeds = []
+            for layer_items in deepstack_layers:
+                if layer_items:
+                    layer_flat = flatten_embeddings(layer_items)
+                else:
+                    layer_flat = jnp.zeros((0, deepstack_dim),
+                                           dtype=deepstack_dtype)
+                layer_padding = jnp.zeros(
+                    (target_pad_len - layer_flat.shape[0], layer_flat.shape[1]),
+                    dtype=layer_flat.dtype)
+                deepstack_embeds.append(
+                    jnp.concatenate([layer_flat, layer_padding], axis=0))
+
+        if deepstack_embeds is not None:
+            return flattened_embeds, deepstack_embeds
         return flattened_embeds
