@@ -187,6 +187,7 @@ def hf_config() -> Qwen3Config:
         rope_theta=10000.0,
         tie_word_embeddings=True,
     )
+    cfg.head_dim = cfg.hidden_size // cfg.num_attention_heads
 
     # Multimodal special tokens must be within vocab_size for embedding lookups.
     cfg.image_token_id = 100
