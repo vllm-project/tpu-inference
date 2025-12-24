@@ -159,6 +159,7 @@ def quantize_tensor(
     axis: int | tuple | None = -1,
     block_size: int | None = None,
     pad_tensor: bool = False,
+    sc_size: int | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Quantize tensor.
 
@@ -225,18 +226,29 @@ def quantize_tensor(
     dtype_max = float(dtype_info.max)
     dtype_min = float(dtype_info.min)
 
-    abs_max = jnp.max(jnp.abs(tensor), axis=axis, keepdims=True)
-    scale = abs_max / dtype_max
+    if sc_size:
+        tensor = jnp.transpose(tensor)
+        k_dim, n_dim = tensor.shape
+        weights_reshaped = tensor.reshape(-1, sc_size, n_dim).astype(jnp.float32)
+        abs_max = jnp.max(jnp.abs(weights_reshaped), axis=1, keepdims=True)
+        scale = abs_max / dtype_max
+        tensor_q = weights_reshaped / scale
+        tensor_q = jnp.clip(tensor_q, dtype_min, dtype_max)
+        tensor_q = tensor_q.astype(dtype).reshape(n_dim, k_dim)
+        scale = jnp.transpose(jnp.squeeze(scale, axis=1))
+    else:
+        abs_max = jnp.max(jnp.abs(tensor), axis=axis, keepdims=True)
+        scale = abs_max / dtype_max
 
-    tensor_q = jnp.clip(tensor / scale, dtype_min, dtype_max)
-    tensor_q = tensor_q.reshape(orig_shape)
-    tensor_q = tensor_q.astype(dtype)
+        tensor_q = jnp.clip(tensor / scale, dtype_min, dtype_max)
+        tensor_q = tensor_q.reshape(orig_shape)
+        tensor_q = tensor_q.astype(dtype)
 
-    # To avoid padded values affecting output of quantized matmul, we mask them
-    # out with 0s.
-    tensor_q = jnp.where(mask, tensor_q, 0)
+        # To avoid padded values affecting output of quantized matmul, we mask them
+        # out with 0s.
+        tensor_q = jnp.where(mask, tensor_q, 0)
 
-    scale = jnp.squeeze(scale, axis).astype(jnp.float32)
+        scale = jnp.squeeze(scale, axis).astype(jnp.float32)
 
     return tensor_q, scale
 
