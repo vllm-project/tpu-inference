@@ -280,6 +280,8 @@ def process_moe_weights(
                         dim=2,
                     )
 
+            w13_weight = jnp.swapaxes(w13_weight, 1, 2)
+            w2_weight = jnp.swapaxes(w2_weight, 1, 2)
             w13_weight = jax.lax.with_sharding_constraint(
                 w13_weight, Format(Layout((0, 1, 2)), sharding))
             w2_weight = jax.lax.with_sharding_constraint(
@@ -336,7 +338,7 @@ def shard_moe_weights(
             weight_shardings = FusedMoEWeights(
                 w13_weight=NamedSharding(
                     mesh,
-                    P(None, ShardingAxisName.MLP_TENSOR, None),
+                    P(None, None, ShardingAxisName.MLP_TENSOR),
                 ),  # (num_experts, out_dim, in_dim)
                 w13_weight_scale=NamedSharding(
                     mesh,
@@ -348,7 +350,7 @@ def shard_moe_weights(
                 ),  # (num_experts, 1, out_dim)
                 w2_weight=NamedSharding(
                     mesh,
-                    P(None, None, ShardingAxisName.MLP_TENSOR),
+                    P(None, ShardingAxisName.MLP_TENSOR, None),
                 ),  # (num_experts, out_dim, in_dim)
                 w2_weight_scale=NamedSharding(
                     mesh, w2_weight_scale_p_spec
