@@ -32,6 +32,55 @@ init_fn = nnx.initializers.uniform()
 DEFAULT_BLOCK_K_MAJOR = 128
 
 
+class _Qwen3VLConfigAdapter:
+    """Adapter that exposes text_config attributes at the top level.
+
+    Qwen3VLConfig has a nested structure where text model attributes
+    (hidden_size, num_attention_heads, etc.) are under text_config.
+    This adapter makes them accessible directly for compatibility with
+    weight loading utilities that expect a flat config structure.
+    """
+
+    def __init__(self, config):
+        self._config = config
+        self._text_config = getattr(config, "text_config", None)
+
+    def __getattr__(self, name):
+        # First try the main config
+        try:
+            return getattr(self._config, name)
+        except AttributeError:
+            pass
+        # Fall back to text_config if available
+        if self._text_config is not None:
+            try:
+                return getattr(self._text_config, name)
+            except AttributeError:
+                pass
+        raise AttributeError(
+            f"'{type(self._config).__name__}' object has no attribute '{name}'"
+        )
+
+
+class _ModelConfigAdapter:
+    """Adapter for model_config that wraps hf_config with _Qwen3VLConfigAdapter.
+
+    This allows get_default_maps to access text_config attributes directly
+    from hf_config without modifying the weight_utils module.
+    """
+
+    def __init__(self, model_config):
+        self._model_config = model_config
+        self._hf_config_adapter = _Qwen3VLConfigAdapter(model_config.hf_config)
+
+    @property
+    def hf_config(self):
+        return self._hf_config_adapter
+
+    def __getattr__(self, name):
+        return getattr(self._model_config, name)
+
+
 def _infer_pos_embed_grid_hw(num_position_embeddings: int) -> Tuple[int, int]:
     """Infer a (grid_h, grid_w) pair from a flattened 2D embedding table."""
     if num_position_embeddings <= 0:
@@ -1925,8 +1974,11 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         if not hf_config.tie_word_embeddings:
             mappings["lm_head"] = "language_model.lm_head"
 
+        # Use adapter to expose text_config attributes at top level for
+        # get_default_maps which expects num_attention_heads, etc. directly
+        adapted_model_config = _ModelConfigAdapter(self.vllm_config.model_config)
         metadata_map = get_default_maps(
-            self.vllm_config.model_config, self.mesh, mappings
+            adapted_model_config, self.mesh, mappings
         )
         load_hf_weights(
             vllm_config=self.vllm_config,
