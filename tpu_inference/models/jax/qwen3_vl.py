@@ -1189,7 +1189,9 @@ class Qwen3VLVisionTransformer(nnx.Module):
         ]
 
         # Final merger settings
-        out_hidden_size = getattr(vision_config, "out_hidden_size", hf_config.hidden_size)
+        # Qwen3VLConfig uses text_config for text model hidden_size
+        text_config = getattr(hf_config, "text_config", hf_config)
+        out_hidden_size = getattr(vision_config, "out_hidden_size", text_config.hidden_size)
 
         self.merger = Qwen3VLVisionPatchMerger(
             d_model=out_hidden_size,
@@ -1496,10 +1498,12 @@ class Qwen3VLModel(nnx.Module):
     ):
         model_config = vllm_config.model_config
         hf_config = model_config.hf_config
+        # Qwen3VLConfig uses text_config for text model attributes
+        text_config = getattr(hf_config, "text_config", hf_config)
         vocab_size = model_config.get_vocab_size()
         dtype = model_config.dtype
-        rms_norm_eps = hf_config.rms_norm_eps
-        hidden_size = hf_config.hidden_size
+        rms_norm_eps = text_config.rms_norm_eps
+        hidden_size = text_config.hidden_size
 
         self.hidden_size = hidden_size
 
@@ -1515,13 +1519,13 @@ class Qwen3VLModel(nnx.Module):
         # Decoder layers with MRoPE support and KV cache attention
         self.layers = [
             Qwen3VLTextDecoderLayer(
-                config=hf_config,
+                config=text_config,
                 dtype=dtype,
                 rngs=rng,
                 mesh=mesh,
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
             )
-            for _ in range(hf_config.num_hidden_layers)
+            for _ in range(text_config.num_hidden_layers)
         ]
 
         self.norm = Qwen3VLTextRMSNorm(
@@ -1632,12 +1636,14 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
 
         config = vllm_config.model_config.hf_config
         self.config = config
+        # Qwen3VLConfig uses text_config for text model attributes
+        text_config = getattr(config, "text_config", config)
 
         self.visual = Qwen3VLVisionTransformer(
             vllm_config=vllm_config,
             rngs=self.rng,
             mesh=mesh,
-            norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+            norm_eps=getattr(text_config, "rms_norm_eps", 1e-6),
         )
 
         self.language_model = Qwen3VLModel(
