@@ -21,14 +21,9 @@ from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
 
-# Optional deps required by the model code. Skip cleanly if not available.
 pytest.importorskip("vllm")
 pytest.importorskip("transformers")
 from transformers import Qwen3Config
-
-# Only run tests on process 0 to avoid duplicate output in multi-host setups.
-if jax.process_index() != 0:
-    pytest.skip("Skipping tests on non-primary process", allow_module_level=True)
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.rope_interface import apply_rope
