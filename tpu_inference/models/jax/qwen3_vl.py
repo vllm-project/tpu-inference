@@ -1930,49 +1930,64 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         self.rng = nnx.Rngs(rng_key)
 
         mappings = {
-            "model.embed_tokens": "language_model.embed.embedding",
-            "model.layers.*.input_layernorm": "language_model.layers.*.input_layernorm.weight",
-            "model.layers.*.mlp.down_proj": "language_model.layers.*.mlp.down_proj.kernel",
-            "model.layers.*.mlp.gate_proj": "language_model.layers.*.mlp.gate_proj.kernel",
-            "model.layers.*.mlp.up_proj": "language_model.layers.*.mlp.up_proj.kernel",
-            "model.layers.*.post_attention_layernorm": "language_model.layers.*.post_attention_layernorm.weight",
-            "model.layers.*.self_attn.k_proj": "language_model.layers.*.self_attn.k_proj.kernel",
-            "model.layers.*.self_attn.o_proj": "language_model.layers.*.self_attn.o_proj.kernel",
-            "model.layers.*.self_attn.q_proj": "language_model.layers.*.self_attn.q_proj.kernel",
-            "model.layers.*.self_attn.v_proj": "language_model.layers.*.self_attn.v_proj.kernel",
-            "model.layers.*.self_attn.q_norm": "language_model.layers.*.self_attn.q_norm.weight",
-            "model.layers.*.self_attn.k_norm": "language_model.layers.*.self_attn.k_norm.weight",
-            "model.norm": "language_model.norm.weight",
-            "visual.patch_embed.proj": "visual.patch_embed.proj.kernel",
-            "visual.pos_embed": "visual.pos_embed.embedding",
-            "visual.blocks.*.attn.qkv": "visual.blocks.*.attn.qkv_proj.kernel",
-            "visual.blocks.*.attn.qkv.bias": "visual.blocks.*.attn.qkv_proj.bias",
-            "visual.blocks.*.attn.proj": "visual.blocks.*.attn.proj.kernel",
-            "visual.blocks.*.attn.proj.bias": "visual.blocks.*.attn.proj.bias",
-            "visual.blocks.*.mlp.fc1": "visual.blocks.*.mlp.fc1.kernel",
-            "visual.blocks.*.mlp.fc1.bias": "visual.blocks.*.mlp.fc1.bias",
-            "visual.blocks.*.mlp.fc2": "visual.blocks.*.mlp.fc2.kernel",
-            "visual.blocks.*.mlp.fc2.bias": "visual.blocks.*.mlp.fc2.bias",
-            "visual.blocks.*.norm1": "visual.blocks.*.norm1.scale",
-            "visual.blocks.*.norm1.bias": "visual.blocks.*.norm1.bias",
-            "visual.blocks.*.norm2": "visual.blocks.*.norm2.scale",
-            "visual.blocks.*.norm2.bias": "visual.blocks.*.norm2.bias",
-            "visual.merger.ln_q": "visual.merger.norm.scale",
-            "visual.merger.mlp.0": "visual.merger.linear_fc1.kernel",
-            "visual.merger.mlp.0.bias": "visual.merger.linear_fc1.bias",
-            "visual.merger.mlp.2": "visual.merger.linear_fc2.kernel",
-            "visual.merger.mlp.2.bias": "visual.merger.linear_fc2.bias",
-            "visual.deepstack_merger_list.*.ln_q": "visual.deepstack_merger_list.*.norm.scale",
-            "visual.deepstack_merger_list.*.mlp.0": "visual.deepstack_merger_list.*.linear_fc1.kernel",
-            "visual.deepstack_merger_list.*.mlp.0.bias": "visual.deepstack_merger_list.*.linear_fc1.bias",
-            "visual.deepstack_merger_list.*.mlp.2": "visual.deepstack_merger_list.*.linear_fc2.kernel",
-            "visual.deepstack_merger_list.*.mlp.2.bias": "visual.deepstack_merger_list.*.linear_fc2.bias",
+            "model.language_model.embed_tokens": "language_model.embed.embedding",
+            "model.language_model.layers.*.input_layernorm": "language_model.layers.*.input_layernorm.weight",
+            "model.language_model.layers.*.mlp.down_proj": "language_model.layers.*.mlp.down_proj.kernel",
+            "model.language_model.layers.*.mlp.gate_proj": "language_model.layers.*.mlp.gate_proj.kernel",
+            "model.language_model.layers.*.mlp.up_proj": "language_model.layers.*.mlp.up_proj.kernel",
+            "model.language_model.layers.*.post_attention_layernorm": "language_model.layers.*.post_attention_layernorm.weight",
+            "model.language_model.layers.*.self_attn.k_proj": "language_model.layers.*.self_attn.k_proj.kernel",
+            "model.language_model.layers.*.self_attn.o_proj": "language_model.layers.*.self_attn.o_proj.kernel",
+            "model.language_model.layers.*.self_attn.q_proj": "language_model.layers.*.self_attn.q_proj.kernel",
+            "model.language_model.layers.*.self_attn.v_proj": "language_model.layers.*.self_attn.v_proj.kernel",
+            "model.language_model.layers.*.self_attn.q_norm": "language_model.layers.*.self_attn.q_norm.weight",
+            "model.language_model.layers.*.self_attn.k_norm": "language_model.layers.*.self_attn.k_norm.weight",
+            "model.language_model.norm": "language_model.norm.weight",
+            "model.visual.patch_embed.proj": "visual.patch_embed.proj.kernel",
+            "model.visual.patch_embed.bias": "visual.patch_embed.proj.bias",
+            "model.visual.pos_embed": "visual.pos_embed.embedding",
+            "model.visual.blocks.*.attn.qkv": "visual.blocks.*.attn.qkv_proj.kernel",
+            "model.visual.blocks.*.attn.qkv.bias": "visual.blocks.*.attn.qkv_proj.bias",
+            "model.visual.blocks.*.attn.proj": "visual.blocks.*.attn.proj.kernel",
+            "model.visual.blocks.*.attn.proj.bias": "visual.blocks.*.attn.proj.bias",
+            "model.visual.blocks.*.mlp.linear_fc1": "visual.blocks.*.mlp.fc1.kernel",
+            "model.visual.blocks.*.mlp.linear_fc1.bias": "visual.blocks.*.mlp.fc1.bias",
+            "model.visual.blocks.*.mlp.linear_fc2": "visual.blocks.*.mlp.fc2.kernel",
+            "model.visual.blocks.*.mlp.linear_fc2.bias": "visual.blocks.*.mlp.fc2.bias",
+            "model.visual.blocks.*.norm1": "visual.blocks.*.norm1.scale",
+            "model.visual.blocks.*.norm1.bias": "visual.blocks.*.norm1.bias",
+            "model.visual.blocks.*.norm2": "visual.blocks.*.norm2.scale",
+            "model.visual.blocks.*.norm2.bias": "visual.blocks.*.norm2.bias",
+            "model.visual.merger.norm": "visual.merger.*.norm.scale",
+            "model.visual.merger.norm.bias": "visual.merger.*.norm.bias",
+            "model.visual.merger.linear_fc1": "visual.merger.*.linear_fc1.kernel",
+            "model.visual.merger.linear_fc1.bias": "visual.merger.*.linear_fc1.bias",
+            "model.visual.merger.linear_fc2": "visual.merger.*.linear_fc2.kernel",
+            "model.visual.merger.linear_fc2.bias": "visual.merger.*.linear_fc2.bias",
+            "model.visual.deepstack_merger_list.*.norm": "visual.merger.*.norm.scale",
+            "model.visual.deepstack_merger_list.*.norm.bias": "visual.merger.*.norm.bias",
+            "model.visual.deepstack_merger_list.*.linear_fc1": "visual.merger.*.linear_fc1.kernel",
+            "model.visual.deepstack_merger_list.*.linear_fc1.bias": "visual.merger.*.linear_fc1.bias",
+            "model.visual.deepstack_merger_list.*.linear_fc2": "visual.merger.*.linear_fc2.kernel",
+            "model.visual.deepstack_merger_list.*.linear_fc2.bias": "visual.merger.*.linear_fc2.bias",
         }
 
         # Add lm_head mapping if not tied
         hf_config = self.vllm_config.model_config.hf_config
         if not hf_config.tie_word_embeddings:
             mappings["lm_head"] = "language_model.lm_head"
+
+        # Add deepstack_merger_list mappings dynamically based on config
+        # weight_utils.py only handles "layers" and "blocks" wildcards,
+        # so we need explicit mappings for each deepstack merger index
+        vision_config = hf_config.vision_config
+        deepstack_indexes = getattr(vision_config, "deepstack_visual_indexes", [8, 16, 24])
+        for i in range(len(deepstack_indexes)):
+            mappings[f"model.visual.deepstack_merger_list.{i}.ln_q"] = f"visual.deepstack_merger_list.{i}.norm.scale"
+            mappings[f"model.visual.deepstack_merger_list.{i}.mlp.0"] = f"visual.deepstack_merger_list.{i}.linear_fc1.kernel"
+            mappings[f"model.visual.deepstack_merger_list.{i}.mlp.0.bias"] = f"visual.deepstack_merger_list.{i}.linear_fc1.bias"
+            mappings[f"model.visual.deepstack_merger_list.{i}.mlp.2"] = f"visual.deepstack_merger_list.{i}.linear_fc2.kernel"
+            mappings[f"model.visual.deepstack_merger_list.{i}.mlp.2.bias"] = f"visual.deepstack_merger_list.{i}.linear_fc2.bias"
 
         # Use adapter to expose text_config attributes at top level for
         # get_default_maps which expects num_attention_heads, etc. directly
