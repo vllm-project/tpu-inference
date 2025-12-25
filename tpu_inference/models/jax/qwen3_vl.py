@@ -510,7 +510,7 @@ class Qwen3VLTextAttention(nnx.Module):
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rngs,
         )
-        self.q_norm = Qwen3VLTextRMSNorm(self.head_dim_original, eps=self.rms_norm_eps, dtype=dtype)
+        self.q_norm = Qwen3VLTextRMSNorm(self.head_dim, eps=self.rms_norm_eps, dtype=dtype)
 
         self.k_proj = nnx.Einsum(
             "TD,DKH->TKH",
@@ -519,7 +519,7 @@ class Qwen3VLTextAttention(nnx.Module):
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rngs,
         )
-        self.k_norm = Qwen3VLTextRMSNorm(self.head_dim_original, eps=self.rms_norm_eps, dtype=dtype)
+        self.k_norm = Qwen3VLTextRMSNorm(self.head_dim, eps=self.rms_norm_eps, dtype=dtype)
 
         self.v_proj = nnx.Einsum(
             "TD,DKH->TKH",
