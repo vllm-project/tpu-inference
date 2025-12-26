@@ -410,7 +410,7 @@ def apply_rotary_pos_emb_thd_padded(
 
     # Normalize cos/sin shapes to (T, head_dim)
     if cos.ndim == 3:
-        # (bs, T, head_dim) -> (T, head_dim) ; your pipeline is effectively bs=1
+        # (bs, T, head_dim) -> (T, head_dim).
         cos = cos[0]
         sin = sin[0]
 
@@ -461,11 +461,9 @@ class Qwen3VLTextRotaryEmbedding(nnx.Module):
         if rope_type != "default":
             raise NotImplementedError(f"RoPE type '{rope_type}' not yet implemented")
 
-        # Compute inverse frequencies: shape (dim // 2,)
-        inv_freq = 1.0 / (
-            rope_theta ** (jnp.arange(0, dim, 2, dtype=jnp.float32) / dim)
-        )
-        self.inv_freq = inv_freq
+        self.dim = dim
+        self.rope_theta = rope_theta
+        # NOTE: We could materialize inv_freq post-load (initialize_cache).
 
         # MRoPE section for interleaving [T_dim, H_dim, W_dim]
         # Must sum to dim // 2 = 64
@@ -494,7 +492,10 @@ class Qwen3VLTextRotaryEmbedding(nnx.Module):
         # position_ids: (3, bs, seq_len)
         # inv_freq: (dim // 2,)
         # freqs: (3, bs, seq_len, dim // 2)
-        freqs = position_ids[:, :, :, None].astype(jnp.float32) * self.inv_freq[None, None, None, :]
+        inv_freq = 1.0 / (
+            self.rope_theta ** (jnp.arange(0, self.dim, 2, dtype=jnp.float32) / self.dim)
+        )
+        freqs = position_ids[:, :, :, None].astype(jnp.float32) * inv_freq[None, None, None, :]
 
         # Apply MRoPE interleaving: (3, bs, seq_len, dim//2) -> (bs, seq_len, dim//2)
         freqs = apply_interleaved_mrope(freqs, self.mrope_section)
@@ -502,7 +503,6 @@ class Qwen3VLTextRotaryEmbedding(nnx.Module):
         # duplicate the half-dim freqs to produce (bs, seq_len, dim).
         freqs = jnp.concatenate([freqs, freqs], axis=-1)
 
-        # Compute cos and sin
         cos = jnp.cos(freqs)
         sin = jnp.sin(freqs)
 
