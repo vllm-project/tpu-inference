@@ -1944,7 +1944,7 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
             "model.language_model.layers.*.self_attn.k_norm": "language_model.layers.*.self_attn.k_norm.weight",
             "model.language_model.norm": "language_model.norm.weight",
             "model.visual.patch_embed.proj": "visual.patch_embed.proj.kernel",
-            "model.visual.patch_embed.bias": "visual.patch_embed.proj.bias",
+            "model.visual.patch_embed.proj.bias": "visual.patch_embed.proj.bias",
             "model.visual.pos_embed": "visual.pos_embed.embedding",
             "model.visual.blocks.*.attn.qkv": "visual.blocks.*.attn.qkv_proj.kernel",
             "model.visual.blocks.*.attn.qkv.bias": "visual.blocks.*.attn.qkv_proj.bias",
@@ -1958,18 +1958,12 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
             "model.visual.blocks.*.norm1.bias": "visual.blocks.*.norm1.bias",
             "model.visual.blocks.*.norm2": "visual.blocks.*.norm2.scale",
             "model.visual.blocks.*.norm2.bias": "visual.blocks.*.norm2.bias",
-            "model.visual.merger.norm": "visual.merger.*.norm.scale",
-            "model.visual.merger.norm.bias": "visual.merger.*.norm.bias",
-            "model.visual.merger.linear_fc1": "visual.merger.*.linear_fc1.kernel",
-            "model.visual.merger.linear_fc1.bias": "visual.merger.*.linear_fc1.bias",
-            "model.visual.merger.linear_fc2": "visual.merger.*.linear_fc2.kernel",
-            "model.visual.merger.linear_fc2.bias": "visual.merger.*.linear_fc2.bias",
-            "model.visual.deepstack_merger_list.*.norm": "visual.merger.*.norm.scale",
-            "model.visual.deepstack_merger_list.*.norm.bias": "visual.merger.*.norm.bias",
-            "model.visual.deepstack_merger_list.*.linear_fc1": "visual.merger.*.linear_fc1.kernel",
-            "model.visual.deepstack_merger_list.*.linear_fc1.bias": "visual.merger.*.linear_fc1.bias",
-            "model.visual.deepstack_merger_list.*.linear_fc2": "visual.merger.*.linear_fc2.kernel",
-            "model.visual.deepstack_merger_list.*.linear_fc2.bias": "visual.merger.*.linear_fc2.bias",
+            "model.visual.merger.norm": "visual.merger.norm.scale",
+            "model.visual.merger.norm.bias": "visual.merger.norm.bias",
+            "model.visual.merger.linear_fc1": "visual.merger.linear_fc1.kernel",
+            "model.visual.merger.linear_fc1.bias": "visual.merger.linear_fc1.bias",
+            "model.visual.merger.linear_fc2": "visual.merger.linear_fc2.kernel",
+            "model.visual.merger.linear_fc2.bias": "visual.merger.linear_fc2.bias",
         }
 
         # Add lm_head mapping if not tied
@@ -1983,11 +1977,12 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         vision_config = hf_config.vision_config
         deepstack_indexes = getattr(vision_config, "deepstack_visual_indexes", [8, 16, 24])
         for i in range(len(deepstack_indexes)):
-            mappings[f"model.visual.deepstack_merger_list.{i}.ln_q"] = f"visual.deepstack_merger_list.{i}.norm.scale"
-            mappings[f"model.visual.deepstack_merger_list.{i}.mlp.0"] = f"visual.deepstack_merger_list.{i}.linear_fc1.kernel"
-            mappings[f"model.visual.deepstack_merger_list.{i}.mlp.0.bias"] = f"visual.deepstack_merger_list.{i}.linear_fc1.bias"
-            mappings[f"model.visual.deepstack_merger_list.{i}.mlp.2"] = f"visual.deepstack_merger_list.{i}.linear_fc2.kernel"
-            mappings[f"model.visual.deepstack_merger_list.{i}.mlp.2.bias"] = f"visual.deepstack_merger_list.{i}.linear_fc2.bias"
+            mappings[f"model.visual.deepstack_merger_list.{i}.norm"] = f"visual.deepstack_merger_list.{i}.norm.scale"
+            mappings[f"model.visual.deepstack_merger_list.{i}.norm.bias"] = f"visual.deepstack_merger_list.{i}.norm.bias"
+            mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc1"] = f"visual.deepstack_merger_list.{i}.linear_fc1.kernel"
+            mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc1.bias"] = f"visual.deepstack_merger_list.{i}.linear_fc1.bias"
+            mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc2"] = f"visual.deepstack_merger_list.{i}.linear_fc2.kernel"
+            mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc2.bias"] = f"visual.deepstack_merger_list.{i}.linear_fc2.bias"
 
         # Use adapter to expose text_config attributes at top level for
         # get_default_maps which expects num_attention_heads, etc. directly
