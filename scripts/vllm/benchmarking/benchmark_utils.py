@@ -230,6 +230,110 @@ def eval_accuracy_mlperf(request_outputs: RequestFuncOutput) -> None:
     print(result)
 
 
+def extract_abcd_gpqa(text: str) -> str:
+    """
+    Extract answer letter (A, B, C, or D) from GPQA response text.
+    Based on gpt-oss abcd_grader.py with patterns for various answer formats.
+    """
+    import re
+
+    patterns = [
+        # "Answer: (C)" or "Answers: (B)"
+        re.compile(r'(?ix)\bAnswer[s]?\b\s*[:\-–]?\s*\(\s*([ABCD])\s*\)'),
+        # "Answer: C" or "Answers – D"
+        re.compile(r'(?ix)\bAnswer[s]?\b\s*[:\-–]?\s*([ABCD])\b'),
+        # "answer is C" or "answer is (C)"
+        re.compile(r'(?ix)\banswer\s+is\s+\(?([ABCD])\)?'),
+        # **Answer:** A or *Answers* – B (markdown wrapped)
+        re.compile(
+            r'''(?ix)(?:\*{1,2}|_{1,2})Answer[s]?\s*[:\-–]?(?:\*{1,2}|_{1,2})\s*([ABCD])\b'''
+        ),
+        # "Option B" or "Choice: C"
+        re.compile(r'(?ix)\b(?:Option|Choice)\b\s*[:\-–]?\s*([ABCD])\b'),
+        # LaTeX \boxed{A}
+        re.compile(r'(?x)\\boxed\{[^}]*?([ABCD])[^}]*\}', re.MULTILINE),
+        # Bare (A), [B], etc.
+        re.compile(
+            r'(?x)(?<![A-Za-z0-9])[\(\[]\s*([ABCD])\s*[\)\]](?![A-Za-z0-9])'),
+        # Markdown wrapped: *A*, **B**, _C_, __D__
+        re.compile(
+            r'(?x)(?<![A-Za-z0-9])(?:\*{1,2}|_{1,2})([ABCD])(?:\*{1,2}|_{1,2})(?![A-Za-z0-9])'
+        ),
+        # Final fallback: line that's exactly "A", "B.", "C)", etc.
+        re.compile(
+            r'''(?x)^\s*(?:\*{1,2}|_{1,2})?([ABCD])(?:\*{1,2}|_{1,2})?\s*[\.\)\-–:]?\s*.*$''',
+            re.MULTILINE),
+    ]
+
+    # Also check for gpt-oss style "assistantfinal" block
+    final_block_match = re.search(r"assistant.*final(.*)", text,
+                                  re.IGNORECASE | re.DOTALL)
+    if final_block_match:
+        final_block = final_block_match.group(1)
+        # Check for **... (A) ...** pattern
+        match = re.search(r"\*\*[^\(]*\s*\(?([A-D])\s*\)?", final_block,
+                          re.DOTALL)
+        if match:
+            return match.group(1).upper()
+        # Check for choice/answer ... (A) pattern
+        match = re.search(r"(?:choice|answer)[^\(]*\s*\(?([A-D])\s*\)?",
+                          final_block, re.IGNORECASE | re.DOTALL)
+        if match:
+            return match.group(1).upper()
+
+    # Try each pattern
+    for pat in patterns:
+        m = pat.search(text)
+        if m:
+            letter = m.group(1).upper()
+            if letter in 'ABCD':
+                return letter
+
+    # Last resort: return first letter if it's A-D
+    first_char = text.strip()[:1].upper()
+    if first_char in 'ABCD':
+        return first_char
+
+    return None
+
+
+def eval_accuracy_gpqa(request_outputs: List[RequestFuncOutput]) -> dict:
+    """
+    Evaluate the accuracy of the results on the GPQA dataset.
+
+    Args:
+        request_outputs (List[RequestFuncOutput]): The outputs of the benchmarking run.
+
+    Returns:
+        dict: A dictionary containing the accuracy of the model on the GPQA dataset
+    """
+    correct = 0
+    total = 0
+
+    for output in request_outputs:
+        if not output.success:
+            continue
+
+        generated_text = output.generated_text
+        target = output.input_request.completion  # This is 'A', 'B', 'C', or 'D'
+
+        extracted = extract_abcd_gpqa(generated_text)
+        if extracted == target.upper():
+            correct += 1
+        total += 1
+
+    accuracy = correct / total if total > 0 else 0.0
+    result = {
+        "accuracy": round(accuracy, 4),
+        "correct": correct,
+        "total": total,
+        "gen_num": len(request_outputs),
+    }
+    print("\nGPQA Results\n")
+    print(result)
+    return result
+
+
 def eval_benchmark_dataset_result(request_outputs: RequestFuncOutput,
                                   dataset_name: str) -> None:
     """
@@ -245,6 +349,9 @@ def eval_benchmark_dataset_result(request_outputs: RequestFuncOutput,
     elif dataset_name == "mlperf":
         print("Evaluating MLPerf...")
         eval_accuracy_mlperf(request_outputs)
+    elif dataset_name == "gpqa":
+        print("Evaluating GPQA...")
+        eval_accuracy_gpqa(request_outputs)
     else:
         raise NotImplementedError("Evaluation is not support for dataset: %s" %
                                   dataset_name)
