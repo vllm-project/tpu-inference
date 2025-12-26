@@ -112,7 +112,7 @@ class MultiModalManager:
         # encoder outputs.
         encoder_outputs = []
         for _, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
-                mm_kwargs, merge_by_field_config=False):
+                mm_kwargs):
             batched_mm_inputs = mm_kwargs_group
             # Convert torch tensors to numpy arrays that JAX can handle.
             if "pixel_values" in batched_mm_inputs and isinstance(
