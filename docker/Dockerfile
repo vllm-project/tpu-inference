@@ -45,7 +45,7 @@ RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install -e tests/v
 RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install \
     git+https://github.com/thuml/depyf.git \
     pytest-asyncio \
-    git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d#egg=lm-eval[api] \
+    "lm-eval[api]>=0.4.9.2" \
     pytest-cov \
     tblib
 
