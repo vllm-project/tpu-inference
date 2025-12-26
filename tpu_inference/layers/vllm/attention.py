@@ -11,6 +11,9 @@ from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
+from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
+                                                   MLACommonImpl,
+                                                   MLACommonMetadata)
 
 from tpu_inference import utils
 from tpu_inference.layers.common.attention_interface import attention
@@ -32,6 +35,32 @@ class PallasAttentionBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["PallasAttentionBackendImpl"]:
         return PallasAttentionBackendImpl
+
+
+class PallasMLABackend(MLACommonBackend):
+
+    @staticmethod
+    def get_name() -> str:
+        return "PALLAS_MLA"
+
+    @staticmethod
+    def get_impl_cls() -> type["PallasMLABackendImpl"]:
+        return PallasMLABackendImpl
+
+
+class PallasMLABackendImpl(MLACommonImpl):
+
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    def _forward_decode(
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: MLACommonMetadata,
+        layer: AttentionLayer,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        pass
 
 
 class PallasAttentionBackendImpl(AttentionImpl):
