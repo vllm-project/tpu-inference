@@ -97,7 +97,7 @@ class GptOss(nnx.Module):
             hidden_size=hidden_size,
             dtype=dtype,
             rngs=self.rng,
-            vd_sharding=P(('data', 'model'), None),
+            vd_sharding=P('model', None),
             random_init=self.random_init,
         )
 
@@ -192,8 +192,9 @@ class GptOss(nnx.Module):
             hidden_size=hidden_size,
             dtype=dtype,
             rngs=self.rng,
-            vd_sharding=P(('data', 'model'), None),
-            dv_sharding=P(None, ('data', 'model')),
+            vd_sharding=P('model', None),
+            dv_sharding=P(None, 'model'),
+            prelogit_td=P('data', None),
             random_init=self.random_init,
         )
 
@@ -264,7 +265,7 @@ class GptOss(nnx.Module):
             ("layers.*.attn.bias_v_KH", transforms["reshape"],
              (self.hf_config.num_key_value_heads, self.hf_config.head_dim)),
             "model.layers.*.self_attn.o_proj.bias": ("layers.*.attn.bias_o_D",
-                                                     None, None),
+                                                      None, None),
 
             # Sinks
             "model.layers.*.self_attn.sinks": ("layers.*.attn.sinks_N", None,
@@ -276,11 +277,19 @@ class GptOss(nnx.Module):
              transforms["transpose"], None),
             "model.layers.*.mlp.router.bias":
             ("layers.*.custom_module.router.bias_E", None, None),
-            "model.layers.*.mlp.experts.gate_up_proj":
-            ("layers.*.custom_module.mlp1_weight_EDF2", swap_mlp_transform,
+
+            "model.layers.*.mlp.experts.gate_proj":
+            ("layers.*.custom_module.gate_proj_kernel", swap_mlp_transform,
              None),
-            "model.layers.*.mlp.experts.gate_up_proj_bias":
-            ("layers.*.custom_module.mlp1_bias_EF2", None, None),
+            "model.layers.*.mlp.experts.gate_proj_bias":
+            ("layers.*.custom_module.gate_proj_bias", None, None),
+
+            "model.layers.*.mlp.experts.up_proj":
+            ("layers.*.custom_module.up_proj_kernel", swap_mlp_transform,
+             None),
+            "model.layers.*.mlp.experts.up_proj_bias":
+            ("layers.*.custom_module.up_proj_bias", None, None),
+
             "model.layers.*.mlp.experts.down_proj":
             ("layers.*.custom_module.mlp2_weight_EFD", swap_mlp_transform,
              None),
