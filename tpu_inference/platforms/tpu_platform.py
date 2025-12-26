@@ -51,16 +51,22 @@ class TpuPlatform(Platform):
     ]
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: "AttentionBackendEnum",
-                             attn_selector_config: "AttentionSelectorConfig",
-                             **kwargs) -> str:
+    def get_attn_backend_cls(
+        cls,
+        selected_backend: "AttentionBackendEnum",
+        attn_selector_config: "AttentionSelectorConfig",
+    ) -> str:
         from vllm.attention.backends.registry import AttentionBackendEnum
 
-        if selected_backend != AttentionBackendEnum.PALLAS:
-            logger.info("Cannot use %s backend on TPU.", selected_backend)
+        if attn_selector_config.use_mla:
+            return "tpu_inference.layers.vllm.attention.PallasMLABackend"
+        else:
+            if selected_backend != AttentionBackendEnum.PALLAS:
+                logger.info("Cannot use %s backend on TPU.", selected_backend)
 
-        logger.info("Using Pallas V1 backend.")
-        return "tpu_inference.layers.vllm.attention.PallasAttentionBackend"
+            logger.info("Using Pallas V1 backend.")
+
+            return "tpu_inference.layers.vllm.attention.PallasAttentionBackend"
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
@@ -197,13 +203,13 @@ class TpuPlatform(Platform):
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is not None:
             assert kv_transfer_config.kv_connector == "TPUConnector"
-        # Late initialization to avoid circular import.
-        # Only perform qwix quantization if it is jax model.
-        if vllm_config.model_config is not None:
-            from tpu_inference.models.jax.utils.qwix.qwix_utils import \
-                update_vllm_config_for_qwix_quantization
-            if vllm_config.model_config:
-                update_vllm_config_for_qwix_quantization(vllm_config)
+        # # Late initialization to avoid circular import.
+        # # Only perform qwix quantization if it is jax model.
+        # if vllm_config.model_config is not None:
+        #     from tpu_inference.models.jax.utils.qwix.qwix_utils import \
+        #         update_vllm_config_for_qwix_quantization
+        #     if vllm_config.model_config:
+        #         update_vllm_config_for_qwix_quantization(vllm_config)
 
         from tpu_inference.core.sched.dp_scheduler import \
             update_vllm_config_for_dp_scheduler
