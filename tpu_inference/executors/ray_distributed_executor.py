@@ -20,7 +20,7 @@ import ray
 import vllm.envs as envs
 from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-from vllm.multimodal.inputs import MultiModalKwargs
+from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE
@@ -53,7 +53,7 @@ logger = init_logger(__name__)
 
 
 def _encode_hook(obj: Any) -> Any:
-    """Custom msgspec enc hook that supports array types and MultiModalKwargs.
+    """Custom msgspec enc hook that supports array types and MultiModalKwargsItem.
 
     See https://jcristharif.com/msgspec/api.html#msgspec.msgpack.Encoder
     """
@@ -62,7 +62,7 @@ def _encode_hook(obj: Any) -> Any:
             f"vLLM array type should use '{VLLM_TOKEN_ID_ARRAY_TYPE}' type. "
             f"Given array has a type code of {obj.typecode}.")
         return obj.tobytes()
-    if isinstance(obj, MultiModalKwargs):
+    if isinstance(obj, MultiModalKwargsItem):
         return dict(obj)
 
 
