@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import tempfile
+from unittest import mock
 
 import jax
 import jax.numpy as jnp
@@ -29,6 +30,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 
+from tpu_inference.layers.vllm.fused_moe import FusedMoEBackend
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.mxfp4 import (VllmMxfp4Config,
                                                           VllmMxfp4MoEMethod)
@@ -160,6 +162,8 @@ def test_mxfp4_fused_moe(num_devices, num_tokens, intermediate_size,
     )
     vllm_config = engine_args.create_engine_config()
     vllm_config.model_config.dtype = dtype
+    vllm_config.parallel_config = ParallelConfig(
+        tensor_parallel_size=mesh.devices.size, enable_expert_parallel=use_ep)
 
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
     with set_current_vllm_config(vllm_config):
@@ -190,13 +194,16 @@ def test_mxfp4_fused_moe(num_devices, num_tokens, intermediate_size,
 
     with torchax.default_env(), set_forward_context(None, vllm_config):
         assert isinstance(vllm_fused_moe.quant_method, VllmMxfp4MoEMethod)
+        if use_ep:
+            assert vllm_fused_moe.quant_method.moe_backend == FusedMoEBackend.GMM_EP
+        else:
+            assert vllm_fused_moe.quant_method.moe_backend == FusedMoEBackend.GMM_TP
 
         jax_a = a.to('jax')
         score = score.to('jax')
 
         vllm_fused_moe.quant_method.process_weights_after_loading(
             vllm_fused_moe)
-
         actual = vllm_fused_moe(jax_a, score)
 
         torch.testing.assert_close(expected,
@@ -213,6 +220,7 @@ def test_mxfp4_fused_moe(num_devices, num_tokens, intermediate_size,
 @pytest.mark.parametrize("num_experts", [8])
 @pytest.mark.parametrize("topk", [2])
 @pytest.mark.parametrize("enable_attn_dp", [False, True])
+@mock.patch("os.environ", {"USE_MOE_EP_KERNEL": "1"})
 def test_mxfp4_fused_moe_use_kernel(num_devices, num_tokens, intermediate_size,
                                     hidden_size, num_experts, topk,
                                     enable_attn_dp):
@@ -253,7 +261,7 @@ def test_mxfp4_fused_moe_use_kernel(num_devices, num_tokens, intermediate_size,
     vllm_config = engine_args.create_engine_config()
     vllm_config.model_config.dtype = dtype
     vllm_config.parallel_config = ParallelConfig(
-        tensor_parallel_size=mesh.devices.size)
+        tensor_parallel_size=mesh.devices.size, enable_expert_parallel=True)
 
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
     with set_current_vllm_config(vllm_config):
@@ -285,14 +293,14 @@ def test_mxfp4_fused_moe_use_kernel(num_devices, num_tokens, intermediate_size,
 
     with torchax.default_env(), set_forward_context(None, vllm_config):
         assert isinstance(vllm_fused_moe.quant_method, VllmMxfp4MoEMethod)
+        assert vllm_fused_moe.quant_method.moe_backend == FusedMoEBackend.FUSED_MOE
 
         jax_a = a.to('jax')
         score = score.to('jax')
 
-        vllm_fused_moe.quant_method.use_kernel = True
         vllm_fused_moe.quant_method.process_weights_after_loading(
             vllm_fused_moe)
-        vllm_fused_moe.quant_method.block_size = {
+        vllm_fused_moe.quant_method.extra_backend_kwargs.update({
             "bt": 32,
             "bf": 512,
             "bd1": 1024,
@@ -301,7 +309,7 @@ def test_mxfp4_fused_moe_use_kernel(num_devices, num_tokens, intermediate_size,
             "bfc": 512,
             "bd1c": 1024,
             "bd2c": 1024,
-        }
+        })
 
         actual = vllm_fused_moe(jax_a, score)
 
