@@ -25,7 +25,7 @@
 /tpu_inference/kernels/ @kyuyeunk @yaochengji @bythew3i
 
 # JAX Model Layers - Attention
-/tpu_inference/layers/jax/ @py4 @bzgoogle @jrplatin @gpolovets1
+/tpu_inference/layers/jax/ @bzgoogle @jrplatin @gpolovets1
 /tpu_inference/layers/vllm/ @kyuyeunk @hfan @vanbasten23
 
 # JAX Model Implementations
@@ -35,18 +35,18 @@
 /tpu_inference/models/vllm/ @kyuyeunk @hfan @vanbasten23
 
 # Runner and Execution
-/tpu_inference/runner/ @kyuyeunk @py4 @wenxindongwork @sixiang-google  @mrjunwan-lang
-/tpu_inference/runner/tpu_runner.py @py4 @kyuyeunk @wenxindongwork @sixiang-google
-/tpu_inference/runner/persistent_batch_manager.py @py4 @wenxindongwork
-/tpu_inference/runner/speculative_decoding_manager.py @py4 @Lumosis
+/tpu_inference/runner/ @kyuyeunk @jrplatin @wenxindongwork @sixiang-google  @mrjunwan-lang
+/tpu_inference/runner/tpu_runner.py @jrplatin @kyuyeunk @wenxindongwork @sixiang-google
+/tpu_inference/runner/persistent_batch_manager.py @jrplatin @wenxindongwork
+/tpu_inference/runner/speculative_decoding_manager.py @Lumosis
 /tpu_inference/executors/ @sixiang-google @mrjunwan-lang
 /tpu_inference/core/ @sixiang-google @mrjunwan-lang @wenxindongwork
 
 # Worker Management
-/tpu_inference/worker/ @sixiang-google @mrjunwan-lang @py4 @vanbasten23 @wenxindongwork
+/tpu_inference/worker/ @sixiang-google @mrjunwan-lang @jrplatin @vanbasten23 @wenxindongwork
 
 # Speculative Decoding
-/tpu_inference/spec_decode/ @py4 @Lumosis
+/tpu_inference/spec_decode/ @Lumosis
 
 # Platform Support
 /tpu_inference/platforms/ @sixiang-google @mrjunwan-lang
