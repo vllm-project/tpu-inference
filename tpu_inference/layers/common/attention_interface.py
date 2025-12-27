@@ -15,6 +15,7 @@ from jax.sharding import PartitionSpec as P
 
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
+import tpu_inference.kernels.ragged_paged_attention.v3.kernel_per_token_my_try_v4_no_pad as rpa_v4
 from tpu_inference.kernels.flash_attention.kernel import flash_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -25,8 +26,7 @@ MAX_ALLOWED_PAGE_INDICES_N = (
 )  # Based on experiments on v5e, 256x1024 results in smem oom but 128x1024 not. TODO: Adjust this based on TPU version.
 
 ragged_paged_attention = rpa.ragged_paged_attention
-ref_ragged_paged_attention = rpa.ref_ragged_paged_attention
-ref_ragged_paged_attention_per_token = rpa.ref_ragged_paged_attention_per_token
+ragged_paged_attention_per_seq = rpa_v4.ragged_paged_attention_per_seq
 get_kv_cache_shape = rpa.get_kv_cache_shape
 
 ragged_paged_attention_hd64 = rpa_hd64.ragged_paged_attention_hd64
@@ -287,8 +287,8 @@ def sharded_ragged_paged_attention(
     sm_scale: float,
     attention_chunk_size: int | None = None,
     q_scale: float | None = None,
-    k_scale: float | None = None,
-    v_scale: float | None = None,
+    k_scale: jax.Array | None = None,
+    v_scale: jax.Array | None = None,
 ):
     """Shards along KV heads."""
 
@@ -300,14 +300,18 @@ def sharded_ragged_paged_attention(
         qkv_spec,  # k
         qkv_spec,  # v
         kv_cache_spec,  # kv cache
+        P(ShardingAxisName.ATTN_DATA),  # k_scale
+        P(ShardingAxisName.ATTN_DATA),  # v_scale
         P(ShardingAxisName.ATTN_DATA),  # kv_lens
         P(ShardingAxisName.ATTN_DATA),  # page_indices
         P(ShardingAxisName.ATTN_DATA),  # cu_q_lens
         P(ShardingAxisName.ATTN_DATA),  # distribution
     )
-    out_specs = (qkv_spec, kv_cache_spec)
-
-    args = (q, k, v, kv_cache, kv_lens, page_indices, cu_q_lens, distribution)
+    # TODO: scales
+    out_specs = (qkv_spec, kv_cache_spec, P(ShardingAxisName.ATTN_DATA),
+                 P(ShardingAxisName.ATTN_DATA))
+    args = (q, k, v, kv_cache, k_scale, v_scale, kv_lens, page_indices,
+            cu_q_lens, distribution)
 
     use_hd64 = q.shape[-1] == 64
 
@@ -317,7 +321,8 @@ def sharded_ragged_paged_attention(
     #                              strict_sliding_window=True)
     # else:
     #     func = ragged_paged_attention
-    func = ref_ragged_paged_attention
+    func = ragged_paged_attention
+    func = ragged_paged_attention_per_seq
     if attention_sink is not None:
         if not use_hd64:
             raise NotImplementedError(
@@ -331,12 +336,10 @@ def sharded_ragged_paged_attention(
             *args,
             sm_scale=sm_scale,
             sliding_window=attention_chunk_size,
-            q_scale=q_scale,
-            k_scale=k_scale,
-            v_scale=v_scale,
+            # q_scale=q_scale,
+            # k_scale=k_scale,
+            # v_scale=v_scale,
         )
-
-    return func(*args)
 
     return shard_map.shard_map(
         _ragged_paged_attention,
@@ -357,8 +360,8 @@ def attention(
     head_dim_original: int | None = None,  # before padding,
     attention_chunk_size: int | None = None,
     q_scale: float | None = None,
-    k_scale: float | None = None,
-    v_scale: float | None = None,
+    k_scale: jax.Array | None = None,
+    v_scale: jax.Array | None = None,
     sinks: jax.Array | None = None,
 ) -> Tuple[jax.Array, jax.Array]:
     # T: seq_len
@@ -379,46 +382,7 @@ def attention(
     md = attention_metadata
 
     # (T, N, H)
-    # write out variables
-    def _save_scales_to_disk(q, k, v, kv_cache, seq_lens, block_tables,
-                             query_start_loc, request_distribution):
-        import os
-        import pickle
-        save_dir = "test_attn_outut"
-        os.makedirs(save_dir, exist_ok=True)
-
-        with open(os.path.join(save_dir, "q.pkl"), "wb") as f:
-            pickle.dump(q, f)
-
-        with open(os.path.join(save_dir, "k.pkl"), "wb") as f:
-            pickle.dump(k, f)
-
-        with open(os.path.join(save_dir, "v.pkl"), "wb") as f:
-            pickle.dump(v, f)
-
-        with open(os.path.join(save_dir, "kv_cache.pkl"), "wb") as f:
-            pickle.dump(kv_cache, f)
-
-        with open(os.path.join(save_dir, "seq_lens.pkl"), "wb") as f:
-            pickle.dump(seq_lens, f)
-
-        with open(os.path.join(save_dir, "block_tables.pkl"), "wb") as f:
-            pickle.dump(block_tables, f)
-
-        with open(os.path.join(save_dir, "query_start_loc.pkl"), "wb") as f:
-            pickle.dump(query_start_loc, f)
-
-        with open(os.path.join(save_dir, "request_distribution.pkl"),
-                  "wb") as f:
-            pickle.dump(request_distribution, f)
-
-        print("saved to", save_dir)
-        raise ValueError
-
-    # jax.debug.callback(_save_scales_to_disk, q, k, v, kv_cache, md.seq_lens,
-    #                    md.block_tables, md.query_start_loc,
-    #                    md.request_distribution)
-    output, kv_cache = sharded_ragged_paged_attention(
+    output, kv_cache, updated_k_scale_cache, updated_v_scale_cache = sharded_ragged_paged_attention(
         mesh,
         q,
         k,
@@ -441,4 +405,4 @@ def attention(
 
     # raise ValueError
 
-    return kv_cache, output
+    return kv_cache, output, updated_k_scale_cache, updated_v_scale_cache

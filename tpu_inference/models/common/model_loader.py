@@ -80,8 +80,8 @@ def _get_nnx_model(
         """
         return model_class(vllm_config, rng, mesh)
 
-    # @nnx.jit(donate_argnums=(0, ),
-    #          static_argnames=('use_qwix_on_abstract_model', ))
+    @nnx.jit(donate_argnums=(0, ),
+             static_argnames=('use_qwix_on_abstract_model', ))
     def create_jit_model(
             model: nnx.Module,
             use_qwix_on_abstract_model: bool = False) -> nnx.Module:
@@ -132,7 +132,7 @@ def _get_nnx_model(
                                              use_qwix_on_abstract_model=True)
             return jit_model
 
-        # @nnx.jit
+        @nnx.jit
         def create_sharded_model():
             model = model_class(vllm_config, rng, mesh)
             state = nnx.state(model)
@@ -226,22 +226,25 @@ def get_flax_model(
                                                ShardingAxisName.ATTN_DATA,
                                                None))  # (T, D)
 
+    kv_scale_cache_sharding = NamedSharding(mesh, PartitionSpec(None))
     # For performance consideration, refer to:
     # https://flax.readthedocs.io/en/latest/guides/performance.html
     graphdef, state = nnx.split(jit_model)
 
-    # @functools.partial(
-    #     jax.jit,
-    #     out_shardings=(
-    #         kv_cache_sharding,
-    #         hidden_states_sharding,
-    #         hidden_states_sharding,  # aux hidden states
-    #     ),
-    #     donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
-    #     static_argnums=(
-    #         7, 10, 11
-    #     ),  #7 is layer_name_to_kvcache_index, 10 is is_first_rank, 11 is is_last_rank
-    # )
+    @functools.partial(
+        jax.jit,
+        out_shardings=(
+            kv_cache_sharding,
+            hidden_states_sharding,
+            hidden_states_sharding,  # aux hidden states
+            kv_scale_cache_sharding,
+            kv_scale_cache_sharding,
+        ),
+        donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
+        static_argnums=(
+            7, 10, 11
+        ),  #7 is layer_name_to_kvcache_index, 10 is is_first_rank, 11 is is_last_rank
+    )
     def run_model(graphdef, state, *args):
         model = nnx.merge(graphdef, state)
         return model(*args)

@@ -392,6 +392,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # The total number of requests is dp_size * max_num_seqs
         self.max_num_reqs = max(self.dp_size * scheduler_config.max_num_seqs,
                                 MIN_NUM_SEQS)
+        num_layers = self.model_config.hf_config.num_hidden_layers
+        self.k_scale_caches_cpu = [
+            np.zeros(self.max_num_reqs, dtype=np.float32)
+            for _ in range(num_layers)
+        ]
+        self.v_scale_caches_cpu = [
+            np.zeros(self.max_num_reqs, dtype=np.float32)
+            for _ in range(num_layers)
+        ]
         # [16, 32, 64, 128, 256, 512, 1024, 2048]
         self.num_tokens_paddings = runner_utils.get_token_paddings(
             min_token_size=max(16, self.dp_size),
@@ -750,8 +759,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     scheduler_output) as kv_connector_output:
                 # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
                 # but one of them would be `None`
-                (self.kv_caches, hidden_states,
-                 aux_hidden_states) = self.model_fn(
+                (self.kv_caches, hidden_states, aux_hidden_states,
+                 new_k_scales, new_v_scales) = self.model_fn(
                      self.state,
                      self.kv_caches,
                      input_ids,
@@ -764,6 +773,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      self.is_first_rank,
                      self.is_last_rank,
                  )
+            self.k_scale_caches_cpu = [np.array(k) for k in new_k_scales]
+            self.v_scale_caches_cpu = [np.array(v) for v in new_v_scales]
             if not get_pp_group().is_last_rank:
                 assert isinstance(hidden_states, JaxIntermediateTensors)
                 hidden_states.kv_connector_output = kv_connector_output
@@ -1488,6 +1499,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             num_scheduled_tokens_per_req.append(num_tokens)
             max_num_scheduled_tokens_all_reqs = max(
                 max_num_scheduled_tokens_all_reqs, num_tokens)
+
+            req_state = self.requests[req_id]
+            tokens_scheduled = scheduler_output.num_scheduled_tokens[req_id]
+            is_new_request = (
+                req_state.num_computed_tokens == tokens_scheduled)
+
+            if is_new_request:
+                req_idx = self.input_batch.req_id_to_index[req_id]
+                for layer_idx in range(len(self.k_scale_caches_cpu)):
+                    self.k_scale_caches_cpu[layer_idx][req_idx] = 0.0
+                    self.v_scale_caches_cpu[layer_idx][req_idx] = 0.0
+
         num_scheduled_tokens_per_req = np.array(num_scheduled_tokens_per_req,
                                                 dtype=np.int32)
         assert max_num_scheduled_tokens_all_reqs > 0
@@ -1606,7 +1629,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
          logits_indices, request_distribution) = device_array(
              self.mesh, (input_ids, positions, query_start_loc, seq_lens,
                          logits_indices, request_distribution))
-
+        # put the k/v scales to device
+        k_scale_cache = device_array(self.mesh, (self.k_scale_caches_cpu))
+        v_scale_cache = device_array(self.mesh, (self.v_scale_caches_cpu))
         attention_metadata_per_layer: Dict[str, AttentionMetadata] = {}
         uniform_attention_metadata: AttentionMetadata = None
         for kv_cache_gid, kv_cache_group in enumerate(
@@ -1625,7 +1650,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 block_tables=block_tables,
                 seq_lens=seq_lens,
                 query_start_loc=query_start_loc,
-                request_distribution=request_distribution)
+                request_distribution=request_distribution,
+                k_scale_cache=k_scale_cache,
+                v_scale_cache=v_scale_cache,
+            )
             # This is for making these cpu buffers hidden during tracing
             attention_metadata_gid.query_start_loc_cpu = query_start_loc_cpu
             attention_metadata_gid.seq_lens_cpu = seq_lens_cpu

@@ -478,9 +478,6 @@ def _ragged_paged_attention_kernel(
                     sem,
                     wait=False,
                 )
-                print(cache_hbm_ref.at[pl.ds(
-                    page_indices_ref[page_indices_offset + i] * page_size,
-                    sz)].shape)
                 debug_print("[RPA debug] loop_body i={}, sz={}", i, sz)
                 return offset + sz
 

@@ -122,14 +122,14 @@ class LlamaAttention(nnx.Module):
 
         self._q_scale = 1.0
         # [total_num_pages, page_size, num_kv_heads, 1]
-        self._k_scale = nnx.Variable(
-            jnp.zeros((1422, 256, self.num_kv_heads, 1)),
-            dtype=jnp.float32,
-        )
-        self._v_scale = nnx.Variable(
-            jnp.zeros((1422, 256, self.num_kv_heads, 1)),
-            dtype=jnp.float32,
-        )
+        # self._k_scale = nnx.Variable(
+        #     jnp.zeros((1422, 256, self.num_kv_heads, 1)),
+        #     dtype=jnp.float32,
+        # )
+        # self._v_scale = nnx.Variable(
+        #     jnp.zeros((1422, 256, self.num_kv_heads, 1)),
+        #     dtype=jnp.float32,
+        # )
         self.kv_cache_quantized_dtype = None
         if kv_cache_dtype != "auto":
             self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
@@ -140,6 +140,8 @@ class LlamaAttention(nnx.Module):
         kv_cache: Optional[jax.Array],
         x: jax.Array,
         attention_metadata: AttentionMetadata,
+        k_scale_cache: Optional[jax.Array] = None,
+        v_scale_cache: Optional[jax.Array] = None,
     ) -> Tuple[jax.Array, jax.Array]:
         md = attention_metadata
         # q: (T, N, H)
@@ -153,16 +155,16 @@ class LlamaAttention(nnx.Module):
         # v: (T, K, H)
         v = self.v_proj(x)
         # o: (T, N, H)
-        if self.kv_cache_quantized_dtype:
-            # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
-            # q_scale = self._q_scale
-            k_scale = 1.0
-            v_scale = 1.0
+        # if self.kv_cache_quantized_dtype:
+        #     # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
+        #     # q_scale = self._q_scale
+        #     k_scale = 1.0
+        #     v_scale = 1.0
 
-            k, v = utils.quantize_kv(k, v, self.kv_cache_quantized_dtype,
-                                     k_scale, v_scale)
+        #     k, v = utils.quantize_kv(k, v, self.kv_cache_quantized_dtype,
+        #                              k_scale, v_scale)
 
-        new_kv_cache, outputs = attention(
+        new_kv_cache, outputs, updated_k_scale, updated_v_scale = attention(
             kv_cache,
             q,
             k,
@@ -171,12 +173,12 @@ class LlamaAttention(nnx.Module):
             self.mesh,
             self.head_dim_original,
             q_scale=None,
-            k_scale=1.0,
-            v_scale=1.0,
+            k_scale=k_scale_cache,
+            v_scale=v_scale_cache,
         )
         # (T, D)
         o = self.o_proj(outputs)
-        return new_kv_cache, o
+        return new_kv_cache, o, updated_k_scale, updated_v_scale
 
 
 class LlamaDecoderLayer(nnx.Module):
@@ -216,12 +218,16 @@ class LlamaDecoderLayer(nnx.Module):
         kv_cache: jax.Array,
         x: jax.Array,
         attention_metadata: AttentionMetadata,
+        k_scale_cache: Optional[jax.Array] = None,
+        v_scale_cache: Optional[jax.Array] = None,
     ) -> Tuple[jax.Array, jax.Array]:
         hidden_states = self.input_layernorm(x)
-        kv_cache, attn_output = self.self_attn(
+        kv_cache, attn_output, k_scale_cache, v_scale_cache = self.self_attn(
             kv_cache,
             hidden_states,
             attention_metadata,
+            k_scale_cache,
+            v_scale_cache,
         )
         attn_output += x
 
@@ -229,7 +235,7 @@ class LlamaDecoderLayer(nnx.Module):
         attn_output = self.post_attention_layernorm(attn_output)
         outputs = self.mlp(attn_output)
         outputs = residual + outputs
-        return kv_cache, outputs
+        return kv_cache, outputs, k_scale_cache, v_scale_cache
 
 
 class LlamaModel(nnx.Module):
@@ -293,18 +299,26 @@ class LlamaModel(nnx.Module):
     ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
         x = self.embed(input_ids)
         aux_hidden_states = []
+        updated_k_scales = []
+        updated_v_scales = []
         for i, layer in enumerate(self.layers):
             if i in self.aux_hidden_state_layers:
                 aux_hidden_states.append(x)
             kv_cache = kv_caches[i]
-            kv_cache, x = layer(
+            k_scales_cache = attention_metadata.k_scale_cache[i]
+            v_scales_cache = attention_metadata.v_scale_cache[i]
+            kv_cache, x, k_scales_cache, v_scales_cache = layer(
                 kv_cache,
                 x,
                 attention_metadata,
-            )
+                k_scale_cache=k_scales_cache,
+                v_scale_cache=v_scales_cache)
             kv_caches[i] = kv_cache
+            updated_k_scales.append(k_scales_cache)
+            updated_v_scales.append(v_scales_cache)
+
         x = self.norm(x)
-        return kv_caches, x, aux_hidden_states
+        return kv_caches, x, aux_hidden_states, updated_k_scales, updated_v_scales
 
 
 class LlamaForCausalLM(nnx.Module):
@@ -328,12 +342,12 @@ class LlamaForCausalLM(nnx.Module):
         attention_metadata: AttentionMetadata,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
-        kv_caches, x, aux_hidden_states = self.model(
+        kv_caches, x, aux_hidden_states, new_k_scales, new_v_scales = self.model(
             kv_caches,
             input_ids,
             attention_metadata,
         )
-        return kv_caches, x, aux_hidden_states
+        return kv_caches, x, aux_hidden_states, new_k_scales, new_v_scales
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         if self.vllm_config.model_config.hf_config.tie_word_embeddings:

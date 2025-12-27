@@ -13,6 +13,8 @@ import jax
         "seq_lens",
         "query_start_loc",
         "request_distribution",
+        "k_scale_cache",
+        "v_scale_cache",
     ],
     meta_fields=[],
     drop_fields=["query_start_loc_cpu", "seq_lens_cpu"],
@@ -29,6 +31,9 @@ class AttentionMetadata(object):
     query_start_loc: jax.Array = None
     # (3,)
     request_distribution: jax.Array = None
+
+    k_scale_cache: jax.Array = None
+    v_scale_cache: jax.Array = None
 
     query_start_loc_cpu: Any = field(init=False)
     seq_lens_cpu: Any = field(init=False)
