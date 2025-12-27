@@ -569,9 +569,6 @@ def _ragged_paged_attention_kernel(
             # Fetch effective kv from kv cache.
             def loop_body(i, offset):
                 sz = jnp.minimum(page_size, kv_left_frm_cache - i * page_size)
-                # print(cache_hbm_ref.at[pl.ds(
-                #         page_indices_ref[page_indices_offset + i] * page_size,
-                #         sz)].shape, vmem_ref.at[pl.ds(i * page_size, sz)].shape, vmem_ref.shape, cache_hbm_ref.shape)
                 _async_copy(
                     cache_hbm_ref.at[pl.ds(
                         page_indices_ref[page_indices_offset + i] * page_size,

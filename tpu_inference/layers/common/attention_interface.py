@@ -14,6 +14,7 @@ from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
+import tpu_inference.kernels.ragged_paged_attention.v3.kernel_per_token_my_try_v4_no_pad as rpa_v4
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
 from tpu_inference.kernels.flash_attention.kernel import flash_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
@@ -25,8 +26,7 @@ MAX_ALLOWED_PAGE_INDICES_N = (
 )  # Based on experiments on v5e, 256x1024 results in smem oom but 128x1024 not. TODO: Adjust this based on TPU version.
 
 ragged_paged_attention = rpa.ragged_paged_attention
-ref_ragged_paged_attention = rpa.ref_ragged_paged_attention
-ref_ragged_paged_attention_per_token = rpa.ref_ragged_paged_attention_per_token
+ragged_paged_attention_per_seq = rpa_v4.ragged_paged_attention_per_seq
 get_kv_cache_shape = rpa.get_kv_cache_shape
 
 ragged_paged_attention_hd64 = rpa_hd64.ragged_paged_attention_hd64
@@ -317,7 +317,7 @@ def sharded_ragged_paged_attention(
     #                              strict_sliding_window=True)
     # else:
     #     func = ragged_paged_attention
-    func = ref_ragged_paged_attention
+    func = ragged_paged_attention
     if attention_sink is not None:
         if not use_hd64:
             raise NotImplementedError(
