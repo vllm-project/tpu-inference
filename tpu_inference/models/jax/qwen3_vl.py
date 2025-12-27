@@ -816,7 +816,7 @@ class Qwen3VLVisionPatchEmbed(nnx.Module):
     def __init__(
         self,
         rngs: nnx.Rngs,
-        patch_size: int = 14,
+        patch_size: int = 16,
         temporal_patch_size: int = 2,
         in_channels: int = 3,
         hidden_size: int = 1152,
@@ -1833,7 +1833,7 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         hf_config=None,
         image_grid_thw=None,
         video_grid_thw=None,
-        # TODO: check if second_per_grid_ts is required for multimodal
+        second_per_grid_ts=None,
         context_len: int = 0,
         seq_len: Optional[int] = None,
         audio_feature_lengths=None,
@@ -1856,7 +1856,7 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
             llm_positions: (3, sliced_seq_len) position IDs for [T, H, W]
             mrope_position_delta: Delta for rope calculation
         """
-        del audio_feature_lengths, use_audio_in_video
+        del second_per_grid_ts, audio_feature_lengths, use_audio_in_video
 
         if hf_config is None:
             hf_config = self.config
