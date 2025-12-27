@@ -1,0 +1,43 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# hybrid kv cache
+# Hybrid kv cache allows the kv cache mgr to allocate different number of 
+# blocks for different attention types. This is useful for models with more 
+# than 1 attention type (e.g. opt-oss 120b, gemma-27b 
+# with full + sliding window attn) to save HBM memory for kv cache and be able
+# to accomodate more requests. 
+steps:
+  - label: "Correctness tests for hybrid kv cache allocation"
+    key: "hybrid_kvcache_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_8_queue
+    commands:
+      - |
+        .buildkite/scripts/run_in_docker.sh \
+          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_hybrid_kvcache.py::test_hybrid_kv_cache \
+          /workspace/tpu_inference/tests/e2e/test_hybrid_kvcache.py::test_hybrid_kv_cache_correctness
+  - label: "Record correctness test result for hybrid kv cache allocation"
+    key: "record_hybrid_kvcache_CorrectnessTest"
+    depends_on: "hybrid_kvcache_CorrectnessTest"
+    env:
+      CI_TARGET: "hybrid_kvcache"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh hybrid_kvcache_CorrectnessTest

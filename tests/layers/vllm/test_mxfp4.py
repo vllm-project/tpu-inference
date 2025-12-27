@@ -1,11 +1,25 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import tempfile
+from unittest import mock
 
 import jax
 import jax.numpy as jnp
 import pytest
 import torch
 import torchax
-import utils as test_utils
 from jax._src import test_util as jtu
 from jax.sharding import PartitionSpec
 from torchax.ops.mappings import j2t, t2j
@@ -16,9 +30,12 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 
+from tpu_inference.layers.vllm.fused_moe import FusedMoEBackend
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.mxfp4 import (VllmMxfp4Config,
                                                           VllmMxfp4MoEMethod)
+
+from . import utils as test_utils
 
 P = PartitionSpec
 MODELS = ["openai/gpt-oss-20b"]
@@ -104,17 +121,22 @@ def test_quant_override(model, mesh):
     assert quant_config.mesh == mesh
 
 
-@pytest.mark.parametrize(
-    "mesh", [test_utils.get_spmd_mesh(1),
-             test_utils.get_spmd_mesh(2)])
+@pytest.mark.parametrize("num_devices", [1, 2])
 @pytest.mark.parametrize("num_tokens", [8])
 @pytest.mark.parametrize("intermediate_size", [1024])
 @pytest.mark.parametrize("hidden_size", [128])
 @pytest.mark.parametrize("num_experts", [8])
 @pytest.mark.parametrize("topk", [2])
 @pytest.mark.parametrize("use_ep", [True, False])
-def test_mxfp4_fused_moe(mesh, num_tokens, intermediate_size, hidden_size,
-                         num_experts, topk, use_ep):
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+def test_mxfp4_fused_moe(num_devices, num_tokens, intermediate_size,
+                         hidden_size, num_experts, topk, use_ep,
+                         enable_attn_dp):
+    # Skip if enable_attn_dp is True but we don't have enough devices
+    if enable_attn_dp and num_devices < 2:
+        pytest.skip("enable_attn_dp requires at least 2 devices")
+
+    mesh = test_utils.get_spmd_mesh(num_devices, enable_attn_dp)
     torch.manual_seed(42)
     dtype = torch.bfloat16
 
@@ -140,6 +162,8 @@ def test_mxfp4_fused_moe(mesh, num_tokens, intermediate_size, hidden_size,
     )
     vllm_config = engine_args.create_engine_config()
     vllm_config.model_config.dtype = dtype
+    vllm_config.parallel_config = ParallelConfig(
+        tensor_parallel_size=mesh.devices.size, enable_expert_parallel=use_ep)
 
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
     with set_current_vllm_config(vllm_config):
@@ -170,13 +194,16 @@ def test_mxfp4_fused_moe(mesh, num_tokens, intermediate_size, hidden_size,
 
     with torchax.default_env(), set_forward_context(None, vllm_config):
         assert isinstance(vllm_fused_moe.quant_method, VllmMxfp4MoEMethod)
+        if use_ep:
+            assert vllm_fused_moe.quant_method.moe_backend == FusedMoEBackend.GMM_EP
+        else:
+            assert vllm_fused_moe.quant_method.moe_backend == FusedMoEBackend.GMM_TP
 
         jax_a = a.to('jax')
         score = score.to('jax')
 
         vllm_fused_moe.quant_method.process_weights_after_loading(
             vllm_fused_moe)
-
         actual = vllm_fused_moe(jax_a, score)
 
         torch.testing.assert_close(expected,
@@ -186,16 +213,27 @@ def test_mxfp4_fused_moe(mesh, num_tokens, intermediate_size, hidden_size,
                                    rtol=1e-1)
 
 
-@pytest.mark.parametrize(
-    "mesh", [test_utils.get_spmd_mesh(1),
-             test_utils.get_spmd_mesh(2)])
+@pytest.mark.parametrize("num_devices", [1, 2])
 @pytest.mark.parametrize("num_tokens", [8])
 @pytest.mark.parametrize("intermediate_size", [512])
 @pytest.mark.parametrize("hidden_size", [1024])
 @pytest.mark.parametrize("num_experts", [8])
 @pytest.mark.parametrize("topk", [2])
-def test_mxfp4_fused_moe_use_kernel(mesh, num_tokens, intermediate_size,
-                                    hidden_size, num_experts, topk):
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+@mock.patch("os.environ", {"USE_MOE_EP_KERNEL": "1"})
+def test_mxfp4_fused_moe_use_kernel(num_devices, num_tokens, intermediate_size,
+                                    hidden_size, num_experts, topk,
+                                    enable_attn_dp):
+    # Skip if enable_attn_dp is True but we don't have enough devices
+    if enable_attn_dp and num_devices < 2:
+        pytest.skip("enable_attn_dp requires at least 2 devices")
+
+    # Skip attn_dp tests for fused_moe_use_kernel since the kernel only supports 2D mesh
+    if enable_attn_dp:
+        pytest.skip(
+            "fused_moe kernel does not support attn_dp (requires 2D mesh)")
+
+    mesh = test_utils.get_spmd_mesh(num_devices, enable_attn_dp)
 
     torch.manual_seed(42)
     dtype = torch.bfloat16
@@ -223,7 +261,7 @@ def test_mxfp4_fused_moe_use_kernel(mesh, num_tokens, intermediate_size,
     vllm_config = engine_args.create_engine_config()
     vllm_config.model_config.dtype = dtype
     vllm_config.parallel_config = ParallelConfig(
-        tensor_parallel_size=mesh.devices.size)
+        tensor_parallel_size=mesh.devices.size, enable_expert_parallel=True)
 
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
     with set_current_vllm_config(vllm_config):
@@ -255,14 +293,14 @@ def test_mxfp4_fused_moe_use_kernel(mesh, num_tokens, intermediate_size,
 
     with torchax.default_env(), set_forward_context(None, vllm_config):
         assert isinstance(vllm_fused_moe.quant_method, VllmMxfp4MoEMethod)
+        assert vllm_fused_moe.quant_method.moe_backend == FusedMoEBackend.FUSED_MOE
 
         jax_a = a.to('jax')
         score = score.to('jax')
 
-        vllm_fused_moe.quant_method.use_kernel = True
         vllm_fused_moe.quant_method.process_weights_after_loading(
             vllm_fused_moe)
-        vllm_fused_moe.quant_method.block_size = {
+        vllm_fused_moe.quant_method.extra_backend_kwargs.update({
             "bt": 32,
             "bf": 512,
             "bd1": 1024,
@@ -271,7 +309,7 @@ def test_mxfp4_fused_moe_use_kernel(mesh, num_tokens, intermediate_size,
             "bfc": 512,
             "bd1c": 1024,
             "bd2c": 1024,
-        }
+        })
 
         actual = vllm_fused_moe(jax_a, score)
 

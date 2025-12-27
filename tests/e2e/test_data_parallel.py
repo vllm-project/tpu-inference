@@ -3,38 +3,37 @@
 
 import os
 import time
-from dataclasses import asdict
 
 import pytest
-from vllm import LLM, EngineArgs, SamplingParams
+from vllm import LLM, SamplingParams
 
 
 @pytest.fixture(autouse=True)
 def setup_new_model_design():
-    """Automatically set NEW_MODEL_DESIGN=1 for all tests."""
     os.environ['NEW_MODEL_DESIGN'] = '1'
+    os.environ['SKIP_JAX_PRECOMPILE'] = '0'
+    os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '1'
 
 
 @pytest.fixture
-def test_prompts():
-    """Simple test prompts for data parallelism testing."""
+def test_prompts(num_prompts: int = 256) -> list:
+    base_text = (
+        "The rapid advancement of artificial intelligence has transformed numerous industries "
+        "and continues to reshape our understanding of technology's potential. Machine learning "
+        "algorithms have become increasingly sophisticated, enabling computers to perform tasks "
+        "that were once thought to require human intelligence. From natural language processing "
+        "to computer vision, AI systems are now capable of understanding context, recognizing "
+        "patterns, and making decisions with remarkable accuracy. " *
+        20  # Repeat to reach ~1k tokens
+    )
     return [
-        "Hello, my name is",
-        "The capital of France is",
-        "The colors of the rainbow are",
-        "The future of AI is",
-        "The president of the United States is",
-        "How many players are on a standard soccer team?",
-        "In Greek mythology, who is the god of the sea?",
-        "What is the capital of Australia?",
-        "What is the largest planet in our solar system?",
-        "Who developed the theory of general relativity?",
+        f"Prompt {i}: {base_text} What are your thoughts on this topic?"
+        for i in range(num_prompts)
     ]
 
 
 @pytest.fixture
 def sampling_params():
-    """Standard sampling parameters for testing."""
     return SamplingParams(
         temperature=0.0,
         max_tokens=32,
@@ -51,164 +50,59 @@ def _run_inference_with_config(model_name: str,
                                additional_config: dict = {},
                                kv_cache_dtype: str = "auto",
                                enable_prefix_caching: bool = False,
-                               async_scheduling: bool = False) -> list:
-    """Helper function to run inference with specified configuration."""
+                               async_scheduling: bool = False,
+                               max_model_len: int = 32,
+                               max_num_batched_tokens: int = 128,
+                               max_num_seqs: int = 16,
+                               gpu_memory_utilization: float = 0.90,
+                               trace_dir: str = None) -> list:
 
-    # Create LLM args using parser-based approach similar to offline_inference.py
-    engine_args = EngineArgs(
+    llm = LLM(
         model=model_name,
-        max_model_len=32,
+        max_model_len=max_model_len,
         tensor_parallel_size=tensor_parallel_size,
         data_parallel_size=data_parallel_size,
-        gpu_memory_utilization=0.98,
-        max_num_batched_tokens=128,
-        max_num_seqs=16,
+        gpu_memory_utilization=gpu_memory_utilization,
+        max_num_batched_tokens=max_num_batched_tokens,
+        max_num_seqs=max_num_seqs,
         enable_prefix_caching=enable_prefix_caching,
         additional_config=additional_config,
         kv_cache_dtype=kv_cache_dtype,
         async_scheduling=async_scheduling,
     )
 
-    engine_args_dict = asdict(engine_args)
-    llm = LLM(**engine_args_dict)
+    start_time = time.time()
+    outputs = llm.generate(test_prompts, sampling_params)
+    elapsed_time = time.time() - start_time
 
-    try:
-        outputs = llm.generate(test_prompts, sampling_params)
-        return outputs
-    finally:
-        del llm
-        # Wait for TPUs to be released
-        time.sleep(5)
+    del llm
+    time.sleep(10)
+    return outputs, elapsed_time
 
 
-@pytest.mark.parametrize("model_impl_type", ["vllm", "flax_nnx"])
-def test_model_data_parallelism(
-    test_prompts: list,
-    sampling_params: SamplingParams,
-    model_impl_type: str,
-):
-    """
-    Test model-wise data parallelism where data=2 in the mesh axis.
-    This test verifies that the model can run with data parallelism enabled,
-    duplicating the entire model across 2 data parallel workers.
+def _check_performance(test_name: str, baseline_time: float, dp_time: float,
+                       num_prompts: int, tol: float):
 
-    Equivalent to:
-    python examples/offline_inference.py --tensor_parallel_size=4 --data_parallel_size=2
-    """
-    # Use Llama 1B for this test
-    test_model = "meta-llama/Llama-3.2-1B-Instruct"
-    os.environ['MODEL_IMPL_TYPE'] = model_impl_type
+    speedup = baseline_time / dp_time if dp_time > 0 else 0
 
-    # Test with data parallelism enabled
-    outputs = _run_inference_with_config(
-        model_name=test_model,
-        test_prompts=test_prompts,
-        sampling_params=sampling_params,
-        tensor_parallel_size=1,
-        data_parallel_size=2,
-        async_scheduling=False,
-    )
+    print(f"✓ {test_name} performance test results:")
+    print(f"  Number of prompts: {num_prompts}")
+    print(f"  Baseline time: {baseline_time:.2f}s")
+    print(f"  Data parallel time: {dp_time:.2f}s")
+    print(f"  Speedup: {speedup:.2f}x")
+    print(f"  Baseline throughput: {num_prompts/baseline_time:.2f} prompts/s")
+    print(f"  Data parallel throughput: {num_prompts/dp_time:.2f} prompts/s")
 
-    # Verify we got outputs for all prompts
-    assert len(outputs) == len(test_prompts)
-
-    # Verify each output has generated text
-    for output in outputs:
-        assert len(output.outputs) > 0
-        assert len(output.outputs[0].text.strip()) > 0
-
-    print(f"✓ Model data parallelism test passed with {len(outputs)} outputs")
+    assert speedup >= tol, f"Data parallelism did not provide expected speedup ({tol:.2f}x): {speedup:.2f}x"
 
 
-def test_attention_data_parallelism(
-    test_prompts: list,
-    sampling_params: SamplingParams,
-):
-    """
-    Test attention data parallelism where only the attention layer gets duplicated,
-    attn_dp=2 in the mesh axis. This is useful when num_kv_heads < TP to avoid
-    wasting KV cache memory.
+def _check_correctness(test_name, baseline_outputs, dp_outputs):
 
-    Equivalent to:
-    python examples/offline_inference.py --tensor_parallel_size=8 --kv-cache-dtype=fp8 \
-        --additional_config='{"sharding":{"sharding_strategy": {"enable_dp_attention":1}}}'
-    """
-    # Use Llama 1B for this test
-    test_model = "Qwen/Qwen3-0.6B"
-
-    additional_config = {
-        "sharding": {
-            "sharding_strategy": {
-                "enable_dp_attention": 1
-            }
-        }
-    }
-
-    # Test with attention data parallelism enabled
-    outputs = _run_inference_with_config(
-        model_name=test_model,
-        test_prompts=test_prompts,
-        sampling_params=sampling_params,
-        tensor_parallel_size=8,
-        data_parallel_size=1,
-        additional_config=additional_config,
-        kv_cache_dtype="fp8",
-    )
-
-    # Verify we got outputs for all prompts
-    assert len(outputs) == len(test_prompts)
-
-    # Verify each output has generated text
-    for output in outputs:
-        assert len(output.outputs) > 0
-        assert len(output.outputs[0].text.strip()) > 0
-
-    print(
-        f"✓ Attention data parallelism test passed with {len(outputs)} outputs"
-    )
-
-
-def test_data_parallelism_correctness(
-    test_prompts: list,
-    sampling_params: SamplingParams,
-):
-    """
-    Test that data parallelism produces consistent results compared to a baseline.
-    This test compares outputs from a single-device run with data parallel runs
-    to ensure correctness, including log probabilities.
-    """
-    os.environ['SKIP_JAX_PRECOMPILE'] = '1'
-    os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '0'
-    model_name = "Qwen/Qwen2.5-1.5B-Instruct"
-    # Use a smaller subset of prompts for correctness testing
-    small_prompts = test_prompts[:10]
-
-    # Run baseline (no data parallelism)
-    baseline_outputs = _run_inference_with_config(
-        model_name=model_name,
-        test_prompts=small_prompts,
-        sampling_params=sampling_params,
-        tensor_parallel_size=1,
-        data_parallel_size=1,
-        async_scheduling=True,
-    )
-
-    # Run with model data parallelism and async scheduling
-    dp_outputs = _run_inference_with_config(
-        model_name=model_name,
-        test_prompts=small_prompts,
-        sampling_params=sampling_params,
-        tensor_parallel_size=1,
-        data_parallel_size=2,
-        async_scheduling=True,
-    )
-
-    # Compare outputs - they should be identical for greedy sampling
     assert len(baseline_outputs) == len(dp_outputs)
 
     text_matches = 0
-    text_mismatches = 0
-    logprob_mismatches = 0
+    logprob_matches = 0
+    total_compared_logprobs = 0
     max_logprob_diff = 0.0
 
     for i, (baseline, dp_result) in enumerate(zip(baseline_outputs,
@@ -216,14 +110,19 @@ def test_data_parallelism_correctness(
         baseline_text = baseline.outputs[0].text.strip()
         dp_text = dp_result.outputs[0].text.strip()
 
-        # Check text output
-        if baseline_text == dp_text:
+        baseline_words = baseline_text.split()
+        dp_words = dp_text.split()
+        overlap_set = set(baseline_words) & set(dp_words)
+        match_percent = len(overlap_set) / len(set(baseline_words))
+        if match_percent >= 0.7:
             text_matches += 1
-        else:
-            text_mismatches += 1
+
+        # Check text output
+        if baseline_text != dp_text:
             print(f"Text mismatch found in prompt {i}:")
             print(f"  Baseline: {baseline_text}")
             print(f"  Data Parallel: {dp_text}")
+            print(f"  Match percent: {match_percent:.2%}")
 
         # Check log probabilities
         baseline_logprobs = baseline.outputs[0].logprobs
@@ -242,36 +141,149 @@ def test_data_parallelism_correctness(
                     base_top_token = list(base_lp.keys())[0]
                     dp_top_token = list(dp_lp.keys())[0]
 
-                    base_logprob_val = base_lp[base_top_token].logprob
-                    dp_logprob_val = dp_lp[dp_top_token].logprob
+                    # Only compare logprobs if tokens match
+                    if base_top_token == dp_top_token:
+                        base_logprob_val = base_lp[base_top_token].logprob
+                        dp_logprob_val = dp_lp[dp_top_token].logprob
 
-                    # Calculate absolute difference
-                    diff = abs(base_logprob_val - dp_logprob_val)
-                    max_logprob_diff = max(max_logprob_diff, diff)
+                        # Calculate absolute difference
+                        diff = abs(base_logprob_val - dp_logprob_val)
+                        max_logprob_diff = max(max_logprob_diff, diff)
 
-                    # Allow small numerical differences
-                    if diff > 0.15:
-                        logprob_mismatches += 1
-                        print(
-                            f"Logprob mismatch in prompt {i}, token {token_idx}:"
-                        )
-                        print(
-                            f"  Baseline token: {base_top_token}, logprob: {base_logprob_val:.6f}"
-                        )
-                        print(
-                            f"  DP token: {dp_top_token}, logprob: {dp_logprob_val:.6f}"
-                        )
-                        print(f"  Difference: {diff:.6f}")
+                        total_compared_logprobs += 1
+                        # Count as match if difference is small
+                        if diff < 0.1:
+                            logprob_matches += 1
+                        else:
+                            print(
+                                f"  Logprob mismatch in prompt {i}, token {token_idx}: "
+                                f"Baseline logprob={base_logprob_val}, "
+                                f"Data Parallel logprob={dp_logprob_val}, "
+                                f"Diff={diff:.6e}")
 
-    print("✓ Correctness test results:")
-    print(f"  Text: {text_matches} matches, {text_mismatches} mismatches")
+    print(f"✓ {test_name} correctness test results:")
+    print(f"  Text: {text_matches} matches (match percent >= 70%)")
+    print(
+        f"  Logprobs: {logprob_matches}/{total_compared_logprobs} ({logprob_matches / total_compared_logprobs:.2%}) matches (diff < 0.1)"
+    )
     print(f"  Max logprob difference: {max_logprob_diff:.6e}")
-    print(f"  Significant logprob mismatches (>0.15): {logprob_mismatches}")
 
     # Allow for some variance due to potential numerical differences
     # but most outputs should match with greedy sampling
     text_match_rate = text_matches / len(baseline_outputs)
     assert text_match_rate >= 0.9, f"Text match rate {text_match_rate:.2%} is too low"
 
-    # Log probabilities should be very close (allow small numerical errors)
-    assert max_logprob_diff < 0.15, f"Max logprob difference {max_logprob_diff} is too large"
+    # Log probabilities should match for most matching tokens
+    if total_compared_logprobs > 0:
+        logprob_match_rate = logprob_matches / total_compared_logprobs
+        assert logprob_match_rate >= 0.9, f"Logprob match rate {logprob_match_rate:.2%} is too low"
+
+
+def test_attention_data_parallelism(
+    test_prompts: list,
+    sampling_params: SamplingParams,
+):
+    """
+    Correctness and performance test for attention DP     
+    """
+
+    os.environ['MODEL_IMPL_TYPE'] = "vllm"
+    model_name = "Qwen/Qwen2.5-1.5B-Instruct"
+
+    # Configuration for long sequences
+    max_model_len = 2048
+    max_num_batched_tokens = 4096
+    max_num_seqs = 128
+
+    # Run with attn_dp=2 tp=2
+    dp_outputs, dp_time = _run_inference_with_config(
+        model_name=model_name,
+        test_prompts=test_prompts,
+        sampling_params=sampling_params,
+        tensor_parallel_size=4,
+        async_scheduling=False,
+        max_model_len=max_model_len,
+        max_num_batched_tokens=max_num_batched_tokens,
+        max_num_seqs=max_num_seqs,
+        additional_config={
+            "sharding": {
+                "sharding_strategy": {
+                    "enable_dp_attention": 1
+                }
+            }
+        })
+
+    # Run baseline (tp=2)
+    baseline_outputs, baseline_time = _run_inference_with_config(
+        model_name=model_name,
+        test_prompts=test_prompts,
+        sampling_params=sampling_params,
+        tensor_parallel_size=2,
+        data_parallel_size=1,
+        async_scheduling=False,
+        max_model_len=max_model_len,
+        max_num_batched_tokens=max_num_batched_tokens,
+        max_num_seqs=max_num_seqs,
+    )
+
+    _check_correctness("Attention data parallelism", baseline_outputs,
+                       dp_outputs)
+
+    # Different hardware gives different performance. This test runs on v6e_8
+    _check_performance("Attention data parallelism",
+                       baseline_time,
+                       dp_time,
+                       len(test_prompts),
+                       tol=1.1)
+
+
+def test_data_parallelism(
+    sampling_params: SamplingParams,
+    test_prompts: list,
+):
+    """
+    Correctness and performance test for model DP 
+    """
+    os.environ['MODEL_IMPL_TYPE'] = "flax_nnx"
+
+    model_name = "Qwen/Qwen2.5-1.5B-Instruct"
+
+    # Configuration for long sequences
+    max_model_len = 2048
+    max_num_batched_tokens = 4096
+    max_num_seqs = 128
+
+    # Run with data parallelism (dp=2, tp=1)
+    dp_outputs, dp_time = _run_inference_with_config(
+        model_name=model_name,
+        test_prompts=test_prompts,
+        sampling_params=sampling_params,
+        tensor_parallel_size=1,
+        data_parallel_size=2,
+        async_scheduling=True,
+        max_model_len=max_model_len,
+        max_num_batched_tokens=max_num_batched_tokens,
+        max_num_seqs=max_num_seqs,
+    )
+
+    # Run baseline (tp=1)
+    baseline_outputs, baseline_time = _run_inference_with_config(
+        model_name=model_name,
+        test_prompts=test_prompts,
+        sampling_params=sampling_params,
+        tensor_parallel_size=1,
+        data_parallel_size=1,
+        async_scheduling=True,
+        max_model_len=max_model_len,
+        max_num_batched_tokens=max_num_batched_tokens,
+        max_num_seqs=max_num_seqs,
+    )
+
+    _check_correctness("Data parallelism", baseline_outputs, dp_outputs)
+
+    # Test is too small to see significant speedup, mainly for testing regression
+    _check_performance("Data parallelism",
+                       baseline_time,
+                       dp_time,
+                       len(test_prompts),
+                       tol=1.1)

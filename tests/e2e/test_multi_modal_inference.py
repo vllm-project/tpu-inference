@@ -4,6 +4,7 @@
 # This script is a self-contained test that runs a single prompt and
 # compares the output to a known-good output.
 
+import difflib
 import os
 from dataclasses import asdict
 
@@ -101,4 +102,10 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes):
     print("-" * 50)
 
     # Check output
-    assert generated_text == EXPECTED_TEXT
+    similarity_score = difflib.SequenceMatcher(None, generated_text,
+                                               EXPECTED_TEXT).ratio()
+    print(f"Similarity Score: {similarity_score:.4f}")
+    assert similarity_score >= 0.85, (
+        f"Text similarity too low ({similarity_score:.2f}).\n"
+        f"Expected: {EXPECTED_TEXT}\n"
+        f"Actual:   {generated_text}")

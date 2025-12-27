@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import random
 from typing import Optional
 
@@ -28,10 +42,12 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.utils import set_random_seed
 from vllm.platforms import current_platform
 
-from tpu_inference.layers.vllm.quantization.common import JaxCommonLinearConfig
+from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
+    _shard_module_to_tpu
+from tpu_inference.layers.vllm.quantization.configs import \
+    VllmQuantLinearConfig
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedLinearMethod
-from tpu_inference.layers.vllm.sharding import _shard_module_to_tpu
 
 from .utils import DummyLoRAManager
 
@@ -615,7 +631,7 @@ def _create_lora_wrapper(linear,
                          mesh,
                          repeats=1):
     base_linear.weight.data = linear.weight.data
-    jax_config = JaxCommonLinearConfig(vllm_config, mesh, base_linear)
+    jax_config = VllmQuantLinearConfig(vllm_config, mesh, base_linear)
     linear_method = VllmUnquantizedLinearMethod(jax_config)
     base_linear.quant_method = linear_method
     linear_method.process_weights_after_loading(

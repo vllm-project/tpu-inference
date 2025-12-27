@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import functools
 from typing import Any, Optional
 
@@ -15,9 +29,10 @@ from vllm.utils.func_utils import supports_kw
 from tpu_inference import envs
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.utils.quantization.quantization_utils import (
+from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     apply_qwix_on_abstract_model, apply_qwix_quantization,
-    load_random_weights_into_qwix_abstract_model)
+    load_random_weights_into_qwix_abstract_model,
+    update_vllm_config_for_qwix_quantization)
 from tpu_inference.utils import to_jax_dtype, to_torch_dtype
 
 logger = init_logger(__name__)
@@ -222,6 +237,10 @@ def get_flax_model(
     model_dtype = to_jax_dtype(vllm_config.model_config.dtype)
     vllm_config.model_config.dtype = model_dtype
 
+    # Only perform qwix quantization if it is jax model.
+    if vllm_config.model_config:
+        update_vllm_config_for_qwix_quantization(vllm_config)
+
     if is_draft_model:
         model_class = _get_model_architecture(
             vllm_config.speculative_config.draft_model_config.hf_config)
@@ -273,10 +292,9 @@ def get_flax_model(
 
     # Multi-modal support only
     # This function calculates the image token's embeddings by VIT
-    def run_get_multimodal_embeddings(graphdef, state, image_grid_thw,
-                                      **kwargs):
+    def run_embed_multimodal(graphdef, state, image_grid_thw, **kwargs):
         model = nnx.merge(graphdef, state)
-        return model.get_multimodal_embeddings(image_grid_thw, **kwargs)
+        return model.embed_multimodal(image_grid_thw, **kwargs)
 
     embed_sharding = NamedSharding(mesh, PartitionSpec(None))
     # This function will calculates the embeddings of input texts and then merge with the image embeddings
@@ -284,9 +302,9 @@ def get_flax_model(
         jax.jit,
         out_shardings=(embed_sharding),
     )
-    def run_get_input_embeddings(graphdef, state, *args, **kwargs):
+    def run_embed_input_ids(graphdef, state, *args, **kwargs):
         model = nnx.merge(graphdef, state)
-        return model.get_input_embeddings(*args, **kwargs)
+        return model.embed_input_ids(*args, **kwargs)
 
     # For models that want to work with EAGLE-3 speculative decoding
     @functools.partial(
@@ -302,10 +320,8 @@ def get_flax_model(
                                            None)
     model_fn = functools.partial(run_model, graphdef)
     compute_logits_fn = functools.partial(run_compute_logits, graphdef)
-    get_multimodal_embeddings_fn = functools.partial(
-        run_get_multimodal_embeddings, graphdef)
-    get_input_embeddings_fn = functools.partial(run_get_input_embeddings,
-                                                graphdef)
+    embed_multimodal_fn = functools.partial(run_embed_multimodal, graphdef)
+    embed_input_ids_fn = functools.partial(run_embed_input_ids, graphdef)
     lora_manager, model = None, None
     combine_hidden_states_fn = functools.partial(combine_hidden_states,
                                                  graphdef)
@@ -316,8 +332,8 @@ def get_flax_model(
 
     multimodal_fns = {
         "precompile_vision_encoder_fn": precompile_vision_encoder_fn,
-        "get_multimodal_embeddings_fn": get_multimodal_embeddings_fn,
-        "get_input_embeddings_fn": get_input_embeddings_fn,
+        "embed_multimodal_fn": embed_multimodal_fn,
+        "embed_input_ids_fn": embed_input_ids_fn,
         "get_mrope_input_positions_fn": get_mrope_input_positions_fn,
     }
 
@@ -475,14 +491,14 @@ def register_model(arch: str, model: Any) -> None:
         )
 
     # Same as `forward`, this is a dummy method to satisfy vLLM's type checks.
-    def unimplemented_get_input_embeddings(
+    def unimplemented_embed_input_ids(
         self,
         input_ids: "torch.Tensor",
         positions: "torch.Tensor",
         inputs_embeds: Optional["torch.Tensor"] = None,
     ) -> "torch.Tensor":
         raise NotImplementedError(
-            "This is a JAX model and does not implement the PyTorch get_input_embeddings method."
+            "This is a JAX model and does not implement the PyTorch embed_input_ids method."
         )
 
     # We need a custom __init__ that only calls torch.nn.Module's init,
@@ -498,7 +514,7 @@ def register_model(arch: str, model: Any) -> None:
         {
             "__init__": wrapper_init,
             "forward": unimplemented_forward,
-            "get_input_embeddings": unimplemented_get_input_embeddings,
+            "embed_input_ids": unimplemented_embed_input_ids,
             # Prevent vLLM from trying to load weights into this dummy class.
             "load_weights": lambda self, *args, **kwargs: None,
         })

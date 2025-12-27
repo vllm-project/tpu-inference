@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import math
 from dataclasses import InitVar, dataclass
 from typing import Any, Tuple
@@ -6,7 +20,6 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from flax.typing import Sharding
-from jax.experimental import shard_map
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
@@ -17,6 +30,7 @@ from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
 from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import \
     get_tuned_block_sizes
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import RMSNorm
@@ -52,8 +66,9 @@ class MLA(nnx.Module):
     rms_norm_eps: float
 
     # Sharding attributes
-    nhd_sharding: Sharding = ()
+    rd_sharding: Sharding = ()
     q_da_sharding: Sharding = ()
+    ap_sharding: Sharding = ()
     anh_sharding: Sharding = ()
     kv_da_sharding: Sharding = ()
 
@@ -113,10 +128,10 @@ class MLA(nnx.Module):
                                                   self.q_da_sharding,
                                                   self.dtype,
                                                   random_init=self.random_init)
-        self.kernel_q_up_proj_ANH = create_param(
+        self.kernel_q_up_proj_AP = create_param(
             rngs,
-            (self.q_lora_rank, self.N, self.qk_head_dim),
-            self.anh_sharding,
+            (self.q_lora_rank, self.N * self.qk_head_dim),
+            self.ap_sharding,
             self.dtype,
             random_init=self.random_init,
         )
@@ -127,6 +142,10 @@ class MLA(nnx.Module):
             self.dtype,
             random_init=self.random_init,
         )
+        # NOTE (jacobplatin): we are keeping these variables as 3D because
+        # we would need to reshape them before the below projection,
+        # which caused issues as Qwix wasn't quantizing it correctly
+        # on the abstract pass
         if self.use_mla_kernel:
             self.kernel_k_up_proj_ANH = create_param(
                 rngs,
@@ -143,17 +162,18 @@ class MLA(nnx.Module):
                 random_init=self.random_init,
             )
         else:
-            self.kernel_kv_up_proj_ANH = create_param(
+            self.kernel_kv_up_proj_AL = create_param(
                 rngs,
-                (self.kv_lora_rank, self.N,
-                 self.qk_nope_head_dim + self.v_head_dim),
-                self.anh_sharding,
+                (self.kv_lora_rank, self.N *
+                 (self.qk_nope_head_dim + self.v_head_dim)),
+                self.
+                ap_sharding,  # NOTE: we use the same sharding for kv_up_proj_AL and kernel_q_up_proj_AP
                 self.dtype,
                 random_init=self.random_init,
             )
-        self.kernel_o_proj_NHD = create_param(
-            rngs, (self.N, self.v_head_dim, self.D),
-            self.nhd_sharding,
+        self.kernel_o_proj_RD = create_param(
+            rngs, (self.N * self.v_head_dim, self.D),
+            self.rd_sharding,
             self.dtype,
             random_init=self.random_init)
         self.q_rms_norm = RMSNorm(
@@ -209,9 +229,10 @@ class MLA(nnx.Module):
             q_TA = jnp.einsum("TD,DA -> TA", x_q_TD,
                               self.kernel_q_down_proj_DA.value)
             q_TA = self.q_rms_norm(q_TA)
-            # Query up projection.
-            q_TNH = jnp.einsum("TA,ANH -> TNH", q_TA,
-                               self.kernel_q_up_proj_ANH.value)
+            # Query up projection, then reshape to TNH.
+            q_TP = jnp.einsum("TA,AP -> TP", q_TA,
+                              self.kernel_q_up_proj_AP.value)
+            q_TNH = q_TP.reshape(q_TA.shape[0], self.N, self.qk_head_dim)
             # Split the query into nope and rope.
             q_nope_TNH = q_TNH[..., :self.qk_nope_head_dim]
             q_rope_TNH = q_TNH[..., self.qk_nope_head_dim:]
@@ -247,9 +268,12 @@ class MLA(nnx.Module):
                 k_rope_SNH = jnp.broadcast_to(
                     k_rope_SNH,
                     (k_rope_SNH.shape[0], self.N, self.qk_rope_head_dim))
-                # KV up projection.
-                kv_nope_SNH = jnp.einsum("SA,ANH -> SNH", kv_SA,
-                                         self.kernel_kv_up_proj_ANH.value)
+                # KV up projection, then reshape to SN(Hk+Hv).
+                kv_SL = jnp.einsum("SA,AL -> SL", kv_SA,
+                                   self.kernel_kv_up_proj_AL.value)
+                kv_nope_SNH = kv_SL.reshape(
+                    kv_SA.shape[0], self.N,
+                    self.qk_nope_head_dim + self.v_head_dim)
                 # Split the latent kv vector into k nope vector and v vector.
                 k_nope_SNH = kv_nope_SNH[..., :self.qk_nope_head_dim]
                 v_SNH = kv_nope_SNH[..., self.qk_nope_head_dim:]
@@ -287,9 +311,8 @@ class MLA(nnx.Module):
                     # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
                     k_scale = self._k_scale
                     v_scale = self._v_scale
-                    k_SNH, v_SNH = utils.quantize_kv(
-                        k_SNH, v_SNH, self.kv_cache_quantized_dtype, k_scale,
-                        v_scale)
+                    k_SNH, v_SNH = quantize_kv(self.kv_cache_quantized_dtype,
+                                               k_SNH, v_SNH, k_scale, v_scale)
 
                 new_kv_cache, outputs_TNH = self.attention(
                     is_prefill,
@@ -323,8 +346,10 @@ class MLA(nnx.Module):
             with jax.named_scope("o_proj"):
                 outputs_TNH = nnx.with_sharding_constraint(
                     outputs_TNH, self.activation_attention_out_td)
-                o_TD = jnp.einsum("TNH,NHD -> TD", outputs_TNH,
-                                  self.kernel_o_proj_NHD.value)
+                outputs_TR = outputs_TNH.reshape(outputs_TNH.shape[0],
+                                                 self.N * self.v_head_dim)
+                o_TD = jnp.einsum("TR,RD -> TD", outputs_TR,
+                                  self.kernel_o_proj_RD.value)
 
             return new_kv_cache, o_TD
 
@@ -391,12 +416,12 @@ class MLA(nnx.Module):
             return outputs
 
         output_TNH, kv_cache = jax.jit(
-            shard_map.shard_map(
+            jax.shard_map(
                 _ragged_paged_attention,
                 mesh=mesh,
                 in_specs=in_specs,
                 out_specs=out_specs,
-                check_rep=False,
+                check_vma=False,
             ))(
                 q_TNH,
                 k_SKH,
@@ -502,12 +527,12 @@ class MLA(nnx.Module):
             return kv_cache, output
 
         kv_cache, output_TNH = jax.jit(
-            shard_map.shard_map(
+            jax.shard_map(
                 _mla_ragged_paged_attention,
                 mesh=mesh,
                 in_specs=in_specs,
                 out_specs=out_specs,
-                check_rep=False,
+                check_vma=False,
             ), )(
                 q_TNA,
                 q_rope_TNH,

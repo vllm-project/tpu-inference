@@ -1,5 +1,19 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import functools
-from typing import TYPE_CHECKING, Dict, List
+from typing import TYPE_CHECKING, List
 
 import jax
 import jax.numpy as jnp
@@ -198,7 +212,6 @@ class KVCacheManager:
         # uniform page size.
         representative_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
         page_size_bytes = representative_spec.page_size_bytes
-        self.runner.layer_name_to_kvcache_index: Dict[str, int] = {}
         kv_caches = self.runner.kv_caches
         num_blocks_list = []
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):

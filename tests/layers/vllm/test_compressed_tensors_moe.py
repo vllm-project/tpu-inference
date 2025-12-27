@@ -1,4 +1,17 @@
-import os
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import tempfile
 
 import jax.numpy as jnp
@@ -6,7 +19,6 @@ import pytest
 import torch
 import torch.nn.functional as F
 import torchax
-import utils as test_utils
 from compressed_tensors.quantization import QuantizationArgs
 from jax.sharding import PartitionSpec
 from vllm.config import set_current_vllm_config
@@ -24,11 +36,11 @@ from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensor
 from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors_moe import \
     VllmCompressedTensorsW8A8Fp8MoEMethod
 
+from . import utils as test_utils
+
 # yapf: enable
 
 P = PartitionSpec
-
-os.environ['VLLM_DISABLE_SHARED_EXPERTS_STREAM'] = '1'
 
 MODEL = 'BCCard/Qwen3-30B-A3B-FP8-Dynamic'
 

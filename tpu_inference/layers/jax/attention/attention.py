@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from dataclasses import InitVar, dataclass
 from typing import Any, Tuple
 
@@ -5,7 +19,6 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from flax.typing import Sharding
-from jax.experimental import shard_map
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
@@ -13,6 +26,7 @@ from tpu_inference import utils
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     ragged_paged_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.rope_interface import apply_rope
@@ -149,9 +163,8 @@ class Attention(nnx.Module):
             # q_scale = self._q_scale
             k_scale = self._k_scale
             v_scale = self._v_scale
-            k_SKH, v_SKH = utils.quantize_kv(k_SKH, v_SKH,
-                                             self.kv_cache_quantized_dtype,
-                                             k_scale, v_scale)
+            k_SKH, v_SKH = quantize_kv(self.kv_cache_quantized_dtype, k_SKH,
+                                       v_SKH, k_scale, v_scale)
 
         with jax.named_scope("attn_op"):
             new_kv_cache, outputs_TNH = self.attention(
@@ -236,12 +249,12 @@ class Attention(nnx.Module):
             )
 
         output_TNH, kv_cache = jax.jit(
-            shard_map.shard_map(
+            jax.shard_map(
                 _ragged_paged_attention,
                 mesh=mesh,
                 in_specs=in_specs,
                 out_specs=out_specs,
-                check_rep=False,
+                check_vma=False,
             ))(
                 q_TNH,
                 k_SKH,

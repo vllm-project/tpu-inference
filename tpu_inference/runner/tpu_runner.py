@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import copy
 import functools
 import logging
@@ -269,6 +283,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self._substitute_placeholder_token_fn = _substitute_placeholder_token
         self.execute_model_state: ExecuteModelState | None = None
 
+        self.kv_caches: list[jax.Array] = []
+        self.layer_name_to_kvcache_index: dict[str, int] = {}
+
     def _init_random(self):
         if self.model_config.seed is None:
             self.model_config.seed = 0
@@ -497,10 +514,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         multimodal_fns = multimodal_fns or {}
         self.precompile_vision_encoder_fn = multimodal_fns.get(
             "precompile_vision_encoder_fn", None)
-        self.get_multimodal_embeddings_fn = multimodal_fns.get(
-            "get_multimodal_embeddings_fn", None)
-        self.get_input_embeddings_fn = multimodal_fns.get(
-            "get_input_embeddings_fn", None)
+        self.embed_multimodal_fn = multimodal_fns.get("embed_multimodal_fn",
+                                                      None)
+        self.embed_input_ids_fn = multimodal_fns.get("embed_input_ids_fn",
+                                                     None)
         self.get_mrope_input_positions_fn = multimodal_fns.get(
             "get_mrope_input_positions_fn", None)
 
@@ -512,7 +529,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             jax.random.key(self.model_config.seed)).params()
         self.is_multimodal_model = (
             self.model_config.is_multimodal_model
-            and self.get_multimodal_embeddings_fn is not None and hasattr(
+            and self.embed_multimodal_fn is not None and hasattr(
                 self.model_config.hf_config, "architectures"
             )  #TODO: Remove Llama Guard 4 specific condition once the LG4 Vision portion is implemented
             and len(self.model_config.hf_config.architectures) >= 1
@@ -528,10 +545,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def get_kv_cache_spec(self):
         return self.kv_cache_manager.get_kv_cache_spec()
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_kv_cache(self,
+                            kv_cache_config: KVCacheConfig,
+                            topology_order_id: int = 0) -> None:
+        self.topology_order_id = topology_order_id
         self.kv_cache_config = kv_cache_config
         self.use_hybrid_kvcache = len(kv_cache_config.kv_cache_groups) > 1
-        self.kv_caches = []
         self.kv_cache_manager.initialize_kv_cache(kv_cache_config)
         if has_kv_transfer_group():
             get_kv_transfer_group().register_runner(self)
@@ -819,7 +838,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         sharding = None
         if self.dp_size > 1:
             sharding = NamedSharding(self.mesh,
-                                     PartitionSpec(ShardingAxisName.ATTN_DATA))
+                                     PartitionSpec(ShardingAxisName.MLP_DATA))
 
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
             self.mesh, self.input_batch, padded_num_reqs, sharding=sharding)
@@ -1382,7 +1401,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.mesh,
             self.input_batch,
             padded_num_reqs,
-            sharding=data_parallel_attn_sharding,
+            sharding=NamedSharding(self.mesh,
+                                   PartitionSpec(ShardingAxisName.MLP_DATA)),
         )
         if self.uses_mrope:
             positions = mrope_positions
@@ -1672,7 +1692,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def _get_input_ids_embeds(self, input_ids: jax.Array,
                               mm_embeds: list[jax.Array]):
         if self.is_multimodal_model:
-            inputs_embeds = self.get_input_embeddings_fn(
+            inputs_embeds = self.embed_input_ids_fn(
                 self.state,
                 input_ids,
                 mm_embeds,

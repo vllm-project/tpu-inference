@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import os
 import tempfile
 from unittest.mock import MagicMock, patch
@@ -204,9 +218,9 @@ def test_register_model_vllm_wrapper_methods():
     with pytest.raises(NotImplementedError, match="JAX model"):
         instance.forward(input_ids=None, positions=None)
 
-    # `get_input_embeddings` should be unimplemented.
+    # `embed_input_ids` should be unimplemented.
     with pytest.raises(NotImplementedError, match="JAX model"):
-        instance.get_input_embeddings(input_ids=None, positions=None)
+        instance.embed_input_ids(input_ids=None, positions=None)
 
     # `load_weights` should be a no-op that returns None.
     assert instance.load_weights() is None

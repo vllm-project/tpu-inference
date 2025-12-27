@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from functools import partial
 from unittest.mock import MagicMock, patch
 
@@ -477,8 +491,7 @@ class TestQwen2_5_VLForConditionalGeneration:
         assert embeddings[1].shape == (tokens_per_image, vc.out_hidden_size)
         assert model.visual.call_count == 2
 
-    def test_get_multimodal_embeddings(
-            self, model: Qwen2_5_VLForConditionalGeneration):
+    def test_embed_multimodal(self, model: Qwen2_5_VLForConditionalGeneration):
         grid_thw = ((2, 28, 28), )
         vc = model.config.vision_config
         patch_dim = vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size
@@ -489,20 +502,20 @@ class TestQwen2_5_VLForConditionalGeneration:
         with patch.object(model,
                           '_process_image_input',
                           return_value=(mock_vision_output, )) as mock_process:
-            mm_embeds = model.get_multimodal_embeddings(
-                grid_thw, pixel_values=pixel_values)
+            mm_embeds = model.embed_multimodal(grid_thw,
+                                               pixel_values=pixel_values)
             mock_process.assert_called_once()
             assert isinstance(mm_embeds, tuple)
             assert len(mm_embeds) == 1
             assert mm_embeds[0].shape == (tokens_per_image, vc.out_hidden_size)
 
-        mm_embeds_none = model.get_multimodal_embeddings(grid_thw)
+        mm_embeds_none = model.embed_multimodal(grid_thw)
         assert len(mm_embeds_none) == 0
 
     @patch('tpu_inference.models.jax.qwen2_5_vl.merge_multimodal_embeddings')
-    def test_get_input_embeddings(self, mock_merge_embeddings: MagicMock,
-                                  model: Qwen2_5_VLForConditionalGeneration,
-                                  rng: PRNGKey):
+    def test_embed_input_ids(self, mock_merge_embeddings: MagicMock,
+                             model: Qwen2_5_VLForConditionalGeneration,
+                             rng: PRNGKey):
         input_ids = jax.random.randint(rng, (1, 10), 0,
                                        model.config.vocab_size)
         mock_text_embeds = jnp.ones((1, 10, model.config.hidden_size))
@@ -510,12 +523,12 @@ class TestQwen2_5_VLForConditionalGeneration:
         model.language_model.model.embed = MagicMock(
             return_value=mock_text_embeds)
 
-        embeds = model.get_input_embeddings(input_ids, None)
+        embeds = model.embed_input_ids(input_ids, None)
         np.testing.assert_array_equal(embeds, mock_text_embeds)
         mock_merge_embeddings.assert_not_called()
 
         empty_mm = jnp.ones((0, model.config.hidden_size), )
-        embeds_empty_mm = model.get_input_embeddings(input_ids, empty_mm)
+        embeds_empty_mm = model.embed_input_ids(input_ids, empty_mm)
         np.testing.assert_array_equal(embeds_empty_mm, mock_text_embeds)
         mock_merge_embeddings.assert_not_called()
 
@@ -523,7 +536,7 @@ class TestQwen2_5_VLForConditionalGeneration:
         mock_merged = jnp.ones((1, 15, model.config.hidden_size))
         mock_merge_embeddings.return_value = mock_merged
 
-        embeds_mm = model.get_input_embeddings(input_ids, mm_embeds)
+        embeds_mm = model.embed_input_ids(input_ids, mm_embeds)
         np.testing.assert_array_equal(embeds_mm, mock_merged)
         mock_merge_embeddings.assert_called_once_with(
             input_ids, mock_text_embeds, mm_embeds,

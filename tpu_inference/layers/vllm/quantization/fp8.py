@@ -1,9 +1,22 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from typing import Optional, Union
 
 import jax
 import torch
 from jax.sharding import PartitionSpec
-from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization import \
@@ -16,17 +29,19 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
 from tpu_inference.layers.common.quant_methods import FP8, get_tpu_quant_method
-from tpu_inference.layers.vllm.quantization.common import (
-    JaxCommonConfig, JaxCommonLinearConfig)
+from tpu_inference.layers.vllm.quantization.configs import (
+    VllmQuantConfig, VllmQuantLinearConfig)
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedLinearMethod
+from tpu_inference.logger import init_logger
 
 P = PartitionSpec
+
 logger = init_logger(__name__)
 
 
 @register_quantization_config(get_tpu_quant_method(FP8))
-class VllmFp8Config(Fp8Config, JaxCommonConfig):
+class VllmFp8Config(Fp8Config, VllmQuantConfig):
 
     @classmethod
     def get_name(cls):
@@ -52,7 +67,7 @@ class VllmFp8Config(Fp8Config, JaxCommonConfig):
 class VllmFp8LinearMethod(Fp8LinearMethod):
 
     def __init__(self, quant_config: VllmFp8Config,
-                 jax_config: JaxCommonLinearConfig):
+                 jax_config: VllmQuantLinearConfig):
         super().__init__(quant_config)
         self.jax_config = jax_config
         self._configure_sharding()

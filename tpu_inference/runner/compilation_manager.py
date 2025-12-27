@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import time
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
@@ -32,6 +46,8 @@ class CompilationManager:
 
     def __init__(self, runner: "TPUModelRunner"):
         self.runner = runner
+        self._sampling_precompiled = False
+        self._gather_logprobs_precompiled = False
         if not vllm_envs.VLLM_DISABLE_COMPILE_CACHE:
             logger.info("Enabling JAX compile cache.")
             jax.config.update("jax_compilation_cache_dir",
@@ -86,9 +102,13 @@ class CompilationManager:
                 return
             self._precompile_select_from_array()
             self._precompile_compute_logits()
+            # Skip sampling if already precompiled before KV cache allocation
+            if not self._sampling_precompiled:
+                self._precompile_sampling()
             self._precompile_disagg_utils()
-            self._precompile_sampling()
-            self._precompile_gather_logprobs()
+            # Skip gather_logprobs if already precompiled before KV cache allocation
+            if not self._gather_logprobs_precompiled:
+                self._precompile_gather_logprobs()
             self._precompile_structured_decoding()
             if self.runner.speculative_config:
                 self._precompile_speculative_decoding()
@@ -107,7 +127,7 @@ class CompilationManager:
 
             self._run_compilation(
                 "input_embeddings_merger",
-                self.runner.get_input_embeddings_fn,
+                self.runner.embed_input_ids_fn,
                 self.runner.state,
                 dummy_input_ids,
                 dummy_multimodal_embeddings,
@@ -116,7 +136,7 @@ class CompilationManager:
 
             self._run_compilation(
                 "input_embeddings_merger_text_only",
-                self.runner.get_input_embeddings_fn,
+                self.runner.embed_input_ids_fn,
                 self.runner.state,
                 dummy_input_ids,
                 None,
@@ -478,35 +498,39 @@ class CompilationManager:
             logits = self._create_dummy_tensor((num_reqs, hsize), jnp.bfloat16,
                                                logits_sharding)
             for do_sampling in (True, False):
-                if do_sampling:
-                    temperature = np.full((num_reqs, ), 0.7, dtype=np.float32)
-                    top_k = np.full((num_reqs, ), 20, dtype=np.int32)
-                    top_p = np.full((num_reqs, ), 0.8, dtype=np.float32)
-                    (temperature, top_k,
-                     top_p) = device_array(self.runner.mesh,
-                                           (temperature, top_k, top_p),
-                                           sharding=sampling_metadata_sharding)
-                else:
-                    temperature = None
-                    top_k = None
-                    top_p = None
+                for logprobs in (True, False):
+                    if do_sampling:
+                        temperature = np.full((num_reqs, ),
+                                              0.7,
+                                              dtype=np.float32)
+                        top_k = np.full((num_reqs, ), 20, dtype=np.int32)
+                        top_p = np.full((num_reqs, ), 0.8, dtype=np.float32)
+                        (temperature, top_k, top_p) = device_array(
+                            self.runner.mesh, (temperature, top_k, top_p),
+                            sharding=sampling_metadata_sharding)
+                    else:
+                        temperature = None
+                        top_k = None
+                        top_p = None
 
-                sampling_metadata = TPUSupportedSamplingMetadata(
-                    temperature=temperature,
-                    top_k=top_k,
-                    top_p=top_p,
-                    do_sampling=do_sampling,
-                )
-                self._run_compilation(
-                    f"worker{self.runner.rank} sample",
-                    sample,
-                    self.runner.rng_params_for_sampling,
-                    self.runner.mesh,
-                    logits,
-                    sampling_metadata,
-                    num_reqs=num_reqs,
-                    do_sampling=do_sampling,
-                )
+                    sampling_metadata = TPUSupportedSamplingMetadata(
+                        temperature=temperature,
+                        top_k=top_k,
+                        top_p=top_p,
+                        do_sampling=do_sampling,
+                        logprobs=logprobs)
+                    self._run_compilation(
+                        f"worker{self.runner.rank} sample",
+                        sample,
+                        self.runner.rng_params_for_sampling,
+                        self.runner.mesh,
+                        logits,
+                        sampling_metadata,
+                        num_reqs=num_reqs,
+                        do_sampling=do_sampling,
+                    )
+
+        self._sampling_precompiled = True
 
     def _precompile_disagg_utils(self) -> None:
         if not is_disagg_enabled():
@@ -536,8 +560,16 @@ class CompilationManager:
         logger.info("Compiling gather_logprobs with different input shapes.")
         hsize = self.runner.model_config.get_vocab_size()
         for num_reqs in self.runner.num_reqs_paddings:
-            logits = self._create_dummy_tensor((num_reqs, hsize), jnp.bfloat16)
-            token_ids = self._create_dummy_tensor((num_reqs, ), jnp.int32)
+            logits_sharding = NamedSharding(
+                self.runner.mesh,
+                PartitionSpec(ShardingAxisName.MLP_DATA,
+                              ShardingAxisName.MLP_TENSOR))
+            token_ids_sharding = NamedSharding(
+                self.runner.mesh, PartitionSpec(ShardingAxisName.MLP_DATA, ))
+            logits = self._create_dummy_tensor((num_reqs, hsize), jnp.bfloat16,
+                                               logits_sharding)
+            token_ids = self._create_dummy_tensor((num_reqs, ), jnp.int32,
+                                                  token_ids_sharding)
             self._run_compilation(
                 f"worker{self.runner.rank} gather_logprobs",
                 self.runner._compute_and_gather_logprobs,
@@ -546,6 +578,8 @@ class CompilationManager:
                 self.runner.model_config.max_logprobs,
                 num_reqs=num_reqs,
             )
+
+        self._gather_logprobs_precompiled = True
 
     def _precompile_speculative_decoding(self) -> None:
         logger.info(

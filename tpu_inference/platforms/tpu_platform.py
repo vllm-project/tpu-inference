@@ -145,17 +145,20 @@ class TpuPlatform(Platform):
             compilation_config.backend = "openxla"
 
         # TODO(cuiq): remove this dependency.
-        from vllm.v1.attention.backends.pallas import PallasAttentionBackend
-        cache_config.block_size = PallasAttentionBackend.get_page_size(
-            vllm_config)  # type: ignore[assignment]
-        min_page_size = PallasAttentionBackend.get_min_page_size(vllm_config)
-        if min_page_size > cache_config.block_size:
-            logger.warning(
-                "Increase the page size from %s to %s to avoid SMEM OOM",
-                cache_config.block_size,
-                min_page_size,
-            )
-            cache_config.block_size = min_page_size  # type: ignore[assignment]
+        if vllm_config.model_config:
+            from vllm.v1.attention.backends.pallas import \
+                PallasAttentionBackend
+            cache_config.block_size = PallasAttentionBackend.get_page_size(
+                vllm_config)  # type: ignore[assignment]
+            min_page_size = PallasAttentionBackend.get_min_page_size(
+                vllm_config)
+            if min_page_size > cache_config.block_size:
+                logger.warning(
+                    "Increase the page size from %s to %s to avoid SMEM OOM",
+                    cache_config.block_size,
+                    min_page_size,
+                )
+                cache_config.block_size = min_page_size  # type: ignore[assignment]
 
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
@@ -165,12 +168,12 @@ class TpuPlatform(Platform):
         multihost_backend = envs.TPU_MULTIHOST_BACKEND
         if not multihost_backend:  # Single host
             if parallel_config.pipeline_parallel_size == 1:
-                logger.info("Force using UniProcExecutor for JAX on \
-                        single host without pipeline parallelism.")
+                logger.info("Force using UniProcExecutor for JAX on "
+                            "single host without pipeline parallelism.")
                 parallel_config.distributed_executor_backend = "uni"
             else:
-                logger.info("Force using MultiprocExecutor for JAX on \
-                        single host with pipeline parallelism.")
+                logger.info("Force using MultiprocExecutor for JAX on "
+                            "single host with pipeline parallelism.")
                 parallel_config.distributed_executor_backend = "mp"
         elif multihost_backend == "ray":
             from tpu_inference.executors.ray_distributed_executor import \
@@ -186,20 +189,15 @@ class TpuPlatform(Platform):
 
         if scheduler_config.is_multimodal_model and not \
             scheduler_config.disable_chunked_mm_input:
-            logger.warning("TPU does not support running Multimodal models"\
-            " without setting `--disable_chunked_mm_input`. " \
-            "Forcing --disable_chunked_mm_input.")
+            logger.warning("TPU does not support running Multimodal models"
+                           " without setting `--disable_chunked_mm_input`. "
+                           "Forcing --disable_chunked_mm_input.")
             scheduler_config.disable_chunked_mm_input = True
 
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is not None:
             assert kv_transfer_config.kv_connector == "TPUConnector"
-        # Late initialization to avoid circular import
-        from tpu_inference.models.jax.utils.quantization.quantization_utils import \
-            update_vllm_config_for_qwix_quantization
-
-        update_vllm_config_for_qwix_quantization(vllm_config)
-
+        # Late initialization to avoid circular import.
         from tpu_inference.core.sched.dp_scheduler import \
             update_vllm_config_for_dp_scheduler
         update_vllm_config_for_dp_scheduler(vllm_config)
