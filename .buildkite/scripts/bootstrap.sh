@@ -41,18 +41,21 @@ upload_pipeline() {
     buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
     buildkite-agent pipeline upload .buildkite/pipeline_jax_tpu7x.yml
     # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
-    buildkite-agent pipeline upload .buildkite/main.yml
+    buildkite-agent pipeline upload .buildkite/nightly_verify.yml
     buildkite-agent pipeline upload .buildkite/nightly_releases.yml
 }
 
 echo "--- Starting Buildkite Bootstrap ---"
 echo "Running in pipeline: $BUILDKITE_PIPELINE_SLUG"
+echo "Adding common notification pipeline"
+buildkite-agent pipeline upload .buildkite/notify.yml
+
 if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
     VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     # Note: upload are inserted in reverse order, so promote LKG should upload before tests
-    buildkite-agent pipeline upload .buildkite/pipeline_integration.yml
+    buildkite-agent pipeline upload .buildkite/integration_promote.yml
     buildkite-agent pipeline upload .buildkite/pipeline_jax_tpu7x.yml
     buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
 

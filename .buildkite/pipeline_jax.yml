@@ -12,12 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-notify:
-  - email: "ullm-test-notifications-external@google.com"
-    if: build.state == "failed" && build.branch == "main"
-  - slack: "vllm#tpu-ci-notifications"
-    if: build.state == "failed" && build.branch == "main"
-
 steps:
   # -----------------------------------------------------------------
   # TEST STEPS - Calling wrapper
