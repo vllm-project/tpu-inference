@@ -82,20 +82,54 @@ upload_pipeline() {
       buildkite-agent pipeline upload .buildkite/nightly_releases.yml
     fi
 
-    buildkite-agent pipeline upload .buildkite/main.yml
+    buildkite-agent pipeline upload .buildkite/nightly_verify.yml
     buildkite-agent pipeline upload .buildkite/pipeline_pypi.yml
 }
 
 echo "--- Starting Buildkite Bootstrap"
 echo "Running in pipeline: $BUILDKITE_PIPELINE_SLUG"
+
+echo "Configure notification"
+ONCALL_EMAIL="ullm-oncall@rotations.google.com"
+NOTIFY_FILE="generated_notification.yml"
+
+# Logic
+# 1. Official integration: If it's the Integration pipeline AND triggered by Schedule -> Notify Oncall & Slack.
+# 2. Everything else (PRs, Manual Triggers): Notify the creator of this build.
+#    - This ensures that if you manually trigger the integration pipeline for debugging, 
+#      it won't alert the oncall team.
+
+if [[ "$BUILDKITE_PIPELINE_SLUG" == "tpu-vllm-integration" ]] && [[ "$BUILDKITE_SOURCE" == "schedule" ]]; then
+    echo "Context: Scheduled vllm Integration. Notifying Oncall."
+    cat <<EOF > "$NOTIFY_FILE"
+notify:
+  - email: "$ONCALL_EMAIL"
+    if: build.state == "failed"
+  - slack: "vllm#tpu-ci-notifications"
+    if: build.state == "failed"
+EOF
+else
+    echo "Context: PR/Manual. Notifying Owner ($BUILDKITE_BUILD_CREATOR_EMAIL)."
+    cat <<EOF > "$NOTIFY_FILE"
+notify:
+  - email: "$BUILDKITE_BUILD_CREATOR_EMAIL"
+    if: build.state == "failed"
+EOF
+
+fi
+
+buildkite-agent pipeline upload "$NOTIFY_FILE"
+rm "$NOTIFY_FILE"
+
+echo "Configure testing logic"
 if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
     # Note: Integration pipeline always fetch latest vllm version
     VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     # Note: upload are inserted in reverse order, so promote LKG should upload before tests
-    buildkite-agent pipeline upload .buildkite/pipeline_integration.yml
-    
+    buildkite-agent pipeline upload .buildkite/integration_promote.yml
+  
     # Upload JAX pipeline for v7
     export LABEL_PREFIX="TPU7x "
     export KEY_PREFIX="tpu7x_"
