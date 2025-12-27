@@ -307,7 +307,6 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         """
         Computes the embeddings for text input and merges them with multimodal embeddings.
         """
-        print("DEBUG: We entered get_input_embeddings")
         inputs_embeds = self.embedder.encode(input_ids)
 
         if multimodal_embeddings is not None and multimodal_embeddings.shape[
@@ -319,30 +318,76 @@ class LlamaGuard4ForCausalLM(nnx.Module):
 
         return inputs_embeds
 
-    def embed_multimodal(self, **kwargs) -> jax.Array:
-        """
-        Computes the final projected embeddings for multimodal input.
-        """
-        print("DEBUG: We entered embed_multimodal")
-
-        # 2. Forward Pass: JAX Array in
+    def embed_multimodal(self, image_grid_thw, **kwargs) -> List[torch.Tensor]:
         pixel_values = kwargs.pop("pixel_values")
+        # Retrieve the critical metadata for splitting
+        patches_per_image = kwargs.pop("patches_per_image", None)
 
-        print("DEBUG: these are pixel_values BEFORE asarray: ", pixel_values)
+        if pixel_values is None:
+            return []
 
-        # Ensure pixel values are JAX-compatible
+        # Ensure JAX handling
         pixel_values = jnp.asarray(pixel_values, dtype=jnp.bfloat16)
 
-        print("DEBUG: these are pixel_values AFTER asarray: ", pixel_values)
-
-        # Run Vision Encoder and Projector
+        # 1. Run Vision Encoder
+        # Output: (Total_Tiles, Tokens_Per_Tile, Hidden_Dim)
         projected_vision_features = self.multi_modal_projector(
             self.vision_model(pixel_values))
 
-        print("DEBUG: these are projected_vision_features: ",
-              projected_vision_features)
+        num_total_tiles = projected_vision_features.shape[0]
+        tokens_per_tile = projected_vision_features.shape[1]  # 144
+        hidden_dim = projected_vision_features.shape[2]  # 5120
 
-        return projected_vision_features
+        # 2. Flatten ALL tokens into one sequence first
+        # This gives us (Total_Tiles * 144, 5120)
+        all_tokens_flat = projected_vision_features.reshape(-1, hidden_dim)
+
+        # 3. Determine how to split the batch
+        if patches_per_image is not None:
+            # patches_per_image is likely a NumPy array from multimodal_manager
+            if hasattr(patches_per_image, 'tolist'):
+                tile_counts = patches_per_image.tolist()
+            else:
+                tile_counts = list(patches_per_image)
+
+            # Flatten list if it's nested (e.g. batch dimension)
+            if isinstance(tile_counts, list) and isinstance(
+                    tile_counts[0], list):
+                import itertools
+                tile_counts = list(itertools.chain.from_iterable(tile_counts))
+
+            # Calculate token split sizes: [Tiles * 144, Tiles * 144, ...]
+            split_sizes = [c * tokens_per_tile for c in tile_counts]
+
+            print(f"DEBUG: Using patches_per_image. Splits: {split_sizes}")
+        else:
+            # Fallback for single image requests without metadata
+            # (Only safe if batch has 1 image or uniform tiling)
+            print("DEBUG: patches_per_image missing. Attempting fallback.")
+            if num_total_tiles % 17 == 0:
+                num_images = num_total_tiles // 17
+                split_sizes = [17 * tokens_per_tile] * num_images
+            elif num_total_tiles % 16 == 0:
+                num_images = num_total_tiles // 16
+                split_sizes = [16 * tokens_per_tile] * num_images
+            else:
+                # Assuming single image if no pattern matches
+                split_sizes = [num_total_tiles * tokens_per_tile]
+
+        # 4. Conversion to Torch (JAX -> CPU -> Torch)
+        features_np = jax.device_get(all_tokens_flat.astype(jnp.float32))
+        torch_features_all = torch.from_numpy(features_np).to(torch.bfloat16)
+
+        # 5. Execute the Split
+        # torch.split takes the tensor and a list of sizes for each chunk
+        output_list = list(torch.split(torch_features_all, split_sizes, dim=0))
+
+        # Verification Debug
+        print(
+            f"DEBUG: InTiles={num_total_tiles} | OutItems={len(output_list)} | Sizes={[t.shape[0] for t in output_list]}"
+        )
+
+        return output_list
 
 
 class LlamaGuard4WeightLoader:

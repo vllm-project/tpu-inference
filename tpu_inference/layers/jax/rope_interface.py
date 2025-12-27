@@ -106,6 +106,19 @@ def apply_rope(
         cos = jnp.squeeze(cos, axis=-1)
         sin = jnp.squeeze(sin, axis=-1)
 
+        # --- FIX START ---
+        # If inputs has more tokens than positions (e.g., batched or flattened),
+        # we need to tile the cos/sin to match.
+        seq_len_input = inputs.shape[0]
+        seq_len_pos = cos.shape[0]
+
+        if seq_len_input != seq_len_pos:
+            # Calculate how many images/blocks are in the input
+            num_repeats = seq_len_input // seq_len_pos
+            cos = jnp.tile(cos, (num_repeats, 1))
+            sin = jnp.tile(sin, (num_repeats, 1))
+        # --- FIX END ---
+
         # Reshape to (S, 1, D_rot) for broadcasting over heads
         cos = cos[:, jnp.newaxis, :]
         sin = sin[:, jnp.newaxis, :]

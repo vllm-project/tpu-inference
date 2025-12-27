@@ -334,15 +334,6 @@ class Llama4VisionAttention(nnx.Module):  # <--- Inherits from nnx.Module
 
         # --- Flash Attention Migration Logic (Starts here, no change needed) ---
 
-        #needed to slice these. Had an extra dimension replicated
-        q_TNH = q_TNH[:, 0, :, :]
-        k_SKH = k_SKH[:, 0, :, :]
-
-        # *** DEBUG ADDITION (keep for sanity check) ***
-        jax.debug.print("DEBUG: q_TNH shape AFTER slice: {}", q_TNH.shape)
-        jax.debug.print("DEBUG: q_TNH rank AFTER slice: {}", q_TNH.ndim)
-        # **********************************************
-
         # Check Q_TNH shape is now (T, N, H)
         T_attn, N, H = q_TNH.shape
         B = 1  # Batch size is 1 for the Vision Encoder (fixed)

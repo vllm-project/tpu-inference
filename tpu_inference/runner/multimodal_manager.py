@@ -120,17 +120,17 @@ class MultiModalManager:
                 batched_mm_inputs["pixel_values"] = torch.cat(
                     batched_mm_inputs["pixel_values"], dim=0)
 
-            #image_grid_thw = ()
+            image_grid_thw = ()
             for key, value in batched_mm_inputs.items():
                 if isinstance(value, torch.Tensor):
                     if key == 'image_grid_thw':
                         # change it to tuple of tuples to make it hashable for JIT
 
                         # Shape: (B, N, 3) -> (B*N, 3) -> tuple of tuples
-                        # grid_thw_tensor = batched_mm_inputs[key]
-                        # grid_thw_reshaped = grid_thw_tensor.reshape(-1, 3)
-                        # image_grid_thw = tuple(
-                        #     tuple(row) for row in grid_thw_reshaped.tolist())
+                        grid_thw_tensor = batched_mm_inputs[key]
+                        grid_thw_reshaped = grid_thw_tensor.reshape(-1, 3)
+                        image_grid_thw = tuple(
+                            tuple(row) for row in grid_thw_reshaped.tolist())
 
                         continue
 
@@ -139,7 +139,8 @@ class MultiModalManager:
                             torch.float32).numpy().astype(jnp.bfloat16)
                     else:
                         batched_mm_inputs[key] = value.numpy()
-            #batched_mm_inputs.pop('image_grid_thw') #HACK: put default arg of None
+            if 'image_grid_thw' in batched_mm_inputs:
+                batched_mm_inputs.pop('image_grid_thw')
 
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
@@ -149,7 +150,7 @@ class MultiModalManager:
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
             curr_group_outputs = self.runner.embed_multimodal_fn(
-                self.runner.state, **batched_mm_inputs)
+                self.runner.state, image_grid_thw, **batched_mm_inputs)
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
@@ -167,10 +168,31 @@ class MultiModalManager:
             if req_id not in self.runner.encoder_cache:
                 self.runner.encoder_cache[req_id] = {}
 
-            self.runner.encoder_cache[mm_hash] = scatter_mm_placeholders(
-                output,
-                is_embed=pos_info.is_embed,
-            )
+            # --- CONDITIONAL FIX START ---
+            if isinstance(
+                    output,
+                (jax.Array, jnp.ndarray
+                 )) and not image_grid_thw:  #Llama Guard 4 Specific logic
+                # JAX specific scatter logic (avoids .new_full and torch-specific indexing)
+                mask = jnp.array(pos_info.is_embed.cpu().numpy())
+                num_placeholders = mask.shape[0]
+                embed_dim = output.shape[-1]
+
+                # Create base filled with NaN to match vLLM standard behavior
+                placeholders = jnp.full((num_placeholders, embed_dim),
+                                        jnp.nan,
+                                        dtype=output.dtype)
+
+                # JAX arrays are immutable, use .at[...].set(...)
+                self.runner.encoder_cache[mm_hash] = placeholders.at[mask].set(
+                    output)
+            else:
+                # Default vLLM behavior for PyTorch models
+                self.runner.encoder_cache[mm_hash] = scatter_mm_placeholders(
+                    output,
+                    is_embed=pos_info.is_embed,
+                )
+            # --- CONDITIONAL FIX END ---
 
     def gather_mm_embeddings(self, scheduler_output: "VllmSchedulerOutput",
                              target_pad_len: int) -> list[jax.Array]:
@@ -207,10 +229,29 @@ class MultiModalManager:
                 encoder_output = self.runner.encoder_cache.get(mm_hash, None)
                 assert encoder_output is not None,\
                       f"Encoder cache miss for {mm_hash}."
-                encoder_output = self.runner.encoder_cache[mm_hash]
+
+                # --- BRIDGE FIX START ---
+                # If the cache contains Torch tensors (from our execute_mm_encoder fix),
+                # convert them back to JAX so flatten_embeddings and the model
+                # can process them natively on the TPU.
+                if hasattr(encoder_output,
+                           'new_full'):  # Robust check for torch.Tensor
+                    # Move to CPU/NumPy then to JAX
+                    import torch
+                    encoder_output_np = encoder_output.to(
+                        torch.float32).cpu().numpy()
+                    encoder_output = jnp.array(encoder_output_np,
+                                               dtype=jnp.bfloat16)
+                # --- BRIDGE FIX END ---
+                #TODO: MAYBE ADD THE FOLLOWING LINE IN AN ELSE: CASE FOR THE PRECEDING IF STATEMENT IF THIS CAUSES QWEN TO BREAK
+                #encoder_output = self.runner.encoder_cache[mm_hash]
 
                 if (is_embed := pos_info.is_embed) is not None:
                     is_embed = is_embed[start_idx:end_idx]
+
+                    if isinstance(encoder_output, jax.Array) and hasattr(
+                            is_embed, 'cpu'):
+                        is_embed = is_embed.cpu().numpy()
 
                 mm_embeds_item = gather_mm_placeholders(
                     encoder_output[start_idx:end_idx],

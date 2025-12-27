@@ -123,15 +123,6 @@ def _get_nnx_model(
                                             rng,
                                             mesh,
                                             apply_to_abstract_model=False)
-
-        for i, (path, value) in enumerate(nnx.state(model).flat_state()):
-            if i == 989:
-                print(f"DEBUG: model.states[0][989] path is: {path}")
-                print(f"DEBUG: model.states[0][989] value is: {value}")
-            if i == 991:
-                print(f"DEBUG: model.states[0][991] path is: {path}")
-                print(f"DEBUG: model.states[0][991] value is: {value}")
-
         return model
 
     if vllm_config.load_config.load_format == "dummy":
@@ -292,13 +283,9 @@ def get_flax_model(
 
     # Multi-modal support only
     # This function calculates the image token's embeddings by VIT
-    def run_embed_multimodal(
-        graphdef, state, **kwargs
-    ):  #HACK: REMOVE image_grid_thw (used to come after state in the arg list)
+    def run_embed_multimodal(graphdef, state, image_grid_thw, **kwargs):
         model = nnx.merge(graphdef, state)
-        return model.embed_multimodal(
-            **kwargs
-        )  #HACK: REMOVE image_grid_thw (used to be first arg in the function call)
+        return model.embed_multimodal(image_grid_thw, **kwargs)
 
     embed_sharding = NamedSharding(mesh, PartitionSpec(None))
     # This function will calculates the embeddings of input texts and then merge with the image embeddings

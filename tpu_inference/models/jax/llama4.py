@@ -1136,6 +1136,9 @@ class JAXLlama4VisionModel(nnx.Module):
         # 4. Transformation layers
         hidden_states = self.layernorm_pre(hidden_states)
         freqs_ci_stacked = self.vision_rope()
+        if isinstance(freqs_ci_stacked, jax.ShapeDtypeStruct):
+            freqs_ci_stacked = jnp.zeros(freqs_ci_stacked.shape,
+                                         dtype=freqs_ci_stacked.dtype)
         hidden_states = self.model(hidden_states, freqs_ci_stacked)
         #hidden_states = self.model(hidden_states)
         hidden_states = self.layernorm_post(hidden_states)
