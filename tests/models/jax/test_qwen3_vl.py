@@ -806,7 +806,7 @@ class TestServingIntegration:
         total_patches = int(img_grid[0] * img_grid[1] * img_grid[2] + vid_grid[0] * vid_grid[1] * vid_grid[2])
         pixel_values = jax.random.normal(rng, (total_patches, patch_dim)).astype(model.vllm_config.model_config.dtype)
 
-        mm_result = model.get_multimodal_embeddings(
+        mm_result = model.embed_multimodal(
             (img_grid, vid_grid), pixel_values=pixel_values)
         assert isinstance(mm_result, dict)
         embeds = mm_result.get("embeds", ())
@@ -871,26 +871,26 @@ class TestServingIntegration:
         )
         assert q_rot.shape == q.shape
 
-    def test_get_multimodal_embeddings_none_pixel_values_returns_empty(
+    def test_embed_multimodal_none_pixel_values_returns_empty(
         self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
-        """get_multimodal_embeddings with None pixel_values should return empty dict."""
+        """embed_multimodal with None pixel_values should return empty dict."""
         model = Qwen3VLForConditionalGeneration(vllm_config, rng, mesh)
-        result = model.get_multimodal_embeddings(((1, 4, 4),), pixel_values=None)
+        result = model.embed_multimodal(((1, 4, 4),), pixel_values=None)
         assert result == {}
 
-    def test_get_multimodal_embeddings_empty_grid_returns_empty(
+    def test_embed_multimodal_empty_grid_returns_empty(
         self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
-        """get_multimodal_embeddings with empty grid should return empty dict."""
+        """embed_multimodal with empty grid should return empty dict."""
         model = Qwen3VLForConditionalGeneration(vllm_config, rng, mesh)
         vc = model.config.vision_config
         patch_dim = int(vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size)
         pixel_values = jax.random.normal(rng, (16, patch_dim)).astype(model.vllm_config.model_config.dtype)
-        result = model.get_multimodal_embeddings((), pixel_values=pixel_values)
+        result = model.embed_multimodal((), pixel_values=pixel_values)
         assert result == {}
 
-    def test_get_multimodal_embeddings_single_image_returns_single_tuple(
+    def test_embed_multimodal_single_image_returns_single_tuple(
         self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
         """Single image grid should return dict with one embed entry."""
@@ -900,7 +900,7 @@ class TestServingIntegration:
         patch_dim = int(vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size)
         num_patches = grid[0] * grid[1] * grid[2]
         pixel_values = jax.random.normal(rng, (num_patches, patch_dim)).astype(model.vllm_config.model_config.dtype)
-        result = model.get_multimodal_embeddings((grid,), pixel_values=pixel_values)
+        result = model.embed_multimodal((grid,), pixel_values=pixel_values)
         assert isinstance(result, dict)
         embeds = result.get("embeds", ())
         deepstack = result.get("deepstack")
@@ -929,6 +929,16 @@ class TestServingIntegration:
         base_embeds = model.language_model.embed(input_ids)
         result = model.get_input_embeddings(input_ids, None)
         np.testing.assert_allclose(np.array(result), np.array(base_embeds), rtol=0, atol=0)
+
+    def test_embed_input_ids_defaults_to_get_input_embeddings(
+        self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
+    ):
+        """embed_input_ids should delegate to get_input_embeddings."""
+        model = Qwen3VLForConditionalGeneration(vllm_config, rng, mesh)
+        input_ids = jnp.array([1, 2, 3, 4, 5], dtype=jnp.int32)
+        expected = model.get_input_embeddings(input_ids, None)
+        result = model.embed_input_ids(input_ids)
+        np.testing.assert_allclose(np.array(result), np.array(expected), rtol=0, atol=0)
 
     def test_mrope_wrapper_context_len_slicing(
         self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh

@@ -1741,7 +1741,7 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         """Compute input embeddings and merge multimodal embeddings if present."""
         return self.get_input_embeddings(input_ids, multimodal_embeddings)
 
-    def get_multimodal_embeddings(
+    def embed_multimodal(
         self,
         image_grid_thw: Tuple[Tuple[int, int, int], ...],
         **kwargs,
