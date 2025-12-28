@@ -167,6 +167,7 @@ def compute_vision_counts_per_sequence(
     """Compute the number of images and videos per sequence in a batch.
 
     This is a preprocessing function for MRoPE computation. It does not JIT.
+    This is not used currently, but would be needed for sequence batches.
 
     Args:
         input_ids: (batch_size, seq_len)
@@ -1610,16 +1611,22 @@ class Qwen3VLModel(nnx.Module):
         Returns:
             Updated hidden_states with visual features added
         """
-        # Flatten for indexing
+        # Flatten for indexing and broadcast mask to match hidden_states.
         flat_hidden = hidden_states.reshape(-1, hidden_states.shape[-1])
-        flat_mask = visual_pos_mask.reshape(-1)
+        mask = jnp.broadcast_to(visual_pos_mask, hidden_states.shape[:-1])
+        flat_mask = mask.reshape(-1).astype(jnp.bool_)
 
-        # Find mask indices and add visual embeddings
-        # TODO: This assumes `visual_embeds.shape[0] == visual_pos_mask.sum()`.
-        mask_indices = jnp.where(flat_mask)[0]
-        if visual_embeds.shape[0] != mask_indices.shape[0]:
-            visual_embeds = visual_embeds[:mask_indices.shape[0]]
-        updated = flat_hidden.at[mask_indices].add(visual_embeds)
+        # JIT-friendly: avoid dynamic-shape indices from jnp.where.
+        # Pad with dummy rows so cumsum-based gathers stay in-bounds.
+        visual_embeds = visual_embeds.astype(flat_hidden.dtype)
+        dummy_row = jnp.zeros((1, flat_hidden.shape[-1]), dtype=flat_hidden.dtype)
+        padded_embeds = jnp.concatenate([dummy_row, visual_embeds, dummy_row], axis=0)
+        gather_indices = jnp.cumsum(flat_mask, dtype=jnp.int32)
+        max_index = visual_embeds.shape[0] + 1
+        gather_indices = jnp.minimum(gather_indices, max_index)
+
+        updates = padded_embeds[gather_indices] * flat_mask[:, None]
+        updated = flat_hidden + updates
 
         return updated.reshape(hidden_states.shape)
 
