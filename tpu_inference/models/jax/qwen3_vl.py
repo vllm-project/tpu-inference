@@ -1733,6 +1733,14 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
 
         return inputs_embeds
 
+    def embed_input_ids(
+        self,
+        input_ids: jax.Array,
+        multimodal_embeddings: Optional[jax.Array] = None,
+    ) -> jax.Array:
+        """Compute input embeddings and merge multimodal embeddings if present."""
+        return self.get_input_embeddings(input_ids, multimodal_embeddings)
+
     def get_multimodal_embeddings(
         self,
         image_grid_thw: Tuple[Tuple[int, int, int], ...],
