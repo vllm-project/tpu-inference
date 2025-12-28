@@ -149,31 +149,8 @@ class MultiModalManager:
             # 2. A list or tuple (length: num_items) of tensors, each of shape
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
-
-            # DEBUG: Log inputs before vision encoder call
-            print(f"[DEBUG MM_ENCODER] image_grid_thw: {image_grid_thw}")
-            print(f"[DEBUG MM_ENCODER] batched_mm_inputs keys: {list(batched_mm_inputs.keys())}")
-            for k, v in batched_mm_inputs.items():
-                if hasattr(v, 'shape'):
-                    print(f"[DEBUG MM_ENCODER]   {k}: shape={v.shape}, dtype={v.dtype}")
-                else:
-                    print(f"[DEBUG MM_ENCODER]   {k}: type={type(v)}")
-
-            try:
-                curr_group_outputs = self.runner.embed_multimodal_fn(
-                    self.runner.state, image_grid_thw, **batched_mm_inputs)
-                print(f"[DEBUG MM_ENCODER] Vision encoder succeeded")
-                if isinstance(curr_group_outputs, dict):
-                    print(f"[DEBUG MM_ENCODER] Output is dict with keys: {list(curr_group_outputs.keys())}")
-                elif isinstance(curr_group_outputs, (list, tuple)):
-                    print(f"[DEBUG MM_ENCODER] Output is {type(curr_group_outputs).__name__} with {len(curr_group_outputs)} items")
-            except Exception as e:
-                import traceback
-                print(f"[DEBUG MM_ENCODER] !!!ERROR!!! Vision encoder failed: {type(e).__name__}: {e}")
-                print(f"[DEBUG MM_ENCODER] image_grid_thw was: {image_grid_thw}")
-                print(f"[DEBUG MM_ENCODER] Full traceback:")
-                traceback.print_exc()
-                raise
+            curr_group_outputs = self.runner.embed_multimodal_fn(
+                self.runner.state, image_grid_thw, **batched_mm_inputs)
             deepstack_group_outputs = None
             if isinstance(curr_group_outputs, dict):
                 deepstack_group_outputs = curr_group_outputs.get("deepstack")

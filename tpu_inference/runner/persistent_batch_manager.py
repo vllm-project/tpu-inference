@@ -158,24 +158,14 @@ class PersistentBatchManager:
                 second_per_grid_ts = []
                 audio_feature_lengths = []
                 use_audio_in_video = False
-                print(f"[DEBUG MROPE] Processing MRoPE for req_id={req_id}")
-                print(f"[DEBUG MROPE] Number of mm_features: {len(self.requests[req_id].mm_features)}")
                 for mm_feature in self.requests[req_id].mm_features:
                     item = mm_feature.data
                     if item is None:
-                        print(f"[DEBUG MROPE] mm_feature.data is None, skipping")
                         continue
                     mm_input = item.get_data()
-                    print(f"[DEBUG MROPE] mm_input keys: {list(mm_input.keys())}")
                     if mm_input.get("image_grid_thw") is not None:
-                        raw_grid = mm_input["image_grid_thw"]
-                        print(f"[DEBUG MROPE] image_grid_thw raw: {raw_grid}")
-                        print(f"[DEBUG MROPE] image_grid_thw type: {type(raw_grid)}")
-                        if hasattr(raw_grid, 'shape'):
-                            print(f"[DEBUG MROPE] image_grid_thw shape: {raw_grid.shape}")
-                        grid_list = raw_grid.tolist()
-                        print(f"[DEBUG MROPE] image_grid_thw as list: {grid_list}")
-                        image_grid_thw.append(grid_list)
+                        image_grid_thw.append(
+                            mm_input["image_grid_thw"].tolist())
                     if mm_input.get("video_grid_thw") is not None:
                         video_grid_thw.append(
                             mm_input["video_grid_thw"].tolist())
@@ -190,31 +180,16 @@ class PersistentBatchManager:
 
                 hf_config = self.model_config.hf_config
 
-                print(f"[DEBUG MROPE] Calling get_mrope_input_positions_fn")
-                print(f"[DEBUG MROPE] prompt_token_ids length: {len(self.requests[req_id].prompt_token_ids)}")
-                print(f"[DEBUG MROPE] image_grid_thw: {image_grid_thw}")
-                print(f"[DEBUG MROPE] video_grid_thw: {video_grid_thw}")
-                try:
-                    self.requests[req_id].mrope_positions, self.requests[
-                        req_id].mrope_position_delta = get_mrope_input_positions_fn(
-                            self.requests[req_id].prompt_token_ids,
-                            hf_config=hf_config,
-                            image_grid_thw=image_grid_thw,
-                            video_grid_thw=video_grid_thw,
-                            second_per_grid_ts=second_per_grid_ts,
-                            audio_feature_lengths=audio_feature_lengths,
-                            use_audio_in_video=use_audio_in_video,
-                        )
-                    print(f"[DEBUG MROPE] MRoPE computation succeeded")
-                    print(f"[DEBUG MROPE] mrope_positions shape: {self.requests[req_id].mrope_positions.shape}")
-                except Exception as e:
-                    import traceback
-                    print(f"[DEBUG MROPE] !!!ERROR!!! MRoPE computation failed: {type(e).__name__}: {e}")
-                    print(f"[DEBUG MROPE] image_grid_thw was: {image_grid_thw}")
-                    print(f"[DEBUG MROPE] video_grid_thw was: {video_grid_thw}")
-                    print(f"[DEBUG MROPE] prompt_token_ids (first 50): {self.requests[req_id].prompt_token_ids[:50]}")
-                    traceback.print_exc()
-                    raise
+                self.requests[req_id].mrope_positions, self.requests[
+                    req_id].mrope_position_delta = get_mrope_input_positions_fn(
+                        self.requests[req_id].prompt_token_ids,
+                        hf_config=hf_config,
+                        image_grid_thw=image_grid_thw,
+                        video_grid_thw=video_grid_thw,
+                        second_per_grid_ts=second_per_grid_ts,
+                        audio_feature_lengths=audio_feature_lengths,
+                        use_audio_in_video=use_audio_in_video,
+                    )
 
         # Update the states of the running/resumed requests.
         req_data = scheduler_output.scheduled_cached_reqs
