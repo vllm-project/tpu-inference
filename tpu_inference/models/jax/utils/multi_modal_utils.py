@@ -131,6 +131,89 @@ def _merge_multimodal_embeddings(
     return jnp.where(condition, update_values, inputs_embeds)
 
 
+def _to_jax_array(x):
+    """Convert torch.Tensor or numpy array to JAX array."""
+    if x is None:
+        return None
+    if isinstance(x, jax.Array):
+        return x
+    # Handle torch.Tensor - convert via numpy
+    if hasattr(x, 'numpy'):
+        return jnp.array(x.numpy())
+    return jnp.array(x)
+
+
+def scatter_mm_placeholders(
+    embeds: jax.Array,
+    is_embed: Union[jax.Array, "torch.Tensor", None],
+) -> jax.Array:
+    """
+    Scatter the multimodal embeddings into a contiguous tensor that represents
+    the placeholder tokens.
+
+    JAX-compatible version of vllm.v1.worker.utils.scatter_mm_placeholders.
+
+    Args:
+        embeds: Multimodal embeddings of shape (num_embeds, embed_dim)
+        is_embed: Boolean mask of shape (num_placeholders,) indicating which
+            positions should receive embeddings. Can be JAX array or torch.Tensor.
+            If None, returns embeds as-is.
+
+    Returns:
+        Placeholder tensor of shape (num_placeholders, embed_dim) with NaN at
+        non-embedding positions.
+    """
+    if is_embed is None:
+        return embeds
+
+    # Convert inputs to JAX arrays
+    embeds = _to_jax_array(embeds)
+    is_embed = _to_jax_array(is_embed)
+
+    # Create gather indices using cumsum (similar to _merge_multimodal_embeddings)
+    # For True positions: maps to 0, 1, 2, ... (embedding indices)
+    # For False positions: maps to len(embeds) (NaN row)
+    embed_indices = jnp.cumsum(is_embed) - 1
+
+    # Append a NaN row for non-embedding positions
+    nan_row = jnp.full((1, embeds.shape[-1]), jnp.nan, dtype=embeds.dtype)
+    padded_embeds = jnp.concatenate([embeds, nan_row], axis=0)
+
+    # For False positions, point to the NaN row
+    max_idx = embeds.shape[0]
+    gather_indices = jnp.where(is_embed, embed_indices, max_idx)
+
+    return padded_embeds[gather_indices]
+
+
+def gather_mm_placeholders(
+    placeholders: jax.Array,
+    is_embed: Union[jax.Array, "torch.Tensor", None],
+) -> jax.Array:
+    """
+    Reconstructs the embeddings from the placeholder tokens.
+
+    JAX-compatible version of vllm.v1.worker.utils.gather_mm_placeholders.
+
+    Args:
+        placeholders: Placeholder tensor of shape (num_placeholders, embed_dim)
+        is_embed: Boolean mask indicating which positions have embeddings.
+            Can be JAX array or torch.Tensor. If None, returns placeholders as-is.
+
+    Returns:
+        Embeddings extracted from True positions in the mask.
+    """
+    if is_embed is None:
+        return placeholders
+
+    # Convert inputs to JAX arrays
+    placeholders = _to_jax_array(placeholders)
+    is_embed = _to_jax_array(is_embed)
+
+    # Use boolean indexing to extract embeddings
+    return placeholders[is_embed]
+
+
 def merge_multimodal_embeddings(
     input_ids: jax.Array,
     inputs_embeds: jax.Array,
