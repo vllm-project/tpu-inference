@@ -322,14 +322,6 @@ class TestInferPosEmbedGridHw:
         h, w = _infer_pos_embed_grid_hw(2)
         assert h * w == 2
 
-    def test_invalid_zero_raises(self):
-        with pytest.raises(ValueError, match="must be positive"):
-            _infer_pos_embed_grid_hw(0)
-
-    def test_invalid_negative_raises(self):
-        with pytest.raises(ValueError, match="must be positive"):
-            _infer_pos_embed_grid_hw(-5)
-
 
 class TestApplyInterleavedMrope:
     """Tests for apply_interleaved_mrope MRoPE interleaving logic."""
@@ -372,26 +364,6 @@ class TestApplyInterleavedMrope:
         # Result should be (1, 1, 3) with values interleaved as [T0, H0, W0]
         assert result.shape == (1, 1, 3)
         np.testing.assert_allclose(np.array(result[0, 0]), [t_val, h_val, w_val])
-
-    def test_invalid_section_length_raises(self):
-        freqs = jnp.ones((3, 1, 8, 12), dtype=jnp.float32)
-        with pytest.raises(ValueError, match="length 3"):
-            apply_interleaved_mrope(freqs, [4, 8])  # only 2 sections
-
-    def test_invalid_section_length_four_raises(self):
-        freqs = jnp.ones((3, 1, 8, 12), dtype=jnp.float32)
-        with pytest.raises(ValueError, match="length 3"):
-            apply_interleaved_mrope(freqs, [3, 3, 3, 3])  # 4 sections
-
-    def test_section_sum_mismatch_raises(self):
-        freqs = jnp.ones((3, 1, 8, 12), dtype=jnp.float32)
-        with pytest.raises(ValueError, match="must sum to"):
-            apply_interleaved_mrope(freqs, [4, 4, 2])  # sums to 10, not 12
-
-    def test_negative_section_raises(self):
-        freqs = jnp.ones((3, 1, 8, 12), dtype=jnp.float32)
-        with pytest.raises(ValueError, match="non-negative"):
-            apply_interleaved_mrope(freqs, [4, -2, 10])
 
     def test_zero_section_allowed(self):
         # Edge case: one section can be zero
@@ -536,19 +508,6 @@ class TestMRoPEPositions:
         assert positions.shape == (3, len(tokens))
         assert int(delta) == 0
 
-    def test_mrope_requires_grid_when_placeholders_present(self, hf_config: Qwen3Config):
-        tokens = [hf_config.vision_start_token_id, hf_config.image_token_id]
-        with pytest.raises(ValueError, match="image_grid_thw"):
-            _ = get_mrope_input_positions(
-                input_tokens=tokens,
-                image_grid_thw=None,
-                video_grid_thw=None,
-                image_token_id=hf_config.image_token_id,
-                video_token_id=hf_config.video_token_id,
-                vision_start_token_id=hf_config.vision_start_token_id,
-                spatial_merge_size=hf_config.vision_config.spatial_merge_size,
-            )
-
     def test_mrope_single_image_3d_structure(self, hf_config: Qwen3Config):
         grid = (1, 4, 4)
         n_img = _num_placeholders_for_grid(grid, hf_config.vision_config.spatial_merge_size)
@@ -649,48 +608,6 @@ class TestMRoPEPositions:
         )
         assert positions.shape == (3, len(tokens))
 
-    def test_mrope_too_few_image_grids_raises(self, hf_config: Qwen3Config):
-        """More image tokens than grids provided should raise."""
-        grid = (1, 4, 4)
-        n_img = _num_placeholders_for_grid(grid, hf_config.vision_config.spatial_merge_size)
-        tokens = (
-            [hf_config.vision_start_token_id]
-            + [hf_config.image_token_id] * n_img
-            + [hf_config.vision_start_token_id]
-            + [hf_config.image_token_id] * n_img
-        )
-        with pytest.raises(ValueError, match="entries but found"):
-            get_mrope_input_positions(
-                input_tokens=tokens,
-                image_grid_thw=[grid],  # Only 1 grid for 2 images
-                video_grid_thw=None,
-                image_token_id=hf_config.image_token_id,
-                video_token_id=hf_config.video_token_id,
-                vision_start_token_id=hf_config.vision_start_token_id,
-                spatial_merge_size=hf_config.vision_config.spatial_merge_size,
-            )
-
-    def test_mrope_too_few_video_grids_raises(self, hf_config: Qwen3Config):
-        """More video tokens than grids provided should raise."""
-        grid = (2, 4, 4)
-        n_vid = _num_placeholders_for_grid(grid, hf_config.vision_config.spatial_merge_size)
-        tokens = (
-            [hf_config.vision_start_token_id]
-            + [hf_config.video_token_id] * n_vid
-            + [hf_config.vision_start_token_id]
-            + [hf_config.video_token_id] * n_vid
-        )
-        with pytest.raises(ValueError, match="entries but found"):
-            get_mrope_input_positions(
-                input_tokens=tokens,
-                image_grid_thw=None,
-                video_grid_thw=[grid],  # Only 1 grid for 2 videos
-                image_token_id=hf_config.image_token_id,
-                video_token_id=hf_config.video_token_id,
-                vision_start_token_id=hf_config.vision_start_token_id,
-                spatial_merge_size=hf_config.vision_config.spatial_merge_size,
-            )
-
     def test_mrope_extra_grids_allowed(self, hf_config: Qwen3Config):
         """Extra grids beyond what's needed should not raise."""
         grid = (1, 4, 4)
@@ -710,15 +627,6 @@ class TestMRoPEPositions:
 
 
 class TestRopeInterface:
-    def test_apply_rope_requires_mrope_section_for_3d_positions(self):
-        seq_len = 8
-        num_heads = 2
-        head_dim = 16
-        x = jnp.zeros((seq_len, num_heads, head_dim), dtype=jnp.bfloat16)
-        positions = jnp.zeros((3, seq_len), dtype=jnp.int32)
-        with pytest.raises(ValueError, match="mrope_section"):
-            _ = apply_rope(x, positions, head_dim=head_dim, rope_scaling={})
-
     def test_apply_rope_accepts_mrope_positions_when_configured(self, hf_config: Qwen3Config):
         seq_len = 8
         num_heads = 2

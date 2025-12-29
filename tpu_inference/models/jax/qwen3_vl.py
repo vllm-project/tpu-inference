@@ -83,10 +83,6 @@ class _ModelConfigAdapter:
 
 def _infer_pos_embed_grid_hw(num_position_embeddings: int) -> Tuple[int, int]:
     """Infer a (grid_h, grid_w) pair from a flattened 2D embedding table."""
-    if num_position_embeddings <= 0:
-        raise ValueError(
-            f"num_position_embeddings must be positive, got {num_position_embeddings}"
-        )
     root = int(math.sqrt(num_position_embeddings))
     for grid_h in range(root, 0, -1):
         if num_position_embeddings % grid_h == 0:
@@ -217,21 +213,8 @@ def get_mrope_input_positions(
         llm_positions: (3, seq_len) position IDs for [T, H, W]
         mrope_position_delta: Delta for rope calculation
     """
-    input_tokens_np = np.array(input_tokens)
-
-    # Check if image/video tokens exist in the sequence
-    has_image_tokens = np.any(input_tokens_np == image_token_id)
-    has_video_tokens = np.any(input_tokens_np == video_token_id)
-
-    # Validate that grid_thw is provided when corresponding tokens exist
-    if has_image_tokens and not image_grid_thw:
-        raise ValueError("image_grid_thw must be provided when image tokens are present.")
-    if has_video_tokens and not video_grid_thw:
-        raise ValueError("video_grid_thw must be provided when video tokens are present.")
-
     # Use the provided grid_thw lengths as authoritative counts.
-    # Note: The previous logic counted vision_start markers followed by image/video tokens,
-    # but for Qwen3VL, each temporal frame may have its own vision_start marker while
+    # Note: For Qwen3VL, each temporal frame may have its own vision_start marker while
     # the grid_thw represents the entire video as a single item with t>1.
     image_nums = len(image_grid_thw) if image_grid_thw else 0
     video_nums = len(video_grid_thw) if video_grid_thw else 0
@@ -334,22 +317,7 @@ def apply_interleaved_mrope(
     :param mrope_section: How MRoPE would be placed.
     :return: A final interleaved MRoPE frequency. (bs, seq, 64)
     """
-    # Validate mrope_section
-    if len(mrope_section) != 3:
-        raise ValueError(
-            f"mrope_section must have length 3, got {len(mrope_section)}"
-        )
-    if any(s < 0 for s in mrope_section):
-        raise ValueError(
-            f"mrope_section values must be non-negative, got {mrope_section}"
-        )
-    head_dim_half = freqs.shape[-1]
-    if sum(mrope_section) != head_dim_half:
-        raise ValueError(
-            f"mrope_section must sum to {head_dim_half}, got {sum(mrope_section)}"
-        )
-
-    t, h, w = mrope_section # 24, 20, 20
+    t, h, w = mrope_section  # 24, 20, 20
 
     result = freqs[0].copy()
 
