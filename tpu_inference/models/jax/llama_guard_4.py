@@ -116,7 +116,6 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             hidden_size=self.vision_config.hidden_size,
             num_attention_heads=self.vision_config.num_attention_heads,
             rope_theta=self.vision_config.rope_theta,
-            rngs=self.rng,
             dtype=self.dtype,
         )
 
