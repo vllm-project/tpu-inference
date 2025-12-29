@@ -46,7 +46,7 @@ Get started with vLLM on TPUs by following the [quickstart guide](https://docs.v
 Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn more.
 
 **Compatible TPU Generations**
-- Recommended: v5e, v6e
+- Recommended: v7x, v5e, v6e
 - Experimental: v3, v4, v5p
 
 *Check out a few v6e recipes [here](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM)!*

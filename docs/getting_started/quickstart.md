@@ -7,12 +7,21 @@ Google Cloud TPUs (Tensor Processing Units) accelerate machine learning workload
 ## Requirements
 
 * **Google Cloud TPU VM:** Access to a TPU VM. For setup instructions, see the [Cloud TPU Setup guide](tpu_setup.md).
-* **TPU versions:** v6e, v5e
+* **TPU versions:** v7x, v6e, v5e
 * **Python:** 3.11 or newer (3.12 used in examples).
 
 ---
 
 ## Installation
+
+!!! important
+    Until jax=0.8.3 is released, v7x will have different build requirements from previous TPU generations (v6e and prior). As a result, please use the following until consolidation can be complete:
+
+    **v6e and prior**
+    `pip install vllm-tpu --version=0.13.2.post6`
+
+    **v7x**
+    `pip install vllm-tpu`
 
 For detailed steps on installing `vllm-tpu` with `pip` or running it as a Docker image, please see the [**Installation Guide**](installation.md).
 
@@ -23,37 +32,31 @@ After installing `vllm-tpu`, you can start the API server.
 1. **Log in to Hugging Face:**
    You'll need a Hugging Face token to download models.
 
-   ```shell
-   export TOKEN=YOUR_TOKEN
-   git config --global credential.helper store
-   huggingface-cli login --token $TOKEN
-   ```
-
+       export TOKEN=YOUR_TOKEN
+       git config --global credential.helper store
+       huggingface-cli login --token $TOKEN
+   
 2. **Launch the Server:**
    The following command starts the server with the Llama-3.1-8B model.
 
-   ```shell
-   vllm serve "meta-llama/Llama-3.1-8B" \
-       --download_dir /tmp \
-       --disable-log-requests \
-       --tensor_parallel_size=1 \
-       --max-model-len=2048
-   ```
-
+       vllm serve "meta-llama/Llama-3.1-8B" \
+        --download_dir /tmp \
+           --disable-log-requests \
+           --tensor_parallel_size=1 \
+           --max-model-len=2048
+   
 3. **Send a Request:**
-
+   
 Once the server is running, you can send it a request using `curl`:
 
-```shell
-curl http://localhost:8000/v1/completions \
-    -H "Content-Type: application/json" \
-    -d '{
-        "model": "meta-llama/Llama-3.1-8B",
-        "prompt": "Hello, my name is",
-        "max_tokens": 20,
-        "temperature": 0.7
-    }'
-```
+    curl http://localhost:8000/v1/completions \
+        -H "Content-Type: application/json" \
+        -d '{
+            "model": "meta-llama/Llama-3.1-8B",
+            "prompt": "Hello, my name is",
+            "max_tokens": 20,
+            "temperature": 0.7
+        }'
 
 ## Next steps:
 
