@@ -1700,6 +1700,40 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         """Compute input embeddings and merge multimodal embeddings if present."""
         return self.get_input_embeddings(input_ids, multimodal_embeddings)
 
+    def _validate_and_reshape_mm_tensor(self, mm_input: object,
+                                        name: str) -> jax.Array:
+        if isinstance(mm_input, list):
+            arrays_to_concat = [jnp.asarray(item) for item in mm_input]
+            return jnp.concatenate(arrays_to_concat, axis=0)
+
+        if hasattr(mm_input, 'ndim'):
+            array_input = jnp.asarray(mm_input)
+            if array_input.ndim == 2:
+                return array_input
+            if array_input.ndim == 3:
+                return array_input.reshape(-1, array_input.shape[-1])
+
+        raise ValueError(f"Incorrect type of {name}. "
+                         f"Got type: {type(mm_input)}")
+
+    def _parse_and_validate_pixel_values(
+            self, **kwargs: object) -> Optional[jax.Array]:
+        pixel_values = kwargs.get("pixel_values", None)
+        if pixel_values is None:
+            pixel_values = kwargs.get("pixel_values_videos", None)
+
+        if pixel_values is None:
+            return None
+
+        pixel_values = self._validate_and_reshape_mm_tensor(
+            pixel_values, "pixel values")
+
+        if not isinstance(pixel_values, jax.Array):
+            raise ValueError("Incorrect type of pixel values. "
+                             f"Got type: {type(pixel_values)}")
+
+        return pixel_values
+
     def embed_multimodal(
         self,
         image_grid_thw: Tuple[Tuple[int, int, int], ...],
@@ -1711,21 +1745,15 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         DeepStack embeddings are returned alongside visual embeddings for caching.
 
         Args:
-            image_grid_thw: Grid dimensions (T, H, W) for each image/video.
-                For video-only inputs, multimodal_manager substitutes video_grid_thw.
-            **kwargs: Contains 'pixel_values' for images or 'pixel_values_videos'
-                for videos. Both use the same vision encoder pipeline.
+            image_grid_thw: Grid dimensions (T, H, W) for each image
+            **kwargs: Contains 'pixel_values' for vision encoder
 
         Returns:
             A dict with:
-              - "embeds": Tuple of embeddings, one per image/video
-              - "deepstack": Optional list of per-item DeepStack embeddings
+              - "embeds": Tuple of embeddings, one per image (Qwen 2.5 VL format)
+              - "deepstack": Optional list of per-image DeepStack embeddings
         """
-        # Support both image and video pixel value keys
-        # vLLM uses 'pixel_values' for images and 'pixel_values_videos' for videos
-        pixel_values = kwargs.get("pixel_values")
-        if pixel_values is None:
-            pixel_values = kwargs.get("pixel_values_videos")
+        pixel_values = self._parse_and_validate_pixel_values(**kwargs)
         if pixel_values is None:
             return {}
         if not image_grid_thw:
