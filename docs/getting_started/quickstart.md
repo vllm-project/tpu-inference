@@ -40,7 +40,7 @@ After installing `vllm-tpu`, you can start the API server.
    The following command starts the server with the Llama-3.1-8B model.
 
        vllm serve "meta-llama/Llama-3.1-8B" \
-        --download_dir /tmp \
+     --download_dir /tmp \
            --disable-log-requests \
            --tensor_parallel_size=1 \
            --max-model-len=2048
@@ -49,6 +49,7 @@ After installing `vllm-tpu`, you can start the API server.
   
 Once the server is running, you can send it a request using `curl`:
 
+    ```shell
     curl http://localhost:8000/v1/completions \
         -H "Content-Type: application/json" \
         -d '{
@@ -57,6 +58,7 @@ Once the server is running, you can send it a request using `curl`:
             "max_tokens": 20,
             "temperature": 0.7
         }'
+    ```
 
 ## Next steps:
 
