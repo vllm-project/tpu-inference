@@ -218,33 +218,23 @@ def get_mrope_input_positions(
         mrope_position_delta: Delta for rope calculation
     """
     input_tokens_np = np.array(input_tokens)
-    vision_start_indices = np.where(input_tokens_np == vision_start_token_id)[0]
-    # Guard against `vision_start_token_id` appearing at the last position.
-    vision_start_indices = vision_start_indices[
-        vision_start_indices + 1 < input_tokens_np.size
-    ]
-    vision_tokens = (
-        input_tokens_np[vision_start_indices + 1]
-        if vision_start_indices.size
-        else np.array([], dtype=input_tokens_np.dtype)
-    )
-    image_nums = int(np.sum(vision_tokens == image_token_id))
-    video_nums = int(np.sum(vision_tokens == video_token_id))
 
-    # If vision placeholder tokens exist, matching grids must be provided.
-    if image_nums > 0 and not image_grid_thw:
+    # Check if image/video tokens exist in the sequence
+    has_image_tokens = np.any(input_tokens_np == image_token_id)
+    has_video_tokens = np.any(input_tokens_np == video_token_id)
+
+    # Validate that grid_thw is provided when corresponding tokens exist
+    if has_image_tokens and not image_grid_thw:
         raise ValueError("image_grid_thw must be provided when image tokens are present.")
-    if video_nums > 0 and not video_grid_thw:
+    if has_video_tokens and not video_grid_thw:
         raise ValueError("video_grid_thw must be provided when video tokens are present.")
-    # Validate grid counts match token counts
-    if image_grid_thw and len(image_grid_thw) < image_nums:
-        raise ValueError(
-            f"image_grid_thw requires {image_nums} entries but found {len(image_grid_thw)}"
-        )
-    if video_grid_thw and len(video_grid_thw) < video_nums:
-        raise ValueError(
-            f"video_grid_thw requires {video_nums} entries but found {len(video_grid_thw)}"
-        )
+
+    # Use the provided grid_thw lengths as authoritative counts.
+    # Note: The previous logic counted vision_start markers followed by image/video tokens,
+    # but for Qwen3VL, each temporal frame may have its own vision_start marker while
+    # the grid_thw represents the entire video as a single item with t>1.
+    image_nums = len(image_grid_thw) if image_grid_thw else 0
+    video_nums = len(video_grid_thw) if video_grid_thw else 0
     llm_pos_ids_list = []
     st = 0
     remain_images, remain_videos = image_nums, video_nums
@@ -1907,7 +1897,7 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
 
         # Get warmup image shapes from config
         image_shapes = []
-        # TODO: `additional_config` may be missing depending on integration.
+        # TODO: `additional_config` may be missing?
         if warmup_config := self.vllm_config.additional_config.get(
             "vision_warmup_config"
         ):
