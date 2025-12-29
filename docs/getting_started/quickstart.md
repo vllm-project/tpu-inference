@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD046 -->
 # Get started with vLLM TPU
 
 Google Cloud TPUs (Tensor Processing Units) accelerate machine learning workloads. vLLM supports TPU v6e and v5e. For architecture, supported topologies, and more, see [TPU System Architecture](https://cloud.google.com/tpu/docs/system-architecture) and specific TPU version pages ([v5e](https://cloud.google.com/tpu/docs/v5e) and [v6e](https://cloud.google.com/tpu/docs/v6e)).
@@ -15,48 +14,50 @@ Google Cloud TPUs (Tensor Processing Units) accelerate machine learning workload
 
 ## Installation
 
-!!! important
-    Until jax=0.8.3 is released, v7x will have different build requirements from previous TPU generations (v6e and prior). As a result, please use the following until consolidation can be complete:
-
-    **For v6e and prior**
-
-    ```shell
-    pip install vllm-tpu --version=0.13.2.post6
-    ```
-
-    **For v7x**
-
-    ```shell
-    pip install vllm-tpu
-    ```
-
 For detailed steps on installing `vllm-tpu` with `pip` or running it as a Docker image, please see the [**Installation Guide**](installation.md).
+
+!!! important
+    Until jax=0.8.3 is released, v7x will have different build requirements from previous TPU generations (v6e and prior). As a result, please use the following until consolidation is complete:
+
+**For v6e and prior**
+
+```shell
+pip install vllm-tpu --version=0.13.2.post6
+```
+
+**For v7x**
+
+```shell
+pip install vllm-tpu
+```
 
 ## Run the vLLM Server
 
 After installing `vllm-tpu`, you can start the API server.
 
-1. **Log in to Hugging Face:**
-   You'll need a Hugging Face token to download models.
+### 1. Log in to Hugging Face
 
-   ```shell
-   export TOKEN=YOUR_TOKEN
-   git config --global credential.helper store
-   huggingface-cli login --token $TOKEN
-   ```
+You'll need a Hugging Face token to download models.
 
-2. **Launch the Server:**
-   The following command starts the server with the Llama-3.1-8B model.
+```shell
+export TOKEN=YOUR_TOKEN
+git config --global credential.helper store
+huggingface-cli login --token $TOKEN
+```
 
-   ```shell
-   vllm serve "meta-llama/Llama-3.1-8B" \
-       --download_dir /tmp \
-       --disable-log-requests \
-       --tensor_parallel_size=1 \
-       --max-model-len=2048
-   ```
+### 2. Launch the Server
 
-3. **Send a Request:**
+The following command starts the server with the Llama-3.1-8B model.
+
+```shell
+vllm serve "meta-llama/Llama-3.1-8B" \
+    --download_dir /tmp \
+    --disable-log-requests \
+    --tensor_parallel_size=1 \
+    --max-model-len=2048
+```
+
+### 3. Send a Request
 
 Once the server is running, you can send it a request using `curl`:
 
