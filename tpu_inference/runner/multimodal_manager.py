@@ -122,16 +122,21 @@ class MultiModalManager:
                     batched_mm_inputs["pixel_values"], dim=0)
 
             image_grid_thw = ()
+            video_grid_thw = ()
             for key, value in batched_mm_inputs.items():
                 if isinstance(value, torch.Tensor):
-                    if key == 'image_grid_thw':
+                    if key == 'image_grid_thw' or key == 'video_grid_thw':
                         # change it to tuple of tuples to make it hashable for JIT
 
                         # Shape: (B, N, 3) -> (B*N, 3) -> tuple of tuples
                         grid_thw_tensor = batched_mm_inputs[key]
                         grid_thw_reshaped = grid_thw_tensor.reshape(-1, 3)
-                        image_grid_thw = tuple(
+                        grid_thw = tuple(
                             tuple(row) for row in grid_thw_reshaped.tolist())
+                        if key == 'image_grid_thw':
+                            image_grid_thw = grid_thw
+                        else:
+                            video_grid_thw = grid_thw
 
                         continue
 
@@ -140,7 +145,12 @@ class MultiModalManager:
                             torch.float32).numpy().astype(jnp.bfloat16)
                     else:
                         batched_mm_inputs[key] = value.numpy()
-            batched_mm_inputs.pop('image_grid_thw')
+            batched_mm_inputs.pop('image_grid_thw', None)
+            batched_mm_inputs.pop('video_grid_thw', None)
+
+            # Use video_grid_thw when processing video modality (image_grid_thw is empty)
+            if not image_grid_thw and video_grid_thw:
+                image_grid_thw = video_grid_thw
 
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
