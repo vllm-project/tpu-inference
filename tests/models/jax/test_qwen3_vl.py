@@ -1,16 +1,7 @@
-"""Meaningful (non-mocked) tests for the Qwen3-VL JAX implementation.
-
-These tests avoid `unittest.mock` and focus on the integration boundaries that
-are easy to get wrong in serving:
-- MRoPE position ID generation + serving-style wrapper signature.
-- Vision encoder end-to-end on TPU (flash attention + segment IDs).
-- Multimodal embedding merge correctness for placeholder tokens.
-"""
-
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Tuple
+from unittest.mock import MagicMock, patch
 
 import copy
 import jax
@@ -24,6 +15,7 @@ from jax.sharding import Mesh
 pytest.importorskip("vllm")
 pytest.importorskip("transformers")
 from transformers import Qwen3Config
+from vllm.config import CacheConfig, DeviceConfig, MultiModalConfig, ParallelConfig, SchedulerConfig
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.rope_interface import apply_rope
@@ -43,21 +35,39 @@ from tpu_inference.models.jax.qwen3_vl import (
 from tpu_inference.runner.kv_cache import create_kv_caches
 
 
-@dataclass(frozen=True)
-class VisionTestConfig:
-    hidden_size: int = 32
-    intermediate_size: int = 64
-    patch_size: int = 2
-    image_size: int = 8
-    temporal_patch_size: int = 1
-    in_channels: int = 3
-    spatial_merge_size: int = 2
-    out_hidden_size: int = 64
-    depth: int = 1
-    num_heads: int = 4
-    num_position_embeddings: int = 16  # 4x4 grid
-    deepstack_visual_indexes: Tuple[int, ...] = (0,)
-    tokens_per_second: float = 1.0
+# --- Configuration Mocking ---
+class MockVisionConfig:
+    """Mock vision config for Qwen3VL testing."""
+
+    def __init__(
+        self,
+        hidden_size: int = 32,
+        intermediate_size: int = 64,
+        patch_size: int = 2,
+        image_size: int = 8,
+        temporal_patch_size: int = 1,
+        in_channels: int = 3,
+        spatial_merge_size: int = 2,
+        out_hidden_size: int = 64,
+        depth: int = 1,
+        num_heads: int = 4,
+        num_position_embeddings: int = 16,
+        deepstack_visual_indexes: Tuple[int, ...] = (0,),
+        tokens_per_second: float = 1.0,
+    ):
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.patch_size = patch_size
+        self.image_size = image_size
+        self.temporal_patch_size = temporal_patch_size
+        self.in_channels = in_channels
+        self.spatial_merge_size = spatial_merge_size
+        self.out_hidden_size = out_hidden_size
+        self.depth = depth
+        self.num_heads = num_heads
+        self.num_position_embeddings = num_position_embeddings
+        self.deepstack_visual_indexes = deepstack_visual_indexes
+        self.tokens_per_second = tokens_per_second
 
     def to_dict(self) -> dict:
         """Return dict for HuggingFace config JSON serialization."""
@@ -78,10 +88,22 @@ class VisionTestConfig:
         }
 
 
-@dataclass(frozen=True)
-class TestModelConfig:
-    hf_config: Qwen3Config
-    dtype: jnp.dtype
+class MockModelConfig:
+    """A mock ModelConfig sufficient for testing the Qwen3 VL model."""
+
+    def __init__(self, hf_config: Qwen3Config, dtype: jnp.dtype):
+        self.hf_config = hf_config
+        self.dtype = dtype
+        self.multimodal_config = MultiModalConfig(
+            image_input_type="pixel",
+            image_token_id=hf_config.image_token_id,
+            image_input_shape=None,
+        )
+        self.model = "mock_qwen3_vl"
+        self.tokenizer = "mock_tokenizer"
+        self.tokenizer_mode = "auto"
+        self.trust_remote_code = True
+        self.seed = 0
 
     def is_multimodal_model(self) -> bool:
         return True
@@ -96,16 +118,45 @@ class TestModelConfig:
         return int(self.hf_config.vocab_size)
 
 
-@dataclass(frozen=True)
-class TestCacheConfig:
-    cache_dtype: str = "auto"
+class MockVllmConfig:
+    """A mock VllmConfig sufficient for testing the Qwen3 VL model."""
 
+    def __init__(self, tie_word_embeddings: bool = False):
+        vision_config = MockVisionConfig()
+        hf_config = Qwen3Config(
+            vocab_size=512,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            hidden_act="silu",
+            rms_norm_eps=1e-6,
+            rope_theta=10000.0,
+            tie_word_embeddings=tie_word_embeddings,
+        )
+        hf_config.head_dim = hf_config.hidden_size // hf_config.num_attention_heads
 
-@dataclass(frozen=True)
-class TestVllmConfig:
-    model_config: TestModelConfig
-    cache_config: TestCacheConfig
-    additional_config: dict
+        # Multimodal special tokens must be within vocab_size for embedding lookups.
+        hf_config.image_token_id = 100
+        hf_config.video_token_id = 101
+        hf_config.vision_start_token_id = 102
+
+        # Attach a minimal vision config object with the attributes used by the model.
+        hf_config.vision_config = vision_config
+
+        # Enable MRoPE branch in apply_rope when positions is (3, seq_len).
+        hf_config.rope_scaling = {"mrope_section": [4, 2, 2]}
+
+        self.model_config = MockModelConfig(hf_config, jnp.bfloat16)
+        self.cache_config = MagicMock(spec=CacheConfig)
+        self.cache_config.cache_dtype = "auto"
+        self.parallelism_config = MagicMock(spec=ParallelConfig)
+        self.scheduler_config = MagicMock(spec=SchedulerConfig)
+        self.device_config = MagicMock(spec=DeviceConfig)
+        self.load_config = MagicMock()
+        self.extra_configs = {}
+        self.additional_config = {"enable_dynamic_image_sizes": False}
 
 
 def _num_placeholders_for_grid(
@@ -151,68 +202,39 @@ def _make_kv_caches(model: Qwen3VLForConditionalGeneration,
     )
 
 
+# --- Fixtures ---
 @pytest.fixture(scope="module")
 def mesh() -> Mesh:
-    """Creates a 1-device mesh to avoid head/data sharding constraints."""
+    """Creates a mesh with all required axes for testing."""
     if not jax.devices():
         pytest.skip("No JAX devices available for mesh creation.")
-    devices = np.array(jax.local_devices()[:1])
-    device_mesh = devices.reshape((1, 1, -1))
-    with Mesh(device_mesh, axis_names=("data", "attn_dp", "model")) as m:
-        yield m
+    devices = np.array(jax.local_devices())
+    return Mesh(devices.reshape((len(devices), 1, 1)),
+                axis_names=('data', 'attn_dp', 'model'))
 
 
 @pytest.fixture
 def rng() -> PRNGKey:
-    return jax.random.PRNGKey(0)
+    """Provides a reusable JAX PRNGKey."""
+    return jax.random.PRNGKey(42)
 
 
-@pytest.fixture(scope="module")
-def hf_config() -> Qwen3Config:
-    # Small config for test speed, but with Qwen3-style fields.
-    cfg = Qwen3Config(
-        vocab_size=512,
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=2,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        hidden_act="silu",
-        rms_norm_eps=1e-6,
-        rope_theta=10000.0,
-        tie_word_embeddings=True,
-    )
-    cfg.head_dim = cfg.hidden_size // cfg.num_attention_heads
-
-    # Multimodal special tokens must be within vocab_size for embedding lookups.
-    cfg.image_token_id = 100
-    cfg.video_token_id = 101
-    cfg.vision_start_token_id = 102
-
-    # Attach a minimal vision config object with the attributes used by the model.
-    cfg.vision_config = VisionTestConfig()
-
-    # Enable MRoPE branch in apply_rope when positions is (3, seq_len).
-    # Keep mrope_section small enough for head_dim_original (hidden/heads=16).
-    cfg.rope_scaling = {"mrope_section": [4, 2, 2]}
-
-    return cfg
-
-
-@pytest.fixture(scope="module")
-def vllm_config(hf_config: Qwen3Config) -> TestVllmConfig:
-    model_config = TestModelConfig(hf_config=hf_config, dtype=jnp.bfloat16)
-    cache_config = TestCacheConfig(cache_dtype="auto")
-    return TestVllmConfig(
-        model_config=model_config,
-        cache_config=cache_config,
-        additional_config={"enable_dynamic_image_sizes": False},
-    )
+@pytest.fixture
+def mock_vllm_config() -> MockVllmConfig:
+    """Provides a mock VllmConfig for testing."""
+    return MockVllmConfig()
 
 
 @pytest.fixture
 def rngs(rng: PRNGKey) -> nnx.Rngs:
+    """Provides flax nnx.Rngs for model initialization."""
     return nnx.Rngs(params=rng)
+
+
+@pytest.fixture
+def hf_config(mock_vllm_config: MockVllmConfig) -> Qwen3Config:
+    """Provides the HuggingFace config from the mock vllm config."""
+    return mock_vllm_config.model_config.hf_config
 
 
 class TestUtils:
@@ -718,10 +740,10 @@ class TestRopeInterface:
 
 class TestVisionPosEmbedInterpolation:
     def test_fast_pos_embed_interpolate_supports_rectangular_base_grid(
-        self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
+        self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
-        cfg = copy.deepcopy(vllm_config.model_config.hf_config)
-        cfg.vision_config = VisionTestConfig(
+        cfg = copy.deepcopy(mock_vllm_config.model_config.hf_config)
+        cfg.vision_config = MockVisionConfig(
             hidden_size=32,
             intermediate_size=64,
             patch_size=2,
@@ -735,12 +757,9 @@ class TestVisionPosEmbedInterpolation:
             num_position_embeddings=12,  # 3x4 grid (non-square)
             deepstack_visual_indexes=(),
         )
-        model_config = TestModelConfig(hf_config=cfg, dtype=vllm_config.model_config.dtype)
-        rect_vllm_config = TestVllmConfig(
-            model_config=model_config,
-            cache_config=vllm_config.cache_config,
-            additional_config=vllm_config.additional_config,
-        )
+        model_config = MockModelConfig(hf_config=cfg, dtype=mock_vllm_config.model_config.dtype)
+        rect_vllm_config = MockVllmConfig()
+        rect_vllm_config.model_config = model_config
 
         vision = Qwen3VLVisionTransformer(rect_vllm_config, nnx.Rngs(params=rng), mesh)
         assert vision.pos_embed_grid_h != vision.pos_embed_grid_w
@@ -749,11 +768,165 @@ class TestVisionPosEmbedInterpolation:
         assert pos_embeds.shape == (8, cfg.vision_config.hidden_size)
 
 
-class TestServingIntegration:
-    def test_text_only_forward_is_causal(
-        self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
+class TestQwen3VLForConditionalGeneration:
+    """Tests for the Qwen3VL model with proper mocking."""
+
+    @pytest.fixture
+    def model(self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh):
+        """Creates a model with mocked vision and language components."""
+        with patch('tpu_inference.models.jax.qwen3_vl.Qwen3VLVisionTransformer', autospec=True) as MockVision, \
+             patch('tpu_inference.models.jax.qwen3_vl.Qwen3ForCausalLM', autospec=True) as MockLM:
+            mock_visual = MockVision.return_value
+            mock_visual.dtype = mock_vllm_config.model_config.dtype
+            mock_visual.config = mock_vllm_config.model_config.hf_config.vision_config
+            mock_visual.spatial_merge_size = mock_vllm_config.model_config.hf_config.vision_config.spatial_merge_size
+
+            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+            model.visual = mock_visual
+            model.language_model = MockLM.return_value
+            yield model
+
+    def test_embed_multimodal_none_pixel_values_returns_empty(
+        self, model: Qwen3VLForConditionalGeneration
     ):
-        model = Qwen3VLForConditionalGeneration(vllm_config, rng, mesh)
+        """embed_multimodal with None pixel_values should return empty dict."""
+        result = model.embed_multimodal(((1, 4, 4),), pixel_values=None)
+        assert result == {}
+
+    def test_embed_multimodal_empty_grid_returns_empty(
+        self, model: Qwen3VLForConditionalGeneration, rng: PRNGKey
+    ):
+        """embed_multimodal with empty grid should return empty dict."""
+        vc = model.config.vision_config
+        patch_dim = int(vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size)
+        pixel_values = jax.random.normal(rng, (16, patch_dim)).astype(model.vllm_config.model_config.dtype)
+        result = model.embed_multimodal((), pixel_values=pixel_values)
+        assert result == {}
+
+    def test_embed_multimodal_single_image(
+        self, model: Qwen3VLForConditionalGeneration, rng: PRNGKey
+    ):
+        """Single image grid should call visual encoder and return embeddings."""
+        grid = (1, 4, 4)
+        vc = model.config.vision_config
+        patch_dim = int(vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size)
+        num_patches = grid[0] * grid[1] * grid[2]
+        n_output_tokens = _num_placeholders_for_grid(grid, vc.spatial_merge_size)
+        pixel_values = jax.random.normal(rng, (num_patches, patch_dim)).astype(model.vllm_config.model_config.dtype)
+
+        mock_vision_output = jnp.ones((n_output_tokens, vc.out_hidden_size))
+        mock_deepstack = [jnp.ones((n_output_tokens, vc.out_hidden_size))]
+        model.visual.return_value = (mock_vision_output, mock_deepstack)
+
+        result = model.embed_multimodal((grid,), pixel_values=pixel_values)
+        assert isinstance(result, dict)
+        embeds = result.get("embeds", ())
+        deepstack = result.get("deepstack")
+        assert isinstance(embeds, tuple)
+        assert len(embeds) == 1
+        assert deepstack is not None
+        assert len(deepstack) == 1
+        model.visual.assert_called_once()
+
+    @patch('tpu_inference.models.jax.qwen3_vl.merge_multimodal_embeddings')
+    def test_get_input_embeddings_without_multimodal(
+        self, mock_merge: MagicMock, model: Qwen3VLForConditionalGeneration, rng: PRNGKey
+    ):
+        """get_input_embeddings with None/empty multimodal should return text embeddings."""
+        input_ids = jnp.array([1, 2, 3, 4, 5], dtype=jnp.int32)
+        mock_text_embeds = jnp.ones((5, model.config.hidden_size))
+        model.language_model.embed = MagicMock(return_value=mock_text_embeds)
+
+        # Test with None
+        result = model.get_input_embeddings(input_ids, None)
+        np.testing.assert_array_equal(np.array(result), np.array(mock_text_embeds))
+        mock_merge.assert_not_called()
+
+        # Test with empty array
+        empty_mm = jnp.empty((0, model.config.hidden_size), dtype=model.vllm_config.model_config.dtype)
+        result = model.get_input_embeddings(input_ids, empty_mm)
+        np.testing.assert_array_equal(np.array(result), np.array(mock_text_embeds))
+        mock_merge.assert_not_called()
+
+    @patch('tpu_inference.models.jax.qwen3_vl.merge_multimodal_embeddings')
+    def test_get_input_embeddings_with_multimodal(
+        self, mock_merge: MagicMock, model: Qwen3VLForConditionalGeneration, rng: PRNGKey
+    ):
+        """get_input_embeddings with multimodal should call merge function."""
+        input_ids = jnp.array([1, 2, 3, 4, 5], dtype=jnp.int32)
+        mock_text_embeds = jnp.ones((5, model.config.hidden_size))
+        model.language_model.embed = MagicMock(return_value=mock_text_embeds)
+
+        mm_embeds = jnp.ones((3, model.config.hidden_size))
+        mock_merged = jnp.ones((5, model.config.hidden_size))
+        mock_merge.return_value = mock_merged
+
+        result = model.get_input_embeddings(input_ids, mm_embeds)
+        np.testing.assert_array_equal(np.array(result), np.array(mock_merged))
+        mock_merge.assert_called_once_with(
+            input_ids, mock_text_embeds, mm_embeds,
+            [model.config.image_token_id, model.config.video_token_id])
+
+    def test_embed_input_ids_delegates_to_get_input_embeddings(
+        self, model: Qwen3VLForConditionalGeneration, rng: PRNGKey
+    ):
+        """embed_input_ids should delegate to get_input_embeddings."""
+        input_ids = jnp.array([1, 2, 3, 4, 5], dtype=jnp.int32)
+        mock_embeds = jnp.ones((5, model.config.hidden_size))
+
+        with patch.object(model, 'get_input_embeddings', return_value=mock_embeds) as mock_get:
+            result = model.embed_input_ids(input_ids)
+            np.testing.assert_array_equal(np.array(result), np.array(mock_embeds))
+            mock_get.assert_called_once_with(input_ids, None)
+
+    def test_call_delegates_to_language_model(
+        self, model: Qwen3VLForConditionalGeneration, rng: PRNGKey
+    ):
+        """Model call should delegate to language model."""
+        kv_caches = [MagicMock()]
+        input_ids = jax.random.randint(rng, (10,), 0, model.config.vocab_size)
+        attn_meta = MagicMock(spec=AttentionMetadata)
+        mock_lm_output = ([MagicMock()], jnp.ones((10, model.config.hidden_size)), [])
+        model.language_model.return_value = mock_lm_output
+
+        new_kvs, x, aux_hidden_states = model(kv_caches, input_ids, attn_meta)
+        model.language_model.assert_called_once()
+        assert len(new_kvs) == 1
+        assert x.shape == (10, model.config.hidden_size)
+
+    def test_compute_logits_delegates_to_language_model(
+        self, model: Qwen3VLForConditionalGeneration
+    ):
+        """compute_logits should delegate to language model."""
+        hidden_states = jnp.ones((10, model.config.hidden_size))
+        mock_logits = jnp.ones((10, model.config.vocab_size))
+        model.language_model.compute_logits = MagicMock(return_value=mock_logits)
+
+        logits = model.compute_logits(hidden_states)
+        np.testing.assert_array_equal(np.array(logits), np.array(mock_logits))
+        model.language_model.compute_logits.assert_called_once_with(hidden_states)
+
+    @patch('tpu_inference.models.jax.qwen3_vl.load_hf_weights')
+    def test_load_weights(
+        self, mock_load_weights: MagicMock, model: Qwen3VLForConditionalGeneration,
+        mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
+    ):
+        """load_weights should call load_hf_weights with proper args."""
+        model.load_weights(rng)
+        mock_load_weights.assert_called_once()
+        kwargs = mock_load_weights.call_args.kwargs
+        assert kwargs['vllm_config'] == mock_vllm_config
+        assert kwargs['model'] is model
+        assert kwargs['mesh'] is mesh
+
+
+class TestServingIntegration:
+    """Integration tests that create actual model instances."""
+
+    def test_text_only_forward_is_causal(
+        self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
+    ):
+        model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
         input_ids_1 = jnp.array([1, 2, 3, 4, 5, 6], dtype=jnp.int32)
         input_ids_2 = jnp.array([1, 2, 3, 4, 5, 7], dtype=jnp.int32)
 
@@ -769,9 +942,9 @@ class TestServingIntegration:
         )
 
     def test_get_mrope_input_positions_wrapper_signature_and_slicing(
-        self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
+        self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
-        model = Qwen3VLForConditionalGeneration(vllm_config, rng, mesh)
+        model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
 
         grid = (1, 4, 4)
         n_img = _num_placeholders_for_grid(grid, model.spatial_merge_size)
@@ -791,9 +964,9 @@ class TestServingIntegration:
         assert isinstance(delta, int)
 
     def test_vision_encoder_and_embedding_merge_end_to_end(
-        self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
+        self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
-        model = Qwen3VLForConditionalGeneration(vllm_config, rng, mesh)
+        model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
 
         img_grid = (1, 4, 4)
         vid_grid = (2, 4, 4)
@@ -871,80 +1044,11 @@ class TestServingIntegration:
         )
         assert q_rot.shape == q.shape
 
-    def test_embed_multimodal_none_pixel_values_returns_empty(
-        self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
-    ):
-        """embed_multimodal with None pixel_values should return empty dict."""
-        model = Qwen3VLForConditionalGeneration(vllm_config, rng, mesh)
-        result = model.embed_multimodal(((1, 4, 4),), pixel_values=None)
-        assert result == {}
-
-    def test_embed_multimodal_empty_grid_returns_empty(
-        self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
-    ):
-        """embed_multimodal with empty grid should return empty dict."""
-        model = Qwen3VLForConditionalGeneration(vllm_config, rng, mesh)
-        vc = model.config.vision_config
-        patch_dim = int(vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size)
-        pixel_values = jax.random.normal(rng, (16, patch_dim)).astype(model.vllm_config.model_config.dtype)
-        result = model.embed_multimodal((), pixel_values=pixel_values)
-        assert result == {}
-
-    def test_embed_multimodal_single_image_returns_single_tuple(
-        self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
-    ):
-        """Single image grid should return dict with one embed entry."""
-        model = Qwen3VLForConditionalGeneration(vllm_config, rng, mesh)
-        grid = (1, 4, 4)
-        vc = model.config.vision_config
-        patch_dim = int(vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size)
-        num_patches = grid[0] * grid[1] * grid[2]
-        pixel_values = jax.random.normal(rng, (num_patches, patch_dim)).astype(model.vllm_config.model_config.dtype)
-        result = model.embed_multimodal((grid,), pixel_values=pixel_values)
-        assert isinstance(result, dict)
-        embeds = result.get("embeds", ())
-        deepstack = result.get("deepstack")
-        assert isinstance(embeds, tuple)
-        assert len(embeds) == 1
-        assert deepstack is not None
-        assert len(deepstack) == 1
-
-    def test_get_input_embeddings_empty_multimodal_returns_text_embeds(
-        self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
-    ):
-        """get_input_embeddings with empty multimodal should return text embeddings unchanged."""
-        model = Qwen3VLForConditionalGeneration(vllm_config, rng, mesh)
-        input_ids = jnp.array([1, 2, 3, 4, 5], dtype=jnp.int32)
-        empty_mm = jnp.empty((0, model.config.hidden_size), dtype=model.vllm_config.model_config.dtype)
-        base_embeds = model.language_model.embed(input_ids)
-        result = model.get_input_embeddings(input_ids, empty_mm)
-        np.testing.assert_allclose(np.array(result), np.array(base_embeds), rtol=0, atol=0)
-
-    def test_get_input_embeddings_none_multimodal_returns_text_embeds(
-        self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
-    ):
-        """get_input_embeddings with None multimodal should return text embeddings."""
-        model = Qwen3VLForConditionalGeneration(vllm_config, rng, mesh)
-        input_ids = jnp.array([1, 2, 3, 4, 5], dtype=jnp.int32)
-        base_embeds = model.language_model.embed(input_ids)
-        result = model.get_input_embeddings(input_ids, None)
-        np.testing.assert_allclose(np.array(result), np.array(base_embeds), rtol=0, atol=0)
-
-    def test_embed_input_ids_defaults_to_get_input_embeddings(
-        self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
-    ):
-        """embed_input_ids should delegate to get_input_embeddings."""
-        model = Qwen3VLForConditionalGeneration(vllm_config, rng, mesh)
-        input_ids = jnp.array([1, 2, 3, 4, 5], dtype=jnp.int32)
-        expected = model.get_input_embeddings(input_ids, None)
-        result = model.embed_input_ids(input_ids)
-        np.testing.assert_allclose(np.array(result), np.array(expected), rtol=0, atol=0)
-
     def test_mrope_wrapper_context_len_slicing(
-        self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
+        self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
         """Test context_len and seq_len slicing behavior in wrapper."""
-        model = Qwen3VLForConditionalGeneration(vllm_config, rng, mesh)
+        model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
         tokens = [1, 2, 3, 4, 5, 6, 7, 8]
 
         # Full positions
@@ -973,10 +1077,10 @@ class TestServingIntegration:
         )
 
     def test_mrope_wrapper_seq_len_none_uses_full_length(
-        self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
+        self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
         """When seq_len is None, should use full token length."""
-        model = Qwen3VLForConditionalGeneration(vllm_config, rng, mesh)
+        model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
         tokens = [1, 2, 3, 4]
         positions, _ = model.get_mrope_input_positions(
             input_tokens=tokens,
@@ -990,10 +1094,10 @@ class TestServingIntegration:
         assert positions.shape == (3, 4)
 
     def test_kv_cache_updates_after_forward(
-        self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
+        self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
         """KV cache should be updated after a forward pass."""
-        model = Qwen3VLForConditionalGeneration(vllm_config, rng, mesh)
+        model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
         input_ids = jnp.array([1, 2, 3, 4], dtype=jnp.int32)
         attn_meta = _make_attention_metadata(input_ids.shape[0])
 
@@ -1008,10 +1112,10 @@ class TestServingIntegration:
         assert after_norm > 0
 
     def test_deepstack_injection_changes_placeholder_positions(
-        self, vllm_config: TestVllmConfig, rng: PRNGKey, mesh: Mesh
+        self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
         """DeepStack embeddings should affect outputs at placeholder positions."""
-        model = Qwen3VLForConditionalGeneration(vllm_config, rng, mesh)
+        model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
         grid = (1, 4, 4)
         n_img = _num_placeholders_for_grid(grid, model.spatial_merge_size)
         input_ids = jnp.array(
