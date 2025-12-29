@@ -35,7 +35,7 @@ After installing `vllm-tpu`, you can start the API server.
        export TOKEN=YOUR_TOKEN
        git config --global credential.helper store
        huggingface-cli login --token $TOKEN
-   
+  
 2. **Launch the Server:**
    The following command starts the server with the Llama-3.1-8B model.
 
@@ -44,9 +44,9 @@ After installing `vllm-tpu`, you can start the API server.
            --disable-log-requests \
            --tensor_parallel_size=1 \
            --max-model-len=2048
-   
+  
 3. **Send a Request:**
-   
+  
 Once the server is running, you can send it a request using `curl`:
 
     curl http://localhost:8000/v1/completions \
