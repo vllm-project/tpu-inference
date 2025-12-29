@@ -32,25 +32,15 @@ DEFAULT_BLOCK_K_MAJOR = 128
 
 
 class _Qwen3VLConfigAdapter:
-    """Adapter that exposes text_config attributes at the top level.
-
-    Qwen3VLConfig has a nested structure where text model attributes
-    (hidden_size, num_attention_heads, etc.) are under text_config.
-    This adapter makes them accessible directly for compatibility with
-    weight loading utilities that expect a flat config structure.
-    """
-
     def __init__(self, config):
         self._config = config
         self._text_config = getattr(config, "text_config", None)
 
     def __getattr__(self, name):
-        # First try the main config
         try:
             return getattr(self._config, name)
         except AttributeError:
             pass
-        # Fall back to text_config if available
         if self._text_config is not None:
             try:
                 return getattr(self._text_config, name)
@@ -62,12 +52,6 @@ class _Qwen3VLConfigAdapter:
 
 
 class _ModelConfigAdapter:
-    """Adapter for model_config that wraps hf_config with _Qwen3VLConfigAdapter.
-
-    This allows get_default_maps to access text_config attributes directly
-    from hf_config without modifying the weight_utils module.
-    """
-
     def __init__(self, model_config):
         self._model_config = model_config
         self._hf_config_adapter = _Qwen3VLConfigAdapter(model_config.hf_config)
@@ -330,8 +314,6 @@ def apply_interleaved_mrope(
 
 
 class Qwen3VLTextRMSNorm(nnx.Module):
-    """RMSNorm for Qwen3VL text model. Equivalent to T5LayerNorm."""
-
     def __init__(
         self,
         hidden_size: int,
@@ -468,8 +450,6 @@ class Qwen3VLTextRotaryEmbedding(nnx.Module):
 
 
 class Qwen3VLTextAttention(nnx.Module):
-    """Multi-headed attention for Qwen3VL text model with KV cache support."""
-
     def __init__(
         self,
         config,
@@ -600,11 +580,6 @@ class Qwen3VLTextAttention(nnx.Module):
 
 
 class Qwen3VLTextMLP(nnx.Module):
-    """SwiGLU MLP for Qwen3VL text model.
-
-    Uses gated activation: down_proj(silu(gate_proj(x)) * up_proj(x))
-    """
-
     def __init__(
         self,
         hidden_size: int,
@@ -613,18 +588,9 @@ class Qwen3VLTextMLP(nnx.Module):
         hidden_act: str = "silu",
         dtype: jnp.dtype = jnp.bfloat16,
     ):
-        """
-        Args:
-            hidden_size: Hidden dimension size
-            intermediate_size: Intermediate dimension size
-            rngs: Random number generators
-            hidden_act: Activation function
-            dtype: Data type for parameters
-        """
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
 
-        # All projections have no bias in Qwen3VL
         self.gate_proj = nnx.Linear(
             hidden_size, intermediate_size, use_bias=False, param_dtype=dtype, rngs=rngs
         )
@@ -635,21 +601,12 @@ class Qwen3VLTextMLP(nnx.Module):
             intermediate_size, hidden_size, use_bias=False, param_dtype=dtype, rngs=rngs
         )
 
-        # Activation function (default is SiLU for SwiGLU)
         if hidden_act == "silu":
             self.act_fn = jax.nn.silu
         else:
             raise NotImplementedError(f"Activation function '{hidden_act}' not implemented")
 
     def __call__(self, x: jax.Array) -> jax.Array:
-        """Forward pass using SwiGLU: down_proj(silu(gate_proj(x)) * up_proj(x))
-
-        Args:
-            x: Input tensor of shape (batch, seq_len, hidden_size)
-
-        Returns:
-            Output tensor of shape (batch, seq_len, hidden_size)
-        """
         gate_output = self.act_fn(self.gate_proj(x))
         up_output = self.up_proj(x)
         down_proj = self.down_proj(gate_output * up_output)
@@ -657,8 +614,6 @@ class Qwen3VLTextMLP(nnx.Module):
 
 
 class Qwen3VLTextDecoderLayer(nnx.Module):
-    """Transformer decoder layer for Qwen3VL text model with KV cache."""
-
     def __init__(
         self,
         config,
@@ -717,15 +672,7 @@ class Qwen3VLTextDecoderLayer(nnx.Module):
 def apply_rotary_pos_emb_vision(
     x: jax.Array, rotary_pos_emb: jax.Array
 ) -> jax.Array:
-    """Apply rotary position embedding to vision tensors.
 
-    Args:
-        x: Input tensor of shape [B, T, N, H]
-        rotary_pos_emb: Rotary embeddings of shape [T, H//2]
-
-    Returns:
-        Rotated tensor of shape [B, T, N, H]
-    """
     _, _, _, H = x.shape
     half_dim = H // 2
 
@@ -1500,7 +1447,6 @@ class Qwen3VLModel(nnx.Module):
     ):
         model_config = vllm_config.model_config
         hf_config = model_config.hf_config
-        # Qwen3VLConfig uses text_config for text model attributes
         text_config = getattr(hf_config, "text_config", hf_config)
         vocab_size = model_config.get_vocab_size()
         dtype = model_config.dtype
@@ -1509,7 +1455,6 @@ class Qwen3VLModel(nnx.Module):
 
         self.hidden_size = hidden_size
 
-        # Embedder
         self.embed = nnx.Embed(
             num_embeddings=vocab_size,
             features=hidden_size,
@@ -1536,7 +1481,6 @@ class Qwen3VLModel(nnx.Module):
             dtype=dtype,
         )
 
-        # LM head
         if hf_config.tie_word_embeddings:
             self.lm_head = self.embed.embedding
         else:
@@ -1563,13 +1507,10 @@ class Qwen3VLModel(nnx.Module):
         Returns:
             Updated hidden_states with visual features added
         """
-        # Flatten for indexing and broadcast mask to match hidden_states.
         flat_hidden = hidden_states.reshape(-1, hidden_states.shape[-1])
         mask = jnp.broadcast_to(visual_pos_mask, hidden_states.shape[:-1])
         flat_mask = mask.reshape(-1).astype(jnp.bool_)
 
-        # JIT-friendly: avoid dynamic-shape indices from jnp.where.
-        # Pad with dummy rows so cumsum-based gathers stay in-bounds.
         visual_embeds = visual_embeds.astype(flat_hidden.dtype)
         dummy_row = jnp.zeros((1, flat_hidden.shape[-1]), dtype=flat_hidden.dtype)
         padded_embeds = jnp.concatenate([dummy_row, visual_embeds, dummy_row], axis=0)
@@ -1620,7 +1561,6 @@ class Qwen3VLModel(nnx.Module):
         return kv_caches, x
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        """Compute logits from hidden states."""
         if self.tie_word_embeddings:
             logits = jnp.dot(hidden_states, self.lm_head.value.T)
         else:
@@ -1630,8 +1570,6 @@ class Qwen3VLModel(nnx.Module):
 
 
 class Qwen3VLForConditionalGeneration(nnx.Module):
-    """Qwen3VL model for conditional generation."""
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -1644,7 +1582,6 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
 
         config = vllm_config.model_config.hf_config
         self.config = config
-        # Qwen3VLConfig uses text_config for text model attributes
         text_config = getattr(config, "text_config", config)
 
         self.visual = Qwen3VLVisionTransformer(
@@ -1660,7 +1597,6 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
             mesh=mesh,
         )
 
-        # Special token IDs
         self.image_token_id = config.image_token_id
         self.video_token_id = config.video_token_id
         self.vision_start_token_id = getattr(config, "vision_start_token_id", 151652)
@@ -1801,7 +1737,6 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         inputs_embeds: Optional[jax.Array] = None,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
-        """Forward pass for Qwen3VL using KV cache attention."""
         visual_pos_mask = None
         deepstack_embeds = None
         if args:
@@ -1963,7 +1898,6 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
             "model.visual.merger.linear_fc2.bias": "visual.merger.linear_fc2.bias",
         }
 
-        # Add lm_head mapping if not tied
         hf_config = self.vllm_config.model_config.hf_config
         if not hf_config.tie_word_embeddings:
             mappings["lm_head"] = "language_model.lm_head"
@@ -1981,8 +1915,6 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
             mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc2"] = f"visual.deepstack_merger_list.{i}.linear_fc2.kernel"
             mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc2.bias"] = f"visual.deepstack_merger_list.{i}.linear_fc2.bias"
 
-        # Use adapter to expose text_config attributes at top level for
-        # get_default_maps which expects num_attention_heads, etc. directly
         adapted_model_config = _ModelConfigAdapter(self.vllm_config.model_config)
         metadata_map = get_default_maps(
             adapted_model_config, self.mesh, mappings
