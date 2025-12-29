@@ -121,6 +121,12 @@ class MultiModalManager:
                 batched_mm_inputs["pixel_values"] = torch.cat(
                     batched_mm_inputs["pixel_values"], dim=0)
 
+            # Handle video pixel values similarly
+            if "pixel_values_videos" in batched_mm_inputs and isinstance(
+                    batched_mm_inputs["pixel_values_videos"], list):
+                batched_mm_inputs["pixel_values_videos"] = torch.cat(
+                    batched_mm_inputs["pixel_values_videos"], dim=0)
+
             image_grid_thw = ()
             video_grid_thw = ()
             for key, value in batched_mm_inputs.items():

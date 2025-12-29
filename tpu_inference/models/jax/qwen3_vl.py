@@ -1717,15 +1717,21 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         DeepStack embeddings are returned alongside visual embeddings for caching.
 
         Args:
-            image_grid_thw: Grid dimensions (T, H, W) for each image
-            **kwargs: Contains 'pixel_values' for vision encoder
+            image_grid_thw: Grid dimensions (T, H, W) for each image/video.
+                For video-only inputs, multimodal_manager substitutes video_grid_thw.
+            **kwargs: Contains 'pixel_values' for images or 'pixel_values_videos'
+                for videos. Both use the same vision encoder pipeline.
 
         Returns:
             A dict with:
-              - "embeds": Tuple of embeddings, one per image (Qwen 2.5 VL format)
-              - "deepstack": Optional list of per-image DeepStack embeddings
+              - "embeds": Tuple of embeddings, one per image/video
+              - "deepstack": Optional list of per-item DeepStack embeddings
         """
+        # Support both image and video pixel value keys
+        # vLLM uses 'pixel_values' for images and 'pixel_values_videos' for videos
         pixel_values = kwargs.get("pixel_values")
+        if pixel_values is None:
+            pixel_values = kwargs.get("pixel_values_videos")
         if pixel_values is None:
             return {}
         if not image_grid_thw:
