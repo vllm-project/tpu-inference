@@ -15,7 +15,6 @@ from tpu_inference.layers.common.attention_interface import (
     sharded_flash_attention,
 )
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.multi_modal_utils import (
     merge_multimodal_embeddings,
@@ -1228,8 +1227,6 @@ class Qwen3VLVisionTransformer(nnx.Module):
             for _ in range(len(self.deepstack_visual_indexes))
         ]
 
-        # TODO: Setting this to True should make patch module forward to use eager mode.
-        # However, transformer blocks(causes most overhead) may be JIT-ed. Padding would be required for efficiency.
         additional_config = getattr(vllm_config, "additional_config", None) or {}
         self.enable_dynamic_image_sizes = additional_config.get(
             "enable_dynamic_image_sizes", False
@@ -1354,7 +1351,6 @@ class Qwen3VLVisionTransformer(nnx.Module):
         weight_tensor = jnp.stack(weight_list, axis=0)  # float32, shape (4, N)
 
         # Lookup embeddings and apply bilinear interpolation
-        # TODO: `weight_tensor` is float32 and can promote the embedding dtype.
         pos_embeds = self.pos_embed(idx_tensor) * weight_tensor[:, :, None]
         patch_pos_embeds = pos_embeds[0] + pos_embeds[1] + pos_embeds[2] + pos_embeds[3]
 
@@ -1373,8 +1369,6 @@ class Qwen3VLVisionTransformer(nnx.Module):
             # Repeat for temporal dimension
             pos_embed = jnp.tile(pos_embed, (t, 1))
 
-            # Rearrange to match merge block ordering
-            # TODO: This assumes `h` and `w` are divisible by `spatial_merge_size`.
             h_merged = h // merge_size
             w_merged = w // merge_size
             pos_embed = pos_embed.reshape(
@@ -1869,9 +1863,7 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
             vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size
         )
 
-        # Get warmup image shapes from config
         image_shapes = []
-        # TODO: `additional_config` may be missing?
         if warmup_config := self.vllm_config.additional_config.get(
             "vision_warmup_config"
         ):
@@ -1904,8 +1896,6 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
             )
 
     def load_weights(self, rng_key: jax.Array) -> None:
-        """Load weights from HuggingFace model."""
-        # TODO: verify model loading
         self.rng = nnx.Rngs(rng_key)
 
         mappings = {
