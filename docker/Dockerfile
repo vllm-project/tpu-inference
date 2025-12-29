@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG NIGHTLY_DATE="20250714"
-ARG BASE_IMAGE="us-central1-docker.pkg.dev/tpu-pytorch-releases/docker/xla:nightly_3.12_tpuvm_$NIGHTLY_DATE"
+ARG BASE_IMAGE="python:3.12-slim-bullseye"
 # The latest main will be used if arg unspecified
 ARG VLLM_COMMIT_HASH=""
 
@@ -21,8 +20,8 @@ FROM $BASE_IMAGE
 
 ARG IS_FOR_V7X="false"
 
-# Remove existing versions of dependencies
-RUN pip uninstall -y torch torch_xla torchvision
+# update pip
+RUN pip install --upgrade pip
 
 # Install some basic utilities
 RUN apt-get update && apt-get install -y \
