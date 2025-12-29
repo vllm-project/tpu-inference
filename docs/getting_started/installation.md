@@ -26,6 +26,9 @@ There are three ways to install `tpu-inference`:
 
 3. Use the following command to install vllm-tpu using `pip`
 
+    !!! note
+        Until jax=0.8.3 is released, v7x will have different build requirements from previous TPU generations (v6e and prior). As a result, please use the following until consolidation is complete.
+
     ```shell
     # v6e and prior
     pip install vllm-tpu --version=0.13.2.post6
@@ -33,9 +36,6 @@ There are three ways to install `tpu-inference`:
     # v7x
     pip install vllm-tpu
     ```
-
-    !!! note
-        Until jax=0.8.3 is released, v7x will have different build requirements from previous TPU generations (v6e and prior). As a result, please use the following until consolidation is complete.
 
 ## Run with Docker
 
