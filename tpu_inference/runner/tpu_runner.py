@@ -123,25 +123,16 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         self.logits_indices_selector: list[int] = logits_indices_selector
 
     def get_output(self) -> ModelRunnerOutput:
-        import traceback
-        try:
-            logger.info(f"[DEBUG] AsyncTPUModelRunnerOutput.get_output() called")
-            next_tokens_cpu = np.asarray(jax.device_get(self._next_tokens))
-            logger.info(f"[DEBUG] next_tokens_cpu shape={next_tokens_cpu.shape}, dtype={next_tokens_cpu.dtype}")
-            if self.logits_indices_selector is not None:
-                next_tokens_cpu = next_tokens_cpu[self.logits_indices_selector]
-            selected_token_ids = np.expand_dims(next_tokens_cpu[:self._num_reqs],
-                                                1)
-            valid_sampled_token_ids = selected_token_ids.tolist()
-            for i in self._discard_sampled_tokens_req_indices:
-                valid_sampled_token_ids[i].clear()
-            self._model_runner_output.sampled_token_ids = valid_sampled_token_ids
-            logger.info(f"[DEBUG] AsyncTPUModelRunnerOutput.get_output() completed successfully")
-            return self._model_runner_output
-        except Exception as e:
-            logger.error(f"[DEBUG] Exception in AsyncTPUModelRunnerOutput.get_output(): {type(e).__name__}: {e}")
-            logger.error(f"[DEBUG] Full traceback:\n{traceback.format_exc()}")
-            raise
+        next_tokens_cpu = np.asarray(jax.device_get(self._next_tokens))
+        if self.logits_indices_selector is not None:
+            next_tokens_cpu = next_tokens_cpu[self.logits_indices_selector]
+        selected_token_ids = np.expand_dims(next_tokens_cpu[:self._num_reqs],
+                                            1)
+        valid_sampled_token_ids = selected_token_ids.tolist()
+        for i in self._discard_sampled_tokens_req_indices:
+            valid_sampled_token_ids[i].clear()
+        self._model_runner_output.sampled_token_ids = valid_sampled_token_ids
+        return self._model_runner_output
 
 
 @dataclass
@@ -573,83 +564,50 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         scheduler_output: "VllmSchedulerOutput",
         intermediate_tensors: Optional[JaxIntermediateTensors] = None,
     ) -> ModelRunnerOutput | JaxIntermediateTensors | None:
-        import traceback
-        import sys
-        try:
-            if self.execute_model_state is not None:
-                raise RuntimeError("State error: sample_tokens() must be called "
-                                   "after execute_model() returns None.")
-            _, output = self._execute_model(scheduler_output, intermediate_tensors)
-            return output
-        except Exception as e:
-            # Log the exception with full details BEFORE it crosses process boundaries
-            # This ensures we see the real error before it becomes UnserializableException
-            exc_type, exc_value, exc_tb = sys.exc_info()
-            logger.error(f"[CRITICAL DEBUG] Exception in execute_model (BEFORE serialization):")
-            logger.error(f"[CRITICAL DEBUG] Exception type: {type(e).__name__}")
-            logger.error(f"[CRITICAL DEBUG] Exception message: {str(e)}")
-            logger.error(f"[CRITICAL DEBUG] Exception args: {e.args}")
-            logger.error(f"[CRITICAL DEBUG] Full traceback:\n{traceback.format_exc()}")
-            # Try to print any nested/chained exceptions
-            if e.__cause__:
-                logger.error(f"[CRITICAL DEBUG] Caused by: {type(e.__cause__).__name__}: {e.__cause__}")
-            if e.__context__:
-                logger.error(f"[CRITICAL DEBUG] Context: {type(e.__context__).__name__}: {e.__context__}")
-            # Re-raise with a simple string message that's guaranteed to be serializable
-            raise RuntimeError(f"execute_model failed: {type(e).__name__}: {str(e)}\nOriginal traceback:\n{traceback.format_exc()}") from None
+        if self.execute_model_state is not None:
+            raise RuntimeError("State error: sample_tokens() must be called "
+                               "after execute_model() returns None.")
+        _, output = self._execute_model(scheduler_output, intermediate_tensors)
+        return output
 
     def sample_tokens(
         self,
         grammar_output: "GrammarOutput | None",
     ) -> ModelRunnerOutput | AsyncTPUModelRunnerOutput:
-        import traceback
-        import sys
-        try:
-            if self.execute_model_state is None:
-                # This can happen in pipeline parallel case.
-                return EMPTY_MODEL_RUNNER_OUTPUT
+        if self.execute_model_state is None:
+            # This can happen in pipeline parallel case.
+            return EMPTY_MODEL_RUNNER_OUTPUT
 
-            (scheduler_output, attn_metadata, input_ids, hidden_states, logits,
-             aux_hidden_states, spec_decode_metadata, kv_connector_output,
-             logits_indices_selector,
-             padded_num_reqs) = (self.execute_model_state.scheduler_output,
-                                 self.execute_model_state.attn_metadata,
-                                 self.execute_model_state.input_ids,
-                                 self.execute_model_state.hidden_states,
-                                 self.execute_model_state.logits,
-                                 self.execute_model_state.aux_hidden_states,
-                                 self.execute_model_state.spec_decode_metadata,
-                                 self.execute_model_state.kv_connector_output,
-                                 self.execute_model_state.logits_indices_selector,
-                                 self.execute_model_state.padded_num_reqs)
-            self.execute_model_state = None
+        (scheduler_output, attn_metadata, input_ids, hidden_states, logits,
+         aux_hidden_states, spec_decode_metadata, kv_connector_output,
+         logits_indices_selector,
+         padded_num_reqs) = (self.execute_model_state.scheduler_output,
+                             self.execute_model_state.attn_metadata,
+                             self.execute_model_state.input_ids,
+                             self.execute_model_state.hidden_states,
+                             self.execute_model_state.logits,
+                             self.execute_model_state.aux_hidden_states,
+                             self.execute_model_state.spec_decode_metadata,
+                             self.execute_model_state.kv_connector_output,
+                             self.execute_model_state.logits_indices_selector,
+                             self.execute_model_state.padded_num_reqs)
+        self.execute_model_state = None
 
-            if grammar_output is not None:
-                (
-                    require_struct_decoding, grammar_bitmask_padded, arange
-                ) = self.structured_decoding_manager.prepare_structured_decoding_input(
-                    logits, grammar_output)
-                logits = self.structured_decoding_manager.structured_decode_fn(
-                    require_struct_decoding,
-                    grammar_bitmask_padded,
-                    logits,
-                    arange,
-                )
-            return self._sample_from_logits(
-                scheduler_output, attn_metadata, input_ids, hidden_states, logits,
-                aux_hidden_states, spec_decode_metadata, kv_connector_output,
-                logits_indices_selector, padded_num_reqs)
-        except Exception as e:
-            # Log the exception with full details BEFORE it crosses process boundaries
-            logger.error(f"[CRITICAL DEBUG] Exception in sample_tokens (BEFORE serialization):")
-            logger.error(f"[CRITICAL DEBUG] Exception type: {type(e).__name__}")
-            logger.error(f"[CRITICAL DEBUG] Exception message: {str(e)}")
-            logger.error(f"[CRITICAL DEBUG] Full traceback:\n{traceback.format_exc()}")
-            if e.__cause__:
-                logger.error(f"[CRITICAL DEBUG] Caused by: {type(e.__cause__).__name__}: {e.__cause__}")
-            if e.__context__:
-                logger.error(f"[CRITICAL DEBUG] Context: {type(e.__context__).__name__}: {e.__context__}")
-            raise RuntimeError(f"sample_tokens failed: {type(e).__name__}: {str(e)}\nOriginal traceback:\n{traceback.format_exc()}") from None
+        if grammar_output is not None:
+            (
+                require_struct_decoding, grammar_bitmask_padded, arange
+            ) = self.structured_decoding_manager.prepare_structured_decoding_input(
+                logits, grammar_output)
+            logits = self.structured_decoding_manager.structured_decode_fn(
+                require_struct_decoding,
+                grammar_bitmask_padded,
+                logits,
+                arange,
+            )
+        return self._sample_from_logits(
+            scheduler_output, attn_metadata, input_ids, hidden_states, logits,
+            aux_hidden_states, spec_decode_metadata, kv_connector_output,
+            logits_indices_selector, padded_num_reqs)
 
     def _modify_prev_results(self):
         # If copy to host has not been done, we just wait.
@@ -738,14 +696,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         intermediate_tensors: Optional[JaxIntermediateTensors] = None,
     ) -> tuple[AttentionMetadata, JaxIntermediateTensors | ModelRunnerOutput
                | None]:
-        import traceback
-        try:
-            self.persistent_batch_manager.update_states(
-                scheduler_output, self.get_mrope_input_positions_fn)
-        except Exception as e:
-            logger.error(f"[DEBUG] Exception in persistent_batch_manager.update_states: {type(e).__name__}: {e}")
-            logger.error(f"[DEBUG] Full traceback:\n{traceback.format_exc()}")
-            raise
+        self.persistent_batch_manager.update_states(
+            scheduler_output, self.get_mrope_input_positions_fn)
         if not scheduler_output.total_num_scheduled_tokens:
             if has_kv_transfer_group():
                 return DUMMY_METADATA, self.kv_connector_no_forward(
@@ -764,21 +716,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             return DUMMY_METADATA, EMPTY_MODEL_RUNNER_OUTPUT
 
         # TODO(pooyam): I guess we can remove returning sampling_metadata in `_prepare_inputs` after https://github.com/njhill/vllm/commit/b7433ca1a47732394b1bdea4099d98389515954b
-        try:
-            (
-                input_ids,
-                input_positions,
-                attn_metadata,
-                _,
-                logits_indices,
-                spec_decode_metadata,
-                logits_indices_selector,
-                padded_num_reqs,
-            ) = self._prepare_inputs(scheduler_output)
-        except Exception as e:
-            logger.error(f"[DEBUG] Exception in _prepare_inputs: {type(e).__name__}: {e}")
-            logger.error(f"[DEBUG] Full traceback:\n{traceback.format_exc()}")
-            raise
+        (
+            input_ids,
+            input_positions,
+            attn_metadata,
+            _,
+            logits_indices,
+            spec_decode_metadata,
+            logits_indices_selector,
+            padded_num_reqs,
+        ) = self._prepare_inputs(scheduler_output)
 
         is_llama_guard_4 = (
             hasattr(
@@ -792,17 +739,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
             # We have the modality embeds at this time.
-            try:
-                logger.info(f"[DEBUG] Running mm_manager.execute_mm_encoder...")
-                self.mm_manager.execute_mm_encoder(scheduler_output)
-                logger.info(f"[DEBUG] Running mm_manager.gather_mm_embeddings with target_pad_len={input_ids.shape[0]}...")
-                mm_result = self.mm_manager.gather_mm_embeddings(
-                    scheduler_output, input_ids.shape[0])
-                logger.info(f"[DEBUG] mm_result type={type(mm_result)}, is tuple={isinstance(mm_result, tuple)}")
-            except Exception as e:
-                logger.error(f"[DEBUG] Exception in multimodal encoder: {type(e).__name__}: {e}")
-                logger.error(f"[DEBUG] Full traceback:\n{traceback.format_exc()}")
-                raise
+            self.mm_manager.execute_mm_encoder(scheduler_output)
+            mm_result = self.mm_manager.gather_mm_embeddings(
+                scheduler_output, input_ids.shape[0])
         #TODO: Remove the follow elif statement once Llama Guard 4 Vision portion has been implemented
         elif is_llama_guard_4 and any(
                 self.mm_manager.runner.requests[req_id].mm_features
@@ -823,15 +762,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Later, the multi-modality model will take the embedding as the input.
         # For text-only model, this does nothing. It will input the input_ids and
         # leave the mebedding job inside the forward pass
-        try:
-            logger.info(f"[DEBUG] Running _get_input_ids_embeds...")
-            input_ids, inputs_embeds = self._get_input_ids_embeds(
-                input_ids, mm_embeds)
-            logger.info(f"[DEBUG] _get_input_ids_embeds done, inputs_embeds is None={inputs_embeds is None}")
-        except Exception as e:
-            logger.error(f"[DEBUG] Exception in _get_input_ids_embeds: {type(e).__name__}: {e}")
-            logger.error(f"[DEBUG] Full traceback:\n{traceback.format_exc()}")
-            raise
+        input_ids, inputs_embeds = self._get_input_ids_embeds(
+            input_ids, mm_embeds)
 
         lora_metadata = self.lora_utils.extract_lora_metadata()
         # TODO: make _get_input_ids_embeds within this context
@@ -846,49 +778,32 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     scheduler_output) as kv_connector_output:
                 # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
                 # but one of them would be `None`
-                try:
-                    logger.info(f"[DEBUG] Running model_fn forward pass...")
-                    logger.info(f"[DEBUG] input_ids shape={input_ids.shape if hasattr(input_ids, 'shape') else 'N/A'}")
-                    logger.info(f"[DEBUG] inputs_embeds shape={inputs_embeds.shape if inputs_embeds is not None and hasattr(inputs_embeds, 'shape') else 'None'}")
-                    logger.info(f"[DEBUG] input_positions shape={input_positions.shape if hasattr(input_positions, 'shape') else 'N/A'}")
-                    (self.kv_caches, hidden_states,
-                     aux_hidden_states) = self.model_fn(
-                         self.state,
-                         self.kv_caches,
-                         input_ids,
-                         attn_metadata,
-                         inputs_embeds,
-                         input_positions,
-                         tuple(self.layer_name_to_kvcache_index.items()),
-                         lora_metadata,
-                         intermediate_tensors,
-                         self.is_first_rank,
-                         self.is_last_rank,
-                         deepstack_embeds,
-                     )
-                    logger.info(f"[DEBUG] model_fn completed successfully, hidden_states shape={hidden_states.shape if hasattr(hidden_states, 'shape') else type(hidden_states)}")
-                except Exception as e:
-                    logger.error(f"[DEBUG] Exception in model_fn forward pass: {type(e).__name__}: {e}")
-                    logger.error(f"[DEBUG] Full traceback:\n{traceback.format_exc()}")
-                    raise
+                (self.kv_caches, hidden_states,
+                 aux_hidden_states) = self.model_fn(
+                     self.state,
+                     self.kv_caches,
+                     input_ids,
+                     attn_metadata,
+                     inputs_embeds,
+                     input_positions,
+                     tuple(self.layer_name_to_kvcache_index.items()),
+                     lora_metadata,
+                     intermediate_tensors,
+                     self.is_first_rank,
+                     self.is_last_rank,
+                     deepstack_embeds,
+                 )
             if not get_pp_group().is_last_rank:
                 assert isinstance(hidden_states, JaxIntermediateTensors)
                 hidden_states.kv_connector_output = kv_connector_output
                 return attn_metadata, hidden_states
-            try:
-                logger.info(f"[DEBUG] Running _select_from_array_fn and compute_logits_fn...")
-                hidden_states = self._select_from_array_fn(hidden_states,
-                                                           logits_indices)
-                logits = self.compute_logits_fn(
-                    self.state,
-                    hidden_states,
-                    lora_metadata,
-                )
-                logger.info(f"[DEBUG] compute_logits_fn completed, logits shape={logits.shape if hasattr(logits, 'shape') else type(logits)}")
-            except Exception as e:
-                logger.error(f"[DEBUG] Exception in _select_from_array_fn or compute_logits_fn: {type(e).__name__}: {e}")
-                logger.error(f"[DEBUG] Full traceback:\n{traceback.format_exc()}")
-                raise
+            hidden_states = self._select_from_array_fn(hidden_states,
+                                                       logits_indices)
+            logits = self.compute_logits_fn(
+                self.state,
+                hidden_states,
+                lora_metadata,
+            )
 
         self.execute_model_state = ExecuteModelState(
             scheduler_output=scheduler_output,
