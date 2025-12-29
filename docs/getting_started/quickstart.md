@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD046 -->
 # Get started with vLLM TPU
 
 Google Cloud TPUs (Tensor Processing Units) accelerate machine learning workloads. vLLM supports TPU v6e and v5e. For architecture, supported topologies, and more, see [TPU System Architecture](https://cloud.google.com/tpu/docs/system-architecture) and specific TPU version pages ([v5e](https://cloud.google.com/tpu/docs/v5e) and [v6e](https://cloud.google.com/tpu/docs/v6e)).
@@ -78,4 +79,3 @@ Check out complete, end-to-end example recipes in the [tpu-recipes repository](h
 
 * [Examples](https://github.com/vllm-project/tpu-inference/tree/main/examples)
 * [Recipes](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM)
-* [GKE serving with vLLM TPU](https://cloud.google.com/kubernetes-engine/docs/tutorials/serve-vllm-tpu)
