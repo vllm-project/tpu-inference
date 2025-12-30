@@ -1,6 +1,6 @@
 import math
 from functools import partial
-from typing import List, NamedTuple, Optional, Tuple
+from typing import List, Literal, NamedTuple, Optional, Tuple, TypedDict, Union
 
 import jax
 import jax.numpy as jnp
@@ -87,6 +87,22 @@ class SegmentIds(NamedTuple):
 
     q: jax.Array  # [batch_size, q_seq_len]
     kv: jax.Array  # [batch_size, kv_seq_len]
+
+
+class Qwen3VLImagePixelInputs(TypedDict):
+    type: Literal["pixel_values"]
+    pixel_values: jax.Array
+    image_grid_thw: Tuple[Tuple[int, int, int], ...]
+
+
+class Qwen3VLImageEmbeddingInputs(TypedDict):
+    type: Literal["image_embeds"]
+    image_embeds: jax.Array
+    image_grid_thw: Tuple[Tuple[int, int, int], ...]
+
+
+Qwen3VLImageInputs = Union[Qwen3VLImagePixelInputs,
+                            Qwen3VLImageEmbeddingInputs]
 
 
 def generate_segment_ids_from_grid_thw(
@@ -1652,23 +1668,128 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         raise ValueError(f"Incorrect type of {name}. "
                          f"Got type: {type(mm_input)}")
 
-    def _parse_and_validate_pixel_values(
-            self, **kwargs: object) -> Optional[jax.Array]:
-        pixel_values = kwargs.get("pixel_values", None)
-        if pixel_values is None:
-            pixel_values = kwargs.get("pixel_values_videos", None)
+    def _normalize_grid_thw(
+            self, grid_thw: object) -> Tuple[Tuple[int, int, int], ...]:
+        if grid_thw is None:
+            return ()
+        if isinstance(grid_thw, (list, tuple)):
+            if len(grid_thw) == 0:
+                return ()
+            if len(grid_thw) == 3 and all(
+                    isinstance(v, (int, np.integer)) for v in grid_thw):
+                return (tuple(int(v) for v in grid_thw), )
+            if isinstance(grid_thw[0], (list, tuple)):
+                return tuple(tuple(int(v) for v in row) for row in grid_thw)
+        if hasattr(grid_thw, 'ndim'):
+            array_input = np.asarray(grid_thw)
+            if array_input.size == 0:
+                return ()
+            if array_input.ndim == 1 and array_input.shape[0] == 3:
+                return (tuple(int(v) for v in array_input.tolist()), )
+            if array_input.ndim == 2 and array_input.shape[1] == 3:
+                return tuple(
+                    tuple(int(v) for v in row)
+                    for row in array_input.tolist())
+        raise ValueError("Incorrect type of grid_thw. "
+                         f"Got type: {type(grid_thw)}")
 
+    def _parse_and_validate_image_input(
+            self, image_grid_thw: Tuple[Tuple[int, int, int], ...],
+            **kwargs: object) -> Optional[Qwen3VLImageInputs]:
+        pixel_values = kwargs.pop("pixel_values", None)
         if pixel_values is None:
+            pixel_values = kwargs.pop("pixel_values_videos", None)
+        image_embeds = kwargs.pop("image_embeds", None)
+
+        if pixel_values is None and image_embeds is None:
             return None
 
-        pixel_values = self._validate_and_reshape_mm_tensor(
-            pixel_values, "pixel values")
+        if pixel_values is not None:
+            pixel_values = self._validate_and_reshape_mm_tensor(
+                pixel_values, "pixel values")
 
-        if not isinstance(pixel_values, jax.Array):
-            raise ValueError("Incorrect type of pixel values. "
-                             f"Got type: {type(pixel_values)}")
+            if not isinstance(pixel_values, jax.Array):
+                raise ValueError("Incorrect type of pixel values. "
+                                 f"Got type: {type(pixel_values)}")
 
-        return pixel_values
+            return Qwen3VLImagePixelInputs(
+                type="pixel_values",
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw)
+
+        # NOTE: Not supporting image embeddings precomputed. Matches Qwen2.5VL.
+        # if image_embeds is not None:
+        #     image_embeds = self._validate_and_reshape_mm_tensor(
+        #         image_embeds, "image embeds")
+        #     if not isinstance(image_embeds, jax.Array):
+        #         raise ValueError("Incorrect type of image embeddings. "
+        #                          f"Got type: {type(image_embeds)}")
+        #     return Qwen3VLImageEmbeddingInputs(
+        #         type="image_embeds",
+        #         image_embeds=image_embeds,
+        #         image_grid_thw=image_grid_thw)
+
+    def _parse_and_validate_multimodal_inputs(self,
+                                              image_grid_thw: Tuple[Tuple[int,
+                                                                          int,
+                                                                          int],
+                                                                    ...],
+                                              **kwargs: object) -> dict:
+        mm_input_by_modality = {}
+        for input_key in kwargs:
+            if input_key in ("pixel_values", "pixel_values_videos",
+                             "image_embeds"
+                             ) and "image" not in mm_input_by_modality:
+                mm_input_by_modality[
+                    "image"] = self._parse_and_validate_image_input(
+                        image_grid_thw, **kwargs)
+        return mm_input_by_modality
+
+    def _process_image_input(
+            self, image_input: Qwen3VLImageInputs
+    ) -> tuple[tuple[jax.Array, ...],
+               Optional[list[list[jax.Array]]]]:
+        grid_thw = image_input["image_grid_thw"]
+        if not grid_thw:
+            return (), None
+
+        if image_input["type"] == "image_embeds":
+            image_embeds = image_input["image_embeds"].astype(self.visual.dtype)
+            deepstack_embeds = None
+        else:
+            pixel_values = image_input["pixel_values"]
+            image_embeds, deepstack_embeds = self.visual(pixel_values, grid_thw)
+
+        sizes = np.array([
+            t * (h // self.spatial_merge_size) * (w // self.spatial_merge_size)
+            for t, h, w in grid_thw
+        ])
+
+        if sizes.size == 0:
+            return (), None
+        if sizes.size == 1:
+            image_splits = (image_embeds, )
+            deepstack_by_item = None
+            if deepstack_embeds:
+                deepstack_by_item = [
+                    [layer_embeds for layer_embeds in deepstack_embeds]
+                ]
+            return image_splits, deepstack_by_item
+
+        split_indices = np.cumsum(sizes)[:-1]
+        image_splits = tuple(jnp.split(image_embeds, split_indices))
+        deepstack_by_item = None
+        if deepstack_embeds:
+            layer_splits = [
+                tuple(jnp.split(layer_embeds, split_indices))
+                for layer_embeds in deepstack_embeds
+            ]
+            deepstack_by_item = []
+            for item_idx in range(len(image_splits)):
+                deepstack_by_item.append(
+                    [layer_split[item_idx] for layer_split in layer_splits]
+                )
+        return image_splits, deepstack_by_item
 
     def embed_multimodal(
         self,
@@ -1689,45 +1810,32 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
               - "embeds": Tuple of embeddings, one per image (Qwen 2.5 VL format)
               - "deepstack": Optional list of per-image DeepStack embeddings
         """
-        pixel_values = self._parse_and_validate_pixel_values(**kwargs)
-        if pixel_values is None:
+        image_grid_thw = self._normalize_grid_thw(image_grid_thw)
+        if not image_grid_thw:
+            image_grid_thw = self._normalize_grid_thw(
+                kwargs.get("video_grid_thw", None))
+
+        mm_input_by_modality = self._parse_and_validate_multimodal_inputs(
+            image_grid_thw, **kwargs)
+        if not mm_input_by_modality:
             return {}
         if not image_grid_thw:
             return {}
 
-        image_embeds, deepstack_embeds = self.visual(pixel_values, image_grid_thw)
+        multimodal_embeddings: tuple[jax.Array, ...] = ()
+        deepstack_outputs = None
+        for modality in mm_input_by_modality:
+            multimodal_input = mm_input_by_modality[modality]
+            if modality == "image":
+                image_splits, deepstack_by_item = self._process_image_input(
+                    multimodal_input)
+                multimodal_embeddings += image_splits
+                if deepstack_by_item is not None:
+                    if deepstack_outputs is None:
+                        deepstack_outputs = []
+                    deepstack_outputs.extend(deepstack_by_item)
 
-        # Split embeddings per image (matching Qwen 2.5 VL return format)
-        sizes = np.array([
-            t * (h // self.spatial_merge_size) * (w // self.spatial_merge_size)
-            for t, h, w in image_grid_thw
-        ])
-
-        if sizes.size == 0:
-            return {}
-        if sizes.size == 1:
-            image_splits = (image_embeds,)
-            deepstack_by_item = None
-            if deepstack_embeds:
-                deepstack_by_item = [
-                    [layer_embeds for layer_embeds in deepstack_embeds]
-                ]
-            return {"embeds": image_splits, "deepstack": deepstack_by_item}
-
-        split_indices = np.cumsum(sizes)[:-1]
-        image_splits = tuple(jnp.split(image_embeds, split_indices))
-        deepstack_by_item = None
-        if deepstack_embeds:
-            layer_splits = [
-                tuple(jnp.split(layer_embeds, split_indices))
-                for layer_embeds in deepstack_embeds
-            ]
-            deepstack_by_item = []
-            for item_idx in range(len(image_splits)):
-                deepstack_by_item.append(
-                    [layer_split[item_idx] for layer_split in layer_splits]
-                )
-        return {"embeds": image_splits, "deepstack": deepstack_by_item}
+        return {"embeds": multimodal_embeddings, "deepstack": deepstack_outputs}
 
     def __call__(
         self,
