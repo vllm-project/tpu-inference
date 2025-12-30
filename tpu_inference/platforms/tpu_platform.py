@@ -46,8 +46,9 @@ class TpuPlatform(Platform):
 
     additional_env_vars: list[str] = [
         "PHASED_PROFILING_DIR", "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS",
-        "TPU_MULTIHOST_BACKEND", "VLLM_MLA_DISABLE", "TPU_BACKEND_TYPE",
-        "NEW_MODEL_DESIGN"
+        "TPU_MULTIHOST_BACKEND", "VLLM_MLA_DISABLE", "TPU_BACKEND_TYPE",        
+        "NEW_MODEL_DESIGN", "VLLM_DISABLE_SHARED_EXPERTS_STREAM",
+        "MODEL_IMPL_TYPE"
     ]
 
     @classmethod
