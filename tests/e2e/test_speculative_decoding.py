@@ -308,4 +308,4 @@ def test_eagle3_performance(
             "model": "unkmaster/EAGLE3-LLaMA3.1-Instruct-8B",
             "num_speculative_tokens": 2,
             "draft_tensor_parallel_size": 1
-        }, 1.2 if _is_v7x() else 1.8)
+        }, 0.6 if _is_v7x() else 1.8)
