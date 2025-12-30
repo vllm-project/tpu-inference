@@ -277,6 +277,9 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             attn_head_dim=self.head_dim)
         weight_loader.load_weights(self)
 
+        logger.info("Materializing Llama 4 Vision RoPE frequencies...")
+        self.vision_rope.__post_init__()
+
     def __call__(
         self,
         kv_caches: List[jax.Array],

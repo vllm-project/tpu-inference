@@ -83,8 +83,8 @@ class Llama4VisionRotaryEmbedding(nnx.Module):
         # The HF code uses concatenation and repeats for X and Y features.
 
         # 1. Calculate frequencies for X and Y dimensions
-        freqs_x = freqs_x_full * inv_freq[jnp.newaxis, :]
-        freqs_y = freqs_y_full * inv_freq[jnp.newaxis, :]
+        freqs_x = (freqs_x_full + 1) * inv_freq[jnp.newaxis, :]
+        freqs_y = (freqs_y_full + 1) * inv_freq[jnp.newaxis, :]
 
         # 2. Concatenate X and Y frequencies to form the final frequency list
         # Resulting shape: (total_tokens, head_dim // 2)
@@ -102,10 +102,26 @@ class Llama4VisionRotaryEmbedding(nnx.Module):
         # Mask out the CLS token frequency (where freqs_x_full < 0)
         cls_mask = freqs_x_full < 0
         cls_mask = cls_mask[:, jnp.newaxis, :]
-        freqs_cis_stacked = jnp.where(cls_mask, 0, freqs_cis_stacked)
+
+        # Identity rotation is [1.0, 0.0] (Real=1, Imag=0)
+        identity_rot = jnp.array([1.0, 0.0], dtype=self.dtype)
+        # Broadcast identity to match stacked shape (1, 1, 2)
+        identity_rot = identity_rot.reshape(1, 1, 2)
+
+        # Use identity where mask is True
+        freqs_cis_stacked = jnp.where(cls_mask, identity_rot,
+                                      freqs_cis_stacked)
+
+        # --- DEBUG CHECK ---
+        print("\n[DEBUG] RoPE Init Check:")
+        print(f"  CLS Mask Sum: {jnp.sum(cls_mask)}")
+        print(
+            f"  Freqs at CLS (Should be 1+0j or similar): {freqs_cis_stacked[-1, 0, :]}"
+        )
 
         # Store as parameter/attribute for checkpointing
-        self.freqs_cis_stacked = freqs_cis_stacked.astype(self.dtype)
+        self.freqs_cis_stacked = freqs_cis_stacked.astype(
+            jnp.float32)  #hardcoding to float32 for testing purposes
 
     def __call__(self) -> jax.Array:
         return self.freqs_cis_stacked

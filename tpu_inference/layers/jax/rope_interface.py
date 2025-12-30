@@ -123,14 +123,36 @@ def apply_rope(
         cos = cos[:, jnp.newaxis, :]
         sin = sin[:, jnp.newaxis, :]
 
-        inputs_f32 = inputs.astype(jnp.float32)
-
-        # Apply rotation (Standard split logic)
-        inputs_real = inputs_f32[..., :head_dim // 2]
-        inputs_imag = inputs_f32[..., head_dim // 2:head_dim]
-
         cos_f32 = cos.astype(jnp.float32)
         sin_f32 = sin.astype(jnp.float32)
+        inputs_f32 = inputs.astype(jnp.float32)
+
+        if rope_input_ordering == "interleaved":
+            # PyTorch Style: Pairs are [0,1], [2,3]...
+            # Reshape inputs to (..., D/2, 2) to separate Re/Im
+            shape_pre = inputs_f32.shape[:-1]
+            inputs_reshaped = inputs_f32.reshape(*shape_pre, -1, 2)
+
+            inputs_real = inputs_reshaped[..., 0]
+            inputs_imag = inputs_reshaped[..., 1]
+
+            # Apply Rotation
+            outputs_real = inputs_real * cos_f32 - inputs_imag * sin_f32
+            outputs_imag = inputs_real * sin_f32 + inputs_imag * cos_f32
+
+            # Stack back to (..., D/2, 2) and flatten to (..., D)
+            out_stacked = jnp.stack([outputs_real, outputs_imag], axis=-1)
+            out = out_stacked.reshape(inputs.shape)
+
+        else:
+            # Legacy/Split Style: Pairs are [0, D/2], [1, D/2+1]...
+            inputs_real = inputs_f32[..., :head_dim // 2]
+            inputs_imag = inputs_f32[..., head_dim // 2:head_dim]
+
+            outputs_real = inputs_real * cos_f32 - inputs_imag * sin_f32
+            outputs_imag = inputs_real * sin_f32 + inputs_imag * cos_f32
+
+            out = jnp.concatenate([outputs_real, outputs_imag], axis=-1)
 
         outputs_real = inputs_real * cos_f32 - inputs_imag * sin_f32
         outputs_imag = inputs_real * sin_f32 + inputs_imag * cos_f32

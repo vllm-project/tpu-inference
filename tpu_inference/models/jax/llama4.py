@@ -1154,7 +1154,7 @@ class JAXLlama4VisionModel(nnx.Module):
         class_embedding_expanded = self.class_embedding.value[
             None, None, :].repeat(hidden_states.shape[0], axis=0)
         hidden_states = jnp.concatenate(
-            [class_embedding_expanded, hidden_states], axis=1)
+            [hidden_states, class_embedding_expanded], axis=1)
 
         # 3. Add positional embedding
         hidden_states += self.positional_embedding_vlm.value
@@ -1162,16 +1162,16 @@ class JAXLlama4VisionModel(nnx.Module):
         # 4. Transformation layers
         hidden_states = self.layernorm_pre(hidden_states)
         freqs_ci_stacked = self.vision_rope()
-        if isinstance(freqs_ci_stacked, jax.ShapeDtypeStruct):
-            freqs_ci_stacked = jnp.zeros(freqs_ci_stacked.shape,
-                                         dtype=freqs_ci_stacked.dtype)
+        # if isinstance(freqs_ci_stacked, jax.ShapeDtypeStruct):
+        #     freqs_ci_stacked = jnp.zeros(freqs_ci_stacked.shape,
+        #                                  dtype=freqs_ci_stacked.dtype)
         hidden_states = self.model(hidden_states, freqs_ci_stacked)
 
         hidden_states = self.layernorm_post(hidden_states)
 
         # --- PROBE 1: VISION ENCODER OUTPUT (Pre-Adapter) ---
         # We slice off the CLS token to match what goes into the adapter
-        encoder_out_no_cls = hidden_states[:, 1:, :]
+        encoder_out_no_cls = hidden_states[:, :-1, :]
         jax.debug.callback(print_head_tail, encoder_out_no_cls,
                            "Step 3: Vision Encoder Output (Pre-Adapter)")
         # ----------------------------------------------------
