@@ -35,29 +35,27 @@ pip install vllm-tpu
 
 After installing `vllm-tpu`, you can start the API server.
 
-### 1. Log in to Hugging Face
+1. **Log in to Hugging Face:**
+   You'll need a Hugging Face token to download models.
 
-You'll need a Hugging Face token to download models.
+   ```shell
+   export TOKEN=YOUR_TOKEN
+   git config --global credential.helper store
+   huggingface-cli login --token $TOKEN
+   ```
 
-```shell
-export TOKEN=YOUR_TOKEN
-git config --global credential.helper store
-huggingface-cli login --token $TOKEN
-```
+2. **Launch the Server:**
+   The following command starts the server with the Llama-3.1-8B model.
 
-### 2. Launch the Server
+   ```shell
+   vllm serve "meta-llama/Llama-3.1-8B" \
+       --download_dir /tmp \
+       --disable-log-requests \
+       --tensor_parallel_size=1 \
+       --max-model-len=2048
+   ```
 
-The following command starts the server with the Llama-3.1-8B model.
-
-```shell
-vllm serve "meta-llama/Llama-3.1-8B" \
-    --download_dir /tmp \
-    --disable-log-requests \
-    --tensor_parallel_size=1 \
-    --max-model-len=2048
-```
-
-### 3. Send a Request
+3. **Send a Request:**
 
 Once the server is running, you can send it a request using `curl`:
 
@@ -80,3 +78,4 @@ Check out complete, end-to-end example recipes in the [tpu-recipes repository](h
 
 * [Examples](https://github.com/vllm-project/tpu-inference/tree/main/examples)
 * [Recipes](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM)
+* [GKE serving with vLLM TPU](https://cloud.google.com/kubernetes-engine/docs/tutorials/serve-vllm-tpu)
