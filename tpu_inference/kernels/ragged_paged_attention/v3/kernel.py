@@ -249,6 +249,8 @@ def _ragged_paged_attention_kernel(
     q_hbm_ref,  # [actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
     kv_hbm_ref,  # [max_num_tokens, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
     kv_cache_hbm_ref,  # [total_num_pages, page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
+    k_scale_ref,  # [num_kv_heads, head_dim]
+    v_scale_ref,  # [num_kv_heads, head_dim]
     # Output
     o_hbm_ref,  # [actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
     updated_kv_cache_hbm_ref,  # [total_num_pages, page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
@@ -260,14 +262,14 @@ def _ragged_paged_attention_kernel(
     l_ref,  # [actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, 128],
     m_ref,  # [actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, 128],
     acc_ref,  # [actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, head_dim],
+    k_scale_scratch_ref,
+    v_scale_scratch_ref,  # <--- Add VMEM Scratch Refs
     *,
     sm_scale: float,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
     mask_value: float = DEFAULT_MASK_VALUE,
     q_scale: float | None = None,
-    k_scale: float | None = None,
-    v_scale: float | None = None,
     chunk_prefill_size: int | None = None,
     bkv_p,
     bq_sz,
@@ -356,6 +358,7 @@ def _ragged_paged_attention_kernel(
         bq_idx,
         bkv_idx,
         kv_head_idx,
+        k_scale=None,
     ):
         assert len(q.shape) == 2
         assert q.shape[0] % num_q_heads_per_kv_head == 0
@@ -379,10 +382,14 @@ def _ragged_paged_attention_kernel(
                 q = jnp.clip(q, min=minval, max=maxval)
             q = q.astype(k.dtype)
 
+        if k_scale is not None:
+            old_dtype = k.dtype
+            k = k.astype(k_scale.dtype) * k_scale
+            # cast back to original dtype
+            k = k.astype(old_dtype)
+
         s = jnp.einsum("nd,md->nm", q, k, preferred_element_type=jnp.float32)
         s *= sm_scale
-        if k_scale is not None:
-            s *= k_scale
         if q_scale is not None:
             s *= q_scale
         if soft_cap is not None:
@@ -421,6 +428,7 @@ def _ragged_paged_attention_kernel(
         *,
         bkv_idx,
         kv_head_idx,
+        v_scale=None,
     ):
         head_acc_ref = acc_ref.at[kv_head_idx, :q_shape_0]
 
@@ -428,9 +436,12 @@ def _ragged_paged_attention_kernel(
             return jnp.where(bkv_idx == 0, jnp.full_like(ref, init_val),
                              ref[...])
 
+        # if v_scale is not None:
+        #     old_dtype = v.dtype
+        #     v = v.astype(v_scale.dtype) * v_scale
+        #     v = v.astype(old_dtype)
+
         pv = jnp.einsum("nm,md->nd", p, v, preferred_element_type=jnp.float32)
-        if v_scale is not None:
-            pv *= v_scale
         o_prev = load_with_init(head_acc_ref, 0.0)
         o_curr = broadcast_minor(exp_m_diff, o_prev.shape) * o_prev + pv
         head_acc_ref[...] = o_curr
@@ -905,10 +916,19 @@ def _ragged_paged_attention_kernel(
                         if cur_kv_head_idx >= actual_num_kv_heads:
                             break
 
+                        cur_k_scale = k_scale_scratch_ref[cur_kv_head_idx]
+                        # cur_v_scale = v_scale_scratch_ref[cur_kv_head_idx]
+
                         cur_kv_head_bq = load_bq(bq_sem_idx,
                                                  cur_kv_head_idx,
                                                  actual_bq_sz=actual_bq_sz)
+                        cur_kv_head_bq = cur_kv_head_bq * cur_k_scale.astype(
+                            cur_kv_head_bq.dtype)
                         bk, bv = bkv_lst[i]
+                        cur_kv_head_bq = cur_kv_head_bq.astype(jnp.bfloat16)
+                        # cast back to original dtype
+                        # bk = bk.astype(bk.dtype)
+                        # bv = bv.astype(bv.dtype)
                         # FlashAttention is divided into `flash_attention_step1_qk_softmax`
                         # and `flash_attention_step2_pv` to pipeline the computation.
                         # `step2_pv` for the previous KV head, which depends on the softmax
@@ -922,6 +942,7 @@ def _ragged_paged_attention_kernel(
                                 bq_idx=bq_idx,
                                 bkv_idx=bkv_idx,
                                 kv_head_idx=cur_kv_head_idx,
+                                # k_scale=cur_k_scale,
                             ))
                         if prev_bq_shape_0 is not None:
                             flash_attention_step2_pv(
@@ -931,12 +952,14 @@ def _ragged_paged_attention_kernel(
                                 prev_kv_head_exp_m_diff,
                                 bkv_idx=bkv_idx,
                                 kv_head_idx=prev_kv_head_idx,
+                                # v_scale=cur_v_scale,
                             )
                         prev_bq_shape_0 = cur_kv_head_bq.shape[0]
                         prev_kv_head_bv = bv
                         prev_kv_head_p = cur_kv_head_p
                         prev_kv_head_exp_m_diff = cur_kv_head_exp_m_diff
                         prev_kv_head_idx = cur_kv_head_idx
+                        # prev_v_scale = cur_v_scale
 
                 # Execute pv of last attention head.
                 assert prev_bq_shape_0 is not None
@@ -947,6 +970,7 @@ def _ragged_paged_attention_kernel(
                     prev_kv_head_exp_m_diff,
                     bkv_idx=bkv_idx,
                     kv_head_idx=prev_kv_head_idx,
+                    # v_scale=prev_v_scale,
                 )
 
             lax.fori_loop(0, num_bkv, compute_with_bkv, None, unroll=False)
@@ -956,6 +980,9 @@ def _ragged_paged_attention_kernel(
             l = broadcast_minor(l_ref[...], acc.shape)  # noqa
             out = (lax.div(acc, l) if q_dtype == jnp.float32 else
                    (acc * pl.reciprocal(l, approx=True)).astype(q_dtype))
+            v_scale_val = v_scale_scratch_ref[...]  # Load (4, 128)
+            out = out * v_scale_val[:, None, :].astype(
+                out.dtype)  # Broadcast (4, 1, 128)
 
             # Wait for previous bo to be fully sent before storing new bo.
             bo_sem_idx = sem_ids_ref[2]
@@ -978,6 +1005,21 @@ def _ragged_paged_attention_kernel(
 
     @pl.when(seq_idx == 0)
     def prologue():
+        dma_sem = sems.at[0, 0]
+
+        # FIX 2: Issue copies and capture the handle of the last one
+        cp = pltpu.make_async_copy(k_scale_ref, k_scale_scratch_ref, dma_sem)
+        cp1 = pltpu.make_async_copy(v_scale_ref, v_scale_scratch_ref, dma_sem)
+        cp.start()
+        cp1.start()
+
+        cp.wait()
+        cp1.wait()
+
+        # FIX 3: Use handle.wait(). This automatically waits for the semaphore
+        # to reach the count corresponding to this specific copy operation (2).
+        # copy_handle.wait()
+
         start_fetch_bq(0, 0, 0)
 
         # Initialize bkv_x2_ref to zeros to avoid NaN issues from accessing
@@ -1342,6 +1384,50 @@ def get_kernel_scope_name(bq_size, bkv_p, page_size):
     return f"RPA-bq_{bq_size}-bkvp_{bkv_p}-p_{page_size}-"
 
 
+def quantize_kv(x, scale, quant_type):
+    """
+    Quantizes a float input tensor 'x' using per-channel 'scale'.
+
+    Args:
+        x: Input tensor [max_num_tokens, num_kv_heads, head_dim]
+        scale: Scale tensor [num_kv_heads, head_dim]
+        quant_type: Target dtype (jnp.int8 or jnp.float8_e4m3fn)
+
+    Returns:
+        Quantized tensor in 'quant_type'
+    """
+    # # Option A
+    # # 1. Reshape scale for broadcasting
+    # # x shape: (Tokens, KV_Heads, Head_Dim)
+    # # scale shape: (KV_Heads, Head_Dim) -> (1, KV_Heads, Head_Dim)
+    # if jnp.issubdtype(quant_type, jnp.integer):
+    #     dtype_info = jnp.iinfo(quant_type)
+    # else:
+    #     dtype_info = jnp.finfo(quant_type)
+
+    # dtype_max = float(dtype_info.max)
+    # dtype_min = float(dtype_info.min)
+
+    # return jnp.clip(x / scale, dtype_min, dtype_max).astype(quant_type)
+
+    # # Option B
+    scale_reshaped = scale[None, :, :]
+
+    if jnp.issubdtype(quant_type, jnp.integer):
+        dtype_info = jnp.iinfo(quant_type)
+    else:
+        dtype_info = jnp.finfo(quant_type)
+
+    dtype_max = float(dtype_info.max)
+    dtype_min = float(dtype_info.min)
+
+    # 2. Divide by scale to map values to integer range
+    # e.g., if max val is 10.0 and scale is (10.0 / 127.0), result is 127.0
+    x = jnp.clip(x / scale_reshaped, dtype_min, dtype_max).astype(quant_type)
+
+    return x
+
+
 @functools.partial(
     jax.jit,
     static_argnames=(
@@ -1350,8 +1436,8 @@ def get_kernel_scope_name(bq_size, bkv_p, page_size):
         "soft_cap",
         "mask_value",
         "q_scale",
-        "k_scale",
-        "v_scale",
+        # "k_scale",
+        # "v_scale",
         "chunk_prefill_size",
         "num_kv_pages_per_block",
         "num_queries_per_block",
@@ -1372,14 +1458,14 @@ def ragged_paged_attention(
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
+    k_scale: jax.Array | None,
+    v_scale: jax.Array | None,
     *,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
     mask_value: float | None = DEFAULT_MASK_VALUE,
     q_scale: float | None = None,
-    k_scale: float | None = None,
-    v_scale: float | None = None,
     # Kernel optimization params.
     chunk_prefill_size: int | None = None,
     # Kernel tuning params.
@@ -1423,34 +1509,41 @@ def ragged_paged_attention(
     The output of the attention.
   """
     q, k, v = queries, keys, values
-    static_validate_inputs(
-        q,
-        k,
-        v,
-        kv_cache,
-        kv_lens,
-        page_indices,
-        cu_q_lens,
-        distribution,
-        sm_scale=sm_scale,
-        sliding_window=sliding_window,
-        soft_cap=soft_cap,
-        mask_value=mask_value,
-        q_scale=q_scale,
-        k_scale=k_scale,
-        v_scale=v_scale,
-        chunk_prefill_size=chunk_prefill_size,
-        num_kv_pages_per_block=num_kv_pages_per_block,
-        num_queries_per_block=num_queries_per_block,
-        vmem_limit_bytes=vmem_limit_bytes,
-    )
+    # static_validate_inputs(
+    #     q,
+    #     k,
+    #     v,
+    #     kv_cache,
+    #     kv_lens,
+    #     page_indices,
+    #     cu_q_lens,
+    #     distribution,
+    #     sm_scale=sm_scale,
+    #     sliding_window=sliding_window,
+    #     soft_cap=soft_cap,
+    #     mask_value=mask_value,
+    #     q_scale=q_scale,
+    #     k_scale=k_scale,
+    #     v_scale=v_scale,
+    #     chunk_prefill_size=chunk_prefill_size,
+    #     num_kv_pages_per_block=num_kv_pages_per_block,
+    #     num_queries_per_block=num_queries_per_block,
+    #     vmem_limit_bytes=vmem_limit_bytes,
+    # )
 
     actual_num_q_heads = q.shape[1]
     actual_head_dim = q.shape[2]
     actual_num_kv_heads = k.shape[1]
 
     actual_num_q_heads_per_kv_head = actual_num_q_heads // actual_num_kv_heads
-    q, kv = prepare_inputs(q, k, v)
+    # scale_v = 1.0
+    # scale_k = 1.0
+    scale_k = k_scale
+    scale_v = v_scale
+    k_q = quantize_kv(k, scale_k, kv_cache.dtype)
+    v_q = quantize_kv(v, scale_v, kv_cache.dtype)
+
+    q, kv = prepare_inputs(q, k_q, v_q)
     (
         _,
         max_num_tokens,
@@ -1492,6 +1585,16 @@ def ragged_paged_attention(
         pl.BlockSpec(memory_space=pltpu.HBM),
     ]
 
+    # NEW: Add specs for scales.
+    # We map them to `None` on the grid dimension so the WHOLE tensor is loaded.
+    # Assuming grid is (num_seqs,), and scales are not seq-dependent.
+    # Block shape equals full shape.
+
+    in_specs.extend([
+        pl.BlockSpec(memory_space=pltpu.HBM),
+        pl.BlockSpec(memory_space=pltpu.HBM),
+    ])
+
     out_specs = [
         pl.BlockSpec(memory_space=pltpu.HBM),
         pl.BlockSpec(memory_space=pltpu.HBM),
@@ -1520,6 +1623,9 @@ def ragged_paged_attention(
         jnp.float32,
     )
 
+    k_scale_scratch = pltpu.VMEM(k_scale.shape, k_scale.dtype)
+    v_scale_scratch = pltpu.VMEM(v_scale.shape, v_scale.dtype)
+
     scratch_shapes = [
         bkv_double_buf,  # Double buffering for kv block.
         bq_double_buf,  # Double buffering for q block.
@@ -1530,6 +1636,8 @@ def ragged_paged_attention(
         l_scratch,
         m_scratch,
         acc_scratch,
+        k_scale_scratch,
+        v_scale_scratch
     ]
 
     scalar_prefetches = (
@@ -1555,8 +1663,8 @@ def ragged_paged_attention(
             soft_cap=soft_cap,
             mask_value=mask_value,
             q_scale=q_scale,
-            k_scale=k_scale,
-            v_scale=v_scale,
+            # k_scale=k_scale,
+            # v_scale=v_scale,
             chunk_prefill_size=chunk_prefill_size,
             bq_sz=bq_sz,
             bkv_p=bkv_p,
@@ -1585,8 +1693,8 @@ def ragged_paged_attention(
         },
         name=scope_name,
     )
-
-    output, updated_kv_cache = kernel(*scalar_prefetches, q, kv, kv_cache)
+    output, updated_kv_cache = kernel(*scalar_prefetches, q, kv, kv_cache,
+                                      k_scale, v_scale)
     return (
         prepare_outputs(output, actual_num_q_heads_per_kv_head,
                         actual_head_dim),

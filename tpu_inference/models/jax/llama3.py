@@ -26,7 +26,6 @@ from tpu_inference import utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.rope_interface import apply_rope
@@ -40,6 +39,13 @@ from tpu_inference.utils import get_mesh_shape_product
 logger = init_logger(__name__)
 
 init_fn = nnx.initializers.uniform()
+
+scales_data = jnp.load("fp4-512-redo-samples.npz")
+# scales_data = jnp.load("fp8-512-samples.npz")
+ALL_K_SCALES = jnp.array(
+    scales_data["k_scales"])  # [layers, kv_heads, head_dim]
+ALL_V_SCALES = jnp.array(
+    scales_data["v_scales"])  # [layers, kv_heads, head_dim]
 
 
 class LlamaMLP(nnx.Module):
@@ -155,6 +161,7 @@ class LlamaAttention(nnx.Module):
         kv_cache: Optional[jax.Array],
         x: jax.Array,
         attention_metadata: AttentionMetadata,
+        layer_idx: int,
     ) -> Tuple[jax.Array, jax.Array]:
         md = attention_metadata
         # q: (T, N, H)
@@ -169,13 +176,16 @@ class LlamaAttention(nnx.Module):
         v = self.v_proj(x)
         # o: (T, N, H)
         q_scale = k_scale = v_scale = None
-        if self.kv_cache_quantized_dtype:
-            # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
-            # q_scale = self._q_scale
-            k_scale = self._k_scale
-            v_scale = self._v_scale
-            k, v = quantize_kv(self.kv_cache_quantized_dtype, k, v, k_scale,
-                               v_scale)
+        # if self.kv_cache_quantized_dtype:
+        #     # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
+        #     # q_scale = self._q_scale
+        #     k_scale = self._k_scale
+        #     v_scale = self._v_scale
+        #     k, v = quantize_kv(self.kv_cache_quantized_dtype, k, v, k_scale,
+        #                        v_scale)
+        k_scale = ALL_K_SCALES[layer_idx]
+        v_scale = ALL_V_SCALES[layer_idx]
+
         new_kv_cache, outputs = attention(
             kv_cache,
             q,
@@ -230,12 +240,14 @@ class LlamaDecoderLayer(nnx.Module):
         kv_cache: jax.Array,
         x: jax.Array,
         attention_metadata: AttentionMetadata,
+        layer_idx: int,
     ) -> Tuple[jax.Array, jax.Array]:
         hidden_states = self.input_layernorm(x)
         kv_cache, attn_output = self.self_attn(
             kv_cache,
             hidden_states,
             attention_metadata,
+            layer_idx,
         )
         attn_output += x
 
@@ -337,6 +349,7 @@ class LlamaModel(nnx.Module):
                 kv_cache,
                 x,
                 attention_metadata,
+                layer_idx=i,
             )
             kv_caches[i] = kv_cache
         if not self.is_last_rank:
