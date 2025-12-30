@@ -315,10 +315,13 @@ def sharded_ragged_paged_attention(
         P(ShardingAxisName.ATTN_DATA),  # page_indices
         P(ShardingAxisName.ATTN_DATA),  # cu_q_lens
         P(ShardingAxisName.ATTN_DATA),  # distribution
+        P(ShardingAxisName.ATTN_HEAD),  # k_scale
+        P(ShardingAxisName.ATTN_HEAD),  # v_scale
     )
     out_specs = (qkv_spec, kv_cache_spec)
 
-    args = (q, k, v, kv_cache, kv_lens, page_indices, cu_q_lens, distribution)
+    args = (q, k, v, kv_cache, kv_lens, page_indices, cu_q_lens, distribution,
+            k_scale, v_scale)
 
     use_hd64 = q.shape[-1] == 64
     func = ragged_paged_attention_hd64 if use_hd64 else ragged_paged_attention
@@ -337,8 +340,6 @@ def sharded_ragged_paged_attention(
             sm_scale=sm_scale,
             sliding_window=attention_chunk_size,
             q_scale=q_scale,
-            k_scale=k_scale,
-            v_scale=v_scale,
         )
 
     return jax.shard_map(
@@ -360,8 +361,8 @@ def attention(
     head_dim_original: int | None = None,  # before padding,
     attention_chunk_size: int | None = None,
     q_scale: float | None = None,
-    k_scale: float | None = None,
-    v_scale: float | None = None,
+    k_scale: jax.Array | None = None,
+    v_scale: jax.Array | None = None,
     sinks: jax.Array | None = None,
 ) -> Tuple[jax.Array, jax.Array]:
     # T: seq_len
