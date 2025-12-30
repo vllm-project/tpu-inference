@@ -286,7 +286,8 @@ class DeepSeekV3(nnx.Module):
                 # ed_sharding=(ShardingAxisName.MOE_TENSOR, None),
                 # e_sharding=(ShardingAxisName.MOE_TENSOR, ))
                 use_sparse_moe=self.sparse_matmul,
-                quantized_dtype=self.weight_loader.quant_dtype
+                # quantized_dtype=self.weight_loader.quant_dtype
+                quantized_dtype=jnp.float4_e2m1fn
                 if self.weight_loader.is_model_quantized else None,
                 use_vllm_moe_kernel=self.use_vllm_moe_kernel,
                 use_fused_moe_kernel=self.use_fused_moe_kernel,
