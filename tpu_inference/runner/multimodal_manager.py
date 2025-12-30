@@ -224,9 +224,6 @@ class MultiModalManager:
                     mm_hashes_pos,
                     encoder_outputs,
             ):
-                if req_id not in self.runner.encoder_cache:
-                    self.runner.encoder_cache[req_id] = {}
-
                 self.runner.encoder_cache[mm_hash] = scatter_mm_placeholders(
                     output,
                     is_embed=pos_info.is_embed,
@@ -237,9 +234,6 @@ class MultiModalManager:
                     encoder_outputs,
                     deepstack_outputs,
             ):
-                if req_id not in self.runner.encoder_cache:
-                    self.runner.encoder_cache[req_id] = {}
-
                 self.runner.encoder_cache[mm_hash] = scatter_mm_placeholders(
                     output,
                     is_embed=pos_info.is_embed,
