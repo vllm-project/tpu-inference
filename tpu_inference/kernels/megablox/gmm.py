@@ -267,15 +267,45 @@ def gmm(
     
     block_size = k // num_quant_blocks
 
-    if tk > block_size or block_size % tk != 0:
-        tk = block_size
+    # Pallas requires the k-dimension of the lhs block (tk) to be a multiple of 128
+    # (or equal to k).
+    # We also need to align with quantization block_size.
+    
+    if block_size < 128:
+        # Quantization block is smaller than physical tile.
+        # We must load multiple quantization blocks per physical tile.
+        if 128 % block_size != 0:
+             raise ValueError(f"Unsupported: block_size {block_size} < 128 but does not divide 128.")
+        tk = 128
+        scales_per_tile = 128 // block_size
+    else:
+        # Quantization block is large. We can tile it.
+        # Ensure tk divides block_size and is multiple of 128.
+        if tk > block_size or block_size % tk != 0 or (tk % 128 != 0 and tk != k):
+            # Find largest valid tk <= requested tk
+            candidate_tk = (block_size // 128) * 128
+            # If requested tk is smaller and valid, prefer that? 
+            # Original logic preferred finding a valid tk close to block_size? 
+            # Actually original logic checked if tk was valid, if not, reset.
+            # Let's just find largest multiple of 128 that divides block_size.
+            # But we should respect user's 'tk' if it is valid.
+            
+            if tk <= block_size and block_size % tk == 0 and (tk % 128 == 0 or tk == k):
+                 pass # tk is fine
+            else:
+                 # Search for best tk
+                 candidate = 128
+                 best_tk = 128 # Default fallback
+                 while candidate <= block_size:
+                     if block_size % candidate == 0:
+                         best_tk = candidate
+                     candidate += 128
+                 tk = best_tk
+        scales_per_tile = 1
 
     # tiles_k is now the TOTAL number of K tiles
     tiles_k, k_rem = _calculate_irregular_num_tiles(k, tk)
     
-    # Calculate tiles per block for indexing logic
-    tiles_per_block = tiles_k // num_quant_blocks
-
     tiles_n, n_rem = _calculate_irregular_num_tiles(n, tn)
     del n_rem
 
@@ -326,21 +356,35 @@ def gmm(
                 mask_k_rem_lhs = _wrapper
                 mask_k_rem_rhs = _wrapper
 
-            loaded_lhs = lhs[...]
-            loaded_rhs = rhs[...]
+            loaded_lhs = mask_k_rem_lhs(lhs[...])
+            loaded_rhs = mask_k_rem_rhs(rhs[...])
+            
+            # Accumulated partial sum for this tile
+            tile_acc = jnp.zeros(acc_scratch.shape, dtype=jnp.float32)
+            
+            sub_k = tk // scales_per_tile
+            
+            for j in range(scales_per_tile):
+                # Slice the tile
+                lhs_slice = loaded_lhs[:, j*sub_k : (j+1)*sub_k]
+                rhs_slice = loaded_rhs[j*sub_k : (j+1)*sub_k, :]
+                
+                term = jax.lax.dot_general(
+                    lhs_slice,
+                    rhs_slice,
+                    preferred_element_type=jnp.float32,
+                    dimension_numbers=(((1, ), (0, )), ((), ())),
+                )
+                
+                if rhs_scale is not None:
+                    # rhs_scale loaded slice: (scales_per_tile, 1, tn)
+                    # We select j-th scale: (1, tn)
+                    scale_slice = rhs_scale[j, 0, :]
+                    term *= jnp.broadcast_to(scale_slice, term.shape)
+                
+                tile_acc += term
 
-            # Calculate partial product for this tile
-            partial_acc = jax.lax.dot_general(
-                mask_k_rem_lhs(loaded_lhs),
-                mask_k_rem_rhs(loaded_rhs),
-                preferred_element_type=jnp.float32,
-                dimension_numbers=(((1, ), (0, )), ((), ())),
-            )
-
-            if rhs_scale is not None:
-                partial_acc *= jnp.broadcast_to(rhs_scale[...], partial_acc.shape)
-
-            acc = acc_scratch[...] + partial_acc
+            acc = acc_scratch[...] + tile_acc
 
             if is_last_k_tile:
                 loaded_out = out[...].astype(jnp.float32)
@@ -393,12 +437,12 @@ def gmm(
 
     def rhs_scale_transform_indices(n_i, grid_id, k_i, group_metadata, group_offset):
         # RHS Scale: (group, num_blocks, 1, n).
-        # We must map the global tile index k_i to the block index.
         group_offsets, group_ids, m_tile_ids = group_metadata
         del group_offsets, m_tile_ids
         
-        # Calculate block index
-        block_idx = k_i // tiles_per_block
+        # Calculate start block index
+        # Each physical k-tile covers 'scales_per_tile' blocks.
+        block_idx = k_i * scales_per_tile
         
         return group_ids[grid_id] - group_offset[0], block_idx, 0, n_i
 
@@ -429,8 +473,8 @@ def gmm(
     if rhs_scale is None:
         rhs_scale_block_spec = None
     else:
-        # Scale tile size: (1, tn)
-        rhs_scale_block_spec = pl.BlockSpec((None, None, 1, tn),
+        # Scale tile size: (scales_per_tile, 1, tn)
+        rhs_scale_block_spec = pl.BlockSpec((None, scales_per_tile, 1, tn),
                                             rhs_scale_transform_indices)
 
     if rhs_bias is None:

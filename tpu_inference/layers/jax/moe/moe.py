@@ -19,7 +19,8 @@ import math
 import enum
 from unittest import mock
 import contextlib
-
+from tpu_inference.logger import init_logger
+logger = init_logger(__name__)
 import jax
 import jax.numpy as jnp
 from jax.experimental import xla_metadata, scheduling_groups
@@ -37,7 +38,7 @@ from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.layers.vllm.fused_moe import fused_moe_func
-from tpu_inference.models.jax.utils.quantization.quantization_utils import (
+from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     manually_quantize_qwix_activation, manually_quantize_qwix_weight)
 
 modeling_flax_utils = FlaxUtils()
@@ -103,7 +104,7 @@ def round_up_to_multiple_of_128_within_limit(x: int, limit: int) -> int:
         return 128
     if x < limit:
         return (x + 127) // 128 * 128
-    for candidate in range(limit, 511, -128):
+    for candidate in range(limit, 127, -128):
         if x % candidate == 0:
             return candidate
     return limit
@@ -286,6 +287,7 @@ class MoE(nnx.Module):
             weights_TX, indices_TX = self.router(x_TD)
 
             if self.use_sparse_moe:
+                logger.warning(f"self.quantized_dtype = {self.quantized_dtype}")
                 if self.quantized_dtype:
                     
                     #gate_up_scale_channel_sharding = self.efd_sharding[2] if   else None
@@ -643,11 +645,11 @@ class MoE(nnx.Module):
             reshaped_tokens_TXD = unsorted_tokens_tD.reshape(
                 -1, self.num_experts_per_tok, D)
         with jax.named_scope("combine_weights"):
-            output_TD = jnp.einsum(
-                "TXD,TX -> TD",
-                reshaped_tokens_TXD.astype(jnp.float32),
-                router_weights_TX.astype(jnp.float32),
-                precision='float32',
+            output_TD = jnp.sum(
+                reshaped_tokens_TXD.astype(jnp.float32)
+                * router_weights_TX[..., None].astype(jnp.float32),
+                axis=1,
+                # precision='float32',
             )
 
         return output_TD.astype(self.dtype)
@@ -672,10 +674,7 @@ class MoE(nnx.Module):
                 kernel_qvalue = kernel
                 kernel_scale = None
 
-            m, g, k, n = inputs.shape[0], *kernel_qvalue.shape
-            tm = round_up_to_multiple_of_128_within_limit(m, 512)
-            tk = round_up_to_multiple_of_128_within_limit(k, 2048)
-            tn = round_up_to_multiple_of_128_within_limit(n, 2048)
+            tm, tk, tn = 128, 128, 256
 
             output = megablox_gmm(
                 lhs=inputs,
@@ -927,4 +926,3 @@ class MoE(nnx.Module):
             return (weight.array.qvalue, weight.array.scale)
         
         return weight
->>>>>>> f0926383 (Add megablox and torchax kernel)

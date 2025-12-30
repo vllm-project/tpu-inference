@@ -63,7 +63,7 @@ DEFAULT_DEEPSEEK_FP4_MLP_MOE_FP8_ATTN_CONFIG = {
                 "module_path": ".*.custom_module.*",
                 "weight_qtype": "float4_e2m1fn",
                 "act_qtype": "float8_e4m3fn",
-                "tile_size": 256,
+                "tile_size": 128,
             },
             # Shared experts: also FP4
             {
