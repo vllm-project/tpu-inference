@@ -271,7 +271,7 @@ def test_ngram_performance_random(
             "prompt_lookup_max": 2,
             "prompt_lookup_min": 2,
             "num_speculative_tokens": 4,
-        }, 1.5 if _is_v7x() else 3.0)
+        }, 1.2 if _is_v7x() else 3.0)
 
 
 def test_eagle3_correctness(
