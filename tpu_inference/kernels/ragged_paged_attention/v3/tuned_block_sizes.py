@@ -829,8 +829,78 @@ TUNED_BLOCK_SIZES = {
                     'max_model_len-8192-sw-None': (32, 32),
                 },
             },
+            "q_bfloat16_kv_float4_e2m1fn": {
+                "q_head-16_kv_head-4_head-128": {
+                    'max_model_len-128-sw-None': (1, 64),
+                    'max_model_len-256-sw-None': (2, 32),
+                    'max_model_len-512-sw-None': (4, 8),
+                    'max_model_len-1024-sw-None': (8, 16),
+                    'max_model_len-2048-sw-None': (16, 16),
+                    'max_model_len-4096-sw-None': (32, 8),
+                    'max_model_len-8192-sw-None': (32, 64),
+                },
+                "q_head-16_kv_head-4_head-256": {
+                    'max_model_len-128-sw-None': (1, 32),
+                    'max_model_len-256-sw-None': (2, 32),
+                    'max_model_len-512-sw-None': (4, 8),
+                    'max_model_len-1024-sw-None': (8, 32),
+                    'max_model_len-2048-sw-None': (8, 16),
+                    'max_model_len-4096-sw-None': (32, 64),
+                    'max_model_len-8192-sw-None': (32, 32),
+                },
+            }
         },
         256: {
+            'q_bfloat16_kv_float4_e2m1fn': {
+                "q_head-16_kv_head-4_head-128": {
+                    256: (1, 32),
+                    512: (2, 128),
+                    1024: (4, 8),
+                    2048: (8, 8),
+                    4096: (16, 8),
+                    8192: (16, 16),
+                },
+                "q_head-16_kv_head-4_head-256": {
+                    8192: (8, 32),
+                    256: (1, 32),
+                    512: (2, 8),
+                    1024: (4, 32),
+                    2048: (8, 8),
+                    4096: (8, 16),
+                },
+                'q_head-32_kv_head-8_head-256': {
+                    4096: (16, 16),
+                    8192: (16, 32),
+                    256: (1, 32),
+                    512: (2, 8),
+                    1024: (4, 8),
+                    2048: (8, 32)
+                },
+                'q_head-32_kv_head-4_head-256': {
+                    256: (1, 8),
+                    512: (2, 8),
+                    1024: (4, 16),
+                    2048: (8, 8),
+                    4096: (16, 16),
+                    8192: (16, 16)
+                },
+                'q_head-32_kv_head-8_head-128': {
+                    4096: (16, 32),
+                    256: (1, 32),
+                    512: (2, 32),
+                    1024: (4, 16),
+                    2048: (8, 16),
+                    8192: (16, 16)
+                },
+                'q_head-32_kv_head-4_head-128': {
+                    256: (1, 32),
+                    512: (2, 32),
+                    1024: (4, 16),
+                    2048: (8, 8),
+                    4096: (16, 8),
+                    8192: (16, 16)
+                }
+            },
             'q_bfloat16_kv_bfloat16': {
                 'q_head-2_kv_head-1_head-256': {
                     'max_model_len-256-sw-None': (1, 64),
@@ -4365,7 +4435,7 @@ def get_tuned_block_sizes(
         bkv_p, bq = TUNED_BLOCK_SIZES[device][page_size][dtypes][head_dims][
             extra]
     except KeyError:
-        logger.warning_once(
+        logger.warning(
             'Couldn`t find tuned sizes for the RPA v3 kernel with %s', keys)
         # When not available use a sensible default based on TPU version
         # Set default block sizes for each tpu_version.
