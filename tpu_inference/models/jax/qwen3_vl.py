@@ -13,6 +13,7 @@ from tpu_inference import utils
 from tpu_inference.layers.common.attention_interface import (
     attention,
     sharded_flash_attention,
+    # TODO: Text attention should use ragged pagedattention
 )
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.logger import init_logger

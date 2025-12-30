@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
@@ -27,6 +28,55 @@ from tpu_inference.models.jax.utils.multi_modal_utils import (
 
 if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
+
+
+def _normalize_grid_thw(grid_thw: object) -> tuple[tuple[int, int, int], ...]:
+    """Normalize grid_thw into a tuple-of-tuples, flattening batch dim if present.
+
+    Note: Multimodal processing currently uses a single batch dimension, but
+    sequence-level batching may introduce a leading B dim (B, N, 3). We flatten
+    it here to keep the encoder interface stable.
+    """
+    if grid_thw is None:
+        return ()
+
+    if isinstance(grid_thw, (list, tuple)):
+        if len(grid_thw) == 0:
+            return ()
+        if len(grid_thw) == 3 and all(
+                isinstance(v, (int, np.integer)) for v in grid_thw):
+            return (tuple(int(v) for v in grid_thw), )
+        if all(isinstance(row, (list, tuple)) for row in grid_thw):
+            if grid_thw and grid_thw[0] and isinstance(grid_thw[0][0],
+                                                      (list, tuple)):
+                # Flatten (B, N, 3) -> (B*N, 3)
+                flat_rows = [row for batch in grid_thw for row in batch]
+                return tuple(tuple(int(v) for v in row) for row in flat_rows)
+            return tuple(tuple(int(v) for v in row) for row in grid_thw)
+
+    # Handle torch/jax/numpy tensors.
+    if hasattr(grid_thw, "detach"):
+        grid_thw = grid_thw.detach().cpu()
+    if hasattr(grid_thw, "numpy"):
+        try:
+            grid_thw = grid_thw.numpy()
+        except Exception:
+            pass
+
+    arr = np.asarray(grid_thw)
+    if arr.size == 0:
+        return ()
+    if arr.ndim == 1 and arr.shape[0] == 3:
+        return (tuple(int(v) for v in arr.tolist()), )
+    if arr.ndim == 2 and arr.shape[1] == 3:
+        return tuple(tuple(int(v) for v in row) for row in arr.tolist())
+    if arr.ndim == 3 and arr.shape[2] == 3:
+        flat = arr.reshape(-1, 3)
+        return tuple(tuple(int(v) for v in row) for row in flat.tolist())
+
+    raise ValueError(
+        "Incorrect type/shape of grid_thw. Expected (3,), (N, 3), or (B, N, 3)."
+    )
 
 
 class MultiModalManager:
@@ -115,31 +165,26 @@ class MultiModalManager:
                 mm_kwargs):
             batched_mm_inputs = mm_kwargs_group
             # Convert torch tensors to numpy arrays that JAX can handle.
-            if "pixel_values" in batched_mm_inputs and isinstance(
-                    batched_mm_inputs["pixel_values"], list):
-                batched_mm_inputs["pixel_values"] = torch.cat(
-                    batched_mm_inputs["pixel_values"], dim=0)
+            for key in ("pixel_values", "pixel_values_videos"):
+                if key in batched_mm_inputs and isinstance(
+                        batched_mm_inputs[key], list):
+                    batched_mm_inputs[key] = torch.cat(
+                        batched_mm_inputs[key], dim=0)
 
-            image_grid_thw = ()
+            image_grid_thw = _normalize_grid_thw(
+                batched_mm_inputs.pop("image_grid_thw", None))
+            video_grid_thw = _normalize_grid_thw(
+                batched_mm_inputs.pop("video_grid_thw", None))
+            if video_grid_thw:
+                batched_mm_inputs["video_grid_thw"] = video_grid_thw
+
             for key, value in batched_mm_inputs.items():
                 if isinstance(value, torch.Tensor):
-                    if key == 'image_grid_thw':
-                        # change it to tuple of tuples to make it hashable for JIT
-
-                        # Shape: (B, N, 3) -> (B*N, 3) -> tuple of tuples
-                        grid_thw_tensor = batched_mm_inputs[key]
-                        grid_thw_reshaped = grid_thw_tensor.reshape(-1, 3)
-                        image_grid_thw = tuple(
-                            tuple(row) for row in grid_thw_reshaped.tolist())
-
-                        continue
-
                     if value.dtype == torch.bfloat16:
                         batched_mm_inputs[key] = value.to(
                             torch.float32).numpy().astype(jnp.bfloat16)
                     else:
                         batched_mm_inputs[key] = value.numpy()
-            batched_mm_inputs.pop('image_grid_thw')
 
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
