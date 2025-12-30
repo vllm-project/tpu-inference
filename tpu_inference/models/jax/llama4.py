@@ -18,9 +18,9 @@ from typing import List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from flax import nnx
 from flax.typing import PRNGKey
-from jax import lax
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
@@ -42,6 +42,20 @@ from tpu_inference.models.jax.utils.weight_utils import (
 from ...layers.jax.llama4_vision_rope import Llama4VisionRotaryEmbedding
 
 logger = init_logger(__name__)
+
+
+def print_head_tail(x, name):
+    x = np.array(x).flatten()  # Convert to Numpy and flatten
+    mean = np.mean(x)
+    std = np.std(x)
+    head = x[:5]
+    tail = x[-5:]
+
+    print(f"\n[DEBUG JAX] {name}")
+    print(f"  Shape: {x.shape} (Flattened)")
+    print(f"  Mean:  {mean} | Std: {std}")
+    print(f"  Head:  {head}")
+    print(f"  Tail:  {tail}", flush=True)
 
 
 class Llama4ForCausalLM(nnx.Module):
@@ -670,11 +684,9 @@ class JAXUnfoldConvolution(nnx.Module):
         self.num_channels = cfg.num_channels
         patch_flat_dim = cfg.num_channels * cfg.patch_size * cfg.patch_size
 
-        # Corresponds to HF: patch_embedding.linear, MaxText: vit_unfold_linear
-        # Projects flattened patch into vision_hidden_size (1408)
         self.linear = nnx.Linear(
-            patch_flat_dim,  #input dimension
-            cfg.hidden_size,  #output dimension
+            patch_flat_dim,
+            cfg.hidden_size,
             use_bias=False,
             dtype=dtype,
             kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(),
@@ -683,26 +695,33 @@ class JAXUnfoldConvolution(nnx.Module):
         )
 
     def __call__(self, inputs: jax.Array) -> jax.Array:
-        # inputs: [batch_size, channels, img, img]
-        batch_size, num_channels, img, _ = inputs.shape
+        # Check if NCHW, flip to NHWC
+        if inputs.shape[1] == self.num_channels and inputs.shape[
+                -1] != self.num_channels:
+            inputs = jnp.transpose(inputs, (0, 2, 3, 1))
 
-        # Use JAX's lax.conv_general_dilated_patches, equivalent to MaxText's approach
-        # This extracts patches and flattens them to [B, Patch_Dim, Num_Patches]
-        patches = lax.conv_general_dilated_patches(
-            inputs,
-            filter_shape=[self.kernel_size, self.kernel_size],
-            window_strides=[self.kernel_size, self.kernel_size],
-            padding="VALID",
-            dimension_numbers=("NCHW", "HWIO", "NCHW"),
-        )
+        # REMOVED DUPLICATE DEBUG PRINT HERE (Use llama_guard_4.py for input pixels)
 
-        # Reshape and transpose to [batch_size, num_patches, num_channels * patch_size * patch_size]
-        patches = patches.reshape(
-            batch_size, -1, num_channels * self.kernel_size * self.kernel_size)
+        batch_size, height, width, channels = inputs.shape
+        patch_size = self.kernel_size
 
-        # Project patches to hidden dimension
-        hidden_states = self.linear(
-            patches)  # [B, num_patches, hidden_size_for_vit]
+        # 1. Reshape to separate tiles
+        patches = inputs.reshape(batch_size, height // patch_size, patch_size,
+                                 width // patch_size, patch_size, channels)
+
+        # 2. Transpose to group grid cells
+        patches = jnp.transpose(patches, (0, 1, 3, 2, 4, 5))
+
+        # 3. Flatten patches
+        patches = patches.reshape(batch_size, -1,
+                                  patch_size * patch_size * channels)
+
+        # 4. Project
+        hidden_states = self.linear(patches)
+
+        # --- DEBUG: Print Patch Embeddings (The Result) ---
+        jax.debug.callback(print_head_tail, hidden_states, "Patch Embeddings")
+        # --------------------------------------------------
 
         return hidden_states
 
@@ -1100,28 +1119,35 @@ class JAXLlama4VisionModel(nnx.Module):
             cfg, rngs=rngs, dtype=dtype, random_init=random_init)
 
     def __call__(self, pixel_values: jax.Array) -> jax.Array:
-        # pixel_values: [batch_size, num_tiles, channels, tile_size, tile_size] in MaxText,
-        # but HF and your model use [batch, channels, height, width] for simplicity
-
-        # For simplicity, assume pixel_values is [B, C, H, W] for now
-        # If your input is [B, T, C, H, W], reshape to [B*T, C, H, W] first.
-        # MaxText example handles the reshape:
         input_shape = pixel_values.shape
-        if len(input_shape) == 5:
-            # Expected VLM format: [Batch, Time/Tile, Channel, Height, Width]
+
+        # --- SHAPE HANDLING FIX ---
+        # We expect (Batch, Height, Width, Channel) from embed_multimodal.
+
+        if len(input_shape) == 4:
+            if input_shape[-1] == 3:
+                # (Batch, Height, Width, Channel) -> Good, this is what we want.
+                b, h, w, c = input_shape
+                t = 1
+            elif input_shape[1] == 3:
+                # (Batch, Channel, Height, Width) -> Legacy/PyTorch format. Transpose it.
+                b, c, h, w = input_shape
+                t = 1
+                pixel_values = jnp.transpose(pixel_values, (0, 2, 3, 1))
+            else:
+                raise ValueError(
+                    f"Unexpected pixel_values 4D shape: {input_shape}")
+        elif len(input_shape) == 5:
+            # (Batch, Time, Channel, Height, Width) -> Standard Video/Multicrop
             b, t, c, h, w = input_shape
-        elif len(input_shape) == 4:
-            # Standard single image format: [Batch, Channel, Height, Width]
-            # We insert the missing Time/Tile dimension (t=1)
-            b, c, h, w = input_shape
-            t = 1
-            pixel_values = jnp.expand_dims(
-                pixel_values, axis=1)  # Reshapes to [B, 1, C, H, W]
+            # Flatten Batch*Time and Transpose to NHWC
+            pixel_values = jnp.transpose(pixel_values,
+                                         (0, 1, 3, 4, 2))  # B, T, H, W, C
+            pixel_values = pixel_values.reshape(b * t, h, w, c)
         else:
             raise ValueError(f"Unexpected pixel_values shape: {input_shape}")
-        pixel_values = jnp.reshape(pixel_values, [b * t, c, h, w])
 
-        # 1. Unfold convolution to extract patches
+        # 1. Unfold convolution (uses our new explicit reshape logic)
         hidden_states = self.patch_embedding(pixel_values)
 
         # 2. Add class embedding
@@ -1140,27 +1166,36 @@ class JAXLlama4VisionModel(nnx.Module):
             freqs_ci_stacked = jnp.zeros(freqs_ci_stacked.shape,
                                          dtype=freqs_ci_stacked.dtype)
         hidden_states = self.model(hidden_states, freqs_ci_stacked)
-        #hidden_states = self.model(hidden_states)
+
         hidden_states = self.layernorm_post(hidden_states)
 
+        # --- PROBE 1: VISION ENCODER OUTPUT (Pre-Adapter) ---
+        # We slice off the CLS token to match what goes into the adapter
+        encoder_out_no_cls = hidden_states[:, 1:, :]
+        jax.debug.callback(print_head_tail, encoder_out_no_cls,
+                           "Step 3: Vision Encoder Output (Pre-Adapter)")
+        # ----------------------------------------------------
+
         # 5. Remove CLS token (MaxText/HF: hidden_states[:, :-1, :])
-        hidden_states = hidden_states[:,
-                                      1:, :]  # HF: hidden_states[:, :-1, :] removes the last one.
-        # If CLS is prepended, we remove the first one (index 0).
-        # MaxText/HF prepend the CLS token, so we remove the first element [:, 1:, :]
+        # HF implementation removes the LAST token (which is CLS due to attention masking tricks?),
+        # but standard ViT usually prepends CLS.
+        # Based on your previous logic:
+        hidden_states = encoder_out_no_cls
 
         # 6. Vision Adapter (Pixel Shuffle MLP)
         hidden_states = self.vision_adapter(hidden_states)
+
+        # --- PROBE 2: VISION ADAPTER OUTPUT ---
+        jax.debug.callback(print_head_tail, hidden_states,
+                           "Step 4: Vision Adapter Output")
+        # --------------------------------------
 
         # 7. Reshape back to [B, T, N_patches, H_out]
         _, patch_num, patch_dim = hidden_states.shape
         hidden_states = jnp.reshape(hidden_states,
                                     [b, t, patch_num, patch_dim])
 
-        # Final output for a single image will be [B, Num_patches, H_out=4096]
-        # where Num_patches is the number of final projected patches
-        return hidden_states.reshape(b, -1,
-                                     patch_dim)  # [B, Total_patches, 4096]
+        return hidden_states.reshape(b, -1, patch_dim)
 
 
 class JAXLlama4MultiModalProjector(nnx.Module):

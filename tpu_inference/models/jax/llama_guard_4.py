@@ -17,6 +17,7 @@ from typing import Any, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import torch
 from flax import nnx
 from flax.typing import PRNGKey
@@ -42,6 +43,20 @@ from tpu_inference.models.jax.utils.weight_utils import (
     transpose_params)
 
 logger = init_logger(__name__)
+
+
+def print_head_tail(x, name):
+    x = np.array(x).flatten()  # Convert to Numpy and flatten
+    mean = np.mean(x)
+    std = np.std(x)
+    head = x[:5]
+    tail = x[-5:]
+
+    print(f"\n[DEBUG JAX] {name}")
+    print(f"  Shape: {x.shape} (Flattened)")
+    print(f"  Mean:  {mean} | Std: {std}")
+    print(f"  Head:  {head}")
+    print(f"  Tail:  {tail}", flush=True)
 
 
 class LlamaGuard4ForCausalLM(nnx.Module):
@@ -319,7 +334,6 @@ class LlamaGuard4ForCausalLM(nnx.Module):
 
     def embed_multimodal(self, image_grid_thw, **kwargs) -> List[torch.Tensor]:
         pixel_values = kwargs.pop("pixel_values")
-        # Retrieve the critical metadata for splitting
         patches_per_image = kwargs.pop("patches_per_image", None)
 
         if pixel_values is None:
@@ -328,41 +342,42 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         # Ensure JAX handling
         pixel_values = jnp.asarray(pixel_values, dtype=jnp.bfloat16)
 
-        # 1. Run Vision Encoder
-        # Output: (Total_Tiles, Tokens_Per_Tile, Hidden_Dim)
+        # --- DEBUG: Print Input Pixels ---
+        jax.debug.callback(print_head_tail, pixel_values,
+                           "Input Pixels (Before Transpose)")
+        # ---------------------------------
+
+        # 1. Transpose Input from NCHW to NHWC
+        if pixel_values.ndim == 4 and pixel_values.shape[1] == 3:
+            pixel_values = jnp.transpose(pixel_values, (0, 2, 3, 1))
+
+        # 2. Run Vision Encoder
         projected_vision_features = self.multi_modal_projector(
             self.vision_model(pixel_values))
 
-        num_total_tiles = projected_vision_features.shape[0]
-        tokens_per_tile = projected_vision_features.shape[1]  # 144
-        hidden_dim = projected_vision_features.shape[2]  # 5120
+        # This checks the final features being passed to the LLM
+        jax.debug.callback(print_head_tail, projected_vision_features,
+                           "Projector Output (Vision Features)")
 
-        # 2. Flatten ALL tokens into one sequence first
-        # This gives us (Total_Tiles * 144, 5120)
+        num_total_tiles = projected_vision_features.shape[0]
+        tokens_per_tile = projected_vision_features.shape[1]
+        hidden_dim = projected_vision_features.shape[2]
+
+        # 3. Flatten tokens
         all_tokens_flat = projected_vision_features.reshape(-1, hidden_dim)
 
-        # 3. Determine how to split the batch
+        # 4. Split batch logic
         if patches_per_image is not None:
-            # patches_per_image is likely a NumPy array from multimodal_manager
             if hasattr(patches_per_image, 'tolist'):
                 tile_counts = patches_per_image.tolist()
             else:
                 tile_counts = list(patches_per_image)
-
-            # Flatten list if it's nested (e.g. batch dimension)
             if isinstance(tile_counts, list) and isinstance(
                     tile_counts[0], list):
                 import itertools
                 tile_counts = list(itertools.chain.from_iterable(tile_counts))
-
-            # Calculate token split sizes: [Tiles * 144, Tiles * 144, ...]
             split_sizes = [c * tokens_per_tile for c in tile_counts]
-
-            print(f"DEBUG: Using patches_per_image. Splits: {split_sizes}")
         else:
-            # Fallback for single image requests without metadata
-            # (Only safe if batch has 1 image or uniform tiling)
-            print("DEBUG: patches_per_image missing. Attempting fallback.")
             if num_total_tiles % 17 == 0:
                 num_images = num_total_tiles // 17
                 split_sizes = [17 * tokens_per_tile] * num_images
@@ -370,21 +385,14 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                 num_images = num_total_tiles // 16
                 split_sizes = [16 * tokens_per_tile] * num_images
             else:
-                # Assuming single image if no pattern matches
                 split_sizes = [num_total_tiles * tokens_per_tile]
 
-        # 4. Conversion to Torch (JAX -> CPU -> Torch)
+        # 5. Convert to Torch
         features_np = jax.device_get(all_tokens_flat.astype(jnp.float32))
         torch_features_all = torch.from_numpy(features_np).to(torch.bfloat16)
 
-        # 5. Execute the Split
-        # torch.split takes the tensor and a list of sizes for each chunk
+        # 6. Split
         output_list = list(torch.split(torch_features_all, split_sizes, dim=0))
-
-        # Verification Debug
-        print(
-            f"DEBUG: InTiles={num_total_tiles} | OutItems={len(output_list)} | Sizes={[t.shape[0] for t in output_list]}"
-        )
 
         return output_list
 
@@ -415,7 +423,8 @@ class LlamaGuard4WeightLoader:
 
         # Vision model transpose map
         self._vision_transpose_map = {
-            "patch_embedding.linear": (1, 0),
+            "patch_embedding.linear":
+            (2, 3, 1, 0),  #TODO: this might be the way
             "self_attn.q_proj": (2, 0, 1),
             "self_attn.k_proj": (2, 0, 1),
             "self_attn.v_proj": (2, 0, 1),
@@ -442,6 +451,9 @@ class LlamaGuard4WeightLoader:
         vision_attn_heads = vision_config.num_attention_heads
         vision_head_dim = vision_hidden_size // vision_attn_heads
         self._vision_weight_shape_map = {
+            "patch_embedding.linear":
+            (vision_hidden_size, 3, vision_config.patch_size,
+             vision_config.patch_size),
             "q_proj": (vision_attn_heads, vision_head_dim, vision_hidden_size),
             "k_proj": (vision_attn_heads, vision_head_dim, vision_hidden_size),
             "v_proj": (vision_attn_heads, vision_head_dim, vision_hidden_size),
@@ -611,6 +623,15 @@ class LlamaGuard4WeightLoader:
                     if transpose_map_to_use:
                         loaded_weight = transpose_params(
                             loaded_name, loaded_weight, transpose_map_to_use)
+
+                    # --- FIX START: Flatten Patch Embedding ---
+                    # The JAX model uses a Dense layer, so we must flatten (H, W, In) into (H*W*In)
+                    if "patch_embedding.linear" in mapped_name:
+                        # Current shape: (14, 14, 3, 1408)
+                        # Target shape: (588, 1408)
+                        loaded_weight = loaded_weight.reshape(
+                            -1, loaded_weight.shape[-1])
+                    # --- FIX END ------------------------------
                 if model_weight.value.shape != loaded_weight.shape:
                     raise ValueError(
                         f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
