@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import os
 from array import array
 from typing import Any, Dict, List, Optional
@@ -6,7 +20,7 @@ import ray
 import vllm.envs as envs
 from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-from vllm.multimodal.inputs import MultiModalKwargs
+from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE
@@ -39,7 +53,7 @@ logger = init_logger(__name__)
 
 
 def _encode_hook(obj: Any) -> Any:
-    """Custom msgspec enc hook that supports array types and MultiModalKwargs.
+    """Custom msgspec enc hook that supports array types and MultiModalKwargsItem.
 
     See https://jcristharif.com/msgspec/api.html#msgspec.msgpack.Encoder
     """
@@ -48,7 +62,7 @@ def _encode_hook(obj: Any) -> Any:
             f"vLLM array type should use '{VLLM_TOKEN_ID_ARRAY_TYPE}' type. "
             f"Given array has a type code of {obj.typecode}.")
         return obj.tobytes()
-    if isinstance(obj, MultiModalKwargs):
+    if isinstance(obj, MultiModalKwargsItem):
         return dict(obj)
 
 

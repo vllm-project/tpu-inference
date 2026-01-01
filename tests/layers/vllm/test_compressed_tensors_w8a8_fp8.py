@@ -1,11 +1,25 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import tempfile
 from typing import Optional
 
 import jax
+import jax.numpy as jnp
 import pytest
 import torch
 import torchax
-import utils as test_utils
 from compressed_tensors.quantization import QuantizationStrategy
 from jax.sharding import PartitionSpec
 from torchax.interop import torch_view
@@ -23,12 +37,17 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsLinearMethod
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 
+from tpu_inference.layers.common.quantization import (dequantize_tensor,
+                                                      quantize_tensor)
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
-from tpu_inference.layers.vllm.quantization.common import JaxCommonLinearConfig
 from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors import \
     VllmCompressedTensorsConfig
-from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import (
-    VllmCompressedTensorsW8A8Fp8, requantize_with_max_scale)
+from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import \
+    VllmCompressedTensorsW8A8Fp8
+from tpu_inference.layers.vllm.quantization.configs import \
+    VllmQuantLinearConfig
+
+from . import utils as test_utils
 
 P = PartitionSpec
 MODELS = [
@@ -83,8 +102,8 @@ def return_ref_and_layer_output(layer: torch.nn.Module, batch_size: int = 16):
     assert isinstance(layer, LinearBase)
     scheme = layer.scheme
     assert isinstance(scheme, VllmCompressedTensorsW8A8Fp8)
-    quant_config = scheme.jax_config
-    assert isinstance(quant_config, JaxCommonLinearConfig)
+    quant_config = scheme.linear_config
+    assert isinstance(quant_config, VllmQuantLinearConfig)
     quant_method = layer.quant_method
     assert isinstance(quant_method, CompressedTensorsLinearMethod)
     per_tensor = scheme.strategy == QuantizationStrategy.TENSOR
@@ -99,8 +118,27 @@ def return_ref_and_layer_output(layer: torch.nn.Module, batch_size: int = 16):
     # For per_tensor with merged layers, vLLM requenzites them so all merged
     # layers shared the same scale values.
     if per_tensor:
-        weight_scale, weight = requantize_with_max_scale(
-            layer.weight, layer.weight_scale, quant_config.output_sizes)
+        dtype = weight.dtype
+
+        weight = t2j(weight)
+        weight_scale = t2j(weight_scale)
+        weights = []
+        start = 0
+        # Multiple weights may have been concatenated. Loop through
+        # each weight and perform dequantization.
+        for i, output_size in enumerate(quant_config.output_sizes):
+            end = start + output_size
+            weights.append(
+                dequantize_tensor(weight[start:end], weight_scale[i]))
+            start = end
+        weight = jnp.concat(weights, axis=0)
+        weight, weight_scale = quantize_tensor(
+            jnp.float8_e4m3fn,
+            weight,
+            None,
+        )
+        weight = j2t(weight.astype(jnp.float32)).to(dtype)
+        weight_scale = j2t(weight_scale)
         if input_scale is not None:
             input_scale = input_scale.max()
 
@@ -136,8 +174,8 @@ def initialize_layer_weights(layer: torch.nn.Module):
     assert isinstance(layer, LinearBase)
     scheme = layer.scheme
     assert isinstance(scheme, VllmCompressedTensorsW8A8Fp8)
-    quant_config = scheme.jax_config
-    assert isinstance(quant_config, JaxCommonLinearConfig)
+    quant_config = scheme.linear_config
+    assert isinstance(quant_config, VllmQuantLinearConfig)
     per_tensor = scheme.strategy == QuantizationStrategy.TENSOR
 
     weight_list = []
@@ -236,12 +274,16 @@ def test_loading_model(model, mesh):
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("mesh", [
-    test_utils.get_spmd_mesh(1),
-    test_utils.get_spmd_mesh(jax.local_device_count())
-])
+@pytest.mark.parametrize("num_devices", [1, jax.local_device_count()])
 @pytest.mark.parametrize("enable_sp", [False, True])
-def test_row_parallel_linear(model, bias, mesh, enable_sp):
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+def test_row_parallel_linear(model, bias, num_devices, enable_sp,
+                             enable_attn_dp):
+    # Skip if enable_attn_dp is True but we don't have enough devices
+    if enable_attn_dp and num_devices < 2:
+        pytest.skip("enable_attn_dp requires at least 2 devices")
+
+    mesh = test_utils.get_spmd_mesh(num_devices, enable_attn_dp)
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
@@ -272,12 +314,16 @@ def test_row_parallel_linear(model, bias, mesh, enable_sp):
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("mesh", [
-    test_utils.get_spmd_mesh(1),
-    test_utils.get_spmd_mesh(jax.local_device_count())
-])
+@pytest.mark.parametrize("num_devices", [1, jax.local_device_count()])
 @pytest.mark.parametrize("enable_sp", [False, True])
-def test_column_parallel_linear(model, bias, mesh, enable_sp):
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+def test_column_parallel_linear(model, bias, num_devices, enable_sp,
+                                enable_attn_dp):
+    # Skip if enable_attn_dp is True but we don't have enough devices
+    if enable_attn_dp and num_devices < 2:
+        pytest.skip("enable_attn_dp requires at least 2 devices")
+
+    mesh = test_utils.get_spmd_mesh(num_devices, enable_attn_dp)
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
@@ -309,13 +355,17 @@ def test_column_parallel_linear(model, bias, mesh, enable_sp):
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("mesh", [
-    test_utils.get_spmd_mesh(1),
-    test_utils.get_spmd_mesh(jax.local_device_count())
-])
+@pytest.mark.parametrize("num_devices", [1, jax.local_device_count()])
 @pytest.mark.parametrize("enable_sp", [False, True])
 @pytest.mark.parametrize("fuse_matmuls", [False, True])
-def test_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+def test_qkv_parallel_linear(model, bias, num_devices, enable_sp, fuse_matmuls,
+                             enable_attn_dp):
+    # Skip if enable_attn_dp is True but we don't have enough devices
+    if enable_attn_dp and num_devices < 2:
+        pytest.skip("enable_attn_dp requires at least 2 devices")
+
+    mesh = test_utils.get_spmd_mesh(num_devices, enable_attn_dp)
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
@@ -350,14 +400,17 @@ def test_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("mesh", [
-    test_utils.get_spmd_mesh(1),
-    test_utils.get_spmd_mesh(jax.local_device_count())
-])
+@pytest.mark.parametrize("num_devices", [1, jax.local_device_count()])
 @pytest.mark.parametrize("fuse_matmuls", [False, True])
 @pytest.mark.parametrize("enable_sp", [False, True])
-def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
-                                       enable_sp):
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+def test_merged_column_parallel_linear(model, bias, num_devices, fuse_matmuls,
+                                       enable_sp, enable_attn_dp):
+    # Skip if enable_attn_dp is True but we don't have enough devices
+    if enable_attn_dp and num_devices < 2:
+        pytest.skip("enable_attn_dp requires at least 2 devices")
+
+    mesh = test_utils.get_spmd_mesh(num_devices, enable_attn_dp)
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(

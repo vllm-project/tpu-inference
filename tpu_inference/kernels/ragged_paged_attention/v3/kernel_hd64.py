@@ -1,3 +1,16 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 A variant of TPU-Friendly Ragged Paged Attention kernel optimized for
 head_dim = 64.
@@ -1311,6 +1324,10 @@ def static_validate_inputs(
     del debug_mode
 
 
+def get_kernel_scope_name(bq_size, bkv_p, page_size):
+    return f"RPA-HD_64-bq_{bq_size}-bkvp_{bkv_p}-p_{page_size}-"
+
+
 @functools.partial(
     jax.jit,
     static_argnames=(
@@ -1449,6 +1466,7 @@ def ragged_paged_attention_hd64(
             page_size,
             max_num_tokens,
             pages_per_seq,
+            sliding_window,
         )
     bkv_sz = bkv_p * page_size
     if vmem_limit_bytes is None:
@@ -1519,7 +1537,7 @@ def ragged_paged_attention_hd64(
         jnp.full((6, ), -1, jnp.int32),
     )
 
-    scope_name = f"RPA-HD_64-bq_{bq_sz}-bkvp_{bkv_p}-p_{page_size}"
+    scope_name = get_kernel_scope_name(bq_sz, bkv_p, page_size)
     kernel = pl.pallas_call(
         functools.partial(
             _ragged_paged_attention_kernel,

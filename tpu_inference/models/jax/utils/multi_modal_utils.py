@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from typing import Union
 
 import jax
@@ -29,25 +43,25 @@ def sanity_check_mm_encoder_outputs(
 ) -> None:
     """
     Perform sanity checks for the result of
-    [`vllm.model_executor.models.SupportsMultiModal.get_multimodal_embeddings`][].
+    [`vllm.model_executor.models.SupportsMultiModal.embed_multimodal`][].
     """
     assert isinstance(mm_embeddings, (list, tuple, jax.Array)), (
         "Expected multimodal embeddings to be a list/tuple of 2D tensors, "
         f"or a single 3D tensor, but got {type(mm_embeddings)} "
         "instead. This is most likely due to incorrect implementation "
-        "of the model's `get_multimodal_embeddings` method.")
+        "of the model's `embed_multimodal` method.")
 
     assert len(mm_embeddings) == expected_num_items, (
         "Expected number of multimodal embeddings to match number of "
         f"input items: {expected_num_items}, but got {len(mm_embeddings)=} "
         "instead. This is most likely due to incorrect implementation "
-        "of the model's `get_multimodal_embeddings` method.")
+        "of the model's `embed_multimodal` method.")
 
     assert all(e.ndim == 2 for e in mm_embeddings), (
         "Expected multimodal embeddings to be a sequence of 2D tensors, "
         f"but got tensors with shapes {[e.shape for e in mm_embeddings]} "
         "instead. This is most likely due to incorrect implementation "
-        "of the model's `get_multimodal_embeddings` method.")
+        "of the model's `embed_multimodal` method.")
 
 
 def flatten_embeddings(embeddings: NestedTensors) -> jax.Array:

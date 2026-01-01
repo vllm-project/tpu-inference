@@ -1,10 +1,23 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import functools
 import math
 from typing import Any, Callable, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
-from jax.experimental import shard_map
 from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention
 from jax.experimental.pallas.ops.tpu.splash_attention import \
     splash_attention_kernel as splash
@@ -55,11 +68,11 @@ def sharded_flash_attention(
                                vmem_limit_bytes=vmem_limit_bytes)
 
     return jax.jit(
-        shard_map.shard_map(_flash_attention,
-                            mesh=mesh,
-                            in_specs=in_specs,
-                            out_specs=out_specs,
-                            check_rep=False))
+        jax.shard_map(_flash_attention,
+                      mesh=mesh,
+                      in_specs=in_specs,
+                      out_specs=out_specs,
+                      check_vma=False))
 
 
 def sharded_paged_attention(
@@ -94,12 +107,12 @@ def sharded_paged_attention(
         )
 
     return jax.jit(
-        shard_map.shard_map(
+        jax.shard_map(
             _paged_attention_fn,
             mesh=mesh,
             in_specs=in_specs,
             out_specs=out_specs,
-            check_rep=False,
+            check_vma=False,
         ))
 
 
@@ -257,7 +270,7 @@ def sharded_splash_attention(
     )
     out_specs = P("data", "model", None, None)
     return jax.jit(
-        shard_map.shard_map(
+        jax.shard_map(
             functools.partial(
                 apply_splash,
                 window_size=window_size,
@@ -267,7 +280,7 @@ def sharded_splash_attention(
             mesh=mesh,
             in_specs=in_specs,
             out_specs=out_specs,
-            check_rep=False,
+            check_vma=False,
         ))
 
 
@@ -328,12 +341,12 @@ def sharded_ragged_paged_attention(
             v_scale=v_scale,
         )
 
-    return shard_map.shard_map(
+    return jax.shard_map(
         _ragged_paged_attention,
         mesh=mesh,
         in_specs=in_specs,
         out_specs=out_specs,
-        check_rep=False,
+        check_vma=False,
     )(*args)
 
 

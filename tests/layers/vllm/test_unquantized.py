@@ -1,10 +1,24 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import tempfile
+from unittest import mock
 
 import jax
 import pytest
 import torch
 import torchax
-import utils as test_utils
 from jax._src import test_util as jtu
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.interop import torch_view
@@ -22,10 +36,13 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 
+from tpu_inference.layers.vllm.fused_moe import FusedMoEBackend
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.unquantized import (
     VllmUnquantizedConfig, VllmUnquantizedFusedMoEMethod,
     VllmUnquantizedLinearMethod)
+
+from . import utils as test_utils
 
 P = PartitionSpec
 MODELS = ["Qwen/Qwen2-1.5B-Instruct"]
@@ -103,12 +120,16 @@ def test_loading_model(model, mesh):
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("mesh", [
-    test_utils.get_spmd_mesh(1),
-    test_utils.get_spmd_mesh(jax.local_device_count())
-])
+@pytest.mark.parametrize("num_devices", [1, jax.local_device_count()])
 @pytest.mark.parametrize("enable_sp", [False, True])
-def test_row_parallel_linear(model, bias, mesh, enable_sp):
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+def test_row_parallel_linear(model, bias, num_devices, enable_sp,
+                             enable_attn_dp):
+    # Skip if enable_attn_dp is True but we don't have enough devices
+    if enable_attn_dp and num_devices < 2:
+        pytest.skip("enable_attn_dp requires at least 2 devices")
+
+    mesh = test_utils.get_spmd_mesh(num_devices, enable_attn_dp)
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
@@ -120,9 +141,6 @@ def test_row_parallel_linear(model, bias, mesh, enable_sp):
     vllm_config = engine_args.create_engine_config()
     vllm_config.compilation_config.pass_config.enable_sp = enable_sp
 
-    input_tensor = torch.rand(10, 4096, dtype=dtype) / 10
-    input_tensor = input_tensor.to('cpu')
-
     with set_current_vllm_config(vllm_config):
         row_linear = RowParallelLinear(
             input_size=4096,
@@ -131,6 +149,9 @@ def test_row_parallel_linear(model, bias, mesh, enable_sp):
             params_dtype=dtype,
             return_bias=False,
         )
+
+    input_tensor = torch.rand(10, row_linear.input_size, dtype=dtype) / 10
+    input_tensor = input_tensor.to('cpu')
 
     weight_data = torch.rand_like(row_linear.weight.data) / 10
     if bias:
@@ -176,12 +197,16 @@ def test_row_parallel_linear(model, bias, mesh, enable_sp):
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("mesh", [
-    test_utils.get_spmd_mesh(1),
-    test_utils.get_spmd_mesh(jax.local_device_count())
-])
+@pytest.mark.parametrize("num_devices", [1, jax.local_device_count()])
 @pytest.mark.parametrize("enable_sp", [False, True])
-def test_column_parallel_linear(model, bias, mesh, enable_sp):
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+def test_column_parallel_linear(model, bias, num_devices, enable_sp,
+                                enable_attn_dp):
+    # Skip if enable_attn_dp is True but we don't have enough devices
+    if enable_attn_dp and num_devices < 2:
+        pytest.skip("enable_attn_dp requires at least 2 devices")
+
+    mesh = test_utils.get_spmd_mesh(num_devices, enable_attn_dp)
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
@@ -193,9 +218,6 @@ def test_column_parallel_linear(model, bias, mesh, enable_sp):
     vllm_config = engine_args.create_engine_config()
     vllm_config.compilation_config.pass_config.enable_sp = enable_sp
 
-    input_tensor = torch.rand(10, 4096, dtype=dtype) / 10
-    input_tensor = input_tensor.to('cpu')
-
     with set_current_vllm_config(vllm_config):
         column_linear = ColumnParallelLinear(
             input_size=4096,
@@ -204,6 +226,9 @@ def test_column_parallel_linear(model, bias, mesh, enable_sp):
             params_dtype=dtype,
             return_bias=False,
         )
+
+    input_tensor = torch.rand(10, column_linear.input_size, dtype=dtype) / 10
+    input_tensor = input_tensor.to('cpu')
 
     weight_data = torch.rand_like(column_linear.weight.data) / 10
     if bias:
@@ -248,13 +273,17 @@ def test_column_parallel_linear(model, bias, mesh, enable_sp):
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("mesh", [
-    test_utils.get_spmd_mesh(1),
-    test_utils.get_spmd_mesh(jax.local_device_count())
-])
+@pytest.mark.parametrize("num_devices", [1, jax.local_device_count()])
 @pytest.mark.parametrize("enable_sp", [False, True])
 @pytest.mark.parametrize("fuse_matmuls", [False, True])
-def test_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+def test_qkv_parallel_linear(model, bias, num_devices, enable_sp, fuse_matmuls,
+                             enable_attn_dp):
+    # Skip if enable_attn_dp is True but we don't have enough devices
+    if enable_attn_dp and num_devices < 2:
+        pytest.skip("enable_attn_dp requires at least 2 devices")
+
+    mesh = test_utils.get_spmd_mesh(num_devices, enable_attn_dp)
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
@@ -266,9 +295,6 @@ def test_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
     vllm_config = engine_args.create_engine_config()
     vllm_config.compilation_config.pass_config.enable_sp = enable_sp
 
-    input_tensor = torch.rand(10, 4096, dtype=dtype) / 10
-    input_tensor = input_tensor.to('cpu')
-
     with set_current_vllm_config(vllm_config):
         qkv_linear = QKVParallelLinear(
             hidden_size=4096,
@@ -279,6 +305,9 @@ def test_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
             params_dtype=dtype,
             return_bias=False,
         )
+
+    input_tensor = torch.rand(10, qkv_linear.input_size, dtype=dtype) / 10
+    input_tensor = input_tensor.to('cpu')
 
     weight_data = torch.rand_like(qkv_linear.weight.data) / 10
     if bias:
@@ -326,14 +355,17 @@ def test_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("mesh", [
-    test_utils.get_spmd_mesh(1),
-    test_utils.get_spmd_mesh(jax.local_device_count())
-])
+@pytest.mark.parametrize("num_devices", [1, jax.local_device_count()])
 @pytest.mark.parametrize("fuse_matmuls", [False, True])
 @pytest.mark.parametrize("enable_sp", [False, True])
-def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
-                                       enable_sp):
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+def test_merged_column_parallel_linear(model, bias, num_devices, fuse_matmuls,
+                                       enable_sp, enable_attn_dp):
+    # Skip if enable_attn_dp is True but we don't have enough devices
+    if enable_attn_dp and num_devices < 2:
+        pytest.skip("enable_attn_dp requires at least 2 devices")
+
+    mesh = test_utils.get_spmd_mesh(num_devices, enable_attn_dp)
     dtype = torch.bfloat16
 
     engine_args = EngineArgs(
@@ -345,9 +377,6 @@ def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
     vllm_config = engine_args.create_engine_config()
     vllm_config.compilation_config.pass_config.enable_sp = enable_sp
 
-    input_tensor = torch.rand(10, 4096, dtype=dtype) / 10
-    input_tensor = input_tensor.to('cpu')
-
     # Call vLLM code
     with set_current_vllm_config(vllm_config):
         merged_column_linear = MergedColumnParallelLinear(
@@ -357,6 +386,10 @@ def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
             params_dtype=dtype,
             return_bias=False,
         )
+
+    input_tensor = torch.rand(10, merged_column_linear.input_size,
+                              dtype=dtype) / 10
+    input_tensor = input_tensor.to('cpu')
 
     weight_data = torch.rand_like(merged_column_linear.weight.data) / 10
     if bias:
@@ -403,10 +436,7 @@ def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
 
 
 @pytest.mark.parametrize("use_ep", [True, False])
-@pytest.mark.parametrize("mesh", [
-    test_utils.get_spmd_mesh(1),
-    test_utils.get_spmd_mesh(jax.local_device_count())
-])
+@pytest.mark.parametrize("num_devices", [1, jax.local_device_count()])
 @pytest.mark.parametrize("num_tokens", [8])
 @pytest.mark.parametrize("intermediate_size", [1024, 2048])
 @pytest.mark.parametrize("hidden_size", [128, 512])
@@ -414,8 +444,15 @@ def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
 @pytest.mark.parametrize("topk", [2])
 @pytest.mark.parametrize("has_bias", [False, True])
 @pytest.mark.parametrize("activation", ["silu", "swigluoai"])
-def test_fused_moe(use_ep, mesh, num_tokens, intermediate_size, hidden_size,
-                   num_experts, topk, has_bias, activation):
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+def test_fused_moe(use_ep, num_devices, num_tokens, intermediate_size,
+                   hidden_size, num_experts, topk, has_bias, activation,
+                   enable_attn_dp):
+    # Skip if enable_attn_dp is True but we don't have enough devices
+    if enable_attn_dp and num_devices < 2:
+        pytest.skip("enable_attn_dp requires at least 2 devices")
+
+    mesh = test_utils.get_spmd_mesh(num_devices, enable_attn_dp)
 
     torch.manual_seed(42)
     dtype = torch.bfloat16
@@ -441,6 +478,8 @@ def test_fused_moe(use_ep, mesh, num_tokens, intermediate_size, hidden_size,
     )
     vllm_config = engine_args.create_engine_config()
     vllm_config.model_config.dtype = dtype
+    vllm_config.parallel_config = ParallelConfig(
+        tensor_parallel_size=mesh.devices.size, enable_expert_parallel=use_ep)
 
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
     with set_current_vllm_config(vllm_config):
@@ -472,6 +511,10 @@ def test_fused_moe(use_ep, mesh, num_tokens, intermediate_size, hidden_size,
     with torchax.default_env(), set_forward_context(None, vllm_config):
         assert isinstance(vllm_fused_moe.quant_method,
                           VllmUnquantizedFusedMoEMethod)
+        if use_ep:
+            assert vllm_fused_moe.quant_method.moe_backend == FusedMoEBackend.GMM_EP
+        else:
+            assert vllm_fused_moe.quant_method.moe_backend == FusedMoEBackend.GMM_TP
 
         jax_a = a.to('jax')
         score = score.to('jax')
@@ -487,16 +530,28 @@ def test_fused_moe(use_ep, mesh, num_tokens, intermediate_size, hidden_size,
                                    rtol=1e-1)
 
 
-@pytest.mark.parametrize("mesh",
-                         [test_utils.get_spmd_mesh(jax.local_device_count())])
+@pytest.mark.parametrize("num_devices", [jax.local_device_count()])
 @pytest.mark.parametrize("num_tokens", [128, 512])
 @pytest.mark.parametrize("intermediate_size", [512])
 @pytest.mark.parametrize("hidden_size", [512])
 @pytest.mark.parametrize("num_experts", [32])
 @pytest.mark.parametrize("topk", [8])
 @pytest.mark.parametrize("has_bias", [False, True])
-def test_fused_moe_use_kernel(mesh, num_tokens, intermediate_size, hidden_size,
-                              num_experts, topk, has_bias):
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+@mock.patch("os.environ", {"USE_MOE_EP_KERNEL": "1"})
+def test_fused_moe_use_kernel(num_devices, num_tokens, intermediate_size,
+                              hidden_size, num_experts, topk, has_bias,
+                              enable_attn_dp):
+    # Skip if enable_attn_dp is True but we don't have enough devices
+    if enable_attn_dp and num_devices < 2:
+        pytest.skip("enable_attn_dp requires at least 2 devices")
+
+    # Skip attn_dp tests for fused_moe_use_kernel since the kernel only supports 2D mesh
+    if enable_attn_dp:
+        pytest.skip(
+            "fused_moe kernel does not support attn_dp (requires 2D mesh)")
+
+    mesh = test_utils.get_spmd_mesh(num_devices, enable_attn_dp)
 
     # TODO(Qiliang Cui): Remove when issue is resolved.
     if not jtu.is_device_tpu_at_least(version=7):
@@ -547,7 +602,7 @@ def test_fused_moe_use_kernel(mesh, num_tokens, intermediate_size, hidden_size,
     vllm_config = engine_args.create_engine_config()
     vllm_config.model_config.dtype = dtype
     vllm_config.parallel_config = ParallelConfig(
-        tensor_parallel_size=mesh.devices.size)
+        tensor_parallel_size=mesh.devices.size, enable_expert_parallel=True)
 
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
     with set_current_vllm_config(vllm_config):
@@ -564,7 +619,6 @@ def test_fused_moe_use_kernel(mesh, num_tokens, intermediate_size, hidden_size,
             has_bias=has_bias,
         )
         vllm_fused_moe.moe_parallel_config.use_ep = True
-        vllm_fused_moe.quant_method.use_kernel = True
 
     vllm_fused_moe.w13_weight.data = w1
     vllm_fused_moe.w2_weight.data = w2
@@ -580,12 +634,14 @@ def test_fused_moe_use_kernel(mesh, num_tokens, intermediate_size, hidden_size,
     with torchax.default_env(), set_forward_context(None, vllm_config):
         assert isinstance(vllm_fused_moe.quant_method,
                           VllmUnquantizedFusedMoEMethod)
+        assert vllm_fused_moe.quant_method.moe_backend == FusedMoEBackend.FUSED_MOE
+
         jax_a = a.to('jax')
         score = score.to('jax')
 
         vllm_fused_moe.quant_method.process_weights_after_loading(
             vllm_fused_moe)
-        vllm_fused_moe.quant_method.block_size = {
+        vllm_fused_moe.quant_method.extra_backend_kwargs.update({
             "bt": 32,
             "bf": 512,
             "bd1": 512,
@@ -594,7 +650,7 @@ def test_fused_moe_use_kernel(mesh, num_tokens, intermediate_size, hidden_size,
             "bfc": 256,
             "bd1c": 256,
             "bd2c": 256,
-        }
+        })
         actual = vllm_fused_moe(jax_a, score)
 
         torch.testing.assert_close(

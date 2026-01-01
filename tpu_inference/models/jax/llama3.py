@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from itertools import islice
 from typing import List, Optional, Tuple
 
@@ -7,11 +21,12 @@ from flax import nnx
 from jax.sharding import Mesh
 from transformers import LlamaConfig, modeling_flax_utils
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group
 
 from tpu_inference import utils
+from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.rope_interface import apply_rope
@@ -20,6 +35,7 @@ from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.jax.utils.weight_utils import (get_default_maps,
                                                          load_hf_weights)
+from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
 
@@ -84,7 +100,8 @@ class LlamaAttention(nnx.Module):
                                          self.hidden_size // self.num_heads)
         self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
 
-        sharding_size = mesh.shape["model"] * mesh.shape.get("attn_dp", 1)
+        sharding_size = get_mesh_shape_product(mesh,
+                                               ShardingAxisName.MLP_TENSOR)
         self.num_heads = utils.get_padded_num_heads(self.num_heads,
                                                     sharding_size)
         self.num_kv_heads = utils.get_padded_num_heads(self.num_kv_heads,
@@ -157,8 +174,8 @@ class LlamaAttention(nnx.Module):
             # q_scale = self._q_scale
             k_scale = self._k_scale
             v_scale = self._v_scale
-            k, v = utils.quantize_kv(k, v, self.kv_cache_quantized_dtype,
-                                     k_scale, v_scale)
+            k, v = quantize_kv(self.kv_cache_quantized_dtype, k, v, k_scale,
+                               v_scale)
         new_kv_cache, outputs = attention(
             kv_cache,
             q,
@@ -355,13 +372,13 @@ class LlamaForCausalLM(nnx.Module):
         kv_caches: List[jax.Array],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
-        _input_embeds,
-        _input_positions,
-        _layer_name_to_kv_cache,
-        _lora_metadata,
-        intermediate_tensors: JaxIntermediateTensors,
-        _is_first_rank: bool,
-        _is_last_rank: bool,
+        _input_embeds=None,
+        _input_positions=None,
+        _layer_name_to_kv_cache=None,
+        _lora_metadata=None,
+        intermediate_tensors: JaxIntermediateTensors | None = None,
+        _is_first_rank: bool | None = None,
+        _is_last_rank: bool | None = None,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]] | Tuple[
             List[jax.Array], JaxIntermediateTensors]:

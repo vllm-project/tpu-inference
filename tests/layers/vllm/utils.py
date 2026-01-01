@@ -1,13 +1,42 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import jax
 import torch
 import torch.nn.functional as F
 
+from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
+                                                  MESH_AXIS_NAMES_2D)
 
-def get_spmd_mesh(num_devices: int = 1):
-    axis_names = ("data", "model")
+
+def get_spmd_mesh(num_devices: int = 1, enable_attn_dp: bool = False):
     devices = sorted(jax.devices(), key=lambda d: d.id)[0:num_devices]
-    mesh_shape = (1, len(devices))
-    return jax.make_mesh(mesh_shape, axis_names, devices=devices)
+
+    if enable_attn_dp:
+        if num_devices < 2:
+            raise ValueError(
+                f"enable_attn_dp requires at least 2 devices, got {num_devices}"
+            )
+        axis_names = MESH_AXIS_NAMES
+        attn_dp_size = 2
+        model_size = num_devices // attn_dp_size
+        mesh_shape = (1, attn_dp_size, 1, model_size)
+        return jax.make_mesh(mesh_shape, axis_names, devices=devices)
+    else:
+        axis_names = MESH_AXIS_NAMES_2D
+        mesh_shape = (1, len(devices))
+        return jax.make_mesh(mesh_shape, axis_names, devices=devices)
 
 
 def find_all_layer_type(module: torch.nn.Module, layer_type: torch.nn.Module):

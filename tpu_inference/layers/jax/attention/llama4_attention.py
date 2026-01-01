@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from dataclasses import dataclass
 
 import jax
@@ -5,8 +19,8 @@ import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Sharding
 
-from tpu_inference import utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.jax.attention.attention import Attention, KVCache
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.logger import init_logger
@@ -114,9 +128,8 @@ class Llama4Attention(Attention):
             # q_scale = self._q_scale
             k_scale = self._k_scale
             v_scale = self._v_scale
-            k_SKH, v_SKH = utils.quantize_kv(k_SKH, v_SKH,
-                                             self.kv_cache_quantized_dtype,
-                                             k_scale, v_scale)
+            k_SKH, v_SKH = quantize_kv(self.kv_cache_quantized_dtype, k_SKH,
+                                       v_SKH, k_scale, v_scale)
 
         with jax.named_scope("attn_op"):
             new_kv_cache, outputs_TNH = self.attention(
