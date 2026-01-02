@@ -65,8 +65,9 @@ nav:
   - Developer Guides:
     - 'JAX Model Development': developer_guides/jax_model_development.md
     - 'Torch Model Development': developer_guides/torchax_model_development.md
-  - 'v7x (Ironwood) Recipes (external)': https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/ironwood/vLLM
-  - 'v6e (Trillium) Recipes (external)': https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM
+  - 'Recipes (External)':
+    - 'v7x (Ironwood)': https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/ironwood/vLLM
+    - 'v6e (Trillium)': https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM
   - 'Profiling' : profiling.md
 plugins:
   - search
