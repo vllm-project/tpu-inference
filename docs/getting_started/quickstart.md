@@ -77,5 +77,6 @@ Check out complete, end-to-end example recipes in the [tpu-recipes repository](h
 ## For further reading
 
 * [Examples](https://github.com/vllm-project/tpu-inference/tree/main/examples)
-* [Recipes](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM)
+* [v7x (Ironwood) Recipes](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/ironwood/vLLM)
+* [v6e (Trillium) Recipes](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM)
 * [GKE serving with vLLM TPU](https://cloud.google.com/kubernetes-engine/docs/tutorials/serve-vllm-tpu)

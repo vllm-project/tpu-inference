@@ -49,7 +49,10 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 - Recommended: v7x, v5e, v6e
 - Experimental: v3, v4, v5p
 
-*Check out a few v6e recipes [here](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM)!*
+## Recipes
+
+- [v7x (Ironwood) Recipes](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/ironwood/vLLM)
+- [v6e (Trillium) Recipes](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM)
 
 ## Contribute
 
