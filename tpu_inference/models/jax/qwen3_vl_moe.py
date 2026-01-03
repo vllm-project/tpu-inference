@@ -43,6 +43,8 @@ from vllm.config import VllmConfig
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference import utils
+from tpu_inference.layers.common.attention_interface import attention
+from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 
 init_fn = nnx.initializers.uniform()
 
@@ -195,72 +197,62 @@ class Qwen3VLMoeTextSparseMoeBlock(nnx.Module):
 
 
 class Qwen3VLMoeTextAttention(nnx.Module):
-    # MHA
     def __init__(
         self,
-        hidden_size: int,
-        num_attention_heads: int,
-        num_key_value_heads: int,
-        head_dim: int,
-        rms_norm_eps: float,
+        config,
         dtype: jnp.dtype,
         rngs: nnx.Rngs,
         mesh: Mesh,
         kv_cache_dtype: str = "auto",
     ):
-        self.hidden_size = hidden_size
-        self.num_heads = num_attention_heads
-        self.num_kv_heads = num_key_value_heads
-        self.rms_norm_eps = rms_norm_eps
-        self.dtype = dtype
-        self.mesh = mesh
+        self.hidden_size = config.hidden_size
+        self.num_heads = config.num_attention_heads
+        self.num_kv_heads = config.num_key_value_heads
+        self.rms_norm_eps = config.rms_norm_eps
 
-        self.head_dim_original = head_dim
+        self.head_dim_original = getattr(config, "head_dim",
+                                         self.hidden_size // self.num_heads)
         self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
 
-        self.num_key_value_groups = self.num_heads // self.num_kv_heads
-        self.scaling = self.head_dim_original ** -0.5
-
-        # Pad heads for sharding
         sharding_size = mesh.shape["model"]
         self.num_heads = utils.get_padded_num_heads(self.num_heads, sharding_size)
         self.num_kv_heads = utils.get_padded_num_heads(self.num_kv_heads, sharding_size)
 
+        self.mesh = mesh
+
         self.q_proj = nnx.Einsum(
             "TD,DNH->TNH",
-            (hidden_size, self.num_heads, self.head_dim),
+            (self.hidden_size, self.num_heads, self.head_dim),
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rngs,
         )
-        self.q_norm = Qwen3VLTextRMSNorm(self.head_dim, eps=rms_norm_eps, dtype=dtype)
+        self.q_norm = Qwen3VLTextRMSNorm(self.head_dim, eps=self.rms_norm_eps, dtype=dtype)
 
         self.k_proj = nnx.Einsum(
             "TD,DKH->TKH",
-            (hidden_size, self.num_kv_heads, self.head_dim),
+            (self.hidden_size, self.num_kv_heads, self.head_dim),
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rngs,
         )
-        self.k_norm = Qwen3VLTextRMSNorm(self.head_dim, eps=rms_norm_eps, dtype=dtype)
+        self.k_norm = Qwen3VLTextRMSNorm(self.head_dim, eps=self.rms_norm_eps, dtype=dtype)
 
         self.v_proj = nnx.Einsum(
             "TD,DKH->TKH",
-            (hidden_size, self.num_kv_heads, self.head_dim),
+            (self.hidden_size, self.num_kv_heads, self.head_dim),
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rngs,
         )
-
         self.o_proj = nnx.Einsum(
             "TNH,NHD->TD",
-            (self.num_heads, self.head_dim, hidden_size),
+            (self.num_heads, self.head_dim, self.hidden_size),
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
             rngs=rngs,
         )
 
-        # KV cache quantization
         self._q_scale = 1.0
         self._k_scale = 1.0
         self._v_scale = 1.0
@@ -270,37 +262,43 @@ class Qwen3VLMoeTextAttention(nnx.Module):
 
     def __call__(
         self,
+        kv_cache: Optional[jax.Array],
         hidden_states: jax.Array,
+        attention_metadata: AttentionMetadata,
         position_embeddings: Tuple[jax.Array, jax.Array],
-        attention_mask: Optional[jax.Array] = None, # additive mask
-    ) -> jax.Array:
-        query_states = self.q_proj(hidden_states)  # (T, N, H)
-        key_states = self.k_proj(hidden_states)    # (T, K, H)
-        value_states = self.v_proj(hidden_states)  # (T, K, H)
+    ) -> Tuple[jax.Array, jax.Array]:
+        q = self.q_proj(hidden_states)
+        q = self.q_norm(q)
 
-        query_states = self.q_norm(query_states)
-        key_states = self.k_norm(key_states)
+        k = self.k_proj(hidden_states)
+        k = self.k_norm(k)
 
         cos, sin = position_embeddings
-        query_states = apply_rotary_pos_emb_thd_padded(query_states, cos, sin, self.head_dim_original)
-        key_states = apply_rotary_pos_emb_thd_padded(key_states, cos, sin, self.head_dim_original)
+        q = apply_rotary_pos_emb_thd_padded(q, cos, sin, self.head_dim_original)
+        k = apply_rotary_pos_emb_thd_padded(k, cos, sin, self.head_dim_original)
 
-        if self.num_key_value_groups > 1:
-            key_states = jnp.repeat(key_states, self.num_key_value_groups, axis=1)
-            value_states = jnp.repeat(value_states, self.num_key_value_groups, axis=1)
+        v = self.v_proj(hidden_states)
+        q_scale = k_scale = v_scale = None
+        if self.kv_cache_quantized_dtype:
+            k_scale = self._k_scale
+            v_scale = self._v_scale
+            k, v = utils.quantize_kv(k, v, self.kv_cache_quantized_dtype,
+                                     k_scale, v_scale)
 
-        # query_states: (T, N, H), key_states: (T, N, H), value_states: (T, N, H)
-        attn_weights = jnp.einsum('TNH,SNH->TNS', query_states, key_states) * self.scaling
-
-        if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask
-
-        attn_weights = jax.nn.softmax(attn_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
-
-        attn_output = jnp.einsum('TNS,SNH->TNH', attn_weights, value_states)
-        attn_output = self.o_proj(attn_output)
-
-        return attn_output
+        new_kv_cache, outputs = attention(
+            kv_cache,
+            q,
+            k,
+            v,
+            attention_metadata,
+            self.mesh,
+            self.head_dim_original,
+            q_scale=q_scale,
+            k_scale=k_scale,
+            v_scale=v_scale,
+        )
+        o = self.o_proj(outputs)
+        return new_kv_cache, o
 
 class Qwen3VLMoeTextMLP(nnx.Module):
     """Dense SwiGLU MLP for non-MoE layers."""
@@ -354,11 +352,7 @@ class Qwen3VLMoeTextDecoderLayer(nnx.Module):
         rms_norm_eps = config.rms_norm_eps
 
         self.self_attn = Qwen3VLMoeTextAttention(
-            hidden_size=hidden_size,
-            num_attention_heads=config.num_attention_heads,
-            num_key_value_heads=config.num_key_value_heads,
-            head_dim=getattr(config, "head_dim", hidden_size // config.num_attention_heads),
-            rms_norm_eps=rms_norm_eps,
+            config=config,
             dtype=dtype,
             rngs=rngs,
             mesh=mesh,
@@ -402,20 +396,21 @@ class Qwen3VLMoeTextDecoderLayer(nnx.Module):
         self.post_attention_layernorm = Qwen3VLTextRMSNorm(
             hidden_size, eps=rms_norm_eps, dtype=dtype
         )
-        self.hidden_size = hidden_size
 
     def __call__(
         self,
+        kv_cache: jax.Array,
         hidden_states: jax.Array,
+        attention_metadata: AttentionMetadata,
         position_embeddings: Tuple[jax.Array, jax.Array],
-        attention_mask: Optional[jax.Array] = None,
-    ) -> jax.Array:
+    ) -> Tuple[jax.Array, jax.Array]:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(
+        kv_cache, hidden_states = self.self_attn(
+            kv_cache=kv_cache,
             hidden_states=hidden_states,
+            attention_metadata=attention_metadata,
             position_embeddings=position_embeddings,
-            attention_mask=attention_mask,
         )
         hidden_states = residual + hidden_states
 
@@ -424,7 +419,7 @@ class Qwen3VLMoeTextDecoderLayer(nnx.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
-        return hidden_states
+        return kv_cache, hidden_states
 
 
 class Qwen3VLMoeTextModel(nnx.Module):
@@ -535,52 +530,54 @@ class Qwen3VLMoeTextModel(nnx.Module):
 
     def __call__(
         self,
-        input_ids: Optional[jax.Array] = None,
-        position_ids: Optional[jax.Array] = None,
-        attention_mask: Optional[jax.Array] = None,
+        kv_caches: List[jax.Array],
+        input_ids: Optional[jax.Array],
+        attention_metadata: AttentionMetadata,
         inputs_embeds: Optional[jax.Array] = None,
         visual_pos_mask: Optional[jax.Array] = None,
         deepstack_visual_embeds: Optional[List[jax.Array]] = None,
-    ) -> jax.Array:
+    ) -> Tuple[List[jax.Array], jax.Array]:
+        """Forward pass with KV cache, MRoPE, and DeepStack support."""
         if inputs_embeds is not None:
-            hidden_states = inputs_embeds
+            x = inputs_embeds
         else:
-            hidden_states = self.embed_tokens(input_ids)
+            x = self.embed_tokens(input_ids)
 
-        # TODO: make this not-so dynamic
-        if position_ids is None:
-            seq_len = hidden_states.shape[0] if hidden_states.ndim == 2 else hidden_states.shape[1]
-            position_ids = jnp.arange(seq_len, dtype=jnp.int32)
-            position_ids = jnp.broadcast_to(position_ids[None, :], (3, seq_len))
-        elif position_ids.ndim == 1:
-            position_ids = jnp.broadcast_to(position_ids[None, :], (3, position_ids.shape[0]))
-        elif position_ids.ndim == 2 and position_ids.shape[0] != 3:
-            # (batch, seq) -> (3, batch, seq) - expand for all dimensions
-            position_ids = jnp.broadcast_to(position_ids[None, :, :], (3, *position_ids.shape))
+        # Compute position embeddings from attention metadata
+        pos = attention_metadata.input_positions
+        # Handle (seq_len,), (3, seq_len), or (3, bs, seq_len) inputs
+        if pos.ndim == 1:
+            # (seq_len,) -> (3, seq_len) for text-only
+            pos = jnp.broadcast_to(pos[None, :], (3, pos.shape[0]))
+        elif pos.ndim == 2:
+            # (3, seq_len) -> (3, 1, seq_len)
+            pos = pos[:, None, :]
 
-        cos, sin = self.rotary_emb(position_ids)
-
+        cos, sin = self.rotary_emb(pos)
         position_embeddings = (cos, sin)
 
-        for layer_idx, decoder_layer in enumerate(self.layers):
-            hidden_states = decoder_layer(
-                hidden_states=hidden_states,
+        for i, layer in enumerate(self.layers):
+            kv_cache = kv_caches[i]
+            kv_cache, x = layer(
+                kv_cache=kv_cache,
+                hidden_states=x,
+                attention_metadata=attention_metadata,
                 position_embeddings=position_embeddings,
-                attention_mask=attention_mask,
             )
+            kv_caches[i] = kv_cache
 
             if (
                 deepstack_visual_embeds is not None
-                and layer_idx < len(deepstack_visual_embeds)
+                and i < len(deepstack_visual_embeds)
                 and visual_pos_mask is not None
             ):
-                hidden_states = self._inject_visual_features(
-                    hidden_states, visual_pos_mask, deepstack_visual_embeds[layer_idx]
+                x = self._inject_visual_features(
+                    x, visual_pos_mask, deepstack_visual_embeds[i]
                 )
 
-        hidden_states = self.norm(hidden_states)
+        x = self.norm(x)
 
-        return hidden_states
+        return kv_caches, x
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         if self.tie_word_embeddings:
