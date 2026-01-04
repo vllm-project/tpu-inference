@@ -42,6 +42,7 @@ from flax.typing import Sharding
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
 
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference import utils
@@ -69,8 +70,8 @@ class Qwen3VLMoeTextExperts(nnx.Module):
     hidden_size: int
     dtype: jnp.dtype = jnp.bfloat16
     rngs: InitVar[nnx.Rngs] = None
-    edf_sharding: Sharding = ('expert', None, 'model')
-    efd_sharding: Sharding = ('expert', 'model', None)
+    edf_sharding: Sharding = (ShardingAxisName.MLP_TENSOR, None, None)
+    efd_sharding: Sharding = (ShardingAxisName.MLP_TENSOR, None, None)
     random_init: bool = False
 
     def __post_init__(self, rngs: nnx.Rngs):
@@ -138,9 +139,9 @@ class Qwen3VLMoeTextSparseMoeBlock(nnx.Module):
     intermediate_size: int
     dtype: jnp.dtype = jnp.bfloat16
     rngs: InitVar[nnx.Rngs] = None
-    gate_sharding: Sharding = (None, 'expert')
-    edf_sharding: Sharding = ('expert', None, 'model')
-    efd_sharding: Sharding = ('expert', 'model', None)
+    gate_sharding: Sharding = (ShardingAxisName.MLP_TENSOR, None)
+    edf_sharding: Sharding = (ShardingAxisName.MLP_TENSOR, None, None)
+    efd_sharding: Sharding = (ShardingAxisName.MLP_TENSOR, None, None)
     random_init: bool = False
 
     def __post_init__(self, rngs: nnx.Rngs):
