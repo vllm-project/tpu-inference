@@ -9,9 +9,11 @@ from tpu_inference.models.jax.qwen3_vl import (
     # Helper functions
     _infer_pos_embed_grid_hw,
     generate_segment_ids_from_grid_thw,
+    get_mrope_input_positions,
     pad_segment_ids_for_attention,
     apply_rotary_pos_emb_vision,
     apply_rotary_pos_emb_thd_padded,
+    _ModelConfigAdapter,
     # Types
     SegmentIds,
     Qwen3VLImagePixelInputs,
@@ -45,10 +47,20 @@ from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference import utils
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.utils.multi_modal_utils import (
+    merge_multimodal_embeddings,
+)
+from tpu_inference.models.jax.utils.weight_utils import (
+    get_default_maps,
+    load_hf_weights,
+)
 
 init_fn = nnx.initializers.uniform()
 
 modeling_flax_utils = FlaxUtils()
+
+logger = init_logger(__name__)
 
 @dataclass(kw_only=True)
 class Qwen3VLMoeTextExperts(nnx.Module):
@@ -585,3 +597,471 @@ class Qwen3VLMoeTextModel(nnx.Module):
         else:
             logits = jnp.dot(hidden_states, self.lm_head.value)
         return logits
+
+
+class Qwen3VLMoeForConditionalGeneration(nnx.Module):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        rng_key: jax.Array,
+        mesh: Mesh,
+    ):
+        self.vllm_config = vllm_config
+        self.rng = nnx.Rngs(rng_key)
+        self.mesh = mesh
+
+        config = vllm_config.model_config.hf_config
+        self.config = config
+        text_config = getattr(config, "text_config", config)
+
+        self.visual = Qwen3VLVisionTransformer(
+            vllm_config=vllm_config,
+            rngs=self.rng,
+            mesh=mesh,
+            norm_eps=getattr(text_config, "rms_norm_eps", 1e-6),
+        )
+
+        self.language_model = Qwen3VLMoeTextModel(
+            config=text_config,
+            dtype=vllm_config.model_config.dtype,
+            rngs=self.rng,
+            mesh=mesh,
+            kv_cache_dtype=vllm_config.cache_config.cache_dtype,
+        )
+
+        self.image_token_id = config.image_token_id
+        self.video_token_id = config.video_token_id
+        self.vision_start_token_id = getattr(config, "vision_start_token_id", 151652)
+        self.spatial_merge_size = config.vision_config.spatial_merge_size
+
+    def get_input_embeddings(
+        self,
+        input_ids: jax.Array,
+        multimodal_embeddings: Optional[jax.Array],
+    ) -> jax.Array:
+        """Get input embeddings with multimodal content merged.
+
+        Args:
+            input_ids: Input token IDs
+            multimodal_embeddings: Flattened multimodal embeddings
+
+        Returns:
+            Input embeddings with multimodal content merged
+        """
+        inputs_embeds = self.language_model.embed_tokens(input_ids)
+
+        if multimodal_embeddings is not None and multimodal_embeddings.shape[0] != 0:
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids,
+                inputs_embeds,
+                multimodal_embeddings,
+                [self.image_token_id, self.video_token_id],
+            )
+
+        return inputs_embeds
+
+    def embed_input_ids(
+        self,
+        input_ids: jax.Array,
+        multimodal_embeddings: Optional[jax.Array] = None,
+    ) -> jax.Array:
+        """Compute input embeddings and merge multimodal embeddings if present."""
+        return self.get_input_embeddings(input_ids, multimodal_embeddings)
+
+    def _validate_and_reshape_mm_tensor(self, mm_input: object,
+                                        name: str) -> jax.Array:
+        if isinstance(mm_input, list):
+            arrays_to_concat = [jnp.asarray(item) for item in mm_input]
+            return jnp.concatenate(arrays_to_concat, axis=0)
+
+        if hasattr(mm_input, 'ndim'):
+            array_input = jnp.asarray(mm_input)
+            if array_input.ndim == 2:
+                return array_input
+            if array_input.ndim == 3:
+                return array_input.reshape(-1, array_input.shape[-1])
+
+        raise ValueError(f"Incorrect type of {name}. "
+                         f"Got type: {type(mm_input)}")
+
+    def _normalize_grid_thw(
+            self, grid_thw: object) -> Tuple[Tuple[int, int, int], ...]:
+        if grid_thw is None:
+            return ()
+        if isinstance(grid_thw, (list, tuple)):
+            if len(grid_thw) == 0:
+                return ()
+            if len(grid_thw) == 3 and all(
+                    isinstance(v, (int, np.integer)) for v in grid_thw):
+                return (tuple(int(v) for v in grid_thw), )
+            if isinstance(grid_thw[0], (list, tuple)):
+                return tuple(tuple(int(v) for v in row) for row in grid_thw)
+        if hasattr(grid_thw, 'ndim'):
+            array_input = np.asarray(grid_thw)
+            if array_input.size == 0:
+                return ()
+            if array_input.ndim == 1 and array_input.shape[0] == 3:
+                return (tuple(int(v) for v in array_input.tolist()), )
+            if array_input.ndim == 2 and array_input.shape[1] == 3:
+                return tuple(
+                    tuple(int(v) for v in row)
+                    for row in array_input.tolist())
+        raise ValueError("Incorrect type of grid_thw. "
+                         f"Got type: {type(grid_thw)}")
+
+    def _parse_and_validate_image_input(
+            self, image_grid_thw: Tuple[Tuple[int, int, int], ...],
+            **kwargs: object) -> Optional[Qwen3VLImageInputs]:
+        pixel_values = kwargs.pop("pixel_values", None)
+        if pixel_values is None:
+            pixel_values = kwargs.pop("pixel_values_videos", None)
+        image_embeds = kwargs.pop("image_embeds", None)
+
+        if pixel_values is None and image_embeds is None:
+            return None
+
+        if pixel_values is not None:
+            pixel_values = self._validate_and_reshape_mm_tensor(
+                pixel_values, "pixel values")
+
+            if not isinstance(pixel_values, jax.Array):
+                raise ValueError("Incorrect type of pixel values. "
+                                 f"Got type: {type(pixel_values)}")
+
+            return Qwen3VLImagePixelInputs(
+                type="pixel_values",
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw)
+
+        # NOTE: Not supporting image embeddings precomputed. Matches Qwen2.5VL.
+        # if image_embeds is not None:
+        #     image_embeds = self._validate_and_reshape_mm_tensor(
+        #         image_embeds, "image embeds")
+        #     if not isinstance(image_embeds, jax.Array):
+        #         raise ValueError("Incorrect type of image embeddings. "
+        #                          f"Got type: {type(image_embeds)}")
+        #     return Qwen3VLImageEmbeddingInputs(
+        #         type="image_embeds",
+        #         image_embeds=image_embeds,
+        #         image_grid_thw=image_grid_thw)
+
+    def _parse_and_validate_multimodal_inputs(self,
+                                              image_grid_thw: Tuple[Tuple[int,
+                                                                          int,
+                                                                          int],
+                                                                    ...],
+                                              **kwargs: object) -> dict:
+        mm_input_by_modality = {}
+        for input_key in kwargs:
+            if input_key in ("pixel_values", "pixel_values_videos",
+                             "image_embeds"
+                             ) and "image" not in mm_input_by_modality:
+                mm_input_by_modality[
+                    "image"] = self._parse_and_validate_image_input(
+                        image_grid_thw, **kwargs)
+        return mm_input_by_modality
+
+    def _process_image_input(
+            self, image_input: Qwen3VLImageInputs
+    ) -> tuple[tuple[jax.Array, ...],
+               Optional[list[list[jax.Array]]]]:
+        grid_thw = image_input["image_grid_thw"]
+        if not grid_thw:
+            return (), None
+
+        if image_input["type"] == "image_embeds":
+            image_embeds = image_input["image_embeds"].astype(self.visual.dtype)
+            deepstack_embeds = None
+        else:
+            pixel_values = image_input["pixel_values"]
+            image_embeds, deepstack_embeds = self.visual(pixel_values, grid_thw)
+
+        sizes = np.array([
+            t * (h // self.spatial_merge_size) * (w // self.spatial_merge_size)
+            for t, h, w in grid_thw
+        ])
+
+        if sizes.size == 0:
+            return (), None
+        if sizes.size == 1:
+            image_splits = (image_embeds, )
+            deepstack_by_item = None
+            if deepstack_embeds:
+                deepstack_by_item = [
+                    [layer_embeds for layer_embeds in deepstack_embeds]
+                ]
+            return image_splits, deepstack_by_item
+
+        split_indices = np.cumsum(sizes)[:-1]
+        image_splits = tuple(jnp.split(image_embeds, split_indices))
+        deepstack_by_item = None
+        if deepstack_embeds:
+            layer_splits = [
+                tuple(jnp.split(layer_embeds, split_indices))
+                for layer_embeds in deepstack_embeds
+            ]
+            deepstack_by_item = []
+            for item_idx in range(len(image_splits)):
+                deepstack_by_item.append(
+                    [layer_split[item_idx] for layer_split in layer_splits]
+                )
+        return image_splits, deepstack_by_item
+
+    def embed_multimodal(
+        self,
+        image_grid_thw: Tuple[Tuple[int, int, int], ...],
+        **kwargs,
+    ) -> dict:
+        """Get multimodal embeddings from pixel values.
+
+        This method is called by the serving infrastructure (multimodal_manager).
+        DeepStack embeddings are returned alongside visual embeddings for caching.
+
+        Args:
+            image_grid_thw: Grid dimensions (T, H, W) for each image
+            **kwargs: Contains 'pixel_values' for vision encoder
+
+        Returns:
+            A dict with:
+              - "embeds": Tuple of embeddings, one per image (Qwen 2.5 VL format)
+              - "deepstack": Optional list of per-image DeepStack embeddings
+        """
+        image_grid_thw = self._normalize_grid_thw(image_grid_thw)
+        if not image_grid_thw:
+            image_grid_thw = self._normalize_grid_thw(
+                kwargs.get("video_grid_thw", None))
+
+        mm_input_by_modality = self._parse_and_validate_multimodal_inputs(
+            image_grid_thw, **kwargs)
+        if not mm_input_by_modality:
+            return {}
+        if not image_grid_thw:
+            return {}
+
+        multimodal_embeddings: tuple[jax.Array, ...] = ()
+        deepstack_outputs = None
+        for modality in mm_input_by_modality:
+            multimodal_input = mm_input_by_modality[modality]
+            if modality == "image":
+                image_splits, deepstack_by_item = self._process_image_input(
+                    multimodal_input)
+                multimodal_embeddings += image_splits
+                if deepstack_by_item is not None:
+                    if deepstack_outputs is None:
+                        deepstack_outputs = []
+                    deepstack_outputs.extend(deepstack_by_item)
+
+        return {"embeds": multimodal_embeddings, "deepstack": deepstack_outputs}
+
+    def __call__(
+        self,
+        kv_caches: List[jax.Array],
+        input_ids: Optional[jax.Array],
+        attention_metadata: AttentionMetadata,
+        inputs_embeds: Optional[jax.Array] = None,
+        *args,
+    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
+        visual_pos_mask = None
+        deepstack_embeds = None
+        if args:
+            candidate = args[-1]
+            if isinstance(candidate, (list, tuple)):
+                deepstack_embeds = candidate
+
+        if deepstack_embeds and input_ids is not None:
+            visual_pos_mask = (input_ids == self.image_token_id) | (
+                input_ids == self.video_token_id
+            )
+
+        kv_caches, hidden_states = self.language_model(
+            kv_caches=kv_caches,
+            input_ids=input_ids,
+            attention_metadata=attention_metadata,
+            inputs_embeds=inputs_embeds,
+            visual_pos_mask=visual_pos_mask,
+            deepstack_visual_embeds=deepstack_embeds,
+        )
+
+        return kv_caches, hidden_states, []
+
+    def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
+        return self.language_model.compute_logits(hidden_states)
+
+    def get_mrope_input_positions(
+        self,
+        input_tokens: List[int],
+        hf_config=None,
+        image_grid_thw=None,
+        video_grid_thw=None,
+        second_per_grid_ts=None,
+        context_len: int = 0,
+        seq_len: Optional[int] = None,
+        audio_feature_lengths=None,
+        use_audio_in_video: bool = False,
+    ) -> Tuple[jax.Array, int]:
+        """Compute MRoPE 3D position IDs for input sequence.
+
+        This is a wrapper around the module-level get_mrope_input_positions function
+        that uses the model's configuration.
+
+        Args:
+            input_tokens: List of token IDs for the sequence
+            hf_config: Optional HF config (defaults to self.config)
+            image_grid_thw: List of (T, H, W) tuples for each image
+            video_grid_thw: List of (T, H, W) tuples for each video
+            context_len: Context length for slicing positions
+            seq_len: Sequence length for slicing positions
+
+        Returns:
+            llm_positions: (3, sliced_seq_len) position IDs for [T, H, W]
+            mrope_position_delta: Delta for rope calculation
+        """
+        del second_per_grid_ts, audio_feature_lengths, use_audio_in_video
+
+        if hf_config is None:
+            hf_config = self.config
+
+        if video_grid_thw is not None:
+            expanded_video = []
+            for t, h, w in video_grid_thw:
+                t_val = int(t)
+                expanded_video.extend([(1, int(h), int(w))] * t_val)
+            video_grid_thw = expanded_video
+
+        llm_positions, mrope_position_delta = get_mrope_input_positions(
+            input_tokens=input_tokens,
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=video_grid_thw,
+            image_token_id=hf_config.image_token_id,
+            video_token_id=hf_config.video_token_id,
+            vision_start_token_id=getattr(hf_config, "vision_start_token_id",
+                                          self.vision_start_token_id),
+            spatial_merge_size=hf_config.vision_config.spatial_merge_size,
+        )
+
+        llm_positions = llm_positions[:, context_len:seq_len]
+        return llm_positions, mrope_position_delta
+
+    def precompile_vision_encoder(
+        self,
+        run_compilation_fn,
+    ) -> None:
+        """Precompile vision encoder for warmup.
+
+        Args:
+            run_compilation_fn: Function to run compilation with signature
+                (name, fn, *args, **kwargs)
+        """
+        vc = self.config.vision_config
+        patch_input_dim = (
+            vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size
+        )
+
+        image_shapes = []
+        if warmup_config := self.vllm_config.additional_config.get(
+            "vision_warmup_config"
+        ):
+            image_shapes = warmup_config.get("image_shapes", [])
+
+        factor = vc.patch_size * vc.spatial_merge_size
+        for input_hw in image_shapes:
+            if not isinstance(input_hw, list) or len(input_hw) != 2:
+                logger.warning(f"Skipping invalid shape {input_hw}.")
+                continue
+            h_input, w_input = input_hw
+            h_processed = round(h_input / factor) * factor
+            w_processed = round(w_input / factor) * factor
+            t, h, w = 1, h_processed // vc.patch_size, w_processed // vc.patch_size
+            grid_thw = (t, h, w)
+            num_patches = t * h * w
+
+            dummy_pixel_values = jnp.ones(
+                (num_patches, patch_input_dim),
+                self.vllm_config.model_config.dtype,
+            )
+            dummy_grid_thw = (grid_thw,)
+
+            run_compilation_fn(
+                "vision_encoder",
+                self.visual.encode_jit,
+                dummy_pixel_values,
+                dummy_grid_thw,
+                image_shape=input_hw,
+            )
+
+    def load_weights(self, rng_key: jax.Array) -> None:
+        self.rng = nnx.Rngs(rng_key)
+
+        mappings = {
+            "model.language_model.embed_tokens": "language_model.embed_tokens.embedding",
+            "model.language_model.layers.*.input_layernorm": "language_model.layers.*.input_layernorm.weight",
+            "model.language_model.layers.*.mlp.down_proj": "language_model.layers.*.mlp.down_proj.kernel",
+            "model.language_model.layers.*.mlp.gate_proj": "language_model.layers.*.mlp.gate_proj.kernel",
+            "model.language_model.layers.*.mlp.up_proj": "language_model.layers.*.mlp.up_proj.kernel",
+            "model.language_model.layers.*.mlp.gate": "language_model.layers.*.mlp.gate",
+            "model.language_model.layers.*.mlp.experts.gate_up_proj": "language_model.layers.*.mlp.experts.gate_up_proj",
+            "model.language_model.layers.*.mlp.experts.down_proj": "language_model.layers.*.mlp.experts.down_proj",
+            "model.language_model.layers.*.post_attention_layernorm": "language_model.layers.*.post_attention_layernorm.weight",
+            "model.language_model.layers.*.self_attn.k_proj": "language_model.layers.*.self_attn.k_proj.kernel",
+            "model.language_model.layers.*.self_attn.o_proj": "language_model.layers.*.self_attn.o_proj.kernel",
+            "model.language_model.layers.*.self_attn.q_proj": "language_model.layers.*.self_attn.q_proj.kernel",
+            "model.language_model.layers.*.self_attn.v_proj": "language_model.layers.*.self_attn.v_proj.kernel",
+            "model.language_model.layers.*.self_attn.q_norm": "language_model.layers.*.self_attn.q_norm.weight",
+            "model.language_model.layers.*.self_attn.k_norm": "language_model.layers.*.self_attn.k_norm.weight",
+            "model.language_model.norm": "language_model.norm.weight",
+            "model.visual.patch_embed.proj": "visual.patch_embed.proj.kernel",
+            "model.visual.patch_embed.proj.bias": "visual.patch_embed.proj.bias",
+            "model.visual.pos_embed": "visual.pos_embed.embedding",
+            "model.visual.blocks.*.attn.qkv": "visual.blocks.*.attn.qkv_proj.kernel",
+            "model.visual.blocks.*.attn.qkv.bias": "visual.blocks.*.attn.qkv_proj.bias",
+            "model.visual.blocks.*.attn.proj": "visual.blocks.*.attn.proj.kernel",
+            "model.visual.blocks.*.attn.proj.bias": "visual.blocks.*.attn.proj.bias",
+            "model.visual.blocks.*.mlp.linear_fc1": "visual.blocks.*.mlp.fc1.kernel",
+            "model.visual.blocks.*.mlp.linear_fc1.bias": "visual.blocks.*.mlp.fc1.bias",
+            "model.visual.blocks.*.mlp.linear_fc2": "visual.blocks.*.mlp.fc2.kernel",
+            "model.visual.blocks.*.mlp.linear_fc2.bias": "visual.blocks.*.mlp.fc2.bias",
+            "model.visual.blocks.*.norm1": "visual.blocks.*.norm1.scale",
+            "model.visual.blocks.*.norm1.bias": "visual.blocks.*.norm1.bias",
+            "model.visual.blocks.*.norm2": "visual.blocks.*.norm2.scale",
+            "model.visual.blocks.*.norm2.bias": "visual.blocks.*.norm2.bias",
+            "model.visual.merger.norm": "visual.merger.norm.scale",
+            "model.visual.merger.norm.bias": "visual.merger.norm.bias",
+            "model.visual.merger.linear_fc1": "visual.merger.linear_fc1.kernel",
+            "model.visual.merger.linear_fc1.bias": "visual.merger.linear_fc1.bias",
+            "model.visual.merger.linear_fc2": "visual.merger.linear_fc2.kernel",
+            "model.visual.merger.linear_fc2.bias": "visual.merger.linear_fc2.bias",
+        }
+
+        hf_config = self.vllm_config.model_config.hf_config
+        if not hf_config.tie_word_embeddings:
+            mappings["lm_head"] = "language_model.lm_head"
+
+        vision_config = hf_config.vision_config
+        deepstack_indexes = getattr(vision_config, "deepstack_visual_indexes", [8, 16, 24])
+        for i in range(len(deepstack_indexes)):
+            mappings[f"model.visual.deepstack_merger_list.{i}.norm"] = f"visual.deepstack_merger_list.{i}.norm.scale"
+            mappings[f"model.visual.deepstack_merger_list.{i}.norm.bias"] = f"visual.deepstack_merger_list.{i}.norm.bias"
+            mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc1"] = f"visual.deepstack_merger_list.{i}.linear_fc1.kernel"
+            mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc1.bias"] = f"visual.deepstack_merger_list.{i}.linear_fc1.bias"
+            mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc2"] = f"visual.deepstack_merger_list.{i}.linear_fc2.kernel"
+            mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc2.bias"] = f"visual.deepstack_merger_list.{i}.linear_fc2.bias"
+
+        adapted_model_config = _ModelConfigAdapter(self.vllm_config.model_config)
+        metadata_map = get_default_maps(
+            adapted_model_config, self.mesh, mappings
+        )
+
+        transpose_map = {
+            "experts.gate_up_proj": (0, 1, 2),
+            "experts.down_proj": (0, 1, 2),
+        }
+        transpose_map.update(metadata_map.transpose_map)
+        transpose_map["mlp.gate"] = (1, 0)
+        metadata_map.transpose_map = transpose_map
+
+        load_hf_weights(
+            vllm_config=self.vllm_config,
+            model=self,
+            metadata_map=metadata_map,
+            mesh=self.mesh,
+        )
