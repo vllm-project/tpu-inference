@@ -48,7 +48,7 @@ from tpu_inference.layers.vllm.process_weights.fused_moe_weights import (
     FusedMoEWeights, process_moe_weights, quantize_moe_weights,
     shard_moe_weights)
 from tpu_inference.layers.vllm.process_weights.linear_weights import (
-    LinearWeights, process_lienar_weights, shard_linear_weights,
+    LinearWeights, process_linear_weights, shard_linear_weights,
     to_parameter_list)
 from tpu_inference.layers.vllm.quantization.configs import (
     VllmQuantConfig, VllmQuantLinearConfig)
@@ -157,7 +157,7 @@ class VllmFp8LinearMethod(Fp8LinearMethod):
             weight = jnp.concat(weights, axis=0)
             weight_scale = jnp.concat(weight_scales, axis=0)
 
-            return process_lienar_weights(
+            return process_linear_weights(
                 LinearWeights(
                     weight=weight,
                     weight_scale=weight_scale,

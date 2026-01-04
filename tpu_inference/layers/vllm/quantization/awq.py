@@ -37,7 +37,7 @@ from tpu_inference.layers.common.quantization import awq_u32_unpack_u4
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
 from tpu_inference.layers.vllm.process_weights.linear_weights import (
-    LinearWeights, process_lienar_weights, shard_linear_weights,
+    LinearWeights, process_linear_weights, shard_linear_weights,
     to_parameter_list)
 from tpu_inference.layers.vllm.quantization.configs import (
     VllmQuantConfig, VllmQuantLinearConfig)
@@ -117,7 +117,7 @@ class VllmAWQLinearMethod(AWQLinearMethod):
 
             zero_point = awq_u32_unpack_u4(zero_point)
 
-            return process_lienar_weights(
+            return process_linear_weights(
                 LinearWeights(
                     weight=weight,
                     weight_scale=weight_scale,

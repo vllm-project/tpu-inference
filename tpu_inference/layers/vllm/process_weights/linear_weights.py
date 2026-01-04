@@ -78,7 +78,7 @@ def get_model_matmul_fusion_assignment(model_name: str, batch_size: int,
     return MODEL_MATMUL_FUSION_TRUTH_TABLE.get(key, True)
 
 
-def process_lienar_weights(
+def process_linear_weights(
     weights: LinearWeights,
     fused: bool = False,
     output_sizes: list[int] | None = None,
