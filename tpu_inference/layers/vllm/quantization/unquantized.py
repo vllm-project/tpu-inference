@@ -291,7 +291,7 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         weights = FusedMoEWeights(
             w13_weight=jax_view(layer.w13_weight),
             w13_weight_scale=None,
-            w13_bias=jax_view(layer.w13_bias) if layer.moe.has_bias else None,
+            w13_bias=jax_view(layer.w13_bias) if self.moe.has_bias else None,
             w2_weight=jax_view(layer.w2_weight),
             w2_weight_scale=None,
             w2_bias=jax_view(layer.w2_bias) if self.moe.has_bias else None,
