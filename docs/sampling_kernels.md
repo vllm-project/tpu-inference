@@ -5,7 +5,7 @@ vLLM TPU includes optimized kernels for large vocabulary models with 15-75× spe
 ## Quick Start
 
 ```bash
-export FLASH_SAMPLING_TOPK_THRESHOLD=128
+export PALLAS_SAMPLING_TOPK_THRESHOLD=128
 vllm serve meta-llama/Llama-3.1-8B
 ```
 
@@ -18,7 +18,7 @@ vllm serve meta-llama/Llama-3.1-8B
 
 ## Configuration
 
-### `FLASH_SAMPLING_TOPK_THRESHOLD`
+### `PALLAS_SAMPLING_TOPK_THRESHOLD`
 
 **Default**: 0 (disabled)
 **Recommended**: 64 or 128
@@ -36,7 +36,7 @@ Enables fast kernel when all batch top_k ≤ threshold.
 
 ```bash
 # Enable for large vocab models
-export FLASH_SAMPLING_TOPK_THRESHOLD=128
+export PALLAS_SAMPLING_TOPK_THRESHOLD=128
 ```
 
 See [kernel README](../tpu_inference/kernels/sampling/README.md) for details.

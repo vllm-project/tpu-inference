@@ -23,7 +23,7 @@ tokens = topk_topp_and_sample(
 
 Enable via environment variable:
 ```bash
-export FLASH_SAMPLING_TOPK_THRESHOLD=128
+export PALLAS_SAMPLING_TOPK_THRESHOLD=128
 ```
 
 ## Algorithms

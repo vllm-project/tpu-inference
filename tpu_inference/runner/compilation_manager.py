@@ -503,7 +503,7 @@ class CompilationManager:
             for do_sampling, logprobs, use_pallas_kernel in itertools.product(
                 (True, False), (True, False),
                 # Doesn't compile pallas kernel if env not set
-                (envs.FLASH_SAMPLING_TOPK_THRESHOLD > 0, False)
+                (envs.PALLAS_SAMPLING_TOPK_THRESHOLD > 0, False)
             ):
                 if do_sampling:
                     temperature = np.full((num_reqs, ),

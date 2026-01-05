@@ -62,10 +62,10 @@ class TPUSupportedSamplingMetadata:
         top_p_tensor = fill_slice(input_batch.top_p_cpu,
                                   DEFAULT_SAMPLING_PARAMS["top_p"])
                                 
-        if envs.FLASH_SAMPLING_TOPK_THRESHOLD <= 0:
+        if envs.PALLAS_SAMPLING_TOPK_THRESHOLD <= 0:
             use_pallas_kernel = False
         else:
-            use_pallas_kernel = bool((input_batch.top_k_cpu <= envs.FLASH_SAMPLING_TOPK_THRESHOLD).all())
+            use_pallas_kernel = bool((input_batch.top_k_cpu <= envs.PALLAS_SAMPLING_TOPK_THRESHOLD).all())
 
 
         # Slice persistent device tensors to a fixed pre-compiled padded shape.

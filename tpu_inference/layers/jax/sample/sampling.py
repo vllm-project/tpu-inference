@@ -55,7 +55,7 @@ def sample(
     if tpu_sampling_metadata.use_pallas_kernel:
         return pallas_sample(
             rng, logits, tpu_sampling_metadata,
-            max_k=envs.FLASH_SAMPLING_TOPK_THRESHOLD,
+            max_k=envs.PALLAS_SAMPLING_TOPK_THRESHOLD,
             sampling_eps=SAMPLING_EPS,
             replace_val=REPLACE_VAL,
         )
