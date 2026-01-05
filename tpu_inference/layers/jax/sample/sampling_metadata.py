@@ -34,7 +34,7 @@ class TPUSupportedSamplingMetadata:
     top_p: Optional[jnp.ndarray] = None
     do_sampling: bool = False
     logprobs: bool = False
-    use_pallas_kernel: bool = False,
+    use_pallas_kernel: bool = False
 
     @classmethod
     def from_input_batch(
