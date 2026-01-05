@@ -1,0 +1,60 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# pipeline-name: attention_kernels-w4a8
+# pipeline-type: kernel support matrix microbenchmarks
+# For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision-w4a8
+steps:
+  - label: "Correctness tests for attention kernels-w4a8"
+    key: "attention_kernels-w4a8_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "attention_kernels-w4a8_CorrectnessTest" "unverified"
+  - label: "Record correctness test result for attention kernels-w4a8"
+    key: "record_attention_kernels-w4a8_CorrectnessTest"
+    depends_on: "attention_kernels-w4a8_CorrectnessTest"
+    env:
+      CI_TARGET: "attention_kernels-w4a8"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "kernel support matrix microbenchmarks"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh attention_kernels-w4a8_CorrectnessTest
+
+  - label: "Performance tests for attention kernels-w4a8"
+    key: "attention_kernels-w4a8_PerformanceTest"
+    depends_on: "record_attention_kernels-w4a8_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - |
+        buildkite-agent meta-data set "attention_kernels-w4a8_PerformanceTest" "unverified"
+  - label: "Record performance test result for attention kernels-w4a8"
+    key: "record_attention_kernels-w4a8_PerformanceTest"
+    depends_on: "attention_kernels-w4a8_PerformanceTest"
+    env:
+      CI_TARGET: "attention_kernels-w4a8"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "kernel support matrix microbenchmarks"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh attention_kernels-w4a8_PerformanceTest
