@@ -1,17 +1,3 @@
-# Copyright 2025 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 import functools
 from dataclasses import dataclass
 from typing import Optional
@@ -21,6 +7,7 @@ import jax.numpy as jnp
 import torch
 from jax.sharding import Mesh
 
+from tpu_inference import envs
 from tpu_inference.runner.input_batch import InputBatch
 from tpu_inference.utils import device_array
 
@@ -38,7 +25,7 @@ DEFAULT_SAMPLING_PARAMS = dict(
         "top_k",
         "top_p",
     ],
-    meta_fields=["do_sampling", "logprobs"],
+    meta_fields=["do_sampling", "logprobs", "use_pallas_kernel"],
 )
 @dataclass
 class TPUSupportedSamplingMetadata:
@@ -47,6 +34,7 @@ class TPUSupportedSamplingMetadata:
     top_p: Optional[jnp.ndarray] = None
     do_sampling: bool = False
     logprobs: bool = False
+    use_pallas_kernel: bool = False,
 
     @classmethod
     def from_input_batch(
@@ -73,6 +61,12 @@ class TPUSupportedSamplingMetadata:
                                   DEFAULT_SAMPLING_PARAMS["top_k"])
         top_p_tensor = fill_slice(input_batch.top_p_cpu,
                                   DEFAULT_SAMPLING_PARAMS["top_p"])
+                                
+        if envs.FLASH_SAMPLING_TOPK_THRESHOLD <= 0:
+            use_pallas_kernel = False
+        else:
+            use_pallas_kernel = bool((input_batch.top_k_cpu <= envs.FLASH_SAMPLING_TOPK_THRESHOLD).all())
+
 
         # Slice persistent device tensors to a fixed pre-compiled padded shape.
         return cls(
@@ -87,4 +81,5 @@ class TPUSupportedSamplingMetadata:
                                sharding=sharding),
             do_sampling=not input_batch.all_greedy,
             logprobs=needs_logprobs,
+            use_pallas_kernel=use_pallas_kernel,
         )
