@@ -68,7 +68,7 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements_bench
 # Install test requirements
 COPY requirements_test.txt .
 Run  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then \
-        pip install -r requirements_test.txt --retries 3 \
+        pip install -r requirements_test.txt --retries 3; \
     fi
 COPY . .
 RUN --mount=type=cache,target=/root/.cache/pip pip install -e .
