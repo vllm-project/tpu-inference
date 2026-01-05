@@ -19,6 +19,7 @@ ARG VLLM_COMMIT_HASH=""
 FROM $BASE_IMAGE
 
 ARG IS_FOR_V7X="false"
+ARG IS_TEST="false"
 
 # Update pip
 RUN pip install --upgrade pip
@@ -64,6 +65,11 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url htt
 COPY requirements_benchmarking.txt .
 # These are needed for the E2E benchmarking tests (i.e. tests/e2e/benchmarking/mlperf.sh)
 RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements_benchmarking.txt --retries 3
+# Install test requirements
+COPY requirements_test.txt .
+Run  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then \
+        pip install -r requirements_test.txt --retries 3 \
+    fi
 COPY . .
 RUN --mount=type=cache,target=/root/.cache/pip pip install -e .
 

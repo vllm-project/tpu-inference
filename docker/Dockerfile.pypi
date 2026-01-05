@@ -6,6 +6,7 @@ ARG VLLM_COMMIT_HASH=""
 FROM $BASE_IMAGE
 
 ARG IS_FOR_V7X="false"
+ARG IS_TEST="false"
 
 # Remove existing versions of dependencies
 RUN pip uninstall -y torch torch_xla torchvision
@@ -23,6 +24,11 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements_bench
 COPY requirements_v7x.txt .
 RUN --mount=type=cache,target=/root/.cache/pip if [ "$IS_FOR_V7X" = "true" ]; then \
         pip install -r requirements_v7x.txt; \
+    fi
+# Install test requirements
+COPY requirements_test.txt .
+Run  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then \
+        pip install -r requirements_test.txt --retries 3 \
     fi
 COPY . .
 
