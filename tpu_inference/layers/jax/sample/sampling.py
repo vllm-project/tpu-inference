@@ -35,11 +35,7 @@ def _sample(
     rng: jax.Array,
     logits: jax.Array,
     tpu_sampling_metadata: TPUSupportedSamplingMetadata,
-) -> jax.Array:    
-    # Unshard the logits explicity to avoid latency increase.
-    logits = jax.lax.with_sharding_constraint(
-        logits, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
-
+) -> jax.Array:
     # Compute greedy sample before applying temperature
     greedy_sampled = jnp.argmax(logits, axis=-1)
 
@@ -80,6 +76,9 @@ def sample(
             sampling_eps=SAMPLING_EPS,
             replace_val=REPLACE_VAL,
         )
+    # Unshard the logits explicity to avoid latency increase.
+    logits = jax.lax.with_sharding_constraint(
+        logits, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
     return _sample(rng, logits, tpu_sampling_metadata)
 
 
