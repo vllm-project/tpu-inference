@@ -98,14 +98,14 @@ class Qwen3VLMoeTextExperts(nnx.Module):
         Inference-only forward pass for MoE experts.
 
         Args:
-            hidden_states: (batch_size, seq_len, hidden_size) or (batch_size * seq_len, hidden_size)
+            hidden_states: (batch_size, seq_len, hidden_size) or (total_tokens, hidden_size)
             routing_weights: (batch_size * seq_len, num_experts) - full routing weights after scatter
             router_indices: (batch_size * seq_len, top_k) - indices of selected experts
 
         Returns:
-            Output tensor of shape (batch_size, seq_len, hidden_size)
+            Output tensor with the same shape as the input.
         """
-        batch_size = hidden_states.shape[0]
+        original_shape = hidden_states.shape
         hidden_states = hidden_states.reshape(-1, self.hidden_size)  # (T, D)
 
         # Compute gate_up for all experts: (T, D) @ (E, D, 2F) -> (T, E, 2F)
@@ -126,8 +126,8 @@ class Qwen3VLMoeTextExperts(nnx.Module):
         # Sum across experts: (T, E, D) -> (T, D)
         next_states = next_states.sum(axis=1)
 
-        # Reshape back to batch format
-        next_states = next_states.reshape(batch_size, -1, self.hidden_size)
+        # Reshape back to the original input layout (2D or 3D).
+        next_states = next_states.reshape(original_shape)
 
         return next_states
 
@@ -168,12 +168,11 @@ class Qwen3VLMoeTextSparseMoeBlock(nnx.Module):
         Forward pass for Sparse MoE block.
 
         Args:
-            hidden_states: (batch_size, seq_len, hidden_size)
+            hidden_states: (batch_size, seq_len, hidden_size) or (total_tokens, hidden_size)
 
         Returns:
-            Output tensor of shape (batch_size, seq_len, hidden_size)
+            Output tensor with the same shape as the input.
         """
-        batch_size = hidden_states.shape[0]
         hidden_states_flat = hidden_states.reshape(-1, self.hidden_size)  # (T, D)
 
         # Compute router logits: (T, D) @ (D, E) -> (T, E)
@@ -200,9 +199,6 @@ class Qwen3VLMoeTextSparseMoeBlock(nnx.Module):
 
         # Scatter the top_k weights into the full routing weights matrix
         router_weights = router_weights.at[token_indices, top_k_indices].set(top_k_weights)
-
-        # Reshape hidden_states back to batch format for experts
-        hidden_states = hidden_states.reshape(batch_size, -1, self.hidden_size)
 
         routed_out = self.experts(hidden_states, router_weights, top_k_indices)
 
