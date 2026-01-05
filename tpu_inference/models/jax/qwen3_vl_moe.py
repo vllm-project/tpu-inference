@@ -4,30 +4,13 @@
 from dataclasses import InitVar, dataclass
 
 from tpu_inference.models.jax.qwen3_vl import (
-    # Constants
     DEFAULT_BLOCK_K_MAJOR,
-    # Helper functions
-    _infer_pos_embed_grid_hw,
-    generate_segment_ids_from_grid_thw,
     get_mrope_input_positions,
-    pad_segment_ids_for_attention,
-    apply_rotary_pos_emb_vision,
     apply_rotary_pos_emb_thd_padded,
     _ModelConfigAdapter,
-    # Types
-    SegmentIds,
     Qwen3VLImagePixelInputs,
-    Qwen3VLImageEmbeddingInputs,
     Qwen3VLImageInputs,
-    # Vision classes
-    Qwen3VLVisionRotaryEmbedding,
-    Qwen3VLVisionPatchEmbed,
-    Qwen3VLVisionMLP,
-    Qwen3VLVisionAttention,
-    Qwen3VLVisionBlock,
-    Qwen3VLVisionPatchMerger,
     Qwen3VLVisionTransformer,
-    # Text classes
     Qwen3VLTextRMSNorm,
     Qwen3VLTextRotaryEmbedding,
 )
