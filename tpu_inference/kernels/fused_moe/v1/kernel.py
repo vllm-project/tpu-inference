@@ -48,24 +48,6 @@ def broadcast_minor(src, shape):
                            axis=-1)[..., :shape[-1]]
 
 
-# TODO(jevinjiang): Apply the same trick for load.
-def store_with_retiling(ref, val, is_acc=False):
-    """Retiling (8, 128) to (1, 128) in store."""
-    assert ref.shape == val.shape
-    assert ref.dtype == val.dtype
-    assert get_dtype_packing(ref.dtype) == 1
-    assert len(ref.shape) == 2
-    assert ref.shape[1] % 128 == 0
-    a, b = ref.shape
-    folds = b // 128
-    reshaped_ref = ref.reshape(a * folds, 128)
-    for i in range(folds):
-        if is_acc:
-            reshaped_ref[pl.ds(i, a, folds)] += val[:, i * 128:(i + 1) * 128]
-        else:
-            reshaped_ref[pl.ds(i, a, folds)] = val[:, i * 128:(i + 1) * 128]
-
-
 def swigluoai(gate: jax.Array,
               up: jax.Array,
               *,
@@ -856,8 +838,6 @@ def _fused_ep_moe_kernel(
 
                         acc_slices = (pl.ds(btc_id * btc,
                                             btc), pl.ds(bfc_id * bfc, bfc))
-                        acc1_vmem_slice = acc1_vmem.at[*acc_slices]
-                        acc3_vmem_slice = acc3_vmem.at[*acc_slices]
                         if should_init and p_id == bd1c_id == 0:
                             if b1_vmem is not None:
                                 b1_scale_slices = (
@@ -876,15 +856,11 @@ def _fused_ep_moe_kernel(
                                     b3_vmem[*b3_scale_slices], acc1.shape)
                                 acc3 += b3
 
-                            store_with_retiling(acc1_vmem_slice, acc1)
-                            store_with_retiling(acc3_vmem_slice, acc3)
+                            acc1_vmem[*acc_slices] = acc1
+                            acc3_vmem[*acc_slices] = acc3
                         else:
-                            store_with_retiling(acc1_vmem_slice,
-                                                acc1,
-                                                is_acc=True)
-                            store_with_retiling(acc3_vmem_slice,
-                                                acc3,
-                                                is_acc=True)
+                            acc1_vmem[*acc_slices] += acc1
+                            acc3_vmem[*acc_slices] += acc3
 
         lax.fori_loop(0, num_loops, body, None)
 
