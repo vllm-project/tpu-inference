@@ -1,3 +1,17 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import functools
 
 import jax
@@ -21,7 +35,11 @@ def _sample(
     rng: jax.Array,
     logits: jax.Array,
     tpu_sampling_metadata: TPUSupportedSamplingMetadata,
-) -> jax.Array:
+) -> jax.Array:    
+    # Unshard the logits explicity to avoid latency increase.
+    logits = jax.lax.with_sharding_constraint(
+        logits, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
+
     # Compute greedy sample before applying temperature
     greedy_sampled = jnp.argmax(logits, axis=-1)
 
@@ -52,6 +70,9 @@ def sample(
     tpu_sampling_metadata: TPUSupportedSamplingMetadata,
 ) -> jax.Array:
     # (B, vocab_size)
+    if not tpu_sampling_metadata.do_sampling:
+        greedy_sampled = jnp.argmax(logits, axis=-1)
+        return greedy_sampled
     if tpu_sampling_metadata.use_pallas_kernel:
         return pallas_sample(
             rng, logits, tpu_sampling_metadata,
@@ -59,13 +80,6 @@ def sample(
             sampling_eps=SAMPLING_EPS,
             replace_val=REPLACE_VAL,
         )
-    if tpu_sampling_metadata.do_sampling:
-        # Unshard the logits explicity to avoid latency increase.
-        logits = jax.lax.with_sharding_constraint(
-            logits, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
-    greedy_sampled = jnp.argmax(logits, axis=-1)
-    if not tpu_sampling_metadata.do_sampling:
-        return greedy_sampled
     return _sample(rng, logits, tpu_sampling_metadata)
 
 
