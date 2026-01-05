@@ -45,6 +45,9 @@ class MlaRaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         sm_scale=1.0,
         sliding_window: int | None = None,
         soft_cap: float | None = None,
+        q_scale: float | None = None,
+        k_scale: float | None = None,
+        v_scale: float | None = None,
     ):
         if not jtu.is_device_tpu_at_least(version=4):
             self.skipTest("Expect TPUv4+")
@@ -110,6 +113,9 @@ class MlaRaggedPagedAttentionKernelTest(jtu.JaxTestCase):
                 sm_scale=sm_scale,
                 sliding_window=sliding_window,
                 soft_cap=soft_cap,
+                q_scale=q_scale,
+                k_scale=k_scale,
+                v_scale=v_scale,
             ))
 
         kernel_out, kernel_updated_kv = (mla.mla_ragged_paged_attention(
@@ -125,6 +131,9 @@ class MlaRaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             sm_scale=sm_scale,
             sliding_window=sliding_window,
             soft_cap=soft_cap,
+            q_scale=q_scale,
+            k_scale=k_scale,
+            v_scale=v_scale,
             num_kv_pages_per_block=num_kv_pages_per_block,
             num_queries_per_block=num_queries_per_block,
             vmem_limit_bytes=vmem_limit_bytes,
@@ -470,6 +479,33 @@ class MlaRaggedPagedAttentionKernelTest(jtu.JaxTestCase):
                 num_pages,
                 sliding_window=-1,
             )
+
+    def test_ragged_paged_attention_with_scales(self):
+        num_heads = 128
+        num_seqs = 2
+        dtype = jnp.float32
+        rng = np.random.default_rng(1234)
+        q_lens = rng.integers(1, 100, num_seqs)
+        kv_lens = q_lens + rng.integers(0, 50, num_seqs)
+        seq_lens = list(zip(q_lens.tolist(), kv_lens.tolist()))
+        lkv_dim = 512
+        r_dim = 64
+        page_size = 16
+        num_pages = 1000
+
+        self._test_mla_ragged_paged_attention(
+            seq_lens,
+            num_heads,
+            lkv_dim,
+            r_dim,
+            page_size,
+            dtype,
+            dtype,
+            num_pages,
+            q_scale=0.5,
+            k_scale=0.5,
+            v_scale=0.7,
+        )
 
     def test_ragged_paged_attention_soft_cap_cannot_be_zero(self):
         dtype = jnp.float32

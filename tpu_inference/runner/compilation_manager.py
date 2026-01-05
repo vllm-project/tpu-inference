@@ -257,9 +257,15 @@ class CompilationManager:
         """
 
         for num_tokens in self.runner.num_tokens_paddings:
-            dp_sharding = NamedSharding(
-                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, )
-            ) if self.runner.vllm_config.sharding_config.total_dp_size > 1 else None
+            if self.runner.vllm_config.sharding_config.total_dp_size > 1:
+                dp_sharding = NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(ShardingAxisName.ATTN_DATA, ))
+                next_tokens_sharding = dp_sharding
+            else:
+                dp_sharding = None
+                next_tokens_sharding = NamedSharding(self.runner.mesh,
+                                                     PartitionSpec())
 
             for num_reqs in self.runner.num_reqs_paddings:
                 padded_token_in_tpu_cur_input_indices = np.zeros(
@@ -278,7 +284,7 @@ class CompilationManager:
                 next_tokens = self._create_dummy_tensor(
                     (num_reqs, ),
                     jnp.int32,
-                    sharding=dp_sharding,
+                    sharding=next_tokens_sharding,
                 )
                 placeholder_num = 1
                 self._run_compilation(

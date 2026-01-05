@@ -14,10 +14,30 @@
 # limitations under the License.
 
 
+
 BUILDKITE_DIR=".buildkite"
-TARGET_FOLDERS="models features parallelism quantization"
 MODEL_LIST_KEY="model-list"
 FEATURE_LIST_KEY="feature-list"
+
+declare -a TARGET_FOLDERS=(
+    "quantization"
+    "parallelism"
+    "models"
+    "features"
+)
+
+
+# Use find to append the kernel_microbenchmarks subdirectories
+KERNEL_PARENT_DIR=".buildkite/kernel_microbenchmarks"
+
+if [[ -d "$KERNEL_PARENT_DIR" ]]; then
+    while IFS= read -r dir; do
+        folder_path_to_add="${dir#"${BUILDKITE_DIR}"/}"
+        TARGET_FOLDERS+=("$folder_path_to_add")
+    done < <(find "$KERNEL_PARENT_DIR" -maxdepth 1 -mindepth 1 -type d)
+else
+    echo "Warning: Kernel microbenchmarks directory '$KERNEL_PARENT_DIR' not found. Skipping dynamic folder discovery."
+fi
 
 declare -a pipeline_steps
 
@@ -26,8 +46,9 @@ declare -a model_list
 declare -a feature_list
 
 
-for folder_path in $TARGET_FOLDERS; do
-  folder="$BUILDKITE_DIR/$folder_path"
+for folder_path in "${TARGET_FOLDERS[@]}"; do
+  folder=$BUILDKITE_DIR/$folder_path
+  # Check if the folder exists
   if [[ ! -d "$folder" ]]; then
     echo "Warning: Folder '$folder' not found. Skipping."
     continue
@@ -53,8 +74,8 @@ for folder_path in $TARGET_FOLDERS; do
         "models")
           model_list+=("$subject_name")
           ;;
-        "features"|"parallelism"|"quantization")
-          feature_list+=("$subject_name")
+        "features" | "parallelism" | "quantization" | "kernel_microbenchmarks"/*)
+          feature_list+=("${subject_name}")
           ;;
       esac
     fi

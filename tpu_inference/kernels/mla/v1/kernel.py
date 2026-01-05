@@ -120,6 +120,9 @@ def ref_mla_ragged_paged_attention(
     sliding_window: int | None = None,
     soft_cap: float | None = None,
     mask_value: float | None = DEFAULT_MASK_VALUE,
+    q_scale: float | None = None,
+    k_scale: float | None = None,
+    v_scale: float | None = None,
 ):
 
     if mask_value is None:
@@ -139,6 +142,9 @@ def ref_mla_ragged_paged_attention(
         sliding_window=sliding_window,
         soft_cap=soft_cap,
         mask_value=mask_value,
+        q_scale=q_scale,
+        k_scale=k_scale,
+        v_scale=v_scale,
     )
 
     updated_cache_kv = update_kv_cache(
@@ -223,6 +229,10 @@ def ref_mla_ragged_paged_attention(
                           k_i,
                           preferred_element_type=jnp.float32)
         attn *= sm_scale
+        if k_scale is not None:
+            attn *= k_scale
+        if q_scale is not None:
+            attn *= q_scale
 
         # Causal mask
         q_span = kv_len - q_len + jax.lax.broadcasted_iota(
@@ -238,6 +248,8 @@ def ref_mla_ragged_paged_attention(
 
         # out_i: [q_len, actual_num_q_heads, lkv_dim]
         out_i = jnp.einsum("nqk,kl->qnl", attn, v_i).astype(q_i.dtype)
+        if v_scale is not None:
+            out_i *= v_scale
         outputs.append(out_i)
 
     return (
@@ -263,6 +275,9 @@ def dynamic_validate_inputs(
     sliding_window: int | None = None,
     soft_cap: float | None = None,
     mask_value: float | None = DEFAULT_MASK_VALUE,
+    q_scale: float | None = None,
+    k_scale: float | None = None,
+    v_scale: float | None = None,
     # Kernel optimization params.
     chunk_prefill_size: int | None = None,
     # Kernel tuning params.
@@ -287,6 +302,9 @@ def dynamic_validate_inputs(
         sliding_window=sliding_window,
         soft_cap=soft_cap,
         mask_value=mask_value,
+        q_scale=q_scale,
+        k_scale=k_scale,
+        v_scale=v_scale,
         chunk_prefill_size=chunk_prefill_size,
         num_kv_pages_per_block=num_kv_pages_per_block,
         num_queries_per_block=num_queries_per_block,
@@ -348,6 +366,9 @@ def static_validate_inputs(
     sliding_window: int | None = None,
     soft_cap: float | None = None,
     mask_value: float | None = DEFAULT_MASK_VALUE,
+    q_scale: float | None = None,
+    k_scale: float | None = None,
+    v_scale: float | None = None,
     # Kernel optimization params.
     chunk_prefill_size: int | None = None,
     # Kernel tuning params.
@@ -462,6 +483,9 @@ def static_validate_inputs(
     # No constraints for the following inputs.
     del sm_scale
     del mask_value
+    del q_scale
+    del k_scale
+    del v_scale
     del debug_mode
 
 
@@ -1058,6 +1082,9 @@ def prepare_outputs(
         "sliding_window",
         "soft_cap",
         "mask_value",
+        "q_scale",
+        "k_scale",
+        "v_scale",
         "chunk_prefill_size",
         "num_kv_pages_per_block",
         "num_queries_per_block",
@@ -1083,6 +1110,9 @@ def mla_ragged_paged_attention(
     sliding_window: int | None = None,
     soft_cap: float | None = None,
     mask_value: float | None = DEFAULT_MASK_VALUE,
+    q_scale: float | None = None,
+    k_scale: float | None = None,
+    v_scale: float | None = None,
     # Kernel optimization params.
     chunk_prefill_size: int | None = None,
     # Kernel tuning params.
@@ -1094,9 +1124,7 @@ def mla_ragged_paged_attention(
 ) -> tuple[
         jax.Array,  # [max_num_tokens, actual_num_q_heads, actual_lkv_dim]
         jax.
-        Array,  # [total_num_pages, page_size_per_kv_packing, kv_packing, lkv_dim]
-        jax.
-        Array,  # [total_num_pages, page_size_per_kv_packing, kv_packing, r_dim]
+        Array,  # [total_num_pages, page_size_per_kv_packing, kv_packing, align_to(lkv_dim, 128) + align_to(r_dim, 128)]
 ]:
     """MLA Ragged paged attention that supports mixed prefill and decode.
 
@@ -1117,6 +1145,9 @@ def mla_ragged_paged_attention(
     sliding_window: the sliding window size for the attention.
     soft_cap: the logit soft cap for the attention.
     mask_value: mask value for causal mask.
+    q_scale: the scale for the query.
+    k_scale: the scale for the key cache.
+    v_scale: the scale for the value cache.
     num_kv_pages_per_block: number of kv pages to be processed in one flash
       attention block in the pallas kernel.
     num_queries_per_block: number of kv pages to be processed in one flash
@@ -1148,6 +1179,9 @@ def mla_ragged_paged_attention(
         sliding_window=sliding_window,
         soft_cap=soft_cap,
         mask_value=mask_value,
+        q_scale=q_scale,
+        k_scale=k_scale,
+        v_scale=v_scale,
         chunk_prefill_size=chunk_prefill_size,
         num_kv_pages_per_block=num_kv_pages_per_block,
         num_queries_per_block=num_queries_per_block,
@@ -1276,6 +1310,9 @@ def mla_ragged_paged_attention(
                 sliding_window=sliding_window,
                 soft_cap=soft_cap,
                 mask_value=mask_value,
+                q_scale=q_scale,
+                k_scale=k_scale,
+                v_scale=v_scale,
                 chunk_prefill_size=chunk_prefill_size,
                 bq_sz=bq_sz,
                 bkv_p=bkv_p,

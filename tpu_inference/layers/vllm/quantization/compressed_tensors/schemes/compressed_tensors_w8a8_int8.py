@@ -18,18 +18,24 @@ import jax
 import jax.numpy as jnp
 import torch
 from compressed_tensors.quantization import QuantizationStrategy
-from jax.sharding import NamedSharding, PartitionSpec
+from jax.sharding import PartitionSpec
+from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
-from vllm.logger import init_logger
+from torchax.ops.mappings import t2j
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_int8 import \
     CompressedTensorsW8A8Int8
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import \
     convert_to_channelwise
 
-from tpu_inference.layers.vllm.linear_common import (
-    sharded_quantized_matmul, slice_sharded_tensor_for_concatenation,
-    torch_to_jax_param)
-from tpu_inference.layers.vllm.quantization.common import JaxCommonLinearConfig
+from tpu_inference.layers.common.utils import \
+    slice_sharded_tensor_for_concatenation
+from tpu_inference.layers.vllm.linear import sharded_quantized_matmul
+from tpu_inference.layers.vllm.process_weights.linear_weights import (
+    LinearWeights, process_lienar_weights, shard_linear_weights,
+    to_parameter_list)
+from tpu_inference.layers.vllm.quantization.configs import \
+    VllmQuantLinearConfig
+from tpu_inference.logger import init_logger
 
 P = PartitionSpec
 logger = init_logger(__name__)
@@ -38,23 +44,15 @@ logger = init_logger(__name__)
 class VllmCompressedTensorsW8A8Int8(CompressedTensorsW8A8Int8):
 
     def __init__(self, strategy: str, is_static_input_scheme: bool,
-                 input_symmetric: bool, jax_config: JaxCommonLinearConfig):
+                 input_symmetric: bool, linear_config: VllmQuantLinearConfig):
         super().__init__(strategy, is_static_input_scheme, input_symmetric)
 
-        self.jax_config = jax_config
-        self.is_channelwise = (self.strategy == QuantizationStrategy.CHANNEL),
+        self.linear_config = linear_config
+        self.is_channelwise = (self.strategy == QuantizationStrategy.CHANNEL)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        weight = torch_to_jax_param(
-            layer.weight,
-            NamedSharding(self.jax_config.mesh,
-                          self.jax_config.weight_sharding),
-            self.jax_config.output_sizes,
-            self.jax_config.n_shards,
-            self.jax_config.fuse_matmuls,
-        )
+        weight = t2j(layer.weight, use_dlpack=False)
         delattr(layer, "weight")
-        layer.weight = weight
 
         weight_scale = layer.weight_scale
         is_fused_module = len(layer.logical_widths) > 1
@@ -62,31 +60,55 @@ class VllmCompressedTensorsW8A8Int8(CompressedTensorsW8A8Int8):
             weight_scale = convert_to_channelwise(weight_scale,
                                                   layer.logical_widths)
         weight_scale = weight_scale.squeeze(-1)
-
-        weight_scale = torch_to_jax_param(
-            weight_scale,
-            NamedSharding(self.jax_config.mesh, self.jax_config.bias_sharding),
-            self.jax_config.output_sizes,
-            self.jax_config.n_shards,
-            self.jax_config.fuse_matmuls,
-        )
+        weight_scale = t2j(weight_scale, use_dlpack=False)
         delattr(layer, "weight_scale")
-        layer.weight_scale = weight_scale
 
         if layer.bias is not None and not layer.skip_bias_add:
             if layer.return_bias:
                 logger.warning_once("Bias might return incorrect value.")
-
-            bias = torch_to_jax_param(
-                layer.bias,
-                NamedSharding(self.jax_config.mesh,
-                              self.jax_config.bias_sharding),
-                self.jax_config.output_sizes,
-                self.jax_config.n_shards,
-                self.jax_config.fuse_matmuls,
-            )
+            bias = t2j(layer.bias, use_dlpack=False)
             delattr(layer, "bias")
-            layer.bias = bias
+        else:
+            bias = None
+
+        @jax.jit
+        def process_int8_linear_weights(
+            weight: jax.Array,
+            weight_scale: jax.Array,
+            bias: jax.Array | None,
+        ) -> LinearWeights:
+            return process_lienar_weights(
+                LinearWeights(
+                    weight=weight,
+                    weight_scale=weight_scale,
+                    zero_point=None,
+                    bias=bias,
+                ),
+                fused=self.linear_config.fuse_matmuls,
+                output_sizes=self.linear_config.output_sizes,
+                reorder_size=self.linear_config.n_shards,
+            )
+
+        weights = process_int8_linear_weights(weight, weight_scale, bias)
+        weights = torch_view(
+            shard_linear_weights(
+                weights,
+                mesh=self.linear_config.mesh,
+                weight_p_spec=self.linear_config.weight_sharding,
+                bias_p_spec=self.linear_config.bias_sharding,
+            ))
+
+        if self.linear_config.fuse_matmuls:
+            layer.weight = Parameter(weights.weight, requires_grad=False)
+            layer.weight_scale = Parameter(weights.weight_scale,
+                                           requires_grad=False)
+            if bias is not None:
+                layer.bias = Parameter(weights.bias, requires_grad=False)
+        else:
+            layer.weight = to_parameter_list(weights.weight)
+            layer.weight_scale = to_parameter_list(weights.weight_scale)
+            if bias is not None:
+                layer.bias = to_parameter_list(weights.bias)
 
         # TODO(kyuyeunk): Support static range input quantization.
         assert getattr(layer, "input_scale", None) is None
@@ -96,7 +118,7 @@ class VllmCompressedTensorsW8A8Int8(CompressedTensorsW8A8Int8):
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
         with jax.named_scope(layer._get_name()):
-            if self.jax_config.fuse_matmuls:
+            if self.linear_config.fuse_matmuls:
                 out = self._apply_fused(layer, x, bias)
             else:
                 out = self._apply_split(layer, x, bias)
@@ -113,14 +135,14 @@ class VllmCompressedTensorsW8A8Int8(CompressedTensorsW8A8Int8):
             x_jax,
             weight_jax,
             weight_scale_jax,
-            self.jax_config.mesh,
-            self.jax_config.weight_sharding,
+            self.linear_config.mesh,
+            self.linear_config.weight_sharding,
         )
         if bias is not None and not layer.skip_bias_add:
             outs += jax_view(bias)
 
         outs = slice_sharded_tensor_for_concatenation(
-            outs, self.jax_config.output_sizes, self.jax_config.n_shards)
+            outs, self.linear_config.output_sizes, self.linear_config.n_shards)
         out = jnp.concatenate(outs, axis=-1)
         return torch_view(out)
 
@@ -139,8 +161,8 @@ class VllmCompressedTensorsW8A8Int8(CompressedTensorsW8A8Int8):
                 x_jax,
                 weight_jax,
                 weight_scale_jax,
-                self.jax_config.mesh,
-                self.jax_config.weight_sharding,
+                self.linear_config.mesh,
+                self.linear_config.weight_sharding,
             )
             if bias is not None and not layer.skip_bias_add:
                 out += jax_view(bias[i])

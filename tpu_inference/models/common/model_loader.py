@@ -31,7 +31,8 @@ from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     apply_qwix_on_abstract_model, apply_qwix_quantization,
-    load_random_weights_into_qwix_abstract_model)
+    load_random_weights_into_qwix_abstract_model,
+    update_vllm_config_for_qwix_quantization)
 from tpu_inference.utils import to_jax_dtype, to_torch_dtype
 
 logger = init_logger(__name__)
@@ -231,6 +232,10 @@ def get_flax_model(
 ) -> nnx.Module:
     model_dtype = to_jax_dtype(vllm_config.model_config.dtype)
     vllm_config.model_config.dtype = model_dtype
+
+    # Only perform qwix quantization if it is jax model.
+    if vllm_config.model_config:
+        update_vllm_config_for_qwix_quantization(vllm_config)
 
     if is_draft_model:
         model_class = _get_model_architecture(

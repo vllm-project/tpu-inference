@@ -26,7 +26,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.vllm.linear_common import \
+from tpu_inference.layers.vllm.process_weights.linear_weights import \
     get_model_matmul_fusion_assignment
 from tpu_inference.utils import TPU_SECOND_LAST_MINOR, get_mesh_shape_product
 
@@ -37,7 +37,7 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
-class JaxCommonLinearConfig:
+class VllmQuantLinearConfig:
 
     def __init__(self, vllm_config: VllmConfig, mesh: Mesh, layer: LinearBase):
         assert isinstance(layer, LinearBase)
@@ -84,27 +84,24 @@ class JaxCommonLinearConfig:
                                                self.weight_sharding[0])
 
     def get_input_sharding(self, x: torchax.tensor.Tensor):
-        if self.enable_sp:
-            token_num = x.shape[0]
-            # NOTE(chengjiyao): make sure the sharded token_num is larger than TPU_SECOND_LAST_MINOR
-            if token_num // self.tp_size >= TPU_SECOND_LAST_MINOR:
-                return self.input_sharding
-            else:
-                return None
+        if not self.enable_sp:
+            return None
+        token_num = x.shape[0]
+        # NOTE(chengjiyao): make sure the sharded token_num is larger than TPU_SECOND_LAST_MINOR
+        if token_num // self.tp_size < TPU_SECOND_LAST_MINOR:
+            return None
         return self.input_sharding
 
     def get_output_sharding(self, x: torchax.tensor.Tensor):
         if self.enable_sp:
             token_num = x.shape[0]
             # NOTE(chengjiyao): make sure the sharded token_num is larger than TPU_SECOND_LAST_MINOR
-            if token_num // self.tp_size >= TPU_SECOND_LAST_MINOR:
-                return self.output_sharding
-            else:
+            if token_num // self.tp_size < TPU_SECOND_LAST_MINOR:
                 return None
         return self.output_sharding
 
 
-class JaxCommonConfig:
+class VllmQuantConfig:
     vllm_config: VllmConfig
     mesh: Mesh
 
@@ -113,9 +110,9 @@ class JaxCommonConfig:
         cls.vllm_config = vllm_config
         cls.mesh = mesh
 
-    def get_linear_config(self, layer: LinearBase) -> JaxCommonLinearConfig:
+    def get_linear_config(self, layer: LinearBase) -> VllmQuantLinearConfig:
         assert isinstance(layer, LinearBase)
-        return JaxCommonLinearConfig(self.vllm_config, self.mesh, layer)
+        return VllmQuantLinearConfig(self.vllm_config, self.mesh, layer)
 
     def get_moe_config(self, layer: FusedMoE) -> FusedMoEConfig:
         assert isinstance(layer, FusedMoE)
