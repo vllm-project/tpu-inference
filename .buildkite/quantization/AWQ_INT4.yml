@@ -15,45 +15,49 @@
 # pipeline-name: AWQ INT4
 # pipeline-type: quantization support matrix
 steps:
-  - label: "Correctness tests for AWQ INT4"
-    key: "AWQ_INT4_CorrectnessTest"
+  - label: "${TEST_LABEL_PREFIX} Correctness tests for AWQ INT4"
+    key: "${TEST_KEY_PREFIX}AWQ_INT4_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_SMALL_CORE_QUEUE}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
-        buildkite-agent meta-data set "AWQ_INT4_CorrectnessTest" "unverified"
-  - label: "Record correctness test result for AWQ INT4"
-    key: "record_AWQ_INT4_CorrectnessTest"
-    depends_on: "AWQ_INT4_CorrectnessTest"
+        buildkite-agent meta-data set "${TEST_KEY_PREFIX}AWQ_INT4_CorrectnessTest" "unverified"
+  - label: "${TEST_LABEL_PREFIX} Record correctness test result for AWQ INT4"
+    key: "${TEST_KEY_PREFIX}record_AWQ_INT4_CorrectnessTest"
+    depends_on: "${TEST_KEY_PREFIX}AWQ_INT4_CorrectnessTest"
     env:
-      CI_TARGET: "AWQ INT4"
+      CI_TARGET: "${TEST_LABEL_PREFIX}AWQ INT4"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "quantization support matrix"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh AWQ_INT4_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TEST_KEY_PREFIX}AWQ_INT4_CorrectnessTest
 
-  - label: "Performance tests for AWQ INT4"
-    key: "AWQ_INT4_PerformanceTest"
-    depends_on: "record_AWQ_INT4_CorrectnessTest"
+  - label: "${TEST_LABEL_PREFIX} Performance tests for AWQ INT4"
+    key: "${TEST_KEY_PREFIX}AWQ_INT4_PerformanceTest"
+    depends_on: "${TEST_KEY_PREFIX}record_AWQ_INT4_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_SMALL_CORE_QUEUE}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
-        buildkite-agent meta-data set "AWQ_INT4_PerformanceTest" "unverified"
-  - label: "Record performance test result for AWQ INT4"
-    key: "record_AWQ_INT4_PerformanceTest"
-    depends_on: "AWQ_INT4_PerformanceTest"
+        buildkite-agent meta-data set "${TEST_KEY_PREFIX}AWQ_INT4_PerformanceTest" "unverified"
+  - label: "${TEST_LABEL_PREFIX} Record performance test result for AWQ INT4"
+    key: "${TEST_KEY_PREFIX}record_AWQ_INT4_PerformanceTest"
+    depends_on: "${TEST_KEY_PREFIX}AWQ_INT4_PerformanceTest"
     env:
-      CI_TARGET: "AWQ INT4"
+      CI_TARGET: "${TEST_LABEL_PREFIX}AWQ INT4"
       CI_STAGE: "PerformanceTest"
       CI_CATEGORY: "quantization support matrix"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh AWQ_INT4_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${TEST_KEY_PREFIX}AWQ_INT4_PerformanceTest

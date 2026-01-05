@@ -19,25 +19,27 @@
 # with full + sliding window attn) to save HBM memory for kv cache and be able
 # to accomodate more requests. 
 steps:
-  - label: "Correctness tests for hybrid kv cache allocation"
-    key: "hybrid_kvcache_CorrectnessTest"
+  - label: "${TEST_LABEL_PREFIX} Correctness tests for hybrid kv cache allocation"
+    key: "${TEST_KEY_PREFIX}hybrid_kvcache_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_8_queue
+      queue: "${TPU_SMALL_CORE_QUEUE}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
           python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_hybrid_kvcache.py::test_hybrid_kv_cache \
           /workspace/tpu_inference/tests/e2e/test_hybrid_kvcache.py::test_hybrid_kv_cache_correctness
-  - label: "Record correctness test result for hybrid kv cache allocation"
-    key: "record_hybrid_kvcache_CorrectnessTest"
-    depends_on: "hybrid_kvcache_CorrectnessTest"
+  - label: "${TEST_LABEL_PREFIX} Record correctness test result for hybrid kv cache allocation"
+    key: "${TEST_KEY_PREFIX}record_hybrid_kvcache_CorrectnessTest"
+    depends_on: "${TEST_KEY_PREFIX}hybrid_kvcache_CorrectnessTest"
     env:
-      CI_TARGET: "hybrid_kvcache"
+      CI_TARGET: "${TEST_LABEL_PREFIX}hybrid_kvcache"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "feature support matrix"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh hybrid_kvcache_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TEST_KEY_PREFIX}hybrid_kvcache_CorrectnessTest
