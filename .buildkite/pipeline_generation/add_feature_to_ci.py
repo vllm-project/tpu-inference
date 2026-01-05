@@ -27,6 +27,7 @@ OUTPUT_DIR = SCRIPT_DIR.parent / "features"
 class FeatureCategory(str, Enum):
     FEATURE_SUPPORT = "feature support matrix"
     KERNEL_SUPPORT = "kernel support matrix"
+    KERNEL_SUPPORT_MICROBENCHMARKS = "kernel support matrix (microbenchmarks)"
 
 
 def generate_from_template(feature_name: str, feature_category: str,
@@ -116,7 +117,8 @@ def main():
         '--category',
         choices=[
             FeatureCategory.FEATURE_SUPPORT.value,
-            FeatureCategory.KERNEL_SUPPORT.value
+            FeatureCategory.KERNEL_SUPPORT.value,
+            FeatureCategory.KERNEL_SUPPORT_MICROBENCHMARKS.value
         ],
         default='feature support matrix',
         help='[OPTIONAL] Category of feature. (Default: feature support matrix)'
