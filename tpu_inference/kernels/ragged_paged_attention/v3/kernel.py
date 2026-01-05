@@ -5,7 +5,6 @@ specifically designed for TPU and compatible with a wide range of model
 specifications. It supports mixed prefill and decoding, enhancing throughput
 during inference.
 """
-# xw32q: revisit the ref impl about writing to the kv cache.
 import functools
 
 import jax
@@ -705,6 +704,7 @@ def _ragged_paged_attention_kernel(
     def load_bq(bq_sem_idx, kv_head_idx, *, actual_bq_sz=bq_sz):
         # NB bq_x2_ref,  # [2, actual_num_kv_heads, bq_sz, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
         # xw32q: why do we bitcast bq_x2_ref to uint32 and then bitcast back to q_dtype? 
+        # reduce the # of vload.
         q_ref = (bq_x2_ref.bitcast(
             jnp.uint32).at[bq_sem_idx, kv_head_idx].reshape(
                 bq_sz * num_q_heads_per_kv_head_per_packing, head_dim))

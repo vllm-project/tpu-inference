@@ -84,6 +84,8 @@ def _all_gather_kernel(
     x_hbm_receiving_slot = outer_step
     x_hbm_working_slot = outer_step - 1
     x_vmem_receiving_slot = outer_step % 2
+    # xw32q: why is x_vmem_working_slot like this instead of "1-x_vmem_receiving_slot"?
+    # has something to do with tiling n and k.
     x_vmem_working_slot = (global_step_id - 1) // gn_by_gk % 2
     o_receiving_slot = lax.rem((global_step_id + grid_k - 1) // grid_k, 2)
     o_working_slot = 1 - o_receiving_slot
@@ -123,6 +125,8 @@ def _all_gather_kernel(
         _start_or_wait_copy(x_local_copy_op, wait)
 
     def _do_subsequent_x_left_local_copy(wait: bool = False):
+        # xw32: what is the diff between this and the "_do_first_x_local_copy"?
+        # The src_ref and the dst_ref in "make_async_copy" are different.
         debug_print(
             "[AGMM debug, wait={}] do subsequent x left local copy,"
             " x_hbm_working_slot={}, x_vmem_receiving_slot={}, bk_i={}",
@@ -172,6 +176,9 @@ def _all_gather_kernel(
         _start_or_wait_copy(x_local_copy_op, wait)
 
     def _do_y_local_copy(wait: bool = False):
+        # xw32q: why do we do differently than x?
+        # eg. why don't we have _do_first_y_local_copy and _do_subsequent_y_left_local_copy
+        # final result is shard on out_features. Each device has y already.
         debug_print(
             "[AGMM debug, wait={}] do y local copy, bk_i={}, bn_i={}",
             int(wait),
@@ -233,6 +240,8 @@ def _all_gather_kernel(
         _start_or_wait_copy(right_remote_copy_op, wait)
 
     def _do_subsequent_left_remote_copy(wait: bool = False):
+        # xw32: what's the difference between this and the _do_first_left_remote_copy?
+        # Only the src_ref in make_async_remote_copy is different.
         debug_print(
             "[AGMM debug, wait={}] do subsequent left remote copy,"
             " x_hbm_receiving_slot={}, x_hbm_working_slot={}",
@@ -253,6 +262,8 @@ def _all_gather_kernel(
         _start_or_wait_copy(left_remote_copy_op, wait)
 
     def _do_subsequent_right_remote_copy(wait: bool = False):
+        # xw32: what's the difference between this and the _do_first_right_remote_copy?
+        # Similarly, only the src_ref in make_async_remote_copy is different.
         debug_print(
             "[AGMM debug, wait={}] do subsequent right remote copy,"
             " x_hbm_receiving_slot={}, x_hbm_working_slot={}",
@@ -273,6 +284,8 @@ def _all_gather_kernel(
         _start_or_wait_copy(right_remote_copy_op, wait)
 
     def _do_mxu():
+        # xw32: Inputs are x_vmem_scrach_ref and y_vmem_scratch_ref.
+        # Output is o_vmem_scratch_ref
         working_global_step_id = global_step_id - 1
         working_bk_i = working_global_step_id % grid_k
         working_bn_i = working_global_step_id % gn_by_gk // grid_k
@@ -351,7 +364,9 @@ def _all_gather_kernel(
                     acc_vmem_scratch_ref)
 
     def _do_o_local_copy(wait: bool = False):
-        working_global_step_id = global_step_id - grid_k - 1
+        # xw32q: why is the working_global_step_id calculated differently from the one in _do_mxu?
+        # because we have tiling on k.
+        working_global_step_id= global_step_id - grid_k - 1
         working_bn_i = (working_global_step_id % gn_by_gk) // grid_k
         n_slice = pl.ds(working_bn_i * bn, bn)
         offset = (global_step_id - 2) // gn_by_gk
@@ -427,6 +442,7 @@ def _all_gather_kernel(
         _do_subsequent_left_remote_copy(wait=False)
         _do_subsequent_right_remote_copy(wait=False)
 
+    # xw32: why do we need bn_i == 0 here?
     @pl.when(jnp.logical_and(outer_step == 0, bn_i == 0))
     @jax.named_scope("_start_first_local_x_copy")
     def _start_first_x_local_copy():
@@ -441,6 +457,8 @@ def _all_gather_kernel(
         _do_subsequent_x_left_local_copy(wait=False)
         _do_subsequent_x_right_local_copy(wait=False)
 
+    # xw32q: could it be 'pl.when(global_step_id == 0)'?
+    # No. we need to copy y multiple tiles (bn and bk.)
     @pl.when(outer_step == 0)
     @jax.named_scope("_start_y_local_copy")
     def _start_y_local_copy():
@@ -679,6 +697,7 @@ def all_gather_matmul(
                 tp_size - 1,
             )),  # left and right recv semaphores
             pltpu.VMEM((2, m_per_device, k), x.dtype),  # x vmem scratch
+            # xw32 nb: y_vmem_shape = (n_per_device, k) if rhs_transpose else (k, n_per_device)
             pltpu.VMEM(y_vmem_shape, y.dtype),  # y vmem scratch
             pltpu.VMEM((2, m_per_device, bn), x.dtype),  # output vmem scratch
             pltpu.VMEM(acc_shape, jnp.float32),  # acc vmem scratch
