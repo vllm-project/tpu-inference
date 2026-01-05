@@ -13,11 +13,11 @@
 # limitations under the License.
 
 steps:
-   - label: "PyPI Test Performance benchmarks for meta-llama/Llama-3.1-8B-Instruct"
-     key: "pypi_meta-llama_Llama-3_1-8B-Instruct_Benchmark"
+   - label: "${TEST_LABEL_PREFIX} PyPI Test Performance benchmarks for meta-llama/Llama-3.1-8B-Instruct"
+     key: "${TEST_KEY_PREFIX}_pypi_meta-llama_Llama-3_1-8B-Instruct_Benchmark"
      if: build.env("NIGHTLY") == "1"
      agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_SMALL_CORE_QUEUE}"
      env:
       TEST_MODEL: meta-llama/Llama-3.1-8B-Instruct
       TENSOR_PARALLEL_SIZE: 1
@@ -28,15 +28,17 @@ steps:
       MAX_MODEL_LEN: 2048
       MAX_NUM_SEQS: 256
       MAX_NUM_BATCHED_TOKENS: 1024
+      IS_FOR_V7X: "${IS_FOR_V7X}"
      commands:
       - |
         .buildkite/scripts/run_with_pypi.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
 
-   - label: "PyPI Test Performance benchmarks for Qwen/Qwen3-4B"
-     key: "pypi_Qwen_Qwen3-4B_Benchmark"
+   - label: "${TEST_LABEL_PREFIX} PyPI Test Performance benchmarks for Qwen/Qwen3-4B"
+     key: "${TEST_KEY_PREFIX}_pypi_Qwen_Qwen3-4B_Benchmark"
      if: build.env("NIGHTLY") == "1"
+     depends_on: "record_verified_commit_hashes"
      agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_SMALL_CORE_QUEUE}"
      env:
       TEST_MODEL: Qwen/Qwen3-4B
       TENSOR_PARALLEL_SIZE: 1
@@ -47,6 +49,7 @@ steps:
       MAX_MODEL_LEN: 2048
       MAX_NUM_SEQS: 94
       MAX_NUM_BATCHED_TOKENS: 4096
+      IS_FOR_V7X: "${IS_FOR_V7X}"
      commands:
       - |
        .buildkite/scripts/run_with_pypi.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
