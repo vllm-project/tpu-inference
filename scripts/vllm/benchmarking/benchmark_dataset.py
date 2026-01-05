@@ -420,6 +420,120 @@ class MLPerfDataset(BenchmarkDataset):
 
 
 # -----------------------------------------------------------------------------
+# GPQA Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class GPQADataset(BenchmarkDataset):
+    """
+    Implements the GPQA dataset.
+    Uses the diamond variant.
+    """
+
+    QUERY_TEMPLATE = """{Question}
+
+(A) {A}
+(B) {B}
+(C) {C}
+(D) {D}
+
+Express your final answer as the corresponding option 'A', 'B', 'C', or 'D'."""
+
+    def __init__(self, use_chat_template: bool = True, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.use_chat_template = use_chat_template
+        self.load_data()
+
+    def load_data(self) -> None:
+        if self.dataset_path:
+            # Load from local path if provided
+            df = pd.read_csv(self.dataset_path)
+        else:
+            # Default to downloading from OpenAI
+            url = "https://openaipublic.blob.core.windows.net/simple-evals/gpqa_diamond.csv"
+            df = pd.read_csv(url)
+
+        rng = random.Random(self.random_seed)
+        examples = [row.to_dict() for _, row in df.iterrows()]
+
+        # Generate a random permutation for each example.
+        examples = [
+            example | {
+                "permutation": rng.sample(range(4), 4)
+            } for example in examples
+        ]
+
+        gpqa_data = []
+        for row in examples:
+            # Get choices and apply permutation
+            choices = [
+                row["Correct Answer"],
+                row["Incorrect Answer 1"],
+                row["Incorrect Answer 2"],
+                row["Incorrect Answer 3"],
+            ]
+            choices = [choices[i] for i in row["permutation"]]
+            correct_index = choices.index(row["Correct Answer"])
+            correct_answer = "ABCD"[correct_index]
+
+            # Format the question
+            choices_dict = dict(A=choices[0],
+                                B=choices[1],
+                                C=choices[2],
+                                D=choices[3],
+                                Question=row["Question"])
+            prompt = self.QUERY_TEMPLATE.format(**choices_dict)
+            gpqa_data.append((prompt, correct_answer))
+
+        self.data = gpqa_data
+        print(f"Loaded {len(self.data)} examples from GPQA diamond dataset")
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        input_len: Optional[int] = None,
+        output_len: Optional[int] = None,
+        **kwargs,
+    ) -> list:
+        samples: list = []
+        for prompt, completion in self.data:
+            if len(samples) >= num_requests:
+                break
+
+            if self.use_chat_template:
+                messages = [{
+                    "role": "system",
+                    "content": "Reasoning effort: high"
+                }, {
+                    "role": "user",
+                    "content": prompt
+                }]
+
+                try:
+                    prompt = tokenizer.apply_chat_template(
+                        messages, tokenize=False, add_generation_prompt=True)
+                except Exception as e:
+                    logger.error(f"Could not apply chat template: {e}. "
+                                 "Falling back to raw prompt.")
+
+            prompt_ids = tokenizer(prompt).input_ids
+            prompt_len = len(prompt_ids)
+            # Model may generate reasoning
+            new_output_len = output_len if output_len is not None else 2048
+
+            samples.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=new_output_len,
+                    completion=completion,
+                ))
+        self.maybe_oversample_requests(samples, num_requests)
+        return samples
+
+
+# -----------------------------------------------------------------------------
 # Random Dataset Implementation (Synthetic Data)
 # -----------------------------------------------------------------------------
 
