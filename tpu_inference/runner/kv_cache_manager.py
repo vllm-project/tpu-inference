@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import functools
+from dataclasses import replace
 from typing import TYPE_CHECKING, List
 
 import jax
@@ -25,6 +26,7 @@ from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.config import get_layers_from_vllm_config
 from vllm.utils.math_utils import cdiv
+from vllm.v1.core.kv_cache_utils import get_uniform_page_size
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec, MLAAttentionSpec,
                                         SlidingWindowSpec)
@@ -34,7 +36,8 @@ from tpu_inference import utils as common_utils
 from tpu_inference.logger import init_logger
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
-from tpu_inference.runner.kv_cache import create_kv_caches
+from tpu_inference.runner.kv_cache import (create_kv_caches,
+                                           get_attention_page_size_bytes)
 
 if TYPE_CHECKING:
     from vllm.v1.request import Request
@@ -177,6 +180,24 @@ class KVCacheManager:
                 else:
                     raise ValueError(
                         f"Unknown attention type: {attn_module.attn_type}")
+
+        if len(kv_cache_spec) == 0:
+            return kv_cache_spec
+
+        vllm_page_size_bytes = get_uniform_page_size(
+            list(kv_cache_spec.values()))
+        attention_page_size_bytes = get_attention_page_size_bytes(
+            self.runner.mesh, kv_cache_spec)
+        if vllm_page_size_bytes != attention_page_size_bytes:
+            logger.info(
+                f"Page size calculated by vLLM ({vllm_page_size_bytes} Bytes) "
+                f"does not match with actual page size used by the kernel "
+                f"({attention_page_size_bytes} Bytes). Overridding the page size to "
+                f"{attention_page_size_bytes} Bytes.")
+            for layer_name, spec in kv_cache_spec.items():
+                kv_cache_spec[layer_name] = replace(
+                    spec, page_size_padded=attention_page_size_bytes)
+
         return kv_cache_spec
 
     def maybe_reinitialize_input_batch(self,
