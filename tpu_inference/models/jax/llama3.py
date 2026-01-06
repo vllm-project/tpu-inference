@@ -42,6 +42,84 @@ logger = init_logger(__name__)
 init_fn = nnx.initializers.uniform()
 
 
+def quantize_kv_per_token(key: jax.Array, value: jax.Array,
+                          kv_cache_quantized_dtype: jnp.dtype):
+    """
+    Quantizes K and V dynamically per token.
+    Returns the quantized tensors AND the scales needed to dequantize them.
+    """
+    dtype_info = jnp.finfo(kv_cache_quantized_dtype)
+    minval, maxval = float(dtype_info.min), float(dtype_info.max)
+    q_max = float(dtype_info.max)  # e.g., 127 for int8
+
+    # 1. Calculate max absolute value per token (keepdims to broadcast later)
+    # Shape becomes: [Batch, Seq, Heads, 1]
+    k_abs_max = jnp.max(jnp.abs(key), axis=-1, keepdims=True)
+    v_abs_max = jnp.max(jnp.abs(value), axis=-1, keepdims=True)
+
+    # 2. Calculate Scale (add epsilon to avoid div by zero)
+    # Formula: Scale = Max_Val / Q_Max
+    epsilon = 1e-5
+    k_scale = jnp.maximum(k_abs_max, epsilon) / q_max
+    v_scale = jnp.maximum(v_abs_max, epsilon) / q_max
+
+    # 3. Quantize
+    # K_quant = Clip(Round(K_float / K_scale))
+    key = key.astype(jnp.float32)
+    key_q = key / k_scale
+    key_q = jnp.clip(key_q, minval, maxval)
+    key_q = key_q.astype(kv_cache_quantized_dtype)
+
+    value = value.astype(jnp.float32)
+    value_q = value / v_scale
+    value_q = jnp.clip(value_q, minval, maxval)
+    value_q = value_q.astype(kv_cache_quantized_dtype)
+
+    k_out = key_q.astype(key.dtype) * k_scale
+    v_out = value_q.astype(value.dtype) * v_scale
+
+    return k_out.astype(jnp.bfloat16), v_out.astype(jnp.bfloat16)
+
+
+def quantize_kv_per_tensor(key: jax.Array, value: jax.Array,
+                           kv_cache_quantized_dtype: jnp.dtype):
+    """
+    Quantizes K and V dynamically per token.
+    Returns the quantized tensors AND the scales needed to dequantize them.
+    """
+    dtype_info = jnp.finfo(kv_cache_quantized_dtype)
+    minval, maxval = float(dtype_info.min), float(dtype_info.max)
+    q_max = float(dtype_info.max)  # e.g., 127 for int8
+
+    # 1. Calculate max absolute value per token (keepdims to broadcast later)
+    # Shape becomes: [Batch, Seq, Heads, 1]
+    k_abs_max = jnp.max(jnp.abs(key))
+    v_abs_max = jnp.max(jnp.abs(value))
+
+    # 2. Calculate Scale (add epsilon to avoid div by zero)
+    # Formula: Scale = Max_Val / Q_Max
+    epsilon = 1e-5
+    k_scale = jnp.maximum(k_abs_max, epsilon) / q_max
+    v_scale = jnp.maximum(v_abs_max, epsilon) / q_max
+
+    # 3. Quantize
+    # K_quant = Clip(Round(K_float / K_scale))
+    key = key.astype(jnp.float32)
+    key_q = key / k_scale
+    key_q = jnp.clip(key_q, minval, maxval)
+    key_q = key_q.astype(kv_cache_quantized_dtype)
+
+    value = value.astype(jnp.float32)
+    value_q = value / v_scale
+    value_q = jnp.clip(value_q, minval, maxval)
+    value_q = value_q.astype(kv_cache_quantized_dtype)
+
+    k_out = key_q.astype(key.dtype) * k_scale
+    v_out = value_q.astype(value.dtype) * v_scale
+
+    return k_out.astype(jnp.bfloat16), v_out.astype(jnp.bfloat16)
+
+
 class LlamaMLP(nnx.Module):
 
     def __init__(self, config: LlamaConfig, dtype: jnp.dtype, rng: nnx.Rngs):
@@ -176,6 +254,7 @@ class LlamaAttention(nnx.Module):
             v_scale = self._v_scale
             k, v = quantize_kv(self.kv_cache_quantized_dtype, k, v, k_scale,
                                v_scale)
+        k, v = quantize_kv_per_tensor(k, v, jnp.float4_e2m1fn)
         new_kv_cache, outputs = attention(
             kv_cache,
             q,
