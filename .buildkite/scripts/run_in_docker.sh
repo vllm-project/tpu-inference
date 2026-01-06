@@ -39,6 +39,8 @@ ENV_VARS=(
   -e MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
 )
 
+BUILDKITE_ANALYTICS_TOKEN="${BUILDKITE_ANALYTICS_TOKEN:-}"
+
 TEST_SUITE_VARS=(
   -e BUILDKITE_ANALYTICS_TOKEN
   -e BUILDKITE_BUILD_ID
@@ -71,6 +73,15 @@ if ( mkdir -p "$persist_cache_dir" ); then
 else
   echo "Error: Failed to create $persist_cache_dir"
   exit 1
+fi
+
+if [ -z "$BUILDKITE_ANALYTICS_TOKEN" ]; then
+  export BUILDKITE_ANALYTICS_TOKEN=$(gcloud secrets versions access latest \
+    --secret=tpu_commons_buildkite_analytics_token \
+    --project=cloud-tpu-inference-test --quiet)
+  echo "Exported BUILDKITE_ANALYTICS_TOKEN to environment."
+else
+  echo "BUILDKITE_ANALYTICS_TOKEN already set."
 fi
 
 # Some test scripts set tp=2 on IS_FOR_V7X=true to mitigate test failures.
