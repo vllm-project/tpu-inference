@@ -21,26 +21,30 @@ import torchax
 from jax.sharding import PartitionSpec
 from torchax.interop import torch_view
 from torchax.ops.mappings import j2t, t2j
-from vllm.config import set_current_vllm_config
+from vllm.config import ParallelConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
+from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 
+from tpu_inference.layers.vllm.fused_moe import FusedMoEBackend
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.fp8 import (VllmFp8Config,
-                                                        VllmFp8LinearMethod)
+                                                        VllmFp8LinearMethod,
+                                                        VllmFp8MoEMethod)
 
 from . import utils as test_utils
 
 P = PartitionSpec
 MODELS = [
-    "Qwen/Qwen3-0.6B-FP8",
     "MiniMaxAI/MiniMax-M2",
+    "Qwen/Qwen3-0.6B-FP8",
 ]
 
 
@@ -130,6 +134,28 @@ def ref_quantize_fp8_block_2d(w: torch.Tensor, block_m: int, block_n: int,
 
     w_q = w_q.reshape(out, inn)
     scale_blocks = scale.squeeze(1).squeeze(-1).to(torch.float32)
+    return w_q, scale_blocks
+
+
+def quantize_to_fp8_block_3d(weight: torch.Tensor, block_m: int, block_n: int,
+                             dtype: torch.dtype):
+    dtype_info = torch.finfo(dtype)
+    dtype_max = float(dtype_info.max)
+    dtype_min = float(dtype_info.min)
+
+    num_experts, out, inn = weight.shape
+
+    assert out % block_m == 0 and inn % block_n == 0
+
+    weight_view = weight.view(num_experts, out // block_m, block_m,
+                              inn // block_n, block_n)
+
+    abs_max = torch.amax(torch.abs(weight_view), dim=(2, 4), keepdim=True)
+    scale = abs_max / dtype_max
+    w_q = torch.clamp(weight_view / scale, dtype_min, dtype_max).to(dtype)
+
+    w_q = w_q.reshape(num_experts, out, inn)
+    scale_blocks = scale.squeeze(2).squeeze(-1).to(torch.float32)
     return w_q, scale_blocks
 
 
@@ -360,3 +386,93 @@ def test_merged_column_parallel_linear(model, bias, num_devices, fuse_matmuls,
     initialize_layer_weights(linear_layer)
     ref_output, layer_output = return_ref_and_layer_output(linear_layer)
     torch.testing.assert_close(ref_output, layer_output)
+
+
+@pytest.mark.parametrize("use_ep", [True, False])
+@pytest.mark.parametrize("num_devices", [1, jax.local_device_count()])
+@pytest.mark.parametrize("num_tokens", [8])
+@pytest.mark.parametrize("intermediate_size", [1024, 2048])
+@pytest.mark.parametrize("hidden_size", [128, 512])
+@pytest.mark.parametrize("num_experts", [8])
+@pytest.mark.parametrize("topk", [2])
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+def test_fused_moe(use_ep, num_devices, num_tokens, intermediate_size,
+                   hidden_size, num_experts, topk, enable_attn_dp):
+    # Skip if enable_attn_dp is True but we don't have enough devices
+    if enable_attn_dp and num_devices < 2:
+        pytest.skip("enable_attn_dp requires at least 2 devices")
+
+    mesh = test_utils.get_spmd_mesh(num_devices, enable_attn_dp)
+
+    torch.manual_seed(42)
+    dtype = torch.bfloat16
+
+    a = torch.randn((num_tokens, hidden_size), dtype=dtype) / 10
+    w1 = torch.randn(
+        (num_experts, 2 * intermediate_size, hidden_size), dtype=dtype) / 10
+    w2 = torch.randn(
+        (num_experts, hidden_size, intermediate_size), dtype=dtype) / 10
+    score = torch.randn((num_tokens, num_experts), dtype=dtype)
+
+    engine_args = EngineArgs(model=MODELS[0],
+                             max_model_len=64,
+                             max_num_batched_tokens=64,
+                             max_num_seqs=4,
+                             trust_remote_code=True)
+    vllm_config = engine_args.create_engine_config()
+    vllm_config.model_config.dtype = dtype
+    vllm_config.parallel_config = ParallelConfig(
+        tensor_parallel_size=mesh.devices.size, enable_expert_parallel=use_ep)
+
+    quant_config = get_tpu_quantization_config(vllm_config, mesh)
+    with set_current_vllm_config(vllm_config):
+        vllm_fused_moe = FusedMoE(
+            num_experts=num_experts,
+            top_k=topk,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            reduce_results=False,
+            renormalize=False,
+            tp_size=1,
+            dp_size=1,
+            quant_config=quant_config,
+            has_bias=False,
+        )
+        vllm_fused_moe.moe_parallel_config.use_ep = use_ep
+
+    block_m, block_n = vllm_fused_moe.quant_method.quant_config.weight_block_size
+
+    w1_weight, w1_weight_scale = quantize_to_fp8_block_3d(
+        w1, block_m, block_n, torch.float8_e4m3fn)
+    w2_weight, w2_weight_scale = quantize_to_fp8_block_3d(
+        w2, block_m, block_n, torch.float8_e4m3fn)
+
+    vllm_fused_moe.w13_weight.data = w1_weight
+    vllm_fused_moe.w2_weight.data = w2_weight
+    vllm_fused_moe.w13_weight_scale_inv.data = w1_weight_scale
+    vllm_fused_moe.w2_weight_scale_inv.data = w2_weight_scale
+
+    expected = test_utils.ref_moe(a, score, w1, w2, None, None,
+                                  vllm_fused_moe.top_k,
+                                  vllm_fused_moe.renormalize,
+                                  vllm_fused_moe.activation)
+
+    with torchax.default_env(), set_forward_context(None, vllm_config):
+        assert isinstance(vllm_fused_moe.quant_method, VllmFp8MoEMethod)
+        if use_ep:
+            assert vllm_fused_moe.quant_method.moe_backend == FusedMoEBackend.GMM_EP
+        else:
+            assert vllm_fused_moe.quant_method.moe_backend == FusedMoEBackend.GMM_TP
+
+        jax_a = a.to('jax')
+        jax_score = score.to('jax')
+
+        vllm_fused_moe.quant_method.process_weights_after_loading(
+            vllm_fused_moe)
+        actual = vllm_fused_moe(jax_a, jax_score)
+
+        torch.testing.assert_close(expected,
+                                   actual,
+                                   check_device=False,
+                                   atol=2e-2,
+                                   rtol=1e-1)
