@@ -393,6 +393,7 @@ class RequestTracker:
             2. execution phase (prefill, decode)
         """
         self.block_ids = []
+        self.token_ids = []
         self.is_decode_phase = False
 
     def __repr__(self) -> str:
@@ -842,19 +843,19 @@ class TPUOffloadConnectorScheduler():
         """
         req_id = tracker.req_id
         _request = self._unfinished_requests[req_id]
-        block_hashes = self._get_request_block_hashes(_request)
-        self.offload_manager.touch(block_hashes)
 
-        # only consider the tokens covered by block_hashes;
-        # currently full blocks only
-        num_total_blocks = len(block_hashes)
-        num_total_tokens = min(num_total_blocks * self.block_size,
-                               len(tracker.token_ids))
-        num_full_blocks = num_total_tokens // self.block_size
-        num_full_block_tokens = num_full_blocks * self.block_size
-        adjusted_num_total_tokens = num_full_block_tokens
+        # calculate blocks to save based on save_watermark
+        num_tracked_tokens = len(tracker.token_ids)
+        num_full_blocks = num_tracked_tokens // self.block_size
         adjusted_num_total_blocks = num_full_blocks
-        assert adjusted_num_total_blocks <= len(tracker.block_ids)
+        adjusted_num_total_tokens = num_full_blocks * self.block_size
+        assert adjusted_num_total_blocks <= len(
+            tracker.block_ids
+        ), f"Req({req_id}, len_tokens:{len(tracker.token_ids)}, num_tokens:{_request.num_tokens}, {adjusted_num_total_blocks} > {len(tracker.block_ids)}"
+
+        # not all block_hashes (for resumed requests) are touched
+        block_hashes = self._get_request_block_hashes(_request)
+        self.offload_manager.touch(block_hashes[:adjusted_num_total_blocks])
 
         has_new_tokens = adjusted_num_total_tokens > tracker.save_watermark
         should_save = False
@@ -880,14 +881,12 @@ class TPUOffloadConnectorScheduler():
                     logger.info(
                         f"in decode phase, next_block_boundary: {next_block_boundary}, "
                     )
-                    if num_total_tokens == next_block_boundary:
-                        # always save the full block for decode (not affected by saving_behavior)
-                        assert num_total_tokens == adjusted_num_total_tokens, f" decode_save: {num_total_tokens} != (adjusted) {adjusted_num_total_tokens}"
+                    if adjusted_num_total_tokens == next_block_boundary:
                         should_save = True
 
         logger.info(f"    - Preparing meta for req (save): {tracker.req_id}, "
                     f"is_finished={is_finished}, "
-                    f"total_tokens={num_total_tokens}, "
+                    f"total_tokens={num_tracked_tokens}, "
                     f"adjusted_num_total_tokens={adjusted_num_total_tokens}, "
                     f"adjusted_num_total_blocks={adjusted_num_total_blocks}, "
                     f"saved_tokens={tracker.save_watermark}, "
@@ -1132,21 +1131,21 @@ class TPUOffloadConnectorScheduler():
         logger.info(
             f"Phase 3: Processing {len(cached_reqs.req_ids)} cached requests.")
         for i, req_id in enumerate(cached_reqs.req_ids):
-            tracker = self._request_trackers[req_id]
             _request = self._unfinished_requests.get(req_id)
-            _block_hashes = _request.block_hashes
-            logger.info(
-                f"  - Processing cached req: {req_id}, {len(_block_hashes)} block_hashes."
-            )
-
             if _request is None:
                 logger.warning(
                     f"  - No full request found for cached req: {req_id}. Skipping."
                 )
                 continue
 
+            tracker = self._request_trackers[req_id]
+            # resumed request gets all blocks reallocated,
+            # therefore, blocks in the tracker should be reset.
+            if req_id in cached_reqs.resumed_req_ids:
+                tracker.reset_after_preempt()
+
             # Update request tracker
-            # 1. collect new tokens and new blocks
+            # collect new tokens and new blocks
             num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
             # (local_computed_tokens + cpu_cache_hit_tokens) + new_tokens
             cur_total_tokens = _request.num_computed_tokens + num_new_tokens
@@ -1159,10 +1158,12 @@ class TPUOffloadConnectorScheduler():
             if new_blocks is None:
                 new_blocks = []
 
-            # resumed request gets all blocks reallocated,
-            # therefore, blocks in the tracker should be reset.
+            # debug
             if req_id in cached_reqs.resumed_req_ids:
-                tracker.reset_after_preempt()
+                logger.info(
+                    f"- cached requests({req_id}): cur_iter new_tokens: {num_new_tokens}, new_token_ids:{len(new_token_ids)}, new_blocks: {new_blocks}"
+                )
+
             # 2. update
             tracker.update(new_blocks, new_token_ids)
 
@@ -1929,11 +1930,11 @@ class TPUOffloadConnectorWorker:
                             req=finished_req_id,
                             saved_chunk_ids=meta.save_spec.dst_chunks)
 
-                    if meta.save_spec and meta.save_spec.is_final_save:
-                        logger.info(
-                            f"Request {finished_req_id}: Final save completed. Marking as finished."
-                        )
-                        self.finished_save_reqs.add(finished_req_id)
+                    # if meta.save_spec and meta.save_spec.is_final_save:
+                    #     logger.info(
+                    #         f"Request {finished_req_id}: Final save completed. Marking as finished."
+                    #     )
+                    #     self.finished_save_reqs.add(finished_req_id)
                     completed_count += 1
                 except Exception as e:
                     raise ValueError(f"A save operation failed: {e}")
