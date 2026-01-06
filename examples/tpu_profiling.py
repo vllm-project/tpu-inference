@@ -19,7 +19,10 @@ from tqdm import tqdm
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptType
-from vllm.utils.argparse_utils import FlexibleArgumentParser
+try:
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+except ImportError:
+    from argparse import ArgumentParser as FlexibleArgumentParser
 
 DURATION_MS = int(os.getenv("VLLM_TPU_PROFILE_DURATION_MS", 3000))
 DELAY_MS = int(os.getenv("VLLM_TPU_PROFILE_DELAY_MS", 0))
@@ -37,13 +40,16 @@ def main(args: argparse.Namespace):
     llm = LLM(**dataclasses.asdict(engine_args))
 
     sampling_params = SamplingParams(
-        temperature=0.0,
+        temperature=1.0,
+        top_k=args.top_k,
+        top_p=args.top_p,
         ignore_eos=True,
         max_tokens=args.output_len,
     )
     print(sampling_params)
     dummy_prompt_token_ids = np.random.randint(10000,
                                                size=(args.batch_size,
+                                               size=(batch_size,
                                                      args.input_len))
     dummy_prompts: list[PromptType] = [{
         "prompt_token_ids": batch
@@ -85,6 +91,20 @@ def parse_args():
     parser.add_argument("--input-len", type=int, default=32)
     parser.add_argument("--output-len", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=8)
+
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=64,
+        help="Integer that controls the number of top tokens to consider."
+    )
+    parser.add_argument(
+        "--top-p",
+        type=float,
+        default=0.95,
+        help="Float that controls the cumulative probability of the top tokens to consider."
+    )
+
     parser.add_argument(
         "--num-iters-warmup",
         type=int,

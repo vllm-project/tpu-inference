@@ -46,6 +46,8 @@ def topk_topp_and_sample(
     bins_topm_schedule=bins_topm_schedule,
     guarantee_convergence=True,
   )
+  if rng_key.shape == ():
+    rng_key = jax.random.key_data(rng_key)
   return top_p_and_sample(
     topk_logits,
     topk_idxs,

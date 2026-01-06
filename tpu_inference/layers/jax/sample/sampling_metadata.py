@@ -82,7 +82,8 @@ class TPUSupportedSamplingMetadata:
             use_pallas_kernel = bool(
             (
               (input_batch.top_k_cpu <= envs.PALLAS_SAMPLING_TOPK_THRESHOLD) & 
-              (input_batch.top_k_cpu > 0)
+              (input_batch.top_k_cpu[:num_reqs] <= envs.PALLAS_SAMPLING_TOPK_THRESHOLD) &
+              (input_batch.top_k_cpu[:num_reqs] > 0)
             ).all())
 
 

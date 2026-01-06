@@ -33,19 +33,17 @@ def uniquely_define_topk(logits, k):
   return logits
 
 
-def verify_topk_output(x, outs, axis=1, approximate=False):
+def verify_topk_output(x, outs, axis=1):
   """Validate top-k outputs for correctness.
 
   Args:
       x: Input array (must be 2D)
       outs: Tuple of (values, indices) from top-k (both must be 2D)
       axis: Axis along which top-k was computed (0 or 1, default 1)
-      approximate: If True, return float % of vals >= threshold (0.0 if indices invalid).
-                   If False, return boolean exact match (default False)
+ 
 
   Returns:
-      If approximate=False: Boolean array indicating validity for each batch element
-      If approximate=True: Float array with % of values of top-k present (0.0 if indices fail)
+      Boolean array indicating validity for each batch element
   """
   if x.ndim != 2:
     raise ValueError(
@@ -73,20 +71,8 @@ def verify_topk_output(x, outs, axis=1, approximate=False):
     indices_bounds_valid = ((i >= 0) & (i < n)).all()
     indices_valid = indices_mapping_valid & indices_bounds_valid
 
-    if approximate:
-      threshold = true_topk_vals[-1]
-      # due to ties at the topk boundary we have to be careful here
-      vals_recall = (
-        # how many values definitely in topk, with a max topk inclusion number at the threshold
-        (vals_slice > threshold).sum()
-        + jnp.minimum(
-          (true_topk_vals == threshold).sum(), (vals_slice == threshold).sum()
-        )
-      ) / k
-      return jnp.where(indices_valid, vals_recall, 0.0)
-    else:
-      vals_valid = (vals_slice == true_topk_vals).all()
-      return vals_valid & indices_valid
+    vals_valid = (vals_slice == true_topk_vals).all()
+    return vals_valid & indices_valid
 
   return verify_slice(x, out_vals, out_indexs)
 

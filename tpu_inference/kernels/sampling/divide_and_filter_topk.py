@@ -635,7 +635,10 @@ def _top_bounded_k(
       (
         n
         for limit, n in [(2**13, 128), (2**15, 256), (2**18, 512)]
-        if vocab_size <= limit
+        # we shift the limit slightly by 128 to be inclusive of LLM
+        # sampling cases where additional vocab is added to power of 2 size vocabs
+        # eg Gemma3 has 2**18 + 64 vocab size in practice
+        if vocab_size <= (limit + 256)
       ),
       1024,
     )
