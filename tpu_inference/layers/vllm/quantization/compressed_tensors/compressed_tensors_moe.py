@@ -97,10 +97,6 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         self.moe_backend = select_moe_backend(self.moe)
 
         self.extra_backend_kwargs = {}
-        if self.moe_backend == FusedMoEBackend.FUSED_MOE:
-            raise NotImplementedError(
-                "Per-channel quantization is not supported in FusedMoE kernel."
-            )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """

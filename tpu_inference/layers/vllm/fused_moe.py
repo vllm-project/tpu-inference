@@ -76,6 +76,7 @@ def fused_moe_apply(
     with jax.named_scope(layer._get_name()):
         match moe_backend:
             case FusedMoEBackend.FUSED_MOE:
+                print('xw32 fused moe is used.')
                 actual_hidden_size = x.shape[-1]
                 padding_size = w13_weight.shape[-2] - actual_hidden_size
                 x = jnp.pad(x, ((0, 0), (0, padding_size)))
