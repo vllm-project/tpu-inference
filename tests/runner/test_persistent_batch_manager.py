@@ -66,7 +66,6 @@ class TestPersistentBatchManager(unittest.TestCase):
         new_token_id = [30]
         req_data.new_token_ids = [new_token_id]
         req_data.new_block_ids = [None]
-        req_data.resumed_from_preemption = [False]
         req_data.num_output_tokens = [len(initial_output_tokens) + 1]
         scheduler_output.scheduled_cached_reqs = req_data
         scheduler_output.scheduled_spec_decode_tokens = {}

@@ -12,6 +12,7 @@ For more information about TPUs, see [TPU System Architecture](https://cloud.goo
 The following TPU versions are compatible with `tpu-inference`:
 
 ### Recommended
+- [TPU v7x](https://cloud.google.com/tpu/docs/tpu7x)
 - [TPU v6e](https://cloud.google.com/tpu/docs/v6e)
 - [TPU v5e](https://cloud.google.com/tpu/docs/v5e)
 

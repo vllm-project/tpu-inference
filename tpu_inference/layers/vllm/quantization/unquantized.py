@@ -218,11 +218,11 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 ep_axis_name=ep_axis_name,
                 # TODO: Use autotune table once we have it.
                 bt=64,
-                bf=1024,
+                bf=1536,
                 bd1=1536,
                 bd2=1536,
                 btc=64,
-                bfc=1024,
+                bfc=1536,
                 bd1c=1536,
                 bd2c=1536,
             )

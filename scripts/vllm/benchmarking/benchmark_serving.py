@@ -52,8 +52,8 @@ except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
 # yapf: disable
-from benchmark_dataset import (MLPerfDataset, MMLUDataset, RandomDataset,
-                               SampleRequest, SonnetDataset)
+from benchmark_dataset import (GPQADataset, MLPerfDataset, MMLUDataset,
+                               RandomDataset, SampleRequest, SonnetDataset)
 # yapf: disable
 from benchmark_utils import (eval_benchmark_dataset_result,
                              sample_warmup_requests)
@@ -600,6 +600,14 @@ def main(args: argparse.Namespace):
                                       input_len=args.mlperf_input_len,
                                       output_len=args.mlperf_output_len,
                                       ),
+            "gpqa":
+            lambda: GPQADataset(random_seed=args.seed,
+                                dataset_path=args.dataset_path,
+                                use_chat_template=args.gpqa_use_chat_template).sample(
+                                    tokenizer=tokenizer,
+                                    num_requests=args.num_prompts,
+                                    output_len=args.gpqa_output_len,
+                                    ),
             "random":
             lambda: RandomDataset(random_seed=args.seed,
                                   dataset_path=args.dataset_path).sample(
@@ -705,7 +713,7 @@ if __name__ == "__main__":
         default="sharegpt",
         choices=[
             "sharegpt", "burstgpt", "sonnet", "random", "hf", "custom", "mmlu",
-            "mlperf"
+            "mlperf", "gpqa"
         ],
         help="Name of the dataset to benchmark on.",
     )
@@ -888,6 +896,20 @@ if __name__ == "__main__":
         default=None,
         help="Output length for each request. Overrides the output length "
         "from the MLPerf dataset.",
+    )
+
+
+    gpqa_group = parser.add_argument_group("gpqa dataset options")
+    gpqa_group.add_argument(
+        "--gpqa-output-len",
+        type=int,
+        default=2048,
+        help="Output length for each request. Default is 2048 for reasoning.",
+    )
+    gpqa_group.add_argument(
+        "--gpqa-use-chat-template",
+        action="store_true",
+        help="Whether to format GPQA prompts using the tokenizer's chat template.",
     )
 
     sonnet_group = parser.add_argument_group("sonnet dataset options")
