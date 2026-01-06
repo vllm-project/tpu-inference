@@ -644,6 +644,11 @@ class TPUOffloadConnectorScheduler():
         self._reqs_being_saved = defaultdict[ReqId, set[CpuChunkId]](set)
         self._reqs_being_loaded = defaultdict[ReqId, set[CpuChunkId]](set)
 
+        # finished requests but with pending save / load ops
+        self._finished_reqs_w_pending_ops: set[ReqId] = set()
+        # finished requests without any pending ops
+        self._fully_finished_reqs: set[ReqId] = set()
+
         model_name = self.vllm_config.model_config.model
 
         self.decode_save = envs.TPU_OFFLOAD_DECODE_SAVE
@@ -1027,10 +1032,6 @@ class TPUOffloadConnectorScheduler():
 
         # TODO(jcgu): should we delete phase_1 for finished_requests
         # Phase 1: Handle and clean up finished requests
-        # This block handles requests that have completed their generation.
-        # We pop their state from our tracking dictionaries and call _prepare_req_meta
-        # one last time. This ensures any final, unsaved tokens are captured and
-        # signals to the worker that this is the final save for the request.
         logger.info(
             f"Phase 1: Processing {len(scheduler_output.finished_req_ids)} finished requests."
         )
@@ -1044,22 +1045,40 @@ class TPUOffloadConnectorScheduler():
                 )
                 continue
 
-            # Prepare one final metadata object if there's a final save needed.
-            # `is_finished` is set to True to flag this as the last save operation.
-            save_spec = self._prepare_save_spec(tracker, is_finished=True)
-            req_meta = self._create_request_meta(tracker,
-                                                 save_spec,
-                                                 load_spec=None)
-            if req_meta:
-                logger.info(
-                    f"  - Creating final save metadata for req: {finished_req_id}"
-                )
-                metadata.requests_meta.append(req_meta)
-
             # Pop tracker and other state first.
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
             self.load_specs.pop(finished_req_id, None)
+
+        # Note: fully_finished (finished w/o any pending ops) requests
+        # are ready to be released (delayed due to pending ops before).
+        # We use a no-op SaveSpec to notify the worker to put them in
+        # the finished_saves list.
+        for _finished_req_id in self._fully_finished_reqs:
+            _save_spec = SaveSpec(
+                num_skip_leading_tokens=0,
+                num_total_tokens=0,
+                src_blocks=[],
+                dst_chunks=[],
+                is_final_save=True,
+                skip_save=True,
+            )
+            _tracker = RequestTracker(
+                req_id=_finished_req_id,
+                prompt_len=0,
+                block_ids=[],
+                token_ids=[],
+                save_watermark=0,
+            )
+            req_meta = self._create_request_meta(_tracker,
+                                                 _save_spec,
+                                                 load_spec=None)
+            if req_meta:
+                logger.info(
+                    f"  - Creating final save metadata for req: {_finished_req_id}"
+                )
+                metadata.requests_meta.append(req_meta)
+        self._fully_finished_reqs = set()
 
         # Phase 2: Process newly scheduled requests
         # This block handles requests being scheduled for the very first time.
@@ -1282,6 +1301,16 @@ class TPUOffloadConnectorScheduler():
                 f"  freed {num_freed_blocks} staging blocks (load) from {req_id}"
             )
 
+        _finished_reqs = list(self._finished_reqs_w_pending_ops)
+        for req_id in _finished_reqs:
+            is_save_done = req_id not in self._reqs_being_saved
+            is_load_done = req_id not in self._reqs_being_loaded
+
+            if is_save_done and is_load_done:
+                self._fully_finished_reqs.add(req_id)
+                self._finished_reqs_w_pending_ops.discard(req_id)
+                logger.info(f"Request {req_id} is now fully finished.")
+
     def request_finished(
         self,
         request: "Request",
@@ -1304,24 +1333,28 @@ class TPUOffloadConnectorScheduler():
         # and its blocks should not be freed yet.
 
         req_id = request.request_id
+        delay_free = False
         if req_id in self._reqs_being_saved and len(
                 self._reqs_being_saved[req_id]) > 0:
+            self._finished_reqs_w_pending_ops.add(req_id)
             logger.info(
                 f"not_free_with_save:{req_id}, {self._reqs_being_saved[req_id]}"
             )
-            return True, None
+            delay_free = True
         if req_id in self._reqs_being_loaded and len(
                 self._reqs_being_loaded[req_id]) > 0:
+            self._finished_reqs_w_pending_ops.add(req_id)
             logger.info(
                 f"not_free_with_load:{req_id}, {self._reqs_being_loaded[req_id]}"
             )
-            return True, None
+            delay_free = True
 
-        logger.info(f" finished request: {req_id}")
-        self._reqs_being_saved.pop(req_id, None)
-        self._reqs_being_loaded.pop(req_id, None)
+        if not delay_free:
+            logger.info(f" finished request: {req_id}")
+            self._reqs_being_saved.pop(req_id, None)
+            self._reqs_being_loaded.pop(req_id, None)
 
-        return False, None
+        return delay_free, None
 
 
 class TPUOffloadConnectorWorker:
@@ -1859,7 +1892,7 @@ class TPUOffloadConnectorWorker:
                         logger.info(
                             f"Request {meta.req_id}: Final save is a no-op. Marking as finished."
                         )
-                        # self.finished_save_reqs.add(meta.req_id)
+                        self.finished_save_reqs.add(meta.req_id)
                     continue
 
             # 1. SYNC BLOCKING: Gather from TPU
