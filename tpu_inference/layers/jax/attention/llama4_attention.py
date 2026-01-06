@@ -269,146 +269,119 @@ class Llama4VisionAttention(nnx.Module):  # <--- Inherits from nnx.Module
 
     def __call__(
             self,
-            x,  # This is the hidden state (S, D) or (B*T, D)
+            x,
             is_prefill,
             kv_cache: KVCache,
             attention_metadata: AttentionMetadata,
             use_attention_rope: bool = True,
+            layer_idx: int = 0, # Ensure this arg is caught
             **kwargs):
 
         md = attention_metadata
         x = jnp.asarray(x, self.dtype)
         x_SD = nnx.with_sharding_constraint(x, self.activation_attention_td)
         x_q_TD = nnx.with_sharding_constraint(x, self.activation_q_td)
+        
+        # --- PROBE 1: Check Input Length ---
+        T_attn = x_SD.shape[0]
+        
+        # Extract frequencies and CLIP
+        freqs = md.input_positions.astype(self.dtype)
+        freqs = freqs[:T_attn, ...]
+
+        # --- PROBE 2: Check Frequency Values ---
+        # HF Freqs (Head): [0.5403, 0.7912, 0.9077, 0.9597, 0.9824]
+        # We need to see if JAX matches this.
+        if layer_idx == 0:
+            # We print the first 5 values of the first token's frequency 
+            # (which roughly corresponds to cos/sin input)
+            jax.debug.print("\n[DEBUG JAX] L0 Freqs (Input Slice)")
+            jax.debug.print("  Val: {}", freqs[0, :5, 0]) 
+            jax.debug.print("  Theta: {}", self.rope_theta)
+
         rope_scaling = self.rope_scaling
         rope_theta = self.rope_theta
         H = self.head_dim
-        #l2_norm = L2Norm()
-
-        # 1. Input Projection and RoPE Application (Output is Rank 3: [S, N/K, H])
-        # [ ... q_proj, k_proj, v_proj blocks omitted for brevity, they produce q_TNH, k_SKH, v_SKH ... ]
-        # NOTE: Your existing code for Q, K, V projection and RoPE/L2Norm application must be kept here.
-        # It results in: q_TNH, k_SKH, v_SKH (all padded to H=128)
-
-        # --- START: RETAINED QKV PROJECTION LOGIC ---
 
         with jax.named_scope("q_proj"):
             q_TNH = jnp.einsum('TD,DNH -> TNH', x_q_TD,
                                self.kernel_q_proj_DNH.value)
-
-            # >>> ADDITION: Apply Bias <<<
             q_TNH += self.bias_q_proj_NH.value[None, ...]
 
-            # --- NEW TRACE POINT A_in (Input to RoPE) ---
-            jax.debug.print("JAX TRACE A_in (Q Pre-RoPE): {}", q_TNH[0, 0, :5])
+            # --- PROBE 3: Check Q Pre-RoPE ---
+            # HF Q Pre-RoPE (Head): [0.0250, -0.2451, -0.1030, 0.0324, 0.0361]
+            if layer_idx == 0:
+                jax.debug.print("[DEBUG JAX] L0 Q (Pre-RoPE)")
+                jax.debug.print("  Head: {}", q_TNH[0, 0, :5])
 
             if use_attention_rope:
-                q_TNH = apply_rope(q_TNH, md.input_positions, H, rope_theta,
+                q_TNH = apply_rope(q_TNH, freqs, H, rope_theta,
                                    rope_scaling, self.rope_input_ordering)
-                # if self.use_qk_norm:  #TODO: MAYBE UNCOMMENT
-                #     q_TNH = l2_norm(q_TNH)
+            
+            # --- PROBE 4: Check Q Post-RoPE ---
+            # HF Q Post-RoPE (Head): [0.2197, -0.1113, -0.1015, -0.0373, 0.0441]
+            if layer_idx == 0:
+                jax.debug.print("[DEBUG JAX] L0 Q (Post-RoPE)")
+                jax.debug.print("  Head: {}", q_TNH[0, 0, :5])
 
-            jax.debug.print("TRACE A: Q after L2Norm/RoPE Slice: {}",
-                            q_TNH[0, 0, :5])
             q_TNH = nnx.with_sharding_constraint(q_TNH, self.query_tnh)
 
         with jax.named_scope("k_proj"):
             k_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
                                self.kernel_k_proj_DKH.value)
-            # >>> ADDITION: Apply Bias <<<
             k_SKH += self.bias_k_proj_KH.value[None, ...]
 
             if use_attention_rope:
-                k_SKH = apply_rope(k_SKH, md.input_positions, H, rope_theta,
+                k_SKH = apply_rope(k_SKH, freqs, H, rope_theta,
                                    rope_scaling, self.rope_input_ordering)
-                # if self.use_qk_norm: #TODO: MAYBE UNCOMMENT
-                #     k_SKH = l2_norm(k_SKH)
             k_SKH = nnx.with_sharding_constraint(k_SKH, self.keyvalue_skh)
 
         with jax.named_scope("v_proj"):
             v_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
                                self.kernel_v_proj_DKH.value)
-            # >>> ADDITION: Apply Bias <<<
             v_SKH += self.bias_v_proj_KH.value[None, ...]
             v_SKH = nnx.with_sharding_constraint(v_SKH, self.keyvalue_skh)
 
-        # --- Flash Attention Migration Logic (Starts here, no change needed) ---
-
-        # Check Q_TNH shape is now (T, N, H)
+        # --- Flash Attention (Standard) ---
         T_attn, N, H = q_TNH.shape
-        B = 1  # Batch size is 1 for the Vision Encoder (fixed)
-
-        # Target block size for sequence dimension padding
+        B = 1 
         BLOCK_SIZE = 128
         pad_len = (BLOCK_SIZE - (T_attn % BLOCK_SIZE)) % BLOCK_SIZE
 
-        # 2. Reshape to Flash Attention Input Format: [B, N, T, H]
-        # a. Add Batch Axis and apply padding for the Sequence (T) dimension
+        q_TNH = jnp.pad(q_TNH, [(0, pad_len), (0, 0), (0, 0)], constant_values=0)
+        q_TNH = jnp.expand_dims(q_TNH, axis=0) 
+        
+        k_SKH = jnp.pad(k_SKH, [(0, pad_len), (0, 0), (0, 0)], constant_values=0)
+        k_SKH = jnp.expand_dims(k_SKH, axis=0)
+        
+        v_SKH = jnp.pad(v_SKH, [(0, pad_len), (0, 0), (0, 0)], constant_values=0)
+        v_SKH = jnp.expand_dims(v_SKH, axis=0)
 
-        # Q Tensor (q_TNH is currently [T, N, H])
-        q_TNH = jnp.pad(q_TNH, [(0, pad_len), (0, 0), (0, 0)],
-                        mode='constant',
-                        constant_values=0)
-        q_TNH = jnp.expand_dims(q_TNH, axis=0)  # [1, T_padded, N, H]
-
-        # K Tensor (k_SKH is currently [T, K, H])
-        k_SKH = jnp.pad(k_SKH, [(0, pad_len), (0, 0), (0, 0)],
-                        mode='constant',
-                        constant_values=0)
-        k_SKH = jnp.expand_dims(k_SKH, axis=0)  # [1, T_padded, K, H]
-
-        # V Tensor (v_SKH is currently [T, K, H])
-        v_SKH = jnp.pad(v_SKH, [(0, pad_len), (0, 0), (0, 0)],
-                        mode='constant',
-                        constant_values=0)
-        v_SKH = jnp.expand_dims(v_SKH, axis=0)  # [1, T_padded, K, H]
-
-        # Update T_attn to the padded length
-        T_padded = T_attn + pad_len
-
-        # b. Transpose T and N axes: [1, N, T_padded, H]
         q_BNTH = jnp.transpose(q_TNH, (0, 2, 1, 3))
         k_BKTH = jnp.transpose(k_SKH, (0, 2, 1, 3))
         v_BKTH = jnp.transpose(v_SKH, (0, 2, 1, 3))
 
-        # 3. Generate Segment Ids (Simplified for Vision Encoder)
+        T_padded = T_attn + pad_len
         segment_ids_q = jnp.full((B, T_padded), 0, dtype=jnp.int32)
         segment_ids = SegmentIds(q=segment_ids_q, kv=segment_ids_q)
 
         with jax.named_scope("flash_attn_op"):
-            # Execute Flash Attention kernel
             outputs_BNTH = sharded_flash_attention(
                 mesh=self.mesh,
                 causal=False,
                 sm_scale=self.head_dim**-0.5,
             )(q_BNTH, k_BKTH, v_BKTH, segment_ids)
-
             new_kv_cache = kv_cache
 
-        jax.debug.print("TRACE B (Raw Attn Output): {}", outputs_BNTH[0, 0,
-                                                                      0, :5])
-
-        # 4. Reverse Transpose and Reshape for Output Projection (NEW FIX 2)
-
-        # a. Reverse Transpose: [B, N, T_padded, H] -> [T_padded, B, N, H]
         outputs_TBH = jnp.transpose(outputs_BNTH, (2, 0, 1, 3))
+        outputs_TBH = outputs_TBH[:T_attn, ...] 
+        outputs_TNH = jnp.squeeze(outputs_TBH, axis=1)
 
-        # *** UNPAD/CROP: Remove the padded elements ***
-        outputs_TBH = outputs_TBH[:T_attn, ...]
-
-        # b. Squeeze the Batch=1 dimension to get TNH
-        outputs_TNH = jnp.squeeze(outputs_TBH, axis=1)  # [T, N, H]
-
-        # 5. Output Projection (o_proj)
         with jax.named_scope("o_proj"):
-            # Standard Llama/Attention einsum: [T, N, H] * [N, H, D] -> [T, D]
             o_TD = jnp.einsum('TNH,NHD -> TD', outputs_TNH,
                               self.kernel_o_proj_NHD.value)
-            # >>> ADDITION: Apply Bias <<<
             o_TD += self.bias_o_proj_D.value
-
             o_TD = nnx.with_sharding_constraint(
                 o_TD, self.activation_attention_out_td)
-
-        # We return the attention output in the 2D format expected by the outer layer loop
+                
         return new_kv_cache, o_TD

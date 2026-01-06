@@ -238,8 +238,9 @@ def main(args: dict):
         raise ValueError(
             f"Only 'custom-mm' benchmark is supported, found: {benchmark}")
 
-    test_cases = load_custom_mm_dataset(image_dir)
-    #test_cases = load_mm_safety_bench(image_dir)
+    
+    #test_cases = load_custom_mm_dataset(image_dir)
+    test_cases = load_mm_safety_bench(image_dir)
     llm = LLM(**args)
     #llm.llm_engine.io_processor.model_config.processor_return_mm_hashes = True
 

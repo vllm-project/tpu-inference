@@ -774,7 +774,9 @@ class JAXLlama4VisionEncoderLayer(nnx.Module):
                  rngs: nnx.Rngs,
                  mesh: Mesh,
                  dtype: jnp.dtype = jnp.bfloat16,
-                 random_init: bool = False):
+                 random_init: bool = False,
+                 layer_idx: int = 0):
+        self.layer_idx = layer_idx
         cfg = config
         self.hidden_size = cfg.hidden_size
 
@@ -835,17 +837,21 @@ class JAXLlama4VisionEncoderLayer(nnx.Module):
     def __call__(self, hidden_state: jax.Array, freqs_ci_stacked: jax.Array,
                  **kwargs) -> jax.Array:
 
-        print(f"DEBUG: freqs_ci_stacked type: {type(freqs_ci_stacked)}")
+        # Helper callback
+        def log_jax(x, name):
+            # Only print for Layer 0
+            # We pass the name as a string to the callback
+            print_head_tail(x, f"[DEBUG JAX L0] {name}")
 
-        jax.debug.print("TRACE 0 (Input): Hidden State Slice: {}",
-                        hidden_state[0, 0, :5])
+        if self.layer_idx == 0:
+            jax.debug.callback(log_jax, hidden_state, "Input Hidden State")
 
         # Self Attention
         residual = hidden_state
         hidden_state = self.input_layernorm(hidden_state)
 
-        jax.debug.print("TRACE 1: After Input LayerNorm Slice: {}",
-                        hidden_state[0, 0, :5])
+        if self.layer_idx == 0:
+            jax.debug.callback(log_jax, hidden_state, "Post Input LayerNorm")
 
         original_shape = hidden_state.shape
         B, S, D = original_shape  # Capture B, S, D for later use
@@ -863,40 +869,37 @@ class JAXLlama4VisionEncoderLayer(nnx.Module):
             attention_metadata=
             vision_metadata,  # Pass the object containing the frequencies
             use_attention_rope=True,  # Explicitly ensure RoPE is executed
+            layer_idx=self.layer_idx,
             **kwargs)
         attention_output = attention_output_2D.reshape(original_shape)
 
-        jax.debug.print("TRACE 2: Attention Output Slice: {}",
-                        attention_output[0, 0, :5])
+        if self.layer_idx == 0:
+            jax.debug.callback(log_jax, attention_output, "Attention Output (Pre-Residual)")
 
         hidden_state = residual + attention_output
-
-        jax.debug.print("TRACE 3: After Attn Residual Add Slice: {}",
-                        hidden_state[0, 0, :5])
 
         residual = hidden_state
 
         # MLP
         hidden_state = self.post_attention_layernorm(hidden_state)
-        # 2. Print state AFTER MLP LayerNorm
-        jax.debug.print("TRACE 4: After MLP LayerNorm Slice: {}",
-                        hidden_state[0, 0, :5])
+        
+        if self.layer_idx == 0:
+            jax.debug.callback(log_jax, hidden_state, "Post Attention LayerNorm")
 
         # ** FIX: Flatten hidden_state to 2D before passing to MLP **
         hidden_state_2D = hidden_state.reshape(B * S, D)
 
         hidden_state_2D = self.mlp(hidden_state_2D)
 
+        if self.layer_idx == 0:
+            jax.debug.callback(log_jax, hidden_state_2D, "MLP Output (Pre-Residual)")
+
         # ** FIX: Restore original 3D shape **
         hidden_state = hidden_state_2D.reshape(B, S, D)
 
-        jax.debug.print("TRACE 5: After MLP FFW Slice: {}",
-                        hidden_state[0, 0, :5])
 
         hidden_state = residual + hidden_state
-        # 4. Print final output slice
-        jax.debug.print("TRACE 6: FINAL Layer Output Slice: {}",
-                        hidden_state[0, 0, :5])
+   
         # --- DEBUG MLP END ---
 
         return hidden_state
@@ -918,16 +921,24 @@ class JAXLlama4VisionEncoder(nnx.Module):
                                         rngs=rngs,
                                         dtype=dtype,
                                         random_init=random_init,
-                                        mesh=mesh) for _ in range(num_layers)
+                                        mesh=mesh, layer_idx=i) for i in range(num_layers)
         ]
 
     def __call__(self, hidden_states: jax.Array, freqs_ci_stacked: jax.Array,
                  **kwargs) -> jax.Array:  # <--- MODIFIED
         # Loop over the layers, passing the frequencies to each one.
-        for encoder_layer in self.layers:
+        for i, encoder_layer in enumerate(self.layers):
             # MODIFIED CALL: Pass freqs to the layer
             hidden_states = encoder_layer(hidden_states, freqs_ci_stacked,
                                           **kwargs)
+
+            # --- LOG LAYER 0 and LAYER 15 ---
+            if i == 0:
+                jax.debug.callback(print_head_tail, hidden_states, "Encoder Layer 0 Output")
+            if i == 15:
+                jax.debug.callback(print_head_tail, hidden_states, "Encoder Layer 15 Output")
+            # -------------------------------
+    
         return hidden_states
 
 
@@ -1147,8 +1158,16 @@ class JAXLlama4VisionModel(nnx.Module):
         else:
             raise ValueError(f"Unexpected pixel_values shape: {input_shape}")
 
+        # --- LOG INPUTS ---
+        jax.debug.callback(print_head_tail, pixel_values, "Input Pixels")
+        # ------------------
+
         # 1. Unfold convolution (uses our new explicit reshape logic)
         hidden_states = self.patch_embedding(pixel_values)
+
+        # --- LOG PATCH EMBEDDINGS ---
+        jax.debug.callback(print_head_tail, hidden_states, "Patch Embeddings")
+        # ----------------------------
 
         # 2. Add class embedding
         class_embedding_expanded = self.class_embedding.value[

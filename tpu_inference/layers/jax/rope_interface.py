@@ -154,11 +154,6 @@ def apply_rope(
 
             out = jnp.concatenate([outputs_real, outputs_imag], axis=-1)
 
-        outputs_real = inputs_real * cos_f32 - inputs_imag * sin_f32
-        outputs_imag = inputs_real * sin_f32 + inputs_imag * cos_f32
-
-        out = jnp.concatenate([outputs_real, outputs_imag], axis=-1)
-
     # Standard RoPE
     else:
         # Calculate inverse frequencies (timescale)
