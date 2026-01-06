@@ -206,6 +206,7 @@ class Llama4VisionAttention(nnx.Module):  # <--- Inherits from nnx.Module
     activation_attention_td: Sharding
     activation_attention_out_td: Sharding
     is_causal: bool = True
+    kv_cache_quantized_dtype: Optional[jnp.dtype] = None
 
     # 1. ADD: The required InitVar for nnx initialization (used in the constructor)
     rngs: InitVar[nnx.Rngs]
@@ -273,8 +274,8 @@ class Llama4VisionAttention(nnx.Module):  # <--- Inherits from nnx.Module
             is_prefill,
             kv_cache: KVCache,
             attention_metadata: AttentionMetadata,
+            freqs_cis: jax.Array, # Accepts pre-calculated freqs_cis from Llama4VisionRotaryEmbedding
             use_attention_rope: bool = True,
-            layer_idx: int = 0, # Ensure this arg is caught
             **kwargs):
 
         md = attention_metadata
@@ -282,23 +283,6 @@ class Llama4VisionAttention(nnx.Module):  # <--- Inherits from nnx.Module
         x_SD = nnx.with_sharding_constraint(x, self.activation_attention_td)
         x_q_TD = nnx.with_sharding_constraint(x, self.activation_q_td)
         
-        # --- PROBE 1: Check Input Length ---
-        T_attn = x_SD.shape[0]
-        
-        # Extract frequencies and CLIP
-        freqs = md.input_positions.astype(self.dtype)
-        freqs = freqs[:T_attn, ...]
-
-        # --- PROBE 2: Check Frequency Values ---
-        # HF Freqs (Head): [0.5403, 0.7912, 0.9077, 0.9597, 0.9824]
-        # We need to see if JAX matches this.
-        if layer_idx == 0:
-            # We print the first 5 values of the first token's frequency 
-            # (which roughly corresponds to cos/sin input)
-            jax.debug.print("\n[DEBUG JAX] L0 Freqs (Input Slice)")
-            jax.debug.print("  Val: {}", freqs[0, :5, 0]) 
-            jax.debug.print("  Theta: {}", self.rope_theta)
-
         rope_scaling = self.rope_scaling
         rope_theta = self.rope_theta
         H = self.head_dim
@@ -308,22 +292,9 @@ class Llama4VisionAttention(nnx.Module):  # <--- Inherits from nnx.Module
                                self.kernel_q_proj_DNH.value)
             q_TNH += self.bias_q_proj_NH.value[None, ...]
 
-            # --- PROBE 3: Check Q Pre-RoPE ---
-            # HF Q Pre-RoPE (Head): [0.0250, -0.2451, -0.1030, 0.0324, 0.0361]
-            if layer_idx == 0:
-                jax.debug.print("[DEBUG JAX] L0 Q (Pre-RoPE)")
-                jax.debug.print("  Head: {}", q_TNH[0, 0, :5])
-
             if use_attention_rope:
-                q_TNH = apply_rope(q_TNH, freqs, H, rope_theta,
+                q_TNH = apply_rope(q_TNH, freqs_cis, H, rope_theta, # Use pre-calculated freqs_cis
                                    rope_scaling, self.rope_input_ordering)
-            
-            # --- PROBE 4: Check Q Post-RoPE ---
-            # HF Q Post-RoPE (Head): [0.2197, -0.1113, -0.1015, -0.0373, 0.0441]
-            if layer_idx == 0:
-                jax.debug.print("[DEBUG JAX] L0 Q (Post-RoPE)")
-                jax.debug.print("  Head: {}", q_TNH[0, 0, :5])
-
             q_TNH = nnx.with_sharding_constraint(q_TNH, self.query_tnh)
 
         with jax.named_scope("k_proj"):
@@ -332,7 +303,7 @@ class Llama4VisionAttention(nnx.Module):  # <--- Inherits from nnx.Module
             k_SKH += self.bias_k_proj_KH.value[None, ...]
 
             if use_attention_rope:
-                k_SKH = apply_rope(k_SKH, freqs, H, rope_theta,
+                k_SKH = apply_rope(k_SKH, freqs_cis, H, rope_theta, # Use pre-calculated freqs_cis
                                    rope_scaling, self.rope_input_ordering)
             k_SKH = nnx.with_sharding_constraint(k_SKH, self.keyvalue_skh)
 
@@ -342,18 +313,24 @@ class Llama4VisionAttention(nnx.Module):  # <--- Inherits from nnx.Module
             v_SKH += self.bias_v_proj_KH.value[None, ...]
             v_SKH = nnx.with_sharding_constraint(v_SKH, self.keyvalue_skh)
 
-        # --- Flash Attention (Standard) ---
+        # --- Flash Attention Setup ---
+        q_scale = k_scale = v_scale = None
+        if self.kv_cache_quantized_dtype:
+            k_scale = self._k_scale
+            v_scale = self._v_scale
+            k_SKH, v_SKH = quantize_kv(self.kv_cache_quantized_dtype, k_SKH,
+                                       v_SKH, k_scale, v_scale)
+
         T_attn, N, H = q_TNH.shape
         B = 1 
         BLOCK_SIZE = 128
         pad_len = (BLOCK_SIZE - (T_attn % BLOCK_SIZE)) % BLOCK_SIZE
 
+        # Pad Q/K/V
         q_TNH = jnp.pad(q_TNH, [(0, pad_len), (0, 0), (0, 0)], constant_values=0)
         q_TNH = jnp.expand_dims(q_TNH, axis=0) 
-        
         k_SKH = jnp.pad(k_SKH, [(0, pad_len), (0, 0), (0, 0)], constant_values=0)
         k_SKH = jnp.expand_dims(k_SKH, axis=0)
-        
         v_SKH = jnp.pad(v_SKH, [(0, pad_len), (0, 0), (0, 0)], constant_values=0)
         v_SKH = jnp.expand_dims(v_SKH, axis=0)
 
@@ -362,7 +339,15 @@ class Llama4VisionAttention(nnx.Module):  # <--- Inherits from nnx.Module
         v_BKTH = jnp.transpose(v_SKH, (0, 2, 1, 3))
 
         T_padded = T_attn + pad_len
-        segment_ids_q = jnp.full((B, T_padded), 0, dtype=jnp.int32)
+        
+        # --- FIX: MASK PADDING ---
+        # 1. Create array of zeros (Valid Tokens)
+        valid_ids = jnp.zeros((B, T_attn), dtype=jnp.int32)
+        # 2. Create array of ones (Padding Tokens) - Different ID = No Attention
+        pad_ids = jnp.ones((B, pad_len), dtype=jnp.int32)
+        # 3. Concatenate
+        segment_ids_q = jnp.concatenate([valid_ids, pad_ids], axis=1)
+        
         segment_ids = SegmentIds(q=segment_ids_q, kv=segment_ids_q)
 
         with jax.named_scope("flash_attn_op"):

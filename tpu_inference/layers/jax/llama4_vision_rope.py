@@ -13,18 +13,17 @@
 # limitations under the License.
 
 from dataclasses import dataclass
+from typing import Optional
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 
-
-# This is the class that generates the static 2D positional frequencies
 @dataclass(kw_only=True)
 class Llama4VisionRotaryEmbedding(nnx.Module):
     """
     Calculates and stores the 2D Rotary Positional Embedding (RoPE) frequencies
-    based on the Vision Transformer (ViT) patch grid structure.
+    with Float32 precision to match PyTorch/HF reference values.
     """
     image_size: int
     patch_size: int
@@ -34,94 +33,67 @@ class Llama4VisionRotaryEmbedding(nnx.Module):
     dtype: jnp.dtype = jnp.bfloat16
 
     def __post_init__(self):
-        # The input x is needed only to get the batch dimensions if necessary, but here
-        # we return the static frequencies calculated in __init__.
-
-        # The final rotation array must be expanded to handle the batch dimension of x.
-        # x is typically (B, S, D). freqs_ci is (S, D_rot)
-
-        # We return the static frequencies. The calling attention layer (Llama4VisionAttention)
-        # is responsible for handling batch and head dimensions.
-        # Calculate the size of the patch grid (e.g., 336 / 14 = 24)
+        # 1. Setup Grid Dimensions
         idx = self.image_size // self.patch_size
-        num_patches = idx * idx
+        num_patches = idx ** 2
+        
+        # 2. Create 2D Position Grid
+        # Shape: (num_patches, 1)
+        img_idx = jnp.arange(num_patches, dtype=jnp.int32).reshape(num_patches, 1)
+        
+        # Add the CLS token (matches HF logic: cat([grid, grid[:1]], dim=0))
+        img_idx = jnp.concatenate([img_idx, img_idx[:1]], axis=0)
+        
+        # Determine X and Y coordinates
+        frequencies_x = img_idx % idx
+        frequencies_y = img_idx // idx
+        
+        # Set CLS token ID (The last element) to -2 as per HF implementation
+        # This allows masking later (freqs are zeroed out for this ID)
+        frequencies_x = frequencies_x.at[-1, -1].set(-2)
+        frequencies_y = frequencies_y.at[-1, -1].set(-2)
 
-        # Calculate head_dim
-        head_dim = self.hidden_size // self.num_attention_heads
+        # 3. Calculate Inverse Frequencies (CRITICAL: FORCE FLOAT32)
+        # We calculate dim/head/2. For Llama 4 Vision: 1408 / 16 / 2 = 44.
+        freq_dim = self.hidden_size // self.num_attention_heads // 2
+        
+        # FORCE FLOAT32 HERE to prevent 0.540 -> 0.539 precision loss
+        t_indices = jnp.arange(0, freq_dim, 2, dtype=jnp.float32)[: (freq_dim // 2)]
+        inv_freq = 1.0 / (self.rope_theta ** (t_indices / freq_dim))
 
-        # --- COORDINATE GENERATION ---
-
-        # Generate 1D coordinates (0 to num_patches - 1)
-        patch_indices_1d = jnp.arange(num_patches, dtype=jnp.int32)
-
-        # Convert to 2D coordinates (x and y)
-        frequencies_x = patch_indices_1d % idx  # X coordinate (width)
-        frequencies_y = patch_indices_1d // idx  # Y coordinate (height)
-
-        # Add a coordinate placeholder for the CLS token (e.g., coordinate -1, or 0)
-        # We set CLS token index to -1 as per HF reference to exclude it from rotation factor calculation
-        cls_token_idx = jnp.array([-1], dtype=jnp.int32)
-
-        # Create full coordinate arrays including CLS placeholder (total_tokens, 1)
-        freqs_x_full = jnp.concatenate([frequencies_x, cls_token_idx],
-                                       axis=0)[:, jnp.newaxis]
-        freqs_y_full = jnp.concatenate([frequencies_y, cls_token_idx],
-                                       axis=0)[:, jnp.newaxis]
-
-        # --- FREQUENCY CALCULATION ---
-
-        # RoPE applies to half the head dimension. We need two sets (for x and y).
-        freq_dim_per_coord = head_dim // 2
-
-        # Calculate the inverse frequencies (timescale) shared by x and y
-        # We split the head_dim/2 across x and y (i.e., head_dim/4 for each coord if concatenated)
-        inv_freq = 1.0 / (self.rope_theta**(
-            jnp.arange(0, freq_dim_per_coord, 2).astype(jnp.float32) /
-            freq_dim_per_coord))
-
-        # We must repeat the inv_freq pattern to fill the required dimensions for rotation
-        # The HF code uses concatenation and repeats for X and Y features.
-
-        # 1. Calculate frequencies for X and Y dimensions
-        freqs_x = (freqs_x_full + 1) * inv_freq[jnp.newaxis, :]
-        freqs_y = (freqs_y_full + 1) * inv_freq[jnp.newaxis, :]
-
-        # 2. Concatenate X and Y frequencies to form the final frequency list
-        # Resulting shape: (total_tokens, head_dim // 2)
-        final_freqs = jnp.concatenate([freqs_x, freqs_y], axis=1)
-
-        # 3. Create complex rotation factors (cos(theta) + i*sin(theta))
-        cos_freqs = jnp.cos(final_freqs)
-        sin_freqs = jnp.sin(final_freqs)
-
-        # The complex format is complex_number = real_part + imag_part * i
-        # We stack the real (cos) and imaginary (sin) parts to pass to jnp.complex64 later.
-        # Shape: (total_tokens, head_dim/2, 2)
+        # 4. Create Frequency Bands
+        # Expand dims for broadcasting: (Seq, 1) * (1, HeadDim/2)
+        freqs_x = (frequencies_x + 1).astype(jnp.float32) * inv_freq[None, :]
+        freqs_y = (frequencies_y + 1).astype(jnp.float32) * inv_freq[None, :]
+        
+        # Repeat interleaving to match Complex number format (Real, Imag)
+        # HF: repeat_interleave(2, dim=-1)
+        freqs_x = jnp.repeat(freqs_x, 2, axis=-1)
+        freqs_y = jnp.repeat(freqs_y, 2, axis=-1)
+        
+        # 5. Concatenate and Format
+        # HF: torch.cat([freqs_x, freqs_y], dim=-1)
+        freqs = jnp.concatenate([freqs_x, freqs_y], axis=-1)
+        
+        # HF: freqs.masked_fill(img_idx < 0, 0)
+        # Mask out the CLS token frequencies (where ID was set to -2)
+        mask_cond = img_idx < 0
+        freqs = jnp.where(mask_cond, 0.0, freqs)
+        
+        # 6. Construct Complex Rotary Embeddings
+        # We need (Cos, Sin) pairs.
+        # Select even/odd indices to separate the interleaved values similar to HF [..., ::2]
+        freqs_rad = freqs[..., ::2] 
+        
+        cos_freqs = jnp.cos(freqs_rad)
+        sin_freqs = jnp.sin(freqs_rad)
+        
+        # Stack to (Seq, Dim/2, 2) which represents (Real, Imag)
+        # This matches the shape expected by apply_rope: (S, D_rot, 2)
         freqs_cis_stacked = jnp.stack([cos_freqs, sin_freqs], axis=-1)
 
-        # Mask out the CLS token frequency (where freqs_x_full < 0)
-        cls_mask = freqs_x_full < 0
-        cls_mask = cls_mask[:, jnp.newaxis, :]
-
-        # Identity rotation is [1.0, 0.0] (Real=1, Imag=0)
-        identity_rot = jnp.array([1.0, 0.0], dtype=self.dtype)
-        # Broadcast identity to match stacked shape (1, 1, 2)
-        identity_rot = identity_rot.reshape(1, 1, 2)
-
-        # Use identity where mask is True
-        freqs_cis_stacked = jnp.where(cls_mask, identity_rot,
-                                      freqs_cis_stacked)
-
-        # --- DEBUG CHECK ---
-        print("\n[DEBUG] RoPE Init Check:")
-        print(f"  CLS Mask Sum: {jnp.sum(cls_mask)}")
-        print(
-            f"  Freqs at CLS (Should be 1+0j or similar): {freqs_cis_stacked[-1, 0, :]}"
-        )
-
-        # Store as parameter/attribute for checkpointing
-        self.freqs_cis_stacked = freqs_cis_stacked.astype(
-            jnp.float32)  #hardcoding to float32 for testing purposes
+        # Store as parameter - Cast to model dtype only at the very end
+        self.freqs_cis_stacked = freqs_cis_stacked.astype(jnp.float32)
 
     def __call__(self) -> jax.Array:
         return self.freqs_cis_stacked

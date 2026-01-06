@@ -858,7 +858,8 @@ class JAXLlama4VisionEncoderLayer(nnx.Module):
 
         hidden_state_2D = hidden_state.reshape(-1, original_shape[-1])
 
-        vision_metadata = AttentionMetadata(input_positions=freqs_ci_stacked, )
+        vision_metadata = AttentionMetadata(input_positions=jnp.array([])
+        )
         #TODO: I don't believe I took care of the causal mask issue yet
         # there is a "mask_value" variable in ref_ragged_paged_attention
         new_kv_cache, attention_output_2D = self.self_attn(
@@ -868,8 +869,9 @@ class JAXLlama4VisionEncoderLayer(nnx.Module):
             kv_cache=None,  # Vision Encoder does not use KV cache
             attention_metadata=
             vision_metadata,  # Pass the object containing the frequencies
+            freqs_cis=freqs_ci_stacked, # Pass freqs_cis directly
             use_attention_rope=True,  # Explicitly ensure RoPE is executed
-            layer_idx=self.layer_idx,
+            #layer_idx=self.layer_idx,
             **kwargs)
         attention_output = attention_output_2D.reshape(original_shape)
 
@@ -1074,6 +1076,7 @@ class JAXLlama4VisionModel(nnx.Module):
         self.patch_size = cfg.patch_size
         self.hidden_size = cfg.hidden_size
         self.norm_eps = cfg.norm_eps
+        self.num_channels = cfg.num_channels
 
         self.num_patches = (self.image_size //
                             self.patch_size)**2 + 1  # +1 for CLS token
@@ -1131,36 +1134,23 @@ class JAXLlama4VisionModel(nnx.Module):
 
     def __call__(self, pixel_values: jax.Array) -> jax.Array:
         input_shape = pixel_values.shape
-
-        # --- SHAPE HANDLING FIX ---
-        # We expect (Batch, Height, Width, Channel) from embed_multimodal.
-
-        if len(input_shape) == 4:
-            if input_shape[-1] == 3:
-                # (Batch, Height, Width, Channel) -> Good, this is what we want.
-                b, h, w, c = input_shape
-                t = 1
-            elif input_shape[1] == 3:
-                # (Batch, Channel, Height, Width) -> Legacy/PyTorch format. Transpose it.
-                b, c, h, w = input_shape
-                t = 1
-                pixel_values = jnp.transpose(pixel_values, (0, 2, 3, 1))
-            else:
-                raise ValueError(
-                    f"Unexpected pixel_values 4D shape: {input_shape}")
-        elif len(input_shape) == 5:
-            # (Batch, Time, Channel, Height, Width) -> Standard Video/Multicrop
+        # --- SHAPE HANDLING ---
+        # This model expects NCHW format. We handle NHWC and 5D (video) inputs.
+        if len(input_shape) == 5:
+            # (Batch, Time, Channel, Height, Width) -> (B*T, C, H, W)
             b, t, c, h, w = input_shape
-            # Flatten Batch*Time and Transpose to NHWC
-            pixel_values = jnp.transpose(pixel_values,
-                                         (0, 1, 3, 4, 2))  # B, T, H, W, C
-            pixel_values = pixel_values.reshape(b * t, h, w, c)
+            pixel_values = pixel_values.reshape(b * t, c, h, w)
+        elif len(input_shape) == 4 and input_shape[-1] == self.num_channels:
+            # (Batch, Height, Width, Channel) -> (B, C, H, W)
+            b, h, w, c = input_shape
+            t = 1
+            pixel_values = jnp.transpose(pixel_values, (0, 3, 1, 2))
         else:
-            raise ValueError(f"Unexpected pixel_values shape: {input_shape}")
+            b, c, h, w = input_shape
+            t = 1
+        
+        # After reshape/transpose, get the final batch size for later.
 
-        # --- LOG INPUTS ---
-        jax.debug.callback(print_head_tail, pixel_values, "Input Pixels")
-        # ------------------
 
         # 1. Unfold convolution (uses our new explicit reshape logic)
         hidden_states = self.patch_embedding(pixel_values)
