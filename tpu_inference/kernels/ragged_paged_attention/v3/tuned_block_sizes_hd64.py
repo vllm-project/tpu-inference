@@ -469,7 +469,10 @@ def get_tuned_block_sizes(
             case _:
                 bkv_p, bq = (2048 // page_size, 32)
 
-        bkv_p, bq = (min(pages_per_seq, bkv_p), min(max_num_tokens, bq))
+    # We should consider the actual page_per_seq and max_num_tokens.
+    # If page_per_seq < bkv_p or max_num_tokens < bq, using the bkv_p or bq may
+    # waste computation. So we need the min here.
+    bkv_p, bq = (min(pages_per_seq, bkv_p), min(max_num_tokens, bq))
 
     logger.info_once('RPA v3 kernel tuned block sizes for %s: bkv_p=%s, bq=%s',
                      keys, bkv_p, bq)

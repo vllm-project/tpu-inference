@@ -23,7 +23,6 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
-from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE
 from vllm.utils.network_utils import (get_distributed_init_method, get_ip,
                                       get_open_port)
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -58,9 +57,6 @@ def _encode_hook(obj: Any) -> Any:
     See https://jcristharif.com/msgspec/api.html#msgspec.msgpack.Encoder
     """
     if isinstance(obj, array):
-        assert obj.typecode == VLLM_TOKEN_ID_ARRAY_TYPE, (
-            f"vLLM array type should use '{VLLM_TOKEN_ID_ARRAY_TYPE}' type. "
-            f"Given array has a type code of {obj.typecode}.")
         return obj.tobytes()
     if isinstance(obj, MultiModalKwargsItem):
         return dict(obj)
