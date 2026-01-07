@@ -31,6 +31,7 @@ _VLLM_DTYPE_STR_TO_JAX_DTYPE = {
     "fp8": jnp.float8_e4m3fn.dtype,
     "fp8_e4m3": jnp.float8_e4m3fn.dtype,
     "fp8_e5m2": jnp.float8_e5m2.dtype,
+    "fp4": jnp.float4_e2m1fn.dtype,
 }
 
 

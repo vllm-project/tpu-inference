@@ -245,6 +245,9 @@ def _ragged_paged_attention_kernel(
     sem_ids_ref,  # [3] (bq_sem_idx, bkv_sem_idx, bo_sem_idx)
     bo_ids_ref,  # [4] (bo_sem_0_seq_idx, bo_sem_1_seq_idx, bo_sem_0_bo_idx, bo_sem_1_bo_idx)
     bkv_update_ids_ref,  # [6] (bkv_sem_0_seq_idx, bkv_sem_1_seq_idx, bkv_sem_0_offset, bkv_sem_1_offset, bkv_sem_0_sz, bkv_sem_1_sz)
+    # New: Dynamic Scale Refs
+    k_scale_ref,
+    v_scale_ref,
     # Input
     q_hbm_ref,  # [actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
     kv_hbm_ref,  # [max_num_tokens, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
@@ -266,8 +269,6 @@ def _ragged_paged_attention_kernel(
     soft_cap: float | None = None,
     mask_value: float = DEFAULT_MASK_VALUE,
     q_scale: float | None = None,
-    k_scale: float | None = None,
-    v_scale: float | None = None,
     chunk_prefill_size: int | None = None,
     bkv_p,
     bq_sz,
@@ -307,6 +308,9 @@ def _ragged_paged_attention_kernel(
     decode_end = distribution_ref[0]
     prefill_end = distribution_ref[1]
     mixed_end = distribution_ref[2]
+
+    k_scale_val = k_scale_ref[0]
+    v_scale_val = v_scale_ref[0]
 
     q_start = cu_q_lens_ref[seq_idx]
     q_end = cu_q_lens_ref[seq_idx + 1]
@@ -381,8 +385,8 @@ def _ragged_paged_attention_kernel(
 
         s = jnp.einsum("nd,md->nm", q, k, preferred_element_type=jnp.float32)
         s *= sm_scale
-        if k_scale is not None:
-            s *= k_scale
+        if k_scale_val is not None:
+            s *= k_scale_val
         if q_scale is not None:
             s *= q_scale
         if soft_cap is not None:
@@ -429,8 +433,8 @@ def _ragged_paged_attention_kernel(
                              ref[...])
 
         pv = jnp.einsum("nm,md->nd", p, v, preferred_element_type=jnp.float32)
-        if v_scale is not None:
-            pv *= v_scale
+        if v_scale_val is not None:
+            pv *= v_scale_val
         o_prev = load_with_init(head_acc_ref, 0.0)
         o_curr = broadcast_minor(exp_m_diff, o_prev.shape) * o_prev + pv
         head_acc_ref[...] = o_curr
@@ -1350,8 +1354,8 @@ def get_kernel_scope_name(bq_size, bkv_p, page_size):
         "soft_cap",
         "mask_value",
         "q_scale",
-        "k_scale",
-        "v_scale",
+        # "k_scale",
+        # "v_scale",
         "chunk_prefill_size",
         "num_kv_pages_per_block",
         "num_queries_per_block",
@@ -1372,14 +1376,14 @@ def ragged_paged_attention(
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
+    k_scale: jax.Array,
+    v_scale: jax.Array,
     *,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
     mask_value: float | None = DEFAULT_MASK_VALUE,
     q_scale: float | None = None,
-    k_scale: float | None = None,
-    v_scale: float | None = None,
     # Kernel optimization params.
     chunk_prefill_size: int | None = None,
     # Kernel tuning params.
@@ -1532,6 +1536,9 @@ def ragged_paged_attention(
         acc_scratch,
     ]
 
+    # k_scale = _ensure_array(k_scale)
+    # v_scale = _ensure_array(v_scale)
+
     scalar_prefetches = (
         kv_lens,
         # TODO(jevinjiang): can we use ragged page_indices to save some smem?
@@ -1544,6 +1551,8 @@ def ragged_paged_attention(
         jnp.full((4, ), -1, jnp.int32),
         # (bkv_sem_0_seq_idx, bkv_sem_1_seq_idx, bkv_sem_0_offset, bkv_sem_1_offset, bkv_sem_0_sz, bkv_sem_1_sz)
         jnp.full((6, ), -1, jnp.int32),
+        k_scale,
+        v_scale,
     )
 
     scope_name = get_kernel_scope_name(bq_sz, bkv_p, page_size)
@@ -1555,8 +1564,6 @@ def ragged_paged_attention(
             soft_cap=soft_cap,
             mask_value=mask_value,
             q_scale=q_scale,
-            k_scale=k_scale,
-            v_scale=v_scale,
             chunk_prefill_size=chunk_prefill_size,
             bq_sz=bq_sz,
             bkv_p=bkv_p,
@@ -1580,8 +1587,8 @@ def ragged_paged_attention(
             jax.ShapeDtypeStruct(shape=kv_cache.shape, dtype=kv_cache.dtype),
         ],
         input_output_aliases={
-            7: 0,
-            9: 1
+            9: 0,
+            11: 1
         },
         name=scope_name,
     )

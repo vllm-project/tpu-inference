@@ -298,8 +298,8 @@ def sharded_ragged_paged_attention(
     sm_scale: float,
     attention_chunk_size: int | None = None,
     q_scale: float | None = None,
-    k_scale: float | None = None,
-    v_scale: float | None = None,
+    k_scale: jax.Array | None = None,
+    v_scale: jax.Array | None = None,
 ):
     """Shards along KV heads."""
 
@@ -360,8 +360,8 @@ def attention(
     head_dim_original: int | None = None,  # before padding,
     attention_chunk_size: int | None = None,
     q_scale: float | None = None,
-    k_scale: float | None = None,
-    v_scale: float | None = None,
+    k_scale: jax.Array | None = None,
+    v_scale: jax.Array | None = None,
     sinks: jax.Array | None = None,
 ) -> Tuple[jax.Array, jax.Array]:
     # T: seq_len
@@ -382,6 +382,22 @@ def attention(
     md = attention_metadata
 
     # (T, N, H)
+    # convert k/v_scale to array
+    def _ensure_array(val):
+        if val is None:
+            # Changed from jnp.array(1.0) to jnp.array([1.0]) to ensure rank-1
+            return jnp.array([1.0], dtype=jnp.float32)
+        if not hasattr(val, 'shape'):  # is float/int
+            # Changed from jnp.array(val) to jnp.array([val]) to ensure rank-1
+            return jnp.array([val], dtype=jnp.float32)
+        val = val.astype(jnp.float32)
+        # Reshape rank-0 arrays to rank-1
+        if val.ndim == 0:
+            return val.reshape(1)
+        return val
+
+    k_scale = _ensure_array(k_scale)
+    v_scale = _ensure_array(v_scale)
     output, kv_cache = sharded_ragged_paged_attention(
         mesh,
         q,

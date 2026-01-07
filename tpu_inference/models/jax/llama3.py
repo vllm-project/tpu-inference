@@ -172,10 +172,18 @@ class LlamaAttention(nnx.Module):
         if self.kv_cache_quantized_dtype:
             # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
             # q_scale = self._q_scale
-            k_scale = self._k_scale
-            v_scale = self._v_scale
+            dtype_info = jnp.finfo(self.kv_cache_quantized_dtype)
+            dtype_max = float(dtype_info.max)
+
+            # 2. Dynamic Per-Tensor Scaling
+            # Scale = max(abs(tensor)) / max_int
+            # We use jax.lax.stop_gradient to ensure these scales don't affect gradients
+            # if used in a training loop, though usually irrelevant for inference.
+            k_scale = jnp.max(jnp.abs(k)) / dtype_max
+            v_scale = jnp.max(jnp.abs(v)) / dtype_max
             k, v = quantize_kv(self.kv_cache_quantized_dtype, k, v, k_scale,
                                v_scale)
+            print(k.dtype, v.dtype, k_scale.dtype)
         new_kv_cache, outputs = attention(
             kv_cache,
             q,
