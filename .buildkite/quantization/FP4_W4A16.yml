@@ -15,45 +15,49 @@
 # pipeline-name: FP4 W4A16
 # pipeline-type: quantization support matrix
 steps:
-  - label: "Correctness tests for FP4 W4A16"
-    key: "FP4_W4A16_CorrectnessTest"
+  - label: "${TEST_LABEL_PREFIX} Correctness tests for FP4 W4A16"
+    key: "${TEST_KEY_PREFIX}FP4_W4A16_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_SMALL_CORE_QUEUE}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
-        buildkite-agent meta-data set "FP4_W4A16_CorrectnessTest" "unverified"
-  - label: "Record correctness test result for FP4 W4A16"
-    key: "record_FP4_W4A16_CorrectnessTest"
-    depends_on: "FP4_W4A16_CorrectnessTest"
+        buildkite-agent meta-data set "${TEST_KEY_PREFIX}FP4_W4A16_CorrectnessTest" "unverified"
+  - label: "${TEST_LABEL_PREFIX} Record correctness test result for FP4 W4A16"
+    key: "${TEST_KEY_PREFIX}record_FP4_W4A16_CorrectnessTest"
+    depends_on: "${TEST_KEY_PREFIX}FP4_W4A16_CorrectnessTest"
     env:
-      CI_TARGET: "FP4 W4A16"
+      CI_TARGET: "${TEST_LABEL_PREFIX}FP4 W4A16"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "quantization support matrix"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh FP4_W4A16_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TEST_KEY_PREFIX}FP4_W4A16_CorrectnessTest
 
-  - label: "Performance tests for FP4 W4A16"
-    key: "FP4_W4A16_PerformanceTest"
-    depends_on: "record_FP4_W4A16_CorrectnessTest"
+  - label: "${TEST_LABEL_PREFIX} Performance tests for FP4 W4A16"
+    key: "${TEST_KEY_PREFIX}FP4_W4A16_PerformanceTest"
+    depends_on: "${TEST_KEY_PREFIX}record_FP4_W4A16_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_SMALL_CORE_QUEUE}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
-        buildkite-agent meta-data set "FP4_W4A16_PerformanceTest" "unverified"
-  - label: "Record performance test result for FP4 W4A16"
-    key: "record_FP4_W4A16_PerformanceTest"
-    depends_on: "FP4_W4A16_PerformanceTest"
+        buildkite-agent meta-data set "${TEST_KEY_PREFIX}FP4_W4A16_PerformanceTest" "unverified"
+  - label: "${TEST_LABEL_PREFIX} Record performance test result for FP4 W4A16"
+    key: "${TEST_KEY_PREFIX}record_FP4_W4A16_PerformanceTest"
+    depends_on: "${TEST_KEY_PREFIX}FP4_W4A16_PerformanceTest"
     env:
-      CI_TARGET: "FP4 W4A16"
+      CI_TARGET: "${TEST_LABEL_PREFIX}FP4 W4A16"
       CI_STAGE: "PerformanceTest"
       CI_CATEGORY: "quantization support matrix"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh FP4_W4A16_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${TEST_KEY_PREFIX}FP4_W4A16_PerformanceTest

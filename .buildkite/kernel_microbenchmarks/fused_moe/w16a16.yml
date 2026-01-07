@@ -15,45 +15,49 @@
 # pipeline-name: fused moe-w16a16
 # pipeline-type: kernel support matrix microbenchmarks
 steps:
-  - label: "Correctness tests for fused moe-w16a16"
-    key: "fused_moe-w16a16_CorrectnessTest"
+  - label: "${TEST_LABEL_PREFIX} Correctness tests for fused moe-w16a16"
+    key: "${TEST_KEY_PREFIX}fused_moe-w16a16_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_SMALL_CORE_QUEUE}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
-        buildkite-agent meta-data set "fused_moe-w16a16_CorrectnessTest" "unverified"
-  - label: "Record correctness test result for fused moe w16a16"
-    key: "record_fused_moe-w16a16_CorrectnessTest"
-    depends_on: "fused_moe-w16a16_CorrectnessTest"
+        buildkite-agent meta-data set "${TEST_KEY_PREFIX}fused_moe-w16a16_CorrectnessTest" "unverified"
+  - label: "${TEST_LABEL_PREFIX} Record correctness test result for fused moe w16a16"
+    key: "${TEST_KEY_PREFIX}record_fused_moe-w16a16_CorrectnessTest"
+    depends_on: "${TEST_KEY_PREFIX}fused_moe-w16a16_CorrectnessTest"
     env:
-      CI_TARGET: "fused moe-w16a16"
+      CI_TARGET: "${TEST_LABEL_PREFIX}fused moe-w16a16"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "kernel support matrix microbenchmarks"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh fused_moe-w16a16_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TEST_KEY_PREFIX}fused_moe-w16a16_CorrectnessTest
 
-  - label: "Performance tests for fused moe-w16a16"
-    key: "fused_moe-w16a16_PerformanceTest"
-    depends_on: "record_fused_moe-w16a16_CorrectnessTest"
+  - label: "${TEST_LABEL_PREFIX} Performance tests for fused moe-w16a16"
+    key: "${TEST_KEY_PREFIX}fused_moe-w16a16_PerformanceTest"
+    depends_on: "${TEST_KEY_PREFIX}record_fused_moe-w16a16_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_SMALL_CORE_QUEUE}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
-        buildkite-agent meta-data set "fused_moe-w16a16_PerformanceTest" "unverified"
-  - label: "Record performance test result for fused moe-w16a16"
-    key: "record_fused_moe-w16a16_PerformanceTest"
-    depends_on: "fused_moe-w16a16_PerformanceTest"
+        buildkite-agent meta-data set "${TEST_KEY_PREFIX}fused_moe-w16a16_PerformanceTest" "unverified"
+  - label: "${TEST_LABEL_PREFIX} Record performance test result for fused moe-w16a16"
+    key: "${TEST_KEY_PREFIX}record_fused_moe-w16a16_PerformanceTest"
+    depends_on: "${TEST_KEY_PREFIX}fused_moe-w16a16_PerformanceTest"
     env:
-      CI_TARGET: "fused moe-w16a16"
+      CI_TARGET: "${TEST_LABEL_PREFIX}fused moe-w16a16"
       CI_STAGE: "PerformanceTest"
       CI_CATEGORY: "kernel support matrix microbenchmarks"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh fused_moe-w16a16_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${TEST_KEY_PREFIX}fused_moe-w16a16_PerformanceTest

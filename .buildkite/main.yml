@@ -67,6 +67,7 @@ steps:
      depends_on:
        - notify_test_results
        - tpu_test_notification
+       - tpu7x_tpu_test_notification
      agents:
        queue: cpu
      secrets:
