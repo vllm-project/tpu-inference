@@ -14,7 +14,8 @@
 
 ARG BASE_IMAGE="python:3.12-slim-bookworm"
 # The latest main will be used if arg unspecified
-ARG VLLM_COMMIT_HASH=""
+# TODO (ranlihao): unpin after the upstream is stable.
+ARG VLLM_COMMIT_HASH="0dd5dee9b9bc88453f5f3eacfde751e6b9ba4871"
 
 FROM $BASE_IMAGE
 
