@@ -16,6 +16,9 @@
 # Exit on error, exit on unset variable, fail on pipe errors.
 set -euo pipefail
 
+# Refresh the tag information on the repository.
+git fetch --tags
+
 # Get the nightly TPU_INFERENCE_VERSION based on the latest stable tag and current date.
 LATEST_STABLE_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)
 BASE_VERSION=${LATEST_STABLE_TAG#v}
