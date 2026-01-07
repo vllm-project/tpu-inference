@@ -33,7 +33,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -802,6 +802,14 @@ class DPScheduler(SchedulerInterface):
                  rank_draft_token_ids))
             self._get_result_from_queue(
                 rank, SchedulerCommand.UPDATE_DRAFT_TOKEN_IDS)
+
+    def update_draft_token_ids_in_output(
+            self, draft_token_ids: "DraftTokenIds",
+            scheduler_output: "SchedulerOutput") -> None:
+        """Not implemented for DPScheduler."""
+        raise NotImplementedError(
+            "update_draft_token_ids_in_output is not implemented for DPScheduler."
+        )
 
     def shutdown(self) -> None:
         """Shutdown all DP rank scheduler worker processes."""
