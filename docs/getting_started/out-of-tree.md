@@ -16,7 +16,7 @@ All vLLM modules within the model must include a `vllm_config` argument in their
 
 The initialization code should look like this:
 
-```
+```python
 class LlamaForCausalLM(nnx.Module):
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
@@ -36,7 +36,7 @@ class LlamaForCausalLM(nnx.Module):
 
 The forward pass of the model should be in `__call__` which must have at least these arguments:
 
-```
+```python
 def __call__(
     self,
     kv_caches: List[jax.Array],
@@ -60,7 +60,7 @@ If your model is not on this list, you must register it to TPU Inference. You ca
 
 Structure your plugin as following:
 
-```
+```shell
 ├── setup.py
 ├── your_code
 │   ├── your_code.py
@@ -71,7 +71,7 @@ The `setup.py` build script should follow the [same guidance as for vLLM plugins
 
 To register the model, use the following code in `your_code/__init__.py`:
 
-```
+```python
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import register_model
 
@@ -86,7 +86,7 @@ def register():
 
 Ensure that you `pip install .` your model from within the same Python environment as vllm/tpu inference. Then to run your model:
 
-```
+```shell
 HF_TOKEN=token TPU_BACKEND_TYPE=jax \
   python -m vllm.entrypoints.cli.main serve \
   /path/to/hf_compatible/weights/ \

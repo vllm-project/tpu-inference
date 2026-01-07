@@ -7,7 +7,7 @@ Google Cloud TPUs (Tensor Processing Units) accelerate machine learning workload
 ## Requirements
 
 * **Google Cloud TPU VM:** Access to a TPU VM. For setup instructions, see the [Cloud TPU Setup guide](tpu_setup.md).
-* **TPU versions:** v6e, v5e
+* **TPU versions:** v7x, v6e, v5e
 * **Python:** 3.11 or newer (3.12 used in examples).
 
 ---
@@ -15,6 +15,21 @@ Google Cloud TPUs (Tensor Processing Units) accelerate machine learning workload
 ## Installation
 
 For detailed steps on installing `vllm-tpu` with `pip` or running it as a Docker image, please see the [**Installation Guide**](installation.md).
+
+!!! important
+    Until jax=0.8.3 is released, v7x will have different build requirements from previous TPU generations (v6e and prior). As a result, please use the following until consolidation is complete:
+
+**For v6e and prior**
+
+```shell
+pip install vllm-tpu --version=0.13.2.post6
+```
+
+**For v7x**
+
+```shell
+pip install vllm-tpu
+```
 
 ## Run the vLLM Server
 
@@ -62,5 +77,6 @@ Check out complete, end-to-end example recipes in the [tpu-recipes repository](h
 ## For further reading
 
 * [Examples](https://github.com/vllm-project/tpu-inference/tree/main/examples)
-* [Recipes](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM)
+* [v7x (Ironwood) Recipes](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/ironwood/vLLM)
+* [v6e (Trillium) Recipes](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM)
 * [GKE serving with vLLM TPU](https://cloud.google.com/kubernetes-engine/docs/tutorials/serve-vllm-tpu)

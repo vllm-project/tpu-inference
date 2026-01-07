@@ -21,6 +21,16 @@ setup_environment() {
   local image_name_param=${1:-"vllm-tpu"}
   IMAGE_NAME="$image_name_param"
 
+  local DOCKERFILE_NAME="Dockerfile"
+
+# Determine whether to build from PyPI packages or source.
+  if [[ "${RUN_WITH_PYPI:-false}" == "true" ]]; then
+    DOCKERFILE_NAME="Dockerfile.pypi"
+    echo "Building from PyPI packages. Using docker/${DOCKERFILE_NAME}"
+  else
+    echo "Building from source. Using docker/${DOCKERFILE_NAME}"
+  fi
+
   if ! grep -q "^HF_TOKEN=" /etc/environment; then
     gcloud secrets versions access latest --secret=bm-agent-hf-token --quiet | \
     sudo tee -a /etc/environment > /dev/null <<< "HF_TOKEN=$(cat)"
@@ -74,6 +84,6 @@ setup_environment() {
   docker build \
       --build-arg VLLM_COMMIT_HASH="${VLLM_COMMIT_HASH}" \
       --build-arg IS_FOR_V7X="${IS_FOR_V7X:-false}" \
-      --no-cache -f docker/Dockerfile -t "${IMAGE_NAME}:${TPU_INFERENCE_HASH}" .
-
+      --build-arg IS_TEST="true" \
+      --no-cache -f docker/${DOCKERFILE_NAME} -t "${IMAGE_NAME}:${TPU_INFERENCE_HASH}" .
 }

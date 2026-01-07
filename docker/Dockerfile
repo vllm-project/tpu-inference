@@ -12,31 +12,39 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG NIGHTLY_DATE="20250714"
-ARG BASE_IMAGE="us-central1-docker.pkg.dev/tpu-pytorch-releases/docker/xla:nightly_3.12_tpuvm_$NIGHTLY_DATE"
+ARG BASE_IMAGE="python:3.12-slim-bookworm"
 # The latest main will be used if arg unspecified
 ARG VLLM_COMMIT_HASH=""
 
 FROM $BASE_IMAGE
 
 ARG IS_FOR_V7X="false"
+ARG IS_TEST="false"
 
-# Remove existing versions of dependencies
-RUN pip uninstall -y torch torch_xla torchvision
+# Update pip
+RUN pip install --upgrade pip
 
 # Install some basic utilities
 RUN apt-get update && apt-get install -y \
     git \
-    libopenblas-base libopenmpi-dev libomp-dev
+    libopenmpi-dev \
+    libomp-dev \
+    procps \
+    curl \
+    rclone \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 # Build vLLM
 WORKDIR /workspace/vllm
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 ARG VLLM_COMMIT_HASH
-RUN git clone $VLLM_REPO /workspace/vllm
-RUN if [ -n "$VLLM_COMMIT_HASH" ]; then \
+
+RUN git clone $VLLM_REPO . && \
+    if [ -n "$VLLM_COMMIT_HASH" ]; then \
         git checkout $VLLM_COMMIT_HASH; \
     fi
+
 RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements/tpu.txt --retries 3
 RUN --mount=type=cache,target=/root/.cache/pip VLLM_TARGET_DEVICE="tpu" pip install -e .
 
@@ -57,6 +65,11 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url htt
 COPY requirements_benchmarking.txt .
 # These are needed for the E2E benchmarking tests (i.e. tests/e2e/benchmarking/mlperf.sh)
 RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements_benchmarking.txt --retries 3
+# Install test requirements
+COPY requirements_test.txt .
+Run  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then \
+        pip install -r requirements_test.txt --retries 3; \
+    fi
 COPY . .
 RUN --mount=type=cache,target=/root/.cache/pip pip install -e .
 
