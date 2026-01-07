@@ -170,6 +170,8 @@ def process_moe_weights(
             # Kernel expects:
             # w13: (num_experts, 2, hidden_size, intermediate_size)
             # w2: (num_experts, intermediate_size, hidden_size)
+            # w1_scale_per_channel: (num_experts, 2, 1, intermediate_size)
+            # w2_scale_per_channel: (num_experts, 1, hidden_size)
             # Current format:
             # w13_weight: (num_experts, 2*intermediate_size, hidden_size)
             # w2_weight: (num_experts, hidden_size, intermediate_size)
