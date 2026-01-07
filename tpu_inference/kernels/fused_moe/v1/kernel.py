@@ -22,6 +22,9 @@ from jax._src import dtypes
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+from tpu_inference.kernels.fused_moe.v1.tuned_block_sizes import \
+    get_tuned_block_sizes
+
 P = jax.sharding.PartitionSpec
 
 cdiv = pl.cdiv
@@ -1219,14 +1222,14 @@ def fused_ep_moe(
     b1: jax.Array | None = None,  # F32(num_experts, 2, 1, intermediate_size)
     b2: jax.Array | None = None,  # F32(num_experts, 1, hidden_size)
     # Kernel tuning parameters.
-    bt: int,
-    bf: int,
-    bd1: int,
-    bd2: int,
-    btc: int,
-    bfc: int,
-    bd1c: int,
-    bd2c: int,
+    bt: int | None = None,
+    bf: int | None = None,
+    bd1: int | None = None,
+    bd2: int | None = None,
+    btc: int | None = None,
+    bfc: int | None = None,
+    bd1c: int | None = None,
+    bd2c: int | None = None,
     ep_axis_name: str = "model",
 ):
     # TODO(jevinjiang): move all these assertions to validation function.
@@ -1281,6 +1284,20 @@ def fused_ep_moe(
     padded_top_k = align_to(top_k, 128)
     t_dtype = tokens.dtype
     t_packing = get_dtype_packing(t_dtype)
+    assert w1.dtype == w2.dtype
+    w_packing = get_dtype_packing(w1.dtype)
+
+    if None in {bt, bf, bd1, bd2, btc, bfc, bd1c, bd2c}:
+        bt, bf, bd1, bd2, btc, bfc, bd1c, bd2c = get_tuned_block_sizes(
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            num_experts=num_experts,
+            top_k=top_k,
+            t_packing=t_packing,
+            w_packing=w_packing,
+            num_tokens=num_tokens,
+            ep_size=ep_size,
+        )
 
     # Override bt
     if local_num_tokens <= t_packing * 8:
