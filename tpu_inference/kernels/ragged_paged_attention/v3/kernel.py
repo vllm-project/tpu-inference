@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -462,14 +462,11 @@ def _ragged_paged_attention_kernel(
         kv_left = kv_len - kv_len_start
         kv_left_frm_cache = jnp.maximum(kv_left - q_len, 0)
         kv_left_frm_new = kv_left - kv_left_frm_cache
-        bkv_p_frm_cache = jnp.minimum(cdiv(kv_left_frm_cache, page_size),
-                                      bkv_p)
-        bkv_sz_frm_new = jnp.minimum(
-            jnp.maximum(bkv_sz - kv_left_frm_cache, 0), kv_left_frm_new)
-        page_indices_offset = seq_idx * pages_per_seq + kv_p_start
 
-        # Make sure the current bkv buffer is safe to overwrite.
-        wait_update_kv_cache(bkv_sem_idx)
+        bkv_sz_frm_cache = jnp.minimum(kv_left_frm_cache, bkv_sz)
+        bkv_sz_frm_new = jnp.minimum(bkv_sz - bkv_sz_frm_cache,
+                                     kv_left_frm_new)
+        page_indices_offset = seq_idx * pages_per_seq + kv_p_start
 
         debug_print(
             "[RPA debug]"
@@ -482,55 +479,49 @@ def _ragged_paged_attention_kernel(
         debug_print("[RPA debug] kv_left={}", kv_left)
         debug_print("[RPA debug] kv_left_frm_cache={}", kv_left_frm_cache)
         debug_print("[RPA debug] kv_left_frm_new={}", kv_left_frm_new)
-        debug_print("[RPA debug] bkv_p_frm_cache={}", bkv_p_frm_cache)
+        debug_print("[RPA debug] bkv_sz_frm_cache={}", bkv_sz_frm_cache)
         debug_print("[RPA debug] bkv_sz_frm_new={}", bkv_sz_frm_new)
         debug_print("[RPA debug] page_indices_offset={}", page_indices_offset)
 
         if not wait:
-            # Fetch effective kv from kv cache.
-            def loop_body(i, offset):
-                sz = jnp.minimum(page_size, kv_left_frm_cache - i * page_size)
+            # Make sure the current bkv buffer is safe to overwrite.
+            wait_update_kv_cache(bkv_sem_idx)
+
+            # Fetch effective kv from kv cache. To pipeline multiple DMA calls, we
+            # utilize static for loop instead of dynamic for loop.
+            for i in range(bkv_p):
+                # Ensure only effective kvs are copied.
+                sz = jnp.clip(kv_left_frm_cache - i * page_size, 0, page_size)
+                # If the page index is out of bound, we set page_idx to the last page.
+                # And there will be no copy since sz will be 0.
+                page_idx = jnp.minimum(page_indices_offset + i,
+                                       num_page_indices - 1)
                 _async_copy(
                     cache_hbm_ref.at[pl.ds(
-                        page_indices_ref[page_indices_offset + i] * page_size,
-                        sz)],
+                        page_indices_ref[page_idx] * page_size, sz)],
                     vmem_ref.at[pl.ds(i * page_size, sz)],
                     sem,
                     wait=False,
                 )
                 debug_print("[RPA debug] loop_body i={}, sz={}", i, sz)
-                return offset + sz
 
-            offset = lax.fori_loop(
-                0,
-                bkv_p_frm_cache,
-                loop_body,
-                0,  # offset
-                unroll=False,
-            )
-
-            size = lax.select(bkv_sz_frm_new > 0, bkv_sz_frm_new, 0)
             new_kv_len_start = q_end - kv_left_frm_new
             debug_print("[RPA debug] new_kv_len_start={}", new_kv_len_start)
-            debug_print("[RPA debug] offset_in_bkv={}", offset)
             _async_copy(
-                kv_hbm_ref.at[pl.ds(new_kv_len_start, size)],
-                vmem_ref.at[pl.ds(offset, size)],
+                kv_hbm_ref.at[pl.ds(new_kv_len_start, bkv_sz_frm_new)],
+                vmem_ref.at[pl.ds(bkv_sz_frm_cache, bkv_sz_frm_new)],
                 sem,
                 wait,
             )
-
-            return kv_len_start + offset, bkv_sz_frm_new
         else:
-            offset = jnp.minimum(kv_left_frm_cache, page_size * bkv_p)
-            dst = vmem_ref.at[pl.ds(0, offset + bkv_sz_frm_new)]
+            dst = vmem_ref.at[pl.ds(0, bkv_sz_frm_cache + bkv_sz_frm_new)]
             _async_copy(
                 src=dst,
                 dst=dst,
                 sem=sem,
                 wait=True,
             )
-            return kv_len_start + offset, bkv_sz_frm_new
+        return kv_len_start + bkv_sz_frm_cache, bkv_sz_frm_new
 
     def _update_kv_cache(seq_idx,
                          bkv_sem_idx,
@@ -1574,6 +1565,10 @@ def ragged_paged_attention(
             # one, we need some extra work to support Megacore mode.
             dimension_semantics=("arbitrary", ),
             vmem_limit_bytes=vmem_limit_bytes,
+            # Paged attention invokes multiple small DMAs for each pages instead
+            # of a single large DMA. Therefore, the overhead of bounds checking
+            # becomes too significant so we disable it.
+            disable_bounds_checks=True,
         ),
         out_shape=[
             jax.ShapeDtypeStruct(shape=q.shape, dtype=q.dtype),
