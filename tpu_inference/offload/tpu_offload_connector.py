@@ -952,7 +952,8 @@ class TPUOffloadConnectorScheduler():
                 if allocate_output is not None:
                     # there are enough chunks to save
                     chunks_for_save, chunk_idxs = allocate_output
-                    assert num_blocks_to_save == len(chunks_for_save)
+                    adjusted_num_blocks_to_save = len(chunks_for_save)
+                    assert num_blocks_to_save >= adjusted_num_blocks_to_save, f"{num_blocks_to_save} < {adjusted_num_blocks_to_save}"
                     src_block_ids = tracker.block_ids[
                         num_skip_leading_blocks:adjusted_num_total_blocks]
 
@@ -971,9 +972,9 @@ class TPUOffloadConnectorScheduler():
                     self._reqs_being_saved[req_id] |= set(dst_chunks)
                     num_allocated_blocks = self.staging_buffer_manager.allocate(
                         tracker.req_id,
-                        num_blocks=num_blocks_to_save,
+                        num_blocks=adjusted_num_blocks_to_save,
                         usage="save")
-                    assert num_allocated_blocks == num_blocks_to_save >= 0, f" failed to allocate {num_allocated_blocks} (save) staging blocks for request {tracker.req_id}, expected {num_blocks_to_save}."
+                    assert num_allocated_blocks == adjusted_num_blocks_to_save >= 0, f" failed to allocate {num_allocated_blocks} (save) staging blocks for request {tracker.req_id}, expected {adjusted_num_blocks_to_save}."
 
                     if adjusted_num_total_tokens > tracker.save_watermark:
                         logger.info(
