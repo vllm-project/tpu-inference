@@ -153,9 +153,11 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
                 weights=FusedMoEWeights(
                     w13_weight=w13_weight,
                     w13_weight_scale=w13_weight_scale,
+                    w13_scale_per_channel=None,
                     w13_bias=w13_bias,
                     w2_weight=w2_weight,
                     w2_weight_scale=w2_weight_scale,
+                    w2_scale_per_channel=None,
                     w2_bias=w2_bias,
                 ),
                 moe_backend=self.moe_backend,
@@ -179,8 +181,12 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
 
         layer.w13_weight_scale = Parameter(weights.w13_weight_scale,
                                            requires_grad=False)
+        layer.w13_scale_per_channel = Parameter(weights.w13_scale_per_channel,
+                                                requires_grad=False)
         layer.w2_weight_scale = Parameter(weights.w2_weight_scale,
                                           requires_grad=False)
+        layer.w2_scale_per_channel = Parameter(weights.w2_scale_per_channel,
+                                               requires_grad=False)
 
         if self.moe.has_bias:
             layer.w13_bias = Parameter(weights.w13_bias, requires_grad=False)
