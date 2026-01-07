@@ -97,16 +97,16 @@ def fused_moe_apply(
                     tokens=x,
                     w1=w13_weight,
                     w2=w2_weight,
-                    b1=w13_bias,
-                    b2=w2_bias,
                     gating_output=gating_output,
                     top_k=layer.top_k,
-                    ep_axis_name="model",
                     renormalize_topk_logits=layer.renormalize,
                     act_fn=layer.activation,
-                    w1_scale_per_channel=jax_view(layer.w13_weight_scale),
-                    w2_scale_per_channel=jax_view(layer.w2_weight_scale),
+                    w1_scale_per_channel=jax_view(layer.w13_scale_per_channel),
+                    w2_scale_per_channel=jax_view(layer.w2_scale_per_channel),
+                    b1=w13_bias,
+                    b2=w2_bias,
                     **block_size,
+                    ep_axis_name="model",
                 )[:, :actual_hidden_size]
                 print('xw32 fused moe ends.')
             case FusedMoEBackend.GMM_EP | FusedMoEBackend.GMM_TP:

@@ -118,6 +118,11 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         # who is the caller?: tpu_runner.load_model->vllm_model_wraper.load_weights->process_weights_after_loading.
         # what are the shape of the weights?
         print('xw32 process_weights_after_loading begins.')
+        # xw32: Comment out this
+        # Below didn't work
+        # if not layer.layer_name.startswith('model.layers.0.') and not layer.layer_name.startswith('model.layers.1.'):
+        #     return
+
         assert isinstance(layer, FusedMoE)
 
         # xw32 N.B (TODO: cleanup, remove the concrete number and leave the rest.):
