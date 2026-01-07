@@ -993,7 +993,7 @@ class JAXLlama4VisionMLP2(nnx.Module):
 
         self.fc1 = nnx.Linear(
             cfg.intermediate_size,
-            cfg.projector_output_dim,
+            cfg.projector_input_dim,
             use_bias=False,
             dtype=dtype,
             kernel_init=nnx.with_partitioning(
