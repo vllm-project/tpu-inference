@@ -353,4 +353,4 @@ class VllmFp8MoEMethod(Fp8MoEMethod):
             self.moe_backend,
             self.mesh,
             self.extra_backend_kwargs,
-        weight.shape, scale.shape)
+        )

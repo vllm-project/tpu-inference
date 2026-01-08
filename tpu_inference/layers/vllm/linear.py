@@ -42,7 +42,7 @@ def sharded_quantized_matmul(x: jax.Array, w_q: jax.Array, w_s: jax.Array,
     if True:
         out_axis, in_axis = weight_sharding
         x_sharding = P(None, in_axis)
-        scale_sharding = P(in_axis, None, out_axis, )
+        scale_sharding = P(in_axis, None, out_axis)
         out_sharding = P(None, out_axis)
 
         x = jax.lax.with_sharding_constraint(x,
