@@ -42,7 +42,7 @@ from tpu_inference.layers.vllm.fused_moe import (FusedMoEBackend,
 from tpu_inference.layers.vllm.process_weights.fused_moe_weights import (
     FusedMoEWeights, process_moe_weights, shard_moe_weights)
 from tpu_inference.layers.vllm.process_weights.linear_weights import (
-    LinearWeights, process_lienar_weights, shard_linear_weights,
+    LinearWeights, process_linear_weights, shard_linear_weights,
     to_parameter_list)
 from tpu_inference.layers.vllm.quantization.configs import (
     VllmQuantConfig, VllmQuantLinearConfig)
@@ -111,7 +111,7 @@ class VllmUnquantizedLinearMethod(UnquantizedLinearMethod):
             weight: jax.Array,
             bias: jax.Array | None,
         ) -> LinearWeights:
-            return process_lienar_weights(
+            return process_linear_weights(
                 LinearWeights(
                     weight=weight,
                     weight_scale=None,
@@ -288,10 +288,20 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
 
+        weights = FusedMoEWeights(
+            w13_weight=jax_view(layer.w13_weight),
+            w13_weight_scale=None,
+            w13_bias=jax_view(layer.w13_bias) if self.moe.has_bias else None,
+            w2_weight=jax_view(layer.w2_weight),
+            w2_weight_scale=None,
+            w2_bias=jax_view(layer.w2_bias) if self.moe.has_bias else None,
+        )
+
         return fused_moe_apply(
             layer,
             x,
             router_logits,
+            weights,
             self.moe_backend,
             self.mesh,
             self.extra_backend_kwargs,

@@ -17,7 +17,7 @@ import torch
 from compressed_tensors.quantization import QuantizationArgs
 from jax.sharding import Mesh
 from torch.nn.parameter import Parameter
-from torchax.interop import torch_view
+from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
@@ -189,10 +189,21 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
+
+        weights = FusedMoEWeights(
+            w13_weight=jax_view(layer.w13_weight),
+            w13_weight_scale=jax_view(layer.w13_weight_scale),
+            w13_bias=jax_view(layer.w13_bias) if self.moe.has_bias else None,
+            w2_weight=jax_view(layer.w2_weight),
+            w2_weight_scale=jax_view(layer.w2_weight_scale),
+            w2_bias=jax_view(layer.w2_bias) if self.moe.has_bias else None,
+        )
+
         return fused_moe_apply(
             layer,
             x,
             router_logits,
+            weights,
             self.moe_backend,
             self.mesh,
             self.extra_backend_kwargs,
