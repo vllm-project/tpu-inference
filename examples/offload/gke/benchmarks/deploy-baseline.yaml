@@ -17,11 +17,11 @@ spec:
         cloud.google.com/gke-tpu-topology: 2x4 # Specify the physical topology for the TPU slice.
       containers:
       - name: tpu-job
-        image: <your-tpu-inference-container-image>
+        image: gcr.io/gke-shared-ai-dev/tpu-inference:cpu-offload-test-dev-merge-1216-jcgu
         imagePullPolicy: Always
         command: ["/bin/sh", "-c"]
         args:
-        - "vllm serve meta-llama/Llama-3.3-70B-Instruct --port 8000 --enable-chunked-prefill --tensor-parallel-size 8 --seed 42 --enable_prefix_caching --gpu-memory-utilization 0.9"
+        - "mkdir -p /tmp/prometheus_multiproc && vllm serve Qwen/Qwen3-32B --port 8000 --enable-chunked-prefill --tensor-parallel-size 8 --seed 42 --enable_prefix_caching --gpu-memory-utilization 0.7"
         env:
         - name: HUGGING_FACE_HUB_TOKEN
           valueFrom:

@@ -32,24 +32,24 @@ spec:
         --seed 42
     env:
     - name: IP
-      value: "34.162.66.198" # Replace with the external IP of your deployed service
+      value: "34.186.236.235" # Replace with the external IP of your deployed service
     - name: PORT
       value: "80"
     - name: MODEL
-      value: "meta-llama/Llama-3.3-70B-Instruct"
+      value: "Qwen/Qwen3-32B"
     - name: HF_TOKEN
       valueFrom:
         secretKeyRef:
           name: hf-token-secret
           key: token
     - name: GSP_NUM_GROUPS
-      value: "2"
+      value: "25"
     - name: GSP_PROMPTS_PER_GROUP
-      value: "16"
+      value: "40"
     - name: GSP_SYSTEM_PROMPT_LEN
-      value: "2048"
+      value: "1024"
     - name: GSP_QUESTION_LEN
       value: "256"
     - name: GSP_OUTPUT_LEN
-      value: "512"
+      value: "256"
   restartPolicy: Never
