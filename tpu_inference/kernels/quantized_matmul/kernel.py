@@ -182,7 +182,8 @@ def subchannel_matmul_kernel(lhs_ref, rhs_ref, w_scales_ref, out_ref,
             else:
                 preferred_element_type = jnp.float32
             dot_res = jax.lax.dot_general(lhs_q,
-                              rhs_q_slice,
+                              #rhs_q_slice,
+                              rhs_q_slice.astype(lhs_q.dtype),
                               (((1,), (1,)), ((), ())),
                               preferred_element_type=preferred_element_type)
             #print("Printing dot_res", dot_res.shape)
@@ -354,7 +355,7 @@ def quantized_matmul_kernel(
             n_out=orig_n_out,
             n_in=orig_n_in,
             x_q_dtype=jnp.dtype(x_q_dtype).name,
-            w_q_dtype=jnp.dtype(w_q.dtype).name,
+            w_q_dtype=jnp.dtype(x_q_dtype).name,
         )
         #print("Printing tuned value:", tuned_value)
     batch_block_size = tuned_value.batch_block_size
