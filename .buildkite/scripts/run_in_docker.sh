@@ -50,6 +50,17 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 source "$SCRIPT_DIR/setup_docker_env.sh"
 setup_environment $IMAGE_NAME
 
+TEST_SUITE_VARS=(
+  -e BUILDKITE_ANALYTICS_TOKEN="${BUILDKITE_ANALYTICS_TOKEN:-}"
+  -e BUILDKITE_BUILD_ID="${BUILDKITE_BUILD_ID:-}"
+  -e BUILDKITE_BUILD_NUMBER="${BUILDKITE_BUILD_NUMBER:-}"
+  -e BUILDKITE_JOB_ID="${BUILDKITE_JOB_ID:-}"
+  -e BUILDKITE_BRANCH="${BUILDKITE_BRANCH:-}"
+  -e BUILDKITE_COMMIT="${BUILDKITE_COMMIT:-}"
+  -e BUILDKITE_MESSAGE="${BUILDKITE_MESSAGE:-}"
+  -e BUILDKITE_BUILD_URL="${BUILDKITE_BUILD_URL:-}"
+)
+
 DOCKER_HF_HOME="/tmp/hf_home"
 
 # Try to cache HF models
@@ -72,6 +83,7 @@ exec docker run \
   --rm \
   -v "$LOCAL_HF_HOME":"$DOCKER_HF_HOME" \
   "${ENV_VARS[@]}" \
+  "${TEST_SUITE_VARS[@]}" \
   -e HF_HOME="$DOCKER_HF_HOME" \
   -e MODEL_IMPL_TYPE="$MODEL_IMPL_TYPE" \
   -e HF_TOKEN="$HF_TOKEN" \

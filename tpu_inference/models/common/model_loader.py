@@ -33,6 +33,7 @@ from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     apply_qwix_on_abstract_model, apply_qwix_quantization,
     load_random_weights_into_qwix_abstract_model,
     update_vllm_config_for_qwix_quantization)
+from tpu_inference.models.jax.utils.weight_utils import BaseWeightLoader
 from tpu_inference.utils import to_jax_dtype, to_torch_dtype
 
 logger = init_logger(__name__)
@@ -212,9 +213,9 @@ def _get_nnx_model(
                 # a TypeError at runtime if you use the RunaiModelStreamerLoader with any
                 # flax_nnx model whose load_weights function does not accept the
                 # weights_iterator keyword argument.
-                vllm_config.model_config.model_weights_iterator = weights_iterator
+                vllm_config.model_config.runai_model_weights_iterator = weights_iterator
                 model.load_weights(rng)
-                del vllm_config.model_config.model_weights_iterator
+                del vllm_config.model_config.runai_model_weights_iterator
             else:
                 model.load_weights(rng)
             jit_model = create_jit_model(
@@ -367,16 +368,8 @@ def get_model(
 ) -> Any:
     impl = envs.MODEL_IMPL_TYPE
     logger.info(f"Loading model with MODEL_IMPL_TYPE={impl}")
-
     if impl == "auto":
-        # Resolve "auto" based on architecture
-        architectures = getattr(vllm_config.model_config.hf_config,
-                                "architectures", [])
-        assert len(architectures) == 1, (
-            f"Expected exactly one architecture, got {len(architectures)}: "
-            f"{architectures}")
-        arch = architectures[0]
-        impl = "vllm" if arch in _VLLM_PREFERRED_ARCHITECTURES else "flax_nnx"
+        impl = resolve_model_architecture(vllm_config)
         logger.info(f"Resolved MODEL_IMPL_TYPE 'auto' to '{impl}'")
 
     match impl:
@@ -401,6 +394,65 @@ def get_model(
             return get_vllm_model(vllm_config, rng, mesh)
         case _:
             raise NotImplementedError(f"Unsupported MODEL_IMPL_TYPE: {impl}")
+
+
+def resolve_model_architecture(vllm_config: VllmConfig) -> str:
+    """Resolves the model implementation type.
+
+    This function determines which model implementation to use based on the model
+    architecture and whether the RunAI model streamer is active.
+
+    When the RunAI model streamer is used, this function explicitly checks if
+    the JAX model supports the streaming capability. It returns 'vllm' if:
+    1. The JAX model class is found but does not have a `WeightLoader`.
+    2. The JAX model's `WeightLoader` is not a subclass of `BaseWeightLoader`.
+
+    If the architecture is not registered in JAX (UnsupportedArchitectureError),
+    this function returns the default implementation ('flax_nnx'), allowing
+    the caller to attempt loading, catch the error, log a
+    warning, and handle the fallback to 'vllm'.
+
+    Otherwise, it resolves the implementation based on whether the model's
+    architecture is in the `_VLLM_PREFERRED_ARCHITECTURES` list.
+
+    Args:
+        vllm_config: The VllmConfig object containing the model and load
+            configuration.
+
+    Returns:
+        The model implementation type.
+    """
+
+    is_runai_streamer = getattr(getattr(vllm_config, 'load_config', None),
+                                'load_format', None) == 'runai_streamer'
+    if is_runai_streamer:
+        try:
+            # Try to get the JAX model class
+            model_class = _get_model_architecture(
+                vllm_config.model_config.hf_config)
+
+            # If found, check for WeightLoader capability
+            if not hasattr(model_class, "WeightLoader") or not issubclass(
+                    getattr(model_class, "WeightLoader", object),
+                    BaseWeightLoader):
+                return "vllm"
+
+        except UnsupportedArchitectureError:
+            # Architecture not in JAX.
+            # We pass to let it fall through to the default logic below.
+            # This causes it to return "flax_nnx", which caller will try,
+            # fail, log a warning, and then fallback to "vllm".
+            pass
+
+    # Resolve "auto" based on architecture
+    architectures = getattr(vllm_config.model_config.hf_config,
+                            "architectures", [])
+    assert len(architectures) == 1, (
+        f"Expected exactly one architecture, got {len(architectures)}: "
+        f"{architectures}")
+    arch = architectures[0]
+    impl = "vllm" if arch in _VLLM_PREFERRED_ARCHITECTURES else "flax_nnx"
+    return impl
 
 
 def _validate_model_interface(model: Any) -> None:
