@@ -340,43 +340,24 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         pixel_values = kwargs.pop("pixel_values")
         patches_per_image = kwargs.pop("patches_per_image", None)
 
-        if not pixel_values:
+        if pixel_values is None:
             return []
 
-        processed_images = []
-        # Standard CLIP normalization values
-        mean = jnp.array([0.48145466, 0.4578275, 0.40821073], dtype=jnp.float32)
-        std = jnp.array([0.26862954, 0.26130258, 0.27577711], dtype=jnp.float32)
-        image_size = self.vision_config.image_size
-
-        for pil_image in pixel_values:
-            # 1. Resize to image_size x image_size
-            image = pil_image.resize((image_size, image_size), Image.LANCZOS)
-
-            # 2. Convert to numpy array and scale to [0, 1]
-            image_np = np.array(image).astype(np.float32) / 255.0
-
-            # 3. Normalize with mean and std
-            normalized_np = (image_np - np.asarray(mean)) / np.asarray(std)
-
-            # 4. Transpose from (H, W, C) to (C, H, W)
-            processed_images.append(normalized_np.transpose(2, 0, 1))
-
-        # Stack all processed images into a single JAX array (NCHW format)
-        pixel_values_jax = jnp.stack(processed_images, axis=0)
+        # Ensure JAX handling
+        pixel_values = jnp.asarray(pixel_values, dtype=jnp.bfloat16)
 
         # --- DEBUG: Print Input Pixels ---
-        jax.debug.callback(print_head_tail, pixel_values_jax,
-                           "Input Pixels (After Normalization)")
+        jax.debug.callback(print_head_tail, pixel_values,
+                           "Input Pixels (Before Transpose)")
         # ---------------------------------
 
-        # 1. Transpose Input from NCHW to NHWC (Vision Model expects NHWC internally)
-        if pixel_values_jax.ndim == 4 and pixel_values_jax.shape[1] == self.vision_config.num_channels:
-            pixel_values_jax = jnp.transpose(pixel_values_jax, (0, 2, 3, 1))
+        # 1. Transpose Input from NCHW to NHWC
+        if pixel_values.ndim == 4 and pixel_values.shape[1] == 3:
+            pixel_values = jnp.transpose(pixel_values, (0, 2, 3, 1))
 
         # 2. Run Vision Encoder
         projected_vision_features = self.multi_modal_projector(
-            self.vision_model(pixel_values_jax))
+            self.vision_model(pixel_values))
 
         # This checks the final features being passed to the LLM
         jax.debug.callback(print_head_tail, projected_vision_features,
