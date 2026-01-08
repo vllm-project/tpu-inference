@@ -175,7 +175,7 @@ class TestTPUWorker:
 
     @patch('tpu_inference.worker.tpu_worker.utils')
     @patch('tpu_inference.worker.tpu_worker.jax')
-    def test_determine_available_memory(self, mock_jax, mock_util,
+    def test_determine_available_memory(self, mock_jax, mock_utils,
                                         mock_vllm_config):
         """Tests the available HBM memory calculation."""
         # Setup mock return for hbm_usage_bytes: [(used_bytes, limit_bytes), ...]
