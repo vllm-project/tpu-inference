@@ -44,6 +44,7 @@ def create_request(
     req.prompt_token_ids = prompt_token_ids
     req.all_token_ids = prompt_token_ids + generated_token_ids
     req.num_computed_tokens = num_computed_tokens + len(generated_token_ids)
+    req.num_tokens = len(req.all_token_ids)
     req.block_size = block_size
     req.block_ids = [[]]
     # Mock the block_hashes property to return a list of mock hashes
