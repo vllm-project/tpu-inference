@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     NUM_SLICES: int = 1
     RAY_USAGE_STATS_ENABLED: str = "0"
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: str = "shm"
-    TPU_OFFLOAD_SAVE_THREADS: int = 10
     TPU_OFFLOAD_SKIP_JAX_PRECOMPILE: bool = False
     TPU_OFFLOAD_SWAP_OP_TYPE: str = "jax"
     TPU_OFFLOAD_DECODE_SAVE: bool = False
@@ -129,9 +128,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Ray compiled DAG channel type for TPU
     "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE":
     env_with_choices("VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE", "shm", ["shm"]),
-    # kv offload to dram: the number of concurrent save threads
-    "TPU_OFFLOAD_SAVE_THREADS":
-    lambda: int(os.getenv("TPU_OFFLOAD_SAVE_THREADS", "10")),
     # kv offload to dram: skip pre-compiling swap-related jax functions
     "TPU_OFFLOAD_SKIP_JAX_PRECOMPILE":
     lambda: bool(int(os.getenv("TPU_OFFLOAD_SKIP_JAX_PRECOMPILE", "0"))),

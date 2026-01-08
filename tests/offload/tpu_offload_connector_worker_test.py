@@ -6,7 +6,7 @@ import os
 import random
 import time
 from typing import List
-from unittest.mock import patch
+from unittest import mock
 
 import jax
 import jax.numpy as jnp
@@ -158,8 +158,8 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
 
         mock_runner = MockTPUModelRunner(kv_caches=source_kv_cache,
                                          mesh=self.mesh)
-        with patch(
-                'tpu_inference.distributed.offload.tpu_offload_connector.get_uniform_page_size'
+        with mock.patch(
+                'tpu_inference.offload.tpu_offload_connector.get_uniform_page_size'
         ) as mock_get_page_size:
             _block_size_in_bytes = self.block_size * self.num_heads * 2 * self.head_size * 2
             mock_get_page_size.return_value = _block_size_in_bytes
