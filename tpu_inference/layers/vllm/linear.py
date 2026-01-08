@@ -49,7 +49,7 @@ def sharded_quantized_matmul(x: jax.Array, w_q: jax.Array, w_s: jax.Array,
                                              NamedSharding(mesh, x_sharding))
 
         def wrapper(x, w_q, w_s):
-            output = quantized_matmul_kernel(x, w_q, w_s, x_q_dtype=w_q.dtype, sc_size=sc_size)
+            output = quantized_matmul_kernel(x, w_q, w_s, x_q_dtype=jax.numpy.float8_e4m3fn, sc_size=sc_size)
             if in_axis:
                 output = jax.lax.psum(output, axis_name=in_axis)
             return output

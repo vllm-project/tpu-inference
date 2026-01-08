@@ -147,7 +147,7 @@ class VllmFp8LinearMethod(Fp8LinearMethod):
                     (0, 1),
                 )
                 weight_slice, weight_scale_slice = quantize_tensor(
-                    jnp.float8_e4m3fn, dequantzed_weight, block_size=512)
+                    jnp.float4_e2m1fn, dequantzed_weight, block_size=512)
 
                 weights.append(weight_slice)
                 weight_scales.append(weight_scale_slice)
