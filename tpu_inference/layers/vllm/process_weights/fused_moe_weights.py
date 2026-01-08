@@ -36,9 +36,11 @@ class FusedMoEWeights:
     """Fused moe weights. weights can be either jax or torchax array."""
     w13_weight: jax.Array | Tensor
     w13_weight_scale: jax.Array | Tensor | None
+    w13_scale_per_channel: jax.Array | Tensor | None
     w13_bias: jax.Array | Tensor | None
     w2_weight: jax.Array | Tensor
     w2_weight_scale: jax.Array | Tensor | None
+    w2_scale_per_channel: jax.Array | Tensor | None
     w2_bias: jax.Array | Tensor | None
 
 
@@ -170,6 +172,8 @@ def process_moe_weights(
             # Kernel expects:
             # w13: (num_experts, 2, hidden_size, intermediate_size)
             # w2: (num_experts, intermediate_size, hidden_size)
+            # w1_scale_per_channel: (num_experts, 2, 1, intermediate_size)
+            # w2_scale_per_channel: (num_experts, 1, hidden_size)
             # Current format:
             # w13_weight: (num_experts, 2*intermediate_size, hidden_size)
             # w2_weight: (num_experts, hidden_size, intermediate_size)
@@ -208,6 +212,18 @@ def process_moe_weights(
             )
 
             if w13_weight_scale is not None:
+                w13_scale_per_channel = jnp.array(
+                    w13_weight_scale
+                )  # (num_experts, 2*moe_intermediate_size, 1)
+                w13_scale_per_channel = w13_scale_per_channel.reshape(
+                    num_experts, 2, intermediate_size, 1)
+                w13_scale_per_channel = jnp.swapaxes(
+                    w13_scale_per_channel, 2,
+                    3)  # (num_experts, 2, 1, intermediate_size)
+                w13_scale_per_channel = jnp.pad(
+                    w13_scale_per_channel,
+                    ((0, 0), (0, 0), (0, 0), (0, pad_width_intermediate_size)))
+
                 w13_weight_scale = w13_weight_scale.reshape(
                     num_experts, 2, intermediate_size, 1, -1)
                 w13_weight_scale = jnp.swapaxes(w13_weight_scale, 2, 4)
@@ -217,6 +233,16 @@ def process_moe_weights(
                      (0, pad_width_intermediate_size)),
                 )
             if w2_weight_scale is not None:
+                # xw32q: why the shape is not (num_experts, intermediate_size, 1) in the kernel?
+                w2_scale_per_channel = jnp.array(
+                    w2_weight_scale)  # (num_experts, hidden_size, 1)
+                w2_scale_per_channel = jnp.swapaxes(
+                    w2_scale_per_channel, 1,
+                    2)  # (num_experts, 1, hidden_size)
+                w2_scale_per_channel = jnp.pad(w2_scale_per_channel,
+                                               ((0, 0), (0, 0),
+                                                (0, pad_width_hidden_size)))
+
                 w2_weight_scale = w2_weight_scale.reshape(
                     num_experts, hidden_size, 1, -1)
                 w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 3)
@@ -280,9 +306,11 @@ def process_moe_weights(
     return FusedMoEWeights(
         w13_weight=w13_weight,
         w13_weight_scale=w13_weight_scale,
+        w13_scale_per_channel=w13_scale_per_channel,
         w13_bias=w13_bias,
         w2_weight=w2_weight,
         w2_weight_scale=w2_weight_scale,
+        w2_scale_per_channel=w2_scale_per_channel,
         w2_bias=w2_bias,
     )
 
@@ -299,9 +327,11 @@ def shard_moe_weights(
             weight_shardings = FusedMoEWeights(
                 w13_weight=ep_sharding,
                 w13_weight_scale=ep_sharding,
+                w13_scale_per_channel=ep_sharding,
                 w13_bias=ep_sharding,
                 w2_weight=ep_sharding,
                 w2_weight_scale=ep_sharding,
+                w2_scale_per_channel=ep_sharding,
                 w2_bias=ep_sharding,
             )
         case FusedMoEBackend.GMM_TP:
@@ -344,9 +374,11 @@ def shard_moe_weights(
             weight_layouts = FusedMoEWeights(
                 w13_weight=Layout((0, 1, 2, 3)),
                 w13_weight_scale=Layout((0, 1, 2, 3, 4)),
+                w13_scale_per_channel=Layout((0, 1, 2, 3)),
                 w13_bias=Layout((0, 1, 2, 3)),
                 w2_weight=Layout((0, 1, 2)),
                 w2_weight_scale=Layout((0, 1, 2, 3)),
+                w2_scale_per_channel=Layout((0, 1, 2)),
                 w2_bias=Layout((0, 1, 2)),
             )
         case FusedMoEBackend.GMM_TP | FusedMoEBackend.GMM_EP:

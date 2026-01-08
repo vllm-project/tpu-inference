@@ -24,8 +24,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsMoEMethod, CompressedTensorsW8A8Fp8MoEMethod)
 
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.vllm.fused_moe import (FusedMoEBackend,
-                                                 fused_moe_apply,
+from tpu_inference.layers.vllm.fused_moe import (fused_moe_apply,
                                                  select_moe_backend)
 from tpu_inference.layers.vllm.process_weights.fused_moe_weights import (
     FusedMoEWeights, process_moe_weights, shard_moe_weights)
@@ -97,10 +96,6 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         self.moe_backend = select_moe_backend(self.moe)
 
         self.extra_backend_kwargs = {}
-        if self.moe_backend == FusedMoEBackend.FUSED_MOE:
-            raise NotImplementedError(
-                "Per-channel quantization is not supported in FusedMoE kernel."
-            )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """
@@ -120,8 +115,21 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
             c. w13_weight_scale - FP32 shape: (num_experts, 2 x intermediate_size, 1)
             d. w2_weight_scale - FP32shape: (num_experts, output_size, 1)
         """
+        # who is the caller?: tpu_runner.load_model->vllm_model_wraper.load_weights->process_weights_after_loading.
+        # what are the shape of the weights?
+        print('xw32 process_weights_after_loading begins.')
+        # xw32: Comment out this
+        # Below didn't work
+        # if not layer.layer_name.startswith('model.layers.0.') and not layer.layer_name.startswith('model.layers.1.'):
+        #     return
+
         assert isinstance(layer, FusedMoE)
 
+        # xw32 N.B (TODO: cleanup, remove the concrete number and leave the rest.):
+        # layer.w13_weight: [160, 5120, 6144]=[num_experts, 2*moe_intermediate_size, hidden_size]
+        # layer.w13_weight_scale: [160, 5120, 1]=[num_experts, 2*moe_intermediate_size, 1]
+        # layer.w2_weight: [160, 6144, 2560]=[num_experts, hidden_size, moe_intermediate_size]
+        # layer.w2_weight_scale: [160, 6144, 1]=[num_experts, hidden_size, 1]
         w13_weight = t2j(layer.w13_weight, use_dlpack=False)
         w13_weight_scale = t2j(layer.w13_weight_scale, use_dlpack=False)
         w2_weight = t2j(layer.w2_weight, use_dlpack=False)
@@ -150,9 +158,11 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
                 weights=FusedMoEWeights(
                     w13_weight=w13_weight,
                     w13_weight_scale=w13_weight_scale,
+                    w13_scale_per_channel=None,
                     w13_bias=w13_bias,
                     w2_weight=w2_weight,
                     w2_weight_scale=w2_weight_scale,
+                    w2_scale_per_channel=None,
                     w2_bias=w2_bias,
                 ),
                 moe_backend=self.moe_backend,
@@ -176,12 +186,17 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
 
         layer.w13_weight_scale = Parameter(weights.w13_weight_scale,
                                            requires_grad=False)
+        layer.w13_scale_per_channel = Parameter(weights.w13_scale_per_channel,
+                                                requires_grad=False)
         layer.w2_weight_scale = Parameter(weights.w2_weight_scale,
                                           requires_grad=False)
+        layer.w2_scale_per_channel = Parameter(weights.w2_scale_per_channel,
+                                               requires_grad=False)
 
         if self.moe.has_bias:
             layer.w13_bias = Parameter(weights.w13_bias, requires_grad=False)
             layer.w2_bias = Parameter(weights.w2_bias, requires_grad=False)
+        print('xw32 process_weights_after_loading ends.')
 
     def apply(
         self,
