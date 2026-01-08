@@ -124,6 +124,9 @@ class TestDeepSeekV3:
     @patch("tpu_inference.models.jax.deepseek_v3.DeepSeekV3WeightLoader")
     def test_load_weights_called(self, mock_loader_cls, mock_config, rng,
                                  mesh):
+        # TODO: Remove the skip when the test is moved to 8 cores machines.
+        if len(jax.devices()) < 8:
+            pytest.skip("Skip the test to avoid large file downloading.")
         model = DeepSeekV3(mock_config, rng, mesh)
         mock_loader_instance = mock_loader_cls.return_value
 
