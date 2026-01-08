@@ -89,6 +89,7 @@ def get_device_topology_order_id(local_devices, global_devices) -> int:
 
     # 1. Find the 'anchor' (minimum coordinate) for the local devices.
     #    This represents the physical top-left corner of the local machine.
+    print(f"Local devices: {local_devices}")
     local_anchor = min(d.coords for d in local_devices)
 
     # 2. Group global devices by process to find the anchor for EVERY process.

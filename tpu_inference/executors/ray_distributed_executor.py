@@ -242,8 +242,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
                 },
                 scheduling_strategy=scheduling_strategy,
                 **ray_remote_kwargs,
-            )(RayWorkerWrapper).remote(vllm_config=self.vllm_config,
-                                       rpc_rank=rank)
+            )(RayWorkerWrapper).remote(rpc_rank=rank)
             worker_metadata.append(
                 RayWorkerMetaData(worker=worker, created_rank=rank))
 
