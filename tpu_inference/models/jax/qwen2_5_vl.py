@@ -36,8 +36,7 @@ from tpu_inference.models.jax.qwen2 import Qwen2ForCausalLM
 # from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from tpu_inference.models.jax.utils.multi_modal_utils import (
     MultiModalEmbeddings, merge_multimodal_embeddings)
-from tpu_inference.models.jax.utils.weight_utils import (get_default_maps,
-                                                         load_hf_weights)
+from tpu_inference.models.jax.utils.weight_utils import StandardWeightLoader
 
 logger = init_logger(__name__)
 
@@ -749,6 +748,7 @@ class Qwen2_5_VisionTransformer(nnx.Module):
 
 
 class Qwen2_5_VLForConditionalGeneration(nnx.Module):
+    WeightLoader = StandardWeightLoader
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
                  mesh: Mesh) -> None:
@@ -1140,12 +1140,8 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
                 "lm_head": "language_model.model.lm_head",
             })
 
-        metadata_map = get_default_maps(self.vllm_config.model_config,
-                                        self.mesh, mappings)
-        load_hf_weights(vllm_config=self.vllm_config,
-                        model=self,
-                        metadata_map=metadata_map,
-                        mesh=self.mesh)
+        loader = self.WeightLoader(self.vllm_config, self.mesh)
+        loader.load_weights(self, mappings)
 
     def precompile_vision_encoder(
         self,
