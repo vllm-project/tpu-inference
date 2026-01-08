@@ -45,27 +45,8 @@ def sampling_config():
     return SamplingParams(temperature=0, max_tokens=10, ignore_eos=True)
 
 
-@pytest.fixture
-# TODO(amacaskill): Replace with GKE owned GCS bucket.
-def gcs_model_name():
-    return "gs://vertex-model-garden-public-us/llama3/llama3-8b-hf"
-
-
-@pytest.fixture
-def hf_model_name():
-    return "meta-llama/Meta-Llama-3-8B"
-
-
-@pytest.fixture
-def prompt():
-    return "Hello, my name is"
-
-
 def test_correctness(
     sampling_config: SamplingParams,
-    gcs_model_name: str,
-    hf_model_name: str,
-    prompt: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
     '''
@@ -74,11 +55,61 @@ def test_correctness(
     These tests attempt to use tensor_parallel_size=1. The model is 16GB,
     # and v6e has 32GB of HBM, so it will fit.
     '''
+    # TODO(amacaskill): Replace with GKE owned GCS bucket.
+    gcs_model_name = "gs://vertex-model-garden-public-us/llama3/llama3-8b-hf"
+    hf_model_name = "meta-llama/Meta-Llama-3-8B"
+    prompt = "Hello, my name is"
+
     # Set ENV variables so that runai_model_streamer uses anonymous GCS access.
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "fake-project")
     monkeypatch.setenv("RUNAI_STREAMER_GCS_USE_ANONYMOUS_CREDENTIALS", "true")
     monkeypatch.setenv("CLOUD_STORAGE_EMULATOR_ENDPOINT",
                        "https://storage.googleapis.com")
+    gcs_llm = LLM(model=gcs_model_name,
+                  load_format="runai_streamer",
+                  max_model_len=128,
+                  max_num_seqs=16,
+                  max_num_batched_tokens=256)
+    gcs_outputs = gcs_llm.generate([prompt], sampling_config)
+    gcs_output_text = gcs_outputs[0].outputs[0].text
+    del gcs_llm
+    time.sleep(10)  # Wait for TPUs to be released
+
+    # Test with Hugging Face model
+    hf_llm = LLM(model=hf_model_name,
+                 max_model_len=128,
+                 max_num_seqs=16,
+                 max_num_batched_tokens=256)
+    hf_outputs = hf_llm.generate([prompt], sampling_config)
+    hf_output_text = hf_outputs[0].outputs[0].text
+    del hf_llm
+    time.sleep(10)  # Wait for TPUs to be released
+
+    assert gcs_output_text == hf_output_text, (
+        f"Outputs do not match! "
+        f"GCS output: {gcs_output_text}, HF output: {hf_output_text}")
+
+
+# TODO before submitting: Confirm the path this test follows to see if logic is tested as expected.
+def test_correctness_codegemma(
+    sampling_config: SamplingParams,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    Compare the outputs of a codegemma model loaded from GCS via runai_model_streamer
+    and a model loaded from Hugging Face. The outputs should be the same.
+    """
+    # TODO(amacaskill): Replace with GKE owned GCS bucket.
+    gcs_model_name = "gs://vertex-model-garden-public-us/codegemma/codegemma-2b"
+    hf_model_name = "google/codegemma-2b"
+    prompt = "def fibonacci("
+
+    # Set ENV variables so that runai_model_streamer uses anonymous GCS access.
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "fake-project")
+    monkeypatch.setenv("RUNAI_STREAMER_GCS_USE_ANONYMOUS_CREDENTIALS", "true")
+    monkeypatch.setenv("CLOUD_STORAGE_EMULATOR_ENDPOINT",
+                       "https://storage.googleapis.com")
+
     gcs_llm = LLM(model=gcs_model_name,
                   load_format="runai_streamer",
                   max_model_len=128,
