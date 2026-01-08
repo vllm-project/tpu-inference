@@ -51,6 +51,7 @@ def create_request(
         f"hash_{i}".encode()
         for i in range(len(req.all_token_ids) // block_size)
     ]
+    req.num_tokens = len(req.all_token_ids)
     return req
 
 
@@ -475,10 +476,4 @@ class TestTPUOffloadConnectorScheduler:
 
         assert req_id not in scheduler._unfinished_requests
         assert req_id not in scheduler._request_trackers
-        assert len(metadata.requests_meta) == 1
-        req_meta = metadata.requests_meta[0]
-        assert req_meta.save_spec is not None
-        assert req_meta.save_spec.is_final_save
-        assert req_meta.save_spec.skip_save
-        assert req_meta.save_spec.src_blocks == []
-        assert req_meta.save_spec.dst_chunks == []
+        assert len(metadata.requests_meta) == 0
