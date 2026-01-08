@@ -1,3 +1,14 @@
+# ==============================================================================
+# Dockerfile.pypi Purpose:
+# This Dockerfile is used for building and testing vLLM-TPU as a distributable 
+# Python package. 
+#
+# Key differences from the standard Dockerfile:
+# 1. It builds a redistributable wheel (.whl) for vllm-tpu.
+# 2. It installs the 'tpu-inference' package from a package index.
+# 3. Use this file if you are verifying the PyPI distribution flow or need 
+#    a production-ready wheel installation rather than an editable source build.
+# ==============================================================================
 
 ARG BASE_IMAGE="python:3.12-slim-bookworm"
 # The latest main will be used if arg unspecified
@@ -7,9 +18,6 @@ FROM $BASE_IMAGE
 
 ARG IS_FOR_V7X="false"
 ARG IS_TEST="false"
-
-# Remove existing versions of dependencies
-RUN pip uninstall -y torch torch_xla torchvision
 
 # Install some basic utilities
 RUN apt-get update && apt-get install -y \
