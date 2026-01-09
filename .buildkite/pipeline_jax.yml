@@ -37,14 +37,9 @@ steps:
        QUANTIZATION: "True"
      agents:
        queue: tpu_v6e_queue
+     if: build.env("NIGHTLY") == "1"
      commands:
-       - |
-         if [[ "$$NIGHTLY" == "1" ]]; then
-           .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
-         else
-           echo "Skipping: NIGHTLY environment variable not set"
-           exit 0
-         fi
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
 
    - label: "E2E MLPerf tests for JAX new models"
      key: test_2
@@ -53,14 +48,9 @@ steps:
        NEW_MODEL_DESIGN: "1"
      agents:
        queue: tpu_v6e_queue
+     if: build.env("NIGHTLY") == "1"
      commands:
-       - |
-         if [[ "$$NIGHTLY" == "1" ]]; then
-           .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
-         else
-           echo "Skipping: NIGHTLY environment variable not set"
-           exit 0
-         fi
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
 
    - label: "E2E MLPerf tests for JAX + vLLM models on single chip"
      key: test_3
@@ -80,31 +70,20 @@ steps:
        USE_V6E8_QUEUE: "True"
      agents:
        queue: tpu_v6e_8_queue
+     if: build.env("NIGHTLY") == "1"
      commands:
-       - |
-         if [[ "$$NIGHTLY" == "1" ]]; then
-           .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
-         else
-           echo "Skipping: NIGHTLY environment variable not set"
-           exit 0
-         fi
-
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
 
    - label: "E2E multi modality test"
      key: test_5
      soft_fail: true
      agents:
        queue: tpu_v6e_queue
+     if: build.env("NIGHTLY") == "1"
      commands:
-       - |
-         if [[ "$$NIGHTLY" == "1" ]]; then
-           .buildkite/scripts/run_in_docker.sh \
+       - .buildkite/scripts/run_in_docker.sh \
              bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_multi_modal_inference.py && \
               bash /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench.sh'
-         else
-           echo "Skipping: NIGHTLY environment variable not set"
-           exit 0
-         fi
 
    - label: "E2E speculative decoding test"
      key: test_6
@@ -148,6 +127,8 @@ steps:
              --ignore=/workspace/tpu_inference/tests/kernels/collectives \
              --ignore=/workspace/tpu_inference/tests/kernels/fused_moe_v1_test.py
          else
+           buildkite-agent step update "label" "🚫 (Skipped) JAX unit tests - kernels"
+           buildkite-agent annotate "Step skipped because no changes were detected in kernel files." --style "info" --context "skip-kernels"
            echo "Skipping: no changes detected in kernels, tests/kernels, or requirements.txt"
            exit 0
          fi
@@ -163,6 +144,8 @@ steps:
            .buildkite/scripts/run_in_docker.sh \
              python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels/collectives
          else
+           buildkite-agent step update "label" "🚫 (Skipped) JAX unit tests - kernels"
+           buildkite-agent annotate "Step skipped because no changes were detected in kernel files." --style "info" --context "skip-kernels"
            echo "Skipping: no changes detected in kernels/collectives, tests/kernels/collectives, or requirements.txt"
            exit 0
          fi
@@ -172,15 +155,10 @@ steps:
      soft_fail: true
      agents:
        queue: tpu_v6e_queue
+     if: build.env("NIGHTLY") == "1"
      commands:
-       - |
-         if [[ "$$NIGHTLY" == "1" ]]; then
-           .buildkite/scripts/run_in_docker.sh \
+       - .buildkite/scripts/run_in_docker.sh \
              bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py'
-         else
-           echo "Skipping: NIGHTLY environment variable not set"
-           exit 0
-         fi
 
    - label: "E2E MLPerf tests for JAX + vLLM models on multiple chips"
      key: test_11
@@ -189,14 +167,9 @@ steps:
        MODEL_IMPL_TYPE: "vllm"
      agents:
        queue: tpu_v6e_8_queue
+     if: build.env("NIGHTLY") == "1"
      commands:
-       - |
-         if [[ "$$NIGHTLY" == "1" ]]; then
-           .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
-         else
-           echo "Skipping: NIGHTLY environment variable not set"
-           exit 0
-         fi
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
 
   # TODO (jacobplatin): re-enable this after b/467105149 is fixed
   #  - label: "E2E MLperf tests for DeepSeek-R1 (no accuracy, 12-decoder layers only)"
@@ -226,16 +199,10 @@ steps:
        VLLM_LOG_LEVEL: "INFO"
      agents:
        queue: tpu_v6e_8_queue
+     if: build.env("NIGHTLY") == "1"
      commands:
-       - |
-         if [[ "$$NIGHTLY" == "1" ]]; then
-           .buildkite/scripts/run_in_docker.sh \
+       - .buildkite/scripts/run_in_docker.sh \
              bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py'
-         else
-           echo "Skipping: NIGHTLY environment variable not set"
-           exit 0
-         fi
-
 
    - label: "lora unit tests on single chip"
      key: test_15
@@ -256,15 +223,11 @@ steps:
        VLLM_LOG_LEVEL: "INFO"
      agents:
        queue: tpu_v6e_8_queue
+     if: build.env("NIGHTLY") == "1"
      commands:
-       - |
-         if [[ "$$NIGHTLY" == "1" ]]; then
-           .buildkite/scripts/run_in_docker.sh \
+       - .buildkite/scripts/run_in_docker.sh \
              bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_layers.py'
-         else
-           echo "Skipping: NIGHTLY environment variable not set"
-           exit 0
-         fi
+
   # -----------------------------------------------------------------
   # NOTIFICATION STEP
   # -----------------------------------------------------------------
