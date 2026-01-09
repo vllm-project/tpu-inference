@@ -55,7 +55,7 @@ class TpuPlatform(Platform):
                              attn_selector_config: "AttentionSelectorConfig",
                              **kwargs) -> str:
         from vllm.attention.backends.registry import AttentionBackendEnum
-        if selected_backend != AttentionBackendEnum.CUSTOM:
+        if selected_backend != AttentionBackendEnum.FLASH_ATTN:
             logger.info("Cannot use %s backend on TPU.", selected_backend)
         logger.info("Using Pallas V1 backend.")
         return "tpu_inference.layers.vllm.attention.PallasAttentionBackend"

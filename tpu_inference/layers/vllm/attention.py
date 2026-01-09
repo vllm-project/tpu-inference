@@ -30,12 +30,12 @@ logger = init_logger(__name__)
 TPU_HEAD_SIZE_ALIGNMENT = 128
 
 
-@register_backend(AttentionBackendEnum.CUSTOM)
+@register_backend(AttentionBackendEnum.FLASH_ATTN)
 class PallasAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "CUSTOM"
+        return "FLASH_ATTN"
 
     @staticmethod
     def get_impl_cls() -> type["PallasAttentionBackendImpl"]:

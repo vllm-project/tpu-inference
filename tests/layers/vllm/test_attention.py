@@ -116,7 +116,7 @@ def mesh():
 class TestPallasAttentionBackend:
 
     def test_get_name(self):
-        assert PallasAttentionBackend.get_name() == "CUSTOM"
+        assert PallasAttentionBackend.get_name() == "FLASH_ATTN"
 
     def test_get_impl_cls(self):
         assert PallasAttentionBackend.get_impl_cls(
