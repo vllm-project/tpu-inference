@@ -680,6 +680,7 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
 
 @dataclass
 class DeepSeekV3(nnx.Module):
+    WeightLoader = DeepSeekV3WeightLoader
 
     def __init__(self,
                  vllm_config: VllmConfig,
@@ -734,7 +735,7 @@ class DeepSeekV3(nnx.Module):
 
         self._process_moe_kernel_flag()
 
-        self.weight_loader = DeepSeekV3WeightLoader(
+        self.weight_loader = self.WeightLoader(
             vllm_config=vllm_config,
             num_layers=num_layers,
             hidden_size=hidden_size,
@@ -1020,7 +1021,7 @@ def weights_dequant_cpu(x: torch.Tensor,
     s = s.to(torch.float32)
     y = torch.empty_like(x)
 
-    M_main = (M // block_size) * block_sizes
+    M_main = (M // block_size) * block_size
     N_main = (N // block_size) * block_size
 
     if M_main > 0 and N_main > 0:
