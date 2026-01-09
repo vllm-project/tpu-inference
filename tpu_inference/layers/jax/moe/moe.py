@@ -35,7 +35,7 @@ from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.layers.jax.misc import round_up_to_multiple_of_128_within_limit
 from tpu_inference.layers.vllm.fused_moe import fused_moe_func
-from tpu_inference.models.jax.utils.quantization.quantization_utils import (
+from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     manually_quantize_qwix_activation, manually_quantize_qwix_weight)
 
 modeling_flax_utils = FlaxUtils()
@@ -99,6 +99,8 @@ class Router(nnx.Module):
         router_act = modeling_flax_utils.ACT2FN[self.router_act]
         router_logits_TE = jnp.einsum('TD,DE -> TE', x_TD,
                                       self.kernel_DE.value)
+
+        #TODO: Refactor the Router so that it will always only return router_logits_TE
         if self.use_moe_kernel:
             return router_logits_TE
         else:
