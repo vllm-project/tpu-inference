@@ -158,13 +158,12 @@ def benchmark_kernel(rpa_key: RpaKey,
                                             num_kv_heads, head_dim, kv_dtype)
 
     # Random Data
-    # rng_key = jax.random.PRNGKey(0)  # Reproducible - unused but kept for reference if needed, or remove completely. 
-    # Ruff says it's unused.
-
-    q = jnp.zeros(q_shape, dtype=q_dtype)
-    k = jnp.zeros(kv_shape, dtype=kv_dtype)
-    v = jnp.zeros(kv_shape, dtype=kv_dtype)
-    kv_cache = jnp.zeros(kv_cache_shape, dtype=kv_dtype)
+    rng_key = jax.random.PRNGKey(0)
+    k1, k2, k3, k4 = jax.random.split(rng_key, 4)
+    q = jax.random.uniform(k1, q_shape, dtype=q_dtype)
+    k = jax.random.uniform(k2, kv_shape, dtype=kv_dtype)
+    v = jax.random.uniform(k3, kv_shape, dtype=kv_dtype)
+    kv_cache = jax.random.uniform(k4, kv_cache_shape, dtype=kv_dtype)
 
     page_indices = np.random.randint(0,
                                      total_num_pages,
