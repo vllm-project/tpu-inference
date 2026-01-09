@@ -223,12 +223,8 @@ def main(batch_sizes, out_in_features, x_q_dtype, w_q_dtype, dry_run,
 
                 results[tuned_key].append(TestResult(tuned_value, latency_ns))
 
-                # Format block sizes concisely
-                _blocks_str = f"[{tuned_value.batch_block_size}, {tuned_value.out_block_size}, {tuned_value.in_block_size}]"
-                _params_str = f"B={tuned_key.n_batch}, O={tuned_key.n_out}, I={tuned_key.n_in}"
-
                 if is_best:
-                    # console.print(f"New Best: {blocks_str} for {params_str} -> {latency_ns/1e9:.6f} s")
+                    # console.print(f"New Best: ... -> {latency_ns/1e9:.6f} s")
                     pass
 
                 if csv_writer:
