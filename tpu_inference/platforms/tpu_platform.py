@@ -56,9 +56,11 @@ class TpuPlatform(Platform):
                              **kwargs) -> str:
         from vllm.attention.backends.registry import AttentionBackendEnum
         if selected_backend != AttentionBackendEnum.FLASH_ATTN:
-            logger.info("Cannot use %s backend on TPU.", selected_backend)
-        logger.info("Using Pallas V1 backend.")
-        return "tpu_inference.layers.vllm.attention.PallasAttentionBackend"
+            logger.info("Cannot use %s backend on TPU. Setting to FLASH_ATTN.",
+                        selected_backend)
+            selected_backend = AttentionBackendEnum.FLASH_ATTN
+        logger.info("Using %s backend.", selected_backend.name)
+        return selected_backend.get_path()
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
