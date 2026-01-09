@@ -59,7 +59,7 @@ def fused_moe_apply(
     mesh: Mesh,
     extra_backend_kwargs: dict,
 ) -> torch.Tensor:
-    print('xw32 fused_moe_apply begins.')
+    # print('xw32 fused_moe_apply begins.')
     assert isinstance(layer, FusedMoE)
     if layer.scoring_func != "softmax":
         raise NotImplementedError("Only softmax is supported for scoring_func")
@@ -77,7 +77,7 @@ def fused_moe_apply(
     with jax.named_scope(layer._get_name()):
         match moe_backend:
             case FusedMoEBackend.FUSED_MOE:
-                print(f'xw32 fused moe begins. {mesh=}')
+                print('xw32 fused moe begins.')
                 actual_hidden_size = x.shape[-1]
                 padding_size = w13_weight.shape[-2] - actual_hidden_size
                 x = jnp.pad(x, ((0, 0), (0, padding_size)))
@@ -108,9 +108,11 @@ def fused_moe_apply(
                     **block_size,
                     ep_axis_name="model",
                 )[:, :actual_hidden_size]
-                print('xw32 fused moe ends.')
+                # print('xw32 fused moe ends.')
             case FusedMoEBackend.GMM_EP | FusedMoEBackend.GMM_TP:
-                print('xw32 gmm begins.')
+                raise NotImplementedError(
+                    "xw32 gmm is used. This is not right.")
+                # print('xw32 gmm begins.')
                 output = fused_moe_func(
                     hidden_states=x,
                     w1=w13_weight,
@@ -126,7 +128,7 @@ def fused_moe_apply(
                     use_ep=layer.use_ep,
                     activation=layer.activation,
                 )
-                print('xw32 gmm ends.')
+                # print('xw32 gmm ends.')
 
-        print('xw32 fused_moe_apply ends.')
+        # print('xw32 fused_moe_apply ends.')
         return torch_view(output)

@@ -117,7 +117,7 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         """
         # who is the caller?: tpu_runner.load_model->vllm_model_wraper.load_weights->process_weights_after_loading.
         # what are the shape of the weights?
-        print('xw32 process_weights_after_loading begins.')
+        # print('xw32 process_weights_after_loading begins.')
         # xw32: Comment out this
         # Below didn't work
         # if not layer.layer_name.startswith('model.layers.0.') and not layer.layer_name.startswith('model.layers.1.'):
@@ -196,7 +196,7 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         if self.moe.has_bias:
             layer.w13_bias = Parameter(weights.w13_bias, requires_grad=False)
             layer.w2_bias = Parameter(weights.w2_bias, requires_grad=False)
-        print('xw32 process_weights_after_loading ends.')
+        # print('xw32 process_weights_after_loading ends.')
 
     def apply(
         self,
