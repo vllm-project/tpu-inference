@@ -122,7 +122,405 @@ class Router(nnx.Module):
                                       sharding=self.ed_sharding,
                                       random_init=self.random_init)
 
+# --- Helper Class for Sparse MoE ---
 
+class SparseMoEEngine(nnx.Module):
+    """Encapsulates logic for Sparse/Grouped Matrix Multiply MoE."""
+    def __init__(self, moe_instance: 'MoE'):
+        self.m = moe_instance
+
+    def _sort_activations(self, inputs: jax.Array,
+                          sort_indices: jax.Array) -> jax.Array:
+        """Sorts activations(inputs) by `sort_indices` for the forward pass."""
+        return inputs[sort_indices, ...]
+
+    def _permute(self, inputs_TD: Float, selected_experts_TX: jax.Array):
+        """Global permute: Sorts tokens by assigned expert."""
+        total_tokens = inputs_TD.shape[0]
+        flat_expert_indices = selected_experts_TX.flatten()
+        sort_indices_t = jnp.argsort(flat_expert_indices)
+
+        replicated_inputs_tD = jnp.repeat(inputs_TD,
+                                          self.m.num_experts_per_tok,
+                                          axis=0)
+        sorted_inputs_tD = self._sort_activations(replicated_inputs_tD,
+                                                  sort_indices_t)
+
+        # number of tokens assigned to each expert
+        group_sizes_E = jnp.bincount(flat_expert_indices,
+                                     length=self.m.num_local_experts)
+
+        expert_ids = jnp.arange(self.m.num_local_experts)
+        total_assignments = total_tokens * self.m.num_experts_per_tok
+        sorted_expert_assignments_t = jnp.repeat(
+            expert_ids,
+            repeats=group_sizes_E,
+            total_repeat_length=total_assignments)
+        return (
+            sorted_inputs_tD,
+            sort_indices_t,
+            group_sizes_E,
+            sorted_expert_assignments_t,
+        )
+
+    def _unpermute(self, processed_tokens: jax.Array, sort_indices: jax.Array,
+                   router_weights_TX: jax.Array):
+        with jax.named_scope("unpermute"):
+            unsorted_tokens_tD = self._sort_activations(
+                processed_tokens, jnp.argsort(sort_indices))
+            reshaped_tokens_TXD = unsorted_tokens_tD.reshape(
+                -1, self.m.num_experts_per_tok, self.m.hidden_size)
+        with jax.named_scope("combine_weights"):
+            output_TD = jnp.einsum(
+                "TXD,TX -> TD",
+                reshaped_tokens_TXD.astype(jnp.float32), 
+                router_weights_TX.astype(jnp.float32),
+                precision='float32',
+            )
+
+        return output_TD.astype(self.m.dtype)
+
+    def _gmm(self, inputs, kernel, group_sizes):
+        """Performs Grouped Matrix Multiply."""
+        num_rows = inputs.shape[0]
+        pad_amount = (self.m.tile_size[0] - num_rows % self.m.tile_size[0]) % self.m.tile_size[0]
+        if pad_amount > 0:
+            inputs = jnp.pad(inputs, ((0, pad_amount), (0, 0)))
+
+        if self.m.use_megablox:
+            m, g, k, n = inputs.shape[0], *kernel.shape
+            tm = round_up_to_multiple_of_128_within_limit(m, 512)
+            tk = round_up_to_multiple_of_128_within_limit(k, 2048)
+            tn = round_up_to_multiple_of_128_within_limit(n, 2048)
+
+            output = megablox_gmm(
+                lhs=inputs,
+                rhs=kernel,
+                group_sizes=group_sizes, 
+                preferred_element_type=self.m.dtype,
+                tiling=(tm, tk, tn)
+            )
+
+        else:
+            inputs = manually_quantize_qwix_activation(
+                inputs, "ragged_dot", jnp.float8_e4m3fn, [0], {},
+                "absmax") if self.m.quantized_dtype else inputs
+            ragged_dot_func = qwix_ragged_dot if self.m.quantized_dtype else jax.lax.ragged_dot
+            with set_xla_metadata(
+                ragged_dot_tiling=",".join([str(t) for t in self.m.tile_size]),
+                mosaic_fusion_group="ragged-dot"):
+                output = ragged_dot_func(
+                    lhs=inputs,
+                    rhs=kernel,
+                    group_sizes=group_sizes,
+                    preferred_element_type=self.m.dtype)
+
+        if pad_amount > 0:
+            output = output[:num_rows, :]
+        return output
+
+    def _local_permute(
+        self,
+        inputs,
+        global_group_sizes,
+        local_expert_size,
+        shard_index,
+        is_offset=False,
+        global_sorted_experts=None,
+    ):
+        """Permutes tokens locally within an expert shard."""
+        # global_group_sizes: (tokens parallelism, num_total_experts)
+        # all_shard_local_sizes: (tokens parallelism, num local experts in the shard)
+        all_shard_local_sizes = jax.lax.dynamic_slice_in_dim(
+            global_group_sizes,
+            shard_index * local_expert_size,
+            local_expert_size,
+            axis=1)
+        local_sizes = all_shard_local_sizes.reshape(-1)
+
+        # local_group_size: (tokens parallelism, )
+        local_group_size = jnp.sum(all_shard_local_sizes, axis=0)
+
+        # When token replicated in devices
+        if is_offset:
+            global_sorted_shard_assignments = jnp.floor_divide(
+                global_sorted_experts, local_expert_size)
+            expert_indices = jnp.where(
+                global_sorted_shard_assignments == shard_index,
+                jnp.mod(global_sorted_experts, local_expert_size),
+                local_expert_size)
+
+        # When token sharded in devices
+        else:
+            base_indices = jnp.mod(jnp.arange(local_sizes.shape[0]),
+                                   local_expert_size)
+            expert_indices = jnp.repeat(base_indices,
+                                        local_sizes,
+                                        total_repeat_length=inputs.shape[0])
+
+        sorted_indices = jnp.argsort(expert_indices)
+        # sort the inputs based on the local expert_indices
+        sorted_inputs = self._sort_activations(inputs, sorted_indices)
+        # sortted local expert id from 0 to local expert size
+        sorted_experts_ids = expert_indices[sorted_indices]
+        return (
+            sorted_inputs,
+            sorted_indices,
+            local_group_size,
+            sorted_experts_ids,
+        )
+
+    @staticmethod
+    def get_all_to_all_params(
+        all_shards_group_sizes,
+        shard_id,
+        num_expert_parallelism,
+        is_batch_sharded=True,
+    ):
+        """Generates params for ragged_all_to_all communication."""
+
+        class TransformStrategy(enum.Enum):
+            INPUT_OFFSET = enum.auto()
+            SEND_SIZE = enum.auto()
+            OUTPUT_OFFSET = enum.auto()
+            RECV_SIZE = enum.auto()
+
+        def transform_array(input_array, shard_id, strategy, is_batch_sharded):
+            if is_batch_sharded:
+                if strategy == TransformStrategy.INPUT_OFFSET:
+                    local_array = input_array[shard_id]
+                    return jnp.concatenate(
+                        (jnp.array([0]), jnp.cumsum(local_array)[:-1]))
+                elif strategy == TransformStrategy.SEND_SIZE:
+                    return input_array[shard_id]
+                elif strategy == TransformStrategy.OUTPUT_OFFSET:
+                    zero_row = jnp.zeros((1, ) + input_array.shape[1:],
+                                         dtype=input_array.dtype)
+                    array_with_zeros = jnp.concatenate((zero_row, input_array),
+                                                       axis=0)
+                    cumulated_array = jnp.cumsum(array_with_zeros,
+                                                 axis=0,
+                                                 dtype=input_array.dtype)
+                    return cumulated_array[shard_id]
+                elif strategy == TransformStrategy.RECV_SIZE:
+                    return input_array[:, shard_id]
+                else:
+                    raise ValueError(
+                        f"Unknown transform array strategy: {strategy}")
+            else:
+                if strategy == TransformStrategy.INPUT_OFFSET:
+                    return jnp.zeros(num_expert_parallelism,
+                                     dtype=input_array.dtype)
+                elif strategy == TransformStrategy.SEND_SIZE:
+                    return jnp.repeat(input_array[shard_id],
+                                      num_expert_parallelism)
+                elif strategy == TransformStrategy.OUTPUT_OFFSET:
+                    output_offset = jnp.concatenate(
+                        (jnp.array([0]),
+                         jnp.cumsum(input_array[:-1])))[shard_id]
+                    return jnp.repeat(output_offset, num_expert_parallelism)
+                elif strategy == TransformStrategy.RECV_SIZE:
+                    return input_array
+                else:
+                    raise ValueError(
+                        f"Unknown transform array strategy: {strategy}")
+
+        input_offsets = transform_array(all_shards_group_sizes, shard_id,
+                                        TransformStrategy.INPUT_OFFSET,
+                                        is_batch_sharded)
+        send_sizes = transform_array(all_shards_group_sizes, shard_id,
+                                     TransformStrategy.SEND_SIZE,
+                                     is_batch_sharded)
+        output_offsets = transform_array(all_shards_group_sizes, shard_id,
+                                         TransformStrategy.OUTPUT_OFFSET,
+                                         is_batch_sharded)
+        recv_sizes = transform_array(all_shards_group_sizes, shard_id,
+                                     TransformStrategy.RECV_SIZE,
+                                     is_batch_sharded)
+        return input_offsets, send_sizes, output_offsets, recv_sizes
+
+    def distributed_fwd(
+        self,
+        x_TD: jax.Array,
+        router_weights_TX: jax.Array,
+        selected_experts_TX: jax.Array,
+        kernel_gating: jax.Array,
+        kernel_up_proj: jax.Array,
+        kernel_down_proj: jax.Array,
+    ):
+        """
+        The sparse MoE forward pass with fully distributed logic.
+        This assumes it is running within a distributed TPU.
+        """
+
+        # 1. Global Permute
+        (
+            sorted_inputs,
+            global_sort_indices,
+            global_group_sizes,
+            global_sorted_experts,
+        ) = self._permute(x_TD, selected_experts_TX)
+
+        expert_shard_id = jax.lax.axis_index(self.m.expert_axis_name)
+        local_expert_size = self.m.num_local_experts // self.m.num_expert_parallelism
+
+        if self.m.num_expert_parallelism > 1:
+            if self.m.is_batch_sharded_by_expert:
+                # 2a. Send Tokens To Experts (All-to-All)
+                all_shards_group_sizes = jax.lax.all_gather(
+                    global_group_sizes, axis_name=self.m.data_axis_name)
+
+                all_shards_group_sizes_per_expert_shard = jnp.sum(
+                    all_shards_group_sizes.reshape(
+                        self.m.num_expert_parallelism,
+                        self.m.num_expert_parallelism,
+                        local_expert_size
+                    ), axis=2)
+                
+                input_offsets, send_sizes, output_offsets, recv_sizes = self.get_all_to_all_params(
+                    all_shards_group_sizes_per_expert_shard, expert_shard_id,
+                    self.m.num_expert_parallelism)
+                
+                local_total_assignments = x_TD.shape[0] * self.m.num_experts_per_tok
+                global_total_assignments = local_total_assignments * self.m.num_expert_parallelism
+                output_shape_est = jnp.zeros(
+                    (global_total_assignments, self.m.hidden_size),
+                    dtype=sorted_inputs.dtype)
+
+                inputs_after_all2all = jax.lax.ragged_all_to_all(
+                    sorted_inputs, output_shape_est, input_offsets,
+                    send_sizes, output_offsets, recv_sizes,
+                    axis_name=self.m.expert_axis_name)
+
+                # 3a. Local Permute
+                full_global_group_sizes = jax.lax.all_gather(
+                    global_group_sizes, axis_name=self.m.expert_axis_name)
+                (
+                    compute_inputs,
+                    local_sorted_indices,
+                    compute_group_sizes,
+                    compute_expert_ids,
+                ) = self._local_permute(
+                    inputs_after_all2all, full_global_group_sizes,
+                    local_expert_size, shard_index=expert_shard_id,
+                    is_offset=False,
+                )
+
+            else:
+                # 3b. Local "Permute" for Replicated tokens
+                (
+                    compute_inputs,
+                    local_sorted_indices,
+                    compute_group_sizes,
+                    compute_expert_ids,
+                ) = self._local_permute(
+                    sorted_inputs, global_group_sizes[None, :],
+                    local_expert_size, shard_index=expert_shard_id,
+                    is_offset=True, global_sorted_experts=global_sorted_experts,
+                )
+
+                reshaped_group_sizes = jnp.sum(global_group_sizes.reshape(
+                    -1, local_expert_size), axis=1)
+                mask = compute_expert_ids < local_expert_size
+                compute_inputs = compute_inputs * mask[..., None]
+
+        else:
+            # --- NO EXPERT PARALLELISM ---
+            compute_inputs = sorted_inputs
+            compute_group_sizes = global_group_sizes
+            compute_expert_ids = global_sorted_experts
+            local_sorted_indices = jnp.arange(sorted_inputs.shape[0])
+
+        # 4. Compute: Apply experts using Grouped Matrix Multiply
+        with jax.named_scope("gating"):
+            gating_TEF = self._gmm(compute_inputs, kernel_gating, compute_group_sizes)
+            activated_gating_TEF = modeling_flax_utils.ACT2FN[self.m.hidden_act](gating_TEF)
+
+        with jax.named_scope("up_projection"):
+            up_proj_TEF = self._gmm(compute_inputs, kernel_up_proj, compute_group_sizes)
+
+        fuse_TEF = activated_gating_TEF * up_proj_TEF
+
+        with jax.named_scope("down_projection"):
+            intermediate_output = self._gmm(fuse_TEF, kernel_down_proj, compute_group_sizes)
+
+        # 5. Return Results (All-to-All)
+        if self.m.num_expert_parallelism > 1:
+            local_total_assignments = x_TD.shape[0] * self.m.num_experts_per_tok
+            output_shape = jnp.zeros(
+                (local_total_assignments, self.m.hidden_size),
+                dtype=intermediate_output.dtype)
+
+            if self.m.is_batch_sharded_by_expert:
+                local_output = self._sort_activations(
+                    intermediate_output, jnp.argsort(local_sorted_indices))
+
+                input_offsets, send_sizes, output_offsets, recv_sizes = self.get_all_to_all_params(
+                    jnp.transpose(all_shards_group_sizes), expert_shard_id,
+                    self.m.num_expert_parallelism,
+                )
+                final_intermediate_output = jax.lax.ragged_all_to_all(
+                    local_output, output_shape, input_offsets, send_sizes,
+                    output_offsets, recv_sizes, axis_name=self.m.expert_axis_name)
+            else:
+                input_offsets, send_sizes, output_offsets, recv_sizes = self.get_all_to_all_params(
+                    reshaped_group_sizes, expert_shard_id,
+                    self.m.num_expert_parallelism, is_batch_sharded=False,
+                )
+                final_intermediate_output = jax.lax.ragged_all_to_all(
+                    intermediate_output, output_shape, input_offsets, send_sizes,
+                    output_offsets, recv_sizes, axis_name=self.m.expert_axis_name)
+        else:
+            final_intermediate_output = intermediate_output
+
+        # 6. Global Unpermute
+        with jax.named_scope("unpermute"):
+            output_TD = self._unpermute(final_intermediate_output,
+                                        global_sort_indices, router_weights_TX)
+
+        return output_TD
+
+# --- Helper Class for Dense MoE ---
+
+class DenseMoEEngine(nnx.Module):
+    """Encapsulates logic for Dense/Standard MoE forward passes."""
+    def __init__(self, moe_instance: 'MoE'):
+        self.m = moe_instance
+
+    def moe_fwd(self, x_TD: Float, weights):
+        x_TD = jnp.asarray(x_TD, self.m.dtype)
+        x_TD = nnx.with_sharding_constraint(x_TD, self.m.activation_ffw_td)
+        with jax.named_scope("gating"):
+            gating_TEF = jnp.einsum('TD,EDF -> TEF', x_TD, self.m.kernel_gating_EDF.value)
+            activated_gating_TEF = modeling_flax_utils.ACT2FN[self.m.hidden_act](gating_TEF)
+        with jax.named_scope("up_projection"):
+            up_proj_TEF = jnp.einsum('TD,EDF -> TEF', x_TD, self.m.kernel_up_proj_EDF.value)
+        fuse_TEF = activated_gating_TEF * up_proj_TEF
+        with jax.named_scope("down_projection"):
+            down_proj_TED = jnp.einsum('TEF,EFD -> TED', fuse_TEF, self.m.kernel_down_proj_EFD.value)
+        with jax.named_scope("sum"):
+            output_TD = jnp.einsum('TED,TE -> TD', down_proj_TED, weights)
+        return output_TD.astype(self.m.dtype)
+
+    def moe_fwd_preapply_router_weights(self, x_TD: jax.Array, weights_TE):
+        num_experts = weights_TE.shape[-1]
+        x_TED = jnp.repeat(x_TD[:, None, :], num_experts, 1)
+        x_TED = jnp.asarray(x_TED, self.m.dtype) * weights_TE[..., None]
+        x_TED = nnx.with_sharding_constraint(x_TED, self.m.activation_ffw_ted)
+        
+        with jax.named_scope("gating"):
+            gating_TEF = jnp.einsum('TED,EDF -> TEF', x_TED, self.m.kernel_gating_EDF.value)
+            activated_gating_TEF = modeling_flax_utils.ACT2FN[self.m.hidden_act](gating_TEF)
+        with jax.named_scope("up_projection"):
+            up_proj_TEF = jnp.einsum('TED,EDF -> TEF', x_TED, self.m.kernel_up_proj_EDF.value)
+        
+        fuse_TEF = activated_gating_TEF * up_proj_TEF
+        with jax.named_scope("down_projection"):
+            down_proj_TED = jnp.einsum('TEF,EFD -> TED', fuse_TEF, self.m.kernel_down_proj_EFD.value)
+        return down_proj_TED.sum(axis=1).astype(self.m.dtype)
+
+
+# --- Main Class for MoE ---
 @dataclass(kw_only=True)
 class MoE(nnx.Module):
     """Mixture-of-Experts (MoE) Routed MLP Layer.
@@ -212,7 +610,6 @@ class MoE(nnx.Module):
 
             if self.use_sparse_moe:
                 in_specs = (
-                    PartitionSpec(),  # Replicated `self`
                     PartitionSpec(*self.activation_ffw_td),  # Sharded x_TD
                     PartitionSpec(),  # Replicated router_weights_TX
                     PartitionSpec(),  # Replicated selected_experts_TX
@@ -227,14 +624,13 @@ class MoE(nnx.Module):
                                         mesh=self.mesh,
                                         in_specs=in_specs,
                                         out_specs=out_specs,
-                                        check_rep=False)(
-                                            MoE._distributed_sparse_moe_fwd)
+                                        check_rep=False)(self.sparse_engine.distributed_fwd)
 
                 kernel_gating_EDF = self._process_weight_for_qwix(self.kernel_gating_EDF, channelwise_axes=[0, 2], tiled_axes={})
                 kernel_up_proj_EDF = self._process_weight_for_qwix(self.kernel_up_proj_EDF, channelwise_axes=[0, 2], tiled_axes={})
                 kernel_down_proj_EFD = self._process_weight_for_qwix(self.kernel_down_proj_EFD, channelwise_axes=[0, 2], tiled_axes={})
 
-                return mapped_moe_fwd(self, x_TD, weights_TX,
+                return mapped_moe_fwd(x_TD, weights_TX,
                                     indices_TX, kernel_gating_EDF,
                                     kernel_up_proj_EDF, kernel_down_proj_EFD)
             
@@ -248,10 +644,10 @@ class MoE(nnx.Module):
                 # weighting the expert outputs.
                 if self.apply_expert_weight_before_computation:
                     with jax.named_scope("pre_computing_weight"):
-                        return self._moe_fwd_preapply_router_weights(
+                        return self.dense_engine.moe_fwd_preapply_router_weights(
                             x_TD, full_weights_TE)
                 else:
-                    return self._moe_fwd(x_TD, full_weights_TE)        
+                    return self.dense_engine.moe_fwd(x_TD, full_weights_TE)        
 
     def __post_init__(self, rngs: nnx.Rngs):
         """Generates the kernels (weights) for the router and experts (gating, up-projection, and down-projection layers)."""
@@ -328,485 +724,9 @@ class MoE(nnx.Module):
         self.data_axis_name = self.activation_ffw_td[0]
         self.is_batch_sharded_by_expert = (
             self.expert_axis_name is not None) and (self.expert_axis_name == self.data_axis_name)
-
-    ## ======= Methods used for Dense Matmul ======= ##
-    def _moe_fwd_preapply_router_weights(self, x_TD: jax.Array, weights_TE):
-        """Performs the forward pass of the MoE experts with router weights pre-applied to the inputs.
-
-        Args:
-            x_TD: Input array for the experts, shape (sequence_length, hidden_size).
-            weights_TE: Router weights, shape (sequence_length, num_experts).
-
-        Returns:
-            Output array of shape (sequence_length, d_model).
-        """
-        # Data needs to be replicated since it will be weighted by the router
-        # scores before being passed to each expert.
-        num_experts = weights_TE.shape[-1]
-        x_TED = jnp.repeat(x_TD[:, None, :], num_experts, 1)
-        weights_TED = weights_TE[..., None]
-        x_TED = jnp.asarray(x_TED, self.dtype)
-
-        with jax.named_scope("activation_expert_weighting"):
-            x_TED = x_TED * weights_TED
-
-        x_TED = nnx.with_sharding_constraint(x_TED, self.activation_ffw_ted)
-        with jax.named_scope("gating"):
-            gating_TEF = jnp.einsum('TED,EDF -> TEF', x_TED,
-                                    self.kernel_gating_EDF.value)
-            activated_gating_TEF = modeling_flax_utils.ACT2FN[self.hidden_act](
-                gating_TEF)
-        with jax.named_scope("up_projection"):
-            up_proj_TEF = jnp.einsum('TED,EDF -> TEF', x_TED,
-                                     self.kernel_up_proj_EDF.value)
-
-        fuse_TEF = activated_gating_TEF * up_proj_TEF
-
-        with jax.named_scope("down_projection"):
-            down_proj_TED = jnp.einsum('TEF,EFD -> TED', fuse_TEF,
-                                       self.kernel_down_proj_EFD.value)
-        with jax.named_scope("sum"):
-            output_TD = down_proj_TED.sum(axis=1)
-        return output_TD.astype(self.dtype)
-
-    def _moe_fwd(self, x_TD: Float, weights):
-        """Performs the basic forward pass of the MoE experts without dropping or megablocks.
-
-        Args:
-            x_TD: Input array for the experts, shape (sequence_length, d_model).
-            weights: Weights for combining expert outputs, shape (sequence_length, num_experts).
-
-        Returns:
-            Output array of shape (sequence_length, d_model).
-        """
-        x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
-        with jax.named_scope("gating"):
-            gating_TEF = jnp.einsum('TD,EDF -> TEF', x_TD,
-                                    self.kernel_gating_EDF.value)
-            activated_gating_TEF = modeling_flax_utils.ACT2FN[self.hidden_act](
-                gating_TEF)
-        with jax.named_scope("up_projection"):
-            up_proj_TEF = jnp.einsum('TD,EDF -> TEF', x_TD,
-                                     self.kernel_up_proj_EDF.value)
-
-        fuse_TEF = activated_gating_TEF * up_proj_TEF
-
-        with jax.named_scope("down_projection"):
-            down_proj_TED = jnp.einsum('TEF,EFD -> TED', fuse_TEF,
-                                       self.kernel_down_proj_EFD.value)
-        with jax.named_scope("sum"):
-            output_TD = jnp.einsum('TED,TE -> TD', down_proj_TED, weights)
-        return output_TD.astype(self.dtype)
-
-    ## ======= END Methods used for Dense Matmul ======= ##
-
-    ## ======= Methods used for Sparse Matmul ======= ##
-
-    def _sort_activations(self, inputs: jax.Array,
-                          sort_indices: jax.Array) -> jax.Array:
-        """Sorts activations(inputs) by `sort_indices` for the forward pass."""
-        return inputs[sort_indices, ...]
-
-    @staticmethod
-    def get_all_to_all_params(
-        all_shards_group_sizes,
-        shard_id,
-        num_expert_parallelism,
-        is_batch_sharded=True,
-    ):
-        """Generates params for ragged_all_to_all communication."""
-
-        class TransformStrategy(enum.Enum):
-            INPUT_OFFSET = enum.auto()
-            SEND_SIZE = enum.auto()
-            OUTPUT_OFFSET = enum.auto()
-            RECV_SIZE = enum.auto()
-
-        def transform_array(input_array, shard_id, strategy, is_batch_sharded):
-            if is_batch_sharded:
-                if strategy == TransformStrategy.INPUT_OFFSET:
-                    local_array = input_array[shard_id]
-                    return jnp.concatenate(
-                        (jnp.array([0]), jnp.cumsum(local_array)[:-1]))
-                elif strategy == TransformStrategy.SEND_SIZE:
-                    return input_array[shard_id]
-                elif strategy == TransformStrategy.OUTPUT_OFFSET:
-                    zero_row = jnp.zeros((1, ) + input_array.shape[1:],
-                                         dtype=input_array.dtype)
-                    array_with_zeros = jnp.concatenate((zero_row, input_array),
-                                                       axis=0)
-                    cumulated_array = jnp.cumsum(array_with_zeros,
-                                                 axis=0,
-                                                 dtype=input_array.dtype)
-                    return cumulated_array[shard_id]
-                elif strategy == TransformStrategy.RECV_SIZE:
-                    return input_array[:, shard_id]
-                else:
-                    raise ValueError(
-                        f"Unknown transform array strategy: {strategy}")
-            else:
-                if strategy == TransformStrategy.INPUT_OFFSET:
-                    return jnp.zeros(num_expert_parallelism,
-                                     dtype=input_array.dtype)
-                elif strategy == TransformStrategy.SEND_SIZE:
-                    return jnp.repeat(input_array[shard_id],
-                                      num_expert_parallelism)
-                elif strategy == TransformStrategy.OUTPUT_OFFSET:
-                    output_offset = jnp.concatenate(
-                        (jnp.array([0]),
-                         jnp.cumsum(input_array[:-1])))[shard_id]
-                    return jnp.repeat(output_offset, num_expert_parallelism)
-                elif strategy == TransformStrategy.RECV_SIZE:
-                    return input_array
-                else:
-                    raise ValueError(
-                        f"Unknown transform array strategy: {strategy}")
-
-        input_offsets = transform_array(all_shards_group_sizes, shard_id,
-                                        TransformStrategy.INPUT_OFFSET,
-                                        is_batch_sharded)
-        send_sizes = transform_array(all_shards_group_sizes, shard_id,
-                                     TransformStrategy.SEND_SIZE,
-                                     is_batch_sharded)
-        output_offsets = transform_array(all_shards_group_sizes, shard_id,
-                                         TransformStrategy.OUTPUT_OFFSET,
-                                         is_batch_sharded)
-        recv_sizes = transform_array(all_shards_group_sizes, shard_id,
-                                     TransformStrategy.RECV_SIZE,
-                                     is_batch_sharded)
-        return input_offsets, send_sizes, output_offsets, recv_sizes
-
-    def _local_permute(
-        self,
-        inputs,
-        global_group_sizes,
-        local_expert_size,
-        shard_index,
-        is_offset=False,
-        global_sorted_experts=None,
-    ):
-        """Permutes tokens locally within an expert shard."""
-        # global_group_sizes: (tokens parallelism, num_total_experts)
-        # all_shard_local_sizes: (tokens parallelism, num local experts in the shard)
-        all_shard_local_sizes = jax.lax.dynamic_slice_in_dim(
-            global_group_sizes,
-            shard_index * local_expert_size,
-            local_expert_size,
-            axis=1,
-        )
-        local_sizes = all_shard_local_sizes.reshape(-1)
-
-        # local_group_size: (tokens parallelism, )
-        local_group_size = jnp.sum(all_shard_local_sizes, axis=0)
-
-        # When token replicated in devices
-        if is_offset:
-            global_sorted_shard_assignments = jnp.floor_divide(
-                global_sorted_experts, local_expert_size)
-            expert_indices = jnp.where(
-                global_sorted_shard_assignments == shard_index,
-                jnp.mod(global_sorted_experts, local_expert_size),
-                local_expert_size,
-            )
-
-        # When token sharded in devices
-        else:
-            base_indices = jnp.mod(jnp.arange(local_sizes.shape[0]),
-                                   local_expert_size)
-            expert_indices = jnp.repeat(base_indices,
-                                        local_sizes,
-                                        total_repeat_length=inputs.shape[0])
-
-        sorted_indices = jnp.argsort(expert_indices)
-        # sort the inputs based on the local expert_indices
-        sorted_inputs = self._sort_activations(inputs, sorted_indices)
-        # sortted local expert id from 0 to local expert size
-        sorted_experts_ids = expert_indices[sorted_indices]
-        return (
-            sorted_inputs,
-            sorted_indices,
-            local_group_size,
-            sorted_experts_ids,
-        )
-
-    def _permute(self, inputs_TD: Float, selected_experts_TX: jax.Array):
-        """Global permute: Sorts tokens by assigned expert."""
-        # suffix t = T * X = total_assignments for the local tokens(T) on this device.
-        total_tokens = inputs_TD.shape[0]
-        flat_expert_indices = selected_experts_TX.flatten()
-        sort_indices_t = jnp.argsort(flat_expert_indices)
-
-        replicated_inputs_tD = jnp.repeat(inputs_TD,
-                                          self.num_experts_per_tok,
-                                          axis=0)
-        sorted_inputs_tD = self._sort_activations(replicated_inputs_tD,
-                                                  sort_indices_t)
-
-        # number of tokens assigned to each expert
-        group_sizes_E = jnp.bincount(flat_expert_indices,
-                                     length=self.num_local_experts)
-
-        expert_ids = jnp.arange(self.num_local_experts)
-        total_assignments = total_tokens * self.num_experts_per_tok
-        sorted_expert_assignments_t = jnp.repeat(
-            expert_ids,
-            repeats=group_sizes_E,
-            total_repeat_length=total_assignments)
-
-        return (
-            sorted_inputs_tD,
-            sort_indices_t,
-            group_sizes_E,
-            sorted_expert_assignments_t,
-        )
-
-    def _unpermute(self, processed_tokens: jax.Array, sort_indices: jax.Array,
-                   router_weights_TX: jax.Array):
-        """Unsorts tokens to their original order and combines expert outputs with router's weight."""
-        with jax.named_scope("unpermute"):
-            unsorted_tokens_tD = self._sort_activations(
-                processed_tokens, jnp.argsort(sort_indices))
-            reshaped_tokens_TXD = unsorted_tokens_tD.reshape(
-                -1, self.num_experts_per_tok, self.hidden_size)
-        with jax.named_scope("combine_weights"):
-            output_TD = jnp.einsum(
-                "TXD,TX -> TD",
-                reshaped_tokens_TXD.astype(jnp.float32),
-                router_weights_TX.astype(jnp.float32),
-                precision='float32',
-            )
-
-        return output_TD.astype(self.dtype)
-
-    def _gmm(self, inputs, kernel, group_sizes):
-        """Performs Grouped Matrix Multiply."""
-        num_rows = inputs.shape[0]
-        pad_amount = (self.tile_size[0] -
-                      num_rows % self.tile_size[0]) % self.tile_size[0]
-        if pad_amount > 0:
-            inputs = jnp.pad(inputs, ((0, pad_amount), (0, 0)))
-
-        if self.use_megablox:
-            m, g, k, n = inputs.shape[0], *kernel.shape
-            tm = round_up_to_multiple_of_128_within_limit(m, 512)
-            tk = round_up_to_multiple_of_128_within_limit(k, 2048)
-            tn = round_up_to_multiple_of_128_within_limit(n, 2048)
-
-            output = megablox_gmm(
-                lhs=inputs,
-                rhs=kernel,
-                group_sizes=group_sizes,
-                preferred_element_type=self.dtype,
-                tiling=(tm, tk, tn),
-            )
-        else:
-            inputs = manually_quantize_qwix_activation(
-                inputs, "ragged_dot", jnp.float8_e4m3fn, [0], {},
-                "absmax") if self.quantized_dtype else inputs
-            ragged_dot_func = qwix_ragged_dot if self.quantized_dtype else jax.lax.ragged_dot
-            tiling = self.tile_size
-            with set_xla_metadata(
-                ragged_dot_tiling=",".join([str(t) for t in tiling]),
-                mosaic_fusion_group="ragged-dot",):
-                output = ragged_dot_func(
-                    lhs=inputs,
-                    rhs=kernel,
-                    group_sizes=group_sizes,
-                    preferred_element_type=self.dtype,
-                )
-
-        if pad_amount > 0:
-            output = output[:num_rows, :]
-        return output
-
-    @staticmethod
-    def _distributed_sparse_moe_fwd(
-        self,
-        x_TD: jax.Array,
-        router_weights_TX: jax.Array,
-        selected_experts_TX: jax.Array,
-        kernel_gating: jax.Array,
-        kernel_up_proj: jax.Array,
-        kernel_down_proj: jax.Array,
-    ):
-        """
-        The sparse MoE forward pass with fully distributed logic.
-        This assumes it is running within a distributed TPU.
-        """
-
-        # 1. Global Permute, perpute all tokens across shards
-        (
-            sorted_inputs,
-            global_sort_indices,
-            global_group_sizes,
-            global_sorted_experts,
-        ) = self._permute(x_TD, selected_experts_TX)
-
-        # TODO: update to 'expert' after we enable expert parallelism, currently experts are sharded along model axis
-        # or we sould derive it from the model init
-        expert_shard_id = jax.lax.axis_index(self.expert_axis_name)
-        local_expert_size = self.num_local_experts // self.num_expert_parallelism
-
-        if self.num_expert_parallelism > 1:
-            if self.is_batch_sharded_by_expert:
-                # When token sharded in devices
-                # In this path, we assume the data(tokens) are fully sharded on expert, namely data_axis_name == expert_axis_name
-
-                # 2a. Send Tokens To Experts (All-to-All)
-                # Gather group sizes from all data shards
-                # all_shards_group_sizes: (data parallelism = expert parallelism, number of total experts )
-                all_shards_group_sizes = jax.lax.all_gather(
-                    global_group_sizes, axis_name=self.data_axis_name)
-
-                # all_shards_group_sizes_per_expert_shard[i][j] = # tokens on shard[i] to be sent to expert shard[j]
-                all_shards_group_sizes_per_expert_shard = jnp.sum(
-                    all_shards_group_sizes.reshape(
-                        self.num_expert_parallelism,  # data parallelism
-                        self.num_expert_parallelism,  # expert parallelism
-                        local_expert_size  # Experts per shard
-                    ),
-                    axis=2)
-                input_offsets, send_sizes, output_offsets, recv_sizes = self.get_all_to_all_params(
-                    all_shards_group_sizes_per_expert_shard, expert_shard_id,
-                    self.num_expert_parallelism)
-                # Estimate buffer size
-                local_total_assignments = x_TD.shape[
-                    0] * self.num_experts_per_tok
-                global_total_assignments = local_total_assignments * self.num_expert_parallelism
-                output_shape_est = jnp.zeros(
-                    (global_total_assignments, self.hidden_size),
-                    dtype=sorted_inputs.dtype)
-
-                inputs_after_all2all = jax.lax.ragged_all_to_all(
-                    sorted_inputs,
-                    output_shape_est,
-                    input_offsets,
-                    send_sizes,
-                    output_offsets,
-                    recv_sizes,
-                    axis_name=self.expert_axis_name)
-
-                # 3a. Local Permute
-                # Get full group sizes from all shards
-                full_global_group_sizes = jax.lax.all_gather(
-                    global_group_sizes, axis_name=self.expert_axis_name)
-                (
-                    compute_inputs,
-                    local_sorted_indices,
-                    compute_group_sizes,
-                    compute_expert_ids,
-                ) = self._local_permute(
-                    inputs_after_all2all,
-                    full_global_group_sizes,
-                    local_expert_size,
-                    shard_index=expert_shard_id,
-                    is_offset=False,
-                )
-
-            else:
-                # When token replicated in devices
-
-                # 2. No send all-to-all needed, as the tokens are sorted and replicated on all devices
-                # 3b. Local "Permute"
-                (
-                    compute_inputs,
-                    local_sorted_indices,
-                    compute_group_sizes,
-                    compute_expert_ids,
-                ) = self._local_permute(
-                    sorted_inputs,
-                    global_group_sizes[None, :],
-                    local_expert_size,
-                    shard_index=expert_shard_id,
-                    is_offset=True,
-                    global_sorted_experts=global_sorted_experts,
-                )
-
-                # Calculate group sizes for return all-to-all
-                reshaped_group_sizes = jnp.sum(global_group_sizes.reshape(
-                    -1, local_expert_size),
-                                               axis=1)
-                mask = compute_expert_ids < local_expert_size
-                compute_inputs = compute_inputs * mask[..., None]
-
-        else:
-            # --- NO EXPERT PARALLELISM ---
-            compute_inputs = sorted_inputs
-            compute_group_sizes = global_group_sizes
-            compute_expert_ids = global_sorted_experts
-            local_sorted_indices = jnp.arange(sorted_inputs.shape[0])
-
-        # 4. Compute: Apply experts using Grouped Matrix Multiply
-        with jax.named_scope("gating"):
-            # compute_inputs: (local total assignments, D)
-            gating_TEF = self._gmm(compute_inputs, kernel_gating,
-                                   compute_group_sizes)
-            activated_gating_TEF = modeling_flax_utils.ACT2FN[self.hidden_act](
-                gating_TEF)
-
-        with jax.named_scope("up_projection"):
-            up_proj_TEF = self._gmm(compute_inputs, kernel_up_proj,
-                                    compute_group_sizes)
-
-        fuse_TEF = activated_gating_TEF * up_proj_TEF
-
-        with jax.named_scope("down_projection"):
-            # intermediate_output: (local total assignments, D)
-            intermediate_output = self._gmm(fuse_TEF, kernel_down_proj,
-                                            compute_group_sizes)
-
-        # 5. Return Results (All-to-All)
-        if self.num_expert_parallelism > 1:
-            local_total_assignments = x_TD.shape[0] * self.num_experts_per_tok
-            output_shape = jnp.zeros(
-                (local_total_assignments, self.hidden_size),
-                dtype=intermediate_output.dtype)
-
-            if self.is_batch_sharded_by_expert:
-                # When token sharded in devices
-                # Unsort locally before sending back
-                local_output = self._sort_activations(
-                    intermediate_output, jnp.argsort(local_sorted_indices))
-
-                input_offsets, send_sizes, output_offsets, recv_sizes = self.get_all_to_all_params(
-                    jnp.transpose(all_shards_group_sizes),
-                    expert_shard_id,
-                    self.num_expert_parallelism,
-                )
-                final_intermediate_output = jax.lax.ragged_all_to_all(
-                    local_output,
-                    output_shape,
-                    input_offsets,
-                    send_sizes,
-                    output_offsets,
-                    recv_sizes,
-                    axis_name=self.expert_axis_name)
-            else:
-                # When token replicated in devices
-                input_offsets, send_sizes, output_offsets, recv_sizes = self.get_all_to_all_params(
-                    reshaped_group_sizes,
-                    expert_shard_id,
-                    self.num_expert_parallelism,
-                    is_batch_sharded=False,
-                )
-                final_intermediate_output = jax.lax.ragged_all_to_all(
-                    intermediate_output,
-                    output_shape,
-                    input_offsets,
-                    send_sizes,
-                    output_offsets,
-                    recv_sizes,
-                    axis_name=self.expert_axis_name)
-        else:
-            final_intermediate_output = intermediate_output
-
-        # 6. Global Unpermute (on the data shard)
-        with jax.named_scope("unpermute"):
-            output_TD = self._unpermute(final_intermediate_output,
-                                        global_sort_indices, router_weights_TX)
-
-        return output_TD
+        
+        self.sparse_engine = SparseMoEEngine(self)
+        self.dense_engine = DenseMoEEngine(self)
 
     def _process_weight_for_qwix(self, weight_param, channelwise_axes=[], tiled_axes={}):
         """
@@ -827,5 +747,3 @@ class MoE(nnx.Module):
             return weight.array
         
         return weight
-
-    ## ======= END Methods used for Sparse Matmul ======= ##
