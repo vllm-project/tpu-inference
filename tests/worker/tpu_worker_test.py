@@ -174,9 +174,7 @@ class TestTPUWorker:
                                                 expected_is_last_rank)
 
     @patch('tpu_inference.worker.tpu_worker.utils')
-    @patch('tpu_inference.worker.tpu_worker.jax')
-    def test_determine_available_memory(self, mock_jax, mock_utils,
-                                        mock_vllm_config):
+    def test_determine_available_memory(self, mock_utils, mock_vllm_config):
         """Tests the available HBM memory calculation."""
         # Setup mock return for hbm_usage_bytes: [(used_bytes, limit_bytes), ...]
         mock_utils.hbm_usage_bytes.return_value = [
@@ -188,11 +186,9 @@ class TestTPUWorker:
                            rank=0,
                            distributed_init_method="test_method",
                            devices=mock_devices)
-        mock_jax.local_devices.return_value = mock_devices
 
         available_mem = worker.determine_available_memory()
 
-        mock_jax.local_devices.assert_called_once()
         mock_utils.hbm_usage_bytes.assert_called_once_with(mock_devices)
         # Total limit: 1000 + 1000 = 2000 GiB
         # Total cap: 2000 * 0.9 = 1800 GiB
