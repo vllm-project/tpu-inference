@@ -143,10 +143,12 @@ class TpuPlatform(Platform):
             compilation_config.backend = "openxla"
 
         if vllm_config.model_config:
-            from tpu_inference.layers.vllm.attention import PallasAttentionBackend
+            from tpu_inference.layers.vllm.attention import \
+                PallasAttentionBackend
             cache_config.block_size = PallasAttentionBackend.get_page_size(
                 vllm_config)  # type: ignore[assignment]
-            min_page_size = PallasAttentionBackend.get_min_page_size(vllm_config)
+            min_page_size = PallasAttentionBackend.get_min_page_size(
+                vllm_config)
             if min_page_size > cache_config.block_size:
                 logger.warning(
                     "Increase the page size from %s to %s to avoid SMEM OOM",

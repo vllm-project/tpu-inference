@@ -11,10 +11,10 @@ from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
+from vllm.attention.backends.registry import (AttentionBackendEnum,
+                                              register_backend)
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv, next_power_of_2
-from vllm.attention.backends.registry import (register_backend, AttentionBackendEnum)
-
 
 from tpu_inference import utils
 from tpu_inference.layers.common.attention_interface import attention
@@ -28,6 +28,7 @@ logger = init_logger(__name__)
 
 # TPU requires the head size to be a multiple of 128.
 TPU_HEAD_SIZE_ALIGNMENT = 128
+
 
 @register_backend(AttentionBackendEnum.CUSTOM)
 class PallasAttentionBackend(AttentionBackend):
@@ -48,9 +49,8 @@ class PallasAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        padded_head_size = (
-            cdiv(head_size, TPU_HEAD_SIZE_ALIGNMENT) * TPU_HEAD_SIZE_ALIGNMENT
-        )
+        padded_head_size = (cdiv(head_size, TPU_HEAD_SIZE_ALIGNMENT) *
+                            TPU_HEAD_SIZE_ALIGNMENT)
         return (num_blocks, block_size, num_kv_heads * 2, padded_head_size)
 
     @staticmethod
@@ -67,12 +67,10 @@ class PallasAttentionBackend(AttentionBackend):
     # we simply make sure that the size is smaller than half of SMEM capacity.
     @staticmethod
     def get_min_page_size(vllm_config: VllmConfig) -> int:
-        max_num_page_per_req = (
-            1024 * 1024 // 2 // vllm_config.scheduler_config.max_num_seqs // 4
-        )
-        min_page_size = cdiv(
-            vllm_config.model_config.max_model_len, max_num_page_per_req
-        )
+        max_num_page_per_req = (1024 * 1024 // 2 //
+                                vllm_config.scheduler_config.max_num_seqs // 4)
+        min_page_size = cdiv(vllm_config.model_config.max_model_len,
+                             max_num_page_per_req)
         min_page_size = 1 << (min_page_size - 1).bit_length()
         return min_page_size
 
@@ -93,12 +91,14 @@ class PallasAttentionBackend(AttentionBackend):
         # handle VREG spills.
         if vllm_config.model_config.max_model_len > 8192:
             return 16
-        page_size = next_power_of_2(vllm_config.model_config.max_model_len) // 16
+        page_size = next_power_of_2(
+            vllm_config.model_config.max_model_len) // 16
         if page_size <= 16:
             return 16
         if page_size >= 256:
             return 256
         return page_size
+
 
 class PallasAttentionBackendImpl(AttentionImpl):
 

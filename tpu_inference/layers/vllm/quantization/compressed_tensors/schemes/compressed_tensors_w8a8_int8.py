@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
 from collections.abc import Callable
+from typing import Optional
 
 import jax
 import jax.numpy as jnp
@@ -27,6 +27,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compress
     CompressedTensorsW8A8Int8
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import \
     convert_to_channelwise
+from vllm.model_executor.parameter import (BasevLLMParameter,
+                                           ChannelQuantScaleParameter,
+                                           ModelWeightParameter,
+                                           PerTensorScaleParameter)
 
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
@@ -37,12 +41,6 @@ from tpu_inference.layers.vllm.process_weights.linear_weights import (
 from tpu_inference.layers.vllm.quantization.configs import \
     VllmQuantLinearConfig
 from tpu_inference.logger import init_logger
-from vllm.model_executor.parameter import (
-    BasevLLMParameter,
-    ChannelQuantScaleParameter,
-    ModelWeightParameter,
-    PerTensorScaleParameter,
-)
 
 P = PartitionSpec
 logger = init_logger(__name__)
@@ -70,9 +68,9 @@ class VllmCompressedTensorsW8A8Int8(CompressedTensorsW8A8Int8):
 
         # WEIGHT
         weight = ModelWeightParameter(
-            data=torch.empty(
-                sum(output_partition_sizes), input_size_per_partition, dtype=torch.int8
-            ),
+            data=torch.empty(sum(output_partition_sizes),
+                             input_size_per_partition,
+                             dtype=torch.int8),
             input_dim=1,
             output_dim=0,
             weight_loader=weight_loader,
@@ -83,23 +81,25 @@ class VllmCompressedTensorsW8A8Int8(CompressedTensorsW8A8Int8):
         # WEIGHT SCALE
         if self.strategy == QuantizationStrategy.CHANNEL:
             weight_scale = ChannelQuantScaleParameter(
-                data=torch.empty((sum(output_partition_sizes), 1), dtype=torch.float32),
+                data=torch.empty((sum(output_partition_sizes), 1),
+                                 dtype=torch.float32),
                 output_dim=0,
                 weight_loader=weight_loader,
             )
         else:
             assert self.strategy == QuantizationStrategy.TENSOR
             weight_scale = PerTensorScaleParameter(
-                data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
+                data=torch.empty(len(output_partition_sizes),
+                                 dtype=torch.float32),
                 weight_loader=weight_loader,
             )
         layer.register_parameter("weight_scale", weight_scale)
 
         # INPUT SCALE
         if self.is_static_input_scheme:
-            input_scale = BasevLLMParameter(
-                data=torch.empty(1, dtype=torch.float32), weight_loader=weight_loader
-            )
+            input_scale = BasevLLMParameter(data=torch.empty(
+                1, dtype=torch.float32),
+                                            weight_loader=weight_loader)
             layer.register_parameter("input_scale", input_scale)
 
             if not self.input_symmetric:
@@ -107,8 +107,8 @@ class VllmCompressedTensorsW8A8Int8(CompressedTensorsW8A8Int8):
                 # as the weights
                 # AZP loaded as int8 but used as int32
                 input_zero_point = BasevLLMParameter(
-                    data=torch.empty(1, dtype=torch.int8), weight_loader=weight_loader
-                )
+                    data=torch.empty(1, dtype=torch.int8),
+                    weight_loader=weight_loader)
                 layer.register_parameter("input_zero_point", input_zero_point)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
