@@ -55,6 +55,9 @@ class TpuPlatform(Platform):
                              attn_selector_config: "AttentionSelectorConfig",
                              **kwargs) -> str:
         from vllm.attention.backends.registry import AttentionBackendEnum
+
+        # Invoke @register_backend in the module.
+        import tpu_inference.layers.vllm.attention  # noqa: F401
         if selected_backend != AttentionBackendEnum.FLASH_ATTN:
             logger.info("Cannot use %s backend on TPU. Setting to FLASH_ATTN.",
                         selected_backend)
