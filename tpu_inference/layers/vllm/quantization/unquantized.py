@@ -23,7 +23,7 @@ from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
 from vllm.attention.layer import Attention
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, FusedMoEConfig, UnquantizedFusedMoEMethod)
+    FusedMoE, FusedMoEConfig, FusedMoERouter, UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import \
@@ -283,7 +283,8 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
+        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
