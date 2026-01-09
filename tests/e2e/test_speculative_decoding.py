@@ -207,7 +207,7 @@ def _test_performance_helper(
         del ref_llm
 
         # Waiting for TPUs to be released
-        time.sleep(10)
+        time.sleep(30)
 
         # Test speculative LLM timing with max_num_seqs=1
         spec_llm = LLM(model=model_name,
@@ -223,7 +223,7 @@ def _test_performance_helper(
 
         del spec_llm
         # Waiting for TPUs to be released
-        time.sleep(10)
+        time.sleep(30)
 
         speedup = ref_time / spec_time
         print(f"Reference LLM time: {ref_time:.2f}s")
