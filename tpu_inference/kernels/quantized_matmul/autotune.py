@@ -43,8 +43,7 @@ def factors_of_n(target: int, n: int) -> List[int]:
     return factors
 
 
-def make_configs(batch_sizes, out_in_features, x_q_dtype, w_q_dtype,
-                 tpu_version):
+def make_configs(batch_sizes, out_in_features, x_q_dtype, w_q_dtype):
     configs = set()
     for batch_size in batch_sizes:
         if batch_size < 128:
@@ -53,9 +52,9 @@ def make_configs(batch_sizes, out_in_features, x_q_dtype, w_q_dtype,
             batch_block_sizes = factors_of_n(batch_size, 128)
 
         for out_feature, in_feature in out_in_features:
-            tuned_key = tuned_block_sizes.TunedKey(tpu_version, batch_size,
-                                                   out_feature, in_feature,
-                                                   x_q_dtype, w_q_dtype)
+            tuned_key = tuned_block_sizes.get_key(batch_size, out_feature,
+                                                  in_feature, x_q_dtype,
+                                                  w_q_dtype)
             out_block_sizes = factors_of_n(out_feature, 128)
             in_block_sizes = factors_of_n(in_feature, 128)
 
@@ -160,9 +159,8 @@ def main(batch_sizes, out_in_features, x_q_dtype, w_q_dtype, dry_run,
         for feature in out_in_features.split(',')
     ]
 
-    tpu_version = get_tpu_version()
     configs = make_configs(batch_sizes_list, out_in_features_list, x_q_dtype,
-                           w_q_dtype, tpu_version)
+                           w_q_dtype)
     print(f"Generated {len(configs)} configurations to tune.")
 
     # Setup CSV writing
@@ -266,26 +264,6 @@ def main(batch_sizes, out_in_features, x_q_dtype, w_q_dtype, dry_run,
                      best.tuned_value.in_block_size)
         print(f"    {key_tuple}: {val_tuple},")
     print("}")
-
-
-def get_tpu_version() -> int:
-    """Returns the numeric version of the TPU, or -1 if not on TPU."""
-    try:
-        if len(jax.devices()) == 0:
-            return -1
-        kind = jax.devices()[0].device_kind
-        import re
-        match = re.match(r'^TPU[^\d]*(\d+)', kind)
-        if match is None:
-            # Fallback based on v5e/v6e
-            if 'v5' in kind:
-                return 7
-            if 'v6' in kind:
-                return 7
-            return 7
-        return int(match.group(1))
-    except (IndexError, RuntimeError):
-        return -1
 
 
 if __name__ == "__main__":

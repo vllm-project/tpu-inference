@@ -26,6 +26,9 @@ from rich.console import Console
 from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 
 from tpu_inference.kernels.ragged_paged_attention.v3 import kernel, kernel_hd64
+from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import \
+    get_lookup_keys
+from tpu_inference.kernels.ragged_paged_attention.v3.util import cdiv
 
 console = Console()
 
@@ -50,10 +53,6 @@ def get_kernel_module(head_dim):
     if head_dim == 64:
         return kernel_hd64
     return kernel
-
-
-def cdiv(a, b):
-    return (a + b - 1) // b
 
 
 def get_qkv_lens_example(max_num_tokens, max_model_len, actual_num_seqs):
@@ -391,19 +390,25 @@ def main(page_size, q_dtype, kv_dtype, num_q_heads, num_kv_heads, head_dim,
     for rpa_key, (t_mean, best_block) in best_results.items():
         (m_len, q_dt, kv_dt, n_q, n_kv, h_dim, ps) = rpa_key
 
-        len_key = f"max_model_len-{m_len}-sw-None"
-        dtype_key = f"q_{q_dt}_kv_{kv_dt}"
-        config_key = f"q_head-{n_q}_kv_head-{n_kv}_head-{h_dim}"
+        device_name, ps_key, dtype_key, config_key, len_key = get_lookup_keys(
+            ps,
+            q_dt,
+            kv_dt,
+            n_q,
+            n_kv,
+            h_dim,
+            m_len,
+            None,  # sliding_window
+        )
 
         # Format block as tuple (kv, q)
-        aggregated_results[ps][dtype_key][config_key][len_key] = (
+        aggregated_results[ps_key][dtype_key][config_key][len_key] = (
             best_block.num_kv_pages_per_block, best_block.num_q_per_block)
 
     # Print Final Output
     print("\n[Output for tpu-inference/tuned_block_sizes.py]:")
-    tpu_device_key = "TPU v6e (Place Inside Correct Device Key)"
 
-    print(f"'{tpu_device_key}': {{")
+    print(f"'{device_name}': {{")
     for ps in sorted(aggregated_results.keys()):
         print(f"    {ps}: {{")
         for dtype_key in sorted(aggregated_results[ps].keys()):
