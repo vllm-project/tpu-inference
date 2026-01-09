@@ -329,7 +329,7 @@ class VllmFp8MoEMethod(Fp8MoEMethod):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
