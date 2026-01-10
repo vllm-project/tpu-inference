@@ -33,7 +33,6 @@ Environment Variables:
 """
 
 import argparse
-import contextlib
 import dataclasses
 import gc
 import json
@@ -42,16 +41,22 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from unittest.mock import MagicMock
+
+# Ensure JAX is configured before imports
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-from flax import nnx
 from jax.sharding import Mesh
 
-# Ensure JAX is configured before imports
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+from tpu_inference import envs
+from tpu_inference import utils as common_utils
+from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
+                                                  MESH_AXIS_NAMES_2D)
+from tpu_inference.models.common.model_loader import get_model
+from tpu_inference.utils import make_optimized_mesh
 
 
 @dataclass
@@ -69,6 +74,7 @@ class BenchmarkConfig:
     tensor_parallel_size: int = 1
     test_vision: bool = True
     vision_grid_thw: Tuple[int, int, int] = (1, 4, 4)
+    max_model_len: Optional[int] = None
 
 
 @dataclass
@@ -107,22 +113,32 @@ class BenchmarkResults:
             json.dump(self.to_dict(), f, indent=2, default=str)
 
 
-class Timer:
-    """Context manager for timing operations with JAX synchronization."""
+@dataclass
+class ModelBundle:
+    impl_type: str
+    vllm_config: Any
+    model_fn: Callable
+    compute_logits_fn: Callable
+    multimodal_fns: Optional[Dict[str, Callable]]
+    state: Any
+    model: Any
+    text_config: Any
+    layer_names: List[str]
+    layer_name_to_kvcache_index: Tuple[Tuple[str, int], ...]
 
-    def __init__(self, sync: bool = True):
-        self.sync = sync
+
+class Timer:
+    """Context manager for timing operations."""
+
+    def __init__(self):
         self.elapsed_ms: float = 0.0
+        self.start: float = 0.0
 
     def __enter__(self):
-        if self.sync:
-            jax.block_until_ready(jax.device_count())
         self.start = time.perf_counter()
         return self
 
     def __exit__(self, *args):
-        if self.sync:
-            jax.block_until_ready(jax.device_count())
         self.elapsed_ms = (time.perf_counter() - self.start) * 1000
 
 
@@ -139,155 +155,265 @@ def get_memory_usage_gb() -> float:
     return 0.0
 
 
-def create_mock_vllm_config(
+def _block_until_ready(value: Any) -> Any:
+    def _block(x):
+        return x.block_until_ready() if hasattr(x, "block_until_ready") else x
+
+    return jax.tree_util.tree_map(_block, value)
+
+
+def _select_safe_token_id(vocab_size: int, disallowed: List[int]) -> int:
+    disallowed_set = {token for token in disallowed if 0 <= token < vocab_size}
+    for candidate in range(min(vocab_size, 8)):
+        if candidate not in disallowed_set:
+            return candidate
+    return 0
+
+
+def _sanitize_input_ids(input_ids: jax.Array, vocab_size: int,
+                        disallowed: List[int]) -> jax.Array:
+    if not disallowed:
+        return input_ids
+    safe_id = _select_safe_token_id(vocab_size, disallowed)
+    sanitized = input_ids
+    for token_id in disallowed:
+        if 0 <= token_id < vocab_size:
+            sanitized = jnp.where(sanitized == token_id, safe_id, sanitized)
+    return sanitized
+
+
+def _build_model_config(model_path: str, dtype: str,
+                        max_model_len: int) -> Any:
+    from vllm.config import ModelConfig
+
+    try:
+        return ModelConfig(
+            model=model_path,
+            tokenizer=model_path,
+            tokenizer_mode="auto",
+            trust_remote_code=True,
+            seed=42,
+            dtype=dtype,
+            max_model_len=max_model_len,
+        )
+    except TypeError:
+        model_config = ModelConfig(model_path)
+        if hasattr(model_config, "tokenizer"):
+            model_config.tokenizer = model_path
+        if hasattr(model_config, "tokenizer_mode"):
+            model_config.tokenizer_mode = "auto"
+        if hasattr(model_config, "trust_remote_code"):
+            model_config.trust_remote_code = True
+        if hasattr(model_config, "seed"):
+            model_config.seed = 42
+        if hasattr(model_config, "dtype"):
+            model_config.dtype = dtype
+        if hasattr(model_config, "max_model_len"):
+            model_config.max_model_len = max_model_len
+        return model_config
+
+
+def create_vllm_config(
     model_path: str,
     dtype: str,
     use_dummy_weights: bool,
     tensor_parallel_size: int,
+    max_model_len: int,
+    max_num_seqs: int,
+    max_num_batched_tokens: int,
 ) -> Any:
-    """Create a mock VllmConfig for testing."""
+    """Create a VllmConfig for benchmarking."""
     try:
-        from transformers import AutoConfig
         from vllm.config import (
             CacheConfig,
             DeviceConfig,
-            LoadConfig,
-            ModelConfig,
             MultiModalConfig,
             ParallelConfig,
             SchedulerConfig,
+            VllmConfig,
         )
-
-        # Load actual HF config if available, otherwise create mock
-        try:
-            hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-        except Exception:
-            # Create a minimal mock config for Qwen3VL
-            from transformers import Qwen2VLConfig
-            hf_config = Qwen2VLConfig(
-                vocab_size=152064,
-                hidden_size=3584,
-                intermediate_size=18944,
-                num_hidden_layers=28,
-                num_attention_heads=28,
-                num_key_value_heads=4,
-                hidden_act="silu",
-                max_position_embeddings=32768,
-                rms_norm_eps=1e-6,
-                rope_theta=1000000.0,
-                tie_word_embeddings=False,
-            )
-            # Add vision config
-            hf_config.vision_config = MagicMock()
-            hf_config.vision_config.hidden_size = 1280
-            hf_config.vision_config.intermediate_size = 5120
-            hf_config.vision_config.num_hidden_layers = 32
-            hf_config.vision_config.num_attention_heads = 16
-            hf_config.vision_config.patch_size = 14
-            hf_config.vision_config.image_size = 384
-            hf_config.vision_config.temporal_patch_size = 2
-            hf_config.vision_config.in_channels = 3
-            hf_config.vision_config.spatial_merge_size = 2
-            hf_config.vision_config.out_hidden_size = 3584
-            hf_config.vision_config.depth = 32
-            hf_config.vision_config.num_heads = 16
-
-        # Ensure required attributes exist
-        if not hasattr(hf_config, "image_token_id"):
-            hf_config.image_token_id = 151655
-        if not hasattr(hf_config, "video_token_id"):
-            hf_config.video_token_id = 151656
-        if not hasattr(hf_config, "vision_start_token_id"):
-            hf_config.vision_start_token_id = 151652
-
-        # Create vLLM config components
-        model_config = MagicMock()
-        model_config.hf_config = hf_config
-        model_config.dtype = dtype
-        model_config.model = model_path
-        model_config.seed = 42
-
-        cache_config = MagicMock(spec=CacheConfig)
-        cache_config.cache_dtype = "auto"
-        cache_config.block_size = 16
-        cache_config.num_gpu_blocks = 1024
-
-        parallel_config = MagicMock(spec=ParallelConfig)
-        parallel_config.tensor_parallel_size = tensor_parallel_size
-        parallel_config.pipeline_parallel_size = 1
-        parallel_config.data_parallel_size = 1
-
-        load_config = MagicMock(spec=LoadConfig)
-        load_config.load_format = "dummy" if use_dummy_weights else "auto"
-
-        scheduler_config = MagicMock(spec=SchedulerConfig)
-        device_config = MagicMock(spec=DeviceConfig)
-
-        # Create mock VllmConfig
-        vllm_config = MagicMock()
-        vllm_config.model_config = model_config
-        vllm_config.cache_config = cache_config
-        vllm_config.parallel_config = parallel_config
-        vllm_config.load_config = load_config
-        vllm_config.scheduler_config = scheduler_config
-        vllm_config.device_config = device_config
-        vllm_config.speculative_config = None
-        vllm_config.lora_config = None
-        vllm_config.additional_config = {"enable_dynamic_image_sizes": False}
-
-        # Sharding config
-        sharding_config = MagicMock()
-        sharding_config.total_dp_size = 1
-        sharding_config.tp_size = tensor_parallel_size
-        vllm_config.sharding_config = sharding_config
-
-        return vllm_config
-
     except ImportError as e:
-        print(f"Warning: Could not import vLLM components: {e}")
+        print(f"Warning: vLLM is required for benchmarking: {e}")
         return None
 
+    try:
+        from vllm.config import LoadConfig
+    except ImportError:
+        from vllm.config.load import LoadConfig
 
-def create_mesh(devices: Optional[List] = None) -> Mesh:
+    model_config = _build_model_config(model_path, dtype, max_model_len)
+    hf_config = getattr(model_config, "hf_config", None)
+    if hf_config is None:
+        try:
+            from transformers import AutoConfig
+        except ImportError as e:
+            raise RuntimeError(
+                "Transformers is required to load the HF config.") from e
+        hf_config = AutoConfig.from_pretrained(model_path,
+                                               trust_remote_code=True)
+        model_config.hf_config = hf_config
+
+    if hasattr(model_config, "multimodal_config"):
+        if (getattr(model_config, "multimodal_config", None) is None
+                and hasattr(hf_config, "image_token_id")):
+            model_config.multimodal_config = MultiModalConfig(
+                image_input_type="pixel",
+                image_token_id=hf_config.image_token_id,
+                image_input_shape=None,
+            )
+
+    cache_config = CacheConfig(
+        block_size=16,
+        gpu_memory_utilization=0.9,
+        swap_space=4,
+        cache_dtype="auto",
+    )
+    parallel_config = ParallelConfig(
+        pipeline_parallel_size=1,
+        tensor_parallel_size=tensor_parallel_size,
+        worker_use_ray=False,
+    )
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=max_num_batched_tokens,
+        max_model_len=max_model_len,
+        is_encoder_decoder=False,
+    )
+    device_config = DeviceConfig(device="tpu")
+
+    load_format = "dummy" if use_dummy_weights else "auto"
+    try:
+        load_config = LoadConfig(load_format=load_format)
+    except TypeError:
+        load_config = LoadConfig()
+        if hasattr(load_config, "load_format"):
+            load_config.load_format = load_format
+
+    return VllmConfig(
+        model_config=model_config,
+        cache_config=cache_config,
+        parallel_config=parallel_config,
+        scheduler_config=scheduler_config,
+        device_config=device_config,
+        load_config=load_config,
+        speculative_config=None,
+        lora_config=None,
+        observability_config={},
+        additional_config={"enable_dynamic_image_sizes": False},
+    )
+
+
+def _is_multimodal_model(model_config: Any) -> bool:
+    attr = getattr(model_config, "is_multimodal_model", False)
+    return bool(attr() if callable(attr) else attr)
+
+
+def _uses_mrope(model_config: Any, hf_config: Any) -> bool:
+    attr = getattr(model_config, "uses_mrope", None)
+    if attr is not None:
+        return bool(attr() if callable(attr) else attr)
+    rope_scaling = getattr(hf_config, "rope_scaling", None)
+    return isinstance(rope_scaling, dict) and "mrope_section" in rope_scaling
+
+
+def _get_text_config(hf_config: Any) -> Any:
+    return getattr(hf_config, "text_config", hf_config)
+
+
+def _collect_vllm_layer_names(vllm_wrapper: Any) -> List[str]:
+    vllm_model = getattr(getattr(vllm_wrapper, "model", None), "vllm_model",
+                         None)
+    if vllm_model is None:
+        return []
+    names = []
+    for module in vllm_model.modules():
+        layer_name = getattr(module, "layer_name", None)
+        if layer_name:
+            names.append(layer_name)
+    # Deduplicate while preserving order.
+    seen = set()
+    ordered = []
+    for name in names:
+        if name not in seen:
+            ordered.append(name)
+            seen.add(name)
+    return ordered
+
+
+def create_mesh(tp_size: int, devices: Optional[List] = None) -> Mesh:
     """Create a JAX mesh for sharding."""
     if devices is None:
-        devices = jax.local_devices()
-    devices_array = np.array(devices).reshape((len(devices), 1, 1))
-    return Mesh(devices_array, axis_names=("data", "attn_dp", "model"))
+        devices = jax.devices()
+    num_devices = len(devices)
+    if num_devices % tp_size != 0:
+        raise ValueError(
+            f"Tensor parallel size {tp_size} does not divide {num_devices} devices."
+        )
+    dp_size = max(1, num_devices // tp_size)
+    if envs.NEW_MODEL_DESIGN:
+        axis_names = MESH_AXIS_NAMES
+        axis_shapes = (dp_size, 1, 1, tp_size)
+    else:
+        axis_names = MESH_AXIS_NAMES_2D
+        axis_shapes = (dp_size, tp_size)
+    return make_optimized_mesh(axis_shapes, axis_names, devices=devices)
 
 
-def create_attention_metadata(
+def build_attention_metadata(
     seq_len: int,
-    batch_size: int = 1,
-) -> Any:
-    """Create attention metadata for benchmarking."""
-    from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+    batch_size: int,
+    block_size: int,
+    use_mrope: bool,
+    dp_size: int,
+) -> Tuple[jax.Array, AttentionMetadata, jax.Array, int]:
+    """Create attention metadata and positions for benchmarking."""
+    if dp_size < 1:
+        dp_size = 1
+    if batch_size % dp_size != 0:
+        raise ValueError(
+            f"Batch size {batch_size} must be divisible by data parallel size {dp_size}."
+        )
+    num_reqs_per_dp = batch_size // dp_size
+    max_num_blocks_per_req = (seq_len + block_size - 1) // block_size
+    tokens_per_dp = seq_len * num_reqs_per_dp
 
-    num_reqs = batch_size
-    max_num_blocks_per_req = (seq_len + 15) // 16
+    positions_per_req = jnp.arange(seq_len, dtype=jnp.int32)
+    positions_per_dp = jnp.tile(positions_per_req, num_reqs_per_dp)
+    if use_mrope:
+        positions_per_dp = jnp.broadcast_to(positions_per_dp[None, :],
+                                            (3, tokens_per_dp))
+        positions = jnp.concatenate([positions_per_dp] * dp_size, axis=1)
+    else:
+        positions = jnp.concatenate([positions_per_dp] * dp_size, axis=0)
 
-    # Create 3D positions for MRoPE
-    positions = jnp.broadcast_to(
-        jnp.arange(seq_len, dtype=jnp.int32)[None, :],
-        (3, seq_len)
-    )
-    block_tables = jnp.zeros(
-        (num_reqs, max_num_blocks_per_req), dtype=jnp.int32
-    ).reshape(-1)
-    seq_lens = jnp.array([seq_len] * num_reqs, dtype=jnp.int32)
-    query_start_loc = jnp.concatenate([
-        jnp.array([0], dtype=jnp.int32),
-        jnp.cumsum(seq_lens)
-    ])
-    request_distribution = jnp.array([0, 0, num_reqs], dtype=jnp.int32)
+    block_ids = np.arange(num_reqs_per_dp * max_num_blocks_per_req,
+                          dtype=np.int32).reshape(num_reqs_per_dp,
+                                                  max_num_blocks_per_req)
+    block_tables = np.concatenate([block_ids.reshape(-1)] * dp_size, axis=0)
+    block_tables = jnp.array(block_tables, dtype=jnp.int32)
+    seq_lens = jnp.array([seq_len] * num_reqs_per_dp * dp_size,
+                         dtype=jnp.int32)
+    query_start_loc_per_dp = jnp.array(
+        [seq_len * i for i in range(num_reqs_per_dp + 1)], dtype=jnp.int32)
+    query_start_loc = jnp.concatenate(
+        [query_start_loc_per_dp] * dp_size, axis=0)
+    request_distribution = jnp.array([0, 0, num_reqs_per_dp] * dp_size,
+                                     dtype=jnp.int32)
 
-    return AttentionMetadata(
+    base_indices = jnp.arange(1, num_reqs_per_dp + 1,
+                              dtype=jnp.int32) * seq_len - 1
+    logits_indices = jnp.concatenate(
+        [base_indices + r * tokens_per_dp for r in range(dp_size)],
+        axis=0)
+
+    attention_metadata = AttentionMetadata(
         input_positions=positions,
         block_tables=block_tables,
         seq_lens=seq_lens,
         query_start_loc=query_start_loc,
         request_distribution=request_distribution,
     )
+    return positions, attention_metadata, logits_indices, max_num_blocks_per_req
 
 
 def create_kv_caches(
@@ -319,7 +445,7 @@ class ModelBenchmarker:
 
     def __init__(self, config: BenchmarkConfig):
         self.config = config
-        self.mesh = create_mesh()
+        self.mesh = create_mesh(config.tensor_parallel_size)
         self.rng = jax.random.PRNGKey(42)
         self.results = BenchmarkResults(config=config)
 
@@ -340,6 +466,53 @@ class ModelBenchmarker:
         }
         return dtype_map.get(self.config.dtype, jnp.bfloat16)
 
+    def _load_model_bundle(self, impl_type: str) -> Optional[ModelBundle]:
+        """Load model and return a bundle of callables and metadata."""
+        envs.MODEL_IMPL_TYPE = impl_type
+        max_model_len = (self.config.max_model_len
+                         or max(self.config.seq_lengths))
+        max_num_seqs = max(self.config.batch_sizes)
+        max_num_batched_tokens = max(self.config.seq_lengths) * max_num_seqs
+
+        vllm_config = create_vllm_config(
+            model_path=self.config.model_path,
+            dtype=self.config.dtype,
+            use_dummy_weights=self.config.use_dummy_weights,
+            tensor_parallel_size=self.config.tensor_parallel_size,
+            max_model_len=max_model_len,
+            max_num_seqs=max_num_seqs,
+            max_num_batched_tokens=max_num_batched_tokens,
+        )
+        if vllm_config is None:
+            return None
+
+        model_fn, compute_logits_fn, _, multimodal_fns, state, _, model = get_model(
+            vllm_config, self.rng, self.mesh)
+        hf_config = vllm_config.model_config.hf_config
+        text_config = _get_text_config(hf_config)
+        num_layers = getattr(text_config, "num_hidden_layers", 0)
+
+        layer_names: List[str] = []
+        if impl_type == "vllm":
+            layer_names = _collect_vllm_layer_names(model)
+        if not layer_names:
+            layer_names = [f"layer.{i}" for i in range(num_layers)]
+        layer_name_to_kvcache_index = tuple(
+            (name, i) for i, name in enumerate(layer_names))
+
+        return ModelBundle(
+            impl_type=impl_type,
+            vllm_config=vllm_config,
+            model_fn=model_fn,
+            compute_logits_fn=compute_logits_fn,
+            multimodal_fns=multimodal_fns,
+            state=state,
+            model=model,
+            text_config=text_config,
+            layer_names=layer_names,
+            layer_name_to_kvcache_index=layer_name_to_kvcache_index,
+        )
+
     def _benchmark_single(
         self,
         name: str,
@@ -350,11 +523,24 @@ class ModelBenchmarker:
         batch_size: int,
     ) -> TimingResult:
         """Run a single benchmark."""
+        kv_caches = input_data.get("kv_caches")
+        static_inputs = {
+            key: value
+            for key, value in input_data.items()
+            if key != "kv_caches"
+        }
+
+        def _run_once(kv_state):
+            if kv_state is None:
+                return None, forward_fn(**static_inputs)
+            kv_out, output = forward_fn(kv_caches=kv_state, **static_inputs)
+            return kv_out, output
+
         # Warmup and measure compile time
         with Timer() as compile_timer:
             for _ in range(self.config.num_warmup):
-                _ = forward_fn(**input_data)
-                jax.block_until_ready(_)
+                kv_caches, result = _run_once(kv_caches)
+                _block_until_ready(result)
 
         compile_time_ms = compile_timer.elapsed_ms / max(self.config.num_warmup, 1)
 
@@ -365,8 +551,8 @@ class ModelBenchmarker:
         times_ms = []
         for _ in range(self.config.num_iterations):
             with Timer() as iter_timer:
-                result = forward_fn(**input_data)
-                jax.block_until_ready(result)
+                kv_caches, result = _run_once(kv_caches)
+                _block_until_ready(result)
             times_ms.append(iter_timer.elapsed_ms)
 
         times_ms = np.array(times_ms)
@@ -387,215 +573,138 @@ class ModelBenchmarker:
             all_times_ms=times_ms.tolist(),
         )
 
-    def benchmark_flax_nnx(self) -> List[TimingResult]:
-        """Benchmark the native JAX/Flax NNX implementation."""
+    def _benchmark_impl(self, impl_type: str) -> List[TimingResult]:
+        """Benchmark a specific implementation."""
         print("\n" + "=" * 60)
-        print("Benchmarking: Native JAX/Flax NNX Implementation")
+        title = ("Native JAX/Flax NNX Implementation"
+                 if impl_type == "flax_nnx" else "vLLM/TorchAX Implementation")
+        print(f"Benchmarking: {title}")
         print("=" * 60)
 
-        results = []
+        results: List[TimingResult] = []
 
         try:
-            # Set environment for flax_nnx
-            import tpu_inference.envs as envs
-            envs.MODEL_IMPL_TYPE = "flax_nnx"
-
-            vllm_config = create_mock_vllm_config(
-                model_path=self.config.model_path,
-                dtype=self.config.dtype,
-                use_dummy_weights=self.config.use_dummy_weights,
-                tensor_parallel_size=self.config.tensor_parallel_size,
-            )
-
-            if vllm_config is None:
-                print("Failed to create vLLM config for flax_nnx")
-                return results
-
-            # Import and create the model
-            from tpu_inference.models.jax.qwen3_vl import Qwen3VLForConditionalGeneration
-
-            print("Creating Qwen3VL model (flax_nnx)...")
+            print(f"Creating Qwen3VL model ({impl_type})...")
             with Timer() as model_timer:
-                model = Qwen3VLForConditionalGeneration(
-                    vllm_config, self.rng, self.mesh
-                )
+                bundle = self._load_model_bundle(impl_type)
+            if bundle is None:
+                print(f"Failed to create vLLM config for {impl_type}")
+                return results
             print(f"Model creation time: {model_timer.elapsed_ms:.2f} ms")
 
-            # Get model config
-            hf_config = vllm_config.model_config.hf_config
-            num_layers = getattr(hf_config, "num_hidden_layers", 28)
-            num_kv_heads = getattr(hf_config, "num_key_value_heads", 4)
-            head_dim = getattr(hf_config, "hidden_size", 3584) // getattr(
-                hf_config, "num_attention_heads", 28
-            )
-            vocab_size = getattr(hf_config, "vocab_size", 152064)
+            hf_config = bundle.vllm_config.model_config.hf_config
+            text_config = bundle.text_config
+            num_kv_heads = getattr(text_config, "num_key_value_heads",
+                                   getattr(text_config, "num_attention_heads",
+                                           0))
+            num_attention_heads = getattr(text_config, "num_attention_heads",
+                                           max(num_kv_heads, 1))
+            hidden_size = getattr(text_config, "hidden_size",
+                                  getattr(hf_config, "hidden_size", 0))
+            head_dim = hidden_size // max(num_attention_heads, 1)
+            num_kv_heads = common_utils.get_padded_num_heads(
+                num_kv_heads, self.mesh.shape["model"])
+            head_dim = common_utils.get_padded_head_dim(head_dim)
+            if hasattr(bundle.vllm_config.model_config, "get_vocab_size"):
+                vocab_size = bundle.vllm_config.model_config.get_vocab_size()
+            else:
+                vocab_size = getattr(text_config, "vocab_size",
+                                     getattr(hf_config, "vocab_size", 0))
+            if vocab_size <= 0:
+                raise ValueError("Invalid vocab size for benchmarking.")
 
-            # Create KV caches
-            kv_caches = create_kv_caches(
-                num_layers=num_layers,
-                num_kv_heads=num_kv_heads,
-                head_dim=head_dim,
-                num_blocks=64,
-                block_size=16,
-                mesh=self.mesh,
-                dtype=self._get_dtype(),
-            )
+            block_size = getattr(bundle.vllm_config.cache_config, "block_size",
+                                 16)
+            use_mrope = _uses_mrope(bundle.vllm_config.model_config, hf_config)
 
-            # JIT compile the model
-            @jax.jit
-            def forward_pass(kv_caches, input_ids, attn_metadata):
-                return model(kv_caches, input_ids, attn_metadata)
+            embed_input_ids_fn = None
+            if bundle.multimodal_fns:
+                embed_input_ids_fn = bundle.multimodal_fns.get(
+                    "embed_input_ids_fn")
+            use_inputs_embeds = (_is_multimodal_model(
+                bundle.vllm_config.model_config) and embed_input_ids_fn is not None)
+            mm_embeds = None
+            if use_inputs_embeds:
+                mm_embeds = jnp.zeros((0, hidden_size),
+                                      dtype=self._get_dtype())
 
             # Benchmark for each sequence length and batch size
             for seq_len in self.config.seq_lengths:
                 for batch_size in self.config.batch_sizes:
                     print(f"\n  seq_len={seq_len}, batch_size={batch_size}")
 
-                    # Create inputs
                     total_tokens = seq_len * batch_size
+                    self.rng, data_rng = jax.random.split(self.rng)
                     input_ids = jax.random.randint(
-                        self.rng, (total_tokens,), 0, vocab_size, dtype=jnp.int32
+                        data_rng, (total_tokens,), 0, vocab_size, dtype=jnp.int32)
+                    disallowed_ids = []
+                    for key in ("image_token_id", "video_token_id",
+                                "vision_start_token_id"):
+                        token_id = getattr(hf_config, key, None)
+                        if isinstance(token_id, (int, np.integer)):
+                            disallowed_ids.append(int(token_id))
+                    input_ids = _sanitize_input_ids(input_ids, vocab_size,
+                                                    disallowed_ids)
+
+                    dp_size = int(self.mesh.shape.get("data", 1))
+                    input_positions, attn_metadata, logits_indices, max_blocks = (
+                        build_attention_metadata(seq_len, batch_size,
+                                                 block_size, use_mrope,
+                                                 dp_size))
+                    kv_caches = create_kv_caches(
+                        num_layers=len(bundle.layer_names),
+                        num_kv_heads=num_kv_heads,
+                        head_dim=head_dim,
+                        num_blocks=max_blocks * batch_size,
+                        block_size=block_size,
+                        mesh=self.mesh,
+                        dtype=self._get_dtype(),
                     )
-                    attn_metadata = create_attention_metadata(seq_len, batch_size)
 
-                    # Benchmark forward pass
-                    result = self._benchmark_single(
-                        name="forward_pass",
-                        impl_type="flax_nnx",
-                        forward_fn=forward_pass,
-                        input_data={
-                            "kv_caches": kv_caches,
-                            "input_ids": input_ids,
-                            "attn_metadata": attn_metadata,
-                        },
-                        seq_length=seq_len,
-                        batch_size=batch_size,
-                    )
-                    results.append(result)
-                    self._print_result(result)
+                    def forward_fn(kv_caches, input_ids, attn_metadata,
+                                   input_positions, logits_indices,
+                                   layer_name_to_kvcache_index, mm_embeds):
+                        inputs_embeds = None
+                        if use_inputs_embeds:
+                            inputs_embeds = embed_input_ids_fn(
+                                bundle.state, input_ids, mm_embeds)
 
-            # Benchmark vision encoder if enabled
-            if self.config.test_vision:
-                results.extend(self._benchmark_vision_encoder(model, "flax_nnx"))
-
-        except Exception as e:
-            print(f"Error benchmarking flax_nnx: {e}")
-            import traceback
-            traceback.print_exc()
-
-        return results
-
-    def benchmark_vllm(self) -> List[TimingResult]:
-        """Benchmark the vLLM/TorchAX implementation."""
-        print("\n" + "=" * 60)
-        print("Benchmarking: vLLM/TorchAX Implementation")
-        print("=" * 60)
-
-        results = []
-
-        try:
-            # Set environment for vllm
-            import tpu_inference.envs as envs
-            envs.MODEL_IMPL_TYPE = "vllm"
-
-            vllm_config = create_mock_vllm_config(
-                model_path=self.config.model_path,
-                dtype=self.config.dtype,
-                use_dummy_weights=self.config.use_dummy_weights,
-                tensor_parallel_size=self.config.tensor_parallel_size,
-            )
-
-            if vllm_config is None:
-                print("Failed to create vLLM config for vllm")
-                return results
-
-            # Import and create the model wrapper
-            from tpu_inference.models.vllm.vllm_model_wrapper import VllmModelWrapper
-
-            print("Creating Qwen3VL model (vllm/TorchAX)...")
-            with Timer() as model_timer:
-                model = VllmModelWrapper(vllm_config, self.rng, self.mesh)
-                params, lora_manager = model.load_weights()
-            print(f"Model creation time: {model_timer.elapsed_ms:.2f} ms")
-
-            # Get the JIT-compiled step function
-            step_fn = model.jit_step_func()
-
-            # Get model config
-            hf_config = vllm_config.model_config.hf_config
-            num_layers = getattr(hf_config, "num_hidden_layers", 28)
-            num_kv_heads = getattr(hf_config, "num_key_value_heads", 4)
-            head_dim = getattr(hf_config, "hidden_size", 3584) // getattr(
-                hf_config, "num_attention_heads", 28
-            )
-            vocab_size = getattr(hf_config, "vocab_size", 152064)
-
-            # Create KV caches
-            kv_caches = create_kv_caches(
-                num_layers=num_layers,
-                num_kv_heads=num_kv_heads,
-                head_dim=head_dim,
-                num_blocks=64,
-                block_size=16,
-                mesh=self.mesh,
-                dtype=self._get_dtype(),
-            )
-
-            # Create layer name to kv cache index mapping
-            layer_name_to_kvcache_index = tuple(
-                (f"model.layers.{i}.self_attn", i) for i in range(num_layers)
-            )
-
-            # Benchmark for each sequence length and batch size
-            for seq_len in self.config.seq_lengths:
-                for batch_size in self.config.batch_sizes:
-                    print(f"\n  seq_len={seq_len}, batch_size={batch_size}")
-
-                    # Create inputs
-                    total_tokens = seq_len * batch_size
-                    input_ids = jax.random.randint(
-                        self.rng, (total_tokens,), 0, vocab_size, dtype=jnp.int32
-                    )
-                    attn_metadata = create_attention_metadata(seq_len, batch_size)
-                    input_positions = jnp.arange(total_tokens, dtype=jnp.int32)
-                    input_embeds = jnp.zeros((0,), dtype=self._get_dtype())
-
-                    def forward_fn(
-                        params_and_buffers,
-                        kv_caches,
-                        input_ids,
-                        attn_metadata,
-                        input_embeds,
-                        input_positions,
-                        layer_name_to_kvcache_index,
-                    ):
-                        return step_fn(
-                            params_and_buffers,
+                        kv_caches, hidden_states, _ = bundle.model_fn(
+                            bundle.state,
                             kv_caches,
                             input_ids,
                             attn_metadata,
-                            input_embeds,
+                            inputs_embeds,
                             input_positions,
                             layer_name_to_kvcache_index,
                             None,  # lora_metadata
                             None,  # intermediate_tensors
                             True,  # is_first_rank
                             True,  # is_last_rank
+                            None,  # deepstack_embeds
                         )
 
-                    # Benchmark forward pass
+                        selected_hidden = hidden_states[logits_indices]
+                        logits = bundle.compute_logits_fn(
+                            bundle.state,
+                            selected_hidden,
+                            None,  # lora_metadata
+                        )
+                        return kv_caches, logits
+
                     result = self._benchmark_single(
                         name="forward_pass",
-                        impl_type="vllm",
+                        impl_type=impl_type,
                         forward_fn=forward_fn,
                         input_data={
-                            "params_and_buffers": params,
                             "kv_caches": kv_caches,
                             "input_ids": input_ids,
                             "attn_metadata": attn_metadata,
-                            "input_embeds": input_embeds,
                             "input_positions": input_positions,
-                            "layer_name_to_kvcache_index": layer_name_to_kvcache_index,
+                            "logits_indices": logits_indices,
+                            "layer_name_to_kvcache_index":
+                            bundle.layer_name_to_kvcache_index,
+                            "mm_embeds": mm_embeds,
                         },
                         seq_length=seq_len,
                         batch_size=batch_size,
@@ -603,46 +712,66 @@ class ModelBenchmarker:
                     results.append(result)
                     self._print_result(result)
 
+            if self.config.test_vision:
+                results.extend(self._benchmark_vision_encoder(bundle))
+
         except Exception as e:
-            print(f"Error benchmarking vllm: {e}")
+            print(f"Error benchmarking {impl_type}: {e}")
             import traceback
             traceback.print_exc()
 
         return results
 
-    def _benchmark_vision_encoder(
-        self, model: Any, impl_type: str
-    ) -> List[TimingResult]:
+    def benchmark_flax_nnx(self) -> List[TimingResult]:
+        """Benchmark the native JAX/Flax NNX implementation."""
+        return self._benchmark_impl("flax_nnx")
+
+    def benchmark_vllm(self) -> List[TimingResult]:
+        """Benchmark the vLLM/TorchAX implementation."""
+        return self._benchmark_impl("vllm")
+
+    def _benchmark_vision_encoder(self,
+                                  bundle: ModelBundle) -> List[TimingResult]:
         """Benchmark the vision encoder."""
-        print(f"\n  Benchmarking Vision Encoder ({impl_type})")
-        results = []
+        print(f"\n  Benchmarking Vision Encoder ({bundle.impl_type})")
+        results: List[TimingResult] = []
+
+        embed_multimodal_fn = None
+        if bundle.multimodal_fns:
+            embed_multimodal_fn = bundle.multimodal_fns.get(
+                "embed_multimodal_fn")
+        if embed_multimodal_fn is None:
+            print("  Vision encoder not available for this implementation.")
+            return results
 
         try:
             grid_thw = self.config.vision_grid_thw
             t, h, w = grid_thw
+            image_grid_thw = (grid_thw, )
 
-            # Get vision config
-            vc = model.config.vision_config
-            patch_dim = int(
-                vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size
-            )
+            vc = bundle.vllm_config.model_config.hf_config.vision_config
+            patch_dim = int(vc.in_channels * vc.temporal_patch_size *
+                            vc.patch_size * vc.patch_size)
             num_patches = t * h * w
 
-            # Create dummy pixel values
+            self.rng, data_rng = jax.random.split(self.rng)
             pixel_values = jax.random.normal(
-                self.rng, (num_patches, patch_dim), dtype=self._get_dtype()
-            )
+                data_rng, (num_patches, patch_dim), dtype=self._get_dtype())
 
-            @jax.jit
-            def vision_forward(pixel_values, grid_thw):
-                return model.embed_multimodal((grid_thw,), pixel_values=pixel_values)
+            def forward_fn(state, pixel_values, image_grid_thw):
+                return embed_multimodal_fn(state,
+                                           image_grid_thw,
+                                           pixel_values=pixel_values)
 
-            # Benchmark vision encoder
             result = self._benchmark_single(
                 name="vision_encoder",
-                impl_type=impl_type,
-                forward_fn=lambda: vision_forward(pixel_values, grid_thw),
-                input_data={},
+                impl_type=bundle.impl_type,
+                forward_fn=forward_fn,
+                input_data={
+                    "state": bundle.state,
+                    "pixel_values": pixel_values,
+                    "image_grid_thw": image_grid_thw,
+                },
                 seq_length=num_patches,
                 batch_size=1,
             )
@@ -803,6 +932,17 @@ def parse_args() -> argparse.Namespace:
         help="Data type",
     )
     parser.add_argument(
+        "--max-model-len",
+        type=int,
+        default=None,
+        help="Override max_model_len (defaults to max seq length).",
+    )
+    parser.add_argument(
+        "--real-weights",
+        action="store_true",
+        help="Load real model weights instead of dummy weights.",
+    )
+    parser.add_argument(
         "--tp",
         type=int,
         default=1,
@@ -842,9 +982,11 @@ def main():
         num_iterations=args.num_iterations,
         profile_dir=args.profile_dir,
         output_file=args.output,
+        use_dummy_weights=not args.real_weights,
         dtype=args.dtype,
         tensor_parallel_size=args.tp,
         test_vision=not args.no_vision,
+        max_model_len=args.max_model_len,
     )
 
     benchmarker = ModelBenchmarker(config)
