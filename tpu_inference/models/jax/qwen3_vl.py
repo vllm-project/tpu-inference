@@ -13,7 +13,6 @@ from tpu_inference import utils
 from tpu_inference.layers.common.attention_interface import (
     attention,
     sharded_flash_attention,
-    # TODO: Text attention should use ragged pagedattention
 )
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.logger import init_logger
@@ -1111,7 +1110,7 @@ class Qwen3VLVisionTransformer(nnx.Module):
             embedding_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rngs,
         )
-        # NOTE: Learned PE can be rectangular (H != W); infer a base (H, W) grid.
+        # TODO: learned PE shape = 48x48. Don't make this robust.
         image_size = getattr(vision_config, "image_size", None)
         pos_embed_grid_h = pos_embed_grid_w = None
         if isinstance(image_size, (tuple, list)) and len(image_size) == 2:
@@ -1406,6 +1405,7 @@ class Qwen3VLVisionTransformer(nnx.Module):
         segment_ids = generate_segment_ids_from_grid_thw(
             grid_thw
         )
+        # TODO: (chore) remove all robustness in the code for less latency
         assert segment_ids.shape[0] == hidden_states.shape[0], (
             "segment_ids must match the patch sequence length. "
             f"Got {segment_ids.shape[0]=} vs {hidden_states.shape[0]=}.")
