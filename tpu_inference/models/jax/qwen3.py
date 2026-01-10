@@ -25,7 +25,9 @@ from tpu_inference import utils
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
+from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.rope_interface import apply_rope
+from tpu_inference.layers.vllm.quantization.common import JaxQuantizationConfig
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.qwen2 import Qwen2DecoderLayer
 from tpu_inference.models.jax.qwen2 import Qwen2MLP as Qwen3MLP
@@ -37,10 +39,11 @@ logger = init_logger(__name__)
 init_fn = nnx.initializers.uniform()
 
 
-class Qwen3Attention(nnx.Module):
+class Qwen3Attention(JaxModule):
 
     def __init__(self, config: Qwen3Config, dtype: jnp.dtype, rng: nnx.Rngs,
-                 mesh: Mesh, kv_cache_dtype: str):
+                 mesh: Mesh, kv_cache_dtype: str,
+                 quant_config: JaxQuantizationConfig):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
@@ -161,7 +164,8 @@ class Qwen3Attention(nnx.Module):
 class Qwen3DecoderLayer(Qwen2DecoderLayer):
 
     def __init__(self, config: Qwen3Config, dtype: jnp.dtype, rng: nnx.Rngs,
-                 mesh: Mesh, kv_cache_dtype: str):
+                 mesh: Mesh, kv_cache_dtype: str,
+                 quant_config: JaxQuantizationConfig):
         rms_norm_eps = config.rms_norm_eps
         hidden_size = config.hidden_size
 
@@ -176,7 +180,8 @@ class Qwen3DecoderLayer(Qwen2DecoderLayer):
                                         dtype=dtype,
                                         rng=rng,
                                         mesh=mesh,
-                                        kv_cache_dtype=kv_cache_dtype)
+                                        kv_cache_dtype=kv_cache_dtype,
+                                        quant_config=quant_config)
         self.post_attention_layernorm = nnx.RMSNorm(
             hidden_size,
             epsilon=rms_norm_eps,
@@ -188,6 +193,7 @@ class Qwen3DecoderLayer(Qwen2DecoderLayer):
             config=config,
             dtype=dtype,
             rng=rng,
+            quant_config=quant_config,
         )
 
 
@@ -216,8 +222,9 @@ class Qwen3Model(Qwen2Model):
                 rng=rng,
                 mesh=mesh,
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
-                kv_cache_dtype=vllm_config.cache_config.cache_dtype)
-            for _ in range(hf_config.num_hidden_layers)
+                kv_cache_dtype=vllm_config.cache_config.cache_dtype,
+                quant_config=vllm_config.quant_config,
+            ) for _ in range(hf_config.num_hidden_layers)
         ]
         self.norm = nnx.RMSNorm(
             hidden_size,
@@ -235,7 +242,7 @@ class Qwen3Model(Qwen2Model):
             )
 
 
-class Qwen3ForCausalLM(nnx.Module):
+class Qwen3ForCausalLM(JaxModule):
     WeightLoader = StandardWeightLoader
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
@@ -282,11 +289,6 @@ class Qwen3ForCausalLM(nnx.Module):
             "model.embed_tokens": "model.embed.embedding",
             "model.layers.*.input_layernorm":
             "model.layers.*.input_layernorm.scale",
-            "model.layers.*.mlp.down_proj":
-            "model.layers.*.mlp.down_proj.kernel",
-            "model.layers.*.mlp.gate_proj":
-            "model.layers.*.mlp.gate_proj.kernel",
-            "model.layers.*.mlp.up_proj": "model.layers.*.mlp.up_proj.kernel",
             "model.layers.*.post_attention_layernorm":
             "model.layers.*.post_attention_layernorm.scale",
             "model.layers.*.self_attn.k_norm":
