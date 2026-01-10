@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections.abc import Generator
 from typing import Any, Optional
 
 import jax
@@ -28,11 +29,12 @@ from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig, QuantizeMethodBase)
 
 from tpu_inference.layers.common.quant_methods import (UNQUANTIZED,
                                                        get_tpu_quant_method)
+from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.jax.linear import JaxLinear as JaxLinearBase
+from tpu_inference.layers.jax.linear import JaxQuantizedLinearMethod
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
@@ -49,6 +51,7 @@ from tpu_inference.layers.vllm.quantization.configs import (
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product
 
+Module = torch.nn.Module | JaxModule
 P = PartitionSpec
 
 logger = init_logger(__name__)
@@ -77,9 +80,9 @@ class VllmUnquantizedConfig(QuantizationConfig, VllmQuantConfig):
     def from_config(cls, _: dict[str, Any]) -> "VllmUnquantizedConfig":
         return cls()
 
-    def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional[QuantizeMethodBase]:
-        if isinstance(layer, LinearBase):
+    def get_quant_method(self, layer: Module,
+                         prefix: str) -> Optional[JaxQuantizeMethodBase]:
+        if isinstance(layer, LinearBase | JaxLinearBase):
             linear_config = self.get_linear_config(layer)
             return VllmUnquantizedLinearMethod(linear_config)
         if isinstance(layer, FusedMoE):
@@ -90,10 +93,15 @@ class VllmUnquantizedConfig(QuantizationConfig, VllmQuantConfig):
         return None
 
 
-class VllmUnquantizedLinearMethod(UnquantizedLinearMethod):
+class VllmUnquantizedLinearMethod(UnquantizedLinearMethod,
+                                  JaxQuantizedLinearMethod):
 
     def __init__(self, linear_config: VllmQuantLinearConfig):
         self.linear_config = linear_config
+
+    def create_weights_jax(self, layer: JaxModule) -> None:
+        assert isinstance(layer, JaxLinearBase)
+        # no-op, `weight` is already created in JaxLinear
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = t2j(layer.weight, use_dlpack=False)
@@ -151,10 +159,25 @@ class VllmUnquantizedLinearMethod(UnquantizedLinearMethod):
             if in_sharding := self.linear_config.get_input_sharding(x):
                 x.shard_(NamedSharding(self.linear_config.mesh, in_sharding))
 
+            x_jax = jax_view(x)
+            bias_jax = jax_view(
+                bias) if bias is not None and not layer.skip_bias_add else None
             if self.linear_config.fuse_matmuls:
                 out = self._apply_fused(layer, x, bias)
+            if self.linear_config.fuse_matmuls:
+                weight_jax = jax_view(layer.weight)
+                out_jax = self._apply_fused(x_jax, weight_jax, bias_jax)
+                out: torch.Tensor = torch_view(out_jax)
             else:
-                out = self._apply_split(layer, x, bias)
+
+                def weight_enumerate():
+                    assert isinstance(layer.weight, torch.nn.ParameterList)
+                    for i, w in enumerate(layer.weight):
+                        yield i, jax_view(w)
+
+                out_jax = self._apply_split(x_jax, weight_enumerate(),
+                                            bias_jax)
+                out: torch.Tensor = torch_view(out_jax)
 
             if out_sharding := self.linear_config.get_output_sharding(out):
                 out.shard_(NamedSharding(self.linear_config.mesh,
@@ -162,40 +185,47 @@ class VllmUnquantizedLinearMethod(UnquantizedLinearMethod):
 
         return out
 
-    def _apply_fused(self,
-                     layer: torch.nn.Module,
-                     x: torch.Tensor,
-                     bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        x_jax = jax_view(x)
-        weight_jax = jax_view(layer.weight)
+    def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
+        assert isinstance(layer, JaxLinearBase)
 
+        with jax.named_scope(layer.__class__.__name__):
+            if self.linear_config.fuse_matmuls:
+                assert isinstance(layer.weight.value, jax.Array)
+                out = self._apply_fused(
+                    x, layer.weight.value,
+                    layer.bias.value if layer.bias is not None else None)
+            else:
+                raise NotImplementedError(
+                    "Split linear is not supported in JAX unquantized method.")
+        return out
+
+    def _apply_fused(self,
+                     x_jax: jax.Array,
+                     weight_jax: jax.Array,
+                     bias_jax: Optional[jax.Array] = None) -> jax.Array:
         outs = jnp.einsum("mn,pn->mp", x_jax, weight_jax)
-        if bias is not None and not layer.skip_bias_add:
-            outs += bias.jax()
+        if bias_jax is not None:
+            outs += bias_jax
 
         outs = slice_sharded_tensor_for_concatenation(
             outs, self.linear_config.output_sizes, self.linear_config.n_shards)
         out = jnp.concatenate(outs, axis=-1)
-        return torch_view(out)
+        return out
 
     def _apply_split(self,
-                     layer: torch.nn.Module,
-                     x: torch.Tensor,
-                     bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        assert isinstance(layer.weight, torch.nn.ParameterList)
+                     x_jax: jax.Array,
+                     weight_generator: Generator,
+                     bias_jax: Optional[jax.Array] = None) -> jax.Array:
 
-        x_jax = x.jax()
         outs = []
-        for i, weight in enumerate(layer.weight):
-            weight_jax = jax_view(weight)
-
+        for i, weight_jax in weight_generator:
             out = jnp.einsum("mn,pn->mp", x_jax, weight_jax)
-            if bias is not None and not layer.skip_bias_add:
-                out += jax_view(bias[i])
+            if bias_jax is not None:
+                out += bias_jax[i]
 
             outs.append(out)
         out = jnp.concatenate(outs, axis=-1)
-        return torch_view(out)
+        return out
 
 
 class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):

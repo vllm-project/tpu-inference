@@ -11,3 +11,49 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+from typing import Iterator
+
+import jax
+from flax import nnx
+
+
+class JaxModule(nnx.Module):
+    """Base module for JAX layers, extending flax.nnx.Module.
+    """
+
+    def register_parameter(self, name: str, value: nnx.Param | None) -> None:
+        """Registers a parameter with the given name and value.
+        The parameter can be accessed as an attribute using given name.
+
+        Args:
+            name: The name of the parameter.
+            value: Parameter to be added to the module. If None, the parameter
+                is **not** included in `nnx.split(.., nnx.Param, ..)`.
+        """
+        if value is None:
+            self.__dict__[name] = None
+            delattr(self, name)
+        else:
+            self.__dict__[name] = value
+            setattr(self, name, value)
+
+    def __getattr__(self, name: str) -> "jax.Array | JaxModule":
+        if name in self.__dict__:
+            return self.__dict__[name]
+        raise AttributeError(
+            f"'{type(self).__name__}' object has no attribute '{name}'")
+
+    def named_parameters(self,
+                         prefix: str = "") -> Iterator[tuple[str, nnx.Param]]:
+        """Yields the named parameters of the module."""
+        params = nnx.state(self, nnx.Param)
+
+        def _traverse_params(params, path=()):
+            if hasattr(params, 'items'):
+                for name, value in params.items():
+                    yield from _traverse_params(value, path + (str(name), ))
+            else:
+                yield ".".join(path), params
+
+        yield from _traverse_params(params, path=(prefix, ) if prefix else ())

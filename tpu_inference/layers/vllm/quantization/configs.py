@@ -12,26 +12,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from abc import abstractmethod
+
+import torch
 import torchax
+from flax import nnx
 from jax.sharding import Mesh, PartitionSpec
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, FusedMoEConfig
 # yapf: disable
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               LinearBase,
-                                               MergedColumnParallelLinear,
+from vllm.model_executor.layers.linear import ColumnParallelLinear
+from vllm.model_executor.layers.linear import LinearBase as VllmLinearBase
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.jax.linear import JaxLinear as JaxLinearBase
+from tpu_inference.layers.jax.linear import QuantizationConfig
 from tpu_inference.layers.vllm.process_weights.linear_weights import \
     get_model_matmul_fusion_assignment
+from tpu_inference.layers.vllm.quantization import JaxQuantizeMethodBase
 from tpu_inference.utils import TPU_SECOND_LAST_MINOR, get_mesh_shape_product
 
 # yapf: enable
 
+Module = torch.nn.Module | nnx.Module
+LinearBase = VllmLinearBase | JaxLinearBase
 P = PartitionSpec
 
 logger = init_logger(__name__)
@@ -74,6 +83,8 @@ class VllmQuantLinearConfig:
                 layer._get_name())
         elif isinstance(layer, ReplicatedLinear):
             self.weight_sharding = P(None, None)
+        elif isinstance(layer, JaxLinearBase):
+            ...
         else:
             logger.warning(
                 "Unsupported linear layer type of %s. Can potentially yield "
@@ -120,3 +131,13 @@ class VllmQuantConfig:
         use_ep = self.vllm_config.parallel_config.enable_expert_parallel
         moe_config.moe_parallel_config.use_ep = use_ep
         return moe_config
+
+
+class JaxQuantizationConfig(JaxCommonConfig, QuantizationConfig):
+    """Extended quantization config for JAX.
+    """
+
+    @abstractmethod
+    def get_quant_method(self, layer: Module,
+                         prefix: str) -> JaxQuantizeMethodBase | None:
+        raise NotImplementedError

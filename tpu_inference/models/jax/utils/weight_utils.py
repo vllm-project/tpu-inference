@@ -327,19 +327,19 @@ def _load_and_shard_weight(vllm_config,
         )
         hf_weight = hf_weight.astype(model_config.dtype)
 
-    if hf_key.endswith(".weight"):
+    if hf_key.endswith(".weight") and "mlp" not in hf_key:
         hf_key = hf_key.removesuffix(".weight")
 
     # Find the corresponding model key using the HF key
     if "layers" in hf_key:
         layer_num = re.search(r"layers\.(\d+)", hf_key).group(1)
         layer_key = re.sub(r"layers\.\d+", "layers.*", hf_key)
-        model_key = name_map[layer_key]
+        model_key = name_map.get(layer_key, layer_key)
         model_key = re.sub(r"layers\.\*", f"layers.{layer_num}", model_key)
     elif "blocks" in hf_key:
         layer_num = re.search(r"blocks\.(\d+)", hf_key).group(1)
         layer_key = re.sub(r"blocks\.\d+", "blocks.*", hf_key)
-        model_key = name_map[layer_key]
+        model_key = name_map.get(layer_key, layer_key)
         model_key = re.sub(r"blocks\.\*", f"blocks.{layer_num}", model_key)
     else:
         if hf_key not in name_map and hf_key == "lm_head":
