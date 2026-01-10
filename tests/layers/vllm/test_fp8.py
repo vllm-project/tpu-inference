@@ -43,7 +43,7 @@ from . import utils as test_utils
 
 P = PartitionSpec
 MODELS = [
-    "Qwen/Qwen3-0.6B-FP8",
+    "deepseek-ai/DeepSeek-V3",
 ]
 
 
@@ -73,11 +73,23 @@ def ref_fp8_activation(
 def ref_dequantize_fp8_block_2d(w_q: torch.Tensor, scale_blocks: torch.Tensor,
                                 block_m: int, block_n: int) -> torch.Tensor:
     out, inn = w_q.shape
-    assert scale_blocks.shape == (out // block_m, inn // block_n)
+    scale_out, scale_inn = scale_blocks.shape
+
+    padded_out = scale_out * block_m
+    padded_inn = scale_inn * block_n
+
+    if padded_out != out or padded_inn != inn:
+        w_padded = torch.zeros((padded_out, padded_inn), dtype=w_q.dtype)
+        w_padded[:out, :inn] = w_q
+        w_q = w_padded
+
     scale_e = scale_blocks[:, None, :, None].repeat(1, block_m, 1, block_n)
-    w_deq = (w_q.to(torch.float32).view(out // block_m, block_m,
-                                        inn // block_n, block_n) * scale_e)
-    return w_deq.reshape(out, inn)
+    w_deq = (
+        w_q.to(torch.float32).view(scale_out, block_m, scale_inn, block_n) *
+        scale_e)
+    w_deq = w_deq.reshape(padded_out, padded_inn)
+
+    return w_deq[:out, :inn]
 
 
 def return_ref_and_layer_output(layer: torch.nn.Module, batch_size: int = 16):
@@ -124,14 +136,24 @@ def ref_quantize_fp8_block_2d(w: torch.Tensor, block_m: int, block_n: int,
     dtype_min = float(dtype_info.min)
 
     out, inn = w.shape
-    assert out % block_m == 0 and inn % block_n == 0
-    w_view = w.view(out // block_m, block_m, inn // block_n, block_n)
+    padded_out = ((out + block_m - 1) // block_m) * block_m
+    padded_inn = ((inn + block_n - 1) // block_n) * block_n
+
+    if padded_out != out or padded_inn != inn:
+        w_padded = torch.zeros((padded_out, padded_inn), dtype=w.dtype)
+        w_padded[:out, :inn] = w
+        w = w_padded
+
+    w_view = w.view(padded_out // block_m, block_m, padded_inn // block_n,
+                    block_n)
 
     abs_max = torch.amax(torch.abs(w_view), dim=(1, 3), keepdim=True)
     scale = abs_max / dtype_max
     w_q = torch.clamp(w_view / scale, dtype_min, dtype_max).to(dtype)
 
-    w_q = w_q.reshape(out, inn)
+    w_q = w_q.reshape(padded_out, padded_inn)
+    w_q = w_q[:out, :inn]
+
     scale_blocks = scale.squeeze(1).squeeze(-1).to(torch.float32)
     return w_q, scale_blocks
 
@@ -168,6 +190,10 @@ def initialize_layer_weights(layer: torch.nn.Module):
     w_f32 = (
         torch.rand(layer.output_size, layer.input_size, dtype=torch.float32) /
         10)
+
+    for i in range(0, layer.output_size, block_m):
+        w_f32[i:i + block_m, :] *= (i // block_m + 1)
+
     w_q, w_scale_blocks = ref_quantize_fp8_block_2d(w_f32, block_m, block_n,
                                                     torch.float8_e4m3fn)
 
@@ -475,3 +501,37 @@ def test_fused_moe(use_ep, num_devices, num_tokens, intermediate_size,
                                    check_device=False,
                                    atol=2e-2,
                                    rtol=1e-1)
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("input_size,output_size", [
+    (7168, 576),
+])
+def test_unaligned_block_quantization(model, input_size, output_size):
+    mesh = test_utils.get_spmd_mesh(1)
+
+    torch.manual_seed(42)
+    dtype = torch.bfloat16
+
+    engine_args = EngineArgs(model=model,
+                             max_model_len=64,
+                             max_num_batched_tokens=64,
+                             max_num_seqs=4,
+                             trust_remote_code=True)
+    vllm_config = engine_args.create_engine_config()
+
+    vllm_config.model_config.dtype = dtype
+    quant_config = get_tpu_quantization_config(vllm_config, mesh)
+    with set_current_vllm_config(vllm_config):
+        linear_layer = RowParallelLinear(
+            input_size=input_size,
+            output_size=output_size,
+            bias=False,
+            params_dtype=dtype,
+            return_bias=False,
+            quant_config=quant_config,
+        )
+
+    initialize_layer_weights(linear_layer)
+    ref_output, layer_output = return_ref_and_layer_output(linear_layer)
+    torch.testing.assert_close(ref_output, layer_output)
