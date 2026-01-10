@@ -34,6 +34,10 @@ kubectl apply -f deploy-baseline.yaml
 ### Option B: vLLM with TPU Host Offload
 
 This deployment configures vLLM to use a `TPUOffloadConnector` for KV cache offload to the host CPU memory. This is specified by the `--kv-transfer-config` argument.
+The following environment variables are used to configure the offload behavior:
+
+* `TPU_OFFLOAD_CPU_BUF_SIZE_GB`: Sets the size (in GB) of the CPU memory buffer for the KV cache.
+* `TPU_OFFLOAD_STAGING_BUF_SIZE_GB`: Sets the size (in GB) of the on-device HBM staging buffer used for swap.
 
 ```bash
 kubectl apply -f deploy-cpu-offload.yaml
