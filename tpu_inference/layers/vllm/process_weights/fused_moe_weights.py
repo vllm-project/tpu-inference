@@ -78,32 +78,33 @@ def quantize_moe_weights(
 
     _, orig_hidden_size, orig_intermediate_size = w2_weight.shape
 
-    w13_weight, w13_weight_scale = quantize_tensor(dtype, w13_weight, 2,
-                                                   w13_block_size, True)
-    w2_weight, w2_weight_scale = quantize_tensor(dtype, w2_weight, 2,
-                                                 w2_block_size, True)
+    hidden_size = align_to(orig_hidden_size, w13_block_size)
+    intermediate_size = align_to(orig_intermediate_size, w2_block_size)
 
-    intermediate_size = w2_weight.shape[-1]
-    hidden_size = w13_weight.shape[-1]
-
-    # Dims may have been padded to align with subchannel size during
-    # quantization. We pad the corresponding dim on other weight.
-    # NOTE: We perform padding after quantization as padding value can
-    # affect quantization numerics.
     w13_pad_widths = [[0, 0] for _ in range(3)]
     w13_pad_widths[1][1] = 2 * (intermediate_size - orig_intermediate_size)
+    w13_pad_widths[2][1] = hidden_size - orig_hidden_size
     w2_pad_widths = [[0, 0] for _ in range(3)]
     w2_pad_widths[1][1] = hidden_size - orig_hidden_size
+    w2_pad_widths[2][1] = intermediate_size - orig_intermediate_size
 
-    weights.w13_weight = jnp.pad(w13_weight, w13_pad_widths)
-    weights.w13_weight_scale = jnp.pad(w13_weight_scale, w13_pad_widths)
-    weights.w2_weight = jnp.pad(w2_weight, w2_pad_widths)
-    weights.w2_weight_scale = jnp.pad(w2_weight_scale, w2_pad_widths)
+    w13_weight = jnp.pad(w13_weight, w13_pad_widths)
+    w2_weight = jnp.pad(w2_weight, w2_pad_widths)
 
     if (w13_bias := weights.w13_bias) is not None:
         weights.w13_bias = jnp.pad(w13_bias, w13_pad_widths[:2])
     if (w2_bias := weights.w2_bias) is not None:
         weights.w2_bias = jnp.pad(w2_bias, w2_pad_widths[:2])
+
+    w13_weight, w13_weight_scale = quantize_tensor(dtype, w13_weight, 2,
+                                                   w13_block_size)
+    w2_weight, w2_weight_scale = quantize_tensor(dtype, w2_weight, 2,
+                                                 w2_block_size)
+
+    weights.w13_weight = w13_weight
+    weights.w13_weight_scale = w13_weight_scale
+    weights.w2_weight = w2_weight
+    weights.w2_weight_scale = w2_weight_scale
 
     return weights
 
