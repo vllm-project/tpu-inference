@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from typing import Optional, Union
 
 import jax
@@ -60,6 +61,39 @@ from tpu_inference.utils import get_mesh_shape_product
 P = PartitionSpec
 
 logger = init_logger(__name__)
+
+
+def _pad_and_dequantize(
+    tensor_q: jax.Array,
+    scale: jax.Array,
+    axis: tuple[int, ...],
+    block_size: tuple[int, ...],
+    out_dtype: jnp.dtype = jnp.bfloat16,
+) -> jax.Array:
+    """Pad tensor to align with scale dimensions, dequantize, then slice back.
+
+    Some models (e.g., DeepSeek V3) store weights that were padded during
+    quantization, then trimmed.
+    
+    Args:        
+        tensor_q: Quantized tensor (may be smaller than scale implies).
+        scale: Quantization scale.
+        axis: Axes that were quantized.
+        block_size: Block size used during quantization (e.g., (128, 128)).
+        out_dtype: Dtype of the output.
+
+    Returns:
+        Dequantized tensor with original (unpadded) shape.
+    """
+    orig_shape = tensor_q.shape
+
+    pad_width = [[0, 0] for _ in range(tensor_q.ndim)]
+    for ax, bs in zip(axis, block_size):
+        pad_width[ax][1] = scale.shape[ax] * bs - tensor_q.shape[ax]
+
+    result = dequantize_tensor(jnp.pad(tensor_q, pad_width), scale, axis,
+                               out_dtype)
+    return result[tuple(slice(0, s) for s in orig_shape)]
 
 
 @register_quantization_config(get_tpu_quant_method(FP8))
@@ -139,18 +173,21 @@ class VllmFp8LinearMethod(Fp8LinearMethod):
                 end = start + output_size
 
                 weight_slice = weight[start:end]
-                weight_scale_slice = weight_scale[start // block_size:end //
-                                                  block_size]
-                dequantzed_weight = dequantize_tensor(
+                weight_scale_slice = weight_scale[start // block_size:math.
+                                                  ceil(end / block_size)]
+
+                dequantized_weight = _pad_and_dequantize(
                     weight_slice,
                     weight_scale_slice,
                     (0, 1),
+                    self.weight_block_size,
                 )
                 weight_slice, weight_scale_slice = quantize_tensor(
-                    jnp.float8_e4m3fn, dequantzed_weight)
+                    jnp.float8_e4m3fn, dequantized_weight)
 
                 weights.append(weight_slice)
                 weight_scales.append(weight_scale_slice)
+                print(weight_slice.shape, weight_scale_slice.shape)  # ADD THIS
 
                 start = end
 
@@ -282,9 +319,10 @@ class VllmFp8MoEMethod(Fp8MoEMethod):
             w2_weight_scale: jax.Array,
         ) -> FusedMoEWeights:
             # Dequantize fp8 2d block quantized weights into fp32.
-            w13_weight = dequantize_tensor(w13_weight, w13_weight_scale,
-                                           (1, 2))
-            w2_weight = dequantize_tensor(w2_weight, w2_weight_scale, (1, 2))
+            w13_weight = _pad_and_dequantize(w13_weight, w13_weight_scale,
+                                             (1, 2), self.weight_block_size)
+            w2_weight = _pad_and_dequantize(w2_weight, w2_weight_scale, (1, 2),
+                                            self.weight_block_size)
 
             w13_interleave = layer.activation == "swigluoai"
             w13_reorder_size = get_mesh_shape_product(
