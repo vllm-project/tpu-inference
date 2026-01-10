@@ -19,11 +19,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
-from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, VllmConfig)
 from vllm.sampling_params import SamplingType
+from vllm.v1.attention.backend import AttentionType
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheTensor,
                                         MLAAttentionSpec, SlidingWindowSpec)

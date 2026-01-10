@@ -22,7 +22,7 @@ import torch
 import torchax
 from jax.sharding import Mesh
 from torchax.interop import torch_view
-from vllm.attention.backends.abstract import AttentionType
+from vllm.v1.attention.backend import AttentionType
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.vllm.attention import (PallasAttentionBackend,
