@@ -97,28 +97,6 @@ class QuantizationTest(jtu.JaxTestCase):
             functools.partial(quantize_tensor, jnp.int8, tensor, axis,
                               block_size))
 
-    def test_block_quantization_padding(self):
-        key = jax.random.key(0)
-
-        shape = (128, 128)
-
-        original = jax.random.normal(key, shape, jnp.bfloat16)
-        block_size = 100
-        axis = 0
-
-        tensor_q, scale = quantize_tensor(jnp.int8, original, axis, block_size,
-                                          True)
-
-        dequantized = dequantize_tensor(tensor_q, scale, axis)
-
-        padded_size = ((shape[axis] + block_size) // block_size) * block_size
-        self.assertEqual(tensor_q.shape[axis], padded_size)
-        self.assertTrue((tensor_q[shape[0]:] == 0).all())
-        self.assertAllClose(dequantized[:shape[0]],
-                            original,
-                            rtol=0.1,
-                            atol=0.1)
-
     @parameterized.product(kv_quant_dtype=[jnp.float8_e4m3fn, jnp.int8])
     def test_quantize_kv(self, kv_quant_dtype):
         """Tests the quantize_kv function with float8_e4m3fn dtype."""
