@@ -104,7 +104,8 @@ def _test_correctness_helper(
         ref_llm = LLM(model=model_name,
                       max_model_len=1024,
                       max_num_seqs=4,
-                      tensor_parallel_size=_get_tensor_parallel_size())
+                      tensor_parallel_size=_get_tensor_parallel_size(),
+                      async_scheduling=0)
         ref_outputs = ref_llm.generate(test_prompts, sampling_config)
 
         del ref_llm
@@ -116,7 +117,8 @@ def _test_correctness_helper(
                        speculative_config=speculative_config,
                        max_model_len=1024,
                        max_num_seqs=4,
-                       tensor_parallel_size=_get_tensor_parallel_size())
+                       tensor_parallel_size=_get_tensor_parallel_size(),
+                       async_scheduling=0)
         spec_outputs = spec_llm.generate(test_prompts, sampling_config)
 
         matches = 0
@@ -198,7 +200,8 @@ def _test_performance_helper(
                       max_model_len=1024,
                       max_num_seqs=1,
                       enable_prefix_caching=False,
-                      tensor_parallel_size=_get_tensor_parallel_size())
+                      tensor_parallel_size=_get_tensor_parallel_size(),
+                      async_scheduling=0)
 
         start_time = time.time()
         _ = ref_llm.generate(test_prompts, sampling_config)
@@ -215,7 +218,8 @@ def _test_performance_helper(
                        max_model_len=1024,
                        max_num_seqs=1,
                        tensor_parallel_size=_get_tensor_parallel_size(),
-                       enable_prefix_caching=False)
+                       enable_prefix_caching=False,
+                       async_scheduling=0)
 
         start_time = time.time()
         _ = spec_llm.generate(test_prompts, sampling_config)
