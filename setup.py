@@ -64,4 +64,13 @@ setup(
         "Programming Language :: Python :: 3.12",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
+    extras_require={
+        "tuning": ["click", "rich"],
+    },
+    entry_points={
+        "console_scripts": [
+            "tpu-tune-rpa=tpu_inference.kernels.ragged_paged_attention.v3.autotune:main",
+            "tpu-tune-quantized-matmul=tpu_inference.kernels.quantized_matmul.autotune:main",
+        ],
+    },
 )
