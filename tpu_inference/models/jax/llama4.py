@@ -33,13 +33,349 @@ from tpu_inference.layers.jax.transformer_block import \
     SharedExpertsTransformerBlock
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
-    convert_torch_to_jax_with_view, get_param, model_weights_generator,
+    BaseWeightLoader, convert_torch_to_jax_with_view, get_param,
     print_param_info, reshape_params, transpose_params)
 
 logger = init_logger(__name__)
 
 
+class Llama4WeightLoader(BaseWeightLoader):
+
+    def __init__(self, vllm_config: VllmConfig, hidden_size, attn_heads,
+                 num_key_value_heads, attn_head_dim):
+        super().__init__(vllm_config,
+                         framework="pt",
+                         filter_regex="language_model")
+        self.is_verbose = getattr(vllm_config.additional_config, "is_verbose",
+                                  False)
+        self.interleave_moe_layer_step = getattr(
+            vllm_config.model_config.hf_config.text_config,
+            "interleave_moe_layer_step", 1)
+
+        self.quantization_config = getattr(vllm_config.model_config.hf_config,
+                                           "quantization_config", None)
+        self.expert_weights_buffer = {}
+        self.expert_prefix = "shared_expert."
+
+        transpose_mappings_to_quantization = {
+            "down_proj": (1, 0),
+            "gate_proj": (1, 0),
+            "up_proj": (1, 0),
+        }
+
+        self._transpose_map = {
+            "q_proj": (2, 0, 1),
+            "k_proj": (2, 0, 1),
+            "v_proj": (2, 0, 1),
+            "router": (1, 0),
+            f"{self.expert_prefix}down_proj": (1, 0),
+            f"{self.expert_prefix}gate_proj": (1, 0),
+            f"{self.expert_prefix}up_proj": (1, 0),
+            "feed_forward.down_proj": (1, 0),
+            "feed_forward.gate_proj": (1, 0),
+            "feed_forward.up_proj": (1, 0),
+            "o_proj": (1, 2, 0),
+            "lm_head": (1, 0),
+        }
+
+        if self.quantization_config and self.expert_prefix:
+            self._transpose_map.update(transpose_mappings_to_quantization)
+
+        self._weight_shape_map = {
+            "q_proj": (attn_heads, attn_head_dim, hidden_size),
+            "k_proj": (num_key_value_heads, attn_head_dim, hidden_size),
+            "v_proj": (num_key_value_heads, attn_head_dim, hidden_size),
+            # o_proj is inverted: https://github.com/huggingface/transformers/blob/v4.53.2/src/transformers/models/llama4/modeling_llama4.py#L298
+            "o_proj": (hidden_size, attn_heads, attn_head_dim),
+        }
+
+        # Set the mappings from loaded parameter keys to standardized names.\
+        # 1. EXPERT_MAPPINGS_FUSED: Used for non-quantized (e.g., BF16) checkpoints.
+        #    - This format typically comes from standard checkpoints where 'gate' and 'up' projection weights might be combined (FUSED) into a single tensor.
+        #    - Expert weights are usually stacked, with the expert dimension (E) being the first dimension.
+        EXPERT_MAPPINGS_FUSED = {
+            "language_model.model.layers.*.feed_forward.experts.down_proj":
+            "layers.*.moe_ffw.kernel_down_proj_EFD",
+            "language_model.model.layers.*.feed_forward.experts.gate_up_proj":
+            "layers.*.moe_ffw.kernel_up_proj_EDF",
+        }
+
+        # 2. EXPERT_MAPPINGS_UNFUSED: Specifically designed for quantized checkpoints (e.g., FP8).
+        #    - Quantized checkpoints store each expert's weights separately and explicitly separate the 'weight' (quantized value) from the 'weight_scale' (quantization scale).
+        #    - The mapping captures both the `.weight` and `.weight_scale` components. This allows the loader to aggregate (stack) the individual expert weights and scales.
+        EXPERT_MAPPINGS_UNFUSED = {
+            "language_model.model.layers.*.feed_forward.experts.*.down_proj.weight":
+            "layers.*.moe_ffw.kernel_down_proj_EFD",
+            "language_model.model.layers.*.feed_forward.experts.*.down_proj.weight_scale":
+            "layers.*.moe_ffw.kernel_down_proj_EFD",
+            "language_model.model.layers.*.feed_forward.experts.*.gate_proj.weight":
+            "layers.*.moe_ffw.kernel_gating_EDF",
+            "language_model.model.layers.*.feed_forward.experts.*.gate_proj.weight_scale":
+            "layers.*.moe_ffw.kernel_gating_EDF",
+            "language_model.model.layers.*.feed_forward.experts.*.up_proj.weight":
+            "layers.*.moe_ffw.kernel_up_proj_EDF",
+            "language_model.model.layers.*.feed_forward.experts.*.up_proj.weight_scale":
+            "layers.*.moe_ffw.kernel_up_proj_EDF",
+        }
+
+        self._loaded_to_standardized_keys = {
+            "language_model.model.embed_tokens.weight":
+            "embedder.input_embedding_table_VD",
+            "language_model.lm_head.weight":
+            "lm_head.input_embedding_table_DV",
+            "language_model.model.norm.weight":
+            "final_norm.scale",
+            "language_model.model.layers.*.input_layernorm.weight":
+            "layers.*.pre_attention_norm.scale",
+            "language_model.model.layers.*.post_attention_layernorm.weight":
+            "layers.*.pre_mlp_norm.scale",
+            "language_model.model.layers.*.self_attn.q_proj.weight":
+            "layers.*.attn.kernel_q_proj_DNH",
+            "language_model.model.layers.*.self_attn.k_proj.weight":
+            "layers.*.attn.kernel_k_proj_DKH",
+            "language_model.model.layers.*.self_attn.v_proj.weight":
+            "layers.*.attn.kernel_v_proj_DKH",
+            "language_model.model.layers.*.self_attn.o_proj.weight":
+            "layers.*.attn.kernel_o_proj_NHD",
+            "language_model.model.layers.*.feed_forward.router.weight":
+            "layers.*.moe_ffw.router.kernel_DE",
+            # shared experts
+            "language_model.model.layers.*.feed_forward.shared_expert.down_proj.weight":
+            "layers.*.shared_experts.kernel_down_proj_FD",
+            "language_model.model.layers.*.feed_forward.shared_expert.gate_proj.weight":
+            "layers.*.shared_experts.kernel_gating_DF",
+            "language_model.model.layers.*.feed_forward.shared_expert.up_proj.weight":
+            "layers.*.shared_experts.kernel_up_proj_DF",
+            # dense layers
+            "language_model.model.layers.*.feed_forward.down_proj.weight":
+            "layers.*.dense_ffw.kernel_down_proj_FD",
+            "language_model.model.layers.*.feed_forward.up_proj.weight":
+            "layers.*.dense_ffw.kernel_up_proj_DF",
+            "language_model.model.layers.*.feed_forward.gate_proj.weight":
+            "layers.*.dense_ffw.kernel_gating_DF",
+        }
+
+        if self.quantization_config is None:
+            self._loaded_to_standardized_keys.update(EXPERT_MAPPINGS_FUSED)
+        else:
+            self._loaded_to_standardized_keys.update(EXPERT_MAPPINGS_UNFUSED)
+
+    def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
+        # Find the corresponding model key using the HF key
+        if "layer" in loaded_key:
+            layer_num = self._get_layer_num(loaded_key)
+            layer_key = re.sub(r"layers\.\d+", "layers.*", loaded_key)
+
+            expert_match = re.search(r"experts\.(\d+)", layer_key)
+            if expert_match:
+                # Key for lookup eg: layers.*.feed_forward.experts.*.down_proj.weight
+                layer_key = re.sub(r"experts\.\d+", "experts.*", layer_key)
+
+            mapped_key = self._loaded_to_standardized_keys.get(
+                layer_key, loaded_key)
+            mapped_key = re.sub(r"layers\.\*", f"layers.{layer_num}",
+                                mapped_key)
+        else:
+            mapped_key = self._loaded_to_standardized_keys.get(
+                loaded_key, loaded_key)
+        return mapped_key
+
+    def _map_llama4_gate_up_proj(self, model_for_loading: nnx.Module,
+                                 model_params: nnx.State, loaded_name: str,
+                                 loaded_weight: jax.Array):
+        """HF's gate_up_proj is a fused tensor of gate and up projections. It needs to be split."""
+
+        cast_type = jnp.dtype(jnp.bfloat16)
+        # loaded_weight is a jax.Array when framework="flax", otherwise it's bfloat16
+        if not isinstance(loaded_weight, jax.Array):
+            loaded_weight = convert_torch_to_jax_with_view(
+                loaded_weight, cast_type)
+
+        split_weights = jnp.split(loaded_weight, 2, axis=-1)
+        layer_num = self._get_layer_num(loaded_name)
+
+        for split_type in ["gate", "up"]:
+            split_loaded_name = loaded_name.replace("gate_up_proj",
+                                                    f"{split_type}_proj")
+            if split_type == "gate":
+                mapped_name = "layers.*.moe_ffw.kernel_gating_EDF"
+                loaded_weight = split_weights[0]
+            else:
+                mapped_name = "layers.*.moe_ffw.kernel_up_proj_EDF"
+                loaded_weight = split_weights[1]
+
+            mapped_name = re.sub(r"layers\.\*", f"layers.{layer_num}",
+                                 mapped_name)
+
+            mapped_model_weight = get_param(model_params, mapped_name)
+
+            if mapped_model_weight.value.shape != loaded_weight.shape:
+                raise ValueError(
+                    f"Loaded shape for {split_loaded_name}: {loaded_weight.shape} "
+                    f"does not match model shape for {mapped_name}: {mapped_model_weight.value.shape}!"
+                )
+
+            mapped_model_weight.value = shard_put(loaded_weight,
+                                                  mapped_model_weight.sharding,
+                                                  mesh=model_for_loading.mesh)
+            logger.debug(
+                f"{split_loaded_name}: {loaded_weight.shape}  -->  {mapped_name}: {mapped_model_weight.value.shape}"
+            )
+            if self.is_verbose:
+                print_param_info(mapped_model_weight, mapped_name)
+
+    def _get_layer_num(self, loaded_key: str) -> Optional[int]:
+        """
+        Extracts the layer number from a HuggingFace weight key string.
+        Returns the layer number (int) or None if no layer number is found.
+        """
+        match = re.search(r"layers\.(\d+)", loaded_key)
+        if match:
+            return int(match.group(1))
+        return None
+
+    def _get_expert_num(self, loaded_key: str) -> Optional[int]:
+        """
+        Extracts the expect number from a HuggingFace weight key string.
+        Returns the expect number (int) or None if no expect number is found.
+        """
+        match = re.search(r"experts\.(\d+)\.", loaded_key)
+        if match:
+            return int(match.group(1))
+        return None
+
+    def load_weights(self, model_for_loading: nnx.Module):
+        model_params = nnx.state(model_for_loading)
+        with jax.default_device(jax.devices("cpu")[0]):
+            for loaded_name, loaded_weight in self.get_weights_iterator():
+                is_moe_layer = False
+                layer_num = self._get_layer_num(loaded_name)
+                expert_num = self._get_expert_num(loaded_name)
+                # Quantized (FP8) checkpoints unstack the expert weights, while unquantized (BF16) checkpoints keep them stacked.
+                is_unfused_expert = self.quantization_config is not None and expert_num is not None
+                is_scale = loaded_name.endswith(".weight_scale")
+
+                if is_unfused_expert:
+                    mapped_name = self.map_loaded_to_standardized_name(
+                        loaded_name)
+                    model_weight = get_param(model_params, mapped_name)
+
+                    if is_scale:
+                        cast_type = model_weight.array.scale.value.dtype
+                    else:
+                        cast_type = model_weight.array.qvalue.value.dtype
+
+                    loaded_weight = convert_torch_to_jax_with_view(
+                        loaded_weight, cast_type)
+                    loaded_weight = transpose_params(loaded_name,
+                                                     loaded_weight,
+                                                     self._transpose_map)
+
+                    buffer_key = f"{mapped_name}_{'scale' if is_scale else 'qvalue'}"
+                    if buffer_key not in self.expert_weights_buffer:
+                        self.expert_weights_buffer[buffer_key] = {}
+                    self.expert_weights_buffer[buffer_key][
+                        expert_num] = loaded_weight
+                    continue
+
+                if layer_num is not None:
+                    is_moe_layer = (layer_num + 1) % \
+                            self.interleave_moe_layer_step == 0
+                    self.expert_prefix = "shared_expert." if is_moe_layer else ""
+
+                if "gate_up_proj" in loaded_name:
+                    self._map_llama4_gate_up_proj(model_for_loading,
+                                                  model_params, loaded_name,
+                                                  loaded_weight)
+                    continue
+
+                mapped_name = self.map_loaded_to_standardized_name(loaded_name)
+                model_weight = get_param(model_params, mapped_name)
+
+                cast_type = model_weight.value.dtype
+                if not isinstance(loaded_weight, jax.Array):
+                    logger.debug(
+                        f"Converting PyTorch tensor {loaded_name} to JAX {cast_type}"
+                    )
+                    loaded_weight = convert_torch_to_jax_with_view(
+                        loaded_weight, cast_type)
+
+                if not loaded_name.endswith(".bias"):
+                    loaded_weight = reshape_params(loaded_name, loaded_weight,
+                                                   self._weight_shape_map)
+                    loaded_weight = transpose_params(loaded_name,
+                                                     loaded_weight,
+                                                     self._transpose_map)
+                if model_weight.value.shape != loaded_weight.shape:
+                    raise ValueError(
+                        f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
+                        f"does not match model shape for {mapped_name}: {model_weight.value.shape}!"
+                    )
+                logger.debug(
+                    f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
+                )
+
+                model_weight.value = shard_put(loaded_weight,
+                                               model_weight.sharding,
+                                               mesh=model_for_loading.mesh)
+                if self.is_verbose:
+                    print_param_info(model_weight, loaded_name)
+
+            with jax.default_device(jax.devices("cpu")[0]):
+                for buffer_key, expert_map in self.expert_weights_buffer.items(
+                ):
+                    sorted_exp_nums = sorted(expert_map.keys())
+                    aggregated_weight = jnp.stack(
+                        [expert_map[k] for k in sorted_exp_nums], axis=0)
+                    is_scale = buffer_key.endswith("_scale")
+                    base_mapped_name = buffer_key.replace("_scale",
+                                                          "").replace(
+                                                              "_qvalue", "")
+
+                    model_weight = get_param(model_params, base_mapped_name)
+
+                    assert hasattr(
+                        model_weight, 'array'
+                    ), f"Expected MoE weight '{base_mapped_name}' to be a quantized array (qarray)"
+
+                    if is_scale:
+                        loaded_name = f"{base_mapped_name}.array.scale.value"
+                        if model_weight.array.scale.value.shape != aggregated_weight.shape:
+                            raise ValueError(
+                                f"[AGGREGATED] Loaded shape for {buffer_key}: {aggregated_weight.shape}"
+                                f"does not match model shape for {loaded_name}: {model_weight.array.scale.value.shape}!"
+                            )
+
+                        model_weight.array.scale.value = shard_put(
+                            aggregated_weight,
+                            model_weight.array.scale.sharding,
+                            mesh=model_for_loading.mesh)
+
+                    elif aggregated_weight.itemsize < 2:  # check model weight elem nbits < 16
+                        loaded_name = f"{base_mapped_name}.array.qvalue.value"
+                        if model_weight.array.qvalue.value.shape != aggregated_weight.shape:
+                            raise ValueError(
+                                f"[AGGREGATED] Loaded shape for {buffer_key}: {aggregated_weight.shape}"
+                                f"does not match model shape for {loaded_name}: {model_weight.array.qvalue.value.shape}!"
+                            )
+
+                        model_weight.array.qvalue.value = shard_put(
+                            aggregated_weight,
+                            model_weight.array.qvalue.sharding,
+                            mesh=model_for_loading.mesh)
+
+                    logger.debug(
+                        f"Aggregated and loaded {loaded_name}: {aggregated_weight.shape}"
+                    )
+
+                    if self.is_verbose:
+                        print_param_info(model_weight, loaded_name)
+
+        nnx.update(model_for_loading, model_params)
+
+
 class Llama4ForCausalLM(nnx.Module):
+    WeightLoader = Llama4WeightLoader
 
     def __init__(self,
                  vllm_config: VllmConfig,
@@ -270,7 +606,7 @@ class Llama4ForCausalLM(nnx.Module):
         # we have to pass dynamic arrays here for __call__'s usage.
         self.rng = nnx.Rngs(rng)
 
-        weight_loader = Llama4WeightLoader(
+        weight_loader = self.WeightLoader(
             vllm_config=self.vllm_config,
             hidden_size=self.hidden_size,
             attn_heads=self.num_attention_heads,
@@ -303,341 +639,3 @@ class Llama4ForCausalLM(nnx.Module):
         logits_TV = jnp.dot(hidden_states,
                             self.lm_head.input_embedding_table_DV.value)
         return logits_TV
-
-
-class Llama4WeightLoader:
-
-    def __init__(self, vllm_config: VllmConfig, hidden_size, attn_heads,
-                 num_key_value_heads, attn_head_dim):
-        self.names_and_weights_generator = model_weights_generator(
-            model_name_or_path=vllm_config.model_config.model,
-            framework="pt",
-            filter_regex="language_model",
-            download_dir=vllm_config.load_config.download_dir)
-        self.is_verbose = getattr(vllm_config.additional_config, "is_verbose",
-                                  False)
-        self.interleave_moe_layer_step = getattr(
-            vllm_config.model_config.hf_config.text_config,
-            "interleave_moe_layer_step", 1)
-
-        self.quantization_config = getattr(vllm_config.model_config.hf_config,
-                                           "quantization_config", None)
-        self.expert_weights_buffer = {}
-        self.expert_prefix = "shared_expert."
-
-        transpose_mappings_to_quantization = {
-            "down_proj": (1, 0),
-            "gate_proj": (1, 0),
-            "up_proj": (1, 0),
-        }
-
-        self._transpose_map = {
-            "q_proj": (2, 0, 1),
-            "k_proj": (2, 0, 1),
-            "v_proj": (2, 0, 1),
-            "router": (1, 0),
-            f"{self.expert_prefix}down_proj": (1, 0),
-            f"{self.expert_prefix}gate_proj": (1, 0),
-            f"{self.expert_prefix}up_proj": (1, 0),
-            "feed_forward.down_proj": (1, 0),
-            "feed_forward.gate_proj": (1, 0),
-            "feed_forward.up_proj": (1, 0),
-            "o_proj": (1, 2, 0),
-            "lm_head": (1, 0),
-        }
-
-        if self.quantization_config and self.expert_prefix:
-            self._transpose_map.update(transpose_mappings_to_quantization)
-
-        self._weight_shape_map = {
-            "q_proj": (attn_heads, attn_head_dim, hidden_size),
-            "k_proj": (num_key_value_heads, attn_head_dim, hidden_size),
-            "v_proj": (num_key_value_heads, attn_head_dim, hidden_size),
-            # o_proj is inverted: https://github.com/huggingface/transformers/blob/v4.53.2/src/transformers/models/llama4/modeling_llama4.py#L298
-            "o_proj": (hidden_size, attn_heads, attn_head_dim),
-        }
-
-        # Set the mappings from loaded parameter keys to standardized names.\
-        # 1. EXPERT_MAPPINGS_FUSED: Used for non-quantized (e.g., BF16) checkpoints.
-        #    - This format typically comes from standard checkpoints where 'gate' and 'up' projection weights might be combined (FUSED) into a single tensor.
-        #    - Expert weights are usually stacked, with the expert dimension (E) being the first dimension.
-        EXPERT_MAPPINGS_FUSED = {
-            "language_model.model.layers.*.feed_forward.experts.down_proj":
-            "layers.*.moe_ffw.kernel_down_proj_EFD",
-            "language_model.model.layers.*.feed_forward.experts.gate_up_proj":
-            "layers.*.moe_ffw.kernel_up_proj_EDF",
-        }
-
-        # 2. EXPERT_MAPPINGS_UNFUSED: Specifically designed for quantized checkpoints (e.g., FP8).
-        #    - Quantized checkpoints store each expert's weights separately and explicitly separate the 'weight' (quantized value) from the 'weight_scale' (quantization scale).
-        #    - The mapping captures both the `.weight` and `.weight_scale` components. This allows the loader to aggregate (stack) the individual expert weights and scales.
-        EXPERT_MAPPINGS_UNFUSED = {
-            "language_model.model.layers.*.feed_forward.experts.*.down_proj.weight":
-            "layers.*.moe_ffw.kernel_down_proj_EFD",
-            "language_model.model.layers.*.feed_forward.experts.*.down_proj.weight_scale":
-            "layers.*.moe_ffw.kernel_down_proj_EFD",
-            "language_model.model.layers.*.feed_forward.experts.*.gate_proj.weight":
-            "layers.*.moe_ffw.kernel_gating_EDF",
-            "language_model.model.layers.*.feed_forward.experts.*.gate_proj.weight_scale":
-            "layers.*.moe_ffw.kernel_gating_EDF",
-            "language_model.model.layers.*.feed_forward.experts.*.up_proj.weight":
-            "layers.*.moe_ffw.kernel_up_proj_EDF",
-            "language_model.model.layers.*.feed_forward.experts.*.up_proj.weight_scale":
-            "layers.*.moe_ffw.kernel_up_proj_EDF",
-        }
-
-        self._loaded_to_standardized_keys = {
-            "language_model.model.embed_tokens.weight":
-            "embedder.input_embedding_table_VD",
-            "language_model.lm_head.weight":
-            "lm_head.input_embedding_table_DV",
-            "language_model.model.norm.weight":
-            "final_norm.scale",
-            "language_model.model.layers.*.input_layernorm.weight":
-            "layers.*.pre_attention_norm.scale",
-            "language_model.model.layers.*.post_attention_layernorm.weight":
-            "layers.*.pre_mlp_norm.scale",
-            "language_model.model.layers.*.self_attn.q_proj.weight":
-            "layers.*.attn.kernel_q_proj_DNH",
-            "language_model.model.layers.*.self_attn.k_proj.weight":
-            "layers.*.attn.kernel_k_proj_DKH",
-            "language_model.model.layers.*.self_attn.v_proj.weight":
-            "layers.*.attn.kernel_v_proj_DKH",
-            "language_model.model.layers.*.self_attn.o_proj.weight":
-            "layers.*.attn.kernel_o_proj_NHD",
-            "language_model.model.layers.*.feed_forward.router.weight":
-            "layers.*.moe_ffw.router.kernel_DE",
-            # shared experts
-            "language_model.model.layers.*.feed_forward.shared_expert.down_proj.weight":
-            "layers.*.shared_experts.kernel_down_proj_FD",
-            "language_model.model.layers.*.feed_forward.shared_expert.gate_proj.weight":
-            "layers.*.shared_experts.kernel_gating_DF",
-            "language_model.model.layers.*.feed_forward.shared_expert.up_proj.weight":
-            "layers.*.shared_experts.kernel_up_proj_DF",
-            # dense layers
-            "language_model.model.layers.*.feed_forward.down_proj.weight":
-            "layers.*.dense_ffw.kernel_down_proj_FD",
-            "language_model.model.layers.*.feed_forward.up_proj.weight":
-            "layers.*.dense_ffw.kernel_up_proj_DF",
-            "language_model.model.layers.*.feed_forward.gate_proj.weight":
-            "layers.*.dense_ffw.kernel_gating_DF",
-        }
-
-        if self.quantization_config is None:
-            self._loaded_to_standardized_keys.update(EXPERT_MAPPINGS_FUSED)
-        else:
-            self._loaded_to_standardized_keys.update(EXPERT_MAPPINGS_UNFUSED)
-
-    def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
-        # Find the corresponding model key using the HF key
-        if "layer" in loaded_key:
-            layer_num = self._get_layer_num(loaded_key)
-            layer_key = re.sub(r"layers\.\d+", "layers.*", loaded_key)
-
-            expert_match = re.search(r"experts\.(\d+)", layer_key)
-            if expert_match:
-                # Key for lookup eg: layers.*.feed_forward.experts.*.down_proj.weight
-                layer_key = re.sub(r"experts\.\d+", "experts.*", layer_key)
-
-            mapped_key = self._loaded_to_standardized_keys.get(
-                layer_key, loaded_key)
-            mapped_key = re.sub(r"layers\.\*", f"layers.{layer_num}",
-                                mapped_key)
-        else:
-            mapped_key = self._loaded_to_standardized_keys.get(
-                loaded_key, loaded_key)
-        return mapped_key
-
-    def _map_llama4_gate_up_proj(self, model_for_loading: nnx.Module,
-                                 model_params: nnx.State, loaded_name: str,
-                                 loaded_weight: jax.Array):
-        """HF's gate_up_proj is a fused tensor of gate and up projections. It needs to be split."""
-
-        cast_type = jnp.dtype(jnp.bfloat16)
-        # loaded_weight is a jax.Array when framework="flax", otherwise it's bfloat16
-        if not isinstance(loaded_weight, jax.Array):
-            loaded_weight = convert_torch_to_jax_with_view(
-                loaded_weight, cast_type)
-
-        split_weights = jnp.split(loaded_weight, 2, axis=-1)
-        layer_num = self._get_layer_num(loaded_name)
-
-        for split_type in ["gate", "up"]:
-            split_loaded_name = loaded_name.replace("gate_up_proj",
-                                                    f"{split_type}_proj")
-            if split_type == "gate":
-                mapped_name = "layers.*.moe_ffw.kernel_gating_EDF"
-                loaded_weight = split_weights[0]
-            else:
-                mapped_name = "layers.*.moe_ffw.kernel_up_proj_EDF"
-                loaded_weight = split_weights[1]
-
-            mapped_name = re.sub(r"layers\.\*", f"layers.{layer_num}",
-                                 mapped_name)
-
-            mapped_model_weight = get_param(model_params, mapped_name)
-
-            if mapped_model_weight.value.shape != loaded_weight.shape:
-                raise ValueError(
-                    f"Loaded shape for {split_loaded_name}: {loaded_weight.shape} "
-                    f"does not match model shape for {mapped_name}: {mapped_model_weight.value.shape}!"
-                )
-
-            mapped_model_weight.value = shard_put(loaded_weight,
-                                                  mapped_model_weight.sharding,
-                                                  mesh=model_for_loading.mesh)
-            logger.debug(
-                f"{split_loaded_name}: {loaded_weight.shape}  -->  {mapped_name}: {mapped_model_weight.value.shape}"
-            )
-            if self.is_verbose:
-                print_param_info(mapped_model_weight, mapped_name)
-
-    def _get_layer_num(self, loaded_key: str) -> Optional[int]:
-        """
-        Extracts the layer number from a HuggingFace weight key string.
-        Returns the layer number (int) or None if no layer number is found.
-        """
-        match = re.search(r"layers\.(\d+)", loaded_key)
-        if match:
-            return int(match.group(1))
-        return None
-
-    def _get_expert_num(self, loaded_key: str) -> Optional[int]:
-        """
-        Extracts the expect number from a HuggingFace weight key string.
-        Returns the expect number (int) or None if no expect number is found.
-        """
-        match = re.search(r"experts\.(\d+)\.", loaded_key)
-        if match:
-            return int(match.group(1))
-        return None
-
-    def load_weights(self, model_for_loading: nnx.Module):
-        model_params = nnx.state(model_for_loading)
-
-        with jax.default_device(jax.devices("cpu")[0]):
-            for loaded_name, loaded_weight in self.names_and_weights_generator:
-                is_moe_layer = False
-                layer_num = self._get_layer_num(loaded_name)
-                expert_num = self._get_expert_num(loaded_name)
-                # Quantized (FP8) checkpoints unstack the expert weights, while unquantized (BF16) checkpoints keep them stacked.
-                is_unfused_expert = self.quantization_config is not None and expert_num is not None
-                is_scale = loaded_name.endswith(".weight_scale")
-
-                if is_unfused_expert:
-                    mapped_name = self.map_loaded_to_standardized_name(
-                        loaded_name)
-                    model_weight = get_param(model_params, mapped_name)
-
-                    if is_scale:
-                        cast_type = model_weight.array.scale.value.dtype
-                    else:
-                        cast_type = model_weight.array.qvalue.value.dtype
-
-                    loaded_weight = convert_torch_to_jax_with_view(
-                        loaded_weight, cast_type)
-                    loaded_weight = transpose_params(loaded_name,
-                                                     loaded_weight,
-                                                     self._transpose_map)
-
-                    buffer_key = f"{mapped_name}_{'scale' if is_scale else 'qvalue'}"
-                    if buffer_key not in self.expert_weights_buffer:
-                        self.expert_weights_buffer[buffer_key] = {}
-                    self.expert_weights_buffer[buffer_key][
-                        expert_num] = loaded_weight
-                    continue
-
-                if layer_num is not None:
-                    is_moe_layer = (layer_num + 1) % \
-                            self.interleave_moe_layer_step == 0
-                    self.expert_prefix = "shared_expert." if is_moe_layer else ""
-
-                if "gate_up_proj" in loaded_name:
-                    self._map_llama4_gate_up_proj(model_for_loading,
-                                                  model_params, loaded_name,
-                                                  loaded_weight)
-                    continue
-
-                mapped_name = self.map_loaded_to_standardized_name(loaded_name)
-                model_weight = get_param(model_params, mapped_name)
-
-                cast_type = model_weight.value.dtype
-                if not isinstance(loaded_weight, jax.Array):
-                    logger.debug(
-                        f"Converting PyTorch tensor {loaded_name} to JAX {cast_type}"
-                    )
-                    loaded_weight = convert_torch_to_jax_with_view(
-                        loaded_weight, cast_type)
-
-                if not loaded_name.endswith(".bias"):
-                    loaded_weight = reshape_params(loaded_name, loaded_weight,
-                                                   self._weight_shape_map)
-                    loaded_weight = transpose_params(loaded_name,
-                                                     loaded_weight,
-                                                     self._transpose_map)
-                if model_weight.value.shape != loaded_weight.shape:
-                    raise ValueError(
-                        f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
-                        f"does not match model shape for {mapped_name}: {model_weight.value.shape}!"
-                    )
-                logger.debug(
-                    f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
-                )
-
-                model_weight.value = shard_put(loaded_weight,
-                                               model_weight.sharding,
-                                               mesh=model_for_loading.mesh)
-                if self.is_verbose:
-                    print_param_info(model_weight, loaded_name)
-
-            with jax.default_device(jax.devices("cpu")[0]):
-                for buffer_key, expert_map in self.expert_weights_buffer.items(
-                ):
-                    sorted_exp_nums = sorted(expert_map.keys())
-                    aggregated_weight = jnp.stack(
-                        [expert_map[k] for k in sorted_exp_nums], axis=0)
-                    is_scale = buffer_key.endswith("_scale")
-                    base_mapped_name = buffer_key.replace("_scale",
-                                                          "").replace(
-                                                              "_qvalue", "")
-
-                    model_weight = get_param(model_params, base_mapped_name)
-
-                    assert hasattr(
-                        model_weight, 'array'
-                    ), f"Expected MoE weight '{base_mapped_name}' to be a quantized array (qarray)"
-
-                    if is_scale:
-                        loaded_name = f"{base_mapped_name}.array.scale.value"
-                        if model_weight.array.scale.value.shape != aggregated_weight.shape:
-                            raise ValueError(
-                                f"[AGGREGATED] Loaded shape for {buffer_key}: {aggregated_weight.shape}"
-                                f"does not match model shape for {loaded_name}: {model_weight.array.scale.value.shape}!"
-                            )
-
-                        model_weight.array.scale.value = shard_put(
-                            aggregated_weight,
-                            model_weight.array.scale.sharding,
-                            mesh=model_for_loading.mesh)
-
-                    elif aggregated_weight.itemsize < 2:  # check model weight elem nbits < 16
-                        loaded_name = f"{base_mapped_name}.array.qvalue.value"
-                        if model_weight.array.qvalue.value.shape != aggregated_weight.shape:
-                            raise ValueError(
-                                f"[AGGREGATED] Loaded shape for {buffer_key}: {aggregated_weight.shape}"
-                                f"does not match model shape for {loaded_name}: {model_weight.array.qvalue.value.shape}!"
-                            )
-
-                        model_weight.array.qvalue.value = shard_put(
-                            aggregated_weight,
-                            model_weight.array.qvalue.sharding,
-                            mesh=model_for_loading.mesh)
-
-                    logger.debug(
-                        f"Aggregated and loaded {loaded_name}: {aggregated_weight.shape}"
-                    )
-
-                    if self.is_verbose:
-                        print_param_info(model_weight, loaded_name)
-
-        nnx.update(model_for_loading, model_params)

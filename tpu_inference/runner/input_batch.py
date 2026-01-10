@@ -11,7 +11,6 @@ from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingType
 from vllm.utils.collection_utils import swap_dict_values
 from vllm.v1.core.sched.output import NewRequestData
-from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 
 from tpu_inference.runner.block_table import MultiGroupBlockTable
 
@@ -176,10 +175,6 @@ class InputBatch:
         self.block_table.add_row(request.block_ids, req_index)
 
         sampling_params = request.sampling_params
-
-        if (self.is_spec_decode
-                and is_spec_decode_unsupported(sampling_params)):
-            self.spec_decode_unsupported_reqs.add(req_id)
 
         if sampling_params.sampling_type == SamplingType.GREEDY:
             # Avoid later division by zero.

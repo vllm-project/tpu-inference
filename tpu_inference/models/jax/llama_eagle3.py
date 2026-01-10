@@ -24,7 +24,8 @@ from vllm.config import VllmConfig
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.llama3 import LlamaDecoderLayer
-from tpu_inference.models.jax.utils.weight_utils import (MetadataMap,
+from tpu_inference.models.jax.utils.weight_utils import (BaseWeightLoader,
+                                                         MetadataMap,
                                                          get_default_maps,
                                                          load_hf_weights)
 
@@ -223,7 +224,44 @@ def update_reshape_map_for_eagle3(vllm_config: VllmConfig,
     })
 
 
+class EagleLlama3WeightLoader(BaseWeightLoader):
+
+    def __init__(self, vllm_config: VllmConfig, mesh: Mesh):
+        super().__init__(vllm_config, framework="pt")
+        self.vllm_config = vllm_config
+        self.mesh = mesh
+
+    def load_weights(self, model: "EagleLlama3ForCausalLM", mappings: dict):
+        # Define keys to keep in original dtype (e.g., float32 for stability)
+        keep_original_dtype_keys_regex = [
+            r".*d2t.*",
+        ]
+
+        metadata_map = get_default_maps(
+            self.vllm_config.speculative_config.draft_model_config, self.mesh,
+            mappings)
+
+        update_reshape_map_for_eagle3(self.vllm_config, metadata_map)
+
+        load_hf_weights(
+            vllm_config=self.vllm_config,
+            model=model,
+            metadata_map=metadata_map,
+            mesh=self.mesh,
+            is_draft_model=True,
+            keep_original_dtype_keys_regex=keep_original_dtype_keys_regex)
+
+        # If the embedding is not initialized, initialize it with a dummy array here to pass jit compilation. The real weights will be shared from the target model in eagle3 class.
+        if isinstance(model.model.embed_tokens.embedding.value,
+                      jax.ShapeDtypeStruct):
+            model.model.embed_tokens.embedding.value = jnp.zeros(
+                model.model.embed_tokens.embedding.shape,
+                dtype=model.model.embed_tokens.embedding.dtype,
+            )
+
+
 class EagleLlama3ForCausalLM(nnx.Module):
+    WeightLoader = EagleLlama3WeightLoader
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
                  mesh: Mesh):
@@ -322,29 +360,5 @@ class EagleLlama3ForCausalLM(nnx.Module):
             "model.embed_tokens.embedding",  # Some checkpoints need this
         }
 
-        # Define keys to keep in original dtype (e.g., float32 for stability)
-        keep_original_dtype_keys_regex = [
-            r".*d2t.*",
-        ]
-
-        metadata_map = get_default_maps(
-            self.vllm_config.speculative_config.draft_model_config, self.mesh,
-            mappings)
-
-        update_reshape_map_for_eagle3(self.vllm_config, metadata_map)
-
-        load_hf_weights(
-            vllm_config=self.vllm_config,
-            model=self,
-            metadata_map=metadata_map,
-            mesh=self.mesh,
-            is_draft_model=True,
-            keep_original_dtype_keys_regex=keep_original_dtype_keys_regex)
-
-        # If the embedding is not initialized, initialize it with a dummy array here to pass jit compilation. The real weights will be shared from the target model in eagle3 class.
-        if isinstance(self.model.embed_tokens.embedding.value,
-                      jax.ShapeDtypeStruct):
-            self.model.embed_tokens.embedding.value = jnp.zeros(
-                self.model.embed_tokens.embedding.shape,
-                dtype=self.model.embed_tokens.embedding.dtype,
-            )
+        loader = self.WeightLoader(self.vllm_config, self.mesh)
+        loader.load_weights(self, mappings)

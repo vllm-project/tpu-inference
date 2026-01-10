@@ -573,7 +573,7 @@ class TestQwen2_5_VLForConditionalGeneration:
         model.language_model.compute_logits.assert_called_once_with(
             hidden_states)
 
-    @patch('tpu_inference.models.jax.qwen2_5_vl.load_hf_weights')
+    @patch("tpu_inference.models.jax.utils.weight_utils.load_hf_weights")
     def test_load_weights(self, mock_load_weights: MagicMock,
                           model: Qwen2_5_VLForConditionalGeneration,
                           mock_vllm_config: MockVllmConfig, rng: PRNGKey,
@@ -590,7 +590,7 @@ class TestQwen2_5_VLForConditionalGeneration:
         assert isinstance(model.rng, nnx.Rngs)
         assert model.language_model.rng is model.rng
 
-    @patch('tpu_inference.models.jax.qwen2_5_vl.load_hf_weights')
+    @patch("tpu_inference.models.jax.utils.weight_utils.load_hf_weights")
     def test_load_weights_tied(self, mock_load_weights: MagicMock,
                                rng: PRNGKey, mesh: Mesh):
         mock_vllm_config_tied = MockVllmConfig(tie_word_embeddings=True)

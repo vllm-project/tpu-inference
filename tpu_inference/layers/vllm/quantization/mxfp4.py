@@ -19,13 +19,14 @@ import jax.numpy as jnp
 import torch
 from jax.sharding import Mesh, PartitionSpec
 from torch.nn.parameter import Parameter
-from torchax.interop import torch_view
+from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
 from vllm.attention.layer import Attention
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig, FusedMoEQuantConfig, mxfp4_w4a16_moe_quant_config)
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
-                                                        FusedMoEMethodBase)
+                                                        FusedMoEMethodBase,
+                                                        FusedMoERouter)
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
@@ -210,15 +211,26 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
+        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
+
+        weights = FusedMoEWeights(
+            w13_weight=jax_view(layer.w13_weight),
+            w13_weight_scale=jax_view(layer.w13_weight_scale),
+            w13_bias=jax_view(layer.w13_bias),
+            w2_weight=jax_view(layer.w2_weight),
+            w2_weight_scale=jax_view(layer.w2_weight_scale),
+            w2_bias=jax_view(layer.w2_bias),
+        )
 
         return fused_moe_apply(
             layer,
             x,
             router_logits,
+            weights,
             self.moe_backend,
             self.mesh,
             self.extra_backend_kwargs,

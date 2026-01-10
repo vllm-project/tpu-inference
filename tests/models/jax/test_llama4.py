@@ -153,16 +153,19 @@ class TestLlama4ForCausalLM:
 
             assert jnp.all(final_norm_scale == 1.0)
 
-    @patch("tpu_inference.models.jax.llama4.Llama4WeightLoader")
-    def test_load_weights_called_correctly(self, mock_loader_cls, rng, mesh):
+    def test_load_weights_called_correctly(self, rng, mesh):
         """Tests that the weight loader is called correctly for checkpoint loading."""
         vllm_config = MockVllmConfig(model_name="llama4-scout",
                                      random_weights=False)
         model = Llama4ForCausalLM(vllm_config, rng, mesh)
 
-        mock_loader_instance = MagicMock()
-        mock_loader_cls.return_value = mock_loader_instance
-        model.load_weights(rng)
+        # Patch the WeightLoader attribute specifically on the class
+        with patch.object(Llama4ForCausalLM,
+                          'WeightLoader') as mock_loader_cls:
+            mock_loader_instance = MagicMock()
+            mock_loader_cls.return_value = mock_loader_instance
+
+            model.load_weights(rng)
 
         mock_loader_cls.assert_called_once_with(vllm_config=vllm_config,
                                                 hidden_size=32,
