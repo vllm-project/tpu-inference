@@ -17,9 +17,7 @@ from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
-import torch
 from jax.sharding import Mesh
-from torchax.interop import jax_view, torch_view
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 
@@ -57,20 +55,17 @@ def select_moe_backend(moe: FusedMoEConfig):
 
 
 def fused_moe_apply(
-    layer: torch.nn.Module,
-    x: torch.Tensor,
-    router_logits: torch.Tensor,
+    layer: FusedMoE,
+    x: jax.Array,
+    gating_output: jax.Array,
     weights: "FusedMoEWeights",
     moe_backend: FusedMoEBackend,
     mesh: Mesh,
     extra_backend_kwargs: dict,
-) -> torch.Tensor:
+) -> jax.Array:
     assert isinstance(layer, FusedMoE)
     if layer.scoring_func != "softmax":
         raise NotImplementedError("Only softmax is supported for scoring_func")
-
-    x = jax_view(x)
-    gating_output = jax_view(router_logits)
 
     with jax.named_scope(layer._get_name()):
         match moe_backend:
@@ -110,4 +105,4 @@ def fused_moe_apply(
                     activation=layer.activation,
                 )
 
-        return torch_view(output)
+        return output

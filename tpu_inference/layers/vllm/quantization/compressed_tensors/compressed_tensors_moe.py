@@ -201,12 +201,13 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
             w2_bias=jax_view(layer.w2_bias) if self.moe.has_bias else None,
         )
 
-        return fused_moe_apply(
-            layer,
-            x,
-            router_logits,
-            weights,
-            self.moe_backend,
-            self.mesh,
-            self.extra_backend_kwargs,
-        )
+        return torch_view(
+            fused_moe_apply(
+                layer,
+                jax_view(x),
+                jax_view(router_logits),
+                weights,
+                self.moe_backend,
+                self.mesh,
+                self.extra_backend_kwargs,
+            ))
