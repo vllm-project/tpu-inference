@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import itertools
 import time
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
@@ -500,38 +501,43 @@ class CompilationManager:
                     ShardingAxisName.MLP_DATA)) if dp_size > 1 else None
             logits = self._create_dummy_tensor((num_reqs, hsize), jnp.bfloat16,
                                                logits_sharding)
-            for do_sampling in (True, False):
-                for logprobs in (True, False):
-                    if do_sampling:
-                        temperature = np.full((num_reqs, ),
-                                              0.7,
-                                              dtype=np.float32)
-                        top_k = np.full((num_reqs, ), 20, dtype=np.int32)
-                        top_p = np.full((num_reqs, ), 0.8, dtype=np.float32)
-                        (temperature, top_k, top_p) = device_array(
-                            self.runner.mesh, (temperature, top_k, top_p),
-                            sharding=sampling_metadata_sharding)
-                    else:
-                        temperature = None
-                        top_k = None
-                        top_p = None
+            for do_sampling, logprobs, use_pallas_kernel in itertools.product(
+                (True, False), (True, False),
+                # Doesn't compile pallas kernel if env not set
+                (envs.PALLAS_SAMPLING_TOPK_THRESHOLD > 0, False)
+            ):
+                if do_sampling:
+                    temperature = np.full((num_reqs, ),
+                                          0.7,
+                                          dtype=np.float32)
+                    top_k = np.full((num_reqs, ), 20, dtype=np.int32)
+                    top_p = np.full((num_reqs, ), 0.8, dtype=np.float32)
+                    (temperature, top_k, top_p) = device_array(
+                        self.runner.mesh, (temperature, top_k, top_p),
+                        sharding=sampling_metadata_sharding)
+                else:
+                    temperature = None
+                    top_k = None
+                    top_p = None
 
-                    sampling_metadata = TPUSupportedSamplingMetadata(
-                        temperature=temperature,
-                        top_k=top_k,
-                        top_p=top_p,
-                        do_sampling=do_sampling,
-                        logprobs=logprobs)
-                    self._run_compilation(
-                        f"worker{self.runner.rank} sample",
-                        sample,
-                        self.runner.rng_params_for_sampling,
-                        self.runner.mesh,
-                        logits,
-                        sampling_metadata,
-                        num_reqs=num_reqs,
-                        do_sampling=do_sampling,
-                    )
+                sampling_metadata = TPUSupportedSamplingMetadata(
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    do_sampling=do_sampling,
+                    logprobs=logprobs,
+                    use_pallas_kernel=use_pallas_kernel if do_sampling else False,
+                )
+                self._run_compilation(
+                    f"worker{self.runner.rank} sample",
+                    sample,
+                    self.runner.rng_params_for_sampling,
+                    self.runner.mesh,
+                    logits,
+                    sampling_metadata,
+                    num_reqs=num_reqs,
+                    do_sampling=do_sampling,
+                )
 
         self._sampling_precompiled = True
 
