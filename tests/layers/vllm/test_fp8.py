@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 import tempfile
 
 import jax
@@ -131,14 +132,10 @@ def ref_quantize_fp8_block_2d(w: torch.Tensor, block_m: int, block_n: int,
     dtype_min = float(dtype_info.min)
 
     out, inn = w.shape
-    padded_out = ((out + block_m - 1) // block_m) * block_m
-    padded_inn = ((inn + block_n - 1) // block_n) * block_n
+    padded_out, padded_inn = math.ceil(out / block_m) * block_m, math.ceil(
+        inn / block_n) * block_n
 
-    if padded_out != out or padded_inn != inn:
-        w_padded = torch.zeros((padded_out, padded_inn), dtype=w.dtype)
-        w_padded[:out, :inn] = w
-        w = w_padded
-
+    w = F.pad(w, (0, padded_inn - inn, 0, padded_out - out))
     w_view = w.view(padded_out // block_m, block_m, padded_inn // block_n,
                     block_n)
 
