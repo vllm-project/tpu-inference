@@ -17,8 +17,29 @@
 # --- Skip build if only docs/icons changed ---
 echo "--- :git: Checking changed files"
 
-# Get a list of all files changed in this commit
-FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r "$BUILDKITE_COMMIT")
+BASE_BRANCH=${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-"main"}
+
+if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
+    echo "PR detected. Target branch: $BASE_BRANCH"
+
+    # Fetch base and current commit to ensure local history exists for diff
+    git fetch origin "$BASE_BRANCH" --depth=20 --quiet || echo "Base fetch failed"
+    git fetch origin "$BUILDKITE_COMMIT" --depth=20 --quiet || true
+
+    # Get all changes in this PR using triple-dot diff (common ancestor to HEAD)
+    # This correctly captures changes even if the last commit is a merge from main
+    FILES_CHANGED=$(git diff --name-only origin/"$BASE_BRANCH"..."$BUILDKITE_COMMIT" 2>/dev/null || true)
+
+    # Fallback to single commit diff if PR history is unavailable
+    if [ -z "$FILES_CHANGED" ]; then
+        echo "Warning: PR diff failed. Falling back to single commit check."
+        FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r -m "$BUILDKITE_COMMIT")
+    fi
+else
+    echo "Non-PR build. Checking the latest commit."
+    # -m ensures merge commits show files brought into the branch
+    FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r -m "$BUILDKITE_COMMIT")
+fi
 
 echo "Files changed:"
 echo "$FILES_CHANGED"
