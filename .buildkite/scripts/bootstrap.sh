@@ -84,7 +84,25 @@ else
   # Check if the current build is a pull request
   if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     echo "This is a Pull Request build."
-    PR_LABELS=$(curl -s "https://api.github.com/repos/vllm-project/tpu-inference/pulls/$BUILDKITE_PULL_REQUEST" | jq -r '.labels[].name')
+
+    # Wait for GitHub API to sync labels
+    echo "Sleeping for 5 seconds to ensure GitHub API is updated..."
+    sleep 5
+
+    API_URL="https://api.github.com/repos/vllm-project/tpu-inference/pulls/$BUILDKITE_PULL_REQUEST"
+    echo "Fetching PR details from: $API_URL"
+
+    # Fetch the response body and save to a temporary file
+    GITHUB_PR_RESPONSE_FILE="github_api_logs.json"
+    curl -s "$API_URL" -o "$GITHUB_PR_RESPONSE_FILE"
+    
+    # Upload the full response body as a Buildkite artifact
+    echo "Uploading GitHub API response as artifact..."
+    buildkite-agent artifact upload "$GITHUB_PR_RESPONSE_FILE"
+
+    # Extract labels using input redirection
+    PR_LABELS=$(jq -r '.labels[].name' < "$GITHUB_PR_RESPONSE_FILE")
+    echo "Extracted PR Labels: $PR_LABELS"
 
     # If it's a PR, check for the specific label
     if [[ $PR_LABELS == *"ready"* ]]; then
