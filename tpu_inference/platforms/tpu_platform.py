@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
 import jax.numpy as jnp
 import torch
 import vllm.envs as vllm_envs
-from tpu_info import device
+from tpu_info.device import TpuChip, get_local_chips
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.platforms.interface import Platform, PlatformEnum
 
@@ -71,19 +71,19 @@ class TpuPlatform(Platform):
         try:
             if vllm_envs.VLLM_TPU_USING_PATHWAYS:
                 # Causes mutliprocess accessing IFRT when calling jax.devices()
-                return "TPU v6 lite"
+                return TpuChip.V6E
             else:
-                chip_type, _ = device.get_local_chips()
-                return f"TPU {chip_type.name}"
+                chip_info, _ = get_local_chips()
+                return chip_info.name
         except Exception as e:
             logger.warning(f"Error getting device name: {e}")
-            return 'TPU'
+            return ""
 
     @classmethod
     def fp8_dtype(cls) -> torch.dtype:
-        if cls.get_device_name().lower() == "tpu v6e":
-            logger.info(
-                "Automatically using fp8_e5m2 for FP8 KV cache on TPU v6e.")
+        if cls.get_device_name() != TpuChip.V7X:
+            logger.info_once(
+                "Automatically using fp8_e5m2 for FP8 KV cache non v7x.")
             return torch.float8_e5m2
         return torch.float8_e4m3fn
 
