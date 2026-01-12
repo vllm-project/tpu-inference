@@ -223,6 +223,7 @@ def tensor_sharded_gmm_row_parallel(
 
 def expert_sharded_gmm(
     lhs: jax.Array,
+    lhs_scale: jax.Array | None,
     rhs: jax.Array,
     rhs_scale: jax.Array | None,
     rhs_bias: jax.Array | None,
@@ -236,13 +237,15 @@ def expert_sharded_gmm(
     num_experts_per_shard = num_experts // ep_size
     group_offset = jnp.arange(0, num_experts, num_experts_per_shard)
 
-    def _gmm(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset):
+    def _gmm(lhs, lhs_scale, rhs, rhs_scale, rhs_bias, group_sizes,
+             group_offset):
         m, g, k, n = lhs.shape[0], *rhs.shape
         tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
 
         gmm_res = gmm(
             lhs=lhs,
             rhs=rhs,
+            lhs_scale=lhs_scale,
             rhs_scale=rhs_scale,
             rhs_bias=rhs_bias,
             group_sizes=group_sizes,
@@ -271,7 +274,15 @@ def expert_sharded_gmm(
     #       0, 0, 0, 0     0, 0, 0, 0     0, 0, 0, 0     D, D, D, D
     #        shard-0        shard-1        shard-2        shard-3
     # Each shards has 3 (row A), 2 (row B), 5 (row C) and 4 (row D).
-    lhs_spec = ep_p_spec if is_last_expert else P()
+    if is_last_expert:
+        lhs_spec = ep_p_spec
+        lhs_scale_spec = P(
+            None, None,
+            ShardingAxisName.EXPERT) if lhs_scale is not None else None
+    else:
+        lhs_spec = P()
+        lhs_scale_spec = P(None, None, None) if lhs_scale is not None else None
+
     rhs_spec = ep_p_spec
     rhs_scale_spec = None if rhs_scale is None else ep_p_spec
     rhs_bias_spec = None if rhs_bias is None else ep_p_spec
@@ -280,6 +291,7 @@ def expert_sharded_gmm(
         mesh=mesh,
         in_specs=(
             lhs_spec,
+            lhs_scale_spec,
             rhs_spec,
             rhs_scale_spec,
             rhs_bias_spec,
@@ -288,7 +300,7 @@ def expert_sharded_gmm(
         ),
         out_specs=ep_p_spec,
         check_vma=False,
-    )(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset)
+    )(lhs, lhs_scale, rhs, rhs_scale, rhs_bias, group_sizes, group_offset)
 
     if not is_last_expert:
         return gmm_res
@@ -493,6 +505,7 @@ def fused_moe_func(
     if use_ep:
         x = expert_sharded_gmm(
             x,
+            x_scale,
             w1,
             w1_scale,
             w1_bias,
@@ -503,9 +516,26 @@ def fused_moe_func(
         x1, x2 = jnp.split(x, 2, -1)
 
         x = activation_fn(activation, x1, x2)
+        x_scale = None
+        if w2_scale is not None:
+            # Block Size (Using Intermediate Dim 1)
+            block_size = w2.shape[1] // w2_scale.shape[1]
+
+            # 2. Quantize
+            # Note: x is sharded by EXPERT here. quantize along Intermediate dimension
+            x, x_scale = quantize_tensor(jnp.float8_e4m3fn,
+                                         x,
+                                         axis=-1,
+                                         block_size=block_size,
+                                         pad_tensor=True)
+
+            # Transpose Scale for Kernel (Blocks, 1, Tokens)
+            x_scale = jnp.swapaxes(x_scale, 0, 1)
+            x_scale = jnp.expand_dims(x_scale, 1)
 
         x = expert_sharded_gmm(
             x,
+            x_scale,
             w2,
             w2_scale,
             w2_bias,
