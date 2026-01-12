@@ -18,7 +18,7 @@ import tempfile
 import jax
 import pytest
 import torch
-import torch.nn.functional.pad as F
+import torch.nn.functional as F
 import torchax
 from jax.sharding import PartitionSpec
 from torchax.interop import torch_view
