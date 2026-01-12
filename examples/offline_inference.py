@@ -9,6 +9,7 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from tpu_inference.core import disagg_utils
 
+os.environ["JAX_ENABLE_X64"] = "1"
 
 def create_parser():
     parser = FlexibleArgumentParser()

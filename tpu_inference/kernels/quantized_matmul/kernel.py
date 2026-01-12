@@ -355,7 +355,7 @@ def quantized_matmul_kernel(
             n_out=orig_n_out,
             n_in=orig_n_in,
             x_q_dtype=jnp.dtype(x_q_dtype).name,
-            w_q_dtype=jnp.dtype(x_q_dtype).name,
+            w_q_dtype=jnp.dtype(w_q_dtype).name,
         )
         #print("Printing tuned value:", tuned_value)
     batch_block_size = tuned_value.batch_block_size
