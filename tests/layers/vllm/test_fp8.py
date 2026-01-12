@@ -44,7 +44,7 @@ from . import utils as test_utils
 
 P = PartitionSpec
 MODELS = [
-    "deepseek-ai/DeepSeek-V3",
+    "Qwen/Qwen3-0.6B-FP8",
 ]
 
 
