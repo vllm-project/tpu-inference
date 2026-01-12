@@ -17,6 +17,7 @@ import tempfile
 import jax
 import pytest
 import torch
+import torch.nn.functional.pad as F
 import torchax
 from jax.sharding import PartitionSpec
 from torchax.interop import torch_view
@@ -74,21 +75,15 @@ def ref_dequantize_fp8_block_2d(w_q: torch.Tensor, scale_blocks: torch.Tensor,
                                 block_m: int, block_n: int) -> torch.Tensor:
     out, inn = w_q.shape
     scale_out, scale_inn = scale_blocks.shape
+    padded_out, padded_inn = scale_out * block_m, scale_inn * block_n
 
-    padded_out = scale_out * block_m
-    padded_inn = scale_inn * block_n
+    w_q = F.pad(w_q, (0, padded_inn - inn, 0, padded_out - out))
 
-    if padded_out != out or padded_inn != inn:
-        w_padded = torch.zeros((padded_out, padded_inn), dtype=w_q.dtype)
-        w_padded[:out, :inn] = w_q
-        w_q = w_padded
+    w_q = w_q.to(torch.float32).view(scale_out, block_m, scale_inn, block_n)
+    scale_e = scale_blocks[:, None, :, None]
+    w_deq = w_q * scale_e
 
-    scale_e = scale_blocks[:, None, :, None].repeat(1, block_m, 1, block_n)
-    w_deq = (
-        w_q.to(torch.float32).view(scale_out, block_m, scale_inn, block_n) *
-        scale_e)
     w_deq = w_deq.reshape(padded_out, padded_inn)
-
     return w_deq[:out, :inn]
 
 
@@ -192,7 +187,8 @@ def initialize_layer_weights(layer: torch.nn.Module):
         10)
 
     for i in range(0, layer.output_size, block_m):
-        w_f32[i:i + block_m, :] *= (i // block_m + 1)
+        w_f32[i:i +
+              block_m] *= i // block_m + 1  # simulate highly varying scales
 
     w_q, w_scale_blocks = ref_quantize_fp8_block_2d(w_f32, block_m, block_n,
                                                     torch.float8_e4m3fn)
