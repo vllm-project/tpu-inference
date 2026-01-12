@@ -441,9 +441,8 @@ def fused_moe_func(
             # To quantize hidden states along reduce dimension (hidden_size for first gmm),
             # we need to pad the hidden to be multiple of block_size
             # padded_hidden_size of w13 aka w1 is already multiple of block_size
-
             hidden_states_local, lhs_scales = quantize_tensor(
-                jnp.float8_e4m3fn,  # Target scale dtype (usually bf16/float)
+                jnp.float8_e4m3fn,
                 hidden_states_local,
                 axis=-1,  # Quantize along Hidden dimension
                 block_size=block_size,
@@ -528,10 +527,10 @@ def fused_moe_func(
         x = activation_fn(activation, x1, x2)
         x_scale = None
         if w2_scale is not None:
-            block_size = w2.shape[2] // w2_scale.shape[1]
+            block_size = w2.shape[1] // w2_scale.shape[1]
             original_intermediate_size = x.shape[-1]
             x, x_scale = quantize_tensor(
-                jnp.float8_e4m3fn,  # Target scale dtype (usually bf16/float)
+                jnp.float8_e4m3fn,
                 x,
                 axis=-1,  # Quantize along Intermediate dimension
                 block_size=block_size,
