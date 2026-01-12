@@ -132,8 +132,8 @@ def ref_quantize_fp8_block_2d(w: torch.Tensor, block_m: int, block_n: int,
     dtype_min = float(dtype_info.min)
 
     out, inn = w.shape
-    padded_out, padded_inn = math.ceil(out / block_m) * block_m, math.ceil(
-        inn / block_n) * block_n
+    padded_out = math.ceil(out / block_m) * block_m
+    padded_inn = math.ceil(inn / block_n) * block_n
 
     w = F.pad(w, (0, padded_inn - inn, 0, padded_out - out))
     w_view = w.view(padded_out // block_m, block_m, padded_inn // block_n,
