@@ -171,12 +171,21 @@ class VllmFp8LinearMethod(Fp8LinearMethod):
 
         weights = process_fp8_linear_weights(weight, weight_scale, bias)
         weights.weight_scale = jnp.expand_dims(jnp.transpose(weights.weight_scale), axis=1)
+
+        # 1. Define the correct sharding for 3D scale (K, 1, N)
+        # We want to shard the last dimension (N), which corresponds to weight_sharding[0]
+        out_axis, in_axis = self.linear_config.weight_sharding
+
+        # 2. Construct the spec mapping K->in_axis and N->out_axis
+        # Scale Shape: (K_blocks, 1, N)
+        fp8_scale_spec = P(in_axis, None, out_axis)
         weights = torch_view(
             shard_linear_weights(
                 weights,
                 mesh=self.linear_config.mesh,
                 weight_p_spec=self.linear_config.weight_sharding,
                 bias_p_spec=self.linear_config.bias_sharding,
+                weight_scale_p_spec=fp8_scale_spec,
             ))
 
         if self.linear_config.fuse_matmuls:

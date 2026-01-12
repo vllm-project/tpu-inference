@@ -147,6 +147,7 @@ def shard_linear_weights(
     bias_p_spec: PartitionSpec,
     transposed: bool = True,
     per_tensor: bool = False,
+    weight_scale_p_spec: PartitionSpec | None = None,
 ) -> LinearWeights:
 
     if not transposed:
@@ -157,10 +158,16 @@ def shard_linear_weights(
 
     weight_sharding = NamedSharding(mesh, weight_p_spec)
     bias_sharding = NamedSharding(mesh, bias_p_spec)
-
+    if per_tensor:
+        scale_sharding = NamedSharding(mesh, P())
+    elif weight_scale_p_spec is not None:
+        # If the caller provided a specific spec (e.g. for FP8 3D scales), use it
+        scale_sharding = NamedSharding(mesh, weight_scale_p_spec)
+    else:
+        scale_sharding = bias_sharding
     weight_shardings = LinearWeights(
         weight=weight_sharding,
-        weight_scale=NamedSharding(mesh, P()) if per_tensor else bias_sharding,
+        weight_scale=scale_sharding,
         zero_point=bias_sharding,
         bias=bias_sharding,
     )
