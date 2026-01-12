@@ -160,7 +160,7 @@ def shard_linear_weights(
 
     weight_shardings = LinearWeights(
         weight=weight_sharding,
-        weight_scale=NamedSharding(mesh, P()) if per_tensor else bias_sharding,
+        weight_scale=NamedSharding(mesh, P()) if per_tensor else NamedSharding(mesh, P(weight_p_spec[1], None, weight_p_spec[0])),
         zero_point=bias_sharding,
         bias=bias_sharding,
     )

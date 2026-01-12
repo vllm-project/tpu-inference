@@ -328,7 +328,6 @@ def quantized_matmul_kernel(
     Quantized matmul result.
   """
 
-    #print("Printing Before kernel shapes:", x.shape, w_q.shape, w_scale.shape)
     if w_zp is not None:
         raise NotImplementedError('zero_point is not supported.')
 
@@ -355,9 +354,8 @@ def quantized_matmul_kernel(
             n_out=orig_n_out,
             n_in=orig_n_in,
             x_q_dtype=jnp.dtype(x_q_dtype).name,
-            w_q_dtype=jnp.dtype(x_q_dtype).name,
+            w_q_dtype=jnp.dtype(w_q.dtype).name,
         )
-        #print("Printing tuned value:", tuned_value)
     batch_block_size = tuned_value.batch_block_size
     out_block_size = tuned_value.out_block_size
     in_block_size = tuned_value.in_block_size
