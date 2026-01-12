@@ -132,12 +132,11 @@ def ref_quantize_fp8_block_2d(w: torch.Tensor, block_m: int, block_n: int,
     dtype_min = float(dtype_info.min)
 
     out, inn = w.shape
-    padded_out = math.ceil(out / block_m) * block_m
-    padded_inn = math.ceil(inn / block_n) * block_n
+    scale_out, scale_inn = math.ceil(out / block_m), math.ceil(inn / block_n)
+    padded_out, padded_inn = scale_out * block_m, scale_inn * block_n
 
     w = F.pad(w, (0, padded_inn - inn, 0, padded_out - out))
-    w_view = w.view(padded_out // block_m, block_m, padded_inn // block_n,
-                    block_n)
+    w_view = w.view(scale_out, block_m, scale_inn, block_n)
 
     abs_max = torch.amax(torch.abs(w_view), dim=(1, 3), keepdim=True)
     scale = abs_max / dtype_max
