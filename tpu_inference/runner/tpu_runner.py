@@ -724,16 +724,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
             # We have the modality embeds at this time.
-            print("DEBUG: We are about to run execute_mm_encoder")
             self.mm_manager.execute_mm_encoder(scheduler_output)
             mm_embeds = self.mm_manager.gather_mm_embeddings(
                 scheduler_output, input_ids.shape[0])
-
-            print("These are mm_embeds: ", mm_embeds)
-
-            print("DEBUG: We successfully ran execute_mm_encoder")
-
-            print("LG4 is being recognized as multimodal!")
         else:
             mm_embeds = []
 

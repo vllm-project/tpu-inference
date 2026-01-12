@@ -190,7 +190,7 @@ class SegmentIds(NamedTuple):
 
 
 @dataclass(kw_only=True)
-class Llama4VisionAttention(nnx.Module):  # <--- Inherits from nnx.Module
+class Llama4VisionAttention(nnx.Module): 
     hidden_size: int
     num_attention_heads: int
     num_key_value_heads: int
@@ -207,11 +207,8 @@ class Llama4VisionAttention(nnx.Module):  # <--- Inherits from nnx.Module
     activation_attention_out_td: Sharding
     is_causal: bool = True
     kv_cache_quantized_dtype: Optional[jnp.dtype] = None
-
-    # 1. ADD: The required InitVar for nnx initialization (used in the constructor)
     rngs: InitVar[nnx.Rngs]
 
-    # 2. ADD: The structural attributes needed for sharding and RoPE
     dnh_sharding: Sharding = ()
     dkh_sharding: Sharding = ()
     nhd_sharding: Sharding = ()
@@ -220,19 +217,17 @@ class Llama4VisionAttention(nnx.Module):  # <--- Inherits from nnx.Module
     keyvalue_skh: P = P()
     rope_input_ordering: str = "interleaved"  # Vision config default
 
-    # 3. ADD: Placeholder for scales (used in inject_weights, even if unused internally)
     _q_scale: float = 1.0
     _k_scale: float = 1.0
     _v_scale: float = 1.0
 
-    # 4. ADD: The required __post_init__ to process rngs and create params
     def __post_init__(self, rngs: nnx.Rngs):
         """Initializes the weight kernels for Q, K, V, and O projections."""
         N = self.num_attention_heads
         K = self.num_key_value_heads
         D = self.hidden_size
         H = self.head_dim
-        random_init = False  # Weights are loaded from PyTorch
+        random_init = False
 
         self.kernel_q_proj_DNH = create_param(rngs, (D, N, H),
                                               self.dnh_sharding,
@@ -274,7 +269,7 @@ class Llama4VisionAttention(nnx.Module):  # <--- Inherits from nnx.Module
             is_prefill,
             kv_cache: KVCache,
             attention_metadata: AttentionMetadata,
-            freqs_cis: jax.Array, # Accepts pre-calculated freqs_cis from Llama4VisionRotaryEmbedding
+            freqs_cis: jax.Array,
             use_attention_rope: bool = True,
             **kwargs):
 
@@ -293,7 +288,7 @@ class Llama4VisionAttention(nnx.Module):  # <--- Inherits from nnx.Module
             q_TNH += self.bias_q_proj_NH.value[None, ...]
 
             if use_attention_rope:
-                q_TNH = apply_rope(q_TNH, freqs_cis, H, rope_theta, # Use pre-calculated freqs_cis
+                q_TNH = apply_rope(q_TNH, freqs_cis, H, rope_theta,
                                    rope_scaling, self.rope_input_ordering)
             q_TNH = nnx.with_sharding_constraint(q_TNH, self.query_tnh)
 
@@ -303,7 +298,7 @@ class Llama4VisionAttention(nnx.Module):  # <--- Inherits from nnx.Module
             k_SKH += self.bias_k_proj_KH.value[None, ...]
 
             if use_attention_rope:
-                k_SKH = apply_rope(k_SKH, freqs_cis, H, rope_theta, # Use pre-calculated freqs_cis
+                k_SKH = apply_rope(k_SKH, freqs_cis, H, rope_theta, 
                                    rope_scaling, self.rope_input_ordering)
             k_SKH = nnx.with_sharding_constraint(k_SKH, self.keyvalue_skh)
 
@@ -313,7 +308,6 @@ class Llama4VisionAttention(nnx.Module):  # <--- Inherits from nnx.Module
             v_SKH += self.bias_v_proj_KH.value[None, ...]
             v_SKH = nnx.with_sharding_constraint(v_SKH, self.keyvalue_skh)
 
-        # --- Flash Attention Setup ---
         q_scale = k_scale = v_scale = None
         if self.kv_cache_quantized_dtype:
             k_scale = self._k_scale
@@ -340,12 +334,9 @@ class Llama4VisionAttention(nnx.Module):  # <--- Inherits from nnx.Module
 
         T_padded = T_attn + pad_len
         
-        # --- FIX: MASK PADDING ---
-        # 1. Create array of zeros (Valid Tokens)
+        # Mask Padding
         valid_ids = jnp.zeros((B, T_attn), dtype=jnp.int32)
-        # 2. Create array of ones (Padding Tokens) - Different ID = No Attention
         pad_ids = jnp.ones((B, pad_len), dtype=jnp.int32)
-        # 3. Concatenate
         segment_ids_q = jnp.concatenate([valid_ids, pad_ids], axis=1)
         
         segment_ids = SegmentIds(q=segment_ids_q, kv=segment_ids_q)

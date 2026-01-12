@@ -106,9 +106,6 @@ def apply_rope(
         cos = jnp.squeeze(cos, axis=-1)
         sin = jnp.squeeze(sin, axis=-1)
 
-        # --- FIX START ---
-        # If inputs has more tokens than positions (e.g., batched or flattened),
-        # we need to tile the cos/sin to match.
         seq_len_input = inputs.shape[0]
         seq_len_pos = cos.shape[0]
 
@@ -117,7 +114,6 @@ def apply_rope(
             num_repeats = seq_len_input // seq_len_pos
             cos = jnp.tile(cos, (num_repeats, 1))
             sin = jnp.tile(sin, (num_repeats, 1))
-        # --- FIX END ---
 
         # Reshape to (S, 1, D_rot) for broadcasting over heads
         cos = cos[:, jnp.newaxis, :]
@@ -128,24 +124,19 @@ def apply_rope(
         inputs_f32 = inputs.astype(jnp.float32)
 
         if rope_input_ordering == "interleaved":
-            # PyTorch Style: Pairs are [0,1], [2,3]...
-            # Reshape inputs to (..., D/2, 2) to separate Re/Im
             shape_pre = inputs_f32.shape[:-1]
             inputs_reshaped = inputs_f32.reshape(*shape_pre, -1, 2)
 
             inputs_real = inputs_reshaped[..., 0]
             inputs_imag = inputs_reshaped[..., 1]
 
-            # Apply Rotation
             outputs_real = inputs_real * cos_f32 - inputs_imag * sin_f32
             outputs_imag = inputs_real * sin_f32 + inputs_imag * cos_f32
 
-            # Stack back to (..., D/2, 2) and flatten to (..., D)
             out_stacked = jnp.stack([outputs_real, outputs_imag], axis=-1)
             out = out_stacked.reshape(inputs.shape)
 
         else:
-            # Legacy/Split Style: Pairs are [0, D/2], [1, D/2+1]...
             inputs_real = inputs_f32[..., :head_dim // 2]
             inputs_imag = inputs_f32[..., head_dim // 2:head_dim]
 

@@ -41,48 +41,37 @@ class Llama4VisionRotaryEmbedding(nnx.Module):
         # Shape: (num_patches, 1)
         img_idx = jnp.arange(num_patches, dtype=jnp.int32).reshape(num_patches, 1)
         
-        # Add the CLS token (matches HF logic: cat([grid, grid[:1]], dim=0))
+        # Add the CLS token
         img_idx = jnp.concatenate([img_idx, img_idx[:1]], axis=0)
         
         # Determine X and Y coordinates
         frequencies_x = img_idx % idx
         frequencies_y = img_idx // idx
         
-        # Set CLS token ID (The last element) to -2 as per HF implementation
-        # This allows masking later (freqs are zeroed out for this ID)
         frequencies_x = frequencies_x.at[-1, -1].set(-2)
         frequencies_y = frequencies_y.at[-1, -1].set(-2)
 
-        # 3. Calculate Inverse Frequencies (CRITICAL: FORCE FLOAT32)
-        # We calculate dim/head/2. For Llama 4 Vision: 1408 / 16 / 2 = 44.
+        # 3. Calculate Inverse Frequencies 
         freq_dim = self.hidden_size // self.num_attention_heads // 2
         
-        # FORCE FLOAT32 HERE to prevent 0.540 -> 0.539 precision loss
         t_indices = jnp.arange(0, freq_dim, 2, dtype=jnp.float32)[: (freq_dim // 2)]
         inv_freq = 1.0 / (self.rope_theta ** (t_indices / freq_dim))
 
         # 4. Create Frequency Bands
-        # Expand dims for broadcasting: (Seq, 1) * (1, HeadDim/2)
         freqs_x = (frequencies_x + 1).astype(jnp.float32) * inv_freq[None, :]
         freqs_y = (frequencies_y + 1).astype(jnp.float32) * inv_freq[None, :]
         
         # Repeat interleaving to match Complex number format (Real, Imag)
-        # HF: repeat_interleave(2, dim=-1)
         freqs_x = jnp.repeat(freqs_x, 2, axis=-1)
         freqs_y = jnp.repeat(freqs_y, 2, axis=-1)
         
         # 5. Concatenate and Format
-        # HF: torch.cat([freqs_x, freqs_y], dim=-1)
         freqs = jnp.concatenate([freqs_x, freqs_y], axis=-1)
         
-        # HF: freqs.masked_fill(img_idx < 0, 0)
-        # Mask out the CLS token frequencies (where ID was set to -2)
         mask_cond = img_idx < 0
         freqs = jnp.where(mask_cond, 0.0, freqs)
         
         # 6. Construct Complex Rotary Embeddings
-        # We need (Cos, Sin) pairs.
-        # Select even/odd indices to separate the interleaved values similar to HF [..., ::2]
         freqs_rad = freqs[..., ::2] 
         
         cos_freqs = jnp.cos(freqs_rad)

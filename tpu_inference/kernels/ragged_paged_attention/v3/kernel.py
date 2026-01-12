@@ -396,7 +396,6 @@ def _ragged_paged_attention_kernel(
             k_span = bkv_idx * bkv_sz + lax.broadcasted_iota(
                 jnp.int32, s.shape, 1)
             mask = k_span <= q_span
-            # TODO(jevinjiang, xiowei): reduce pages_per_seq based on sliding_window.
             if sliding_window is not None:
                 mask = jnp.logical_and(mask, q_span - sliding_window < k_span)
         else:

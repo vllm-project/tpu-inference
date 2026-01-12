@@ -46,19 +46,6 @@ from tpu_inference.models.jax.utils.weight_utils import (
 logger = init_logger(__name__)
 
 
-def print_head_tail(x, name):
-    x = np.array(x).flatten()  # Convert to Numpy and flatten
-    mean = np.mean(x)
-    std = np.std(x)
-    head = x[:5]
-    tail = x[-5:]
-
-    print(f"\n[DEBUG JAX] {name}")
-    print(f"  Shape: {x.shape} (Flattened)")
-    print(f"  Mean:  {mean} | Std: {std}")
-    print(f"  Head:  {head}")
-    print(f"  Tail:  {tail}", flush=True)
-
 
 class LlamaGuard4ForCausalLM(nnx.Module):
 
@@ -112,8 +99,6 @@ class LlamaGuard4ForCausalLM(nnx.Module):
 
         self.image_token_id = getattr(self.model_config.hf_config,
                                       "image_token_index")
-
-        print("This is self.image_token_id: ", self.image_token_id)
 
         self.rng = nnx.Rngs(rng)
 
@@ -329,7 +314,6 @@ class LlamaGuard4ForCausalLM(nnx.Module):
 
         if multimodal_embeddings is not None and multimodal_embeddings.shape[
                 0] > 0:
-            # NOTE (jiries): Not sure if self.image_token_id is correct from the config (defined above in init)
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
                 [self.image_token_id])
@@ -346,11 +330,6 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         # Ensure JAX handling
         pixel_values = jnp.asarray(pixel_values, dtype=jnp.bfloat16)
 
-        # --- DEBUG: Print Input Pixels ---
-        jax.debug.callback(print_head_tail, pixel_values,
-                           "Input Pixels (Before Transpose)")
-        # ---------------------------------
-
         # 1. Transpose Input from NCHW to NHWC
         if pixel_values.ndim == 4 and pixel_values.shape[1] == 3:
             pixel_values = jnp.transpose(pixel_values, (0, 2, 3, 1))
@@ -358,10 +337,6 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         # 2. Run Vision Encoder
         projected_vision_features = self.multi_modal_projector(
             self.vision_model(pixel_values))
-
-        # This checks the final features being passed to the LLM
-        jax.debug.callback(print_head_tail, projected_vision_features,
-                           "Projector Output (Vision Features)")
 
         num_total_tiles = projected_vision_features.shape[0]
         tokens_per_tile = projected_vision_features.shape[1]
@@ -371,25 +346,15 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         all_tokens_flat = projected_vision_features.reshape(-1, hidden_dim)
 
         # 4. Split batch logic
-        if patches_per_image is not None:
-            if hasattr(patches_per_image, 'tolist'):
-                tile_counts = patches_per_image.tolist()
-            else:
-                tile_counts = list(patches_per_image)
-            if isinstance(tile_counts, list) and isinstance(
-                    tile_counts[0], list):
-                import itertools
-                tile_counts = list(itertools.chain.from_iterable(tile_counts))
-            split_sizes = [c * tokens_per_tile for c in tile_counts]
+        if hasattr(patches_per_image, 'tolist'):
+            tile_counts = patches_per_image.tolist()
         else:
-            if num_total_tiles % 17 == 0:
-                num_images = num_total_tiles // 17
-                split_sizes = [17 * tokens_per_tile] * num_images
-            elif num_total_tiles % 16 == 0:
-                num_images = num_total_tiles // 16
-                split_sizes = [16 * tokens_per_tile] * num_images
-            else:
-                split_sizes = [num_total_tiles * tokens_per_tile]
+            tile_counts = list(patches_per_image)
+        if isinstance(tile_counts, list) and isinstance(
+                tile_counts[0], list):
+            import itertools
+            tile_counts = list(itertools.chain.from_iterable(tile_counts))
+        split_sizes = [c * tokens_per_tile for c in tile_counts]
 
         # 5. Convert to Torch
         features_np = jax.device_get(all_tokens_flat.astype(jnp.float32))
@@ -586,7 +551,6 @@ class LlamaGuard4WeightLoader:
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in self.names_and_weights_generator:
                 mapped_name = self.map_loaded_to_standardized_name(loaded_name)
-                print("this is mapped_name: ", mapped_name)
                 try:
                     model_weight = get_param(model_params, mapped_name)
                 except KeyError:
@@ -628,14 +592,9 @@ class LlamaGuard4WeightLoader:
                         loaded_weight = transpose_params(
                             loaded_name, loaded_weight, transpose_map_to_use)
 
-                    # --- FIX START: Flatten Patch Embedding ---
-                    # The JAX model uses a Dense layer, so we must flatten (H, W, In) into (H*W*In)
                     if "patch_embedding.linear" in mapped_name:
-                        # Current shape: (14, 14, 3, 1408)
-                        # Target shape: (588, 1408)
                         loaded_weight = loaded_weight.reshape(
                             -1, loaded_weight.shape[-1])
-                    # --- FIX END ------------------------------
                 if model_weight.value.shape != loaded_weight.shape:
                     raise ValueError(
                         f"Loaded shape for {loaded_name}: {loaded_weight.shape} "

@@ -168,11 +168,10 @@ class MultiModalManager:
             if req_id not in self.runner.encoder_cache:
                 self.runner.encoder_cache[req_id] = {}
 
-            # --- CONDITIONAL FIX START ---
             if isinstance(
                     output,
                 (jax.Array, jnp.ndarray
-                 )) and not image_grid_thw:  #Llama Guard 4 Specific logic
+                 )) and not image_grid_thw:  #Non-video multimodal model logic (image_grid_thw is specific to MM models that take video as input)
                 # JAX specific scatter logic (avoids .new_full and torch-specific indexing)
                 mask = jnp.array(pos_info.is_embed.cpu().numpy())
                 num_placeholders = mask.shape[0]
@@ -192,7 +191,6 @@ class MultiModalManager:
                     output,
                     is_embed=pos_info.is_embed,
                 )
-            # --- CONDITIONAL FIX END ---
 
     def gather_mm_embeddings(self, scheduler_output: "VllmSchedulerOutput",
                              target_pad_len: int) -> list[jax.Array]:
@@ -230,21 +228,13 @@ class MultiModalManager:
                 assert encoder_output is not None,\
                       f"Encoder cache miss for {mm_hash}."
 
-                # --- BRIDGE FIX START ---
-                # If the cache contains Torch tensors (from our execute_mm_encoder fix),
-                # convert them back to JAX so flatten_embeddings and the model
-                # can process them natively on the TPU.
                 if hasattr(encoder_output,
-                           'new_full'):  # Robust check for torch.Tensor
-                    # Move to CPU/NumPy then to JAX
+                           'new_full'): 
                     import torch
                     encoder_output_np = encoder_output.to(
                         torch.float32).cpu().numpy()
                     encoder_output = jnp.array(encoder_output_np,
                                                dtype=jnp.bfloat16)
-                # --- BRIDGE FIX END ---
-                #TODO: MAYBE ADD THE FOLLOWING LINE IN AN ELSE: CASE FOR THE PRECEDING IF STATEMENT IF THIS CAUSES QWEN TO BREAK
-                #encoder_output = self.runner.encoder_cache[mm_hash]
 
                 if (is_embed := pos_info.is_embed) is not None:
                     is_embed = is_embed[start_idx:end_idx]

@@ -23,7 +23,7 @@ import os
 import vllm.envs as vllm_envs
 from vllm import LLM, EngineArgs
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-
+from vllm.inputs import TokensPrompt
 from tpu_inference.core import disagg_utils
 
 
@@ -126,10 +126,6 @@ def main(args: dict):
     # Create an LLM
     llm = LLM(**args)
 
-    #TODO: Temporary patch as we haven't fully implemented the multimodal part of this model
-    #TODO: This might need to be True now
-    llm.llm_engine.processor.model_config.processor_return_mm_hashes = False
-
     sampling_params = llm.get_default_sampling_params()
     if max_tokens is not None:
         sampling_params.max_tokens = max_tokens
@@ -149,8 +145,6 @@ def main(args: dict):
         print(
             f"Token for '{token_name}': {tokenizer._tokenizer.encode(token_name)}"
         )
-
-    from vllm.inputs import TokensPrompt
 
     prompts = []
 

@@ -53,9 +53,16 @@ OUTPUT_LEN_OVERRIDE=20 # Max tokens to generate for safety classification.
 RAW_CSV_URL="https://raw.githubusercontent.com/mlcommons/ailuminate/main/airr_official_1.0_demo_en_us_prompt_set_release.csv"
 LOCAL_CSV_FILE="/tmp/airr_official_1.0_demo_en_us_prompt_set_release.csv"
 LOCAL_JSONL_FILE="/tmp/airr_official_1.0_demo_en_us_prompt_set_release.jsonl"
+
+# MM-SafetyBench Data Paths
+MM_SAFETYBENCH_REPO="https://github.com/isXinLiu/MM-SafetyBench.git"
+MM_SAFETYBENCH_ZIP_URL="https://drive.usercontent.google.com/corp/download?id=1xjW9k-aGkmwycqGCXbru70FaSKpSDcR_&export=download&authuser=0"
+MM_SAFETYBENCH_DIR="/tmp/MM-SafetyBench"
+MM_SAFETYBENCH_IMAGE_DIR="${MM_SAFETYBENCH_DIR}/data/imgs"
 # ------------------
 
 TEST_MODE=""
+BENCHMARK_TYPE=""
 EXIT_CODE=0
 
 # Access shared benchmarking functionality (cleanUp, waitForServerReady)
@@ -66,7 +73,7 @@ source "$(dirname "$0")/bench_utils.sh"
 
 helpFunction()
 {
-   echo "Usage: $0 --mode <accuracy|performance> [other args]"
+   echo "Usage: $0 --mode <accuracy|performance> --benchmark <text-only|multimodal> [other args]"
    exit 1
 }
 
@@ -74,6 +81,11 @@ while [[ "$#" -gt 0 ]]; do
     case "$1" in
         --mode)
             TEST_MODE="$2"
+            shift
+            shift
+            ;;
+        --benchmark)
+            BENCHMARK_TYPE="$2"
             shift
             shift
             ;;
@@ -86,6 +98,11 @@ done
 
 if [[ -z "$TEST_MODE" ]]; then
     echo "Error: --mode argument is required."
+    helpFunction
+fi
+
+if [[ -z "$BENCHMARK_TYPE" ]]; then
+    echo "Error: --benchmark argument is required."
     helpFunction
 fi
 
@@ -138,7 +155,7 @@ fi
 run_accuracy_check() {
     echo -e "\n--- Running Accuracy Check (Mode: ACCURACY) ---"
 
-    CONFTEST_DIR="/workspace/tpu_inference/scripts/vllm/integration"
+    CONFTEST_DIR="./scripts/vllm/integration"
 
     RELATIVE_TEST_FILE="test_safety_model_accuracy.py"
 
@@ -146,18 +163,18 @@ run_accuracy_check() {
         cd "$CONFTEST_DIR" || { echo "Error: Failed to find conftest directory: $CONFTEST_DIR"; exit 1; }
         echo "Running pytest from: $(pwd)"
 
-        python -m pytest -s -rP "$RELATIVE_TEST_FILE::test_safety_model_accuracy_check" \
+        python -m pytest -s -rP "$RELATIVE_TEST_FILE"::test_safety_model_accuracy_check \
             -W ignore::DeprecationWarning \
-            --tensor-parallel-size="$TP_SIZE" \
-            --model-name="$MODEL_NAME" \
-            --expected-value="$MINIMUM_ACCURACY_THRESHOLD" \
-            --dataset-path="$LOCAL_CSV_FILE"
+            --tensor-parallel-size "$TP_SIZE" \
+            --model-name "$MODEL_NAME" \
+            --expected-value "$MINIMUM_ACCURACY_THRESHOLD" \
+            --dataset-path "$LOCAL_CSV_FILE"
     )
     return $?
 }
 
 run_performance_benchmark() {
-    echo -e "\n--- Running Performance Benchmark (Mode: PERFORMANCE) ---"
+    echo -e "\n--- Running Performance Benchmark, Mode: PERFORMANCE ---"
 
     vllm bench serve \
         --model "$MODEL_NAME" \
@@ -187,6 +204,73 @@ run_performance_benchmark() {
     fi
 }
 
+download_mm_safetybench_dataset() {
+    echo -e "\n--- Setting up MM-SafetyBench Dataset ---"
+
+    # 1. Clone the MM-SafetyBench repository
+    if [ ! -d "$MM_SAFETYBENCH_DIR" ]; then
+        echo "Cloning MM-SafetyBench repository..."
+        if ! git clone "$MM_SAFETYBENCH_REPO" "$MM_SAFETYBENCH_DIR"; then
+            echo "Error: Failed to clone MM-SafetyBench repository." >&2
+            return 1
+        fi
+    else
+        echo "MM-SafetyBench repository already exists locally: $MM_SAFETYBENCH_DIR"
+        # Ensure it's up to date
+        (cd "$MM_SAFETYBENCH_DIR" && git pull) || \
+            { echo "Warning: Failed to update MM-SafetyBench repository."; }
+    fi
+
+    # 2. Download and unzip the images from Google Drive
+    if [ ! -d "$MM_SAFETYBENCH_IMAGE_DIR" ]; then
+        echo "Downloading MM-SafetyBench images from Google Drive..."
+        local zip_file="${MM_SAFETYBENCH_DIR}/MM-SafetyBench_imgs.zip"
+        
+        # Use wget with --no-check-certificate to handle potential SSL issues
+        # --content-disposition to use the filename from the server
+        if ! wget --no-check-certificate --content-disposition "$MM_SAFETYBENCH_ZIP_URL" -O "$zip_file"; then
+            echo "Error: Failed to download MM-SafetyBench images." >&2
+            return 1
+        fi
+
+        echo "Unzipping images..."
+        mkdir -p "${MM_SAFETYBENCH_DIR}/data/imgs"
+        if ! unzip -q "$zip_file" -d "${MM_SAFETYBENCH_DIR}/data/imgs"; then
+            echo "Error: Failed to unzip MM-SafetyBench images." >&2
+            rm -f "$zip_file" # Clean up incomplete zip
+            return 1
+        fi
+        rm -f "$zip_file" # Clean up zip file after extraction
+        echo "MM-SafetyBench images downloaded and unzipped."
+    else
+        echo "MM-SafetyBench images already exist locally: $MM_SAFETYBENCH_IMAGE_DIR"
+    fi
+}
+
+run_multimodal_accuracy_check() {
+    echo -e "\n--- Running Multimodal Accuracy Check, Mode: ACCURACY, Benchmark: MULTIMODAL ---"
+
+    download_mm_safetybench_dataset || return 1
+
+    CONFTEST_DIR="./scripts/vllm/integration"
+
+    RELATIVE_TEST_FILE="test_multimodal_safety_model_accuracy.py"
+
+    (
+        cd "$CONFTEST_DIR" || { echo "Error: Failed to find conftest directory: $CONFTEST_DIR"; exit 1; }
+        echo "Running pytest from: $(pwd)"
+
+        python -m pytest -s -rP "${RELATIVE_TEST_FILE}::test_multimodal_safety_model_accuracy_check" \
+            -W ignore::DeprecationWarning \
+            --tensor-parallel-size="$TP_SIZE" \
+            --model-name="$MODEL_NAME" \
+            --expected-value="$MINIMUM_ACCURACY_THRESHOLD" \
+            --image-dir="$MM_SAFETYBENCH_IMAGE_DIR"
+    )
+    return $?
+}
+
+
 # --- MAIN EXECUTION FLOW ---
 
 # Set initial trap to ensure cleanup happens even on immediate exit
@@ -194,9 +278,16 @@ trap 'cleanUp "$MODEL_NAME" || true' EXIT
 
 # --- 1. RUN TEST MODE  ---
 if [ "$TEST_MODE" == "accuracy" ]; then
-    run_accuracy_check
-    EXIT_CODE=$?
-
+    if [ "$BENCHMARK_TYPE" == "text-only" ]; then
+        run_accuracy_check
+        EXIT_CODE=$?
+    elif [ "$BENCHMARK_TYPE" == "multimodal" ]; then
+        run_multimodal_accuracy_check
+        EXIT_CODE=$?
+    else
+        echo "Error: Invalid benchmark type for accuracy mode: $BENCHMARK_TYPE" >&2
+        EXIT_CODE=1
+    fi
     exit $EXIT_CODE
 fi
 
@@ -207,8 +298,8 @@ if [ "$TEST_MODE" == "performance" ]; then
     # Server startup
     (vllm serve "$MODEL_NAME" \
         --tensor-parallel-size "$TP_SIZE" \
-        --max-model-len="$MAX_MODEL_LEN" \
-        --max-num-batched-tokens="$MAX_BATCHED_TOKENS" \
+        --max-model-len "$MAX_MODEL_LEN" \
+        --max-num-batched-tokens "$MAX_BATCHED_TOKENS" \
         2>&1 | tee -a "$LOG_FILE") &
 
     waitForServerReady
