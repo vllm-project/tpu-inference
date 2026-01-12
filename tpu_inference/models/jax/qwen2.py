@@ -27,8 +27,7 @@ from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.utils.weight_utils import (get_default_maps,
-                                                         load_hf_weights)
+from tpu_inference.models.jax.utils.weight_utils import StandardWeightLoader
 
 logger = init_logger(__name__)
 
@@ -306,6 +305,7 @@ class Qwen2Model(nnx.Module):
 
 
 class Qwen2ForCausalLM(nnx.Module):
+    WeightLoader = StandardWeightLoader
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
                  mesh: Mesh) -> None:
@@ -383,9 +383,5 @@ class Qwen2ForCausalLM(nnx.Module):
                 "lm_head": "model.lm_head",
             })
 
-        metadata_map = get_default_maps(self.vllm_config.model_config,
-                                        self.mesh, mappings)
-        load_hf_weights(vllm_config=self.vllm_config,
-                        model=self,
-                        metadata_map=metadata_map,
-                        mesh=self.mesh)
+        loader = self.WeightLoader(self.vllm_config, self.mesh)
+        loader.load_weights(self, mappings)
