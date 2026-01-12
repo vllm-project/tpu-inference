@@ -28,7 +28,8 @@ from qwix._src.providers import ptq
 
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
-from tpu_inference.layers.jax.moe.moe import CombineExperts, MoE
+from tpu_inference.layers.jax.moe.moe import CombineExperts, MoE, MoEBackend
+from tpu_inference.layers.jax.moe.utils import MoEBackend
 from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     manually_quantize_qwix_activation, manually_quantize_qwix_weight)
 
@@ -62,7 +63,7 @@ class DeepSeekV3Router(nnx.Module):
 
     router_bias_dtype: jnp.dtype = jnp.float32
 
-    use_moe_kernel: bool = False
+    moe_backend: MoEBackend = MoEBackend.DENSE_MAT
 
     def get_topk_indices(self, scores_TE: Float) -> Float:
         """Get the topk indices of the scores.
@@ -111,7 +112,7 @@ class DeepSeekV3Router(nnx.Module):
         scores_TE = jnp.einsum("TD,DE -> TE", x_TD, self.kernel_DE.value)
         scores_TE = nnx.sigmoid(scores_TE)
 
-        if self.use_moe_kernel:
+        if self.moe_backend == MoEBackend.FUSED_MOE or self.moe_backend == MoEBackend.VLLM_MOE:
             return scores_TE
         
         else:

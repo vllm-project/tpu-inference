@@ -37,6 +37,7 @@ from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
 from tpu_inference.layers.jax.moe.deepseek_v3_moe import DeepSeekV3Router
 from tpu_inference.layers.jax.moe.moe import MoE
+from tpu_inference.layers.jax.moe.utils import select_moe_backend
 from tpu_inference.layers.jax.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
 from tpu_inference.logger import init_logger
@@ -733,7 +734,7 @@ class DeepSeekV3(nnx.Module):
 
         self.mesh = mesh
 
-        self._process_moe_kernel_flag()
+        self.moe_backend = select_moe_backend()
 
         self.weight_loader = self.WeightLoader(
             vllm_config=vllm_config,
@@ -842,7 +843,7 @@ class DeepSeekV3(nnx.Module):
                 rngs=self.rng,
                 routed_scaling_factor=2.5,
                 dtype=dtype,
-                use_moe_kernel=(self.use_fused_moe_kernel or self.use_vllm_moe_kernel), 
+                moe_backend=self.moe_backend,
                 activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
                 ed_sharding=(ShardingAxisName.MLP_TENSOR, None),
                 e_sharding=(ShardingAxisName.MLP_TENSOR, ))
@@ -860,12 +861,9 @@ class DeepSeekV3(nnx.Module):
                 activation_ffw_ted=(ShardingAxisName.MLP_DATA, None, None),
                 edf_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
                 efd_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
-                use_sparse_moe=self.sparse_matmul,
+                moe_backend=self.moe_backend,
                 quantized_dtype=self.weight_loader.quant_dtype
                 if self.weight_loader.is_model_quantized else None,
-                use_vllm_moe_kernel=self.use_vllm_moe_kernel,
-                use_fused_moe_kernel=self.use_fused_moe_kernel,
-                use_megablox=self.use_megablox,
                 router=router) if is_moe_layer else DenseFFW(
                     dtype=dtype,
                     hidden_act=hidden_act,
