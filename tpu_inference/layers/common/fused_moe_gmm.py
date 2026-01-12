@@ -135,7 +135,7 @@ def tensor_sharded_gmm_merged_column_parallel(
             group_sizes,
             rhs_scale=rhs_scale,
             rhs_bias=rhs_bias,
-            preferred_element_type=lhs.dtype,
+            preferred_element_type=jnp.bfloat16,
             tiling=(tm, tk, tn),
             transpose_rhs=False,
             group_offset=jnp.array(0),
@@ -185,7 +185,7 @@ def tensor_sharded_gmm_row_parallel(
             group_sizes,
             rhs_scale=rhs_scale,
             rhs_bias=rhs_bias,
-            preferred_element_type=lhs.dtype,
+            preferred_element_type=jnp.bfloat16,
             tiling=(tm, tk, tn),
             transpose_rhs=False,
             group_offset=jnp.array(0),
@@ -206,8 +206,8 @@ def tensor_sharded_gmm_row_parallel(
         out_specs=(P(ShardingAxisName.MLP_DATA)),
         check_vma=False,
     )(lhs, rhs, rhs_scale, rhs_bias, group_sizes)
-
-    return gmm_result.astype(lhs.dtype)
+    return gmm_result
+    # return gmm_result.astype(lhs.dtype)
 
 
 def expert_sharded_gmm(
@@ -235,7 +235,7 @@ def expert_sharded_gmm(
             rhs_scale=rhs_scale,
             rhs_bias=rhs_bias,
             group_sizes=group_sizes,
-            preferred_element_type=lhs.dtype,
+            preferred_element_type=jnp.bfloat16,
             tiling=(tm, tk, tn),
             transpose_rhs=False,
             group_offset=group_offset[0],
