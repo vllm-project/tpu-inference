@@ -327,7 +327,8 @@ def _load_and_shard_weight(vllm_config,
         )
         hf_weight = hf_weight.astype(model_config.dtype)
 
-    if hf_key.endswith(".weight") and "mlp" not in hf_key:
+    if hf_key.endswith(
+            ".weight") and "mlp" not in hf_key and "proj" not in hf_key:
         hf_key = hf_key.removesuffix(".weight")
 
     # Find the corresponding model key using the HF key

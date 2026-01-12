@@ -26,6 +26,7 @@ from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.jax.einsum import JaxEinsum
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.layers.vllm.quantization.common import JaxQuantizationConfig
 from tpu_inference.logger import init_logger
@@ -63,12 +64,13 @@ class Qwen3Attention(JaxModule):
 
         self.mesh = mesh
 
-        self.q_proj = nnx.Einsum(
+        self.q_proj = JaxEinsum(
             "TD,DNH->TNH",
             (self.hidden_size, self.num_heads, self.head_dim),
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rng,
+            quant_config=quant_config,
         )
         self.q_norm = nnx.RMSNorm(
             self.head_dim,
@@ -77,12 +79,13 @@ class Qwen3Attention(JaxModule):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
         )
-        self.k_proj = nnx.Einsum(
+        self.k_proj = JaxEinsum(
             "TD,DKH->TKH",
             (self.hidden_size, self.num_kv_heads, self.head_dim),
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rng,
+            quant_config=quant_config,
         )
         self.k_norm = nnx.RMSNorm(
             self.head_dim,
@@ -91,19 +94,21 @@ class Qwen3Attention(JaxModule):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
         )
-        self.v_proj = nnx.Einsum(
+        self.v_proj = JaxEinsum(
             "TD,DKH->TKH",
             (self.hidden_size, self.num_kv_heads, self.head_dim),
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rng,
+            quant_config=quant_config,
         )
-        self.o_proj = nnx.Einsum(
+        self.o_proj = JaxEinsum(
             "TNH,NHD->TD",
             (self.num_heads, self.head_dim, self.hidden_size),
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
             rngs=rng,
+            quant_config=quant_config,
         )
 
         self._q_scale = 1.0
@@ -293,16 +298,8 @@ class Qwen3ForCausalLM(JaxModule):
             "model.layers.*.post_attention_layernorm.scale",
             "model.layers.*.self_attn.k_norm":
             "model.layers.*.self_attn.k_norm.scale",
-            "model.layers.*.self_attn.k_proj":
-            "model.layers.*.self_attn.k_proj.kernel",
-            "model.layers.*.self_attn.o_proj":
-            "model.layers.*.self_attn.o_proj.kernel",
             "model.layers.*.self_attn.q_norm":
             "model.layers.*.self_attn.q_norm.scale",
-            "model.layers.*.self_attn.q_proj":
-            "model.layers.*.self_attn.q_proj.kernel",
-            "model.layers.*.self_attn.v_proj":
-            "model.layers.*.self_attn.v_proj.kernel",
             "model.norm": "model.norm.scale",
         }
 
