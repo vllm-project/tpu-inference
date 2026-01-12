@@ -126,13 +126,14 @@ def tensor_sharded_gmm_merged_column_parallel(
     mesh: Mesh,
 ) -> list[jax.Array]:
 
-    def _gmm(lhs, rhs, rhs_scale, rhs_bias, group_sizes):
+    def _gmm(lhs, lhs_scale, rhs, rhs_scale, rhs_bias, group_sizes):
         m, g, k, n = lhs.shape[0], *rhs.shape
         tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
         return gmm(
             lhs,
             rhs,
             group_sizes,
+            lhs_scale=lhs_scale,
             rhs_scale=rhs_scale,
             rhs_bias=rhs_bias,
             preferred_element_type=jnp.bfloat16,
@@ -146,15 +147,19 @@ def tensor_sharded_gmm_merged_column_parallel(
     rhs_bias_spec = None if rhs_bias is None else P(
         None, None, ShardingAxisName.MLP_TENSOR)
 
+    lhs_scale_spec = P(
+        None, None,
+        ShardingAxisName.MLP_DATA) if lhs_scale is not None else None
+
     gmm_result = jax.shard_map(
         _gmm,
         mesh=mesh,
-        in_specs=(P(ShardingAxisName.MLP_DATA,
-                    None), P(None, None, ShardingAxisName.MLP_TENSOR),
-                  rhs_scale_spec, rhs_bias_spec, P(ShardingAxisName.MLP_DATA)),
+        in_specs=(P(ShardingAxisName.MLP_DATA, None), lhs_scale_spec,
+                  P(None, None, ShardingAxisName.MLP_TENSOR), rhs_scale_spec,
+                  rhs_bias_spec, P(ShardingAxisName.MLP_DATA)),
         out_specs=(P(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR)),
         check_vma=False,
-    )(lhs, rhs, rhs_scale, rhs_bias, group_sizes)
+    )(lhs, lhs_scale, rhs, rhs_scale, rhs_bias, group_sizes)
 
     tp_size = get_mesh_shape_product(mesh, ShardingAxisName.MLP_TENSOR)
     intermediate_size = gmm_result.shape[-1] // 2
@@ -173,7 +178,7 @@ def tensor_sharded_gmm_row_parallel(
     mesh: Mesh,
 ) -> jax.Array:
 
-    def _gmm_all_reduce(lhs, rhs, rhs_scale, rhs_bias, group_sizes):
+    def _gmm_all_reduce(lhs, lhs_scale, rhs, rhs_scale, rhs_bias, group_sizes):
         m, g, k, n = lhs.shape[0], *rhs.shape
         tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
         if rhs_bias is not None:
@@ -183,6 +188,7 @@ def tensor_sharded_gmm_row_parallel(
             lhs,
             rhs,
             group_sizes,
+            lhs_scale=lhs_scale,
             rhs_scale=rhs_scale,
             rhs_bias=rhs_bias,
             preferred_element_type=jnp.bfloat16,
@@ -196,16 +202,21 @@ def tensor_sharded_gmm_row_parallel(
     rhs_scale_spec = None if num_blocks == 1 else P(
         None, ShardingAxisName.MLP_TENSOR, None, None)
     rhs_bias_spec = None if rhs_bias is None else P(None, None, None)
+
+    lhs_scale_spec = P(
+        None, None,
+        ShardingAxisName.MLP_DATA) if lhs_scale is not None else None
     gmm_result = jax.shard_map(
         _gmm_all_reduce,
         mesh=mesh,
-        in_specs=(P(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR),
+        in_specs=(P(ShardingAxisName.MLP_DATA,
+                    ShardingAxisName.MLP_TENSOR), lhs_scale_spec,
                   P(None, ShardingAxisName.MLP_TENSOR,
                     None), rhs_scale_spec, rhs_bias_spec,
                   P(ShardingAxisName.MLP_DATA)),
         out_specs=(P(ShardingAxisName.MLP_DATA)),
         check_vma=False,
-    )(lhs, rhs, rhs_scale, rhs_bias, group_sizes)
+    )(lhs, lhs_scale, rhs, rhs_scale, rhs_bias, group_sizes)
     return gmm_result
     # return gmm_result.astype(lhs.dtype)
 
