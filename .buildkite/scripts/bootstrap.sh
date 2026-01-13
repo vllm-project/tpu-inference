@@ -107,8 +107,9 @@ else
       echo "Found 'ready' label on PR. Uploading main pipeline..."
       upload_pipeline
     else
-      echo "No 'ready' label found on PR. Skipping main pipeline upload."
-      exit 0 # Exit with 0 to indicate success (no error, just skipped)
+      # Explicitly fail the build because the required 'ready' label is missing.
+      echo "Missing 'ready' label on PR. Failing build."
+      exit 1
     fi
   else
     # If it's NOT a Pull Request (e.g., branch push, tag, manual build)
