@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List
+from typing import Any, List
 
 import jax
 import jax.numpy as jnp
@@ -124,18 +124,43 @@ def create_kv_caches(
     return kv_caches
 
 
-def get_attention_page_size_bytes(mesh, block_size, num_kv_heads, head_size,
-                                  dtype, use_mla) -> int:
-    jax_dtype = t2j_dtype(dtype)
-    bits = (dtypes.bit_width(jax_dtype) if hasattr(dtypes, "bit_width") else
-            dtypes.itemsize_bits(jax_dtype))
-    kv_cache_shape = get_kv_cache_shape_with_mesh(
-        mesh=mesh,
-        total_num_pages=1,
-        page_size=block_size,
-        actual_num_kv_heads=num_kv_heads,
-        actual_head_dim=head_size,
-        kv_dtype=jax_dtype,
-        use_mla=use_mla,
-    )
-    return (bits * np.prod(kv_cache_shape)) // 8
+def get_attention_page_size_bytes(mesh: Mesh,
+                                  kv_cache_specs: dict[str, Any]) -> int:
+    """
+    Calculate KV cache page size of RPA kernel.
+
+    Args:
+        mesh: The mesh to shard the KV caches across.
+        kv_cache_specs: Dictionary of KV cache specs.
+
+    Returns:
+        KV cache page size in bytes.
+    """
+
+    # Import it here to avoid circular import.
+    from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
+
+    page_size_bytes_set = set()
+    for kv_cache_spec in kv_cache_specs.values():
+        assert isinstance(kv_cache_spec, AttentionSpec)
+
+        dtype = t2j_dtype(kv_cache_spec.dtype)
+        bits = (dtypes.bit_width(dtype) if hasattr(dtypes, "bit_width") else
+                dtypes.itemsize_bits(dtype))
+        use_mla = isinstance(kv_cache_spec, MLAAttentionSpec)
+
+        kv_cache_shape = get_kv_cache_shape_with_mesh(
+            mesh=mesh,
+            total_num_pages=1,  # Pass 1 to get shape of a single page.
+            page_size=kv_cache_spec.block_size,
+            actual_num_kv_heads=kv_cache_spec.num_kv_heads,
+            actual_head_dim=kv_cache_spec.head_size,
+            kv_dtype=dtype,
+            use_mla=use_mla,
+        )
+        page_size_bytes = (bits * np.prod(kv_cache_shape)) // 8
+        page_size_bytes_set.add(page_size_bytes)
+
+    # Ensure that page size is the same for all kv caches.
+    assert len(page_size_bytes_set) == 1
+    return page_size_bytes_set.pop()
