@@ -34,7 +34,9 @@ from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.layers.jax.misc import round_up_to_multiple_of_128_within_limit
-from tpu_inference.layers.jax.moe.utils import MoEBackend, SparseMoEEngine, DenseMoEEngine
+from tpu_inference.layers.jax.moe.sparse_moe import SparseMoEEngine
+from tpu_inference.layers.jax.moe.dense_moe import DenseMoEEngine
+from tpu_inference.layers.jax.moe.utils import MoEBackend
 from tpu_inference.layers.vllm.fused_moe import fused_moe_func
 from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     manually_quantize_qwix_activation, manually_quantize_qwix_weight)
