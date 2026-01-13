@@ -23,6 +23,7 @@ steps:
     commands:
       # TODO (keweiwang): Re-enable once multimodal support is fixed for the torchax path.
       - echo "Skipping: This Multimodal test is currently disabled due to upstream removal."
+      - buildkite-agent meta-data set "Multimodal_Inputs_CorrectnessTest" "unverified"
   - label: "Record correctness test result for Multimodal Inputs"
     key: "record_Multimodal_Inputs_CorrectnessTest"
     depends_on: "Multimodal_Inputs_CorrectnessTest"
