@@ -115,7 +115,8 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
             # When fused moe kernle is used, we pass extra arguments like
             # tuned block sizes to the kernel.
             self.extra_backend_kwargs = dict(
-                subc_quant_wsz=REQUANTIZED_BLOCK_SIZE,
+                subc_quant_w1_sz=REQUANTIZED_BLOCK_SIZE,
+                subc_quant_w2_sz=REQUANTIZED_BLOCK_SIZE,
                 ep_axis_name=ep_axis_name,
                 # TODO: Use autotune table once we have it.
                 bt=256,
