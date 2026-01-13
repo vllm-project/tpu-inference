@@ -10,7 +10,6 @@ import jaxlib
 import jaxtyping
 import vllm.envs as vllm_envs
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.distributed import get_pp_group
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
                                           has_kv_transfer_group)
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
@@ -24,6 +23,7 @@ from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 
 from tpu_inference import envs, utils
 from tpu_inference.distributed import jax_parallel_state
+from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.distributed.utils import (get_device_topology_order_id,
                                              get_host_ip, get_kv_transfer_port)
 from tpu_inference.layers.common.sharding import ShardingConfigManager
