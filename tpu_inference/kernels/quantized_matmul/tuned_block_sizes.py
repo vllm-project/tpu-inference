@@ -24,6 +24,7 @@ class TunedValue(NamedTuple):
     batch_block_size: int
     out_block_size: int
     in_block_size: int
+    n_lane_multiplier: int = 1
 
 
 TUNED_BLOCK_SIZES_RAW = {
