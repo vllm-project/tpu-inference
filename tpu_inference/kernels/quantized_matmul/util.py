@@ -32,7 +32,7 @@ def unfold_args(
         fn(*fn_conditions)
 
 
-def quantize_tensor(x: jax.Array, dtype: jnp.dtype, dim: int = -1):
+def quantize_tensor(x: jax.Array, dtype: jnp.dtype, dim: int = -1, block_size: int | None = None):
     if jnp.issubdtype(dtype, jnp.integer):
         dtype_info = jnp.iinfo(dtype)
         max_val = int(dtype_info.max)
@@ -41,11 +41,15 @@ def quantize_tensor(x: jax.Array, dtype: jnp.dtype, dim: int = -1):
         dtype_info = jnp.finfo(dtype)
         max_val = float(dtype_info.max)
         min_val = float(dtype_info.min)
-
+    n_dim, k_dim = x.shape
+    if block_size:
+        x = x.reshape(n_dim, -1, block_size).astype(jnp.float32)
     x_abs_max = jnp.max(jnp.abs(x), axis=dim, keepdims=True)
     scale = x_abs_max / max_val
     x_q = jnp.clip(x / scale, min_val, max_val).astype(dtype)
-    return x_q, scale.astype(jnp.float32)
+    if block_size:
+        x_q = x_q.reshape(n_dim, k_dim)
+    return x_q, scale.transpose(1, 2, 0).astype(jnp.float32) if block_size else scale.astype(jnp.float32)
 
 
 def next_multiple(x, multiple):
