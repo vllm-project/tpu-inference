@@ -17,8 +17,29 @@
 # --- Skip build if only docs/icons changed ---
 echo "--- :git: Checking changed files"
 
-# Get a list of all files changed in this commit
-FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r "$BUILDKITE_COMMIT")
+BASE_BRANCH=${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-"main"}
+
+if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
+    echo "PR detected. Target branch: $BASE_BRANCH"
+
+    # Fetch base and current commit to ensure local history exists for diff
+    git fetch origin "$BASE_BRANCH" --depth=20 --quiet || echo "Base fetch failed"
+    git fetch origin "$BUILDKITE_COMMIT" --depth=20 --quiet || true
+
+    # Get all changes in this PR using triple-dot diff (common ancestor to HEAD)
+    # This correctly captures changes even if the last commit is a merge from main
+    FILES_CHANGED=$(git diff --name-only origin/"$BASE_BRANCH"..."$BUILDKITE_COMMIT" 2>/dev/null || true)
+
+    # Fallback to single commit diff if PR history is unavailable
+    if [ -z "$FILES_CHANGED" ]; then
+        echo "Warning: PR diff failed. Falling back to single commit check."
+        FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r -m "$BUILDKITE_COMMIT")
+    fi
+else
+    echo "Non-PR build. Checking the latest commit."
+    # -m ensures merge commits show files brought into the branch
+    FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r -m "$BUILDKITE_COMMIT")
+fi
 
 echo "Files changed:"
 echo "$FILES_CHANGED"
@@ -61,7 +82,25 @@ else
   # Check if the current build is a pull request
   if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     echo "This is a Pull Request build."
-    PR_LABELS=$(curl -s "https://api.github.com/repos/vllm-project/tpu-inference/pulls/$BUILDKITE_PULL_REQUEST" | jq -r '.labels[].name')
+
+    # Wait for GitHub API to sync labels
+    echo "Sleeping for 5 seconds to ensure GitHub API is updated..."
+    sleep 5
+
+    API_URL="https://api.github.com/repos/vllm-project/tpu-inference/pulls/$BUILDKITE_PULL_REQUEST"
+    echo "Fetching PR details from: $API_URL"
+
+    # Fetch the response body and save to a temporary file
+    GITHUB_PR_RESPONSE_FILE="github_api_logs.json"
+    curl -s "$API_URL" -o "$GITHUB_PR_RESPONSE_FILE"
+    
+    # Upload the full response body as a Buildkite artifact
+    echo "Uploading GitHub API response as artifact..."
+    buildkite-agent artifact upload "$GITHUB_PR_RESPONSE_FILE"
+
+    # Extract labels using input redirection
+    PR_LABELS=$(jq -r '.labels[].name' < "$GITHUB_PR_RESPONSE_FILE")
+    echo "Extracted PR Labels: $PR_LABELS"
 
     # If it's a PR, check for the specific label
     if [[ $PR_LABELS == *"ready"* ]]; then
