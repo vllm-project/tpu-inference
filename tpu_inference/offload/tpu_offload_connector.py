@@ -84,11 +84,13 @@ Worker Side Execution:
     KV data from TPU to CPU and update the CPU backend. It then waits for all
     submitted save tasks for the current step to complete.
 """
+import asyncio
 import copy
 import os
+import threading
 import time
 from collections import defaultdict
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Optional, get_args
 
@@ -1387,11 +1389,11 @@ class TPUOffloadConnectorWorker:
             f"Model name is {model_name}, KV block_size={self.block_size}")
 
         self.cpu_chunk_size = self.block_size
-        # Thread pool for asynchronous TPU->CPU copies
-        self.num_save_threads = envs.TPU_OFFLOAD_SAVE_THREADS
-        self.save_executor = ThreadPoolExecutor(
-            max_workers=self.num_save_threads,
-            thread_name_prefix="tpu_save_handler")
+        # Event loop for asynchronous TPU->CPU copies in a background thread
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._loop.run_forever,
+                                        daemon=True)
+        self._thread.start()
         self.finished_save_reqs: set[ReqId] = set()
         self.finished_load_reqs: set[ReqId] = set()
         # Tracks if wait_for_save has been called for the current step's metadata.
@@ -1409,7 +1411,10 @@ class TPUOffloadConnectorWorker:
 
     def __del__(self):
         logger.info("TPUOffloadConnectorWorker: Entering __del__")
-        self.save_executor.shutdown(wait=True)
+        if hasattr(self, "_loop") and self._loop.is_running():
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        if hasattr(self, "_thread") and self._thread.is_alive():
+            self._thread.join()
 
     def register_runner(self, runner: TPUModelRunner):
         logger.info("TPUOffloadConnectorWorker: Entering register_runner")
@@ -1916,20 +1921,25 @@ class TPUOffloadConnectorWorker:
              blocks_to_save) = gather_result
 
             # Define a safe wrapper for the async part to ensure logging
-            def _async_transfer_task(req_id, *args):
+            async def _async_transfer_task(req_id, *args):
                 try:
-                    self._transfer_and_register_cpu_chunks(req_id, *args)
+                    # Run the synchronous, CPU/IO-bound function in a thread pool
+                    # managed by the asyncio event loop.
+                    await asyncio.to_thread(
+                        self._transfer_and_register_cpu_chunks, req_id, *args)
                 except Exception as e:
+                    # Re-raise with context for better debugging
                     raise ValueError(
-                        f"Error transferring blocks for request {req_id}: {e}")
+                        f"Error transferring blocks for request {req_id}: {e}"
+                    ) from e
                 return req_id
 
             # 2. ASYNC NON-BLOCKING: Transfer to CPU and Register
             logger.info(f"Submitting transfer task for request {meta.req_id}")
-            future = self.save_executor.submit(_async_transfer_task,
-                                               meta.req_id, flat_kv_caches_tpu,
-                                               num_blocks_to_save, dst_chunks,
-                                               blocks_to_save)
+            coro = _async_transfer_task(meta.req_id, flat_kv_caches_tpu,
+                                        num_blocks_to_save, dst_chunks,
+                                        blocks_to_save)
+            future = asyncio.run_coroutine_threadsafe(coro, self._loop)
 
             self._pending_save_futures.append((future, meta))
 
