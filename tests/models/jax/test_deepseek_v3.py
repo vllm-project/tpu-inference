@@ -142,7 +142,7 @@ class TestDeepSeekV3WeightLoader:
     def loader(self, mock_config):
         # We need to mock the generator so it doesn't try to download files
         with patch(
-                "tpu_inference.models.jax.deepseek_v3.model_weights_generator",
+                "tpu_inference.models.jax.utils.weight_utils.model_weights_generator",
                 return_value=[]):
             return DeepSeekV3WeightLoader(vllm_config=mock_config,
                                           num_layers=2,
