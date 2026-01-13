@@ -142,7 +142,6 @@ steps:
            --ignore=/workspace/tpu_inference/tests/e2e \
            --ignore=/workspace/tpu_inference/tpu_inference/mock \
            --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py \
-           --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py \
            --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference --cov-report term-missing --cov-fail-under=${COV_FAIL_UNDER:-69}
 
    - label: "${LABEL_PREFIX}JAX unit tests - kernels"
