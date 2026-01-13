@@ -393,7 +393,10 @@ class TestDPScheduler:
                 assert combined.req_ids == ["req1", "req2"]
                 assert combined.resumed_req_ids == ["req1"]
                 assert combined.new_token_ids == [[1, 2, 3], [6, 7]]
-                assert combined.all_token_ids == {"req1": [1, 2, 3, 4, 5], "req2": [6, 7, 8, 9]}
+                assert combined.all_token_ids == {
+                    "req1": [1, 2, 3, 4, 5],
+                    "req2": [6, 7, 8, 9]
+                }
                 assert combined.num_computed_tokens == [5, 4]
                 assert combined.num_output_tokens == [3, 2]
 
