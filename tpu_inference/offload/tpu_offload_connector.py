@@ -421,6 +421,7 @@ class KVOffloadConnectorStats(KVConnectorStats):
         # Must be serializable
         self.data: dict[str, dict[str, list[int]]] = {
             "finished_save_chunks": dict(),
+            "finished_gather_blocks": dict(),
             "finished_load_chunks": dict(),
         }
 
@@ -435,6 +436,12 @@ class KVOffloadConnectorStats(KVConnectorStats):
             self.data["finished_load_chunks"][req] = []
         self.data["finished_load_chunks"][req].extend(
             copy.deepcopy(loaded_chunk_ids))
+
+    def record_gather(self, req: ReqId, gathered_block_ids: list[int]):
+        if req not in self.data["finished_gather_blocks"]:
+            self.data["finished_gather_blocks"][req] = []
+        self.data["finished_gather_blocks"][req].extend(
+            copy.deepcopy(gathered_block_ids))
 
     def clone_and_reset(self) -> "KVOffloadConnectorStats":
         old = copy.copy(self)
@@ -451,10 +458,14 @@ class KVOffloadConnectorStats(KVConnectorStats):
         # Compute compact representative stats suitable for CLI logging
         if self.is_empty():
             return {
-                "Num finished save blocks ": 0,
-                "Num finished load blocks ": 0,
+                "Num finished gather blocks ": 0,
+                "Num finished save chunks ": 0,
+                "Num finished load chunks ": 0,
             }
 
+        finished_gather_blocks = sum(
+            len(block_list)
+            for block_list in self.data["finished_gather_blocks"].values())
         finished_save_chunks = sum(
             len(chunk_list)
             for chunk_list in self.data["finished_save_chunks"].values())
@@ -463,6 +474,7 @@ class KVOffloadConnectorStats(KVConnectorStats):
             for chunk_list in self.data["finished_load_chunks"].values())
 
         return {
+            "Num finished gather blocks": finished_gather_blocks,
             "Num finished save chunks ": finished_save_chunks,
             "Num finished load chunks": finished_load_chunks,
         }
@@ -645,6 +657,8 @@ class TPUOffloadConnectorScheduler():
         # request ID -> set(block hashes being saved/loaded)
         self._reqs_being_saved = defaultdict[ReqId, set[CpuChunkId]](set)
         self._reqs_being_loaded = defaultdict[ReqId, set[CpuChunkId]](set)
+        # request ID -> set(src_block_ids to gather into the staging buffer)
+        self._save_reqs_w_pending_gather = defaultdict[ReqId, set[int]](set)
 
         # finished requests but with pending save / load ops
         self._finished_reqs_w_pending_ops: set[ReqId] = set()
@@ -972,6 +986,7 @@ class TPUOffloadConnectorScheduler():
                         dst_chunks=dst_chunks,
                     )
                     self._reqs_being_saved[req_id] |= set(dst_chunks)
+                    self._save_reqs_w_pending_gather[req_id] |= set(src_blocks)
                     num_allocated_blocks = self.staging_buffer_manager.allocate(
                         tracker.req_id,
                         num_blocks=adjusted_num_blocks_to_save,
@@ -1238,8 +1253,28 @@ class TPUOffloadConnectorScheduler():
         if connector_output.kv_connector_stats and connector_output.kv_connector_stats.data is not None:
             assert isinstance(connector_output.kv_connector_stats,
                               KVOffloadConnectorStats)
+            assert "finished_gather_blocks" in connector_output.kv_connector_stats.data
             assert "finished_save_chunks" in connector_output.kv_connector_stats.data
             assert "finished_load_chunks" in connector_output.kv_connector_stats.data
+
+            for req_id, gathered_block_ids in connector_output.kv_connector_stats.data[
+                    "finished_gather_blocks"].items():
+                num_gathered_blocks = len(gathered_block_ids)
+                logger.info(
+                    f"  finished_gather_blocks for {req_id}: {num_gathered_blocks}"
+                )
+                # update pending gathers
+                for gathered_block_id in gathered_block_ids:
+                    assert gathered_block_id in self._save_reqs_w_pending_gather[
+                        req_id]
+                    self._save_reqs_w_pending_gather[req_id].remove(
+                        gathered_block_id)
+                if len(self._save_reqs_w_pending_gather[req_id]) == 0:
+                    self._save_reqs_w_pending_gather.pop(req_id, None)
+                else:
+                    logger.info(
+                        f"  remaining_gather_blocks:{req_id}, {self._save_reqs_w_pending_gather[req_id]}."
+                    )
             for req_id, saved_chunk_ids in connector_output.kv_connector_stats.data[
                     "finished_save_chunks"].items():
                 num_saved_chunks = len(saved_chunk_ids)
@@ -1254,9 +1289,14 @@ class TPUOffloadConnectorScheduler():
                     self._reqs_being_saved[req_id].remove(saved_chunk_id)
                 if len(self._reqs_being_saved[req_id]) == 0:
                     self._reqs_being_saved.pop(req_id, None)
+                    assert req_id not in self._save_reqs_w_pending_gather
                 else:
+                    if req_id in self._save_reqs_w_pending_gather:
+                        assert len(self._reqs_being_saved[req_id]) >= len(
+                            self._save_reqs_w_pending_gather[req_id]
+                        ), f"{req_id}, {self._reqs_being_saved[req_id]}, {self._save_reqs_w_pending_gather[req_id]}"
                     logger.info(
-                        f"  remaining_saving_blocks:{req_id}, { self._reqs_being_saved[req_id]}."
+                        f"  remaining_saving_blocks:{req_id}, {self._reqs_being_saved[req_id]}."
                     )
 
                 # update the status of occupied cpu chunks
@@ -1284,6 +1324,9 @@ class TPUOffloadConnectorScheduler():
         # clean up the status of the finished requests
         # save
         for req_id in connector_output.finished_sending or []:
+            if req_id in self._save_reqs_w_pending_gather:
+                assert len(self._save_reqs_w_pending_gather[req_id]) == 0
+                self._save_reqs_w_pending_gather.pop(req_id)
             if req_id in self._reqs_being_saved:
                 assert len(self._reqs_being_saved[req_id]) == 0
                 self._reqs_being_saved.pop(req_id)
@@ -1306,10 +1349,11 @@ class TPUOffloadConnectorScheduler():
 
         _finished_reqs = list(self._finished_reqs_w_pending_ops)
         for req_id in _finished_reqs:
+            is_gather_done = req_id not in self._save_reqs_w_pending_gather
             is_save_done = req_id not in self._reqs_being_saved
             is_load_done = req_id not in self._reqs_being_loaded
 
-            if is_save_done and is_load_done:
+            if is_gather_done and is_save_done and is_load_done:
                 self._fully_finished_reqs.add(req_id)
                 self._finished_reqs_w_pending_ops.discard(req_id)
                 logger.info(f"Request {req_id} is now fully finished.")
@@ -1337,6 +1381,13 @@ class TPUOffloadConnectorScheduler():
 
         req_id = request.request_id
         delay_free = False
+        if req_id in self._save_reqs_w_pending_gather and len(
+                self._save_reqs_w_pending_gather[req_id]) > 0:
+            self._finished_reqs_w_pending_ops.add(req_id)
+            logger.info(
+                f"not_free_with_gather:{req_id}, {self._save_reqs_w_pending_gather[req_id]}"
+            )
+            delay_free = True
         if req_id in self._reqs_being_saved and len(
                 self._reqs_being_saved[req_id]) > 0:
             self._finished_reqs_w_pending_ops.add(req_id)
@@ -1354,6 +1405,7 @@ class TPUOffloadConnectorScheduler():
 
         if not delay_free:
             logger.info(f" finished request: {req_id}")
+            self._save_reqs_w_pending_gather.pop(req_id, None)
             self._reqs_being_saved.pop(req_id, None)
             self._reqs_being_loaded.pop(req_id, None)
 
@@ -1907,6 +1959,10 @@ class TPUOffloadConnectorWorker:
                 gather_result = self._gather_tpu_blocks(
                     meta.req_id, meta.local_block_ids, meta.token_ids,
                     meta.save_spec)
+                if len(meta.save_spec.src_blocks) > 0:
+                    self.offload_stats.record_gather(
+                        req=meta.req_id,
+                        gathered_block_ids=meta.save_spec.src_blocks)
             except Exception as e:
                 logger.error(
                     f"Error gathering blocks for request {meta.req_id}: {e}",
