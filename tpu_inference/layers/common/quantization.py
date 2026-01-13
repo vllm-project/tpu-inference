@@ -193,9 +193,9 @@ def pad_and_dequantize_tensor(
     for ax, bs in zip(axis, block_size):
         pad_width[ax][1] = scale.shape[ax] * bs - tensor_q.shape[ax]
 
-    result = dequantize_tensor(jnp.pad(tensor_q, pad_width), scale, axis,
+    tensor = dequantize_tensor(jnp.pad(tensor_q, pad_width), scale, axis,
                                out_dtype)
-    return result[tuple(slice(0, s) for s in orig_shape)]
+    return tensor[tuple(slice(0, dim_size) for dim_size in orig_shape)]
 
 
 def quantize_tensor(
