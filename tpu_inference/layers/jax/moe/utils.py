@@ -21,7 +21,8 @@ import enum
 import jax
 import jax.numpy as jnp
 from jax.experimental import xla_metadata
-from jax.experimental.pallas.ops.tpu.megablox.gmm import gmm as megablox_gmm
+#from jax.experimental.pallas.ops.tpu.megablox.gmm import gmm as megablox_gmm
+from tpu_inference.kernels.megablox.gmm_ds import gmm as megablox_gmm
 
 from flax import nnx
 from flax.typing import Sharding
@@ -126,12 +127,11 @@ def unpermute_fn(processed_tokens: jax.Array,
             -1, num_experts_per_tok, hidden_size)
     
     with jax.named_scope("combine_weights"):
-        output_TD = jnp.einsum(
-            "TXD,TX -> TD",
-            reshaped_tokens_TXD.astype(jnp.float32), 
-            router_weights_TX.astype(jnp.float32),
-            precision='float32',
-        )
+        tokens_f32 = reshaped_tokens_TXD.astype(jnp.float32)
+        weights_f32 = router_weights_TX.astype(jnp.float32)
+        weights_expanded = jnp.expand_dims(weights_f32, axis=-1)
+        
+        output_TD = jnp.sum(tokens_f32 * weights_expanded, axis=1)
 
     return output_TD.astype(output_dtype)
 
@@ -253,15 +253,24 @@ def gmm_fn(inputs, kernel, group_sizes,
         inputs = jnp.pad(inputs, ((0, pad_amount), (0, 0)))
 
     if moe_backend == MoEBackend.MEGABLX_GMM:
-        m, g, k, n = inputs.shape[0], *kernel.shape
+        if quantized_dtype:
+            kernel_qvalue, kernel_scale = kernel
+            #kernel_qvalue = jnp.swapaxes(kernel_qvalue, 1, 2)
+            kernel_scale = jnp.expand_dims(kernel_scale, 2)
+        else:
+            #kernel_qvalue = jnp.swapaxes(kernel, 1, 2)
+            kernel_qvalue = kernel
+            kernel_scale = None
+        m, g, k, n = inputs.shape[0], *kernel_qvalue.shape
         tm = round_up_to_multiple_of_128_within_limit(m, 512)
         tk = round_up_to_multiple_of_128_within_limit(k, 2048)
         tn = round_up_to_multiple_of_128_within_limit(n, 2048)
 
         output = megablox_gmm(
             lhs=inputs,
-            rhs=kernel,
-            group_sizes=group_sizes, 
+            rhs=kernel_qvalue,
+            rhs_scale=kernel_scale,
+            group_sizes=group_sizes,
             preferred_element_type=dtype,
             tiling=(tm, tk, tn)
         )

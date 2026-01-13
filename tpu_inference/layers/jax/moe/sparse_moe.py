@@ -19,6 +19,8 @@ from flax import nnx
 
 from tpu_inference.layers.jax.moe.utils import *
 
+from qwix._src.core.qarray import QArray
+
 
 
 class SparseMoEEngine(nnx.Module):
