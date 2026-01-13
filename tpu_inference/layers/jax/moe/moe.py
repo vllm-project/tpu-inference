@@ -19,11 +19,16 @@ from typing import Optional
 
 import jax
 import jax.numpy as jnp
+<<<<<<< HEAD
+=======
+
+>>>>>>> 9fd2240c (Enable quantization support for megablox gmm)
 from flax import nnx
 from flax.typing import Sharding
 from jax.sharding import PartitionSpec
 from jaxtyping import Float
 from qwix._src.providers import ptq
+from qwix._src.core.qarray import QArray
 
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
 from tpu_inference.layers.jax.base import create_param
@@ -211,16 +216,22 @@ class MoE(nnx.Module):
             weights_TX, indices_TX = self.router(x_TD)
 
             if self.moe_backend == MoEBackend.MEGABLX_GMM or self.moe_backend == MoEBackend.RAGGED_DOT:
+
+                if self.quantized_dtype:
+                    gating_up_proj_spec = (PartitionSpec(*self.edf_sharding), PartitionSpec(*self.edf_sharding))
+                    down_proj_spec = (PartitionSpec(*self.efd_sharding), PartitionSpec(self.efd_sharding[0], None, self.efd_sharding[2]))
+                else:
+                    gating_up_proj_spec = PartitionSpec(*self.edf_sharding)
+                    down_proj_spec = PartitionSpec(*self.efd_sharding)
+
                 in_specs = (
                     PartitionSpec(),  # replicated MoE instance
                     PartitionSpec(*self.activation_ffw_td),  # Sharded x_TD
                     PartitionSpec(),  # Replicated router_weights_TX
                     PartitionSpec(),  # Replicated selected_experts_TX
-                    PartitionSpec(*self.edf_sharding),  # Sharded gating kernel
-                    PartitionSpec(
-                        *self.edf_sharding),  # Sharded up-projection kernel
-                    PartitionSpec(
-                        *self.efd_sharding),  # Sharded down-projection kernel
+                    gating_up_proj_spec,  # Sharded gating kernel
+                    gating_up_proj_spec,  # Sharded up-projection kernel
+                    down_proj_spec,  # Sharded down-projection kernel
                 )
                 out_specs = PartitionSpec(*self.activation_ffw_td)
 
@@ -231,18 +242,9 @@ class MoE(nnx.Module):
                     out_specs=out_specs,
                     check_rep=False)(sparse_moe_distributed_fwd)
 
-                kernel_gating_EDF = self._process_weight_for_qwix(
-                    self.kernel_gating_EDF,
-                    channelwise_axes=[0, 2],
-                    tiled_axes={})
-                kernel_up_proj_EDF = self._process_weight_for_qwix(
-                    self.kernel_up_proj_EDF,
-                    channelwise_axes=[0, 2],
-                    tiled_axes={})
-                kernel_down_proj_EFD = self._process_weight_for_qwix(
-                    self.kernel_down_proj_EFD,
-                    channelwise_axes=[0, 2],
-                    tiled_axes={})
+                kernel_gating_EDF = self._process_weight_for_qwix("kernel_gating_EDF", self.kernel_gating_EDF, channelwise_axes=[0, 2], tiled_axes={})
+                kernel_up_proj_EDF = self._process_weight_for_qwix("kernel_up_proj_EDF", self.kernel_up_proj_EDF, channelwise_axes=[0, 2], tiled_axes={})
+                kernel_down_proj_EFD = self._process_weight_for_qwix("kernel_down_proj_EFD", self.kernel_down_proj_EFD, channelwise_axes=[0, 2], tiled_axes={})
 
                 return mapped_moe_fwd(self, x_TD, weights_TX, indices_TX,
                                       kernel_gating_EDF, kernel_up_proj_EDF,
@@ -354,10 +356,8 @@ class MoE(nnx.Module):
             self.expert_axis_name is not None) and (self.expert_axis_name
                                                     == self.data_axis_name)
 
-    def _process_weight_for_qwix(self,
-                                 weight_param,
-                                 channelwise_axes=[],
-                                 tiled_axes={}):
+
+    def _process_weight_for_qwix(self, name, weight_param, channelwise_axes=[], tiled_axes={}):
         """
         Extracts weight value, applies quantization if needed,
         and returns the underlying array.
@@ -366,10 +366,14 @@ class MoE(nnx.Module):
 
         if self.quantized_dtype:
             if not isinstance(weight, ptq.WithAux):
-                weight = manually_quantize_qwix_weight(weight,
-                                                       self.quantized_dtype,
-                                                       channelwise_axes,
-                                                       tiled_axes, "absmax")
-            return weight.array
+                weight = manually_quantize_qwix_weight(
+                    name,
+                    weight,
+                    self.quantized_dtype,
+                    channelwise_axes,
+                    tiled_axes,
+                    "absmax"
+                )
+            return (weight.array.qvalue, weight.array.scale)
 
         return weight

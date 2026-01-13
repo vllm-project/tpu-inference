@@ -22,7 +22,8 @@ from tpu_inference.layers.jax.moe.utils import (get_all_to_all_params_fn,
                                                 sort_activations_fn,
                                                 unpermute_fn)
 
-# yapf: enable
+from qwix._src.core.qarray import QArray
+
 
 
 def sparse_moe_distributed_fwd(
