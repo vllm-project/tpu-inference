@@ -107,11 +107,12 @@ class JaxEinsum(JaxLinear):
                            use_bias=bias_shape is not None,
                            quant_config=quant_config,
                            **kwargs)
+        self.einsum_str = einsum_str
+        self.weight.value = self.weight.value.reshape(kernel_shape)
+        if self.bias is not None:
+            self.bias.value = self.bias.value.reshape(bias_shape)
 
         # TODO(lk-chen): reduce kernel's sharding
 
     def __call__(self, inputs: jax.Array) -> jax.Array:
-        if len(inputs.shape) != 2:
-            inputs = inputs.reshape(-1, self.in_features)
-        return self.quant_method.apply_jax(
-            self, inputs).reshape(*self._out_reshape_dims)
+        return self.quant_method.apply_jax(self, inputs)

@@ -192,8 +192,10 @@ class VllmUnquantizedLinearMethod(UnquantizedLinearMethod,
             if self.linear_config.fuse_matmuls:
                 assert isinstance(layer.weight.value, jax.Array)
                 out = self._apply_fused(
-                    x, layer.weight.value,
-                    layer.bias.value if layer.bias is not None else None)
+                    x,
+                    layer.weight.value,
+                    layer.bias.value if layer.bias is not None else None,
+                    einsum_str=layer.einsum_str)
             else:
                 raise NotImplementedError(
                     "Split linear is not supported in JAX unquantized method.")
@@ -202,11 +204,14 @@ class VllmUnquantizedLinearMethod(UnquantizedLinearMethod,
     def _apply_fused(self,
                      x_jax: jax.Array,
                      weight_jax: jax.Array,
-                     bias_jax: Optional[jax.Array] = None) -> jax.Array:
-        outs = jnp.einsum("mn,pn->mp", x_jax, weight_jax)
+                     bias_jax: Optional[jax.Array] = None,
+                     einsum_str: str = "mn,np->mp") -> jax.Array:
+        outs = jnp.einsum(einsum_str, x_jax, weight_jax)
         if bias_jax is not None:
             outs += bias_jax
 
+        if self.jax_config.n_shards == 1:
+            return outs
         outs = slice_sharded_tensor_for_concatenation(
             outs, self.linear_config.output_sizes, self.linear_config.n_shards)
         out = jnp.concatenate(outs, axis=-1)

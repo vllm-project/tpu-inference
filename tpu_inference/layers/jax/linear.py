@@ -59,14 +59,11 @@ class JaxLinear(nnx.Linear, JaxModule):
         assert isinstance(quant_config, JaxQuantizationConfig)
 
         nnx.Linear.__init__(self, *args, rngs=rngs, **kwargs)
+        self.einsum_str = "mn,np->mp"
         # For compatibility. HF model use 'weight' as name suffix, we alias `self.kernel` to
         # `self.weight` such that `named_parameters()` can match the names in HF models. We also
         # apply transpose here to match HF weight layout.
         self.weight = self.kernel
-        self.weight.value = self.weight.value.T
-        if 'sharding' in self.weight._var_metadata:
-            self.weight._var_metadata['sharding'] = self.weight._var_metadata[
-                'sharding'][::-1]
         delattr(self, 'kernel')
         # For compatibility with vLLM. e.g. `JaxCommonLinearConfig` is used in both flax_nnx
         # and vllm implementations, and it's looking for `layer.output_size` attribute.

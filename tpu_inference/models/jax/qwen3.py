@@ -310,4 +310,5 @@ class Qwen3ForCausalLM(JaxModule):
             })
 
         loader = self.WeightLoader(self.vllm_config, self.mesh)
+        reshape map add weight suffix
         loader.load_weights(self, mappings)
