@@ -18,6 +18,8 @@ import jax.numpy as jnp
 from flax import nnx
 from jaxtyping import Float
 
+from tpu_inference.layers.jax.moe.utils import modeling_flax_utils
+
 class DenseMoEEngine(nnx.Module):
     """Encapsulates logic for Dense/Standard MoE forward passes."""
     def __init__(self, moe_instance: 'MoE'):
