@@ -16,7 +16,6 @@ from typing import Any, Optional
 
 import jax
 from jax.experimental import transfer
-from vllm.distributed.parallel_state import set_pp_provider
 
 BASE_JAX_PORT = 5000
 
@@ -62,7 +61,6 @@ def init_pp_distributed_environment(ip: str, rank: int, world_size: int,
                                     device: Any, need_pp: bool):
     global _PP
     _PP = GroupCoordinator(rank, world_size)
-    set_pp_provider(get_pp_group)
 
     if need_pp:
         port_number = BASE_JAX_PORT + rank
