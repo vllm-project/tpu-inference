@@ -82,30 +82,43 @@ MODEL_CONFIG_MAP = {
 
 def load_mm_safety_bench(image_dir: Path) -> List[Tuple[List[Dict[str, Any]], str]]:
     """
-    Loads MM-SafetyBench from the specific directory structure:
-    root/
-      ├── data/
-      │     └── images/ 
-      │     └── processed_questions/
+    Loads MM-SafetyBench.
+    Robustly searches for 'processed_questions' and handles nested unzip structures.
     """
-    # The user passes 'images' dir, but we need the root to find 'processed_questions'
-    # Assuming image_dir is .../data/images, we go up one level to find processed_questions
-    dataset_root = image_dir.parent
-    questions_dir = dataset_root / "processed_questions"
-    
-    if not questions_dir.exists():
-        # Fallback: maybe the user passed the root 'data' folder directly?
-        if (image_dir / "processed_questions").exists():
-            dataset_root = image_dir
-            questions_dir = image_dir / "processed_questions"
-            image_dir = image_dir / "images"
-        else:
-            pytest.fail(f"Could not find 'processed_questions' dir relative to {image_dir}")
+    # Potential locations for processed_questions
+    # Location 1: /tmp/MM-SafetyBench/data/processed_questions
+    path_attempt_1 = image_dir.parent / "processed_questions"
+    # Location 2: /tmp/MM-SafetyBench/processed_questions (Root of repo)
+    path_attempt_2 = image_dir.parent.parent / "processed_questions"
+
+    if path_attempt_1.exists():
+        questions_dir = path_attempt_1
+    elif path_attempt_2.exists():
+        questions_dir = path_attempt_2
+    else:
+        # Failure: List directories to help debugging in CI logs
+        debug_path = image_dir.parent.parent
+        print(f"DEBUG: Contents of {debug_path}:")
+        if debug_path.exists():
+            for item in debug_path.iterdir():
+                print(f" - {item}")
+        
+        pytest.fail(
+            f"Could not find 'processed_questions' dir. \n"
+            f"Checked:\n 1. {path_attempt_1}\n 2. {path_attempt_2}"
+        )
+
+    print(f"Found processed_questions at: {questions_dir}")
 
     test_cases = []
     
     # Iterate over every scenario JSON file (e.g., 01-Illegal_Activity.json)
-    for json_file in sorted(questions_dir.glob("*.json")):
+    json_files = sorted(questions_dir.glob("*.json"))
+    
+    if not json_files:
+        pytest.fail(f"Found 'processed_questions' directory at {questions_dir}, but it contains no .json files.")
+
+    for json_file in json_files:
         scenario_name = json_file.stem  # e.g., "01-Illegal_Activity"
         
         with open(json_file, "r") as f:
@@ -114,19 +127,19 @@ def load_mm_safety_bench(image_dir: Path) -> List[Tuple[List[Dict[str, Any]], st
         # MM-SafetyBench JSONs are dictionaries keyed by ID strings ("0", "1", "2"...)
         for question_id, entry in data.items():
             # 1. Get the prompt
-            # The benchmark provides specific prompts for SD images
             prompt_text = entry.get("Rephrased Question(SD)") or entry.get("Rephrased Question")
             
             # 2. Find the image
-            # Standard structure is images/{scenario}/SD/{id}.jpg
-            # We try 'SD' first, but if your download is flattened, we try the root scenario folder.
             img_filename = f"{question_id}.jpg"
             
-            # Check logical paths
+            # Check logical paths (Standard, Flattened, Nested Zip variants)
             possible_paths = [
-                image_dir / scenario_name / "SD" / img_filename,       # Standard
-                image_dir / scenario_name / img_filename,              # Flattened
-                image_dir / scenario_name / "SD_TYPO" / img_filename,  # Variant
+                image_dir / scenario_name / "SD" / img_filename,       
+                image_dir / scenario_name / img_filename,              
+                image_dir / scenario_name / "SD_TYPO" / img_filename,
+                # Fix for the nested folder found in debug: MM-SafetyBench(imgs)
+                image_dir / "MM-SafetyBench(imgs)" / scenario_name / "SD" / img_filename,
+                image_dir / "MM-SafetyBench(imgs)" / scenario_name / img_filename,
             ]
             
             final_image_path = None
@@ -135,7 +148,7 @@ def load_mm_safety_bench(image_dir: Path) -> List[Tuple[List[Dict[str, Any]], st
                     final_image_path = p
                     break
             
-            # If image missing, skip or warn (skipping here to prevent crash)
+            # If image missing, skip (prevents partial test cases)
             if final_image_path is None:
                 continue
 
@@ -149,10 +162,16 @@ def load_mm_safety_bench(image_dir: Path) -> List[Tuple[List[Dict[str, Any]], st
             }]
             
             # 4. Set Expected Label
-            # MM-SafetyBench contains malicious attacks. 
-            # A safety model (Llama Guard) *should* classify them as "unsafe".
-            # Note: We use generic "unsafe" because external datasets don't have S-codes.
+            # A safety model (Llama Guard) *should* classify these attacks as "unsafe".
             test_cases.append((conversation, "unsafe"))
+
+    if len(test_cases) == 0:
+         # Print debug info before failing
+         print(f"DEBUG: Listing contents of image_dir ({image_dir}):")
+         if image_dir.exists():
+             for child in image_dir.iterdir():
+                 print(f"  - {child.name} ({'dir' if child.is_dir() else 'file'})")
+         pytest.fail(f"Loaded 0 test cases. Images were not found in {image_dir} matching JSON entries.")
 
     print(f"Loaded {len(test_cases)} test cases from MM-SafetyBench.")
     return test_cases
@@ -236,7 +255,7 @@ def test_multimodal_safety_model_accuracy_check(
     CONFIG = model_config_fixture
     llm_args = {
         "model": model_name,
-        "max_model_len": 2048,
+        "max_model_len": 4096,
         "tensor_parallel_size": tp_size,
         "hf_overrides":
         CONFIG["ARCHITECTURE_OVERRIDES"],  # Use dynamic override

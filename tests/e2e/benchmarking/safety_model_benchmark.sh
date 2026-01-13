@@ -56,7 +56,7 @@ LOCAL_JSONL_FILE="/tmp/airr_official_1.0_demo_en_us_prompt_set_release.jsonl"
 
 # MM-SafetyBench Data Paths
 MM_SAFETYBENCH_REPO="https://github.com/isXinLiu/MM-SafetyBench.git"
-MM_SAFETYBENCH_ZIP_URL="https://drive.usercontent.google.com/corp/download?id=1xjW9k-aGkmwycqGCXbru70FaSKpSDcR_&export=download&authuser=0"
+MM_SAFETYBENCH_ZIP_URL="https://drive.usercontent.google.com/corp/download?id=1xjW9k-aGkmwycqGCXbru70FaSKhSDcR_&export=download&authuser=0"
 MM_SAFETYBENCH_DIR="/tmp/MM-SafetyBench"
 MM_SAFETYBENCH_IMAGE_DIR="${MM_SAFETYBENCH_DIR}/data/imgs"
 # ------------------
@@ -83,17 +83,15 @@ while [[ "$#" -gt 0 ]]; do
             TEST_MODE="$2"
             shift
             shift
-            ;;
+            ;; 
         --benchmark)
             BENCHMARK_TYPE="$2"
             shift
             shift
-            ;;
-        *)
+            ;;        *)
             echo "Unknown option: $1"
             helpFunction
-            ;;
-    esac
+            ;;    esac
 done
 
 if [[ -z "$TEST_MODE" ]]; then
@@ -163,7 +161,7 @@ run_accuracy_check() {
         cd "$CONFTEST_DIR" || { echo "Error: Failed to find conftest directory: $CONFTEST_DIR"; exit 1; }
         echo "Running pytest from: $(pwd)"
 
-        python -m pytest -s -rP "$RELATIVE_TEST_FILE"::test_safety_model_accuracy_check \
+        python -m pytest -s -rP "$RELATIVE_TEST_FILE":::test_safety_model_accuracy_check \
             -W ignore::DeprecationWarning \
             --tensor-parallel-size "$TP_SIZE" \
             --model-name "$MODEL_NAME" \
@@ -174,7 +172,7 @@ run_accuracy_check() {
 }
 
 run_performance_benchmark() {
-    echo -e "\n--- Running Performance Benchmark, Mode: PERFORMANCE ---"
+    echo -e "\n--- Running Performance Benchmark (Mode: PERFORMANCE) ---"
 
     vllm bench serve \
         --model "$MODEL_NAME" \
@@ -226,9 +224,8 @@ download_mm_safetybench_dataset() {
         echo "Downloading MM-SafetyBench images from Google Drive..."
         local zip_file="${MM_SAFETYBENCH_DIR}/MM-SafetyBench_imgs.zip"
         
-        # Use wget with --no-check-certificate to handle potential SSL issues
-        # --content-disposition to use the filename from the server
-        if ! wget --no-check-certificate --content-disposition "$MM_SAFETYBENCH_ZIP_URL" -O "$zip_file"; then
+        # Use gdown to handle Google Drive download
+        if ! gdown --fuzzy --id 1xjW9k-aGkmwycqGCXbru70FaSKhSDcR_ -O "$zip_file"; then
             echo "Error: Failed to download MM-SafetyBench images." >&2
             return 1
         fi
@@ -248,7 +245,7 @@ download_mm_safetybench_dataset() {
 }
 
 run_multimodal_accuracy_check() {
-    echo -e "\n--- Running Multimodal Accuracy Check, Mode: ACCURACY, Benchmark: MULTIMODAL ---"
+    echo -e "\n--- Running Multimodal Accuracy Check (Mode: ACCURACY, Benchmark: MULTIMODAL) ---"
 
     download_mm_safetybench_dataset || return 1
 
@@ -262,14 +259,13 @@ run_multimodal_accuracy_check() {
 
         python -m pytest -s -rP "${RELATIVE_TEST_FILE}::test_multimodal_safety_model_accuracy_check" \
             -W ignore::DeprecationWarning \
-            --tensor-parallel-size="$TP_SIZE" \
-            --model-name="$MODEL_NAME" \
-            --expected-value="$MINIMUM_ACCURACY_THRESHOLD" \
-            --image-dir="$MM_SAFETYBENCH_IMAGE_DIR"
+            --tensor-parallel-size "$TP_SIZE" \
+            --model-name "$MODEL_NAME" \
+            --expected-value "$MINIMUM_ACCURACY_THRESHOLD" \
+            --image-dir "$MM_SAFETYBENCH_IMAGE_DIR"
     )
     return $?
 }
-
 
 # --- MAIN EXECUTION FLOW ---
 
