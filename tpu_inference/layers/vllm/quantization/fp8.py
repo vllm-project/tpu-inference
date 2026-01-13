@@ -36,8 +36,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
 from tpu_inference.layers.common.quant_methods import FP8, get_tpu_quant_method
-from tpu_inference.layers.common.quantization import (dequantize_tensor,
-                                                      quantize_tensor)
+from tpu_inference.layers.common.quantization import (
+    pad_and_dequantize_tensor, quantize_tensor)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
@@ -61,39 +61,6 @@ from tpu_inference.utils import get_mesh_shape_product
 P = PartitionSpec
 
 logger = init_logger(__name__)
-
-
-def _pad_and_dequantize(
-    tensor_q: jax.Array,
-    scale: jax.Array,
-    axis: tuple[int, ...],
-    block_size: tuple[int, ...],
-    out_dtype: jnp.dtype = jnp.bfloat16,
-) -> jax.Array:
-    """Pad tensor to align with scale dimensions, dequantize, then slice back.
-
-    Some models (e.g., DeepSeek V3) store weights that were padded during
-    quantization, then trimmed.
-    
-    Args:        
-        tensor_q: Quantized tensor (may be smaller than scale implies).
-        scale: Quantization scale.
-        axis: Axes that were quantized.
-        block_size: Block size used during quantization (e.g., (128, 128)).
-        out_dtype: Dtype of the output.
-
-    Returns:
-        Dequantized tensor with original (unpadded) shape.
-    """
-    orig_shape = tensor_q.shape
-
-    pad_width = [[0, 0] for _ in range(tensor_q.ndim)]
-    for ax, bs in zip(axis, block_size):
-        pad_width[ax][1] = scale.shape[ax] * bs - tensor_q.shape[ax]
-
-    result = dequantize_tensor(jnp.pad(tensor_q, pad_width), scale, axis,
-                               out_dtype)
-    return result[tuple(slice(0, s) for s in orig_shape)]
 
 
 @register_quantization_config(get_tpu_quant_method(FP8))
@@ -175,7 +142,7 @@ class VllmFp8LinearMethod(Fp8LinearMethod):
                 weight_slice = weight[start:end]
                 weight_scale_slice = weight_scale[start // block_size:math.
                                                   ceil(end / block_size)]
-                dequantized_weight = _pad_and_dequantize(
+                dequantized_weight = pad_and_dequantize_tensor(
                     weight_slice,
                     weight_scale_slice,
                     (0, 1),
@@ -317,10 +284,12 @@ class VllmFp8MoEMethod(Fp8MoEMethod):
             w2_weight_scale: jax.Array,
         ) -> FusedMoEWeights:
             # Dequantize fp8 2d block quantized weights into fp32.
-            w13_weight = _pad_and_dequantize(w13_weight, w13_weight_scale,
-                                             (1, 2), self.weight_block_size)
-            w2_weight = _pad_and_dequantize(w2_weight, w2_weight_scale, (1, 2),
-                                            self.weight_block_size)
+            w13_weight = pad_and_dequantize_tensor(w13_weight,
+                                                   w13_weight_scale, (1, 2),
+                                                   self.weight_block_size)
+            w2_weight = pad_and_dequantize_tensor(w2_weight, w2_weight_scale,
+                                                  (1, 2),
+                                                  self.weight_block_size)
 
             w13_interleave = layer.activation == "swigluoai"
             w13_reorder_size = get_mesh_shape_product(
