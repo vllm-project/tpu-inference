@@ -79,53 +79,15 @@ _original_loads = multiprocessing.reduction.ForkingPickler.loads
 def _cloudpickle_dumps(obj, protocol=None):
     """Use cloudpickle for serialization."""
     try:
-        # Log what we're trying to pickle for debugging
-        obj_type = type(obj).__name__
-        logger.debug(f"Attempting to pickle object of type: {obj_type}")
-        
-        # Check if it's a tuple (command, data)
-        if isinstance(obj, tuple) and len(obj) == 2:
-            cmd, data = obj
-            logger.debug(f"Pickling command: {cmd}, data type: {type(data).__name__}")
-            if hasattr(data, 'request_id'):
-                logger.debug(f"Data is Request with ID: {data.request_id}")
-                # Check for potential circular references
-                if hasattr(data, '__dict__'):
-                    attrs = list(data.__dict__.keys())
-                    logger.debug(f"Request attributes: {attrs}")
-        
-        # Increase recursion limit temporarily for deep objects
-        import sys
-        old_limit = sys.getrecursionlimit()
-        sys.setrecursionlimit(10000)
-        
-        try:
-            result = cloudpickle.dumps(obj, protocol=protocol)
-            logger.debug(f"Successfully pickled {obj_type}, size: {len(result)} bytes")
-            return result
-        finally:
-            sys.setrecursionlimit(old_limit)
-            
-    except RecursionError as e:
-        logger.error(f"RecursionError while pickling {type(obj).__name__}: {e}")
-        # Try to get more details about the object
-        if isinstance(obj, tuple) and len(obj) == 2:
-            cmd, data = obj
-            logger.error(f"Failed command: {cmd}, data type: {type(data).__name__}")
-            if hasattr(data, '__dict__'):
-                logger.error(f"Data attributes: {list(data.__dict__.keys())}")
-                # Try to identify circular references
-                for attr_name, attr_value in data.__dict__.items():
-                    try:
-                        if attr_value is data:
-                            logger.error(f"Found circular self-reference in attribute: {attr_name}")
-                        elif hasattr(attr_value, '__dict__') and data in attr_value.__dict__.values():
-                            logger.error(f"Found circular reference through attribute: {attr_name}")
-                    except Exception:
-                        pass
-        raise
+        return cloudpickle.dumps(obj, protocol=protocol)
     except Exception as e:
-        logger.error(f"Error pickling {type(obj).__name__}: {e}")
+        obj_type = type(obj).__name__
+        logger.error(f"Error pickling {obj_type}: {e}")
+        if isinstance(obj, tuple) and len(obj) == 2:
+            cmd, data = obj
+            logger.error(
+                f"Failed to pickle command: {cmd}, data type: {type(data).__name__}"
+            )
         raise
 
 
@@ -178,77 +140,60 @@ def _scheduler_worker_process(
     # Process commands from the input queue
     while True:
         try:
-            logger.debug(f"Rank {rank}: Waiting for command from input queue")
             command, data = input_queue.get()
-            logger.debug(f"Rank {rank}: Received command {command.value}")
 
             match command:
                 case SchedulerCommand.ADD_REQUEST:
                     request = data
-                    logger.info(f"Rank {rank}: Adding request {request.request_id}")
                     scheduler.add_request(request)
-                    logger.debug(f"Rank {rank}: Successfully added request {request.request_id}")
                     output_queues[command.value].put(None)  # Signal completion
-                    logger.debug(f"Rank {rank}: Sent completion signal for ADD_REQUEST")
 
                 case SchedulerCommand.SCHEDULE:
-                    logger.debug(f"Rank {rank}: Running schedule()")
                     output = scheduler.schedule()
-                    logger.debug(f"Rank {rank}: Schedule completed, sending output")
                     output_queues[command.value].put(output)
-                    logger.debug(f"Rank {rank}: Sent schedule output")
 
                 case SchedulerCommand.FINISH_REQUESTS:
                     request_ids, finished_status = data
-                    logger.debug(f"Rank {rank}: Finishing {len(request_ids)} requests")
                     scheduler.finish_requests(request_ids, finished_status)
                     output_queues[command.value].put(None)  # Signal completion
 
                 case SchedulerCommand.UPDATE_DRAFT_TOKEN_IDS:
                     draft_token_ids = data
-                    logger.debug(f"Rank {rank}: Updating draft token IDs")
                     scheduler.update_draft_token_ids(draft_token_ids)
                     output_queues[command.value].put(None)  # Signal completion
 
                 case SchedulerCommand.UPDATE_FROM_OUTPUT:
                     scheduler_output, model_runner_output = data
-                    logger.debug(f"Rank {rank}: Updating from output")
                     result = scheduler.update_from_output(
                         scheduler_output, model_runner_output)
                     output_queues[command.value].put(result)
 
                 case SchedulerCommand.GET_GRAMMAR_BITMASK:
                     scheduler_output = data
-                    logger.debug(f"Rank {rank}: Getting grammar bitmask")
                     result = scheduler.get_grammar_bitmask(scheduler_output)
                     output_queues[command.value].put(result)
 
                 case SchedulerCommand.MAKE_STATS:
                     spec_decoding_stats, kv_connector_stats = data
-                    logger.debug(f"Rank {rank}: Making stats")
                     result = scheduler.make_stats(spec_decoding_stats,
                                                   kv_connector_stats)
                     output_queues[command.value].put(result)
 
                 case SchedulerCommand.RESET_PREFIX_CACHE:
-                    logger.debug(f"Rank {rank}: Resetting prefix cache")
                     result = scheduler.reset_prefix_cache()
                     output_queues[command.value].put(result)
 
                 case SchedulerCommand.GET_NUM_UNFINISHED_REQUESTS:
-                    logger.debug(f"Rank {rank}: Getting num unfinished requests")
                     result = scheduler.get_num_unfinished_requests()
                     output_queues[command.value].put(result)
 
                 case SchedulerCommand.HAS_FINISHED_REQUESTS:
-                    logger.debug(f"Rank {rank}: Checking for finished requests")
                     result = scheduler.has_finished_requests()
                     output_queues[command.value].put(result)
 
                 case SchedulerCommand.GET_REQUEST_COUNTS:
                     running = len(scheduler.running)
                     waiting = len(scheduler.waiting)
-                    logger.debug(f"Rank {rank}: Request counts - running: {running}, waiting: {waiting}")
                     output_queues[command.value].put((running, waiting))
 
                 case SchedulerCommand.GET_TOKEN_COUNT:
@@ -258,16 +203,15 @@ def _scheduler_worker_process(
                         total_tokens += len(req.all_token_ids)
                     for req in scheduler.waiting:
                         total_tokens += len(req.all_token_ids)
-                    logger.debug(f"Rank {rank}: Total tokens: {total_tokens}")
                     output_queues[command.value].put(total_tokens)
 
                 case SchedulerCommand.GET_COMPUTED_BLOCKS:
                     request = data
-                    logger.debug(f"Rank {rank}: Getting computed blocks for request {request.request_id}")
                     blocks, cached_tokens = scheduler.kv_cache_manager.get_computed_blocks(
                         request)
-                    logger.debug(f"Rank {rank}: Found {cached_tokens} cached tokens for request {request.request_id}")
-                    output_queues[command.value].put((blocks, cached_tokens))
+                    # Only return cached_tokens, not blocks, to avoid circular reference issues
+                    # The blocks object contains a linked list structure that can cause recursion errors during pickling
+                    output_queues[command.value].put(cached_tokens)
 
                 case SchedulerCommand.SHUTDOWN:
                     logger.info(f"Rank {rank}: Shutting down")
@@ -433,13 +377,9 @@ class DPScheduler(SchedulerInterface):
 
     def _find_best_rank_for_request(self, request: Request) -> int:
         """Find the best DP rank for a new request based on load balancing."""
-        logger.debug(f"Finding best rank for request {request.request_id}")
-        
         rank_tokens = self._get_rank_token_counts()
-        logger.debug(f"Current rank token counts: {rank_tokens}")
 
         # First, try to find a rank with prefix cache hit
-        logger.debug(f"Checking for prefix cache hits across {self.dp_size} ranks")
         for rank in range(self.dp_size):
             self.input_queues[rank].put(
                 (SchedulerCommand.GET_COMPUTED_BLOCKS, request))
@@ -447,22 +387,16 @@ class DPScheduler(SchedulerInterface):
         best_cache_rank = None
         best_cache_tokens = 0
         for rank in range(self.dp_size):
-            blocks, cached_tokens = self._get_result_from_queue(
+            cached_tokens = self._get_result_from_queue(
                 rank, SchedulerCommand.GET_COMPUTED_BLOCKS)
-            logger.debug(f"Rank {rank} has {cached_tokens} cached tokens for request {request.request_id}")
             if cached_tokens > best_cache_tokens:
                 best_cache_tokens = cached_tokens
                 best_cache_rank = rank
-        
         if best_cache_tokens > 0:
-            logger.info(f"Selected rank {best_cache_rank} for request {request.request_id} "
-                       f"due to prefix cache hit ({best_cache_tokens} tokens)")
             return best_cache_rank
 
         # Otherwise, find rank with least tokens
         selected_rank = min(rank_tokens, key=rank_tokens.get)
-        logger.info(f"Selected rank {selected_rank} for request {request.request_id} "
-                   f"due to load balancing ({rank_tokens[selected_rank]} tokens)")
         return selected_rank
 
     def add_request(self, request: Request) -> None:
@@ -474,42 +408,14 @@ class DPScheduler(SchedulerInterface):
         2. Assign the request to that rank
         3. Add the request to the rank's scheduler
         """
-        logger.debug(f"Adding request {request.request_id} to DPScheduler")
-        logger.debug(f"Current assigned_dp_rank size: {len(self.assigned_dp_rank)} requests")
-        
         assert request.request_id not in self.assigned_dp_rank, (
             f"Request {request.request_id} already "
             f"assigned to rank {self.assigned_dp_rank[request.request_id]})")
-        
-        logger.debug(f"Finding best rank for request {request.request_id}")
         rank = self._find_best_rank_for_request(request)
         self.assigned_dp_rank[request.request_id] = rank
-        logger.info(f"Assigned request {request.request_id} to DP rank {rank} "
-                   f"(total assigned: {len(self.assigned_dp_rank)})")
 
-        # Log request details before pickling
-        logger.debug(f"Request {request.request_id} attributes: {list(request.__dict__.keys())}")
-        logger.debug(f"Request {request.request_id} all_token_ids length: {len(request.all_token_ids)}")
-        
-        # Check if request has any attributes that might cause circular references
-        if hasattr(request, 'inputs') and hasattr(request.inputs, '__dict__'):
-            logger.debug(f"Request {request.request_id} inputs type: {type(request.inputs).__name__}")
-        
-        try:
-            logger.debug(f"Putting ADD_REQUEST command for {request.request_id} to rank {rank} queue")
-            self.input_queues[rank].put((SchedulerCommand.ADD_REQUEST, request))
-            logger.debug(f"Successfully queued ADD_REQUEST for {request.request_id}")
-            
-            logger.debug(f"Waiting for ADD_REQUEST completion for {request.request_id}")
-            self._get_result_from_queue(rank, SchedulerCommand.ADD_REQUEST)
-            logger.info(f"Successfully added request {request.request_id} to rank {rank}")
-        except Exception as e:
-            logger.error(f"Error adding request {request.request_id} to rank {rank}: {e}", exc_info=True)
-            # Remove from assigned_dp_rank on failure
-            if request.request_id in self.assigned_dp_rank:
-                del self.assigned_dp_rank[request.request_id]
-                logger.debug(f"Removed failed request {request.request_id} from assigned_dp_rank")
-            raise
+        self.input_queues[rank].put((SchedulerCommand.ADD_REQUEST, request))
+        self._get_result_from_queue(rank, SchedulerCommand.ADD_REQUEST)
 
     @time_function
     def schedule(self) -> DPSchedulerOutput:
@@ -749,38 +655,26 @@ class DPScheduler(SchedulerInterface):
 
     def _cleanup_finished_requests(self, finished_req_ids: set[str]) -> None:
         """Remove finished requests from our DP rank assignment tracking."""
-        if finished_req_ids:
-            logger.info(f"Cleaning up {len(finished_req_ids)} finished requests from DP tracking")
         for req_id in finished_req_ids:
             if req_id in self.assigned_dp_rank:
-                rank = self.assigned_dp_rank[req_id]
                 del self.assigned_dp_rank[req_id]
-                logger.debug(f"Removed finished request {req_id} (was on rank {rank}) from assigned_dp_rank")
-        logger.debug(f"Remaining assigned requests: {len(self.assigned_dp_rank)}")
 
     def finish_requests(self, request_ids, finished_status) -> None:
         """Forward request finish signals to the appropriate DP rank schedulers."""
         if isinstance(request_ids, str):
             request_ids = [request_ids]
 
-        logger.info(f"Finishing {len(request_ids)} requests with status {finished_status}")
-
         # Route finish signals to appropriate schedulers
         rank_request_ids = defaultdict(list)
         for req_id in request_ids:
-            if req_id not in self.assigned_dp_rank:
-                logger.warning(f"Request {req_id} not found in assigned_dp_rank during finish")
-                continue
             rank = self.assigned_dp_rank[req_id]
             rank_request_ids[rank].append(req_id)
 
         # Forward to each scheduler
         for rank, req_ids in rank_request_ids.items():
-            logger.debug(f"Sending FINISH_REQUESTS to rank {rank} for {len(req_ids)} requests")
             self.input_queues[rank].put(
                 (SchedulerCommand.FINISH_REQUESTS, (req_ids, finished_status)))
             self._get_result_from_queue(rank, SchedulerCommand.FINISH_REQUESTS)
-            logger.debug(f"Rank {rank} confirmed finishing {len(req_ids)} requests")
 
     def get_num_unfinished_requests(self) -> int:
         """Get total number of unfinished requests across all DP ranks."""
