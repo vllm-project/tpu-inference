@@ -121,15 +121,19 @@ class TestDeepSeekV3:
             # Check a layer norm (should be 1s usually, but check existence)
             assert model.final_norm.scale.value.shape == (7168, )
 
-    @patch("tpu_inference.models.jax.deepseek_v3.DeepSeekV3WeightLoader")
-    def test_load_weights_called(self, mock_loader_cls, mock_config, rng,
-                                 mesh):
+    @patch("tpu_inference.models.jax.deepseek_v3.DeepSeekV3.WeightLoader")
+    @patch(
+        "tpu_inference.models.jax.utils.weight_utils.model_weights_generator",
+        return_value=[],
+    )
+    def test_load_weights_called(
+        self, mock_weights_generator, mock_loader_cls, mock_config, rng, mesh
+    ):
         model = DeepSeekV3(mock_config, rng, mesh)
-        mock_loader_instance = mock_loader_cls.return_value
 
         model.load_weights(rng)
 
-        mock_loader_instance.load_weights.assert_called_once_with(model)
+        model.weight_loader.load_weights.assert_called_once_with(model)
 
 
 class TestDeepSeekV3WeightLoader:
