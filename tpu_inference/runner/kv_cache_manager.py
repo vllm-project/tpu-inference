@@ -128,6 +128,8 @@ class KVCacheManager:
                 else:
                     kv_cache_spec[f"layer.{i}"] = self._create_attention_spec(
                         block_size, num_kv_heads, head_size)
+
+            if self.runner.speculative_config and self.runner.speculative_config.method == "eagle3":
                 draft_model_config = self.runner.speculative_config.draft_model_config
                 hf_config = draft_model_config.hf_config
                 num_kv_heads = common_utils.get_padded_num_heads(
