@@ -175,7 +175,6 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
 
         return out
 
-
 class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def __init__(
