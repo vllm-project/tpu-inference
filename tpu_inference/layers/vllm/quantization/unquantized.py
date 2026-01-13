@@ -23,7 +23,7 @@ from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
 from vllm.attention.layer import Attention
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, FusedMoEConfig, UnquantizedFusedMoEMethod)
+    FusedMoE, FusedMoEConfig, FusedMoERouter, UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import \
@@ -214,18 +214,7 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         if self.moe_backend == FusedMoEBackend.FUSED_MOE:
             # When fused moe kernle is used, we pass extra arguments like
             # tuned block sizes to the kernel.
-            self.extra_backend_kwargs = dict(
-                ep_axis_name=ep_axis_name,
-                # TODO: Use autotune table once we have it.
-                bt=64,
-                bf=1536,
-                bd1=1536,
-                bd2=1536,
-                btc=64,
-                bfc=1536,
-                bd1c=1536,
-                bd2c=1536,
-            )
+            self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name, )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         assert isinstance(layer, FusedMoE)
@@ -283,7 +272,8 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
+        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:

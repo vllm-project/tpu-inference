@@ -9,8 +9,12 @@ import torch
 from jax.sharding import Mesh
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionLayer, AttentionType)
+from vllm.config import VllmConfig
+from vllm.utils.math_utils import cdiv, next_power_of_2
+from vllm.v1.attention.backend import (AttentionBackend, AttentionImpl,
+                                       AttentionLayer, AttentionType)
+from vllm.v1.attention.backends.registry import (AttentionBackendEnum,
+                                                 register_backend)
 
 from tpu_inference import utils
 from tpu_inference.layers.common.attention_interface import attention
@@ -22,16 +26,78 @@ from tpu_inference.models.vllm.vllm_model_wrapper_context import \
 
 logger = init_logger(__name__)
 
+# TPU requires the head size to be a multiple of 128.
+TPU_HEAD_SIZE_ALIGNMENT = 128
 
+
+@register_backend(AttentionBackendEnum.FLASH_ATTN)
 class PallasAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "PALLAS"
+        return "FLASH_ATTN"
 
     @staticmethod
     def get_impl_cls() -> type["PallasAttentionBackendImpl"]:
         return PallasAttentionBackendImpl
+
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_dtype_str: str = "auto",
+    ) -> tuple[int, ...]:
+        padded_head_size = (cdiv(head_size, TPU_HEAD_SIZE_ALIGNMENT) *
+                            TPU_HEAD_SIZE_ALIGNMENT)
+        return (num_blocks, block_size, num_kv_heads * 2, padded_head_size)
+
+    @staticmethod
+    def swap_blocks(
+        src_kv_cache: torch.Tensor,
+        dst_kv_cache: torch.Tensor,
+        src_to_dst: torch.Tensor,
+    ) -> None:
+        raise RuntimeError("swap_blocks is not used for the TPU backend.")
+
+    # In recent TPU generations, up to v6e, the SMEM size is 1MB. The
+    # block_tables within the PallasMetadata constitute almost the entire SMEM
+    # requirement. Its size is max_num_seqs * num_page_per_seq * 4 (Int). Here
+    # we simply make sure that the size is smaller than half of SMEM capacity.
+    @staticmethod
+    def get_min_page_size(vllm_config: VllmConfig) -> int:
+        max_num_page_per_req = (1024 * 1024 // 2 //
+                                vllm_config.scheduler_config.max_num_seqs // 4)
+        min_page_size = cdiv(vllm_config.model_config.max_model_len,
+                             max_num_page_per_req)
+        min_page_size = 1 << (min_page_size - 1).bit_length()
+        return min_page_size
+
+    @staticmethod
+    def get_max_num_seqs(model_len: int, page_size: int) -> int:
+        num_page_per_req = cdiv(model_len, page_size)
+        return 1024 * 1024 // 2 // num_page_per_req // 4
+
+    # TPU has limited SREGs (scalar registers), if page_size is too small, we
+    # can spill SREGs easily which leads to bad performance. The strategy we
+    # apply here is trying to split max-model-len to 16 pages which make the
+    # spill less likely. Meanwhile we make sure the page size is in [16, 256].
+    @staticmethod
+    def get_page_size(vllm_config: VllmConfig) -> int:
+        # TODO: This is a temporary fix for vmem OOM.
+        # For long model length, we use 16 page-size to avoid too much
+        # VMEM spill. A more robust solution should be implemented to
+        # handle VREG spills.
+        if vllm_config.model_config.max_model_len > 8192:
+            return 16
+        page_size = next_power_of_2(
+            vllm_config.model_config.max_model_len) // 16
+        if page_size <= 16:
+            return 16
+        if page_size >= 256:
+            return 256
+        return page_size
 
 
 class PallasAttentionBackendImpl(AttentionImpl):

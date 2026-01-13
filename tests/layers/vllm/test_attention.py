@@ -22,7 +22,7 @@ import torch
 import torchax
 from jax.sharding import Mesh
 from torchax.interop import torch_view
-from vllm.attention.backends.abstract import AttentionType
+from vllm.v1.attention.backend import AttentionType
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.vllm.attention import (PallasAttentionBackend,
@@ -116,7 +116,7 @@ def mesh():
 class TestPallasAttentionBackend:
 
     def test_get_name(self):
-        assert PallasAttentionBackend.get_name() == "PALLAS"
+        assert PallasAttentionBackend.get_name() == "FLASH_ATTN"
 
     def test_get_impl_cls(self):
         assert PallasAttentionBackend.get_impl_cls(

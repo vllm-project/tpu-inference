@@ -20,7 +20,6 @@ import numpy as np
 import pytest
 import torch
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
 
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.runner.kv_cache import (create_kv_caches,
@@ -169,14 +168,9 @@ def test_get_attention_page_size_bytes(mesh: Mesh):
     head_size = 128
     dtype = torch.bfloat16
 
-    full_attn_spec = FullAttentionSpec(block_size=block_size,
-                                       num_kv_heads=num_kv_heads,
-                                       head_size=head_size,
-                                       dtype=dtype)
-
-    kv_cache_specs = {"layer.0": full_attn_spec}
-
-    page_size_bytes = get_attention_page_size_bytes(mesh, kv_cache_specs)
+    page_size_bytes = get_attention_page_size_bytes(mesh, block_size,
+                                                    num_kv_heads, head_size,
+                                                    dtype, False)
 
     shape = get_kv_cache_shape_with_mesh(mesh, 1, block_size, num_kv_heads,
                                          head_size, jnp.bfloat16)
@@ -195,17 +189,9 @@ def test_get_attention_page_size_bytes_mla(mesh: Mesh):
     head_size = 512 + 128  # lkv_dim + r_dim
     dtype = torch.bfloat16
 
-    mla_spec = MLAAttentionSpec(
-        block_size=block_size,
-        num_kv_heads=num_kv_heads,
-        head_size=head_size,
-        dtype=dtype,
-        cache_dtype_str="bfloat16",
-    )
-
-    kv_cache_specs = {"layer.0": mla_spec}
-
-    page_size_bytes = get_attention_page_size_bytes(mesh, kv_cache_specs)
+    page_size_bytes = get_attention_page_size_bytes(mesh, block_size,
+                                                    num_kv_heads, head_size,
+                                                    dtype, True)
 
     shape = get_kv_cache_shape_with_mesh(mesh,
                                          1,

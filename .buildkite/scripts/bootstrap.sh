@@ -17,8 +17,29 @@
 # --- Skip build if only docs/icons changed ---
 echo "--- :git: Checking changed files"
 
-# Get a list of all files changed in this commit
-FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r "$BUILDKITE_COMMIT")
+BASE_BRANCH=${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-"main"}
+
+if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
+    echo "PR detected. Target branch: $BASE_BRANCH"
+
+    # Fetch base and current commit to ensure local history exists for diff
+    git fetch origin "$BASE_BRANCH" --depth=20 --quiet || echo "Base fetch failed"
+    git fetch origin "$BUILDKITE_COMMIT" --depth=20 --quiet || true
+
+    # Get all changes in this PR using triple-dot diff (common ancestor to HEAD)
+    # This correctly captures changes even if the last commit is a merge from main
+    FILES_CHANGED=$(git diff --name-only origin/"$BASE_BRANCH"..."$BUILDKITE_COMMIT" 2>/dev/null || true)
+
+    # Fallback to single commit diff if PR history is unavailable
+    if [ -z "$FILES_CHANGED" ]; then
+        echo "Warning: PR diff failed. Falling back to single commit check."
+        FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r -m "$BUILDKITE_COMMIT")
+    fi
+else
+    echo "Non-PR build. Checking the latest commit."
+    # -m ensures merge commits show files brought into the branch
+    FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r -m "$BUILDKITE_COMMIT")
+fi
 
 echo "Files changed:"
 echo "$FILES_CHANGED"
@@ -38,8 +59,20 @@ upload_pipeline() {
     VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
+    
+    # Upload JAX pipeline for v6 (default)
     buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
-    buildkite-agent pipeline upload .buildkite/pipeline_jax_tpu7x.yml
+
+    # Upload JAX pipeline for v7
+    export LABEL_PREFIX="TPU7x "
+    export KEY_PREFIX="tpu7x_"
+    export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
+    export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
+    export IS_FOR_V7X="true"
+    export COV_FAIL_UNDER="67"
+    buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
+    unset LABEL_PREFIX KEY_PREFIX TPU_QUEUE_SINGLE TPU_QUEUE_MULTI IS_FOR_V7X COV_FAIL_UNDER
+
     # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
     buildkite-agent pipeline upload .buildkite/main.yml
     buildkite-agent pipeline upload .buildkite/nightly_releases.yml
@@ -54,22 +87,52 @@ if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     # Note: upload are inserted in reverse order, so promote LKG should upload before tests
     buildkite-agent pipeline upload .buildkite/pipeline_integration.yml
-    buildkite-agent pipeline upload .buildkite/pipeline_jax_tpu7x.yml
+    
+    # Upload JAX pipeline for v7
+    export LABEL_PREFIX="TPU7x "
+    export KEY_PREFIX="tpu7x_"
+    export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
+    export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
+    export IS_FOR_V7X="true"
+    export COV_FAIL_UNDER="67"
+    buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
+    unset LABEL_PREFIX KEY_PREFIX TPU_QUEUE_SINGLE TPU_QUEUE_MULTI IS_FOR_V7X COV_FAIL_UNDER
+
+    # Upload JAX pipeline for v6 (default)
     buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
 
 else
   # Check if the current build is a pull request
   if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     echo "This is a Pull Request build."
-    PR_LABELS=$(curl -s "https://api.github.com/repos/vllm-project/tpu-inference/pulls/$BUILDKITE_PULL_REQUEST" | jq -r '.labels[].name')
+
+    # Wait for GitHub API to sync labels
+    echo "Sleeping for 5 seconds to ensure GitHub API is updated..."
+    sleep 5
+
+    API_URL="https://api.github.com/repos/vllm-project/tpu-inference/pulls/$BUILDKITE_PULL_REQUEST"
+    echo "Fetching PR details from: $API_URL"
+
+    # Fetch the response body and save to a temporary file
+    GITHUB_PR_RESPONSE_FILE="github_api_logs.json"
+    curl -s "$API_URL" -o "$GITHUB_PR_RESPONSE_FILE"
+    
+    # Upload the full response body as a Buildkite artifact
+    echo "Uploading GitHub API response as artifact..."
+    buildkite-agent artifact upload "$GITHUB_PR_RESPONSE_FILE"
+
+    # Extract labels using input redirection
+    PR_LABELS=$(jq -r '.labels[].name' < "$GITHUB_PR_RESPONSE_FILE")
+    echo "Extracted PR Labels: $PR_LABELS"
 
     # If it's a PR, check for the specific label
     if [[ $PR_LABELS == *"ready"* ]]; then
       echo "Found 'ready' label on PR. Uploading main pipeline..."
       upload_pipeline
     else
-      echo "No 'ready' label found on PR. Skipping main pipeline upload."
-      exit 0 # Exit with 0 to indicate success (no error, just skipped)
+      # Explicitly fail the build because the required 'ready' label is missing.
+      echo "Missing 'ready' label on PR. Failing build."
+      exit 1
     fi
   else
     # If it's NOT a Pull Request (e.g., branch push, tag, manual build)

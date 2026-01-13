@@ -13,14 +13,12 @@
 # limitations under the License.
 
 import os
-from array import array
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 import ray
 import vllm.envs as envs
 from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils.network_utils import (get_distributed_init_method, get_ip,
@@ -43,23 +41,9 @@ except ImportError:
 import asyncio
 from collections import defaultdict
 
-import msgspec
-from vllm.v1.outputs import SamplerOutput
-
 from tpu_inference.distributed.utils import set_node_kv_ip_port
 
 logger = init_logger(__name__)
-
-
-def _encode_hook(obj: Any) -> Any:
-    """Custom msgspec enc hook that supports array types and MultiModalKwargsItem.
-
-    See https://jcristharif.com/msgspec/api.html#msgspec.msgpack.Encoder
-    """
-    if isinstance(obj, array):
-        return obj.tobytes()
-    if isinstance(obj, MultiModalKwargsItem):
-        return dict(obj)
 
 
 class RayDistributedExecutor(RayDistributedExecutorV1):
@@ -103,10 +87,6 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
 
         # Create the parallel GPU workers.
         self._init_workers_ray(placement_group)
-
-        self.input_encoder = msgspec.msgpack.Encoder(enc_hook=_encode_hook)
-        self.output_decoder = msgspec.msgpack.Decoder(
-            Optional[List[SamplerOutput]])
 
         self.pp_locks: Optional[List[asyncio.Lock]] = None
 
@@ -242,8 +222,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
                 },
                 scheduling_strategy=scheduling_strategy,
                 **ray_remote_kwargs,
-            )(RayWorkerWrapper).remote(vllm_config=self.vllm_config,
-                                       rpc_rank=rank)
+            )(RayWorkerWrapper).remote(rpc_rank=rank)
             worker_metadata.append(
                 RayWorkerMetaData(worker=worker, created_rank=rank))
 

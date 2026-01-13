@@ -499,7 +499,7 @@ class DPScheduler(SchedulerInterface):
         combined_req_ids = []
         combined_resumed_req_ids = []
         combined_new_token_ids = []
-        combined_all_token_ids = []
+        combined_all_token_ids = {}
         combined_new_block_ids = []
         combined_num_computed_tokens = []
         combined_num_output_tokens = []
@@ -510,7 +510,7 @@ class DPScheduler(SchedulerInterface):
             combined_req_ids.extend(cached_data.req_ids)
             combined_resumed_req_ids.extend(cached_data.resumed_req_ids)
             combined_new_token_ids.extend(cached_data.new_token_ids)
-            combined_all_token_ids.extend(cached_data.all_token_ids)
+            combined_all_token_ids.update(cached_data.all_token_ids)
             combined_new_block_ids.extend(cached_data.new_block_ids)
             combined_num_computed_tokens.extend(
                 cached_data.num_computed_tokens)
