@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import copy
 import functools
 import os
 from typing import TYPE_CHECKING, Callable, List
@@ -451,35 +450,35 @@ def get_default_qwix_quantization_config(
     # more flexible
     # NOTE (jacobplatin): we'll default to mixed FP8 (attention) + FP4 (MoE experts)
     # for DeepSeek
-    if model_type == "deepseek_v3" and quant_method == "fp8":
-        config = copy.deepcopy(DEFAULT_DEEPSEEK_FP4_MLP_MOE_FP8_ATTN_CONFIG)
+    # if model_type == "deepseek_v3" and quant_method == "fp8":
+    #     config = copy.deepcopy(DEFAULT_DEEPSEEK_FP4_MLP_MOE_FP8_ATTN_CONFIG)
 
-        # Dynamically fetch block size from HF config if available
-        # Config fmt: 'weight_block_size': [1, 512] -> we want the 2nd dim for tile_size
-        # NOTE: if the checkpoint is not 1D subchannel, we will throw an error
-        hf_quant_config = hf_config.quantization_config
-        assert "weight_block_size" in hf_quant_config, "Expected weight_block_size in quantization_config"
-        block_size = hf_quant_config["weight_block_size"]
-        if isinstance(block_size, (list, tuple)) and len(block_size) == 2:
-            assert block_size[
-                0] == 1, f"Expected first dimension to be 1 (unchanneled), but got {block_size[0]}! If you are trying to run quantized DeepSeek, we currently only support 1D-subchannel quantization and those models can be found here: https://huggingface.co/collections/jrplatin/deepseek-r1-1d-subchannel"
-            tile_size = block_size[1]
-            assert tile_size > 1, f"Expected tile_size > 1 for DeepSeek, but got {tile_size}"
-            logger.info(
-                f"Detected DeepSeek tile_size from config: {tile_size}")
+    #     # Dynamically fetch block size from HF config if available
+    #     # Config fmt: 'weight_block_size': [1, 512] -> we want the 2nd dim for tile_size
+    #     # NOTE: if the checkpoint is not 1D subchannel, we will throw an error
+    #     hf_quant_config = hf_config.quantization_config
+    #     assert "weight_block_size" in hf_quant_config, "Expected weight_block_size in quantization_config"
+    #     block_size = hf_quant_config["weight_block_size"]
+    #     if isinstance(block_size, (list, tuple)) and len(block_size) == 2:
+    #         assert block_size[
+    #             0] == 1, f"Expected first dimension to be 1 (unchanneled), but got {block_size[0]}! If you are trying to run quantized DeepSeek, we currently only support 1D-subchannel quantization and those models can be found here: https://huggingface.co/collections/jrplatin/deepseek-r1-1d-subchannel"
+    #         tile_size = block_size[1]
+    #         assert tile_size > 1, f"Expected tile_size > 1 for DeepSeek, but got {tile_size}"
+    #         logger.info(
+    #             f"Detected DeepSeek tile_size from config: {tile_size}")
 
-            # Update tile_size in the rules, since we might not always use a 1D subchannel size of
-            # 256
-            for rule in config["qwix"]["rules"]:
-                if "tile_size" in rule:
-                    rule["tile_size"] = tile_size
-        else:
-            raise ValueError(
-                f"Invalid weight_block_size config: {block_size}, expected a list/tuple of length 2"
-            )
+    #         # Update tile_size in the rules, since we might not always use a 1D subchannel size of
+    #         # 256
+    #         for rule in config["qwix"]["rules"]:
+    #             if "tile_size" in rule:
+    #                 rule["tile_size"] = tile_size
+    #     else:
+    #         raise ValueError(
+    #             f"Invalid weight_block_size config: {block_size}, expected a list/tuple of length 2"
+    #         )
 
-        return config
-    elif model_type == "llama4" and quant_method == "compressed-tensors":
+    #     return config
+    if model_type == "llama4" and quant_method == "compressed-tensors":
         return DEFAULT_LLAMA4_FP8_CONFIG
     # MXFP4 (GPT-OSS): provide a default configuration to quantize MoE experts via Qwix
     elif model_type == "gpt_oss" and quant_method == "mxfp4":
