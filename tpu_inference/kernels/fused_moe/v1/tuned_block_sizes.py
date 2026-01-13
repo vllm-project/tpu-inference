@@ -74,7 +74,7 @@ TUNED_BLOCK_SIZES = {
         256 * 6,
     ),
     (3072, 3072, 128, 4, 2, 2, 1024, 4): (
-        256,
+        128,
         256 * 3,
         256 * 6,
         256 * 6,
@@ -84,7 +84,7 @@ TUNED_BLOCK_SIZES = {
         256 * 6,
     ),
     (3072, 3072, 128, 4, 2, 2, 2048, 4): (
-        256,
+        128,
         256 * 3,
         256 * 6,
         256 * 6,
@@ -173,7 +173,7 @@ def get_default_block_sizes(
     f = intermediate_size // 256
 
     return (
-        min(local_num_tokens, 256),
+        min(local_num_tokens, 128),
         min(256 * f // 2, 1024),
         min(256 * d // 2, 1024),
         min(256 * d // 2, 2048),
