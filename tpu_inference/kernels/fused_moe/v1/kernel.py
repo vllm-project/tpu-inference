@@ -1396,7 +1396,8 @@ def fused_ep_moe(
             f"Expected {hidden_size=} to be aligned to {bd1=} and {bd2=}.")
     if intermediate_size % bf != 0:
         raise ValueError(
-            f"Expected {intermediate_size=} to be aligned to {bf=}.")
+            f"fused moe kernel line 1399 Expected {intermediate_size=} to be aligned to {bf=}."
+        )
 
     # Note: we should dump scale as the kernel expected shape in the
     # checkpoint offline or reshape right after weight loading.
