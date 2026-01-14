@@ -34,6 +34,7 @@ from vllm.model_executor.layers.quantization.fp8 import (Fp8Config,
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
+from tpu_inference import envs
 from tpu_inference.layers.common.quant_methods import FP8, get_tpu_quant_method
 from tpu_inference.layers.common.quantization import (dequantize_tensor,
                                                       quantize_tensor)
@@ -103,9 +104,12 @@ class VllmFp8Config(Fp8Config, VllmQuantConfig):
 class VllmFp8LinearMethod(Fp8LinearMethod):
 
     def __init__(self, quant_config: VllmFp8Config,
-                 linear_config: VllmQuantLinearConfig):
+                 linear_config: VllmQuantLinearConfig,
+                 ):
         super().__init__(quant_config)
         self.linear_config = linear_config
+        self.requant_block_size = envs.REQUANTIZE_BLOCK_SIZE
+        self.requant_weight_dtype = getattr(jnp, envs.REQUANTIZE_WEIGHT_DTYPE)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         assert isinstance(layer, LinearBase)
@@ -133,21 +137,22 @@ class VllmFp8LinearMethod(Fp8LinearMethod):
         ) -> LinearWeights:
             weights = []
             weight_scales = []
-            block_size = self.weight_block_size[0]
+            original_block_size = self.weight_block_size[0]
+            requant_block_size = self.requant_block_size
             start = 0
             for output_size in self.linear_config.output_sizes:
                 end = start + output_size
 
                 weight_slice = weight[start:end]
-                weight_scale_slice = weight_scale[start // block_size:end //
-                                                  block_size]
+                weight_scale_slice = weight_scale[start // original_block_size:end //
+                                                  original_block_size]
                 dequantzed_weight = dequantize_tensor(
                     weight_slice,
                     weight_scale_slice,
                     (0, 1),
                 )
                 weight_slice, weight_scale_slice = quantize_tensor(
-                    jnp.float8_e4m3fn, dequantzed_weight)
+                    self.requant_weight_dtype, dequantzed_weight, block_size=requant_block_size)
 
                 weights.append(weight_slice)
                 weight_scales.append(weight_scale_slice)
@@ -170,12 +175,21 @@ class VllmFp8LinearMethod(Fp8LinearMethod):
             )
 
         weights = process_fp8_linear_weights(weight, weight_scale, bias)
+        weight_sharding = self.linear_config.weight_sharding
+        bias_sharding = self.linear_config.bias_sharding
+        weight_scale_sharding = None
+        if self.requant_block_size is not None and envs.ENABLE_QUANTIZED_MATMUL_KERNEL:
+            # The quantized_matmul_kernel expects weight scales shaped (n_out_features, 1, n_blocks) for blockwisze quantization.
+            weights.weight_scale = jnp.expand_dims(jnp.transpose(weights.weight_scale), axis=1)
+            # Weight scale should be resharded accordingly as well.
+            weight_scale_sharding = P(weight_sharding[1], None, weight_sharding[0])
         weights = torch_view(
             shard_linear_weights(
                 weights,
                 mesh=self.linear_config.mesh,
-                weight_p_spec=self.linear_config.weight_sharding,
-                bias_p_spec=self.linear_config.bias_sharding,
+                weight_p_spec=weight_sharding,
+                bias_p_spec=bias_sharding,
+                weight_scale_p_spec=weight_scale_sharding,
             ))
 
         if self.linear_config.fuse_matmuls:
@@ -206,7 +220,8 @@ class VllmFp8LinearMethod(Fp8LinearMethod):
 
         outs = sharded_quantized_matmul(x_jax, weight_jax, weight_scale_jax,
                                         self.linear_config.mesh,
-                                        self.linear_config.weight_sharding)
+                                        self.linear_config.weight_sharding,
+                                        self.requant_block_size)
 
         if bias is not None and not layer.skip_bias_add:
             outs += jax_view(bias)
