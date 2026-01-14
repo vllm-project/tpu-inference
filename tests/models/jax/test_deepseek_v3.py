@@ -23,6 +23,7 @@ import torch
 from flax import nnx
 from jax.sharding import Mesh
 from vllm.config import ModelConfig
+import os
 
 # Assuming the model file is named deepseek_v3.py
 from tpu_inference.models.jax.deepseek_v3 import (DeepSeekV3,
