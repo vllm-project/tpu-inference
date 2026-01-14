@@ -188,11 +188,15 @@ def _test_correctness_helper(
                 matches += 1
             else:
                 misses += 1
-                print(f"ref_output: {ref_output.outputs[0].text}")
-                print(f"async_output: {async_output.outputs[0].text}")
+                print(
+                    f"missed ref_output: {ref_output.outputs[0].text} \n missed ref_output ends"
+                )
+                print(
+                    f"missed async_output: {async_output.outputs[0].text} \n missed async_output ends"
+                )
 
         assert misses == 0
-        del async_outputs
+        del async_llm
 
         # Waiting for TPUs to be released.
         time.sleep(10)

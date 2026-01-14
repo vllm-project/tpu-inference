@@ -227,12 +227,13 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
             w2_bias=jax_view(layer.w2_bias),
         )
 
-        return fused_moe_apply(
-            layer,
-            x,
-            router_logits,
-            weights,
-            self.moe_backend,
-            self.mesh,
-            self.extra_backend_kwargs,
-        )
+        return torch_view(
+            fused_moe_apply(
+                layer,
+                jax_view(x),
+                jax_view(router_logits),
+                weights,
+                self.moe_backend,
+                self.mesh,
+                self.extra_backend_kwargs,
+            ))
