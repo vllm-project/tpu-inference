@@ -99,8 +99,11 @@ class VllmFp8Config(vllm_fp8.Fp8Config, VllmQuantConfig):
 class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
                           common_fp8.Fp8LinearMethod):
 
-    def __init__(self, quant_config: VllmFp8Config,
-                 linear_config: VllmQuantLinearConfig):
+    def __init__(
+        self,
+        quant_config: VllmFp8Config,
+        linear_config: VllmQuantLinearConfig,
+    ):
         super().__init__(quant_config)
         self.linear_config = linear_config
 
@@ -130,21 +133,25 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
         ) -> LinearWeights:
             weights = []
             weight_scales = []
-            block_size = self.weight_block_size[0]
+            original_block_size = self.weight_block_size[0]
+            requant_block_size = self.linear_config.requant_block_size
             start = 0
             for output_size in self.linear_config.output_sizes:
                 end = start + output_size
 
                 weight_slice = weight[start:end]
-                weight_scale_slice = weight_scale[start // block_size:end //
-                                                  block_size]
+                weight_scale_slice = weight_scale[start //
+                                                  original_block_size:end //
+                                                  original_block_size]
                 dequantzed_weight = dequantize_tensor(
                     weight_slice,
                     weight_scale_slice,
                     (0, 1),
                 )
                 weight_slice, weight_scale_slice = quantize_tensor(
-                    jnp.float8_e4m3fn, dequantzed_weight)
+                    self.linear_config.requant_weight_dtype,
+                    dequantzed_weight,
+                    block_size=requant_block_size)
 
                 weights.append(weight_slice)
                 weight_scales.append(weight_scale_slice)
@@ -167,12 +174,29 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
             )
 
         weights = process_fp8_linear_weights(weight, weight_scale, bias)
+        weight_sharding = self.linear_config.weight_sharding
+        bias_sharding = self.linear_config.bias_sharding
+        weight_scale_sharding = None
+        if self.linear_config.requant_block_size is not None and self.linear_config.enable_quantized_matmul_kernel:
+            # The quantized_matmul_kernel expects weight scales shaped (n_out_features, 1, n_blocks) for blockwisze quantization.
+            weights.weight_scale = jnp.expand_dims(jnp.transpose(
+                weights.weight_scale),
+                                                   axis=1)
+            # Weight scale should be resharded accordingly as well.
+            if len(weight_sharding) == 2:
+                weight_scale_sharding = P(weight_sharding[1], None,
+                                          weight_sharding[0])
+            else:
+                raise ValueError(
+                    F"The weight sharding shape length should be 2, but given {len(weight_sharding)}."
+                )
         weights = torch_view(
             shard_linear_weights(
                 weights,
                 mesh=self.linear_config.mesh,
-                weight_p_spec=self.linear_config.weight_sharding,
-                bias_p_spec=self.linear_config.bias_sharding,
+                weight_p_spec=weight_sharding,
+                bias_p_spec=bias_sharding,
+                weight_scale_p_spec=weight_scale_sharding,
             ))
 
         if self.linear_config.fuse_matmuls:
