@@ -164,9 +164,9 @@ class TestDPScheduler:
                 mock_queue_get_token_1 = MagicMock()
                 mock_queue_get_token_1.get.return_value = 50
                 mock_queue_computed_0 = MagicMock()
-                mock_queue_computed_0.get.return_value = ([], 10)
+                mock_queue_computed_0.get.return_value = 10  # Only cached_tokens, not (blocks, cached_tokens)
                 mock_queue_computed_1 = MagicMock()
-                mock_queue_computed_1.get.return_value = ([], 25)
+                mock_queue_computed_1.get.return_value = 25  # Only cached_tokens, not (blocks, cached_tokens)
 
                 scheduler.output_queues = {
                     (0, "get_token_count"): mock_queue_get_token_0,
@@ -206,9 +206,9 @@ class TestDPScheduler:
                 mock_queue_get_token_1 = MagicMock()
                 mock_queue_get_token_1.get.return_value = 50
                 mock_queue_computed_0 = MagicMock()
-                mock_queue_computed_0.get.return_value = ([], 0)
+                mock_queue_computed_0.get.return_value = 0  # Only cached_tokens, not (blocks, cached_tokens)
                 mock_queue_computed_1 = MagicMock()
-                mock_queue_computed_1.get.return_value = ([], 0)
+                mock_queue_computed_1.get.return_value = 0  # Only cached_tokens, not (blocks, cached_tokens)
 
                 scheduler.output_queues = {
                     (0, "get_token_count"): mock_queue_get_token_0,
