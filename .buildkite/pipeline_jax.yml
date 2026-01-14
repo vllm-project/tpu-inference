@@ -140,8 +140,7 @@ steps:
              python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels \
              --ignore=/workspace/tpu_inference/tests/kernels/ragged_paged_attention_kernel_v2_test.py \
              --ignore=/workspace/tpu_inference/tests/kernels/ragged_kv_cache_update_v2_test.py \
-             --ignore=/workspace/tpu_inference/tests/kernels/collectives \
-             --ignore=/workspace/tpu_inference/tests/kernels/fused_moe_v1_test.py
+             --ignore=/workspace/tpu_inference/tests/kernels/collectives
          else
            echo "Skipping: no changes detected in kernels, tests/kernels, or requirements.txt"
            exit 0
@@ -318,4 +317,4 @@ steps:
      commands:
        - |
          .buildkite/scripts/check_results.sh \
-           "TPU JAX Tests Failed" ${KEY_PREFIX}test_0 ${KEY_PREFIX}test_1 ${KEY_PREFIX}test_2 ${KEY_PREFIX}test_3 ${KEY_PREFIX}test_4 ${KEY_PREFIX}test_6 ${KEY_PREFIX}test_7 ${KEY_PREFIX}test_8 ${KEY_PREFIX}test_9 ${KEY_PREFIX}test_10 ${KEY_PREFIX}test_11 ${KEY_PREFIX}test_12 ${KEY_PREFIX}test_13 ${KEY_PREFIX}test_15 ${KEY_PREFIX}test_16 ${KEY_PREFIX}test_17
+           "TPU JAX Tests Failed" ${KEY_PREFIX}test_0 ${KEY_PREFIX}test_1 ${KEY_PREFIX}test_2 ${KEY_PREFIX}test_3 ${KEY_PREFIX}test_4 ${KEY_PREFIX}test_5 ${KEY_PREFIX}test_6 ${KEY_PREFIX}test_7 ${KEY_PREFIX}test_8 ${KEY_PREFIX}test_9 ${KEY_PREFIX}test_10 ${KEY_PREFIX}test_11 ${KEY_PREFIX}test_12 ${KEY_PREFIX}test_13 ${KEY_PREFIX}test_15 ${KEY_PREFIX}test_16 ${KEY_PREFIX}test_17
