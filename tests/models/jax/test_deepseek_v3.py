@@ -232,7 +232,7 @@ class TestDeepSeekV3WeightLoader:
 
     
     @pytest.mark.skipif(
-        os.environ.get("IS_FOR_V7X") != "1", 
+        os.environ.get("IS_FOR_V7X") != "true", 
         reason="MXFP4/FP4 weights are only supported on v7 TPU hardware"
     )
     def test_load_individual_weight_with_mxfp4(self, loader, mesh):
