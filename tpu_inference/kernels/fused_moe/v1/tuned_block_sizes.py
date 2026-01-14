@@ -143,6 +143,37 @@ TUNED_BLOCK_SIZES = {
         1536,
         1536,
     ),
+    # for qwen3-coder-480b, we use a temporary huristic block size here. Need to tune for better performance.
+    # (6144, 2560, 160, 8, 2, 4, 16, 8): (
+    #     64,
+    #     1280,
+    #     1536,
+    #     1536,
+    #     64,
+    #     1280,
+    #     1536,
+    #     1536,
+    # ),
+    # (6144, 2560, 160, 8, 2, 4, 512, 8): (
+    #     64,
+    #     1280,
+    #     1536,
+    #     1536,
+    #     64,
+    #     1280,
+    #     1536,
+    #     1536,
+    # ),
+    # (6144, 2560, 160, 8, 2, 4, 64, 8): (
+    #     64,
+    #     1280,
+    #     1536,
+    #     1536,
+    #     64,
+    #     1280,
+    #     1536,
+    #     1536,
+    # ),
 }
 
 
@@ -174,11 +205,11 @@ def get_default_block_sizes(
 
     return (
         min(local_num_tokens, 128),
-        min(256 * f // 2, 1024),
+        min(256 * f // 2, 512),
         min(256 * d // 2, 1024),
         min(256 * d // 2, 2048),
         min(local_num_tokens // 2, 64),
-        min(256 * f // 2, 1024),
+        min(256 * f // 2, 512),
         min(256 * d // 2, 1024),
         min(256 * d // 2, 2048),
     )
@@ -215,4 +246,12 @@ def get_tuned_block_sizes(
         ep_size,
     )
 
+    if key in TUNED_BLOCK_SIZES:
+        print(
+            f'Using tuned block sizes for key: {key}: {TUNED_BLOCK_SIZES[key]}'
+        )
+    else:
+        print(
+            f'Using default block sizes for key: {key}: {get_default_block_sizes(*key)}'
+        )
     return TUNED_BLOCK_SIZES.get(key, get_default_block_sizes(*key))

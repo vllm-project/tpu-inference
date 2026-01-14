@@ -70,6 +70,15 @@ def fused_moe_apply(
     with jax.named_scope(layer._get_name()):
         match moe_backend:
             case FusedMoEBackend.FUSED_MOE:
+                # print(f'xw32 fused_moe_apply begins {layer.moe_quant_config.per_out_ch_quant=}, {layer.moe_quant_config.is_block_quantized=}')
+                subc_quant_w1_sz = None
+                subc_quant_w2_sz = None
+                if layer.moe_quant_config.per_out_ch_quant or layer.moe_quant_config.is_block_quantized:
+                    padded_hidden_size = weights.w13_weight.shape[-2]
+                    subc_quant_w1_sz = padded_hidden_size
+                    intermediate_size = weights.w13_weight.shape[-1]
+                    subc_quant_w2_sz = intermediate_size
+
                 actual_hidden_size = x.shape[-1]
                 padding_size = weights.w13_weight.shape[-2] - actual_hidden_size
                 x = jnp.pad(x, ((0, 0), (0, padding_size)))
@@ -78,17 +87,21 @@ def fused_moe_apply(
                     tokens=x,
                     w1=weights.w13_weight,
                     w2=weights.w2_weight,
-                    w1_scale=weights.w13_weight_scale,
-                    w2_scale=weights.w2_weight_scale,
-                    b1=weights.w13_bias,
-                    b2=weights.w2_bias,
                     gating_output=gating_output,
                     top_k=layer.top_k,
                     renormalize_topk_logits=layer.renormalize,
                     act_fn=layer.activation,
+                    subc_quant_w1_sz=subc_quant_w1_sz,
+                    subc_quant_w2_sz=subc_quant_w2_sz,
+                    w1_scale=weights.w13_weight_scale,
+                    w2_scale=weights.w2_weight_scale,
+                    b1=weights.w13_bias,
+                    b2=weights.w2_bias,
                     **extra_backend_kwargs,
                 )[:, :actual_hidden_size]
             case FusedMoEBackend.GMM_EP | FusedMoEBackend.GMM_TP:
+                raise ValueError(
+                    "xw32 GMM MoE backend should have not been called.")
                 output = fused_moe_func(
                     hidden_states=x,
                     w1=weights.w13_weight,
