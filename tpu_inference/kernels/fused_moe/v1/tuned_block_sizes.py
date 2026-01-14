@@ -246,12 +246,12 @@ def get_tuned_block_sizes(
         ep_size,
     )
 
-    if key in TUNED_BLOCK_SIZES:
-        print(
-            f'[Fused MOE kernel] using tuned block sizes for key: {key}: {TUNED_BLOCK_SIZES[key]}',
-            flush=True)
-    else:
-        print(
-            f'[Fused MOE kernel] using default block sizes for key: {key}: {get_default_block_sizes(*key)}',
-            flush=True)
+    # if key in TUNED_BLOCK_SIZES:
+    #     print(
+    #         f'[Fused MOE kernel] using tuned block sizes for key: {key}: {TUNED_BLOCK_SIZES[key]}',
+    #         flush=True)
+    # else:
+    #     print(
+    #         f'[Fused MOE kernel] using default block sizes for key: {key}: {get_default_block_sizes(*key)}',
+    #         flush=True)
     return TUNED_BLOCK_SIZES.get(key, get_default_block_sizes(*key))
