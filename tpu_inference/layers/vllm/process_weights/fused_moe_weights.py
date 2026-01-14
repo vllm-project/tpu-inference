@@ -156,14 +156,28 @@ def process_moe_weights(
             w3_bias = w13_bias[:, 1::2]
             w13_bias = jnp.concat([w1_bias, w3_bias], axis=1)
 
+    # Transpose non-constracting dim to right most dim
+    w13_weight = jnp.swapaxes(w13_weight, 1, 2)
+    w2_weight = jnp.swapaxes(w2_weight, 1, 2)
+
+    # Workaround for JAX error "must have valid byte strides"
+    w13_weight = with_layout_constraint(w13_weight, Layout((0, 1, 2)))
+    w2_weight = with_layout_constraint(w2_weight, Layout((0, 1, 2)))
+
     if w13_weight_scale is not None:
         w13_weight_scale = w13_weight_scale.astype(jnp.float32)
+        w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
+        w13_weight_scale = jnp.expand_dims(w13_weight_scale, 2)
     if w2_weight_scale is not None:
         w2_weight_scale = w2_weight_scale.astype(jnp.float32)
+        w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
+        w2_weight_scale = jnp.expand_dims(w2_weight_scale, 2)
     if w13_bias is not None:
         w13_bias = w13_bias.astype(jnp.float32)
+        w13_bias = jnp.expand_dims(w13_bias, 1)
     if w2_bias is not None:
         w2_bias = w2_bias.astype(jnp.float32)
+        w2_bias = jnp.expand_dims(w2_bias, 1)
 
     match moe_backend:
         case FusedMoEBackend.FUSED_MOE:
@@ -174,26 +188,20 @@ def process_moe_weights(
             # w13_weight: (num_experts, 2*intermediate_size, hidden_size)
             # w2_weight: (num_experts, hidden_size, intermediate_size)
 
+            w13_weight = w13_weight.reshape(
+                num_experts,
+                hidden_size,
+                2,
+                intermediate_size,
+            )
+            w13_weight = jnp.swapaxes(w13_weight, 1, 2)
+            w13_weight = with_layout_constraint(w13_weight, Layout(
+                (0, 1, 2, 3)))
+
             # Fused moe kernel expects dims to be multiple of 256.
             pad_width_intermediate_size = align_to(intermediate_size,
                                                    256) - intermediate_size
             pad_width_hidden_size = align_to(hidden_size, 256) - hidden_size
-
-            w13_weight = w13_weight.reshape(
-                num_experts,
-                2,
-                intermediate_size,
-                hidden_size,
-            )
-
-            # Transpose non-constracting dim to right most dim
-            w13_weight = jnp.swapaxes(w13_weight, 2, 3)
-            w2_weight = jnp.swapaxes(w2_weight, 1, 2)
-
-            # Workaround for JAX error "must have valid byte strides"
-            w13_weight = with_layout_constraint(w13_weight, Layout(
-                (0, 1, 2, 3)))
-            w2_weight = with_layout_constraint(w2_weight, Layout((0, 1, 2)))
 
             w13_weight = jnp.pad(
                 w13_weight,
@@ -209,17 +217,14 @@ def process_moe_weights(
 
             if w13_weight_scale is not None:
                 w13_weight_scale = w13_weight_scale.reshape(
-                    num_experts, 2, intermediate_size, 1, -1)
-                w13_weight_scale = jnp.swapaxes(w13_weight_scale, 2, 4)
+                    num_experts, -1, 2, 1, intermediate_size)
+                w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
                 w13_weight_scale = jnp.pad(
                     w13_weight_scale,
                     ((0, 0), (0, 0), (0, pad_width_hidden_size), (0, 0),
                      (0, pad_width_intermediate_size)),
                 )
             if w2_weight_scale is not None:
-                w2_weight_scale = w2_weight_scale.reshape(
-                    num_experts, hidden_size, 1, -1)
-                w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 3)
                 w2_weight_scale = jnp.pad(
                     w2_weight_scale,
                     ((0, 0), (0, pad_width_intermediate_size), (0, 0),
@@ -234,48 +239,38 @@ def process_moe_weights(
                     ((0, 0), (0, 0), (0, 0), (0, pad_width_intermediate_size)),
                 )
             if w2_bias is not None:
-                w2_bias = w2_bias.reshape(num_experts, 1, hidden_size)
                 w2_bias = jnp.pad(
                     w2_bias,
                     ((0, 0), (0, 0), (0, pad_width_hidden_size)),
                 )
 
-        case FusedMoEBackend.GMM_EP | FusedMoEBackend.GMM_TP:
+        case FusedMoEBackend.GMM_TP:
+            assert w13_reorder_size is not None
+            assert intermediate_size % w13_reorder_size == 0
+            output_sizes = [intermediate_size, intermediate_size]
+            w13_weight = reorder_concatenated_tensor_for_sharding(
+                w13_weight,
+                output_sizes,
+                w13_reorder_size,
+                dim=2,
+            )
             if w13_weight_scale is not None:
-                w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
-                w13_weight_scale = jnp.expand_dims(w13_weight_scale, 2)
-            if w2_weight_scale is not None:
-                w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
-                w2_weight_scale = jnp.expand_dims(w2_weight_scale, 2)
-            if w13_bias is not None:
-                w13_bias = jnp.expand_dims(w13_bias, 1)
-            if w2_bias is not None:
-                w2_bias = jnp.expand_dims(w2_bias, 1)
-
-            if moe_backend == FusedMoEBackend.GMM_TP:
-                assert w13_reorder_size is not None
-                assert intermediate_size % w13_reorder_size == 0
-                output_sizes = [intermediate_size, intermediate_size]
-                w13_weight = reorder_concatenated_tensor_for_sharding(
-                    w13_weight,
+                w13_weight_scale = reorder_concatenated_tensor_for_sharding(
+                    w13_weight_scale,
                     output_sizes,
                     w13_reorder_size,
-                    dim=1,
+                    dim=3,
                 )
-                if w13_weight_scale is not None:
-                    w13_weight_scale = reorder_concatenated_tensor_for_sharding(
-                        w13_weight_scale,
-                        output_sizes,
-                        w13_reorder_size,
-                        dim=3,
-                    )
-                if w13_bias is not None:
-                    w13_bias = reorder_concatenated_tensor_for_sharding(
-                        w13_bias,
-                        output_sizes,
-                        w13_reorder_size,
-                        dim=2,
-                    )
+            if w13_bias is not None:
+                w13_bias = reorder_concatenated_tensor_for_sharding(
+                    w13_bias,
+                    output_sizes,
+                    w13_reorder_size,
+                    dim=2,
+                )
+        case FusedMoEBackend.GMM_EP:
+            # No additional processing is needed for GMM_EP.
+            pass
 
     return FusedMoEWeights(
         w13_weight=w13_weight,
@@ -316,7 +311,7 @@ def shard_moe_weights(
             weight_shardings = FusedMoEWeights(
                 w13_weight=NamedSharding(
                     mesh,
-                    P(None, ShardingAxisName.MLP_TENSOR, None),
+                    P(None, None, ShardingAxisName.MLP_TENSOR),
                 ),  # (num_experts, out_dim, in_dim)
                 w13_weight_scale=NamedSharding(
                     mesh,
@@ -328,7 +323,7 @@ def shard_moe_weights(
                 ),  # (num_experts, 1, out_dim)
                 w2_weight=NamedSharding(
                     mesh,
-                    P(None, None, ShardingAxisName.MLP_TENSOR),
+                    P(None, ShardingAxisName.MLP_TENSOR, None),
                 ),  # (num_experts, out_dim, in_dim)
                 w2_weight_scale=NamedSharding(
                     mesh, w2_weight_scale_p_spec
