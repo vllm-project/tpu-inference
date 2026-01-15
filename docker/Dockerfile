@@ -18,7 +18,6 @@ ARG VLLM_COMMIT_HASH=""
 
 FROM $BASE_IMAGE
 
-ARG IS_FOR_V7X="false"
 ARG IS_TEST="false"
 
 # Update pip
@@ -74,6 +73,4 @@ Run  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then
 COPY . .
 RUN --mount=type=cache,target=/root/.cache/pip pip install -e .
 
-COPY requirements_dev.txt .
-RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements_dev.txt
 CMD ["/bin/bash"]

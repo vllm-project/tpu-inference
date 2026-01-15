@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-import os
 import random
 import string
 import time
@@ -23,16 +22,7 @@ import pytest
 from vllm import LLM, SamplingParams
 
 
-# TODO (Qiliang Cui): remove this when XLA fixes the recursive jit call issue.
-def _is_v7x():
-    # jax.devices() will hang so use IS_FOR_V7X to indicate the version.
-    return os.environ.get("IS_FOR_V7X", "false") == "true"
-
-
 def _get_tensor_parallel_size():
-    # Work around an XLA issue.
-    if _is_v7x():
-        return 2
     return 1
 
 
@@ -253,7 +243,7 @@ def test_ngram_performance_greedy(
             "prompt_lookup_max": 2,
             "prompt_lookup_min": 2,
             "num_speculative_tokens": 4,
-        }, 1.2 if _is_v7x() else 3.0)
+        }, 3.0)
 
 
 def test_ngram_performance_random(
@@ -275,7 +265,7 @@ def test_ngram_performance_random(
             "prompt_lookup_max": 2,
             "prompt_lookup_min": 2,
             "num_speculative_tokens": 4,
-        }, 1.2 if _is_v7x() else 3.0)
+        }, 3.0)
 
 
 def test_eagle3_correctness(
@@ -312,4 +302,4 @@ def test_eagle3_performance(
             "model": "unkmaster/EAGLE3-LLaMA3.1-Instruct-8B",
             "num_speculative_tokens": 2,
             "draft_tensor_parallel_size": 1
-        }, 0.6 if _is_v7x() else 1.8)
+        }, 1.8)
