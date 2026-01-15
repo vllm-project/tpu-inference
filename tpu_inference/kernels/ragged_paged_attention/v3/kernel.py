@@ -96,7 +96,7 @@ def ref_ragged_paged_attention(
     num_page_indices = page_indices.shape[0]
     assert num_page_indices % max_num_seqs == 0
     pages_per_seq = num_page_indices // max_num_seqs
-    outputs = []
+    result = queries
 
     for i in range(distribution[-1]):
         q_start = cu_q_lens[i]
@@ -162,9 +162,9 @@ def ref_ragged_paged_attention(
         if v_scale is not None:
             out *= v_scale
 
-        outputs.append(out)
+        result = result.at[q_start:q_end].set(out)
 
-    result = jnp.concatenate(outputs, axis=0)
+    # result = jnp.concatenate(outputs, axis=0)
     return result, kv_cache
 
 

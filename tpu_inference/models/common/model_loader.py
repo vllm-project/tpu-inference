@@ -264,10 +264,14 @@ def get_flax_model(
             kv_cache_sharding,
             hidden_states_sharding,
             hidden_states_sharding,  # aux hidden states
+            kv_cache_sharding,  # k scales cache
+            kv_cache_sharding,  # v scales cache
         ),
-        donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
+        donate_argnums=(
+            2, 3, 4
+        ),  # 0 is graphdef, 1 is state, 2 is kv_cache, 3 is k_scales_cache, 4 is v_scales_cache
         static_argnums=(
-            7, 10, 11
+            9, 12, 13
         ),  #7 is layer_name_to_kvcache_index, 10 is is_first_rank, 11 is is_last_rank
     )
     def run_model(graphdef, state, *args):
