@@ -33,6 +33,7 @@ def _validate_args(
     lhs: jnp.ndarray,
     rhs: jnp.ndarray,
     group_sizes: jnp.ndarray,
+    lhs_scale: jnp.ndarray | None = None,
     rhs_scale: jnp.ndarray | None = None,
     rhs_bias: jnp.ndarray | None = None,
 ):
@@ -47,10 +48,13 @@ def _validate_args(
         raise ValueError(f"Expected 3-tensor for 'rhs' but got {rhs.ndim=}.")
     common.assert_is_supported_dtype(rhs.dtype)
 
-    if lhs.shape[1] != rhs.shape[1]:
+    num_quant_blocks = rhs_scale.shape[1] if rhs_scale is not None else 1
+    m = lhs.shape[0]  # local number of tokens
+
+    if lhs.shape[-1] != rhs.shape[-2]:
         raise ValueError(
             "Expected 'lhs' and 'rhs' to have the same number of input features."
-            f" But instead got {lhs.shape[1]=} and {rhs.shape[1]=}")
+            f" But instead got {lhs.shape[-1]=} and {rhs.shape[-2]=}")
 
     # Validate 'group_sizes'.
     if group_sizes.dtype != jnp.int32:
@@ -60,14 +64,25 @@ def _validate_args(
 
     num_groups, in_size, out_size = rhs.shape
 
+    if lhs_scale is not None:
+        # Validate 'lhs_scale'.
+        if lhs_scale.ndim != 3:
+            raise ValueError(
+                f"Expected 3-tensor for 'lhs_scale' but got {lhs_scale.ndim=}."
+            )
+        expected_lhs_scale_shape = (num_quant_blocks, m, 128)
+        if lhs_scale.shape != expected_lhs_scale_shape:
+            raise ValueError(
+                "Expected 'lhs_scale' to have the shape of"
+                f" {expected_lhs_scale_shape} but got {lhs_scale.shape=}.")
+
     if rhs_scale is not None:
         # Validate 'rhs_scale'.
         if rhs_scale.ndim != 4:
             raise ValueError(
                 f"Expected 4-tensor for 'rhs_scale' but got {rhs_scale.ndim=}."
             )
-        expected_rhs_scale_shape = (num_groups, rhs_scale.shape[1], 1,
-                                    out_size)
+        expected_rhs_scale_shape = (num_groups, num_quant_blocks, 1, out_size)
         if rhs_scale.shape != expected_rhs_scale_shape:
             raise ValueError(
                 "Expected 'rhs_scale' to have the shape of"
@@ -327,6 +342,7 @@ def gmm(
     rhs: jnp.ndarray,
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype = jnp.float32,
+    lhs_scale: jnp.ndarray | None = None,
     rhs_scale: jnp.ndarray | None = None,
     rhs_bias: jnp.ndarray | None = None,
     tiling: tuple[int, int, int] | LutFn | None = (128, 128, 128),
@@ -338,9 +354,10 @@ def gmm(
 
   Args:
     lhs: A 2d, jnp.ndarray with shape [m, k].
-    rhs: A 3d, jnp.ndarray with shape [num_groups, n, k].
+    rhs: A 3d, jnp.ndarray with shape [num_groups, k, n].
     group_sizes: A 1d, jnp.ndarray with shape [num_groups] and jnp.int32 dtype.
     preferred_element_type: jnp.dtype, the element type for the output matrix.
+    lhs_scale: A 3d, jnp.ndarray with shape [num_blocks, 1, m].
     rhs_scale: A 4d, jnp.ndarray with shape [num_groups, num_blocks, 1, n].
     rhs_bias: A 3d, jnp.ndarray with shape [num_groups, 1, n].
     tiling: 3-tuple of ints. The m, k and n-dimension tile sizes.
@@ -374,6 +391,7 @@ def gmm(
         lhs=lhs,
         rhs=rhs,
         group_sizes=group_sizes,
+        lhs_scale=lhs_scale,
         rhs_scale=rhs_scale,
         rhs_bias=rhs_bias,
     )
@@ -423,6 +441,7 @@ def gmm(
         group_metadata,
         group_offset,
         lhs,
+        lhs_scale,
         rhs,
         rhs_scale,
         rhs_bias,
@@ -487,6 +506,11 @@ def gmm(
                 if rhs_scale is not None:
                     acc *= jnp.broadcast_to(rhs_scale[...], acc.shape)
 
+                if lhs_scale is not None:
+                    l_scale = lhs_scale[...]
+                    l_scale = pltpu.repeat(l_scale, repeats=tn // 128, axis=-1)
+                    acc *= l_scale
+
                 loaded_out = out[...].astype(jnp.float32)
                 if not is_first_b_tile:
                     acc += loaded_out
@@ -523,6 +547,12 @@ def gmm(
         group_offsets, group_ids, m_tile_ids = group_metadata
         del n_i, group_offsets, group_ids, group_offset
         return m_tile_ids[grid_id], b_i * tiles_k + k_i
+
+    def lhs_scale_transform_indices(n_i, grid_id, b_i, k_i, group_metadata,
+                                    group_offset):
+        group_offsets, group_ids, m_tile_ids = group_metadata
+        del n_i, group_offsets, group_ids, group_offset
+        return b_i, m_tile_ids[grid_id], 0
 
     def rhs_transform_indices(n_i, grid_id, b_i, k_i, group_metadata,
                               group_offset):
@@ -564,6 +594,12 @@ def gmm(
         input_output_aliases = {7: 0}
 
     lhs_block_spec = pl.BlockSpec((tm, tk), lhs_transform_indices)
+    if lhs_scale is None:
+        lhs_scale_block_spec = None
+    else:
+        lhs_scale_block_spec = pl.BlockSpec((None, tm, 128),
+                                            lhs_scale_transform_indices)
+
     rhs_block_spec = pl.BlockSpec((None, tk, tn), rhs_transform_indices)
 
     if rhs_scale is None:
@@ -579,6 +615,8 @@ def gmm(
                                            rhs_bias_transform_indices)
 
     lhs_bytes = lhs.size * lhs.itemsize
+    if lhs_scale is not None:
+        lhs_bytes += (num_quant_blocks * m * 128) * lhs_scale.itemsize
     rhs_bytes = (k * n) * rhs.itemsize  # We don't read all of rhs
     if rhs_scale is not None:
         rhs_bytes += (num_quant_blocks * n) * rhs_scale.itemsize
@@ -599,6 +637,7 @@ def gmm(
             num_scalar_prefetch=2,
             in_specs=[
                 lhs_block_spec,
+                lhs_scale_block_spec,
                 rhs_block_spec,
                 rhs_scale_block_spec,
                 rhs_bias_block_spec,
@@ -623,6 +662,7 @@ def gmm(
         group_metadata,
         group_offset,
         lhs,
+        lhs_scale,
         rhs,
         rhs_scale,
         rhs_bias,
