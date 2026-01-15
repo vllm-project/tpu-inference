@@ -261,6 +261,17 @@ GATHER_SLICE_LATENCY = Histogram(
     "vllm_kv_cache_slice_seconds",
     "Time spent creating the dynamic slice for a block chunk")
 
+LOAD_KV_LATENCY_SECONDS = Histogram(
+    'vllm_kv_cache_load_data_latency_seconds',
+    'Latency of loading KV cache data from CPU to TPU per request',
+    buckets=[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0]
+)
+
+LOAD_KV_SIZE_BLOCKS = Counter(
+    'vllm_kv_cache_load_blocks_total',
+    'Total number of KV cache blocks loaded from CPU to TPU'
+)
+
 # we keep our operations at vllm's block granularity,
 # and want to provide the following three preferences when handling
 # the last partial block during save:
@@ -2158,7 +2169,10 @@ class TPUOffloadConnectorWorker:
                 f"Request {meta.req_id}: Loaded {num_tokens_to_load_delta} tokens into "
                 f"{num_blocks_to_load} new blocks.")
 
-            load_times.append(time.time() - request_load_start_time)
+            load_duration = time.time() - request_load_start_time
+            LOAD_KV_LATENCY_SECONDS.observe(load_duration)
+            load_times.append(load_duration)
+            LOAD_KV_SIZE_BLOCKS.inc(num_blocks_to_load)
             self.finished_load_reqs.add(meta.req_id)
             if num_blocks_to_load > 0:
                 self.offload_stats.record_load(req=meta.req_id,
