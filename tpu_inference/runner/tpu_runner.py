@@ -285,6 +285,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.kv_caches: list[jax.Array] = []
         self.layer_name_to_kvcache_index: dict[str, int] = {}
 
+        self.k_scale_caches: list[jax.Array] = []
+        self.v_scale_caches: list[jax.Array] = []
+
     def _init_random(self):
         if self.model_config.seed is None:
             self.model_config.seed = 0
@@ -770,10 +773,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     scheduler_output) as kv_connector_output:
                 # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
                 # but one of them would be `None`
-                (self.kv_caches, hidden_states,
-                 aux_hidden_states) = self.model_fn(
+                (self.kv_caches, hidden_states, aux_hidden_states,
+                 self.k_scale_caches, self.v_scale_caches) = self.model_fn(
                      self.state,
                      self.kv_caches,
+                     self.k_scale_caches,
+                     self.v_scale_caches,
                      input_ids,
                      attn_metadata,
                      inputs_embeds,
