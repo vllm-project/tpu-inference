@@ -38,8 +38,8 @@ echo "Evaluation output:"
 echo "$output"
 
 # Thresholds
-flex_threshold=0.0
-strict_threshold=0.0
+flex_threshold=0.87
+strict_threshold=0.72
 
 # Extract scores
 flex_score=$(echo "$output" | grep "flexible-extract" | awk -F'|' '{print $8}' | xargs)
