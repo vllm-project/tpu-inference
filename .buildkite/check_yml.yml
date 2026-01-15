@@ -15,6 +15,6 @@
 steps:
    - label: "Check YAML syntax"
      agents:
-       queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
+        qussseue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
      commands:
        - bash .buildkite/scripts/check_yml_syntax.sh

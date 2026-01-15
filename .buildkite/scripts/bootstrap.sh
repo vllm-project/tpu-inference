@@ -141,6 +141,6 @@
 #   fi
 # fi
 
-buildkite-agent pipeline upload .buildkite/check_yml.yml
+buildkite-agent pipeline upload .buildkite/check_yml.yml --dry-run
 
 echo "--- Buildkite Bootstrap Finished ---"
