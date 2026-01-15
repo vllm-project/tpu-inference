@@ -5,7 +5,6 @@ import functools
 
 import jax
 import jax.numpy as jnp
-from jax._src import dtypes
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
@@ -116,8 +115,8 @@ def matmul_kernel(
 @functools.partial(
     jax.jit,
     static_argnames=[
-        'x_q_dtype',
-        'tuned_value',
+        "x_q_dtype",
+        "tuned_value",
     ],
 )
 def quantized_matmul_kernel(
@@ -132,24 +131,24 @@ def quantized_matmul_kernel(
 ) -> jax.Array:
     """Quantized matmul kernel.
 
-  Args:
-    x: Input unquantized array.
-    w_q: Weight quantized array. [n_output_features, n_input_features]
-    w_scale: Weight quantization scale. [n_output_features]
-    w_zp: Weight zero point for asymmetric quantization.
-    block_size: Block size for subchannel quantization.
-    x_q_dtype: Quantization type of the input. If None or if the value is the
-      same as x.dtype, then no quantization is applied.
-    tuned_value: Kernel tuned values for optimal performance.
+    Args:
+      x: Input unquantized array.
+      w_q: Weight quantized array. [n_output_features, n_input_features]
+      w_scale: Weight quantization scale. [n_output_features]
+      w_zp: Weight zero point for asymmetric quantization.
+      block_size: Block size for subchannel quantization.
+      x_q_dtype: Quantization type of the input. If None or if the value is the
+        same as x.dtype, then no quantization is applied.
+      tuned_value: Kernel tuned values for optimal performance.
 
-  Returns:
-    Quantized matmul result.
-  """
+    Returns:
+      Quantized matmul result.
+    """
 
     if w_zp is not None:
-        raise NotImplementedError('zero_point is not supported.')
+        raise NotImplementedError("zero_point is not supported.")
     if block_size is not None:
-        raise NotImplementedError('block_size is not supported.')
+        raise NotImplementedError("block_size is not supported.")
 
     if x_q_dtype is None:
         x_q_dtype = x.dtype
@@ -252,20 +251,19 @@ def quantized_matmul_kernel(
             out_specs=pl.BlockSpec((batch_block_size, out_block_size),
                                    lambda b, o, i: (b, o)),
             scratch_shapes=[
-                pltpu.VMEM((batch_block_size, out_block_size), acc_dtype)
-                if save_acc else None,  # acc_scratch
-                pltpu.VMEM((batch_block_size, in_block_size), x_q_dtype)
-                if save_x_q else None,  # x_q_scratch
-                pltpu.VMEM(
-                    (batch_block_size,
-                     1), jnp.float32) if save_x_q else None,  # x_scale_scratch
+                (pltpu.VMEM((batch_block_size, out_block_size), acc_dtype)
+                 if save_acc else None),  # acc_scratch
+                (pltpu.VMEM((batch_block_size, in_block_size), x_q_dtype)
+                 if save_x_q else None),  # x_q_scratch
+                (pltpu.VMEM((batch_block_size, 1), jnp.float32)
+                 if save_x_q else None),  # x_scale_scratch
             ],
             grid=(n_batch, n_out, n_in),
         ),
         out_shape=jax.ShapeDtypeStruct((padded_n_batch, padded_n_out),
                                        x.dtype),
         compiler_params=pltpu.CompilerParams(
-            dimension_semantics=('parallel', 'arbitrary', 'arbitrary'),
+            dimension_semantics=("parallel", "arbitrary", "arbitrary"),
             vmem_limit_bytes=vmem_limit_bytes,
         ),
     )

@@ -17,8 +17,8 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 from tpu_inference import envs
-from tpu_inference.kernels.quantized_matmul.kernel import (
-    quantized_matmul_kernel)
+from tpu_inference.kernels.quantized_matmul.kernel import \
+    quantized_matmul_kernel
 from tpu_inference.kernels.quantized_matmul.util import xla_quantized_matmul
 
 
@@ -55,11 +55,12 @@ def sharded_quantized_matmul(x: jax.Array, w_q: jax.Array, w_s: jax.Array,
                 output = jax.lax.psum(output, axis_name=in_axis)
             return output
 
-        return jax.shard_map(wrapper,
-                             mesh=mesh,
-                             in_specs=(x_sharding, weight_sharding,
-                                       scale_sharding),
-                             out_specs=(out_sharding),
-                             check_vma=False)(x, w_q, w_s)
+        return jax.shard_map(
+            wrapper,
+            mesh=mesh,
+            in_specs=(x_sharding, weight_sharding, scale_sharding),
+            out_specs=(out_sharding),
+            check_vma=False,
+        )(x, w_q, w_s)
     else:
         return xla_quantized_matmul(x, w_q, w_s)

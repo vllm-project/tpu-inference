@@ -56,7 +56,9 @@ def get_kernel_name(tuned_value: TunedValue):
     batch_block_size = tuned_value.batch_block_size
     out_block_size = tuned_value.out_block_size
     in_block_size = tuned_value.in_block_size
-    return f'quantized_matmul_kernel_{batch_block_size}_{out_block_size}_{in_block_size}'
+    return (
+        f"quantized_matmul_kernel_{batch_block_size}_{out_block_size}_{in_block_size}"
+    )
 
 
 def xla_quantized_matmul(
@@ -139,14 +141,14 @@ def get_vmem_limit(
     x_size = (batch_block_size *
               in_block_size * (dtypes.bit_width(x_dtype) if hasattr(
                   dtypes, "bit_width") else dtypes.itemsize_bits(x_dtype)))
-    x_abs_max_size = (
-        batch_block_size * (dtypes.bit_width(scale_dtype) if hasattr(
-            dtypes, "bit_width") else dtypes.itemsize_bits(scale_dtype)))
+    x_abs_max_size = batch_block_size * (dtypes.bit_width(scale_dtype)
+                                         if hasattr(dtypes, "bit_width") else
+                                         dtypes.itemsize_bits(scale_dtype))
     w_q_size = (out_block_size *
                 in_block_size * (dtypes.bit_width(w_q_dtype) if hasattr(
                     dtypes, "bit_width") else dtypes.itemsize_bits(w_q_dtype)))
-    w_scale_size = (out_block_size * (dtypes.bit_width(scale_dtype) if hasattr(
-        dtypes, "bit_width") else dtypes.itemsize_bits(scale_dtype)))
+    w_scale_size = out_block_size * (dtypes.bit_width(scale_dtype) if hasattr(
+        dtypes, "bit_width") else dtypes.itemsize_bits(scale_dtype))
     out_size = (batch_block_size *
                 out_block_size * (dtypes.bit_width(out_dtype) if hasattr(
                     dtypes, "bit_width") else dtypes.itemsize_bits(out_dtype)))
@@ -169,9 +171,9 @@ def get_vmem_limit(
     x_q_size = (batch_block_size *
                 in_block_size * (dtypes.bit_width(x_q_dtype) if hasattr(
                     dtypes, "bit_width") else dtypes.itemsize_bits(x_q_dtype)))
-    x_scale_size = (
-        batch_block_size * (dtypes.bit_width(scale_dtype) if hasattr(
-            dtypes, "bit_width") else dtypes.itemsize_bits(scale_dtype)))
+    x_scale_size = batch_block_size * (dtypes.bit_width(scale_dtype)
+                                       if hasattr(dtypes, "bit_width") else
+                                       dtypes.itemsize_bits(scale_dtype))
 
     vmem_scratch = acc_size if save_acc else 0
     vmem_scratch += x_q_size + x_scale_size if save_x_q else 0
@@ -203,24 +205,24 @@ def validate_inputs(
         if jnp.issubdtype(x_q_dtype, jnp.integer) != jnp.issubdtype(
                 w_q.dtype, jnp.integer):
             raise ValueError(
-                f'{x_q_dtype=} and {w_q.dtype=} must be the same int or float type.'
+                f"{x_q_dtype=} and {w_q.dtype=} must be the same int or float type."
             )
 
     # Verify input shapes.
     if x.shape[1] != w_q.shape[1]:
-        raise ValueError(f'{x.shape[1]=} must be equal to {w_q.shape[1]=}')
+        raise ValueError(f"{x.shape[1]=} must be equal to {w_q.shape[1]=}")
     if w_q.shape[0] != w_scale.shape[1]:
         raise ValueError(
-            f'{w_q.shape[0]=} must be equal to {w_scale.shape[1]=}')
+            f"{w_q.shape[0]=} must be equal to {w_scale.shape[1]=}")
     if x_abs_max.shape != (1, x.shape[0]):
         raise ValueError(
-            f'{x_abs_max.shape=} must be equal to (1, {x.shape[0]=})')
+            f"{x_abs_max.shape=} must be equal to (1, {x.shape[0]=})")
     if x.shape[0] % batch_block_size != 0:
         raise ValueError(
-            f'{x.shape[0]=} must be a multiple of {batch_block_size=}')
+            f"{x.shape[0]=} must be a multiple of {batch_block_size=}")
     if w_q.shape[0] % out_block_size != 0:
         raise ValueError(
-            f'{w_q.shape[0]=} must be a multiple of {out_block_size=}')
+            f"{w_q.shape[0]=} must be a multiple of {out_block_size=}")
     if x.shape[1] % in_block_size != 0:
         raise ValueError(
-            f'{x.shape[1]=} must be a multiple of {in_block_size=}')
+            f"{x.shape[1]=} must be a multiple of {in_block_size=}")
