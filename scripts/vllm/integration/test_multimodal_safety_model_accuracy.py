@@ -201,6 +201,7 @@ def multimodal_safety_test_data_loader(request):
     """
     # Get the dynamic dataset path passed via the shell script CLI
     image_dir_path = request.config.getoption("--image-dir")
+    num_test_cases = request.config.getoption("--num-test-cases")
 
     if not image_dir_path:
         pytest.skip(
@@ -210,6 +211,10 @@ def multimodal_safety_test_data_loader(request):
 
     # Load the full dataset
     full_test_cases = load_mm_safety_bench(image_dir)
+
+    # Truncate the dataset if --num-test-cases is provided
+    if num_test_cases is not None:
+        full_test_cases = full_test_cases[:num_test_cases]
 
     conversations = [case[0] for case in full_test_cases]
     expected_outputs = [case[1] for case in full_test_cases]

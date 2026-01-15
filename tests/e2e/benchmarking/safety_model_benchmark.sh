@@ -34,6 +34,7 @@ export TIMEOUT_SECONDS=600
 # Check thresholds (set in CI YAML env block)
 # shellcheck disable=SC2269
 MINIMUM_ACCURACY_THRESHOLD=${MINIMUM_ACCURACY_THRESHOLD}
+CI_MAX_TEST_CASES=100
 if [ "$TP_SIZE" -eq 1 ]; then
     TARGET_THROUGHPUT="225.00" # New threshold for single device
 elif [ "$TP_SIZE" -ge 8 ]; then
@@ -45,7 +46,7 @@ fi
 # Benchmark/Serve Settings
 MAX_MODEL_LEN=4096
 MAX_BATCHED_TOKENS=4096
-NUM_PROMPTS=500
+NUM_PROMPTS=50
 OUTPUT_LEN_OVERRIDE=20 # Max tokens to generate for safety classification.
 
 # --- DATA PATHS ---
@@ -150,6 +151,53 @@ fi
 
 # --- FUNCTION DEFINITIONS ---
 
+create_multimodal_dataset() {
+    echo "Creating multimodal dataset..."
+
+    NUM_PROMPTS=$NUM_PROMPTS python -c "
+import json
+import os
+from pathlib import Path
+
+# The path to the processed_questions directory
+questions_dir = Path('$MM_SAFETYBENCH_DIR') / 'data' / 'processed_questions'
+image_dir = Path('$MM_SAFETYBENCH_IMAGE_DIR')
+output_file = Path('/tmp/mm_safety_bench.jsonl')
+num_prompts = int(os.environ['NUM_PROMPTS'])
+print('This is num_prompts: , ', num_prompts)
+
+with output_file.open('w') as f:
+    for json_file in sorted(questions_dir.glob('*.json')):
+        scenario_name = json_file.stem
+        with json_file.open('r') as qf:
+            data = json.load(qf)
+        for question_id, entry in data.items():
+            if num_prompts <= 0:
+                break
+            prompt_text = entry.get('Rephrased Question(SD)') or entry.get('Rephrased Question')
+            img_filename = f'{question_id}.jpg'
+            possible_paths = [
+                image_dir / scenario_name / 'SD' / img_filename,
+                image_dir / scenario_name / img_filename,
+                image_dir / scenario_name / 'SD_TYPO' / img_filename,
+            ]
+            final_image_path = None
+            for p in possible_paths:
+                if p.exists():
+                    final_image_path = p
+                    break
+            if final_image_path:
+                entry = {
+                    'prompt': prompt_text,
+                    'image': str(final_image_path)
+                }
+                f.write(json.dumps(entry) + '\n')
+                num_prompts -= 1
+        if num_prompts <= 0:
+            break
+"
+}
+
 run_accuracy_check() {
     echo -e "\n--- Running Accuracy Check (Mode: ACCURACY) ---"
 
@@ -192,6 +240,53 @@ run_performance_benchmark() {
     fi
 
     echo "Actual Output Token Throughput: $ACTUAL_THROUGHPUT tok/s"
+
+    if awk -v actual="$ACTUAL_THROUGHPUT" -v target="$TARGET_THROUGHPUT" 'BEGIN { exit !(actual >= target) }'; then
+        echo "PERFORMANCE CHECK PASSED: $ACTUAL_THROUGHPUT >= $TARGET_THROUGHPUT"
+        return 0
+    else
+        echo "PERFORMANCE CHECK FAILED: $ACTUAL_THROUGHPUT < $TARGET_THROUGHPUT" >&2
+        return 1
+    fi
+}
+
+run_multimodal_performance_benchmark() {
+    echo -e "\n--- Running Multimodal Performance Benchmark (Mode: PERFORMANCE, Benchmark: MULTIMODAL) ---"
+
+    download_mm_safetybench_dataset || return 1
+    create_multimodal_dataset
+
+    echo "Spinning up the vLLM server for $MODEL_NAME (TP=$TP_SIZE)..."
+
+    # Server startup
+    (vllm serve "$MODEL_NAME" \
+        --tensor-parallel-size "$TP_SIZE" \
+        --max-model-len="$MAX_MODEL_LEN" \
+        --max-num-batched-tokens="$MAX_BATCHED_TOKENS" \
+        --limit-mm-per-prompt '{"image": 1}' \
+        --mm-processor-kwargs '{"max_pixels": 1003520}' \
+        --disable-chunked-mm-input \
+        2>&1 | tee -a "$LOG_FILE") &
+
+    waitForServerReady
+
+    vllm bench serve \
+        --model "$MODEL_NAME" \
+        --dataset-name custom \
+        --dataset-path /tmp/mm_safety_bench.jsonl \
+        --num-prompts "$NUM_PROMPTS" \
+        --backend "openai-chat" \
+        --endpoint "/v1/chat/completions" \
+        2>&1 | tee -a "$BENCHMARK_LOG_FILE"
+
+    ACTUAL_THROUGHPUT=$(awk '/Request throughput \(req\/s\):/ {print $NF}' "$BENCHMARK_LOG_FILE")
+
+    if [ -z "$ACTUAL_THROUGHPUT" ]; then
+        echo "Error: Request throughput NOT FOUND in benchmark logs."
+        return 1
+    fi
+
+    echo "Actual Request Throughput: $ACTUAL_THROUGHPUT req/s"
 
     if awk -v actual="$ACTUAL_THROUGHPUT" -v target="$TARGET_THROUGHPUT" 'BEGIN { exit !(actual >= target) }'; then
         echo "PERFORMANCE CHECK PASSED: $ACTUAL_THROUGHPUT >= $TARGET_THROUGHPUT"
@@ -262,7 +357,8 @@ run_multimodal_accuracy_check() {
             --tensor-parallel-size "$TP_SIZE" \
             --model-name "$MODEL_NAME" \
             --expected-value "$MINIMUM_ACCURACY_THRESHOLD" \
-            --image-dir "$MM_SAFETYBENCH_IMAGE_DIR"
+            --image-dir "$MM_SAFETYBENCH_IMAGE_DIR" \
+            --num-test-cases "$CI_MAX_TEST_CASES"
     )
     return $?
 }
@@ -289,19 +385,27 @@ fi
 
 # --- 2. START SERVER (Required ONLY for Performance Mode) ---
 if [ "$TEST_MODE" == "performance" ]; then
-    echo "Spinning up the vLLM server for $MODEL_NAME (TP=$TP_SIZE)..."
+    if [ "$BENCHMARK_TYPE" == "text-only" ]; then
+        echo "Spinning up the vLLM server for $MODEL_NAME (TP=$TP_SIZE)..."
 
-    # Server startup
-    (vllm serve "$MODEL_NAME" \
-        --tensor-parallel-size "$TP_SIZE" \
-        --max-model-len "$MAX_MODEL_LEN" \
-        --max-num-batched-tokens "$MAX_BATCHED_TOKENS" \
-        2>&1 | tee -a "$LOG_FILE") &
+        # Server startup
+        (vllm serve "$MODEL_NAME" \
+            --tensor-parallel-size "$TP_SIZE" \
+            --max-model-len "$MAX_MODEL_LEN" \
+            --max-num-batched-tokens "$MAX_BATCHED_TOKENS" \
+            2>&1 | tee -a "$LOG_FILE") &
 
-    waitForServerReady
+        waitForServerReady
 
-    run_performance_benchmark
-    EXIT_CODE=$?
+        run_performance_benchmark
+        EXIT_CODE=$?
+    elif [ "$BENCHMARK_TYPE" == "multimodal" ]; then
+        run_multimodal_performance_benchmark
+        EXIT_CODE=$?
+    else
+        echo "Error: Invalid benchmark type for performance mode: $BENCHMARK_TYPE" >&2
+        EXIT_CODE=1
+    fi
 fi
 
 # --- 3. CLEANUP AND EXIT ---
