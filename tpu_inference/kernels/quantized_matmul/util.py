@@ -32,7 +32,10 @@ def unfold_args(
         fn(*fn_conditions)
 
 
-def quantize_tensor(x: jax.Array, dtype: jnp.dtype, dim: int = -1, block_size: int | None = None):
+def quantize_tensor(x: jax.Array,
+                    dtype: jnp.dtype,
+                    dim: int = -1,
+                    block_size: int | None = None):
     if jnp.issubdtype(dtype, jnp.integer):
         dtype_info = jnp.iinfo(dtype)
         max_val = int(dtype_info.max)
@@ -49,7 +52,8 @@ def quantize_tensor(x: jax.Array, dtype: jnp.dtype, dim: int = -1, block_size: i
     x_q = jnp.clip(x / scale, min_val, max_val).astype(dtype)
     if block_size:
         x_q = x_q.reshape(n_dim, k_dim)
-    return x_q, scale.transpose(1, 2, 0).astype(jnp.float32) if block_size else scale.astype(jnp.float32)
+    return x_q, scale.transpose(1, 2, 0).astype(
+        jnp.float32) if block_size else scale.astype(jnp.float32)
 
 
 def next_multiple(x, multiple):
@@ -214,11 +218,12 @@ def validate_inputs(
 
     # Verify input shapes.
     if x.shape[1] != w_q.shape[1]:
-        raise ValueError(f"{x.shape[1]=} must be equal to {w_q.shape[1]=}")
-    if w_q.shape[0] != w_scale.shape[1]:
+        raise ValueError(f'{x.shape[1]=} must be equal to {w_q.shape[1]=}')
+    if w_q.shape[0] != w_scale.shape[1] and (w_scale.ndim == 3 and w_q.shape[0]
+                                             != w_scale.shape[2]):
         raise ValueError(
             f"{w_q.shape[0]=} must be equal to {w_scale.shape[1]=}")
-    if x_abs_max.shape != (1, x.shape[0]):
+    if x_abs_max is not None and x_abs_max.shape != (1, x.shape[0]):
         raise ValueError(
             f"{x_abs_max.shape=} must be equal to (1, {x.shape[0]=})")
     if x.shape[0] % batch_block_size != 0:
@@ -230,3 +235,29 @@ def validate_inputs(
     if x.shape[1] % in_block_size != 0:
         raise ValueError(
             f"{x.shape[1]=} must be a multiple of {in_block_size=}")
+
+
+def get_max_min(target_dtype):
+    if jnp.issubdtype(target_dtype, jnp.floating):
+        return jnp.finfo(target_dtype).max.astype(
+            jnp.float32), jnp.finfo(target_dtype).min.astype(jnp.float32)
+    else:
+        return jnp.iinfo(target_dtype).max, jnp.iinfo(target_dtype).min
+
+
+def quantize_block(data, axis, target_dtype):
+    """Calculates scale and quantizes a block of data."""
+    abs_max = jnp.max(
+        jnp.abs(data),
+        axis=axis,
+        keepdims=True,
+    )
+    dtype_max, dtype_min = get_max_min(target_dtype)
+    scale = abs_max / dtype_max
+    scale = jnp.where(scale == 0, 1.0, scale)
+
+    if jnp.issubdtype(target_dtype, jnp.floating):
+        data_q = (data / scale).clip(dtype_min, dtype_max).astype(target_dtype)
+    else:
+        data_q = jnp.round(data / scale).astype(target_dtype)
+    return data_q, scale
