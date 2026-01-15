@@ -264,13 +264,11 @@ GATHER_SLICE_LATENCY = Histogram(
 LOAD_KV_LATENCY_SECONDS = Histogram(
     'vllm_kv_cache_load_data_latency_seconds',
     'Latency of loading KV cache data from CPU to TPU per request',
-    buckets=[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0]
-)
+    buckets=[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0])
 
 LOAD_KV_SIZE_BLOCKS = Counter(
     'vllm_kv_cache_load_blocks_total',
-    'Total number of KV cache blocks loaded from CPU to TPU'
-)
+    'Total number of KV cache blocks loaded from CPU to TPU')
 
 # we keep our operations at vllm's block granularity,
 # and want to provide the following three preferences when handling
@@ -1465,10 +1463,19 @@ class TPUOffloadConnectorWorker:
         # record finished save / load blocks (with req_ids) for each iteration
         self.offload_stats = KVOffloadConnectorStats()
 
-        # self.no_op: bool = os.getenv("TPU_OFFLOAD_NO_OP", "0") == "1"
-        self.no_op = False
-        if self.no_op:
-            logger.info("TPU_OFFLOAD_NO_OP is set, skipping wait_for_save.")
+        self.no_op_load = os.getenv("TPU_OFFLOAD_NO_OP_LOAD", "0") == "1"
+        self.no_op_gather = os.getenv("TPU_OFFLOAD_NO_OP_GATHER", "0") == "1"
+        self.no_op_swap_out = os.getenv("TPU_OFFLOAD_NO_OP_SWAP_OUT",
+                                        "0") == "1"
+        # when gather is no-op, its successor should also be no-op
+        if self.no_op_gather:
+            self.no_op_swap_out = True
+        # when any save is no-op, load should also be no-op.
+        if self.no_op_gather or self.no_op_swap_out:
+            self.no_op_load = True
+        logger.warning(
+            f"TPU_OFFLOAD_NO_OP config: load({self.no_op_load}), gather({self.no_op_gather}), swap_out({self.no_op_swap_out})"
+        )
 
     def __del__(self):
         logger.info("TPUOffloadConnectorWorker: Entering __del__")
@@ -1840,20 +1847,24 @@ class TPUOffloadConnectorWorker:
             )
 
         start_time = time.time()
-        blocks_to_save_arr = jnp.array(blocks_to_save)
-        if self.use_bucketed_swap_ops:
-            flat_kv_caches_tpu = self._bucketed_gather_kv_cache(
-                self.runner.kv_caches, blocks_to_save_arr)
+        if not self.no_op_gather:
+            blocks_to_save_arr = jnp.array(blocks_to_save)
+            if self.use_bucketed_swap_ops:
+                flat_kv_caches_tpu = self._bucketed_gather_kv_cache(
+                    self.runner.kv_caches, blocks_to_save_arr)
+            else:
+                flat_kv_caches_tpu = KVCacheManager._jitted_gather_kv_cache(
+                    self.runner.kv_caches, blocks_to_save_arr)
+            jax.block_until_ready(flat_kv_caches_tpu)
         else:
-            flat_kv_caches_tpu = KVCacheManager._jitted_gather_kv_cache(
-                self.runner.kv_caches, blocks_to_save_arr)
+            flat_kv_caches_tpu = None
 
-        jax.block_until_ready(flat_kv_caches_tpu)
         duration = time.time() - start_time
         GATHER_TPU_BLOCKS_LATENCY.observe(duration)
-        logger.info(
-            f"extracted_blocks_tpu: {flat_kv_caches_tpu[0].shape}, {flat_kv_caches_tpu[0].sharding}"
-        )
+        if flat_kv_caches_tpu is not None:
+            logger.info(
+                f"extracted_blocks_tpu: {flat_kv_caches_tpu[0].shape}, {flat_kv_caches_tpu[0].sharding}"
+            )
 
         # We return the data needed for the next phase
         return flat_kv_caches_tpu, num_blocks_to_save, dst_chunks, blocks_to_save
@@ -1870,34 +1881,40 @@ class TPUOffloadConnectorWorker:
         TRANSFER_AND_GEGISTER_CPU_CHUNKS_CALLS.inc()
         start_time = time.time()
         chunks_on_cpu = None
-        if self.use_bucketed_swap_ops:
-            chunks_on_cpu = self._bucketed_swap_out_fn(flat_kv_caches_tpu)
+        if not self.no_op_swap_out:
+            if self.use_bucketed_swap_ops:
+                chunks_on_cpu = self._bucketed_swap_out_fn(flat_kv_caches_tpu)
+            else:
+                flat_kv_caches_cpu = self.swap_out_fn(flat_kv_caches_tpu)
+                if flat_kv_caches_cpu:
+                    jax.block_until_ready(flat_kv_caches_cpu)
+                    # NOTE(jcgu): we keep cpu_chunk_size == block_size
+                    split_size_list = [self.cpu_chunk_size
+                                       ] * num_blocks_to_save
+                    chunks_on_cpu = jax.tree.map(
+                        lambda flat_layer_cache: jax.lax.split(
+                            flat_layer_cache, split_size_list, axis=0),
+                        flat_kv_caches_cpu)
+
+            if chunks_on_cpu and chunks_on_cpu[0]:
+                jax.block_until_ready(chunks_on_cpu)
         else:
-            flat_kv_caches_cpu = self.swap_out_fn(flat_kv_caches_tpu)
-            if flat_kv_caches_cpu:
-                jax.block_until_ready(flat_kv_caches_cpu)
-                # NOTE(jcgu): we keep cpu_chunk_size == block_size
-                split_size_list = [self.cpu_chunk_size] * num_blocks_to_save
-                chunks_on_cpu = jax.tree.map(
-                    lambda flat_layer_cache: jax.lax.split(
-                        flat_layer_cache, split_size_list, axis=0),
-                    flat_kv_caches_cpu)
-
-        if chunks_on_cpu and chunks_on_cpu[0]:
-            jax.block_until_ready(chunks_on_cpu)
-
+            chunks_on_cpu = [[(j * num_blocks_to_save + i)
+                              for i in range(num_blocks_to_save)]
+                             for j in range(self.num_layers)]
         duration = time.time() - start_time
         KV_SAVE_TRANSFER_LATENCY.observe(duration)
         logger.info(f"Successfully saved {len(blocks_to_save)} blocks for "
                     f"request {req_id} to CPU in {duration:.4f} seconds.")
 
-        total_size_bytes = sum(
-            sum(chunk.nbytes for chunk in layer_chunks)
-            for layer_chunks in chunks_on_cpu)
-        logger.info(
-            f"Total size of chunks_on_cpu: {total_size_bytes / 1024**2:.2f} MB"
-        )
-        KV_SAVED_BYTES.inc(total_size_bytes)
+        if not self.no_op_swap_out:
+            total_size_bytes = sum(
+                sum(chunk.nbytes for chunk in layer_chunks)
+                for layer_chunks in chunks_on_cpu)
+            logger.info(
+                f"Total size of chunks_on_cpu: {total_size_bytes / 1024**2:.2f} MB"
+            )
+            KV_SAVED_BYTES.inc(total_size_bytes)
 
         post_transfer_start_time = time.time()
 
@@ -2122,7 +2139,7 @@ class TPUOffloadConnectorWorker:
                 f"Fetching delta of {num_tokens_to_load_delta} tokens from cache for "
                 f"{num_blocks_to_load} blocks.")
 
-            if not self.no_op:
+            if not self.no_op_load:
                 # Assemble the per-layer data for the delta tokens on the CPU.
                 # We create a list of lists, where the outer list represents layers
                 # and the inner lists will hold the data chunks for that layer.
