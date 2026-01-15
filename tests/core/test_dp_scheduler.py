@@ -40,6 +40,9 @@ class TestDPScheduler:
         config.scheduler_config.max_num_seqs = 8
         config.scheduler_config.max_num_batched_tokens = 1024
         config.scheduler_config.async_scheduling = False
+        config.cache_config = MagicMock()
+        config.cache_config.enable_prefix_caching = False
+        config.cache_config.prefix_caching_hash_algo = "sha256"
         return config
 
     @pytest.fixture
@@ -98,6 +101,88 @@ class TestDPScheduler:
 
                 # Verify processes were started
                 assert mock_process.start.call_count == 2
+
+    def test_init_with_prefix_caching_enabled(
+        self,
+        mock_vllm_config,
+        mock_kv_cache_config,
+        mock_structured_output_manager,
+    ):
+        """Test initialization with prefix caching enabled initializes NONE_HASH."""
+        mock_vllm_config.cache_config.enable_prefix_caching = True
+        mock_vllm_config.cache_config.prefix_caching_hash_algo = "sha256"
+        
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
+            with patch('multiprocessing.get_context') as mock_get_context:
+                with patch(
+                    'vllm.v1.core.kv_cache_utils.init_none_hash'
+                ) as mock_init_none_hash:
+                    with patch(
+                        'vllm.utils.hashing.get_hash_fn_by_name'
+                    ) as mock_get_hash_fn:
+                        # Setup mocks
+                        mock_ctx = MagicMock()
+                        mock_process = MagicMock()
+                        mock_queue = MagicMock()
+                        mock_ctx.Queue = MagicMock(return_value=mock_queue)
+                        mock_ctx.Process = MagicMock(return_value=mock_process)
+                        mock_get_context.return_value = mock_ctx
+                        
+                        mock_hash_fn = MagicMock()
+                        mock_get_hash_fn.return_value = mock_hash_fn
+
+                        scheduler = DPScheduler(
+                            vllm_config=mock_vllm_config,
+                            kv_cache_config=mock_kv_cache_config,
+                            structured_output_manager=mock_structured_output_manager,
+                            block_size=16,
+                            log_stats=True,
+                        )
+
+                        # Verify init_none_hash was called with correct hash function
+                        mock_get_hash_fn.assert_called_once_with("sha256")
+                        mock_init_none_hash.assert_called_once_with(mock_hash_fn)
+                        
+                        assert scheduler.dp_size == 2
+
+    def test_init_without_prefix_caching_skips_initialization(
+        self,
+        mock_vllm_config,
+        mock_kv_cache_config,
+        mock_structured_output_manager,
+    ):
+        """Test initialization without prefix caching skips NONE_HASH initialization."""
+        mock_vllm_config.cache_config.enable_prefix_caching = False
+        
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
+            with patch('multiprocessing.get_context') as mock_get_context:
+                with patch(
+                    'vllm.v1.core.kv_cache_utils.init_none_hash'
+                ) as mock_init_none_hash:
+                    # Setup mocks
+                    mock_ctx = MagicMock()
+                    mock_process = MagicMock()
+                    mock_queue = MagicMock()
+                    mock_ctx.Queue = MagicMock(return_value=mock_queue)
+                    mock_ctx.Process = MagicMock(return_value=mock_process)
+                    mock_get_context.return_value = mock_ctx
+
+                    scheduler = DPScheduler(
+                        vllm_config=mock_vllm_config,
+                        kv_cache_config=mock_kv_cache_config,
+                        structured_output_manager=mock_structured_output_manager,
+                        block_size=16,
+                        log_stats=True,
+                    )
+
+                    # Verify init_none_hash was NOT called
+                    mock_init_none_hash.assert_not_called()
+                    
+                    assert scheduler.dp_size == 2
 
     def test_get_rank_token_counts(self, mock_vllm_config,
                                    mock_kv_cache_config,
