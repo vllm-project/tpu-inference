@@ -118,15 +118,6 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
                 subc_quant_w1_sz=REQUANTIZED_BLOCK_SIZE,
                 subc_quant_w2_sz=REQUANTIZED_BLOCK_SIZE,
                 ep_axis_name=ep_axis_name,
-                # TODO: Use autotune table once we have it.
-                bt=256,
-                bf=1024,
-                bd1=1024,
-                bd2=1024,
-                btc=256,
-                bfc=1024,
-                bd1c=1024,
-                bd2c=1024,
             )
 
     def get_fused_moe_quant_config(

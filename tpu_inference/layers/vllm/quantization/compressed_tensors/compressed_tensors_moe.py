@@ -25,7 +25,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsMoEMethod, CompressedTensorsW8A8Fp8MoEMethod)
 
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.vllm.fused_moe import (fused_moe_apply,
+from tpu_inference.layers.vllm.fused_moe import (FusedMoEBackend,
+                                                 fused_moe_apply,
                                                  select_moe_backend)
 from tpu_inference.layers.vllm.process_weights.fused_moe_weights import (
     FusedMoEWeights, process_moe_weights, shard_moe_weights)
@@ -84,19 +85,20 @@ class VllmCompressedTensorsMoEMethod(CompressedTensorsMoEMethod):
 class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
                                             VllmQuantConfig):
 
-    def __init__(
-        self,
-        weight_quant: QuantizationArgs,
-        input_quant: QuantizationArgs,
-        moe: FusedMoEConfig,
-        mesh: Mesh,
-    ):
+    def __init__(self,
+                 weight_quant: QuantizationArgs,
+                 input_quant: QuantizationArgs,
+                 moe: FusedMoEConfig,
+                 mesh: Mesh,
+                 ep_axis_name: str = "model"):
         super().__init__(weight_quant, input_quant, moe)
 
         self.mesh = mesh
         self.moe_backend = select_moe_backend(self.moe)
 
         self.extra_backend_kwargs = {}
+        if self.moe_backend == FusedMoEBackend.FUSED_MOE:
+            self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name, )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """

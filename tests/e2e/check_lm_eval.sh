@@ -18,14 +18,57 @@
 
 set -e # Exit immediately if a command exits with a non-zero status.
 
-if [ -z "$1" ]; then
-    echo "Usage: $0 <model_name>. A model name is needed."
+# Function to display usage
+usage() {
+    echo "Usage: $0 --model_name <model_name> --use_moe_ep_kernel <0|1> --tensor_parallel_size <size> --max_model_len <length> --max_num_batched_tokens <num> --max_gen_toks <num> --enable_expert_parallel <0|1>"
+    echo ""
+    echo "All parameters are required."
+    echo ""
+    echo "Options:"
+    echo "  --model_name <name>             Model name to evaluate."
+    echo "  --use_moe_ep_kernel <0|1>       Whether to use MoE EP kernel."
+    echo "  --tensor_parallel_size <size>   Tensor parallel size."
+    echo "  --max_model_len <length>        Maximum model length."
+    echo "  --max_num_batched_tokens <num>  Maximum number of batched tokens."
+    echo "  --max_gen_toks <num>            Maximum number of generated tokens."
+    echo "  --enable_expert_parallel <0|1>  Whether to enable expert parallel."
+    echo "  -h, --help                      Display this help message."
     exit 1
-fi
-MODEL_NAME=$1
+}
 
-model_args_json=$(printf '{"pretrained": "%s", "tensor_parallel_size": 8, "max_model_len": 2048, "max_num_batched_tokens": 2048, "max_gen_toks": 256, "enable_expert_parallel": 1}' "$MODEL_NAME")
-output=$(USE_MOE_EP_KERNEL=1 VLLM_DISABLE_SHARED_EXPERTS_STREAM=1 MODEL_IMPL_TYPE=vllm lm_eval \
+# Initialize variables
+MODEL_NAME=""
+USE_MOE_EP_KERNEL=""
+TENSOR_PARALLEL_SIZE=""
+MAX_MODEL_LEN=""
+MAX_NUM_BATCHED_TOKENS=""
+MAX_GEN_TOKS=""
+ENABLE_EXPERT_PARALLEL=""
+
+# Parse named arguments
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --model_name) MODEL_NAME="$2"; shift ;;
+        --use_moe_ep_kernel) USE_MOE_EP_KERNEL="$2"; shift ;;
+        --tensor_parallel_size) TENSOR_PARALLEL_SIZE="$2"; shift ;;
+        --max_model_len) MAX_MODEL_LEN="$2"; shift ;;
+        --max_num_batched_tokens) MAX_NUM_BATCHED_TOKENS="$2"; shift ;;
+        --max_gen_toks) MAX_GEN_TOKS="$2"; shift ;;
+        --enable_expert_parallel) ENABLE_EXPERT_PARALLEL="$2"; shift ;;
+        -h|--help) usage ;;
+        *) echo "Unknown parameter passed: $1"; usage ;;
+    esac
+    shift
+done
+
+# Check if all parameters are provided
+if [ -z "$MODEL_NAME" ] || [ -z "$USE_MOE_EP_KERNEL" ] || [ -z "$TENSOR_PARALLEL_SIZE" ] || [ -z "$MAX_MODEL_LEN" ] || [ -z "$MAX_NUM_BATCHED_TOKENS" ] || [ -z "$MAX_GEN_TOKS" ] || [ -z "$ENABLE_EXPERT_PARALLEL" ]; then
+    echo "Error: All parameters are required."
+    usage
+fi
+
+model_args_json=$(printf '{"pretrained": "%s", "tensor_parallel_size": %d, "max_model_len": %d, "max_num_batched_tokens": %d, "max_gen_toks": %d, "enable_expert_parallel": %d}' "$MODEL_NAME" "$TENSOR_PARALLEL_SIZE" "$MAX_MODEL_LEN" "$MAX_NUM_BATCHED_TOKENS" "$MAX_GEN_TOKS" "$ENABLE_EXPERT_PARALLEL")
+output=$(USE_MOE_EP_KERNEL=${USE_MOE_EP_KERNEL} MODEL_IMPL_TYPE=vllm lm_eval \
     --model vllm \
     --model_args "${model_args_json}" \
     --tasks gsm8k_cot \

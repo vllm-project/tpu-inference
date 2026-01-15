@@ -13,6 +13,10 @@
 # limitations under the License.
 """Auto-tuned block sizes for Fused MoE kernel."""
 
+from tpu_inference.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 # TODO(jevinjiang): create sharable util
 def cdiv(a, b):
@@ -317,7 +321,7 @@ def get_tuned_block_sizes(
     )
 
     if key not in TUNED_BLOCK_SIZES:
-        print(
-            f'[Fused MOE kernel] using default block sizes for key: {key}: {get_default_block_sizes(*key)}',
-            flush=True)
+        logger.warning_once(
+            f'[Fused MOE kernel] using default block sizes for key: {key}: {get_default_block_sizes(*key)}'
+        )
     return TUNED_BLOCK_SIZES.get(key, get_default_block_sizes(*key))
