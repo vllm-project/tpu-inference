@@ -26,7 +26,6 @@ from tpu_inference import utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.rope_interface import apply_rope
@@ -142,8 +141,7 @@ class LlamaAttention(nnx.Module):
         )
 
         self._q_scale = 1.0
-        self._k_scale = 1.0
-        self._v_scale = 1.0
+
         self.kv_cache_quantized_dtype = None
         if kv_cache_dtype != "auto":
             self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
@@ -152,6 +150,8 @@ class LlamaAttention(nnx.Module):
     def __call__(
         self,
         kv_cache: Optional[jax.Array],
+        k_scale_cache: Optional[jax.Array],
+        v_scale_cache: Optional[jax.Array],
         x: jax.Array,
         attention_metadata: AttentionMetadata,
     ) -> Tuple[jax.Array, jax.Array]:
@@ -167,15 +167,15 @@ class LlamaAttention(nnx.Module):
         # v: (T, K, H)
         v = self.v_proj(x)
         # o: (T, N, H)
-        q_scale = k_scale = v_scale = None
-        if self.kv_cache_quantized_dtype:
-            # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
-            # q_scale = self._q_scale
-            k_scale = self._k_scale
-            v_scale = self._v_scale
-            k, v = quantize_kv(self.kv_cache_quantized_dtype, k, v, k_scale,
-                               v_scale)
-        new_kv_cache, outputs = attention(
+        # q_scale = k_scale = v_scale = None
+        # if self.kv_cache_quantized_dtype:
+        #     # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
+        #     # q_scale = self._q_scale
+        #     k_scale = self._k_scale
+        #     v_scale = self._v_scale
+        #     k, v = quantize_kv(self.kv_cache_quantized_dtype, k, v, k_scale,
+        #                        v_scale)
+        new_kv_cache, outputs, new_k_scale_cache, new_v_scale_cache = attention(
             kv_cache,
             q,
             k,
@@ -183,13 +183,13 @@ class LlamaAttention(nnx.Module):
             attention_metadata,
             self.mesh,
             self.head_dim_original,
-            q_scale=q_scale,
-            k_scale=k_scale,
-            v_scale=v_scale,
+            q_scale=None,
+            k_scale=k_scale_cache,
+            v_scale=v_scale_cache,
         )
         # (T, D)
         o = self.o_proj(outputs)
-        return new_kv_cache, o
+        return new_kv_cache, o, new_k_scale_cache, new_v_scale_cache
 
 
 class LlamaDecoderLayer(nnx.Module):
@@ -227,12 +227,16 @@ class LlamaDecoderLayer(nnx.Module):
     def __call__(
         self,
         kv_cache: jax.Array,
+        k_scale_cache: jax.Array,
+        v_scale_cache: jax.Array,
         x: jax.Array,
         attention_metadata: AttentionMetadata,
     ) -> Tuple[jax.Array, jax.Array]:
         hidden_states = self.input_layernorm(x)
-        kv_cache, attn_output = self.self_attn(
+        kv_cache, attn_output, k_scale_cache, v_scale_cache = self.self_attn(
             kv_cache,
+            k_scale_cache,
+            v_scale_cache,
             hidden_states,
             attention_metadata,
         )
@@ -242,7 +246,7 @@ class LlamaDecoderLayer(nnx.Module):
         attn_output = self.post_attention_layernorm(attn_output)
         outputs = self.mlp(attn_output)
         outputs = residual + outputs
-        return kv_cache, outputs
+        return kv_cache, outputs, k_scale_cache, v_scale_cache
 
 
 class LlamaModel(nnx.Module):
@@ -315,6 +319,8 @@ class LlamaModel(nnx.Module):
     def __call__(
         self,
         kv_caches: List[jax.Array],
+        k_scale_caches: List[jax.Array],
+        v_scale_caches: List[jax.Array],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
         intermediate_tensors: JaxIntermediateTensors | None,
@@ -332,18 +338,24 @@ class LlamaModel(nnx.Module):
             if i in self.aux_hidden_state_layers:
                 aux_hidden_states.append(x)
             kv_cache = kv_caches[i]
-            kv_cache, x = layer(
+            k_scale_cache = k_scale_caches[i]
+            v_scale_cache = v_scale_caches[i]
+            kv_cache, x, k_scale_cache, v_scale_cache = layer(
                 kv_cache,
+                k_scale_cache,
+                v_scale_cache,
                 x,
                 attention_metadata,
             )
             kv_caches[i] = kv_cache
-        if not self.is_last_rank:
-            # Note: add aux_hidden_states to make the output spec consistent.
-            return kv_caches, JaxIntermediateTensors({"hidden_states":
-                                                      x}), aux_hidden_states
+            k_scale_caches[i] = k_scale_cache
+            v_scale_caches[i] = v_scale_cache
+        # if not self.is_last_rank:
+        #     # Note: add aux_hidden_states to make the output spec consistent.
+        #     return kv_caches, JaxIntermediateTensors({"hidden_states":
+        #                                               x}), aux_hidden_states
         x = self.norm(x)
-        return kv_caches, x, aux_hidden_states
+        return kv_caches, x, aux_hidden_states, k_scale_caches, v_scale_caches
 
 
 class LlamaForCausalLM(nnx.Module):
@@ -370,6 +382,8 @@ class LlamaForCausalLM(nnx.Module):
     def __call__(
         self,
         kv_caches: List[jax.Array],
+        k_scale_caches: List[jax.Array],
+        v_scale_caches: List[jax.Array],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
         _input_embeds=None,
@@ -384,6 +398,8 @@ class LlamaForCausalLM(nnx.Module):
             List[jax.Array], JaxIntermediateTensors]:
         return self.model(
             kv_caches,
+            k_scale_caches,
+            v_scale_caches,
             input_ids,
             attention_metadata,
             intermediate_tensors,

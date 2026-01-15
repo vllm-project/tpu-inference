@@ -28,6 +28,7 @@ from jax.sharding import PartitionSpec as P
 
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
+import tpu_inference.kernels.ragged_paged_attention.v3.per_token_scale_kernel as rpa_per_token
 from tpu_inference.kernels.flash_attention.kernel import flash_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -37,7 +38,8 @@ MAX_ALLOWED_PAGE_INDICES_N = (
     128 * 1024
 )  # Based on experiments on v5e, 256x1024 results in smem oom but 128x1024 not. TODO: Adjust this based on TPU version.
 
-ragged_paged_attention = rpa.ragged_paged_attention
+ragged_paged_attention = rpa.ref_ragged_paged_attention
+ragged_paged_attention_per_token = rpa_per_token.ref_ragged_paged_attention_per_token
 get_kv_cache_shape = rpa.get_kv_cache_shape
 
 ragged_paged_attention_hd64 = rpa_hd64.ragged_paged_attention_hd64
@@ -331,23 +333,20 @@ def sharded_ragged_paged_attention(
         in_specs += (P(ShardingAxisName.ATTN_HEAD), )
         args += (attention_sink, )
 
-    def _ragged_paged_attention(*args):
-        return func(
-            *args,
-            sm_scale=sm_scale,
-            sliding_window=attention_chunk_size,
-            q_scale=q_scale,
-            k_scale=k_scale,
-            v_scale=v_scale,
-        )
-
-    return jax.shard_map(
-        _ragged_paged_attention,
-        mesh=mesh,
-        in_specs=in_specs,
-        out_specs=out_specs,
-        check_vma=False,
-    )(*args)
+    return ragged_paged_attention_per_token(
+        q,
+        k,
+        v,
+        kv_cache,
+        kv_lens,
+        page_indices,
+        cu_q_lens,
+        distribution,
+        k_scale,
+        v_scale,
+        sm_scale=sm_scale,
+        sliding_window=attention_chunk_size,
+    )
 
 
 def attention(
@@ -381,8 +380,11 @@ def attention(
 
     md = attention_metadata
 
+    # jax.debug.print("Step {i} BEFORE: Writing K scales with mean: {x}", i=0, x=jnp.mean(k_scale))
+    # jax.debug.print("Step {i} BEFORE: Writing V scales with mean: {x} {y}", i=0, x=jnp.mean(v_scale), y=v_scale.shape)
+
     # (T, N, H)
-    output, kv_cache = sharded_ragged_paged_attention(
+    output, kv_cache, k_scale_cache, v_scale_cache = sharded_ragged_paged_attention(
         mesh,
         q,
         k,
@@ -400,4 +402,7 @@ def attention(
         v_scale=v_scale,
     )
 
-    return kv_cache, output
+    # jax.debug.print("Step {i} AFTER: Writing K scales with mean: {x}", i=0, x=jnp.mean(k_scale_cache))
+    # jax.debug.print("Step {i} AFTER: Writing V scales with mean: {x}", i=0, x=jnp.mean(v_scale_cache))
+
+    return kv_cache, output, k_scale_cache, v_scale_cache

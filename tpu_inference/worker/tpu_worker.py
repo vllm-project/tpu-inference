@@ -363,7 +363,8 @@ class TPUWorker:
         self.model_runner.load_model()
 
     def compile_or_warm_up_model(self) -> None:
-        self.model_runner.capture_model()
+        # TODO: renable
+        # self.model_runner.capture_model()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         self.model_runner._init_random()
