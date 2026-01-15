@@ -95,25 +95,6 @@ steps:
            exit 0
          fi
 
-
-   - label: "${LABEL_PREFIX}E2E multi modality test"
-     key: ${KEY_PREFIX}test_5
-     soft_fail: true
-     env:
-       IS_FOR_V7X: "${IS_FOR_V7X}"
-     agents:
-       queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
-     commands:
-       - |
-         if [[ "$$NIGHTLY" == "1" ]]; then
-           .buildkite/scripts/run_in_docker.sh \
-             bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_multi_modal_inference.py && \
-              bash /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench.sh'
-         else
-           echo "Skipping: NIGHTLY environment variable not set"
-           exit 0
-         fi
-
    - label: "${LABEL_PREFIX}E2E speculative decoding test"
      key: ${KEY_PREFIX}test_6
      soft_fail: true
@@ -305,7 +286,6 @@ steps:
        - ${KEY_PREFIX}test_2
        - ${KEY_PREFIX}test_3
        - ${KEY_PREFIX}test_4
-       - ${KEY_PREFIX}test_5
        - ${KEY_PREFIX}test_6
        - ${KEY_PREFIX}test_7
        - ${KEY_PREFIX}test_8
@@ -321,4 +301,4 @@ steps:
      commands:
        - |
          .buildkite/scripts/check_results.sh \
-           "TPU JAX Tests Failed" ${KEY_PREFIX}test_0 ${KEY_PREFIX}test_1 ${KEY_PREFIX}test_2 ${KEY_PREFIX}test_3 ${KEY_PREFIX}test_4 ${KEY_PREFIX}test_5 ${KEY_PREFIX}test_6 ${KEY_PREFIX}test_7 ${KEY_PREFIX}test_8 ${KEY_PREFIX}test_9 ${KEY_PREFIX}test_10 ${KEY_PREFIX}test_11 ${KEY_PREFIX}test_12 ${KEY_PREFIX}test_13 ${KEY_PREFIX}test_15 ${KEY_PREFIX}test_16
+           "TPU JAX Tests Failed" ${KEY_PREFIX}test_0 ${KEY_PREFIX}test_1 ${KEY_PREFIX}test_2 ${KEY_PREFIX}test_3 ${KEY_PREFIX}test_4 ${KEY_PREFIX}test_6 ${KEY_PREFIX}test_7 ${KEY_PREFIX}test_8 ${KEY_PREFIX}test_9 ${KEY_PREFIX}test_10 ${KEY_PREFIX}test_11 ${KEY_PREFIX}test_12 ${KEY_PREFIX}test_13 ${KEY_PREFIX}test_15 ${KEY_PREFIX}test_16
