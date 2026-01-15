@@ -176,6 +176,9 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
         self.is_model_quantized = not vllm_config.additional_config.get(
             "skip_quantization", False)
 
+        # TODO (jacobplatin): remove this once the JAX path refactor is done
+        self.is_native_fp8_model = False
+
         if self.is_model_quantized:
             # NOTE: this is only needed for pre-quantized models when doing random weight loading
             # because the scales that Qwix configures by default don't necessarily match the
@@ -206,6 +209,17 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
 
             # TODO (jacobplatin): remove this check eventually!
             assert self.quant_dtype == jnp.float8_e4m3fn, f"Expected quant_dtype to be float8_e4m3fn for DeepSeek but got {self.quant_dtype}"
+
+            quantization_block_sizes = vllm_config.model_config.hf_config.quantization_config[
+                "weight_block_size"]
+            # TODO (jacobplatin): remove this once the JAX path refactor is done
+            if quantization_block_sizes == [128, 128]:
+                assert len(
+                    quantization_block_sizes
+                ) == 2, f"Expected only 2 quantization block sizes but got {quantization_block_sizes}"
+                self.quantization_block_size_n = quantization_block_sizes[0]
+                self.quantization_block_size_k = quantization_block_sizes[1]
+                self.is_native_fp8_model = True
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
@@ -320,16 +334,32 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
             scale_shape = scale.shape
             if len(weight_shape) == len(scale_shape):
                 new_scale = scale
-                for wdim, sdim in zip(weight_shape, scale_shape):
-                    if (wdim % sdim != 0):
-                        raise ValueError(
-                            f"Weight dim {wdim} is not divisible by scale dim {sdim} for weight {name} with shape {weight_shape} and scale {scale_shape}!"
+                # TODO (jacobplatin): remove once the refactor is complete
+                if self.is_native_fp8_model:
+                    for idx, (weight_dim, scale_dim) in enumerate(
+                            zip(weight_shape, scale_shape)):
+                        if weight_dim // self.quantization_block_size_n != scale_dim and weight_dim // scale_dim != 1:
+                            old_scale_shape = scale.shape
+                            scale = scale.repeat(
+                                self.quantization_block_size_n,
+                                axis=idx)[:, :weight_dim]
+                            logger.warning(
+                                f"Got a weight with shape {weight_shape} and scale with shape {old_scale_shape} "
+                                f"where the scale_dim {scale_dim} does not match the weight_dim {weight_dim} "
+                                f"multiplied by the quantization block size {self.quantization_block_size_n}. "
+                                f"Repeating the scale to new shape {scale.shape} along axis {idx} with repeat size {self.quantization_block_size_n}."
+                            )
+                else:
+                    for wdim, sdim in zip(weight_shape, scale_shape):
+                        if (wdim % sdim != 0):
+                            raise ValueError(
+                                f"Weight dim {wdim} is not divisible by scale dim {sdim} for weight {name} with shape {weight_shape} and scale {scale_shape}!"
+                            )
+                    if scale_shape != new_scale.shape:
+                        logger.warning(
+                            f"Adjusted scale shape {scale_shape} to {new_scale.shape} to match weight {weight_shape}"
                         )
-                if scale_shape != new_scale.shape:
-                    logger.warning(
-                        f"Adjusted scale shape {scale_shape} to {new_scale.shape} to match weight {weight_shape}"
-                    )
-                scale = new_scale
+                    scale = new_scale
             else:
                 raise ValueError(
                     f"Scale rank {scale_shape} does not match weight rank {weight_shape}"
@@ -527,6 +557,7 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                             self.attn_heads,
                             self.qk_nope_head_dim + self.v_head_dim,
                             self.kv_lora_rank)
+
                         k_weight = weight_reshaped[:, :self.
                                                    qk_nope_head_dim, :]
                         v_weight = weight_reshaped[:,
@@ -540,19 +571,35 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
 
                         scales_list = [None, None]
                         if scale is not None:
-                            assert loaded_weight.shape[0] == scale.shape[0]
-                            block_size_k = loaded_weight.shape[
-                                1] // scale.shape[1]
-                            assert block_size_k > 0, f"Expected non-zero block size but got {block_size_k}!"
-                            scale_reshaped = scale.view(
-                                self.attn_heads,
-                                (self.qk_nope_head_dim + self.v_head_dim),
-                                self.kv_lora_rank // block_size_k)
+                            # TODO (jacobplatin): remove once refactor happens
+                            if self.is_native_fp8_model:
+                                bn = self.quantization_block_size_n
+                                bk = self.quantization_block_size_k
+                                scale_reshaped = scale.view(
+                                    self.attn_heads,
+                                    (self.qk_nope_head_dim + self.v_head_dim)
+                                    // bn, self.kv_lora_rank // bk)
 
-                            k_scale = scale_reshaped[:, :self.
-                                                     qk_nope_head_dim, :]
-                            v_scale = scale_reshaped[:,
-                                                     self.qk_nope_head_dim:, :]
+                                k_scale = scale_reshaped[:, :self.
+                                                         qk_nope_head_dim //
+                                                         bn, :]
+                                v_scale = scale_reshaped[:, self.
+                                                         qk_nope_head_dim //
+                                                         bn:, :]
+                            else:
+                                assert loaded_weight.shape[0] == scale.shape[0]
+                                block_size_k = loaded_weight.shape[
+                                    1] // scale.shape[1]
+                                assert block_size_k > 0, f"Expected non-zero block size but got {block_size_k}!"
+                                scale_reshaped = scale.view(
+                                    self.attn_heads,
+                                    (self.qk_nope_head_dim + self.v_head_dim),
+                                    self.kv_lora_rank // block_size_k)
+
+                                k_scale = scale_reshaped[:, :self.
+                                                         qk_nope_head_dim, :]
+                                v_scale = scale_reshaped[:, self.
+                                                         qk_nope_head_dim:, :]
                             scales_list = [k_scale, v_scale]
 
                     else:
