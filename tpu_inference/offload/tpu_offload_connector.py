@@ -849,9 +849,14 @@ class TPUOffloadConnectorScheduler():
         req_id = tracker.req_id
         _request = self._unfinished_requests[req_id]
 
-        # calculate blocks to save based on save_watermark
-        num_tracked_tokens = len(tracker.token_ids)
-        num_full_blocks = num_tracked_tokens // self.block_size
+        # identify the target tokens to save
+        # when save prompt only, throttled by the prompt len;
+        # if save prompt + gen. token (decode_save), use all the current tokens
+        num_target_tokens = len(tracker.token_ids)
+        if not self.decode_save and num_target_tokens > tracker.prompt_len:
+            num_target_tokens = tracker.prompt_len
+
+        num_full_blocks = num_target_tokens // self.block_size
         adjusted_num_total_blocks = num_full_blocks
         adjusted_num_total_tokens = num_full_blocks * self.block_size
         assert adjusted_num_total_blocks <= len(
@@ -862,48 +867,21 @@ class TPUOffloadConnectorScheduler():
         block_hashes = self._get_request_block_hashes(_request)
         self.offload_manager.touch(block_hashes[:adjusted_num_total_blocks])
 
+        # identify new tokens by comparing with the save_watermark
         has_new_tokens = adjusted_num_total_tokens > tracker.save_watermark
-        should_save = False
-        # Determine if a save is needed for this step
-        # when there are new token KVs:
-        # 1. Prefill: always save
-        # 2. Decode (with save_decode=True)
-        #  2.1 regular decode (not finished): accumulate until getting a full block
-        #  2.2 request finished: save
-        if has_new_tokens:
-            if not tracker.is_decode_phase:
-                # Prefill: always save the new-computed blocks
-                should_save = True
-            elif self.decode_save:
-                if is_finished:
-                    # After decode, if there are new final new tokens to save
-                    should_save = True
-                else:
-                    # During decode, we do not drop or pad, just accumulate tokens until the next block boundary
-                    next_block_boundary = (
-                        tracker.save_watermark // self.block_size +
-                        1) * self.block_size
-                    logger.info(
-                        f"in decode phase, next_block_boundary: {next_block_boundary}, "
-                    )
-                    if adjusted_num_total_tokens == next_block_boundary:
-                        should_save = True
 
-        logger.info(f"    - Preparing meta for req (save): {tracker.req_id}, "
-                    f"is_finished={is_finished}, "
-                    f"total_tokens={num_tracked_tokens}, "
-                    f"adjusted_num_total_tokens={adjusted_num_total_tokens}, "
-                    f"adjusted_num_total_blocks={adjusted_num_total_blocks}, "
-                    f"saved_tokens={tracker.save_watermark}, "
-                    f"has_new={has_new_tokens}, "
-                    f"is_decode={tracker.is_decode_phase}, "
-                    f"should_save={should_save}")
-
-        # A SaveSpec is always prepared for a finished request to signal completion,
-        # even if we don't save the underlying KV data. This is to ensure the TPUOffloadConnectorWorker
-        # can correctly report finished request.
         save_spec = None
-        if should_save:
+        if has_new_tokens:
+            logger.info(
+                f"    - Preparing meta for req (save): {tracker.req_id}, "
+                f"is_finished={is_finished}, "
+                f"total_tokens={num_target_tokens}, "
+                f"adjusted_num_total_tokens={adjusted_num_total_tokens}, "
+                f"adjusted_num_total_blocks={adjusted_num_total_blocks}, "
+                f"saved_tokens={tracker.save_watermark}, "
+                f"has_new={has_new_tokens}, "
+                f"is_decode={tracker.is_decode_phase}")
+
             # get src block_ids for save
             # NOTE(jcgu): recompute skip_leading_blocks
             # if tracker.save_watermark has partial tokens in the last block
@@ -1169,10 +1147,10 @@ class TPUOffloadConnectorScheduler():
             num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
             # (local_computed_tokens + cpu_cache_hit_tokens) + new_tokens
             cur_total_tokens = _request.num_computed_tokens + num_new_tokens
-            num_tracked_tokens = len(tracker.token_ids)
+            num_target_tokens = len(tracker.token_ids)
             # the slice of new tokens should be tracked
             new_token_ids = _request.all_token_ids[
-                num_tracked_tokens:cur_total_tokens] if cur_total_tokens > num_tracked_tokens else []
+                num_target_tokens:cur_total_tokens] if cur_total_tokens > num_target_tokens else []
             # newly allocated blocks
             new_blocks = cached_reqs.new_block_ids[i]
             if new_blocks is None:
