@@ -18,7 +18,8 @@ from jax.sharding import PartitionSpec as P
 
 from tpu_inference import envs
 from tpu_inference.kernels.quantized_matmul.kernel import (
-    quantized_matmul_kernel, xla_quantized_matmul)
+    quantized_matmul_kernel)
+from tpu_inference.kernels.quantized_matmul.util import xla_quantized_matmul
 
 
 def sharded_quantized_matmul(x: jax.Array, w_q: jax.Array, w_s: jax.Array,
