@@ -24,12 +24,11 @@ if TYPE_CHECKING:
     NUM_SLICES: int = 1
     RAY_USAGE_STATS_ENABLED: str = "0"
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: str = "shm"
-    TPU_OFFLOAD_SAVE_THREADS: int = 10
     TPU_OFFLOAD_SKIP_JAX_PRECOMPILE: bool = False
     TPU_OFFLOAD_SWAP_OP_TYPE: str = "jax"
     TPU_OFFLOAD_DECODE_SAVE: bool = False
-    TPU_OFFLOAD_NUM_CPU_CHUNKS: int = 1024
-    TPU_OFFLOAD_NUM_STAGING_BLOCKS: int = 128
+    TPU_OFFLOAD_CPU_BUFFER_SIZE_GB: float = 64.0
+    TPU_OFFLOAD_STAGING_BUF_SIZE_GB: float = 8.0
     TPU_OFFLOAD_SAVE_THREADS: int = 1
 
 
@@ -129,9 +128,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Ray compiled DAG channel type for TPU
     "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE":
     env_with_choices("VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE", "shm", ["shm"]),
-    # kv offload to dram: the number of concurrent save threads
-    "TPU_OFFLOAD_SAVE_THREADS":
-    lambda: int(os.getenv("TPU_OFFLOAD_SAVE_THREADS", "10")),
     # kv offload to dram: skip pre-compiling swap-related jax functions
     "TPU_OFFLOAD_SKIP_JAX_PRECOMPILE":
     lambda: bool(int(os.getenv("TPU_OFFLOAD_SKIP_JAX_PRECOMPILE", "0"))),
@@ -141,12 +137,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # kv offload to dram: save kv in the decode phase
     "TPU_OFFLOAD_DECODE_SAVE":
     lambda: bool(int(os.getenv("TPU_OFFLOAD_DECODE_SAVE", "0"))),
-    # kv offload to dram: dram space size in # of chunks / blocks
-    "TPU_OFFLOAD_NUM_CPU_CHUNKS":
-    lambda: int(os.getenv("TPU_OFFLOAD_NUM_CPU_CHUNKS", "1024")),
-    # kv offload to dram: size of staging buffer (hbm) for swap
-    "TPU_OFFLOAD_NUM_STAGING_BLOCKS":
-    lambda: int(os.getenv("TPU_OFFLOAD_NUM_STAGING_BLOCKS", "128")),
+    # kv offload to dram: dram space size (per host)
+    "TPU_OFFLOAD_CPU_BUF_SIZE_GB":
+    lambda: float(os.getenv("TPU_OFFLOAD_CPU_BUF_SIZE_GB", "64.0")),
+    # kv offload to dram: size of staging buffer (hbm) for swap (per host)
+    "TPU_OFFLOAD_STAGING_BUF_SIZE_GB":
+    lambda: float(os.getenv("TPU_OFFLOAD_STAGING_BUF_SIZE_GB", "8.0")),
     # kv offload to dram: number of threads for asynchronous TPU -> CPU data transfer
     "TPU_OFFLOAD_SAVE_THREADS":
     lambda: int(os.getenv("TPU_OFFLOAD_SAVE_THREADS", "1")),

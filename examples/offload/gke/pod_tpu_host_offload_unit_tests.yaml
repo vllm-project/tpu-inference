@@ -10,9 +10,32 @@ spec:
   nodeSelector:
     cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
     cloud.google.com/gke-tpu-topology: 2x4 # Specify the physical topology for the TPU slice.
+  initContainers:
+    - name: tpu-node-setup
+      image: busybox
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          # WARNING: This changes the HOST memory settings, not just the container.
+          # Required to prevent vLLM crashes due to memory mapping limits.
+          sysctl -w vm.max_map_count=8388608
+
+          # Check if the VFIO IOMMU module parameter exists, and if so, increase the
+          # limit on DMA mappings. This allows the TPU driver to pin and map a
+          # larger number of memory pages for direct hardware access.
+          if [ -f /sys/module/vfio_iommu_type1/parameters/dma_entry_limit ]; then
+            echo 2000000 > /sys/module/vfio_iommu_type1/parameters/dma_entry_limit
+            echo "Successfully increased dma_entry_limit to 2000000"
+          else
+            echo "Warning: vfio_iommu_type1 module parameter not found. Ensure the module is loaded."
+          fi
+
+          echo "Final vm.max_map_count: $(cat /proc/sys/vm/max_map_count)"
+      securityContext:
+        privileged: true
   containers:
   - name: tpu-job
-    image: <your-tpu-inference-container-image>
+    image: gcr.io/gke-shared-ai-dev/tpu-inference:cpu-offload-test-dev-merge-1216-jcgu
     imagePullPolicy: Always
     command:
     - /bin/bash
