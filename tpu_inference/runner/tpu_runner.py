@@ -770,20 +770,25 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     scheduler_output) as kv_connector_output:
                 # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
                 # but one of them would be `None`
-                (self.kv_caches, hidden_states,
-                 aux_hidden_states) = self.model_fn(
-                     self.state,
-                     self.kv_caches,
-                     input_ids,
-                     attn_metadata,
-                     inputs_embeds,
-                     input_positions,
-                     tuple(self.layer_name_to_kvcache_index.items()),
-                     lora_metadata,
-                     intermediate_tensors,
-                     self.is_first_rank,
-                     self.is_last_rank,
-                 )
+                # TODO(xiowei): revert the change here before merge.
+                try:
+                    (self.kv_caches, hidden_states,
+                     aux_hidden_states) = self.model_fn(
+                         self.state,
+                         self.kv_caches,
+                         input_ids,
+                         attn_metadata,
+                         inputs_embeds,
+                         input_positions,
+                         tuple(self.layer_name_to_kvcache_index.items()),
+                         lora_metadata,
+                         intermediate_tensors,
+                         self.is_first_rank,
+                         self.is_last_rank,
+                     )
+                except Exception as e:
+                    logger.error(f"Error during model forward pass: {e=}")
+                    raise e
             if not get_pp_group().is_last_rank:
                 assert isinstance(hidden_states, JaxIntermediateTensors)
                 hidden_states.kv_connector_output = kv_connector_output

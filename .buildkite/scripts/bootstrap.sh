@@ -99,7 +99,7 @@ if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
     unset LABEL_PREFIX KEY_PREFIX TPU_QUEUE_SINGLE TPU_QUEUE_MULTI IS_FOR_V7X COV_FAIL_UNDER
 
     # Upload JAX pipeline for v6 (default)
-    buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
+    # buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
 
 else
   # Check if the current build is a pull request
