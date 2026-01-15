@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 2026 Google LLC
+# Copyright 2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,17 +14,16 @@
 # limitations under the License.
 
 
-# This script runs the QWEN model accuracy test and checks the results against a threshold.
+# This script runs the lm_eval model accuracy test and checks the results against a threshold.
 
 set -e # Exit immediately if a command exits with a non-zero status.
 
 if [ -z "$1" ]; then
-    echo "Usage: $0 <model_name>"
+    echo "Usage: $0 <model_name>. A model name is needed."
     exit 1
 fi
 MODEL_NAME=$1
 
-# Run the evaluation and capture the output
 model_args_json=$(printf '{"pretrained": "%s", "tensor_parallel_size": 8, "max_model_len": 2048, "max_num_batched_tokens": 2048, "max_gen_toks": 256, "enable_expert_parallel": 1}' "$MODEL_NAME")
 output=$(USE_MOE_EP_KERNEL=1 VLLM_DISABLE_SHARED_EXPERTS_STREAM=1 MODEL_IMPL_TYPE=vllm lm_eval \
     --model vllm \
@@ -41,25 +40,20 @@ echo "$output"
 flex_threshold=0.87
 strict_threshold=0.72
 
-# Extract scores
 flex_score=$(echo "$output" | grep "flexible-extract" | awk -F'|' '{print $8}' | xargs)
 strict_score=$(echo "$output" | grep "strict-match" | awk -F'|' '{print $8}' | xargs)
-
 echo "Extracted flexible-extract score: $flex_score"
 echo "Extracted strict-match score: $strict_score"
 
-# Check if scores are valid numbers
 if ! [[ "$flex_score" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
     echo "Error: flexible-extract score is not a valid number: $flex_score"
     exit 1
 fi
-
 if ! [[ "$strict_score" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
     echo "Error: strict-match score is not a valid number: $strict_score"
     exit 1
 fi
 
-# Compare scores with thresholds using awk for floating point comparison
 is_flex_ok=$(awk -v val="$flex_score" -v threshold="$flex_threshold" 'BEGIN {print (val >= threshold)}')
 is_strict_ok=$(awk -v val="$strict_score" -v threshold="$strict_threshold" 'BEGIN {print (val >= threshold)}')
 

@@ -118,11 +118,11 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         """
         assert isinstance(layer, FusedMoE)
 
-        # xw32 N.B (TODO: cleanup, remove the concrete number and leave the rest.):
-        # layer.w13_weight: [160, 5120, 6144]=[num_experts, 2*moe_intermediate_size, hidden_size]
-        # layer.w13_weight_scale: [160, 5120, 1]=[num_experts, 2*moe_intermediate_size, 1]
-        # layer.w2_weight: [160, 6144, 2560]=[num_experts, hidden_size, moe_intermediate_size]
-        # layer.w2_weight_scale: [160, 6144, 1]=[num_experts, hidden_size, 1]
+        # N.B
+        # layer.w13_weight: [num_experts, 2*moe_intermediate_size, hidden_size]
+        # layer.w13_weight_scale: [num_experts, 2*moe_intermediate_size, 1]
+        # layer.w2_weight: [num_experts, hidden_size, moe_intermediate_size]
+        # layer.w2_weight_scale: [num_experts, hidden_size, 1]
         w13_weight = t2j(layer.w13_weight, use_dlpack=False)
         w13_weight_scale = t2j(layer.w13_weight_scale, use_dlpack=False)
         w2_weight = t2j(layer.w2_weight, use_dlpack=False)
