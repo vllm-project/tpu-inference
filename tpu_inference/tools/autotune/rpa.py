@@ -13,8 +13,6 @@
 # limitations under the License.
 
 import collections
-import contextlib
-import csv
 import functools
 import itertools
 import json
@@ -299,35 +297,27 @@ def tune_rpa(
         ]
 
     # Setup CSV with context manager
-    csv_context = open(csv_file, 'w',
-                       newline='') if csv_file else contextlib.nullcontext()
+    fieldnames = [
+        "page_size",
+        "q_dtype",
+        "kv_dtype",
+        "num_q_heads",
+        "num_kv_heads",
+        "head_dim",
+        "max_model_len",
+        "num_kv_pages_per_block",
+        "num_q_per_block",
+        "time_ns",
+        "time_std_ns",
+        "compile_time_s",
+        "lower_time_s",
+        "is_best",
+    ]
 
-    with csv_context as csv_f:
-        csv_writer = None
-        if csv_f:
-            try:
-                fieldnames = [
-                    "page_size",
-                    "q_dtype",
-                    "kv_dtype",
-                    "num_q_heads",
-                    "num_kv_heads",
-                    "head_dim",
-                    "max_model_len",
-                    "num_kv_pages_per_block",
-                    "num_q_per_block",
-                    "time_ns",
-                    "time_std_ns",
-                    "compile_time_s",
-                    "lower_time_s",
-                    "is_best",
-                ]
-                csv_writer = csv.DictWriter(csv_f, fieldnames=fieldnames)
-                csv_writer.writeheader()
-                console.print(f"Streaming results to {csv_file}")
-            except IOError as e:
-                console.print(f"Error opening CSV file {csv_file}: {e}")
-                return
+    with utils.CsvResultLogger(csv_file, fieldnames) as csv_logger:
+        if not csv_logger and csv_file:
+            # Error was already logged by CsvResultLogger
+            return
 
         # Flatten Configs
         configs = make_rpa_configs(
@@ -382,7 +372,7 @@ def tune_rpa(
                     is_best = True
 
                 # CSV Logging
-                if csv_writer:
+                if csv_logger:
                     row = {
                         "page_size": rpa_key.page_size,
                         "q_dtype": rpa_key.q_dtype,
@@ -400,8 +390,8 @@ def tune_rpa(
                         "lower_time_s": lower_time,
                         "is_best": is_best,
                     }
-                    csv_writer.writerow(row)
-                    csv_f.flush()
+                    csv_logger.writer.writerow(row)
+                    csv_logger.flush()
 
                 progress.update(task, advance=1)
 
