@@ -1,131 +1,48 @@
 # Kernel Tuning Guide
 
 > [!CAUTION]
-> **Development Note**: These autotuning tools are currently in **alpha**. APIs and output formats may change in future releases.
+> **Alpha Status**: These tools are in active development.
 
-This guide explains how to use the built-in tuning tools in `tpu-inference` to optimize kernel performance for your specific model and TPU hardware.
-
-## What is Kernel Tuning?
-
-Kernel tuning finds optimal block sizes for custom Pallas kernels (RPA and Quantized Matmul). These settings are critical for performance and vary by TPU generation (v5e/v6e) and model architecture.
-
-## How do I know if I need to tune?
-
-The most reliable way to check if your model needs specific tuning is to **run the model and inspect the logs**.
-
-If the system cannot find a tuned configuration for a specific shape, it will emit a warning with the *exact* parameters you need to tune for:
-
-```text
-WARNING ... [tuned_block_sizes.py] Couldn't find tuned sizes for ... TunedKey(tpu_version=6, n_batch=16, n_out=2048, n_in=4096, ...)
-```
-
-In this example, the log tells you exactly what to run:
-* Batch Size: `16`
-* Out Features: `2048`
-* In Features: `4096`
-
-## Important: Sharding and Local Shapes
-The autotuners must tune for the **local (per-chip) shape**. You can do this automatically using `--tp-size` or manually.
-
-* **Automatic:** Pass `--tp-size N`. The tool will automatically divide `num_heads` (RPA) or features (Matmul) by N.
-* **Manual:** Calculate the local shape yourself and pass it directly.
-
-> [!TIP]
-> **Example:** 32 Heads with TP=8.
-> * **Option A (Auto):** `--num-q-heads 32 --tp-size 8` -> Tool tunes for 4 heads.
-> * **Option B (Manual):** `--num-q-heads 4`
+This guide explains how to optimize block sizes for Pallas kernels (RPA and Quantized Matmul) on TPU. Correct tuning is essential for maximizing serving throughput.
 
 ## Installation
-
-These tools are included with `tpu-inference`. Please follow the main [Installation Guide](../getting_started/installation.md) to set up your environment (supports `uv` and `conda`).
-
-Once installed, you can access the tools directly from your CLI.
-
-### Verification
-
-You can verify your installation using the built-in help commands:
+The autotuning tools require additional dependencies (`click`, `rich`). Install them using the `tuning` extra:
 
 ```bash
-tpu-tune --help
-tpu-tune rpa --help
-tpu-tune quantized-matmul --help
+# Standard pip
+pip install -e ".[tuning]"
+
+# Or using uv (recommended)
+uv pip install -e ".[tuning]"
 ```
 
-## Benchmarking Strategies
+## Quick Start
+If you see a generic warning in your logs like `WARNING: Couldn't find tuned sizes for key...`, it means the kernel is falling back to a default, unoptimized configuration. You can resolve this by running the autotuner for that specific shape.
 
-The tools support two benchmarking methods:
-
-### 1. Amortized (Default)
-**Flag:** `--benchmarking-method amortized`
-
-### Benchmarking Methods
-
-* **`amortized` (Default)**: Runs the kernel in a `lax.fori_loop` on the device (e.g., 100 iterations) and measures the average time. **Recommended for Tuning.** This metric best represents the "serving" throughput of the kernel (hiding dispatch overhead).
-* **`xprof`**: Captures a full XPlane trace of a single kernel execution. **Recommended for Debugging.** This gives precise device-level ops duration but often includes trace overhead, resulting in higher reported latencies (e.g., ~1ms vs 50µs).
-
-> [!NOTE]
-> **Safety Check**: The `tpu-tune apply` command includes a safety check. It will **skip** updating the registry if the new configuration is slower than the existing entry. This prevents experimental runs (like XProf) from overwriting optimized results.
-
-## Registry vs. Logs
-
-* **Registry (`tpu_inference/kernels/tuned_data/*.json`)**: Stores only the **best** configuration found for a given shape. This file is loaded at runtime.
-* **Logs (`tuning_runs/<run>/trials.csv`)**: Stores **every** trial run during tuning. Use this for debugging or analyzing the optimization landscape.
-
-### Registry Schema
-
-The registry uses a structured format designed for provenance and debugging:
-
-```json
-"key_params": {
-  "config": {
-    "block_size_1": 128,
-    "block_size_2": 32
-  },
-  "stats": {
-    "latency_avg_ns": 4500.0,
-    "latency_std_ns": 120.0,
-    "compile_time_s": 0.5
-  },
-  "metadata": {
-    "benchmarking_method": "xprof",
-    "samples_ns": [4600.0, 4400.0, ...]
-  }
-}
-```
-
-## Tuning Ragged Paged Attention (RPA)
-
-### Usage
+For example, to tune a quantized matmul layer:
 
 ```bash
-tpu-tune rpa-v3 [OPTIONS]
+# 1. Activate Environment
+source .venv/bin/activate
+
+# 2. Run Tuner
+tpu-tune quantized-matmul \
+    --batch-sizes 16 \
+    --out-in-features 2048/4096 \
+    --update-registry
 ```
 
-### Key Options
-### Full CLI Reference
+This command benchmarks various block sizes on your TPU and automatically saves the fastest configuration to the registry (`tpu_inference/kernels/tuned_data/`). The next time you run your model, it will pick up these optimized values.
 
-| Option | Default | Description |
-| :--- | :--- | :--- |
-| `--page-size` | `128` | Comma-separated list of page sizes to tune. |
-| `--head-dim` | `128` | Comma-separated list of head dimensions. |
-| `--num-q-heads` | `128` | Global query heads. |
-| `--num-kv-heads` | `1` | Global KV heads. |
-| `--max-model-len` | `1024` | sequence lengths to tune. |
-| `--tp-size` | `1` | Tensor Parallelism degree. Scales num_heads automatically. |
-| `--benchmarking-method` | `amortized` | Strategy: `amortized` (fast) or `xprof` (precise). |
-| `--num-repeats` | `5` | Number of outer loop repeats for stats variance. |
-| `--num-iterations` | `100` | Number of inner loop iterations provided to JAX. |
-| `--run-name` | `auto` | Name of the experiment run (folder name). |
-| `--output-dir` | `tuning_runs` | Base directory for experiments. |
-| `--no-save` | `False` | Disable saving results to disk. |
-| `--update-registry` | `False` | Algorithmically update the JSON registry with best results. |
-| `--dry-run` | `False` | Print configuration plan without running kernels. |
-| `--num-sequences` | `35` | Number of sequences for the synthetic benchmark data. |
-| `--kv-block-sizes` | `1,2...128` | Search space for KV pages per block. |
-| `--q-block-sizes` | `8,16...256` | Search space for Query tokens per block. |
+## Why Tuning Matters
+Pallas kernels split large matrix operations into smaller "blocks" or tiles to fit within the TPU's high-speed memory (VMEM). The optimal block size is a trade-off: small blocks incur high scheduling overhead, while large blocks can cause memory spilling or out-of-memory errors.
 
-### Example
-Tuning Llama-3-8B (Head Dim 128, GQA 32:8) on TPU v6e with **TP=1** (No Sharding):
+Because this balance depends heavily on the specific hardware generation (e.g., TPU v5e vs v6e) and the exact tensor shapes, we cannot use a single static configuration. Autotuning empirically finds the best fit for your specific deployment.
+
+## Usage Reference
+
+### Ragged Paged Attention (RPA)
+Use this tuner if you are changing sequence lengths, head dimensions, or the number of KV heads (e.g., Grouped Query Attention).
 
 ```bash
 tpu-tune rpa-v3 \
@@ -134,83 +51,87 @@ tpu-tune rpa-v3 \
     --num-q-heads 32 \
     --num-kv-heads 8 \
     --max-model-len 8192 \
-    --run-name rpa_llama3_v6e
-```
-
-### Experiment Tracking
-By default, every run is saved to `tuning_runs/<run_name>/`.
-* `results.json`: Best configurations ready to be applied.
-* `trials.csv`: Detailed log of every trial.
-* `run_metadata.json`: Reproducibility info (args, machine info).
-
-### Applying Results
-To update your registry with the best results from a run:
-
-```bash
-tpu-tune apply tuning_runs/tune_20240101_120000/results.json
-```
-
-## Tuning Quantized Matmul
-
-### Usage
-
-```bash
-tpu-tune quantized-matmul [OPTIONS]
-```
-
-### Key Options
-### Full CLI Reference
-
-| Option | Required | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `--batch-sizes` | Yes | - | Comma-separated batch sizes (e.g., `16,32`). |
-| `--out-in-features` | Yes | - | Comma-separated pairs (e.g., `2048/4096`). |
-| `--tp-size` | No | `1` | Tensor Parallelism degree. |
-| `--tp-split-dim` | No | `out` | Dimension sharded: `out` (Column) or `in` (Row). |
-| `--x-q-dtype` | No | `int8` | Input quantization dtype. |
-| `--w-q-dtype` | No | `int8` | Weight quantization dtype. |
-| `--benchmarking-method` | No | `amortized` | Strategy: `amortized` or `xprof`. |
-| `--num-repeats` | No | `5` | Outer loop repeats. |
-| `--num-iterations` | No | `10` | Inner loop iterations. |
-| `--run-name` | No | `auto` | Name of the experiment run (folder name). |
-| `--output-dir` | No | `tuning_runs` | Base directory for experiments. |
-| `--no-save` | No | `False` | Disable saving results to disk. |
-| `--update-registry` | No | `False` | Update JSON registry. |
-| `--dry-run` | No | `False` | Print plan only. |
-
-### Example
-Tuning a specific layer found in logs (e.g., Batch 16, 2048x4096):
-
-```bash
-tpu-tune quantized-matmul \
-    --batch-sizes 16 \
-    --out-in-features 2048/4096 \
-    --run-name matmul_test
-```
-
-## Applying Results
-
-The easiest way to apply your tuned config is to use the `--update-registry` flag. This will automatically update the JSON registry files tailored to your TPU generation (e.g., `tpu_v6e.json`).
-
-```bash
-tpu-tune rpa \
-    ... \
+    --run-name my_llama_tune \
     --update-registry
 ```
 
-### Manual Update
-If you prefer to review changes first, you can omit the flag. The tool will print a JSON snippet that you can check.
+**Common Parameters:**
 
-The registry files are located in `tpu_inference/kernels/tuned_data/`. The system automatically loads the correct file at runtime based on the detected TPU version.
+| Option | Default | Description |
+| :--- | :--- | :--- |
+| `--page-size` | `128` | Size of the KV cache page. |
+| `--head-dim` | `128` | Dimension of each attention head. |
+| `--num-q-heads` | `128` | **Global** number of Query heads. |
+| `--num-kv-heads` | `1` | **Global** number of Key/Value heads. |
+| `--max-model-len` | `1024` | Maximum sequence length to tune for. |
+| `--tp-size` | `1` | Tensor Parallelism degree. Scales global heads to local heads automatically. |
+| `--benchmarking-method` | `amortized` | `amortized` (recommended) or `xprof`. |
+| `--run-name` | `auto` | Name of the experiment folder in `tuning_runs/`. |
+| `--update-registry` | `False` | Algorithmically update the JSON registry with best results. |
 
-## Sharding Cheat Sheet
+**Note on Sharding:** If your model uses Tensor Parallelism (TP), you must specify the `--tp-size` flag (e.g., `--tp-size 4`). The tool will automatically calculate the local head count for each chip. Forgetting this flag will result in tuning for the wrong shape.
 
-| Model | Weight Sharding | Tuning Strategy | Example (TP=4) |
-| :--- | :--- | :--- | :--- |
-| **Llama 3 70B** | **Q / KV Heads** | `--num-q-heads 64 --tp-size 4` | Tunes for 16 heads |
-| **DeepSeek V3** | **Experts** | `--out-in-features ... --tp-size 4` | Tunes for `Experts/4` |
+### Quantized Matmul
+Use this tuner for linear layers, such as MLP blocks or input/output projections, particularly when changing batch sizes.
 
-> [!NOTE]
-> For **Quantized Matmul**, use `--tp-split-dim` (default `out`) to specify which dimension is sharded.
-> * **Column Parallel** split output features (`out`).
-> * **Row Parallel** split input features (`in`).
+```bash
+tpu-tune quantized-matmul \
+    --batch-sizes 16,32,64 \
+    --out-in-features 4096/12288 \
+    --tp-size 4 \
+    --tp-split-dim out \
+    --update-registry
+```
+
+**Common Parameters:**
+
+| Option | Default | Description |
+| :--- | :--- | :--- |
+| `--batch-sizes` | *(Required)* | Comma-separated list of batch sizes (e.g., `16,32`). |
+| `--out-in-features` | *(Required)* | Dimensions as `OUT/IN` pairs (e.g., `4096/12288`). |
+| `--tp-size` | `1` | Tensor Parallelism degree. |
+| `--tp-split-dim` | `out` | Dimension to split: `out` (Column Parallel) or `in` (Row Parallel). |
+| `--x-q-dtype` | `int8` | Quantization type for input activation. |
+| `--w-q-dtype` | `int8` | Quantization type for weights. |
+| `--benchmarking-method` | `amortized` | `amortized` (recommended) or `xprof`. |
+| `--update-registry` | `False` | Update JSON registry with best results. |
+
+For the `--out-in-features` argument, format pairs as `OUT/IN`. When using Tensor Parallelism, specify which dimension is split using `--tp-split-dim` (use `out` for Column Parallel and `in` for Row Parallel).
+
+## Benchmarking Methods
+The tools provide two methods for measuring performance.
+
+We generally recommend the **Amortized** default. This method runs the kernel in a loop on the device (usually 100+ iterations) and measures the average time. It effectively mimics a high-throughput serving scenario by hiding the Python host overhead.
+
+The **XProf** method is available for deeper debugging. It captures a full XPlane trace to measure the exact device-side execution time of a single kernel call. While precise, this method often includes tracing overhead and is slower to run, making it less suitable for broad optimization sweeps.
+
+**Experiment Safety:** The tooling includes a regression check. If you experiment with different settings or benchmarking methods, `tpu-tune` will not overwrite an existing registry entry unless the new result is strictly faster.
+
+## Experiment Tracking
+All tuning runs work as experiments. Output artifacts are saved to `tuning_runs/<run_name>/`:
+
+* **results.json**: The best configurations found.
+* **trials.csv**: A complete log of every block size tested, useful for analyzing performance trends.
+* **run_metadata.json**: Reproducibility information.
+
+If you run an experiment without the `--update-registry` flag, you can apply the results later:
+
+```bash
+tpu-tune apply tuning_runs/my_run/results.json
+```
+
+## Contributing Tuned Values
+If you identify optimized configurations for common models (e.g., Llama 3, DeepSeek) that are significantly faster than the defaults or missing from the registry, please contribute them back!
+
+1. Run the tuner with `--update-registry`.
+2. Verify the changes in `tpu_inference/kernels/tuned_data/*.json`.
+3. Commit the updated JSON files.
+4. Submit a Pull Request to the `tpu-inference` repository.
+
+Sharing these results helps the entire community serve models faster on TPU.
+
+## Troubleshooting
+
+* **Invalid Block Sizes:** If the tuner suggests unexpected block sizes, verify your `--tp-size` setting. Tuning for the global shape instead of the local sharded shape is a common error.
+* **Skipped Updates:** If the logs say updates were skipped, it means the new results were slower than the existing registry entries. You can inspect `trials.csv` to see the comparison.
+* **Inf Latency:** A latency of `inf` typically indicates the configuration failed to run, often due to an Out of Memory (OOM) error or an invalid block size combination.
