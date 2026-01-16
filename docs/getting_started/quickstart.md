@@ -16,19 +16,8 @@ Google Cloud TPUs (Tensor Processing Units) accelerate machine learning workload
 
 For detailed steps on installing `vllm-tpu` with `pip` or running it as a Docker image, please see the [**Installation Guide**](installation.md).
 
-!!! important
-    Until jax=0.8.3 is released, v7x will have different build requirements from previous TPU generations (v6e and prior). As a result, please use the following until consolidation is complete:
-
-**For v6e and prior**
-
 ```shell
 pip install vllm-tpu --version=0.13.2.post6
-```
-
-**For v7x**
-
-```shell
-pip install vllm-tpu
 ```
 
 ## Run the vLLM Server

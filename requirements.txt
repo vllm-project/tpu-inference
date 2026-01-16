@@ -5,11 +5,8 @@ pytest-mock
 absl-py
 numpy
 google-cloud-storage
---pre
--i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
--f https://storage.googleapis.com/jax-releases/libtpu_releases.html
-jax[tpu]==0.8.3.dev20251220
-jaxlib==0.8.3.dev20251220
+jax[tpu]==0.8.3
+jaxlib==0.8.3
 jaxtyping
 libtpu==0.0.32
 flax==0.11.1
