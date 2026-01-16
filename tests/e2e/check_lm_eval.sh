@@ -69,7 +69,7 @@ fi
 
 # TODO(xw32): enable async scheduling before merging.
 model_args_json=$(printf '{"pretrained": "%s", "tensor_parallel_size": %d, "max_model_len": %d, "max_num_batched_tokens": %d, "max_gen_toks": %d, "enable_expert_parallel": %d, "async_scheduling": 0}' "$MODEL_NAME" "$TENSOR_PARALLEL_SIZE" "$MAX_MODEL_LEN" "$MAX_NUM_BATCHED_TOKENS" "$MAX_GEN_TOKS" "$ENABLE_EXPERT_PARALLEL")
-output=$(USE_MOE_EP_KERNEL=${USE_MOE_EP_KERNEL} MODEL_IMPL_TYPE=vllm lm_eval \
+output=$(VLLM_XLA_CHECK_RECOMPILATION=0 USE_MOE_EP_KERNEL=${USE_MOE_EP_KERNEL} MODEL_IMPL_TYPE=vllm lm_eval \
     --model vllm \
     --model_args "${model_args_json}" \
     --tasks gsm8k_cot \
