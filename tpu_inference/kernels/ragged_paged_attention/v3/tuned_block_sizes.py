@@ -15,6 +15,7 @@
 
 import json
 import os
+import pathlib
 
 import jax.numpy as jnp
 
@@ -37,11 +38,14 @@ def _get_tuning_file_path(device_name: str) -> str:
         norm_name = "tpu_v5e"
 
     # Assume data is in tpu_inference/kernels/tuned_data/rpa/
-    # This file is in tpu_inference/kernels/ragged_paged_attention/v3/
-    # So we go up: ../../../tuned_data/rpa/
-    base_dir = os.path.dirname(__file__)
-    data_dir = os.path.join(base_dir, "../../tuned_data/rpa")
-    return os.path.join(data_dir, f"{norm_name}.json")
+    # Use pathlib for robust resolution relative to this file
+    # file: tpu_inference/kernels/ragged_paged_attention/v3/tuned_block_sizes.py
+    # target: tpu_inference/kernels/tuned_data/rpa/{norm_name}.json
+    base_path = pathlib.Path(__file__).parent.resolve()
+    # Go up from v3 -> rag_paged_att -> kernels -> tuned_data -> rpa
+    data_dir = base_path.parent.parent / "tuned_data" / "rpa"
+
+    return str(data_dir / f"{norm_name}.json")
 
 
 def _load_tuning_data(device_name: str) -> dict:
