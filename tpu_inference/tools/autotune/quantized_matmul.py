@@ -24,7 +24,7 @@ import jax.numpy as jnp
 
 from tpu_inference import utils as tpu_utils
 from tpu_inference.kernels.quantized_matmul import tuned_block_sizes, util
-from tpu_inference.tools.autotune import utils
+from tpu_inference.tools.autotune import benchmarks, utils
 
 console = utils.console
 
@@ -35,6 +35,7 @@ class BenchmarkResult(NamedTuple):
     std: float
     compile_time: float
     lower_time: float
+    metadata: dict
 
 
 def factors_of_n(target: int, n: int) -> List[int]:
@@ -77,10 +78,21 @@ def autotune_kernel(
     tuned_value,
     dtype=jnp.bfloat16,
     num_iter=10,
+    num_repeats=5,
+    benchmarking_method: benchmarks.BenchmarkMethod = benchmarks.
+    BenchmarkMethod.AMORTIZED,
     dry_run=False,
-):
+) -> benchmarks.BenchmarkResult:
     if dry_run:
-        return 1.0, 0.0, 0.0, 0.0  # Mock latency (mean, std, compile_time, lower_time)
+        return benchmarks.BenchmarkResult(mean_time_ns=1.0,
+                                          std_time_ns=0.0,
+                                          min_time_ns=1.0,
+                                          max_time_ns=1.0,
+                                          samples_ns=[1.0],
+                                          metadata={
+                                              "compile_time_s": 0.0,
+                                              "lower_time_s": 0.0
+                                          })
 
     from tpu_inference.kernels.quantized_matmul import kernel
 
@@ -119,35 +131,31 @@ def autotune_kernel(
         compile_time = t3 - t2
     except Exception:
         # console.print(f"Failed to compile {kernel_name}: {e}")
-        return float("inf"), 0.0, 0.0, 0.0
+        return benchmarks.BenchmarkResult(float("inf"), 0.0, 0.0, 0.0, [], {})
 
     try:
-        # Compile amortized function (Use source kernel, not compiled binary)
+        # Prepare function for benchmarking
         import functools
         pallas_fn = functools.partial(kernel.quantized_matmul_kernel,
                                       x_q_dtype=x_q_dtype_obj,
                                       tuned_value=tuned_value)
-        amortized_fn = utils.amortized_wrapper(pallas_fn, n_iter=num_iter)
-        amortized_jit = jax.jit(amortized_fn)
 
-        # Warmup the amortized function
-        outputs = amortized_jit(x, w_q, w_scale)
-        utils.block_until_ready(outputs)
+        result = benchmarks.benchmark_kernel(
+            benchmark_fn=pallas_fn,
+            args=(x, w_q, w_scale),
+            num_iterations=num_iter,
+            num_repeats=num_repeats,
+            method=benchmarking_method,
+        )
 
-        # Measure
-        start = time.perf_counter_ns()
-        outputs = amortized_jit(x, w_q, w_scale)
-        utils.block_until_ready(outputs)
-        end = time.perf_counter_ns()
+        result.metadata["compile_time_s"] = compile_time
+        result.metadata["lower_time_s"] = lower_time
 
-        total_time_ns = end - start
-        avg_time_ns = total_time_ns / num_iter
-
-        return avg_time_ns, 0.0, compile_time, lower_time
+        return result
 
     except Exception:
         # console.print(f"Execution failed for {kernel_name}: {e}")
-        return float("inf"), 0.0, 0.0, 0.0
+        return benchmarks.BenchmarkResult(float("inf"), 0.0, 0.0, 0.0, [], {})
 
 
 def tune_matmul(
@@ -157,11 +165,22 @@ def tune_matmul(
     w_q_dtype: str = "int8",
     dry_run: bool = False,
     num_iterations: int = 10,
+    num_repeats: int = 5,
+    benchmarking_method: str = "amortized",
     csv_file: Optional[str] = None,
     update_registry: bool = False,
     tp_size: int = 1,
     tp_split_dim: str = "out",
 ):
+
+    # Resolve benchmarking method
+    try:
+        method = benchmarks.BenchmarkMethod(benchmarking_method)
+    except ValueError:
+        raise ValueError(
+            f"Invalid benchmarking method: {benchmarking_method}. "
+            f"Choose from {[m.value for m in benchmarks.BenchmarkMethod]}")
+
     # Apply sharding (TP) if requested
     if tp_size > 1:
         console.print(
@@ -180,7 +199,8 @@ def tune_matmul(
         out_in_features = new_features
 
     configs = make_configs(batch_sizes, out_in_features, x_q_dtype, w_q_dtype)
-    console.print(f"Generated {len(configs)} configurations to tune.")
+    console.print(f"Generated {len(configs)} configurations to tune "
+                  f"using '{method.value}' method.")
 
     # Setup CSV with context manager
     fieldnames = [
@@ -197,6 +217,7 @@ def tune_matmul(
         "compile_time_s",
         "lower_time_s",
         "is_best",
+        "benchmarking_method",
     ]
 
     with utils.CsvResultLogger(csv_file, fieldnames) as csv_logger:
@@ -217,43 +238,68 @@ def tune_matmul(
                     f"[green]Tuning {tuned_value.batch_block_size}x{tuned_value.out_block_size}x{tuned_value.in_block_size}...",
                 )
 
-                latency_ns, std_ns, compile_time_s, lower_time_s = autotune_kernel(
+                result = autotune_kernel(
                     tuned_key,
                     tuned_value,
                     dry_run=dry_run,
                     num_iter=num_iterations,
+                    num_repeats=num_repeats,
+                    benchmarking_method=method,
                 )
 
-                if latency_ns == float("inf"):
+                if result.mean_time_ns == float("inf"):
                     progress.update(task, advance=1)
                     continue
 
                 # Check if best so far
                 is_best = False
                 current_best = results_best.get(tuned_key)
-                if current_best is None or latency_ns < current_best:
-                    results_best[tuned_key] = latency_ns
+                if current_best is None or result.mean_time_ns < current_best:
+                    results_best[tuned_key] = result.mean_time_ns
                     is_best = True
 
                 results[tuned_key].append(
-                    BenchmarkResult(tuned_value, latency_ns, std_ns,
-                                    compile_time_s, lower_time_s))
+                    BenchmarkResult(tuned_value,
+                                    result.mean_time_ns,
+                                    result.std_time_ns,
+                                    result.metadata.get("compile_time_s", 0.0),
+                                    result.metadata.get("lower_time_s", 0.0),
+                                    metadata={
+                                        "benchmarking_method": method.value,
+                                        "num_repeats": num_repeats,
+                                        "samples_ns": result.samples_ns
+                                    }))
 
                 if csv_logger:
                     row = {
-                        "batch_size": tuned_key.n_batch,
-                        "out_feature": tuned_key.n_out,
-                        "in_feature": tuned_key.n_in,
-                        "x_q_dtype": tuned_key.x_q_dtype,
-                        "w_q_dtype": tuned_key.w_q_dtype,
-                        "batch_block_size": tuned_value.batch_block_size,
-                        "out_block_size": tuned_value.out_block_size,
-                        "in_block_size": tuned_value.in_block_size,
-                        "time_ns": latency_ns,
-                        "time_std_ns": std_ns,
-                        "compile_time_s": compile_time_s,
-                        "lower_time_s": lower_time_s,
-                        "is_best": is_best,
+                        "batch_size":
+                        tuned_key.n_batch,
+                        "out_feature":
+                        tuned_key.n_out,
+                        "in_feature":
+                        tuned_key.n_in,
+                        "x_q_dtype":
+                        tuned_key.x_q_dtype,
+                        "w_q_dtype":
+                        tuned_key.w_q_dtype,
+                        "batch_block_size":
+                        tuned_value.batch_block_size,
+                        "out_block_size":
+                        tuned_value.out_block_size,
+                        "in_block_size":
+                        tuned_value.in_block_size,
+                        "time_ns":
+                        result.mean_time_ns,
+                        "time_std_ns":
+                        result.std_time_ns,
+                        "compile_time_s":
+                        result.metadata.get("compile_time_s", 0.0),
+                        "lower_time_s":
+                        result.metadata.get("lower_time_s", 0.0),
+                        "is_best":
+                        is_best,
+                        "benchmarking_method":
+                        method.value,
                     }
                     csv_logger.writer.writerow(row)
                     csv_logger.flush()
@@ -285,6 +331,7 @@ def tune_matmul(
                 "compile_time_s": best.compile_time,
                 "lower_time_s": best.lower_time,
             },
+            "metadata": best.metadata
         }
 
     # Print JSON output
