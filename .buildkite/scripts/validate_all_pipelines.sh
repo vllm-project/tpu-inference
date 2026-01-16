@@ -17,7 +17,14 @@
 TOTAL=0
 FAILED=0
 
-echo "=== 🔍 Starting Bulk Pipeline Validation ==="
+TARGET_DIR="/workspace/tpu_inference/.buildkite"
+
+echo "=== 🔍 Scanning directory: $TARGET_DIR ==="
+
+if [ ! -d "$TARGET_DIR" ]; then
+    echo "❌ Error: Directory $TARGET_DIR does not exist."
+    exit 1
+fi
 
 while IFS= read -r file; do
     echo "Validating: $file"
@@ -31,7 +38,7 @@ while IFS= read -r file; do
     fi
     echo "-------------------------------------------"
 
-done < <(find . -type f \( -name "*.yml" -o -name "*.yaml" \) -not -path "*/.*/*" -not -path "*/node_modules/*")
+done < <(find "$TARGET_DIR" -type f \( -name "*.yml" -o -name "*.yaml" \) -not -path "*/.*/*")
 
 echo "=== 📊 Validation Summary ==="
 echo "Total processed: $TOTAL"
