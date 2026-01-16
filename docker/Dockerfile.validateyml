@@ -1,0 +1,19 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    curl \
+    gnupg \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /etc/apt/keyrings && \
+    curl -fsSL "https://packages.buildkite.com/buildkite/cli-deb/gpgkey" | \
+    gpg --dearmor -o /etc/apt/keyrings/buildkite_cli-deb-archive-keyring.gpg && \
+    echo "deb [signed-by=/etc/apt/keyrings/buildkite_cli-deb-archive-keyring.gpg] https://packages.buildkite.com/buildkite/cli-deb/any/ any main" | \
+    tee /etc/apt/sources.list.d/buildkite-buildkite-cli-deb.list && \
+    apt-get update && apt-get install -y bk && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
