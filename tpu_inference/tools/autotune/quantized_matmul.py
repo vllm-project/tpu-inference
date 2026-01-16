@@ -29,7 +29,7 @@ from tpu_inference.tools.autotune import utils
 console = utils.console
 
 
-class TestResult(NamedTuple):
+class BenchmarkResult(NamedTuple):
     tuned_value: tuned_block_sizes.TunedValue
     latency: float
     std: float
@@ -236,8 +236,8 @@ def tune_matmul(
                     is_best = True
 
                 results[tuned_key].append(
-                    TestResult(tuned_value, latency_ns, std_ns, compile_time_s,
-                               lower_time_s))
+                    BenchmarkResult(tuned_value, latency_ns, std_ns,
+                                    compile_time_s, lower_time_s))
 
                 if csv_logger:
                     row = {
