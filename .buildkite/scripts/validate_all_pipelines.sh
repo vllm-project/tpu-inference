@@ -37,8 +37,7 @@ while IFS= read -r file; do
         ((FAILED++))
     fi
     echo "-------------------------------------------"
-
-done < <(find "$TARGET_DIR" -type f \( -name "*.yml" -o -name "*.yaml" \) -not -path "*/.*/*")
+done < <(find "$TARGET_DIR" -type f \( -name "*.yml" -o -name "*.yaml" \))
 
 echo "=== 📊 Validation Summary ==="
 echo "Total processed: $TOTAL"
