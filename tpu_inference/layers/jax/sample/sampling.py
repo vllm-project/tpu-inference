@@ -21,7 +21,7 @@ from jax.sharding import PartitionSpec as P
 from vllm.v1.outputs import LogprobsTensors
 
 from tpu_inference import envs
-from tpu_inference.kernels.sampling import topk_topp_and_sample as pallas_sample
+from tpu_inference.kernels.sampling import topk_topp_and_sample_shmap as pallas_sample
 from tpu_inference.layers.common.binary_search import topk_mask, topp_mask
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling_metadata import \
@@ -71,7 +71,7 @@ def sample(
         return greedy_sampled
     if tpu_sampling_metadata.use_pallas_kernel:
         return pallas_sample(
-            rng, logits, tpu_sampling_metadata,
+            rng, mesh, logits, tpu_sampling_metadata,
             max_k=envs.PALLAS_SAMPLING_TOPK_THRESHOLD,
             sampling_eps=SAMPLING_EPS,
             replace_val=REPLACE_VAL,

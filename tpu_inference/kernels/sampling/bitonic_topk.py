@@ -10,6 +10,7 @@ from functools import lru_cache
 import jax
 import jax.numpy as jnp
 from jax.experimental import pallas as pl
+from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference.kernels.sampling.utils import (
   NUM_LANES,
@@ -415,3 +416,27 @@ def bitonic_sort_substage(
     ]
   assert all(not any(v is None for v in out_tiles) for out_tiles in outs_tiles)
   return outs_tiles
+
+def bitonic_topk_refs(input_refs, outputs_refs):
+  """Top-k refs kernel using bitonic_topk_arrays."""
+  k = outputs_refs[0].shape[1]
+  outputs = bitonic_topk_arrays(
+    [ref[...] for ref in input_refs], k=k, axis=1
+  )
+  for ref, output in zip(outputs_refs, outputs, strict=True):
+    ref[...] = output
+
+@functools.partial(jax.jit, static_argnames=("k", "interpret"))
+def bitonic_topk(operands, k: int,      interpret=False):
+  operands = jax.tree.leaves(operands)
+  out_shape = (operands[0].shape[0], k)
+  return pl.pallas_call(
+    bitonic_topk_refs,
+    out_shape=([
+      jax.ShapeDtypeStruct(out_shape, x.dtype) for x in operands],),
+    compiler_params=pltpu.CompilerParams(
+      vmem_limit_bytes=int(0.9 * 2**27)
+    ),
+    interpret=interpret,
+  )(operands)[0]
+
