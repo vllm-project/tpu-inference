@@ -26,8 +26,10 @@ def runner():
 
 
 def test_rpa_command(runner):
-    with patch("tpu_inference.tools.autotune.rpa.tune_rpa") as mock_tune_rpa:
-        result = runner.invoke(cli.rpa, [
+    with patch(
+            "tpu_inference.tools.autotune.ragged_paged_attention_v3.tune_rpa"
+    ) as mock_tune_rpa:
+        result = runner.invoke(cli.rpa_v3, [
             "--page-size", "128", "--q-dtype", "bfloat16", "--kv-dtype",
             "bfloat16", "--num-iterations", "1", "--dry-run"
         ])
@@ -53,33 +55,3 @@ def test_quantized_matmul_command(runner):
         assert call_kwargs["batch_sizes"] == [128]
         assert call_kwargs["out_in_features"] == [(1024, 1024)]
         assert call_kwargs["dry_run"] is True
-
-
-def test_legacy_rpa_cli():
-    # Shim to verify legacy entry point calls the main cli logic
-    with patch("sys.argv", ["tpu-tune-rpa", "--dry-run", "--page-size", "128"]), \
-         patch("tpu_inference.tools.autotune.rpa.tune_rpa") as mock_tune_rpa, \
-         patch("tpu_inference.tools.autotune.utils.setup_logging"):
-
-        try:
-            cli.legacy_rpa_cli()
-        except SystemExit as e:
-            assert e.code == 0
-
-        mock_tune_rpa.assert_called()
-        assert mock_tune_rpa.call_args.kwargs["page_sizes"] == [128]
-
-
-def test_legacy_matmul_cli():
-    # Shim to verify legacy entry point calls the main cli logic
-    with patch("sys.argv", ["tpu-tune-quantized-matmul", "--dry-run", "--batch-sizes", "64", "--out-in-features", "128/128"]), \
-         patch("tpu_inference.tools.autotune.quantized_matmul.tune_matmul") as mock_tune_matmul, \
-         patch("tpu_inference.tools.autotune.utils.setup_logging"):
-
-        try:
-            cli.legacy_matmul_cli()
-        except SystemExit as e:
-            assert e.code == 0
-
-        mock_tune_matmul.assert_called()
-        assert mock_tune_matmul.call_args.kwargs["batch_sizes"] == [64]

@@ -14,8 +14,8 @@
 
 from unittest.mock import patch
 
-from tpu_inference.tools.autotune.rpa import (RpaBlock, RpaKey,
-                                              make_rpa_configs, tune_rpa)
+from tpu_inference.tools.autotune.ragged_paged_attention_v3 import (
+    RpaBlock, RpaKey, make_rpa_configs, tune_rpa)
 
 
 def test_make_rpa_configs():
@@ -63,7 +63,8 @@ def test_make_rpa_configs_filters_invalid_blocks():
     assert configs[0][1].num_kv_pages_per_block == 32
 
 
-@patch("tpu_inference.tools.autotune.rpa.benchmark_kernel")
+@patch(
+    "tpu_inference.tools.autotune.ragged_paged_attention_v3.benchmark_kernel")
 @patch("tpu_inference.tools.autotune.utils.update_json_registry")
 @patch("tpu_inference.tools.autotune.utils.get_registry_file_name")
 @patch("tpu_inference.utils.get_tpu_name_slug")
@@ -107,7 +108,8 @@ def test_tune_rpa_flow(mock_slug, mock_registry_name, mock_update,
         "max_model_len-128-sw-None"]["stats"]["latency_avg_ns"] == 5.0
 
 
-@patch("tpu_inference.tools.autotune.rpa.benchmark_kernel")
+@patch(
+    "tpu_inference.tools.autotune.ragged_paged_attention_v3.benchmark_kernel")
 def test_tune_rpa_tp_scaling(mock_benchmark):
     # Set return value to prevent unpacking error
     mock_benchmark.return_value = (10.0, 0.0, 0.0, 0.0)

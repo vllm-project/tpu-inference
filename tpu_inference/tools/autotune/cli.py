@@ -35,7 +35,7 @@ def parse_arg(arg, type_fn=str):
     return [type_fn(arg)]
 
 
-@main.command(name='rpa')
+@main.command(name='rpa-v3')
 @click.option('--page-size',
               default='128',
               help="Comma separated list of page sizes",
@@ -93,11 +93,12 @@ def parse_arg(arg, type_fn=str):
               default=1,
               help="Tensor Parallelism degree (divides num_heads)",
               show_default=True)
-def rpa(page_size, q_dtype, kv_dtype, num_q_heads, num_kv_heads, head_dim,
-        max_model_len, num_iterations, dry_run, num_sequences, csv_file,
-        kv_block_sizes, q_block_sizes, update_registry, tp_size):
+def rpa_v3(page_size, q_dtype, kv_dtype, num_q_heads, num_kv_heads, head_dim,
+           max_model_len, num_iterations, dry_run, num_sequences, csv_file,
+           kv_block_sizes, q_block_sizes, update_registry, tp_size):
     """Tune Ragged Paged Attention (RPA) kernels."""
-    from tpu_inference.tools.autotune import rpa as rpa_lib
+    from tpu_inference.tools.autotune import \
+        ragged_paged_attention_v3 as rpa_lib
 
     # Parse args
     page_sizes_parsed = parse_arg(page_size, int)
@@ -197,18 +198,6 @@ def quantized_matmul(batch_sizes, out_in_features, x_q_dtype, w_q_dtype,
                            update_registry=update_registry,
                            tp_size=tp_size,
                            tp_split_dim=tp_split_dim)
-
-
-def legacy_rpa_cli():
-    """Shim for legacy tpu-tune-rpa command."""
-    utils.setup_logging()
-    rpa()
-
-
-def legacy_matmul_cli():
-    """Shim for legacy tpu-tune-quantized-matmul command."""
-    utils.setup_logging()
-    quantized_matmul()
 
 
 if __name__ == "__main__":
