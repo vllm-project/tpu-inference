@@ -22,6 +22,8 @@ from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
 from vllm.attention.layer import Attention
+from vllm.model_executor.layers.fused_moe.fused_moe_method_base import \
+    FusedMoEMethodBase
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEConfig, FusedMoERouter, UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.linear import (LinearBase,
@@ -206,7 +208,7 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         mesh: Mesh,
         ep_axis_name: str = "model",
     ):
-        super().__init__(moe)
+        FusedMoEMethodBase.__init__(self, moe)
         self.mesh = mesh
         self.moe_backend = select_moe_backend(self.moe)
 
