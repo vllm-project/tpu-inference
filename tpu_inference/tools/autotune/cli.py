@@ -68,6 +68,15 @@ def parse_arg(arg, type_fn=str):
               default=100,
               help="Number of iterations for benchmarking",
               show_default=True)
+@click.option('--num-repeats',
+              default=5,
+              help="Number of outer loop repeats for stats",
+              show_default=True)
+@click.option('--benchmarking-method',
+              type=click.Choice(['amortized', 'xprof']),
+              default='amortized',
+              help="Method to use for benchmarking",
+              show_default=True)
 @click.option('--dry-run',
               is_flag=True,
               help="Run without actual kernel calls")
@@ -94,8 +103,9 @@ def parse_arg(arg, type_fn=str):
               help="Tensor Parallelism degree (divides num_heads)",
               show_default=True)
 def rpa_v3(page_size, q_dtype, kv_dtype, num_q_heads, num_kv_heads, head_dim,
-           max_model_len, num_iterations, dry_run, num_sequences, csv_file,
-           kv_block_sizes, q_block_sizes, update_registry, tp_size):
+           max_model_len, num_iterations, num_repeats, benchmarking_method,
+           dry_run, num_sequences, csv_file, kv_block_sizes, q_block_sizes,
+           update_registry, tp_size):
     """Tune Ragged Paged Attention (RPA) kernels."""
     from tpu_inference.tools.autotune import \
         ragged_paged_attention_v3 as rpa_lib
@@ -128,6 +138,8 @@ def rpa_v3(page_size, q_dtype, kv_dtype, num_q_heads, num_kv_heads, head_dim,
                      kv_block_sizes=kv_block_sizes_parsed,
                      q_block_sizes=q_block_sizes_parsed,
                      num_iterations=num_iterations,
+                     num_repeats=num_repeats,
+                     benchmarking_method=benchmarking_method,
                      dry_run=dry_run,
                      num_sequences=num_sequences,
                      csv_file=csv_file,
@@ -152,6 +164,15 @@ def rpa_v3(page_size, q_dtype, kv_dtype, num_q_heads, num_kv_heads, head_dim,
 @click.option('--num-iterations',
               default=10,
               help="Number of iterations for benchmarking")
+@click.option('--num-repeats',
+              default=5,
+              help="Number of outer loop repeats for stats",
+              show_default=True)
+@click.option('--benchmarking-method',
+              type=click.Choice(['amortized', 'xprof']),
+              default='amortized',
+              help="Method to use for benchmarking",
+              show_default=True)
 @click.option('--csv-file',
               default=None,
               help="Optional path to output results to a CSV file")
@@ -168,8 +189,8 @@ def rpa_v3(page_size, q_dtype, kv_dtype, num_q_heads, num_kv_heads, head_dim,
               help="Dimension to split for TP (out or in)",
               show_default=True)
 def quantized_matmul(batch_sizes, out_in_features, x_q_dtype, w_q_dtype,
-                     dry_run, num_iterations, csv_file, update_registry,
-                     tp_size, tp_split_dim):
+                     dry_run, num_iterations, num_repeats, benchmarking_method,
+                     csv_file, update_registry, tp_size, tp_split_dim):
     """Tune Quantized Matmul kernels."""
     from tpu_inference.tools.autotune import quantized_matmul as matmul_lib
 
@@ -194,6 +215,8 @@ def quantized_matmul(batch_sizes, out_in_features, x_q_dtype, w_q_dtype,
                            w_q_dtype=w_q_dtype,
                            dry_run=dry_run,
                            num_iterations=num_iterations,
+                           num_repeats=num_repeats,
+                           benchmarking_method=benchmarking_method,
                            csv_file=csv_file,
                            update_registry=update_registry,
                            tp_size=tp_size,

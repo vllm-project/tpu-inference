@@ -29,7 +29,7 @@ from tpu_inference.kernels.ragged_paged_attention.v3 import kernel, kernel_hd64
 from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import \
     get_lookup_keys
 from tpu_inference.kernels.ragged_paged_attention.v3.util import cdiv
-from tpu_inference.tools.autotune import utils
+from tpu_inference.tools.autotune import benchmarks, utils
 
 console = utils.console
 
@@ -118,11 +118,14 @@ def benchmark_kernel(
     rpa_block: RpaBlock,
     total_num_pages=1000,
     num_iterations=100,
+    num_repeats=5,
+    benchmarking_method: benchmarks.BenchmarkMethod = benchmarks.
+    BenchmarkMethod.AMORTIZED,
     vmem_limit_bytes=1024 * 1024 * 1024,
     smem_limit_bytes=0.9 * 1024 * 1024,
     dry_run=False,
     num_sequences=35,
-):
+) -> benchmarks.BenchmarkResult:
     """Benchmarks a single configuration (Key + Block)."""
 
     # Unpack Key
@@ -140,7 +143,15 @@ def benchmark_kernel(
     num_kv_pages_per_block, num_q_per_block = rpa_block
 
     if dry_run:
-        return 1.0, 0.0, 0.0, 0.0  # Mock latency
+        return benchmarks.BenchmarkResult(mean_time_ns=1.0,
+                                          std_time_ns=0.0,
+                                          min_time_ns=1.0,
+                                          max_time_ns=1.0,
+                                          samples_ns=[1.0],
+                                          metadata={
+                                              "compile_time_s": 0.0,
+                                              "lower_time_s": 0.0
+                                          })
 
     # Handle string dtypes
     q_dtype = jnp.dtype(q_dtype_name)
@@ -209,21 +220,22 @@ def benchmark_kernel(
         kv_dtype,
     )
     if vmem > vmem_limit_bytes:
-        return float("inf"), 0.0, 0.0, 0.0
+        return benchmarks.BenchmarkResult(float("inf"), 0.0, 0.0, 0.0, [], {})
 
     smem = mod.get_smem_estimate_bytes(max_num_seqs, pages_per_seq)
     if smem > smem_limit_bytes:
-        return float("inf"), 0.0, 0.0, 0.0
+        return benchmarks.BenchmarkResult(float("inf"), 0.0, 0.0, 0.0, [], {})
 
     # Validate
     try:
         mod.dynamic_validate_inputs(*args, **kwargs)
-    except Exception:
-        return float("inf"), 0.0, 0.0, 0.0
+    except Exception as e:
+        console.print(f"[red]Error in validation: {e}[/red]")
+        return benchmarks.BenchmarkResult(float("inf"), 0.0, 0.0, 0.0, [], {})
 
     # Execution
     try:
-        # Explicit Compilation
+        # Explicit Compilation for Stats
         t0 = time.perf_counter()
         lowered = rpa_fn.lower(*args, **kwargs)
         t1 = time.perf_counter()
@@ -234,32 +246,27 @@ def benchmark_kernel(
         t3 = time.perf_counter()
         compile_time = t3 - t2
 
-        # Compile amortized function (Use source function rpa_fn)
-        # We ignore return values/donation inside the loop for benchmarking stability
-        # The latency of N repetitions of the same op is what we measure.
-        fn_to_wrap = functools.partial(rpa_fn, **kwargs)
-        amortized_fn = utils.amortized_wrapper(fn_to_wrap,
-                                               n_iter=num_iterations)
-        amortized_jit = jax.jit(amortized_fn)
+        # Prepare function for benchmarking
+        # NOTE: benchmark_kernel manages JIT and amortization depending on method
+        fn_to_benchmark = functools.partial(rpa_fn, **kwargs)
 
-        # Warmup (Only pass args, kwargs are frozen)
-        outputs = amortized_jit(*args)
-        utils.block_until_ready(outputs)
+        result = benchmarks.benchmark_kernel(
+            benchmark_fn=fn_to_benchmark,
+            args=tuple(args),
+            num_iterations=num_iterations,
+            num_repeats=num_repeats,
+            method=benchmarking_method,
+        )
 
-        # Measure (One call = num_iterations runs)
-        start = time.perf_counter_ns()
-        outputs = amortized_jit(*args)
-        utils.block_until_ready(outputs)
-        end = time.perf_counter_ns()
+        # Append compile stats to result metadata
+        result.metadata["compile_time_s"] = compile_time
+        result.metadata["lower_time_s"] = lower_time
 
-        total_time_ns = end - start
-        avg_time_ns = total_time_ns / num_iterations
-        std_time_ns = 0.0
+        return result
 
-        return avg_time_ns, std_time_ns, compile_time, lower_time
-
-    except Exception:
-        return float("inf"), 0.0, 0.0, 0.0
+    except Exception as e:
+        console.print(f"[red]Error in execution: {e}[/red]")
+        return benchmarks.BenchmarkResult(float("inf"), 0.0, 0.0, 0.0, [], {})
 
 
 def tune_rpa(
@@ -273,6 +280,8 @@ def tune_rpa(
     kv_block_sizes: List[int],
     q_block_sizes: List[int],
     num_iterations: int = 100,
+    num_repeats: int = 5,
+    benchmarking_method: str = "amortized",
     dry_run: bool = False,
     num_sequences: int = 35,
     csv_file: Optional[str] = None,
@@ -280,6 +289,15 @@ def tune_rpa(
     tp_size: int = 1,
 ):
     """Main entry point for tuning RPA kernels."""
+
+    # Resolve benchmarking method
+    try:
+        method = benchmarks.BenchmarkMethod(benchmarking_method)
+    except ValueError:
+        raise ValueError(
+            f"Invalid benchmarking method: {benchmarking_method}. "
+            f"Choose from {[m.value for m in benchmarks.BenchmarkMethod]}")
+
     if tp_size > 1:
         console.print(
             f"[bold cyan]Applying TP Scaling (TP={tp_size})[/bold cyan]")
@@ -312,6 +330,7 @@ def tune_rpa(
         "compile_time_s",
         "lower_time_s",
         "is_best",
+        "benchmarking_method",
     ]
 
     with utils.CsvResultLogger(csv_file, fieldnames) as csv_logger:
@@ -333,15 +352,15 @@ def tune_rpa(
         )
 
         console.print(
-            f"Generated {len(configs)} configuration-block combinations to tune."
-        )
+            f"Generated {len(configs)} configuration-block combinations to tune "
+            f"using '{method.value}' method.")
 
         # Results Aggregation
         aggregated_results = collections.defaultdict(
             lambda: collections.defaultdict(lambda: collections.defaultdict(
                 dict)))
 
-        best_results = {}  # Map RpaKey -> (min_latency, best_block)
+        best_results = {}  # Map RpaKey -> (BenchmarkResult, is_best)
 
         with utils.setup_progress() as progress:
             task = progress.add_task("[green]Tuning...", total=len(configs))
@@ -350,56 +369,71 @@ def tune_rpa(
                 desc_str = f"Tuning {rpa_block.num_kv_pages_per_block}x{rpa_block.num_q_per_block} for Len={rpa_key.max_model_len}"
                 progress.update(task, description=f"[green]{desc_str}")
 
-                t_mean, t_std, compile_time, lower_time = benchmark_kernel(
+                result = benchmark_kernel(
                     rpa_key,
                     rpa_block,
                     num_iterations=num_iterations,
+                    num_repeats=num_repeats,
+                    benchmarking_method=method,
                     dry_run=dry_run,
                     num_sequences=num_sequences,
                 )
 
-                if t_mean == float("inf"):
+                if result.mean_time_ns == float("inf"):
                     progress.update(task, advance=1)
                     continue
 
                 # Update Best
                 is_best = False
-                current = best_results.get(rpa_key)
-                if current is None or t_mean < current[0]:
-                    # Store (latency, block, std, compile_time)
-                    best_results[rpa_key] = (t_mean, rpa_block, t_std,
-                                             compile_time, lower_time)
+                current_best = best_results.get(rpa_key)
+                # Compare mean latency
+                if current_best is None or result.mean_time_ns < current_best[
+                        0].mean_time_ns:
+                    best_results[rpa_key] = (result, rpa_block)
                     is_best = True
 
                 # CSV Logging
                 if csv_logger:
                     row = {
-                        "page_size": rpa_key.page_size,
-                        "q_dtype": rpa_key.q_dtype,
-                        "kv_dtype": rpa_key.kv_dtype,
-                        "num_q_heads": rpa_key.num_q_heads,
-                        "num_kv_heads": rpa_key.num_kv_heads,
-                        "head_dim": rpa_key.head_dim,
-                        "max_model_len": rpa_key.max_model_len,
+                        "page_size":
+                        rpa_key.page_size,
+                        "q_dtype":
+                        rpa_key.q_dtype,
+                        "kv_dtype":
+                        rpa_key.kv_dtype,
+                        "num_q_heads":
+                        rpa_key.num_q_heads,
+                        "num_kv_heads":
+                        rpa_key.num_kv_heads,
+                        "head_dim":
+                        rpa_key.head_dim,
+                        "max_model_len":
+                        rpa_key.max_model_len,
                         "num_kv_pages_per_block":
                         rpa_block.num_kv_pages_per_block,
-                        "num_q_per_block": rpa_block.num_q_per_block,
-                        "time_ns": t_mean,
-                        "time_std_ns": t_std,
-                        "compile_time_s": compile_time,
-                        "lower_time_s": lower_time,
-                        "is_best": is_best,
+                        "num_q_per_block":
+                        rpa_block.num_q_per_block,
+                        "time_ns":
+                        result.mean_time_ns,
+                        "time_std_ns":
+                        result.std_time_ns,
+                        "compile_time_s":
+                        result.metadata.get("compile_time_s", 0.0),
+                        "lower_time_s":
+                        result.metadata.get("lower_time_s", 0.0),
+                        "is_best":
+                        is_best,
+                        "benchmarking_method":
+                        method.value,
                     }
                     csv_logger.writer.writerow(row)
+                    # We might want to persist samples in another file or extended CSV if debugging
                     csv_logger.flush()
 
                 progress.update(task, advance=1)
 
     # Populate Aggregated Results for Log/Printing
-    # Populate Aggregated Results for Log/Printing
-
-    for rpa_key, (t_mean, best_block, t_std, compile_time,
-                  lower_time) in best_results.items():
+    for rpa_key, (result, best_block) in best_results.items():
         (m_len, q_dt, kv_dt, n_q, n_kv, h_dim, ps) = rpa_key
 
         d_name, ps_key, dtype_key, config_key, len_key = get_lookup_keys(
@@ -412,21 +446,22 @@ def tune_rpa(
             m_len,
             None,  # sliding_window
         )
-        # device_name = d_name
 
-        # Format block as tuple (kv, q)
-        # Format as Rich Object Schema
         aggregated_results[ps_key][dtype_key][config_key][len_key] = {
             "config": {
                 "num_kv_pages_per_block": best_block.num_kv_pages_per_block,
                 "num_q_per_block": best_block.num_q_per_block,
             },
             "stats": {
-                "latency_avg_ns": t_mean,
-                "latency_std_ns": t_std,
-                "compile_time_s": compile_time,
-                "lower_time_s": lower_time,
-                # "throughput_tok_s": ... # Add later if needed
+                "latency_avg_ns": result.mean_time_ns,
+                "latency_std_ns": result.std_time_ns,
+                "compile_time_s": result.metadata.get("compile_time_s", 0.0),
+                "lower_time_s": result.metadata.get("lower_time_s", 0.0),
+            },
+            "metadata": {
+                "benchmarking_method": method.value,
+                "num_repeats": num_repeats,
+                "samples_ns": result.samples_ns
             }
         }
 
