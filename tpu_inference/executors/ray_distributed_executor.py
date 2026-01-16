@@ -31,9 +31,6 @@ from vllm.v1.executor.ray_utils import RayWorkerWrapper, _wait_until_pg_ready
 
 from tpu_inference.logger import init_logger
 
-# Note: available_resources_per_node was removed in favor of ray.nodes()
-# which provides more reliable TPU resource reporting
-
 import asyncio
 from collections import defaultdict
 
@@ -110,7 +107,6 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         """
         from vllm.platforms import current_platform
 
-        # Refers to https://github.com/vllm-project/vllm/blob/v0.14.0rc1/vllm/v1/executor/ray_utils.py#L371-L374
         # Check if placement group is already provided (e.g., by ray.serve.llm)
         # This allows ray.serve.llm to pre-create a placement group with the correct
         # TPU topology (e.g., 4 bundles × 4 TPUs for v6e 4x4) and have vLLM reuse it.
@@ -139,7 +135,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         ray_nodes = ray.nodes()
         logger.info(f"RayDistributedExecutor | ray_nodes={ray_nodes}")
 
-        # Filter nodes that have the required device (TPU/GPU)
+        # Filter nodes that have the required TPU
         # This is necessary when the head node doesn't have TPU resources
         # (e.g., KubeRay deployments where head runs on a non-TPU node)
         nodes_with_device = [
