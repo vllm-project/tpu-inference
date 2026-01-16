@@ -26,6 +26,18 @@ from tpu_inference.layers.common.utils import \
 from tpu_inference.utils import get_mesh_shape_product
 
 
+def scoring_fn(scoring: str, x: jax.Array) -> jax.Array:
+    x = x.astype(jnp.float32)
+    match scoring:
+        case "softmax":
+            return jax.nn.softmax(x, axis=-1)
+        case "sigmoid":
+            return jax.nn.sigmoid(x)
+        case _:
+            raise NotImplementedError(
+                f"FusedMoE does not support {scoring} scoring")
+
+
 def activation_fn(activation: str, x1: jax.Array, x2: jax.Array) -> jax.Array:
     match activation:
         case "silu":
@@ -351,13 +363,8 @@ def expert_sharded_gmm(
 
 @functools.partial(
     jax.jit,
-    static_argnames=(
-        "topk",
-        "renormalize",
-        "mesh",
-        "use_ep",
-        "activation",
-    ),
+    static_argnames=("topk", "renormalize", "mesh", "use_ep", "activation",
+                     "scoring_func"),
 )
 def fused_moe_func(
     hidden_states: jax.Array,
@@ -373,6 +380,7 @@ def fused_moe_func(
     mesh: Mesh,
     use_ep: bool,
     activation: str,
+    scoring_func: str,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -404,7 +412,7 @@ def fused_moe_func(
 
     assert gating_output.shape == (num_tokens, global_num_experts)
 
-    topk_weights = jax.nn.softmax(gating_output.astype(jnp.float32), axis=-1)
+    topk_weights = topk_weights = scoring_fn(scoring_func, gating_output)
     # All-gather topk weights for attention dp
     topk_weights = jax.lax.with_sharding_constraint(
         topk_weights, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
