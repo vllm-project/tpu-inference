@@ -90,7 +90,18 @@ TUNED_BLOCK_SIZES = {
                     'max_model_len-8192-sw-None': (16, 32),
                     'max_model_len-8192-sw-128': (1, 64),
                 },
-            }
+            },
+            'q_bfloat16_kv_float8_e4m3fn': {
+                'q_head-32_kv_head-4_head-64': {
+                    'max_model_len-16384-sw-128': (8, 16),
+                },
+                'q_head-16_kv_head-2_head-64': {
+                    'max_model_len-16384-sw-128': (8, 16),
+                },
+                'q_head-8_kv_head-2_head-64': {
+                    'max_model_len-16384-sw-128': (8, 16),
+                },
+            },
         },
         128: {
             'q_bfloat16_kv_bfloat16': {
@@ -158,7 +169,57 @@ TUNED_BLOCK_SIZES = {
                     'max_model_len-8192-sw-None': (32, 32),
                     'max_model_len-8192-sw-128': (2, 32),
                 },
-            }
+            },
+            'q_bfloat16_kv_float8_e4m3fn': {
+                'q_head-32_kv_head-4_head-64': {
+                    'max_model_len-16384-sw-128': (16, 16),
+                },
+                'q_head-16_kv_head-2_head-64': {
+                    'max_model_len-16384-sw-128': (16, 16),
+                },
+                'q_head-8_kv_head-2_head-64': {
+                    'max_model_len-16384-sw-128': (16, 16),
+                },
+            },
+        },
+        32: {
+            'q_bfloat16_kv_float8_e4m3fn': {
+                'q_head-32_kv_head-4_head-64': {
+                    'max_model_len-16384-sw-128': (64, 16),
+                },
+                'q_head-16_kv_head-2_head-64': {
+                    'max_model_len-16384-sw-128': (64, 16),
+                },
+                'q_head-8_kv_head-2_head-64': {
+                    'max_model_len-16384-sw-128': (64, 16),
+                },
+            },
+        },
+        64: {
+            'q_bfloat16_kv_float8_e4m3fn': {
+                'q_head-32_kv_head-4_head-64': {
+                    'max_model_len-16384-sw-128': (32, 16),
+                },
+                'q_head-16_kv_head-2_head-64': {
+                    'max_model_len-16384-sw-128': (32, 16),
+                },
+                'q_head-8_kv_head-2_head-64': {
+                    'max_model_len-16384-sw-128': (32, 16),
+                },
+            },
+        },
+        512: {
+            'q_bfloat16_kv_float8_e4m3fn': {
+                'q_head-32_kv_head-4_head-64': {
+                    'max_model_len-16384-sw-128': (4, 16),
+                },
+                'q_head-16_kv_head-2_head-64': {
+                    'max_model_len-16384-sw-128': (4, 16),
+                },
+                'q_head-8_kv_head-2_head-64': {
+                    'max_model_len-16384-sw-128': (4, 16),
+                },
+            },
         },
     },
     'TPU v6e': {
