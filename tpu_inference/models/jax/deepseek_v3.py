@@ -27,7 +27,6 @@ from jax.sharding import PartitionSpec as P
 from torchax.ops.mappings import j2t_dtype
 from vllm.config import VllmConfig
 
-from tpu_inference import envs
 from tpu_inference import utils
 from tpu_inference.layers.common.quantization import u8_unpack_e2m1
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -37,7 +36,7 @@ from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
 from tpu_inference.layers.jax.moe.deepseek_v3_moe import DeepSeekV3Router
 from tpu_inference.layers.jax.moe.moe import MoE
-from tpu_inference.layers.jax.moe.utils import select_moe_backend, MoEBackend
+from tpu_inference.layers.jax.moe.utils import MoEBackend, select_moe_backend
 from tpu_inference.layers.jax.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
 from tpu_inference.logger import init_logger
@@ -53,6 +52,7 @@ DTYPE_VIEW_MAP = {
     jnp.dtype(jnp.bfloat16): torch.uint16,
     jnp.dtype(jnp.float32): torch.uint32,
 }
+
 
 @dataclass
 class DeepSeekV3WeightLoader(BaseWeightLoader):
@@ -98,7 +98,7 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
             # moe
             r"mlp\.gate\.weight": (1, 0),
             r"mlp\.experts\.\d+\.gate_proj": (0, 2, 1),
-            r"mlp\.experts\.\d+\.down_proj": (0, 2, 1),
+            # r"mlp\.experts\.\d+\.down_proj": (0, 2, 1),
             r"mlp\.experts\.\d+\.up_proj": (0, 2, 1),
             r"mlp\.shared_experts\.down_proj": (1, 0),
             r"mlp\.shared_experts\.gate_proj": (1, 0),
@@ -152,9 +152,11 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
             "model.layers.*.mlp.experts.*.gate_proj.weight":
             "layers.*.custom_module.kernel_gating_EDF",
             "model.layers.*.mlp.experts.*.down_proj.weight":
-            "layers.*.custom_module.kernel_down_proj_EFD",
+            "layers.*.custom_module.kernel_down_proj_EDF",
             "model.layers.*.mlp.experts.*.up_proj.weight":
             "layers.*.custom_module.kernel_up_proj_EDF",
+            "model.layers.*.mlp.experts.*.gating_upproj_EFD.weight":
+            "layers.*.custom_module.kernel_gating_upproj_EFD",
             "model.layers.*.mlp.experts.*.gate_upproj_fused.weight":
             "layers.*.custom_module.kernel_gating_upproj_E2DF",
             # MOE(shared experts)
@@ -366,7 +368,6 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                 raise ValueError(
                     f"Scale rank {scale_shape} does not match weight rank {weight_shape}"
                 )
-
         if model_weight.value.shape != weight_np.shape:
             raise ValueError(
                 f"Loaded shape for {name}: {weight_np.shape} "
@@ -539,48 +540,90 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                             stacked_scales = self._process_moe_weights(
                                 loaded_name, scale, mlp_experts_up_proj_scales)
                     if stacked_weights is not None:
-                        stacked_tensors[layer_num + proj_type] = (stacked_weights, stacked_scales)
-                        if all(f"{layer_num}{p}" in stacked_tensors 
+                        stacked_tensors[layer_num +
+                                        proj_type] = (stacked_weights,
+                                                      stacked_scales)
+                        if all(f"{layer_num}{p}" in stacked_tensors
                                for p in ["gate_proj", "up_proj", "down_proj"]):
-                            
-                            gate_w, gate_s = stacked_tensors.pop(layer_num + "gate_proj")
-                            up_w, up_s = stacked_tensors.pop(layer_num + "up_proj")
-                            down_w, down_s = stacked_tensors.pop(layer_num + "down_proj")
-                            
+
+                            gate_w, gate_s = stacked_tensors.pop(layer_num +
+                                                                 "gate_proj")
+                            up_w, up_s = stacked_tensors.pop(layer_num +
+                                                             "up_proj")
+                            down_w, down_s = stacked_tensors.pop(layer_num +
+                                                                 "down_proj")
+
                             is_moe_kernel = model_for_loading.moe_backend in [
                                 MoEBackend.FUSED_MOE, MoEBackend.VLLM_MOE
                             ]
-                            gate_name = loaded_name.replace(proj_type, "gate_proj")
-                            up_name   = loaded_name.replace(proj_type, "up_proj")
-                            down_name = loaded_name.replace(proj_type, "down_proj")
+                            gate_name = loaded_name.replace(
+                                proj_type, "gate_proj")
+                            up_name = loaded_name.replace(proj_type, "up_proj")
+                            down_name = loaded_name.replace(
+                                proj_type, "down_proj")
                             if is_moe_kernel:
-                                # (E, D, F) -> (E, 2, D, F)
-                                fused_w = torch.stack([gate_w, up_w], dim=1)
-                                fused_s = torch.stack([gate_s, up_s], dim=1) if gate_s is not None and up_s is not None else None
-                                
-                                fused_name = loaded_name.replace(proj_type, "gate_upproj_fused")
+                                if model_for_loading.moe_backend == MoEBackend.VLLM_MOE:
+                                    # (E, D, F) -> (E, 2 * F, D)
+
+                                    fused_w = torch.cat([gate_w, up_w], dim=1)
+                                    fused_s = torch.cat(
+                                        [gate_s, up_s], dim=1
+                                    ) if gate_s is not None and up_s is not None else None
+                                    fused_name = loaded_name.replace(
+                                        proj_type, "gating_upproj_EFD")
+
+                                else:
+                                    # (E, D, F) -> (E, 2, D, F)
+                                    fused_w = torch.stack([gate_w, up_w],
+                                                          dim=1)
+                                    fused_s = torch.stack(
+                                        [gate_s, up_s], dim=1
+                                    ) if gate_s is not None and up_s is not None else None
+
+                                    fused_name = loaded_name.replace(
+                                        proj_type, "gate_upproj_fused")
                                 weight_bytes, weight_shards = self._load_individual_weight(
-                                    fused_name, fused_w, model_params, model_for_loading.mesh, scale=fused_s)
-                                
+                                    fused_name,
+                                    fused_w,
+                                    model_params,
+                                    model_for_loading.mesh,
+                                    scale=fused_s)
+
                                 weight_bytes_down, weight_shards_down = self._load_individual_weight(
-                                    loaded_name, down_w, model_params, model_for_loading.mesh, scale=down_s)
-                                
+                                    down_name,
+                                    down_w,
+                                    model_params,
+                                    model_for_loading.mesh,
+                                    scale=down_s)
+
                                 # Update cumulative memory
                                 weight_bytes += weight_bytes_down
                                 weight_shards += weight_shards_down
-                                
+
                             else:
 
                                 weight_bytes, weight_shards = self._load_individual_weight(
-                                    gate_name, gate_w, model_params, model_for_loading.mesh, scale=gate_s)
-                                
+                                    gate_name,
+                                    gate_w,
+                                    model_params,
+                                    model_for_loading.mesh,
+                                    scale=gate_s)
+
                                 weight_bytes_up, weight_shards_up = self._load_individual_weight(
-                                    up_name, up_w, model_params, model_for_loading.mesh, scale=up_s)
+                                    up_name,
+                                    up_w,
+                                    model_params,
+                                    model_for_loading.mesh,
+                                    scale=up_s)
                                 weight_bytes += weight_bytes_up
                                 weight_shards += weight_shards_up
-                                
+
                                 weight_bytes_down, weight_shards_down = self._load_individual_weight(
-                                    down_name, down_w, model_params, model_for_loading.mesh, scale=down_s)
+                                    down_name,
+                                    down_w,
+                                    model_params,
+                                    model_for_loading.mesh,
+                                    scale=down_s)
                                 weight_bytes += weight_bytes_down
                                 weight_shards += weight_shards_down
                         else:
@@ -681,6 +724,7 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
         del quantized_scales
         # TODO: validate that all of the model_params were accounted for as well.
         nnx.update(model_for_loading, model_params)
+
 
 @dataclass
 class DeepSeekV3(nnx.Module):
@@ -943,32 +987,6 @@ class DeepSeekV3(nnx.Module):
 
         logger.debug("\n### LM Head ###")
         nnx.display(self.lm_head)
-
-    def _process_moe_kernel_flag(self):
-        self.use_fused_moe_kernel = envs.USE_MOE_EP_KERNEL
-        self.use_vllm_moe_kernel = envs.USE_VLLM_MOE_KERNEL
-        self.sparse_matmul = envs.USE_SPARSE_MATMUL
-        self.use_megablox = envs.USE_MEGABLOCKS
-        self.use_ragged_dot = envs.USE_RAGGED_DOT
-
-        assert sum([self.use_fused_moe_kernel, self.use_vllm_moe_kernel]) <= 1, "You can enable at most one MoE kernels." 
-
-        match (self.use_fused_moe_kernel, self.use_vllm_moe_kernel, self.sparse_matmul):
-            case (True, _, _):
-                logger.info("Fused MoE kernel is enabled")
-            case (_, True, _):
-                logger.info("VLLM MoE kernel is enabled")
-            case (_, _, True):
-                logger.info("Sparse Matmul is enabled")
-                match (self.use_megablox, self.use_ragged_dot):
-                    case (True, _):
-                        logger.info("Mega Blocks is enabled for GMM in Sparse Matmul")
-                    case (_, True):
-                        logger.info("Ragged Dot is enabled for GMM in Sparse Matmul")
-                    case _:
-                        logger.error("Neither Ragged Dot nor Mega Blocks is enabled for GMM if using Sparse Matmul")   
-            case _:
-                logger.info("Dense Matmul is enabled")
 
     # For compatibility with flax.
     def apply(self, variables, *args, **kwargs):

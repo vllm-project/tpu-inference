@@ -125,7 +125,7 @@ def tensor_sharded_gmm_merged_column_parallel(
 ) -> list[jax.Array]:
 
     def _gmm(lhs, rhs, rhs_scale, rhs_bias, group_sizes):
-        m, g, k, n = lhs.shape[0], *rhs.shape
+        m, g, n, k = lhs.shape[0], *rhs.shape
         tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
         return gmm(
             lhs,
@@ -135,6 +135,7 @@ def tensor_sharded_gmm_merged_column_parallel(
             rhs_bias=rhs_bias,
             preferred_element_type=lhs.dtype,
             tiling=(tm, tk, tn),
+            transpose_rhs=True,
             group_offset=jnp.array(0),
         )
 
@@ -147,8 +148,9 @@ def tensor_sharded_gmm_merged_column_parallel(
         _gmm,
         mesh=mesh,
         in_specs=(P(ShardingAxisName.MLP_DATA,
-                    None), P(None, None, ShardingAxisName.MLP_TENSOR),
-                  rhs_scale_spec, rhs_bias_spec, P(ShardingAxisName.MLP_DATA)),
+                    None), P(None, ShardingAxisName.MLP_TENSOR,
+                             None), rhs_scale_spec, rhs_bias_spec,
+                  P(ShardingAxisName.MLP_DATA)),
         out_specs=(P(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR)),
         check_vma=False,
     )(lhs, rhs, rhs_scale, rhs_bias, group_sizes)
@@ -170,7 +172,7 @@ def tensor_sharded_gmm_row_parallel(
 ) -> jax.Array:
 
     def _gmm_all_reduce(lhs, rhs, rhs_scale, rhs_bias, group_sizes):
-        m, g, k, n = lhs.shape[0], *rhs.shape
+        m, g, n, k = lhs.shape[0], *rhs.shape
         tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
         if rhs_bias is not None:
             shard_id = jax.lax.axis_index(ShardingAxisName.MLP_TENSOR).sum()
@@ -183,6 +185,7 @@ def tensor_sharded_gmm_row_parallel(
             rhs_bias=rhs_bias,
             preferred_element_type=lhs.dtype,
             tiling=(tm, tk, tn),
+            transpose_rhs=True,
             group_offset=jnp.array(0),
         )
         return jax.lax.psum(out, axis_name=ShardingAxisName.MLP_TENSOR)
@@ -195,9 +198,8 @@ def tensor_sharded_gmm_row_parallel(
         _gmm_all_reduce,
         mesh=mesh,
         in_specs=(P(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR),
-                  P(None, ShardingAxisName.MLP_TENSOR,
-                    None), rhs_scale_spec, rhs_bias_spec,
-                  P(ShardingAxisName.MLP_DATA)),
+                  P(None, None, ShardingAxisName.MLP_TENSOR), rhs_scale_spec,
+                  rhs_bias_spec, P(ShardingAxisName.MLP_DATA)),
         out_specs=(P(ShardingAxisName.MLP_DATA)),
         check_vma=False,
     )(lhs, rhs, rhs_scale, rhs_bias, group_sizes)
@@ -211,17 +213,17 @@ def expert_sharded_gmm(
     rhs_scale: jax.Array | None,
     rhs_bias: jax.Array | None,
     group_sizes: jax.Array,
-    is_last_gmm: bool,
+    is_last_expert: bool,
     mesh: Mesh,
 ) -> jax.Array:
-    ep_size = get_mesh_shape_product(mesh, ShardingAxisName.EXPERT)
+    ep_size = get_mesh_shape_product(mesh, ShardingAxisName.MLP_TENSOR)
     ep_p_spec = P(ShardingAxisName.EXPERT)
     num_experts = rhs.shape[0]
     num_experts_per_shard = num_experts // ep_size
     group_offset = jnp.arange(0, num_experts, num_experts_per_shard)
 
     def _gmm(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset):
-        m, g, k, n = lhs.shape[0], *rhs.shape
+        m, g, n, k = lhs.shape[0], *rhs.shape
         tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
 
         gmm_res = gmm(
@@ -232,6 +234,7 @@ def expert_sharded_gmm(
             group_sizes=group_sizes,
             preferred_element_type=lhs.dtype,
             tiling=(tm, tk, tn),
+            transpose_rhs=True,
             group_offset=group_offset[0],
         )
         return gmm_res
@@ -254,7 +257,7 @@ def expert_sharded_gmm(
     #       0, 0, 0, 0     0, 0, 0, 0     0, 0, 0, 0     D, D, D, D
     #        shard-0        shard-1        shard-2        shard-3
     # Each shards has 3 (row A), 2 (row B), 5 (row C) and 4 (row D).
-    lhs_spec = ep_p_spec if is_last_gmm else P()
+    lhs_spec = ep_p_spec if is_last_expert else P()
     rhs_spec = ep_p_spec
     rhs_scale_spec = None if rhs_scale is None else ep_p_spec
     rhs_bias_spec = None if rhs_bias is None else ep_p_spec
@@ -273,7 +276,7 @@ def expert_sharded_gmm(
         check_vma=False,
     )(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset)
 
-    if not is_last_gmm:
+    if not is_last_expert:
         return gmm_res
 
     # For i-th shard, it is responsible groups (AKA experts) from
@@ -290,16 +293,6 @@ def expert_sharded_gmm(
     input_offsets = jnp.concatenate((jnp.array([0]), send_sizes.cumsum()[:-1]))
     output_offsets = input_offsets
     recv_sizes = send_sizes
-
-    replicated_sharding = NamedSharding(mesh, P())
-    send_sizes = jax.lax.with_sharding_constraint(send_sizes,
-                                                  replicated_sharding)
-    input_offsets = jax.lax.with_sharding_constraint(input_offsets,
-                                                     replicated_sharding)
-    output_offsets = jax.lax.with_sharding_constraint(output_offsets,
-                                                      replicated_sharding)
-    recv_sizes = jax.lax.with_sharding_constraint(recv_sizes,
-                                                  replicated_sharding)
 
     def _ragged_all_to_all(operand, input_offsets, send_sizes, output_offsets,
                            recv_sizes):
@@ -405,7 +398,7 @@ def fused_moe_func(
         Output of moe operation [num_tokens, hidden_size]
     """
     num_tokens, hidden_size = hidden_states.shape
-    global_num_experts, padded_hidden_size, _ = w1.shape
+    global_num_experts, _, padded_hidden_size = w1.shape
     dtype = hidden_states.dtype
 
     assert (num_tokens * topk) % 16 == 0, (
@@ -455,7 +448,7 @@ def fused_moe_func(
             w1_scale,
             w1_bias,
             group_sizes,
-            is_last_gmm=False,
+            is_last_expert=False,
             mesh=mesh,
         )
         x1, x2 = jnp.split(x, 2, -1)
@@ -468,7 +461,7 @@ def fused_moe_func(
             w2_scale,
             w2_bias,
             group_sizes,
-            is_last_gmm=True,
+            is_last_expert=True,
             mesh=mesh,
         )
     else:
