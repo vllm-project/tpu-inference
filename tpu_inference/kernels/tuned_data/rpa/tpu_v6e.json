@@ -2243,16 +2243,16 @@
         "max_model_len-128-sw-None": {
           "config": {
             "num_kv_pages_per_block": 1,
-            "num_q_per_block": 16
+            "num_q_per_block": 32
           },
           "metadata": {
             "schema_version": "1.0"
           },
           "stats": {
-            "compile_time_s": 0.37352737598121166,
-            "latency_avg_ns": 1007740.0,
+            "compile_time_s": 0.5358073641546071,
+            "latency_avg_ns": 504365.0,
             "latency_std_ns": 0.0,
-            "lower_time_s": 0.5822098930366337
+            "lower_time_s": 0.4830775149166584
           }
         },
         "max_model_len-2048-sw-None": {
