@@ -944,32 +944,6 @@ class DeepSeekV3(nnx.Module):
         logger.debug("\n### LM Head ###")
         nnx.display(self.lm_head)
 
-    def _process_moe_kernel_flag(self):
-        self.use_fused_moe_kernel = envs.USE_MOE_EP_KERNEL
-        self.use_vllm_moe_kernel = envs.USE_VLLM_MOE_KERNEL
-        self.sparse_matmul = envs.USE_SPARSE_MATMUL
-        self.use_megablox = envs.USE_MEGABLOCKS
-        self.use_ragged_dot = envs.USE_RAGGED_DOT
-
-        assert sum([self.use_fused_moe_kernel, self.use_vllm_moe_kernel]) <= 1, "You can enable at most one MoE kernels." 
-
-        match (self.use_fused_moe_kernel, self.use_vllm_moe_kernel, self.sparse_matmul):
-            case (True, _, _):
-                logger.info("Fused MoE kernel is enabled")
-            case (_, True, _):
-                logger.info("VLLM MoE kernel is enabled")
-            case (_, _, True):
-                logger.info("Sparse Matmul is enabled")
-                match (self.use_megablox, self.use_ragged_dot):
-                    case (True, _):
-                        logger.info("Mega Blocks is enabled for GMM in Sparse Matmul")
-                    case (_, True):
-                        logger.info("Ragged Dot is enabled for GMM in Sparse Matmul")
-                    case _:
-                        logger.error("Neither Ragged Dot nor Mega Blocks is enabled for GMM if using Sparse Matmul")   
-            case _:
-                logger.info("Dense Matmul is enabled")
-
     # For compatibility with flax.
     def apply(self, variables, *args, **kwargs):
         return self.__call__(*args, **kwargs)
