@@ -21,7 +21,7 @@ steps:
     agents:
       queue: tpu_v6e_queue
     commands:
-      - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_multimodal.py
+      - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_multi_modal_inference.py
   - label: "Record correctness test result for Multimodal Inputs"
     key: "record_Multimodal_Inputs_CorrectnessTest"
     depends_on: "Multimodal_Inputs_CorrectnessTest"
