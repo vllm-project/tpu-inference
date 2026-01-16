@@ -15,7 +15,6 @@
 import collections
 import functools
 import itertools
-import json
 import os
 import time
 from typing import List, NamedTuple, Optional, Tuple
@@ -284,9 +283,11 @@ def tune_rpa(
     benchmarking_method: str = "amortized",
     dry_run: bool = False,
     num_sequences: int = 35,
-    csv_file: Optional[str] = None,
     update_registry: bool = False,
     tp_size: int = 1,
+    run_name: Optional[str] = None,
+    output_dir: str = "tuning_runs",
+    no_save: bool = False,
 ):
     """Main entry point for tuning RPA kernels."""
 
@@ -333,10 +334,47 @@ def tune_rpa(
         "benchmarking_method",
     ]
 
-    with utils.CsvResultLogger(csv_file, fieldnames) as csv_logger:
-        if not csv_logger and csv_file:
-            # Error was already logged by CsvResultLogger
-            return
+    # Setup Experiment Run
+    run_ctx = utils.RunContext(run_name, output_dir, no_save)
+
+    # Save Metadata
+    run_ctx.save_metadata({
+        "kernel": "rpa_v3",
+        "cli_args": {
+            "page_sizes": page_sizes,
+            "q_dtypes": q_dtypes,
+            "kv_dtypes": kv_dtypes,
+            "num_q_heads_list": num_q_heads_list,
+            "num_kv_heads_list": num_kv_heads_list,
+            "head_dims": head_dims,
+            "max_model_lens": max_model_lens,
+            "num_iterations": num_iterations,
+            "num_repeats": num_repeats,
+            "benchmarking_method": benchmarking_method,
+            "tp_size": tp_size
+        }
+    })
+
+    # Setup CSV with context manager
+    fieldnames = [
+        "page_size",
+        "q_dtype",
+        "kv_dtype",
+        "num_q_heads",
+        "num_kv_heads",
+        "head_dim",
+        "max_model_len",
+        "num_kv_pages_per_block",
+        "num_q_per_block",
+        "time_ns",
+        "time_std_ns",
+        "compile_time_s",
+        "lower_time_s",
+        "is_best",
+        "benchmarking_method",
+    ]
+
+    with run_ctx.open_csv(fieldnames) as csv_writer:
 
         # Flatten Configs
         configs = make_rpa_configs(
@@ -393,7 +431,7 @@ def tune_rpa(
                     is_best = True
 
                 # CSV Logging
-                if csv_logger:
+                if csv_writer:
                     row = {
                         "page_size":
                         rpa_key.page_size,
@@ -426,9 +464,8 @@ def tune_rpa(
                         "benchmarking_method":
                         method.value,
                     }
-                    csv_logger.writer.writerow(row)
+                    csv_writer.writerow(row)
                     # We might want to persist samples in another file or extended CSV if debugging
-                    csv_logger.flush()
 
                 progress.update(task, advance=1)
 
@@ -466,18 +503,28 @@ def tune_rpa(
         }
 
     # Print JSON output
-    tpu_version = tpu_utils.get_tpu_name_slug()
-    norm_name = utils.get_registry_file_name(tpu_version)
-
-    print(
-        f"\n[Output for tpu-inference/kernels/tuned_data/ragged_paged_attention/v3/{norm_name}.json]:"
-    )
-
     # Ensure top-level keys (page_size) are strings for JSON
     json_results = {str(k): v for k, v in aggregated_results.items()}
-    print(json.dumps(json_results, indent=2, sort_keys=True))
+
+    # Save Results
+    run_ctx.save_results(json_results)
+
+    # Flatten for Display (Rich Table expects Key -> Entry)
+    display_results = {}
+    for ps_key, v1 in aggregated_results.items():
+        for dtype_key, v2 in v1.items():
+            for config_key, v3 in v2.items():
+                for len_key, entry in v3.items():
+                    # Create a readable key for the TABLE
+                    flat_key = f"{ps_key} | {len_key}"
+                    display_results[flat_key] = entry
+
+    run_ctx.print_summary_table(display_results)
 
     if update_registry:
+        tpu_version = tpu_utils.get_tpu_name_slug()
+        norm_name = utils.get_registry_file_name(tpu_version)
+
         base_dir = os.path.dirname(os.path.dirname(
             os.path.dirname(__file__)))  # tpu_inference/
         data_dir = os.path.join(
@@ -486,6 +533,3 @@ def tune_rpa(
 
         console.print(f"[bold]Updating registry at {target_file}...[/bold]")
         utils.update_json_registry(target_file, json_results)
-
-    if csv_file:
-        console.print(f"\nResults written to {csv_file}")

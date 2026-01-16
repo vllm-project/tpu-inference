@@ -20,7 +20,7 @@ import os
 import pathlib
 import tempfile
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import jax
 from rich.console import Console
@@ -119,46 +119,189 @@ def update_json_registry(path: str, new_data: Dict[str, Any]):
         console.print(f"[yellow]Creating new registry at {path}[/yellow]")
         existing_data = {}
 
-    # Merge
-    merged_data = deep_update(existing_data, new_data)
+    # Recursive merge with safety check
+    def safe_merge(target: Dict[str, Any],
+                   source: Dict[str, Any],
+                   path_str: str = "") -> Tuple[int, int]:
+        """Recursively merges source into target with latency checks."""
+        updated = 0
+        skipped = 0
+
+        for k, v in source.items():
+            if k not in target:
+                target[k] = v
+                updated += 1
+                continue
+
+            # If both have 'stats' and 'latency_avg_ns', compare
+            if isinstance(
+                    v,
+                    dict) and "stats" in v and "latency_avg_ns" in v["stats"]:
+                if isinstance(target[k], dict) and "stats" in target[k]:
+                    try:
+                        new_lat = float(v["stats"].get("latency_avg_ns",
+                                                       float('inf')))
+                        old_lat = float(target[k]["stats"].get(
+                            "latency_avg_ns", float('inf')))
+
+                        if new_lat < old_lat:
+                            target[k] = v
+                            updated += 1
+                        else:
+                            skipped += 1
+                            # Optional: verbose logging
+                            # console.print(f"[dim]Skip {path_str}.{k}: {new_lat:.0f} >= {old_lat:.0f}[/dim]")
+                    except (ValueError, TypeError):
+                        # Fallback for Malformed data
+                        target[k] = v
+                        updated += 1
+                else:
+                    # Target has no stats, overwrite
+                    target[k] = v
+                    updated += 1
+
+            elif isinstance(v, dict) and isinstance(target[k], dict):
+                # Recurse
+                u, s = safe_merge(target[k], v, f"{path_str}.{k}")
+                updated += u
+                skipped += s
+            else:
+                # Leaf node rewrite (non-stats)
+                target[k] = v
+                updated += 1
+
+        return updated, skipped
+
+    updated_count, skipped_count = safe_merge(existing_data, new_data)
 
     with open(path, 'w') as f:
-        json.dump(merged_data, f, indent=2, sort_keys=True)
-    console.print(f"[green]Successfully updated {path}[/green]")
+        json.dump(existing_data, f, indent=2, sort_keys=True)
+    console.print(
+        f"[green]Registry Updated: {updated_count} accepted, {skipped_count} skipped (slower).[/green]"
+    )
 
 
-class CsvResultLogger:
-    """Context manager for streaming results to CSV."""
+class RunContext:
+    """Manages experiment directory and logging for a tuning run."""
 
-    def __init__(self, filepath: Optional[str], fieldnames: list[str]):
-        self.filepath = filepath
-        self.fieldnames = fieldnames
-        self.file = None
-        self.writer = None
+    def __init__(self,
+                 run_name: Optional[str] = None,
+                 output_dir: str = "tuning_runs",
+                 no_save: bool = False):
+        self.no_save = no_save
+        self.output_dir = pathlib.Path(output_dir)
 
-    def __enter__(self):
-        if not self.filepath:
-            return None
+        # Determine Run Name
+        if not run_name or run_name == "auto":
+            import datetime
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            run_name = f"tune_{timestamp}"
 
+        self.run_name = run_name
+        self.run_dir = self.output_dir / self.run_name
+
+        self.csv_file = None
+        self.csv_writer = None
+
+        if not self.no_save:
+            self._setup_directories()
+
+    def _setup_directories(self):
+        """Creates the run directory."""
         try:
-            self.file = open(self.filepath, 'w', newline='')
-            self.writer = csv.DictWriter(self.file, fieldnames=self.fieldnames)
-            self.writer.writeheader()
-            console.print(f"Streaming results to {self.filepath}")
-            return self
-        except IOError as e:
+            self.run_dir.mkdir(parents=True, exist_ok=True)
+            console.print(f"[green]Initialized Run: {self.run_dir}[/green]")
+        except OSError as e:
             console.print(
-                f"[red]Error opening CSV file {self.filepath}: {e}[/red]")
-            return None
+                f"[red]Failed to create run directory {self.run_dir}: {e}[/red]"
+            )
+            # Fallback to no_save if filesystem fails? Or crash?
+            # For now, just warn and disable saving to prevent crash loop
+            self.no_save = True
 
-    def flush(self):
-        """Flushes the underlying file buffer."""
-        if self.file:
-            self.file.flush()
+    @contextlib.contextmanager
+    def open_csv(self, fieldnames: list[str]):
+        """Context manager for the trials.csv log."""
+        if self.no_save:
+            yield None
+            return
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.file:
-            self.file.close()
+        csv_path = self.run_dir / "trials.csv"
+        try:
+            with open(csv_path, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                yield writer
+        except IOError as e:
+            console.print(f"[red]Failed to open CSV log {csv_path}: {e}[/red]")
+            yield None
+
+    def save_results(self, results: Dict[str, Any]):
+        """Saves the best results to results.json."""
+        if self.no_save:
+            return
+
+        path = self.run_dir / "results.json"
+        try:
+            with open(path, 'w') as f:
+                json.dump(results, f, indent=2, sort_keys=True)
+            console.print(f"[dim]Saved results to {path}[/dim]")
+        except IOError as e:
+            console.print(f"[red]Failed to save results.json: {e}[/red]")
+
+    def save_metadata(self, metadata: Dict[str, Any]):
+        """Saves run metadata (CLI args, hardware info) to run_metadata.json."""
+        if self.no_save:
+            return
+
+        path = self.run_dir / "run_metadata.json"
+        try:
+            with open(path, 'w') as f:
+                json.dump(metadata, f, indent=2, sort_keys=True)
+        except IOError as e:
+            console.print(f"[red]Failed to save run_metadata.json: {e}[/red]")
+
+    def print_summary_table(self, results: Dict[str, Any], limit: int = 5):
+        """Prints a rich summary table of the top results."""
+        from rich.table import Table
+
+        table = Table(
+            title=f"Top Results ({min(len(results), limit)}/{len(results)})")
+        table.add_column("Config Key", style="cyan", no_wrap=True)
+        table.add_column("Latency", style="magenta")
+        table.add_column("Compile Time", style="green")
+
+        # Convert simple mapping to list for sorting
+        # Key format varies (RPA vs Matmul), but value has 'stats'
+        scored_results = []
+        for key, entry in results.items():
+            stats = entry.get('stats', {})
+            latency = stats.get('latency_avg_ns', float('inf'))
+            compile_time = stats.get('compile_time_s', 0.0)
+            scored_results.append({
+                "key": key,
+                "latency": latency,
+                "compile": compile_time
+            })
+
+        # Sort by latency
+        scored_results.sort(key=lambda x: x["latency"])
+
+        for item in scored_results[:limit]:
+            lat_str = f"{item['latency'] / 1000:.2f} µs"
+            if item['latency'] > 1e6:
+                lat_str = f"{item['latency'] / 1e6:.2f} ms"
+
+            table.add_row(str(item['key']), lat_str,
+                          f"{item['compile']:.2f} s")
+
+        console.print(table)
+        if not self.no_save:
+            console.print(
+                f"\n[bold green]Run Saved to: {self.run_dir}[/bold green]")
+            console.print(
+                f"Apply results: [on black] tpu-tune apply {self.run_dir}/results.json [/on black]"
+            )
 
 
 # --- Profiling Utilities (Aligned with Tokamax) ---
@@ -203,7 +346,7 @@ class XprofProfileSession(contextlib.AbstractContextManager):
             return 0.0
 
         duration_ns = max(t_ends) - min(t_starts)
-        return duration_ns / 1e9
+        return float(duration_ns)
 
     def __enter__(self):
         try:
