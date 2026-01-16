@@ -84,9 +84,15 @@ def parse_arg(arg, type_fn=str):
               default=35,
               help="Number of sequences for autotuning example",
               show_default=True)
-@click.option('--csv-file',
-              default=None,
-              help="Optional path to output results to a CSV file")
+@click.option('--run-name',
+              default='auto',
+              help="Name of the run folder in output-dir",
+              show_default=True)
+@click.option('--output-dir',
+              default='tuning_runs',
+              help="Base directory for experiment outputs",
+              show_default=True)
+@click.option('--no-save', is_flag=True, help="Disable saving results to disk")
 @click.option('--kv-block-sizes',
               default='1,2,4,8,16,32,64,128',
               help="Comma separated list of KV pages per block to test",
@@ -104,8 +110,8 @@ def parse_arg(arg, type_fn=str):
               show_default=True)
 def rpa_v3(page_size, q_dtype, kv_dtype, num_q_heads, num_kv_heads, head_dim,
            max_model_len, num_iterations, num_repeats, benchmarking_method,
-           dry_run, num_sequences, csv_file, kv_block_sizes, q_block_sizes,
-           update_registry, tp_size):
+           dry_run, num_sequences, kv_block_sizes, q_block_sizes,
+           update_registry, tp_size, run_name, output_dir, no_save):
     """Tune Ragged Paged Attention (RPA) kernels."""
     from tpu_inference.tools.autotune import \
         ragged_paged_attention_v3 as rpa_lib
@@ -121,6 +127,10 @@ def rpa_v3(page_size, q_dtype, kv_dtype, num_q_heads, num_kv_heads, head_dim,
 
     kv_block_sizes_parsed = parse_arg(kv_block_sizes, int)
     q_block_sizes_parsed = parse_arg(q_block_sizes, int)
+
+    # Dry run implies no-save unless explicitly overridden?
+    # Usually dry-run means "don't run kernel", but maybe we still want to save empty plan?
+    # User requested --no-save to be explicit.
 
     if update_registry and dry_run:
         utils.console.print(
@@ -142,9 +152,11 @@ def rpa_v3(page_size, q_dtype, kv_dtype, num_q_heads, num_kv_heads, head_dim,
                      benchmarking_method=benchmarking_method,
                      dry_run=dry_run,
                      num_sequences=num_sequences,
-                     csv_file=csv_file,
                      update_registry=update_registry,
-                     tp_size=tp_size)
+                     tp_size=tp_size,
+                     run_name=run_name,
+                     output_dir=output_dir,
+                     no_save=no_save)
 
 
 @main.command(name='quantized-matmul')
@@ -173,9 +185,15 @@ def rpa_v3(page_size, q_dtype, kv_dtype, num_q_heads, num_kv_heads, head_dim,
               default='amortized',
               help="Method to use for benchmarking",
               show_default=True)
-@click.option('--csv-file',
-              default=None,
-              help="Optional path to output results to a CSV file")
+@click.option('--run-name',
+              default='auto',
+              help="Name of the run folder in output-dir",
+              show_default=True)
+@click.option('--output-dir',
+              default='tuning_runs',
+              help="Base directory for experiment outputs",
+              show_default=True)
+@click.option('--no-save', is_flag=True, help="Disable saving results to disk")
 @click.option('--update-registry',
               is_flag=True,
               help="Update the JSON registry with results")
@@ -190,7 +208,8 @@ def rpa_v3(page_size, q_dtype, kv_dtype, num_q_heads, num_kv_heads, head_dim,
               show_default=True)
 def quantized_matmul(batch_sizes, out_in_features, x_q_dtype, w_q_dtype,
                      dry_run, num_iterations, num_repeats, benchmarking_method,
-                     csv_file, update_registry, tp_size, tp_split_dim):
+                     update_registry, tp_size, tp_split_dim, run_name,
+                     output_dir, no_save):
     """Tune Quantized Matmul kernels."""
     from tpu_inference.tools.autotune import quantized_matmul as matmul_lib
 
@@ -217,10 +236,108 @@ def quantized_matmul(batch_sizes, out_in_features, x_q_dtype, w_q_dtype,
                            num_iterations=num_iterations,
                            num_repeats=num_repeats,
                            benchmarking_method=benchmarking_method,
-                           csv_file=csv_file,
                            update_registry=update_registry,
                            tp_size=tp_size,
-                           tp_split_dim=tp_split_dim)
+                           tp_split_dim=tp_split_dim,
+                           run_name=run_name,
+                           output_dir=output_dir,
+                           no_save=no_save)
+
+
+@main.command(name='apply')
+@click.argument('result-file', type=click.Path(exists=True, dir_okay=False))
+def apply_results(result_file):
+    """Apply a results.json file to the main registry."""
+    import json
+
+    from tpu_inference.tools.autotune.utils import (console,
+                                                    update_json_registry)
+    # Creating a thin wrapper here, actual logic fits better in utils or libraries.
+    # For now, let's implement the logic inline or call a utility function.
+    from tpu_inference.utils import get_tpu_name_slug
+
+    # Need to infer target registry file...
+    # The result JSON keys are generated by 'tuned_block_sizes.get_lookup_keys'
+    # which puts the DEVICE NAME as the first element of the tuple key?
+    # Wait, the JSON structure is:
+    # "KEY_STRING": { "config": ..., "stats": ... }
+    # Determining usage requires parsing the key.
+    # Actually, simpler: each kernel has its own registry file per TPU generation.
+    # The results.json should map to a specific TPU gen.
+    # We can infer the TPU generation from the runtime environment using `utils.get_tpu_generation()`
+    # OR we need it stored in metadata.
+    # Limitation: We need to know WHICH kernel registry to update (RPA vs Matmul).
+    # Heuristic: Check keys in the JSON?
+    # RPA keys usually have "q_dtype_kv_dtype"
+    # Matmul keys are "batch,out,in,dq,wq"
+
+    with open(result_file, 'r') as f:
+        data = json.load(f)
+
+    if not data:
+        console.print("[yellow]Results file is empty.[/yellow]")
+        return
+
+    # Infer Kernel Type
+    sample_key = next(iter(data.keys()))
+
+    # RPA keys are distinct (nested or specific string structure?) I need to check how they are stored in V2.
+    # V2 RPA Storage: "128": { "q_bf16...": ... } hierarchy? Or flat in results.json?
+    # `tune_rpa` produces a flat dictionary of results in `RunContext.save_results`.
+    # Wait, `update_json_registry` expects a dictionary structure that matches the file.
+    # If `tune_rpa` saves a flat dict, but the file is nested (RPA is nested!), we need `update_json_registry` to handle it.
+
+    # Wait, `tune_rpa` calls `update_json_registry(..., results)`.
+    # If `results` is what is saved to `results.json`, then `results.json` has the correct structure for the registry.
+    # So we simply need to find the destination file.
+
+    # Matmul Registry: tpu_inference/kernels/tuned_data/quantized_matmul/...
+    # RPA Registry: tpu_inference/kernels/tuned_data/ragged_paged_attention/v3/...
+
+    # We can use the detected TPU from the current env?
+    # DANGER: What if applying results from v6e on a v5e machine?
+    # We should trust the user or check metadata?
+    # Let's use the current TPU for now as the target default.
+
+    tpu_name = get_tpu_name_slug()
+    # If running on CPU/Head node without TPU, this might fail or default.
+    # Assume user is on the TPU VM they want to apply to, OR provide --tpu-version arg?
+    # Simplest MVP: Run on the target machine.
+
+    # Guess Registry Path based on content
+    is_rpa = any("q_head" in k for k in str(data)) or any("max_model_len" in k
+                                                          for k in str(data))
+    # Matmul keys: "128,128,128,int8,int8"
+    is_matmul = "," in sample_key and "int8" in sample_key
+
+    target_registry = None
+    if is_rpa:
+        # Need 'get_rpa_registry_path' equivalent but public
+        # Hardcoding path logic for MVP safely
+        base_dir = "tpu_inference/kernels/tuned_data/ragged_paged_attention/v3"
+        fname = f"{tpu_name}.json"
+        target_registry = f"{base_dir}/{fname}"
+    elif is_matmul:
+        base_dir = "tpu_inference/kernels/tuned_data/quantized_matmul"
+        fname = f"{tpu_name}.json"
+        target_registry = f"{base_dir}/{fname}"
+    else:
+        # Fallback / Error
+        # Try to determine if it's RPA via nested structure (keys are integers as strings?)
+        # Actually RPA V2 uses string keys.
+        console.print(
+            "[red]Could not determine kernel type from results keys.[/red]")
+        return
+
+    import os
+    if not os.path.exists(target_registry):
+        # Maybe we aren't at repo root?
+        # Try finding the file relative to module?
+        console.print(
+            f"[yellow]Registry file {target_registry} not found (are you in repo root?). Creating new.[/yellow]"
+        )
+
+    update_json_registry(target_registry, data)
 
 
 if __name__ == "__main__":

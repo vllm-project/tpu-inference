@@ -14,7 +14,6 @@
 
 import collections
 import itertools
-import json
 import os
 import time
 from typing import List, NamedTuple, Optional, Tuple
@@ -167,10 +166,12 @@ def tune_matmul(
     num_iterations: int = 10,
     num_repeats: int = 5,
     benchmarking_method: str = "amortized",
-    csv_file: Optional[str] = None,
     update_registry: bool = False,
     tp_size: int = 1,
     tp_split_dim: str = "out",
+    run_name: Optional[str] = None,
+    output_dir: str = "tuning_runs",
+    no_save: bool = False,
 ):
 
     # Resolve benchmarking method
@@ -202,6 +203,25 @@ def tune_matmul(
     console.print(f"Generated {len(configs)} configurations to tune "
                   f"using '{method.value}' method.")
 
+    # Setup Experiment Run
+    run_ctx = utils.RunContext(run_name, output_dir, no_save)
+
+    # Save Metadata
+    run_ctx.save_metadata({
+        "kernel": "quantized_matmul",
+        "cli_args": {
+            "batch_sizes": batch_sizes,
+            "out_in_features": out_in_features,
+            "x_q_dtype": x_q_dtype,
+            "w_q_dtype": w_q_dtype,
+            "num_iterations": num_iterations,
+            "num_repeats": num_repeats,
+            "benchmarking_method": benchmarking_method,
+            "tp_size": tp_size,
+            "tp_split_dim": tp_split_dim
+        }
+    })
+
     # Setup CSV with context manager
     fieldnames = [
         "batch_size",
@@ -220,9 +240,7 @@ def tune_matmul(
         "benchmarking_method",
     ]
 
-    with utils.CsvResultLogger(csv_file, fieldnames) as csv_logger:
-        if not csv_logger and csv_file:
-            return
+    with run_ctx.open_csv(fieldnames) as csv_writer:
 
         results = collections.defaultdict(list)
         results_best = {}  # Track best per key for is_best flag
@@ -270,7 +288,7 @@ def tune_matmul(
                                         "samples_ns": result.samples_ns
                                     }))
 
-                if csv_logger:
+                if csv_writer:
                     row = {
                         "batch_size":
                         tuned_key.n_batch,
@@ -301,8 +319,7 @@ def tune_matmul(
                         "benchmarking_method":
                         method.value,
                     }
-                    csv_logger.writer.writerow(row)
-                    csv_logger.flush()
+                    csv_writer.writerow(row)
 
                 progress.update(task, advance=1)
 
@@ -334,16 +351,14 @@ def tune_matmul(
             "metadata": best.metadata
         }
 
-    # Print JSON output
-    tpu_version = tpu_utils.get_tpu_name_slug()
-    norm_name = utils.get_registry_file_name(tpu_version)
-
-    print(
-        f"\n[Output for tpu-inference/kernels/tuned_data/quantized_matmul/{norm_name}.json]:"
-    )
-    print(json.dumps(aggregated_results, indent=2, sort_keys=True))
+    # Save Results
+    run_ctx.save_results(aggregated_results)
+    run_ctx.print_summary_table(aggregated_results)
 
     if update_registry:
+        tpu_version = tpu_utils.get_tpu_name_slug()
+        norm_name = utils.get_registry_file_name(tpu_version)
+
         base_dir = os.path.dirname(os.path.dirname(
             os.path.dirname(__file__)))  # tpu_inference/
         data_dir = os.path.join(base_dir,
@@ -352,6 +367,3 @@ def tune_matmul(
 
         console.print(f"[bold]Updating registry at {target_file}...[/bold]")
         utils.update_json_registry(target_file, aggregated_results)
-
-    if csv_file:
-        console.print(f"\nResults written to {csv_file}")

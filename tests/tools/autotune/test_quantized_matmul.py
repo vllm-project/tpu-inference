@@ -14,6 +14,7 @@
 
 from unittest.mock import patch
 
+from tpu_inference.tools.autotune.benchmarks import BenchmarkResult
 from tpu_inference.tools.autotune.quantized_matmul import (factors_of_n,
                                                            make_configs,
                                                            tune_matmul)
@@ -59,10 +60,17 @@ def test_tune_matmul_flow(mock_tpu_ver, mock_slug, mock_registry_name,
     mock_slug.return_value = "tpu_v5e"
     mock_registry_name.return_value = "tpu_v5e"
 
-    # Mock autotune return: (latency, std, compile, lower)
-    mock_autotune.side_effect = [
-        (10.0, 1.0, 0.1, 0.1),
-    ]
+    # Mock autotune return: BenchmarkResult
+    result = BenchmarkResult(mean_time_ns=10.0,
+                             std_time_ns=1.0,
+                             min_time_ns=9.0,
+                             max_time_ns=11.0,
+                             samples_ns=[],
+                             metadata={
+                                 "compile_time_s": 0.1,
+                                 "lower_time_s": 0.1
+                             })
+    mock_autotune.side_effect = [result]
 
     tune_matmul(
         batch_sizes=[128],
@@ -94,7 +102,13 @@ def test_tune_matmul_flow(mock_tpu_ver, mock_slug, mock_registry_name,
 def test_tune_matmul_tp_scaling(mock_tpu_ver, mock_autotune):
     # Set return value
     mock_tpu_ver.return_value = 5
-    mock_autotune.return_value = (10.0, 0.0, 0.0, 0.0)
+    result = BenchmarkResult(mean_time_ns=10.0,
+                             std_time_ns=0.0,
+                             min_time_ns=10.0,
+                             max_time_ns=10.0,
+                             samples_ns=[],
+                             metadata={})
+    mock_autotune.return_value = result
 
     # TP=2, Split=out
     tune_matmul(batch_sizes=[128],

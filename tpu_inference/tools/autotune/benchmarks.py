@@ -15,9 +15,7 @@
 
 import dataclasses
 import enum
-import pathlib
 import statistics
-import tempfile
 import time
 from typing import Any, Callable, Dict, List, Tuple
 
@@ -85,9 +83,6 @@ def _benchmark_xprof(
     num_repeats: int,
 ) -> List[float]:
     """Benchmarks using XProf traces."""
-    if ProfileData is None:
-        raise ImportError("jax.profiler.ProfileData is not available.")
-
     samples_ns = []
 
     # Warmup
@@ -95,57 +90,18 @@ def _benchmark_xprof(
     utils.block_until_ready(outputs)
 
     for _ in range(num_repeats):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            jax.profiler.start_trace(temp_dir)
-            outputs = compiled_fn(*args)
-            utils.block_until_ready(outputs)
-            jax.profiler.stop_trace()
+        try:
+            with utils.XprofProfileSession() as session:
+                outputs = compiled_fn(*args)
+                utils.block_until_ready(outputs)
 
-            # Parse trace
-            profile_path = list(
-                pathlib.Path(temp_dir).glob('**/*.xplane.pb'))[0]
-            profile_data = ProfileData.from_serialized_xspace(
-                profile_path.read_bytes())
+            # session.total_op_time is now in ns (from utils update)
+            samples_ns.append(session.total_op_time)
 
-            # Sum XLA Ops duration
-            # Logic adapted from Tokamax/TensorBoard parsing
-            device_duration_ns = 0.0
-            found_device = False
-
-            # This is a heuristic: Iterate planes -> lines -> events
-            # We look for the plane corresponding to the TPU device
-            for plane in profile_data.planes:
-                if "/device:TPU" in plane.name or "/device:GPU" in plane.name:
-                    found_device = True
-                    # In standard XProf, XLA ops are usually in a line named "XLA Ops"
-                    # or similar. We sum all event durations on this plane.
-                    # Note: This is a simplification. A robust parser checks line names.
-                    for line in plane.lines:
-                        # Common line names: "XLA Ops", "Unknown (0)", etc.
-                        # For pure kernel microbenchmarks, almost all device activity is the kernel.
-                        if "XLA Ops" in line.name or "Unknown" in line.name:
-                            for event in line.events:
-                                # Newer JAX versions use duration_ns
-                                if hasattr(event, 'duration_ns'):
-                                    device_duration_ns += event.duration_ns
-                                elif hasattr(event, 'duration_ps'):
-                                    device_duration_ns += event.duration_ps / 1000.0
-                                else:
-                                    # Fallback or error?
-                                    pass
-
-            if not found_device:
-                # Fallback/Warning if specific plane not found
-                pass
-
-            # If we couldn't find explicit XLA ops, we might need to look deeper.
-            # For now, if 0, we fallback to a wallclock measurement or raise warning.
-            if device_duration_ns == 0:
-                # Fallback to simple wallclock logic if trace is empty (shouldn't happen on TPU)
-                # But XProf parsing is brittle.
-                pass
-
-            samples_ns.append(device_duration_ns)
+        except Exception as e:
+            # Fallback for profiling failures
+            print(f"Profiling failed: {e}")
+            pass
 
     return samples_ns
 
