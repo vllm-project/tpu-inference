@@ -319,6 +319,7 @@ def tune_rpa(
                     "time_ns",
                     "time_std_ns",
                     "compile_time_s",
+                    "lower_time_s",
                     "is_best",
                 ]
                 csv_writer = csv.DictWriter(csv_f, fieldnames=fieldnames)
