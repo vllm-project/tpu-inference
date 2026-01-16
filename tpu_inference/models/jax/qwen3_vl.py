@@ -121,29 +121,16 @@ def generate_segment_ids_from_grid_thw(
     Returns:
         segment_ids: (total_tokens,) array with segment IDs per frame
     """
-    if not grid_thw:
-        return jnp.zeros((0,), dtype=jnp.int32)
-
-    frame_sizes = []
-    frame_segment_ids = []
-    seg_id = 1  # start from 1 to make padding 0
+    segments = []
+    seg_id = 1 # start for 1 to make padding 0
 
     for (t, h, w) in grid_thw:
         frame_size = h * w
-        if t <= 0 or frame_size <= 0:
-            continue
-        frame_sizes.append(jnp.full((t,), frame_size, dtype=jnp.int32))
-        frame_segment_ids.append(
-            jnp.arange(seg_id, seg_id + t, dtype=jnp.int32)
-        )
-        seg_id += t
+        for _ in range(t):
+            segments.append(jnp.full((frame_size,), seg_id, dtype=jnp.int32))
+            seg_id += 1
 
-    if not frame_segment_ids:
-        return jnp.zeros((0,), dtype=jnp.int32)
-
-    frame_sizes = jnp.concatenate(frame_sizes, axis=0)
-    frame_segment_ids = jnp.concatenate(frame_segment_ids, axis=0)
-    return jnp.repeat(frame_segment_ids, frame_sizes)
+    return jnp.concatenate(segments, axis=0) if segments else jnp.zeros((0,), dtype=jnp.int32)
 
 
 def pad_segment_ids_for_attention(
@@ -160,10 +147,6 @@ def pad_segment_ids_for_attention(
         SegmentIds for flash attention with padding tokens set to 0
     """
     seq_len = segment_ids.shape[0]
-    if padded_seq_len == seq_len:
-        padded_ids = segment_ids.reshape(1, -1)
-        return SegmentIds(q=padded_ids, kv=padded_ids)
-
     padded_ids = jnp.zeros(padded_seq_len, dtype=jnp.int32)
     padded_ids = padded_ids.at[:seq_len].set(segment_ids)
     padded_ids = padded_ids.reshape(1, -1)
@@ -703,10 +686,7 @@ class Qwen3VLTextDecoderLayer(nnx.Module):
 
 
 def apply_rotary_pos_emb_vision(
-    x: jax.Array,
-    rotary_pos_emb: jax.Array,
-    cos_emb: Optional[jax.Array] = None,
-    sin_emb: Optional[jax.Array] = None,
+    x: jax.Array, rotary_pos_emb: jax.Array
 ) -> jax.Array:
 
     _, _, _, H = x.shape
@@ -716,14 +696,13 @@ def apply_rotary_pos_emb_vision(
     x_real = x[..., :half_dim]
     x_imag = x[..., half_dim:]
 
-    if cos_emb is None or sin_emb is None:
-        cos_emb = jnp.cos(rotary_pos_emb)
-        sin_emb = jnp.sin(rotary_pos_emb)
+    # [T, H//2]
+    cos_emb = jnp.cos(rotary_pos_emb)
+    sin_emb = jnp.sin(rotary_pos_emb)
 
-    if cos_emb.ndim == 2:
-        cos_emb = cos_emb[None, :, None, :]
-    if sin_emb.ndim == 2:
-        sin_emb = sin_emb[None, :, None, :]
+    # [1, T, 1, H//2]
+    cos_emb = cos_emb[None, :, None, :]
+    sin_emb = sin_emb[None, :, None, :]
 
     # [B, T, N, H//2]
     x_rotated_real = x_real * cos_emb - x_imag * sin_emb
@@ -741,13 +720,13 @@ class Qwen3VLVisionRotaryEmbedding(nnx.Module):
     def __init__(self, dim: int, theta: float = 10000.0):
         self.dim = dim
         self.theta = theta
-        self.inv_freq = 1.0 / (
-            self.theta ** (jnp.arange(0, self.dim, 2, dtype=jnp.float32) / self.dim)
-        )
 
     def __call__(self, seqlen: int) -> jax.Array:
+        inv_freq = 1.0 / (
+            self.theta ** (jnp.arange(0, self.dim, 2, dtype=jnp.float32) / self.dim)
+        )
         seq = jnp.arange(seqlen, dtype=jnp.float32)
-        freqs = jnp.outer(seq, self.inv_freq)
+        freqs = jnp.outer(seq, inv_freq)
         return freqs.astype(jnp.bfloat16)
 
 
@@ -899,8 +878,6 @@ class Qwen3VLVisionAttention(nnx.Module):
         x: jax.Array,
         rotary_pos_emb: jax.Array,
         segment_ids: jax.Array,
-        padded_segment_ids: Optional[SegmentIds] = None,
-        padded_seq_len: Optional[int] = None,
     ) -> jax.Array:
         """Apply vision attention with variable-length segment masking.
 
@@ -929,44 +906,31 @@ class Qwen3VLVisionAttention(nnx.Module):
         k = jnp.transpose(k, (1, 0, 2, 3))
         v = jnp.transpose(v, (1, 0, 2, 3))
 
-        rotary_cos = jnp.cos(rotary_pos_emb)[None, :, None, :]
-        rotary_sin = jnp.sin(rotary_pos_emb)[None, :, None, :]
-        q = apply_rotary_pos_emb_vision(
-            q, rotary_pos_emb, cos_emb=rotary_cos, sin_emb=rotary_sin
-        )
-        k = apply_rotary_pos_emb_vision(
-            k, rotary_pos_emb, cos_emb=rotary_cos, sin_emb=rotary_sin
-        )
+        q = apply_rotary_pos_emb_vision(q, rotary_pos_emb)
+        k = apply_rotary_pos_emb_vision(k, rotary_pos_emb)
 
         # Transpose to [B, N, T, H] for flash attention
         q = jnp.transpose(q, (0, 2, 1, 3))
         k = jnp.transpose(k, (0, 2, 1, 3))
         v = jnp.transpose(v, (0, 2, 1, 3))
 
+        # Pad sequence length to multiple of block size
+        block_k_major = DEFAULT_BLOCK_K_MAJOR
         T_attn = q.shape[2]
-        if padded_seq_len is None:
-            block_k_major = DEFAULT_BLOCK_K_MAJOR
-            padded_seq_len = (
-                (T_attn + block_k_major - 1) // block_k_major * block_k_major
-            )
-        pad_len = padded_seq_len - T_attn
-        if pad_len:
-            pad_width = ((0, 0), (0, 0), (0, pad_len), (0, 0))
-            q = jnp.pad(q, pad_width, "constant")
-            k = jnp.pad(k, pad_width, "constant")
-            v = jnp.pad(v, pad_width, "constant")
+        padded_T = (T_attn + block_k_major - 1) // block_k_major * block_k_major
+        pad_width = ((0, 0), (0, 0), (0, padded_T - T_attn), (0, 0))
+
+        q = jnp.pad(q, pad_width, "constant")
+        k = jnp.pad(k, pad_width, "constant")
+        v = jnp.pad(v, pad_width, "constant")
 
         # Pad segment IDs for attention (padding tokens get segment_id=0)
-        if padded_segment_ids is None:
-            padded_segment_ids = pad_segment_ids_for_attention(
-                segment_ids, padded_seq_len
-            )
+        padded_segment_ids = pad_segment_ids_for_attention(segment_ids, padded_T)
 
         output = self.flash_attention(q, k, v, padded_segment_ids)
 
         # Unpad and reshape: [B, N, T, H] -> [T, B, N, H] -> [T, B, D]
-        if pad_len:
-            output = output[:, :, :T_attn, :]
+        output = output[:, :, :T_attn, :]
         output = jnp.transpose(output, (2, 0, 1, 3))
         output = output.reshape(T, B, D)
 
@@ -1022,16 +986,8 @@ class Qwen3VLVisionBlock(nnx.Module):
         x: jax.Array,
         rotary_pos_emb: jax.Array,
         segment_ids: jax.Array,
-        padded_segment_ids: Optional[SegmentIds] = None,
-        padded_seq_len: Optional[int] = None,
     ) -> jax.Array:
-        x = x + self.attn(
-            self.norm1(x),
-            rotary_pos_emb,
-            segment_ids,
-            padded_segment_ids=padded_segment_ids,
-            padded_seq_len=padded_seq_len,
-        )
+        x = x + self.attn(self.norm1(x), rotary_pos_emb, segment_ids)
         x = x + self.mlp(self.norm2(x))
         return x
 
@@ -1303,11 +1259,8 @@ class Qwen3VLVisionTransformer(nnx.Module):
         """
         merge_size = self.spatial_merge_size
 
-        if not grid_thw:
-            return jnp.zeros((0, self.hidden_size), dtype=self.dtype)
-
-        idx_chunks = [[] for _ in range(4)]
-        weight_chunks = [[] for _ in range(4)]
+        idx_list = [jnp.empty((0,), dtype=jnp.int32) for _ in range(4)]
+        weight_list = [jnp.empty((0,), dtype=jnp.float32) for _ in range(4)]
 
         grid_ts = [g[0] for g in grid_thw]
         grid_hs = [g[1] for g in grid_thw]
@@ -1353,16 +1306,12 @@ class Qwen3VLVisionTransformer(nnx.Module):
             ]
 
             for i in range(4):
-                idx_chunks[i].append(indices[i])
-                weight_chunks[i].append(weights[i])
+                idx_list[i] = jnp.concatenate([idx_list[i], indices[i]], axis=0)
+                weight_list[i] = jnp.concatenate([weight_list[i], weights[i]], axis=0)
 
         # Convert to JAX arrays
-        idx_tensor = jnp.stack(
-            [jnp.concatenate(chunks, axis=0) for chunks in idx_chunks], axis=0
-        )  # int32, shape (4, N)
-        weight_tensor = jnp.stack(
-            [jnp.concatenate(chunks, axis=0) for chunks in weight_chunks], axis=0
-        )  # float32, shape (4, N)
+        idx_tensor = jnp.stack(idx_list, axis=0)  # int32, shape (4, N)
+        weight_tensor = jnp.stack(weight_list, axis=0)  # float32, shape (4, N)
 
         # Lookup embeddings and apply bilinear interpolation
         pos_embeds = self.pos_embed(idx_tensor) * weight_tensor[:, :, None]
@@ -1406,13 +1355,6 @@ class Qwen3VLVisionTransformer(nnx.Module):
 
         # Reshape for merge block ordering
         seq_len = x.shape[0]
-        padded_seq_len = (
-            (seq_len + DEFAULT_BLOCK_K_MAJOR - 1)
-            // DEFAULT_BLOCK_K_MAJOR * DEFAULT_BLOCK_K_MAJOR
-        )
-        padded_segment_ids = pad_segment_ids_for_attention(
-            segment_ids, padded_seq_len
-        )
         hidden_states = hidden_states.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
         )
@@ -1426,8 +1368,6 @@ class Qwen3VLVisionTransformer(nnx.Module):
                 hidden_states,
                 rotary_pos_emb=rotary_pos_emb,
                 segment_ids=segment_ids,
-                padded_segment_ids=padded_segment_ids,
-                padded_seq_len=padded_seq_len,
             )
 
             # Collect DeepStack features at specified layers
@@ -1472,13 +1412,6 @@ class Qwen3VLVisionTransformer(nnx.Module):
 
         # Reshape for transformer
         seq_len = hidden_states.shape[0]
-        padded_seq_len = (
-            (seq_len + DEFAULT_BLOCK_K_MAJOR - 1)
-            // DEFAULT_BLOCK_K_MAJOR * DEFAULT_BLOCK_K_MAJOR
-        )
-        padded_segment_ids = pad_segment_ids_for_attention(
-            segment_ids, padded_seq_len
-        )
         hidden_states = hidden_states.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
         )
@@ -1490,8 +1423,6 @@ class Qwen3VLVisionTransformer(nnx.Module):
                 hidden_states,
                 rotary_pos_emb=rotary_pos_emb,
                 segment_ids=segment_ids,
-                padded_segment_ids=padded_segment_ids,
-                padded_seq_len=padded_seq_len,
             )
 
             if layer_num in self.deepstack_visual_indexes:
