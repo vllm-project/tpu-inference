@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List
+from typing import Any, List
+import math
 
 import jax
 import jax.numpy as jnp
@@ -41,7 +42,13 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
                                  use_mla: bool = False):
     """Gets the KV cache shape based on the mesh configuration."""
 
-    model_cnt = mesh.shape["model"]
+    axis_name = ShardingAxisName.ATTN_HEAD
+
+    if isinstance(axis_name, (tuple, list)):
+        model_cnt = math.prod(mesh.shape[name] for name in axis_name)
+    else:
+        model_cnt = mesh.shape[axis_name]
+
     assert actual_num_kv_heads % model_cnt == 0
     # NOTE(chengjiyao): Currently, the attention kernel is tailored to the
     # specific model, rather than being determined by the head_dim. If new
