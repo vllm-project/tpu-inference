@@ -69,8 +69,6 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "tpu-tune-rpa=tpu_inference.tools.autotune.cli:legacy_rpa_cli",
-            "tpu-tune-quantized-matmul=tpu_inference.tools.autotune.cli:legacy_matmul_cli",
             "tpu-tune=tpu_inference.tools.autotune.cli:main",
         ],
     },
