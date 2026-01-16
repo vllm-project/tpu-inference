@@ -1,0 +1,3516 @@
+{
+  "1024,1024,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 4096,
+      "out_block_size": 256
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,1024,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 8192,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,128,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 8192,
+      "out_block_size": 128
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,1280,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 2048,
+      "out_block_size": 1280
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,13824,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 5120,
+      "out_block_size": 768
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,14336,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 4096,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,1536,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 1536,
+      "out_block_size": 1536
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,1536,8960,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 8960,
+      "out_block_size": 256
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,1792,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 5120,
+      "out_block_size": 256
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,17920,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 1536,
+      "out_block_size": 1792
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,2048,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 1536,
+      "out_block_size": 2048
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,28672,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 4096,
+      "out_block_size": 2048
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,3584,18944,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 18944,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,3584,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 3584,
+      "out_block_size": 896
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,3584,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 8192,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,37888,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 3584,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,4096,14336,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 14336,
+      "out_block_size": 256
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,4096,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 4096,
+      "out_block_size": 256
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,4608,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 3584,
+      "out_block_size": 768
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,5120,1280,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 1280,
+      "out_block_size": 1280
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,5120,3456,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 3456,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,5120,640,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 640,
+      "out_block_size": 5120
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,5120,6912,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 6912,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,6144,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 4096,
+      "out_block_size": 768
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,6912,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 5120,
+      "out_block_size": 768
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,7168,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 8192,
+      "out_block_size": 256
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,8192,1024,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 1024,
+      "out_block_size": 2048
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,8192,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 3584,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "1024,896,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 2560,
+      "out_block_size": 896
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,1024,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 4096,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,1024,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 2048,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,128,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 1024,
+      "out_block_size": 128
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {
+      "compile_time_s": 0.11525416909717023,
+      "latency_avg_ns": 78540.0,
+      "latency_std_ns": 0.0,
+      "lower_time_s": 0.019450699910521507
+    }
+  },
+  "128,1280,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 2048,
+      "out_block_size": 1280
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,13824,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 256,
+      "out_block_size": 13824
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,14336,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 4096,
+      "out_block_size": 896
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,1536,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 1536,
+      "out_block_size": 768
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,1536,8960,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 8960,
+      "out_block_size": 384
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,1792,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 1280,
+      "out_block_size": 1792
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,17920,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 384,
+      "out_block_size": 8960
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,2048,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 1536,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,28672,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 256,
+      "out_block_size": 28672
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,3584,18944,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 9472,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,3584,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 896,
+      "out_block_size": 3584
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,3584,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 1024,
+      "out_block_size": 3584
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,37888,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 3584,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,4096,14336,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 14336,
+      "out_block_size": 256
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,4096,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 4096,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,4608,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 3584,
+      "out_block_size": 768
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,5120,1280,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 1280,
+      "out_block_size": 2560
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,5120,3456,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 3456,
+      "out_block_size": 640
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,5120,640,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 128,
+      "out_block_size": 5120
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,5120,6912,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 6912,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,6144,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 4096,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,6912,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 5120,
+      "out_block_size": 768
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,7168,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 1024,
+      "out_block_size": 3584
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,8192,1024,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 1024,
+      "out_block_size": 4096
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,8192,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 512,
+      "out_block_size": 8192
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "128,896,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 2560,
+      "out_block_size": 896
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,1024,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 2048,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,1024,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 8192,
+      "out_block_size": 256
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,128,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 8192,
+      "out_block_size": 128
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,1280,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 8192,
+      "out_block_size": 256
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,13824,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 5120,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,14336,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 4096,
+      "out_block_size": 896
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,1536,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 1536,
+      "out_block_size": 768
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,1536,8960,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 1792,
+      "out_block_size": 1536
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,1792,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 2560,
+      "out_block_size": 1792
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,17920,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 1536,
+      "out_block_size": 1792
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,2048,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 1536,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,28672,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 4096,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,3584,18944,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 18944,
+      "out_block_size": 256
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,3584,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 3584,
+      "out_block_size": 896
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,3584,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 1024,
+      "out_block_size": 3584
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,37888,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 3584,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,4096,14336,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 1792,
+      "out_block_size": 2048
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,4096,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 4096,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,4608,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 3584,
+      "out_block_size": 1152
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,5120,1280,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 1280,
+      "out_block_size": 2560
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,5120,3456,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 3456,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,5120,640,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 640,
+      "out_block_size": 2560
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,5120,6912,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 6912,
+      "out_block_size": 640
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,6144,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 4096,
+      "out_block_size": 768
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,6912,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 5120,
+      "out_block_size": 768
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,7168,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 8192,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,8192,1024,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 1024,
+      "out_block_size": 2048
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,8192,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 3584,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16,896,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 2560,
+      "out_block_size": 896
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,1024,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 4096,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,1024,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 8192,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,128,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 8192,
+      "out_block_size": 128
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,1280,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 8192,
+      "out_block_size": 1280
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,13824,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 5120,
+      "out_block_size": 2304
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,14336,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 4096,
+      "out_block_size": 2048
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,1536,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 1536,
+      "out_block_size": 1536
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,1536,8960,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 8960,
+      "out_block_size": 1536
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,1792,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 5120,
+      "out_block_size": 1792
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,17920,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 1536,
+      "out_block_size": 17920
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,2048,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 4096,
+      "in_block_size": 1536,
+      "out_block_size": 2048
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,28672,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 4096,
+      "out_block_size": 1792
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,3584,18944,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 512,
+      "out_block_size": 3584
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,3584,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 3584,
+      "out_block_size": 3584
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,3584,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 8192,
+      "out_block_size": 1792
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,37888,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 3584,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,4096,14336,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 512,
+      "out_block_size": 4096
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,4096,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 4096,
+      "out_block_size": 4096
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,4608,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 3584,
+      "out_block_size": 2304
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,5120,1280,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 1280,
+      "out_block_size": 5120
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,5120,3456,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 3456,
+      "out_block_size": 5120
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,5120,640,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 640,
+      "out_block_size": 5120
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,5120,6912,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 6912,
+      "out_block_size": 5120
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,6144,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 4096,
+      "out_block_size": 6144
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,6912,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 5120,
+      "out_block_size": 6912
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,7168,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 4096,
+      "out_block_size": 1792
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,8192,1024,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 1024,
+      "out_block_size": 8192
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,8192,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 3584,
+      "out_block_size": 8192
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "16384,896,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 2560,
+      "out_block_size": 896
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,1024,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 4096,
+      "out_block_size": 256
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,1024,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 8192,
+      "out_block_size": 256
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,128,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 8192,
+      "out_block_size": 128
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,1280,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 8192,
+      "out_block_size": 256
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,13824,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 5120,
+      "out_block_size": 768
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,14336,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 4096,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,1536,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 1536,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,1536,8960,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 8960,
+      "out_block_size": 768
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,1792,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 5120,
+      "out_block_size": 256
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,17920,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 1536,
+      "out_block_size": 2560
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,2048,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 1536,
+      "out_block_size": 2048
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,28672,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 4096,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,3584,18944,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 512,
+      "out_block_size": 3584
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,3584,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 3584,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,3584,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 8192,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,37888,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 3584,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,4096,14336,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 512,
+      "out_block_size": 4096
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,4096,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 4096,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,4608,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 3584,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,5120,1280,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 1280,
+      "out_block_size": 1280
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,5120,3456,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 3456,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,5120,640,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 640,
+      "out_block_size": 5120
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,5120,6912,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 6912,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,6144,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 4096,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,6912,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 5120,
+      "out_block_size": 768
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,7168,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 8192,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,8192,1024,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 1024,
+      "out_block_size": 8192
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,8192,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 3584,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "2048,896,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 5120,
+      "out_block_size": 896
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,1024,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 4096,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,1024,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 8192,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,128,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 8192,
+      "out_block_size": 128
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,1280,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 2048,
+      "out_block_size": 1280
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,13824,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 512,
+      "out_block_size": 6912
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,14336,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 4096,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,1536,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 1536,
+      "out_block_size": 768
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,1536,8960,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 8960,
+      "out_block_size": 256
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,1792,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 5120,
+      "out_block_size": 896
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,17920,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 1536,
+      "out_block_size": 3584
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,2048,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 1536,
+      "out_block_size": 2048
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,28672,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 4096,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,3584,18944,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 18944,
+      "out_block_size": 256
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,3584,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 3584,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,3584,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 1024,
+      "out_block_size": 3584
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,37888,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 512,
+      "out_block_size": 9472
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,4096,14336,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 2048,
+      "out_block_size": 2048
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,4096,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 4096,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,4608,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 3584,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,5120,1280,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 1280,
+      "out_block_size": 2560
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,5120,3456,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 3456,
+      "out_block_size": 640
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,5120,640,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 640,
+      "out_block_size": 2560
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,5120,6912,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 6912,
+      "out_block_size": 640
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,6144,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 2048,
+      "out_block_size": 2048
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,6912,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 5120,
+      "out_block_size": 768
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,7168,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 8192,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,8192,1024,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 1024,
+      "out_block_size": 2048
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,8192,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 512,
+      "out_block_size": 8192
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "256,896,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 2560,
+      "out_block_size": 896
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,1024,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 4096,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,1024,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 8192,
+      "out_block_size": 256
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,128,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 4096,
+      "out_block_size": 128
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,1280,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 2048,
+      "out_block_size": 1280
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,13824,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 5120,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,14336,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 4096,
+      "out_block_size": 896
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,1536,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 1536,
+      "out_block_size": 768
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,1536,8960,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 1792,
+      "out_block_size": 1536
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,1792,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 2560,
+      "out_block_size": 1792
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,17920,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 1536,
+      "out_block_size": 1792
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,2048,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 1536,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,28672,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 4096,
+      "out_block_size": 896
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,3584,18944,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 18944,
+      "out_block_size": 256
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,3584,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 3584,
+      "out_block_size": 896
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,3584,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 8192,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,37888,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 128,
+      "out_block_size": 37888
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,4096,14336,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 14336,
+      "out_block_size": 256
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,4096,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 4096,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,4608,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 1792,
+      "out_block_size": 1536
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,5120,1280,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 1280,
+      "out_block_size": 2560
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,5120,3456,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 3456,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,5120,640,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 640,
+      "out_block_size": 2560
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,5120,6912,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 6912,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,6144,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 4096,
+      "out_block_size": 768
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,6912,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 5120,
+      "out_block_size": 768
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,7168,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 8192,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,8192,1024,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 256,
+      "out_block_size": 8192
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,8192,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 896,
+      "out_block_size": 4096
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "32,896,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 2560,
+      "out_block_size": 896
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,1024,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 4096,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,1024,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 4096,
+      "in_block_size": 1024,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,128,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 8192,
+      "out_block_size": 128
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,1280,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 8192,
+      "out_block_size": 1280
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,13824,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 5120,
+      "out_block_size": 768
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,14336,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 4096,
+      "out_block_size": 2048
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,1536,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 1536,
+      "out_block_size": 1536
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,1536,8960,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 4480,
+      "out_block_size": 1536
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,1792,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 5120,
+      "out_block_size": 1792
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,17920,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 1536,
+      "out_block_size": 17920
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,2048,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 1536,
+      "out_block_size": 2048
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,28672,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 4096,
+      "out_block_size": 1792
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,3584,18944,int8,int8": {
+    "config": {
+      "batch_block_size": 4096,
+      "in_block_size": 512,
+      "out_block_size": 1792
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,3584,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 4096,
+      "in_block_size": 3584,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,3584,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 8192,
+      "out_block_size": 3584
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,37888,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 3584,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,4096,14336,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 1792,
+      "out_block_size": 4096
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,4096,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 4096,
+      "in_block_size": 4096,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,4608,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 4096,
+      "in_block_size": 3584,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,5120,1280,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 1280,
+      "out_block_size": 5120
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,5120,3456,int8,int8": {
+    "config": {
+      "batch_block_size": 4096,
+      "in_block_size": 3456,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,5120,640,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 640,
+      "out_block_size": 5120
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,5120,6912,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 6912,
+      "out_block_size": 5120
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,6144,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 4096,
+      "in_block_size": 4096,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,6912,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 5120,
+      "out_block_size": 6912
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,7168,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 8192,
+      "out_block_size": 1792
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,8192,1024,int8,int8": {
+    "config": {
+      "batch_block_size": 4096,
+      "in_block_size": 1024,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,8192,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 4096,
+      "in_block_size": 3584,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "4096,896,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 5120,
+      "out_block_size": 896
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,1024,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 2048,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,1024,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 8192,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,128,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 8192,
+      "out_block_size": 128
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,1280,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 8192,
+      "out_block_size": 256
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,13824,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 5120,
+      "out_block_size": 768
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,14336,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 4096,
+      "out_block_size": 896
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,1536,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 1536,
+      "out_block_size": 768
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,1536,8960,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 8960,
+      "out_block_size": 256
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,1792,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 1280,
+      "out_block_size": 1792
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,17920,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 1536,
+      "out_block_size": 1280
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,2048,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 1536,
+      "out_block_size": 2048
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,28672,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 4096,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,3584,18944,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 18944,
+      "out_block_size": 256
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,3584,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 3584,
+      "out_block_size": 1792
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,3584,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 2048,
+      "out_block_size": 3584
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,37888,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 3584,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,4096,14336,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 14336,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,4096,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 4096,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,4608,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 3584,
+      "out_block_size": 768
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,5120,1280,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 1280,
+      "out_block_size": 5120
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,5120,3456,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 3456,
+      "out_block_size": 1280
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,5120,640,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 640,
+      "out_block_size": 2560
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,5120,6912,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 6912,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,6144,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 4096,
+      "out_block_size": 768
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,6912,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 5120,
+      "out_block_size": 768
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,7168,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 4096,
+      "out_block_size": 1792
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,8192,1024,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 1024,
+      "out_block_size": 2048
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,8192,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 3584,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "512,896,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 2560,
+      "out_block_size": 896
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,1024,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 1024,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,1024,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 2048,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,128,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 4096,
+      "out_block_size": 128
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,1280,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 2048,
+      "out_block_size": 1280
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,13824,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 256,
+      "out_block_size": 13824
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,14336,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 512,
+      "out_block_size": 7168
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,1536,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 1536,
+      "out_block_size": 256
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,1536,8960,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 8960,
+      "out_block_size": 256
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,1792,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 5120,
+      "out_block_size": 896
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,17920,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 1536,
+      "out_block_size": 1792
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,2048,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 768,
+      "out_block_size": 2048
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,28672,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 4096,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,3584,18944,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 18944,
+      "out_block_size": 256
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,3584,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 3584,
+      "out_block_size": 896
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,3584,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 8192,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,37888,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 256,
+      "out_block_size": 18944
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,4096,14336,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 14336,
+      "out_block_size": 256
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,4096,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 1024,
+      "out_block_size": 4096
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,4608,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 3584,
+      "out_block_size": 768
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,5120,1280,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 1280,
+      "out_block_size": 2560
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,5120,3456,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 3456,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,5120,640,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 640,
+      "out_block_size": 2560
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,5120,6912,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 6912,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,6144,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 4096,
+      "out_block_size": 1536
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,6912,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 5120,
+      "out_block_size": 768
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,7168,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 8192,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,8192,1024,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 1024,
+      "out_block_size": 2048
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,8192,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 3584,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "64,896,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 2560,
+      "out_block_size": 896
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,1024,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 4096,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,1024,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 8192,
+      "out_block_size": 1024
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,128,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 8192,
+      "out_block_size": 128
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,1280,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 8192,
+      "out_block_size": 1280
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,13824,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 5120,
+      "out_block_size": 1536
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,14336,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 4096,
+      "out_block_size": 1792
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,1536,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 1536,
+      "out_block_size": 1536
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,1536,8960,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 8960,
+      "out_block_size": 1536
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,1792,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 2560,
+      "out_block_size": 1792
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,17920,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 1536,
+      "out_block_size": 17920
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,2048,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 1536,
+      "out_block_size": 2048
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,28672,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 4096,
+      "out_block_size": 1792
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,3584,18944,int8,int8": {
+    "config": {
+      "batch_block_size": 4096,
+      "in_block_size": 512,
+      "out_block_size": 1792
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,3584,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 3584,
+      "out_block_size": 1792
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,3584,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 8192,
+      "out_block_size": 3584
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,37888,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 4096,
+      "in_block_size": 3584,
+      "out_block_size": 512
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,4096,14336,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 3584,
+      "out_block_size": 2048
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,4096,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 4096,
+      "out_block_size": 2048
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,4608,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 3584,
+      "out_block_size": 1536
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,5120,1280,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 1280,
+      "out_block_size": 1280
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,5120,3456,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 3456,
+      "out_block_size": 5120
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,5120,640,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 640,
+      "out_block_size": 5120
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,5120,6912,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 6912,
+      "out_block_size": 5120
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,6144,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 4096,
+      "out_block_size": 6144
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,6912,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 5120,
+      "out_block_size": 6912
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,7168,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "in_block_size": 8192,
+      "out_block_size": 1792
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,8192,1024,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "in_block_size": 1024,
+      "out_block_size": 8192
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,8192,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "in_block_size": 3584,
+      "out_block_size": 4096
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  },
+  "8192,896,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "in_block_size": 5120,
+      "out_block_size": 896
+    },
+    "metadata": {
+      "schema_version": "1.0"
+    },
+    "stats": {}
+  }
+}
