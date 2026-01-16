@@ -16,7 +16,6 @@ steps:
    - label: "PyPI Test Performance benchmarks for meta-llama/Llama-3.1-8B-Instruct"
      key: "pypi_meta-llama_Llama-3_1-8B-Instruct_Benchmark"
      if: build.env("NIGHTLY") == "1"
-     depends_on: "record_verified_commit_hashes"
      agents:
       queue: tpu_v6e_queue
      env:
@@ -34,9 +33,8 @@ steps:
         .buildkite/scripts/run_with_pypi.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
 
    - label: "PyPI Test Performance benchmarks for Qwen/Qwen3-4B"
-     if: build.env("NIGHTLY") == "1"
      key: "pypi_Qwen_Qwen3-4B_Benchmark"
-     depends_on: "record_verified_commit_hashes"
+     if: build.env("NIGHTLY") == "1"
      agents:
       queue: tpu_v6e_queue
      env:

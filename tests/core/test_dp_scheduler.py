@@ -164,9 +164,9 @@ class TestDPScheduler:
                 mock_queue_get_token_1 = MagicMock()
                 mock_queue_get_token_1.get.return_value = 50
                 mock_queue_computed_0 = MagicMock()
-                mock_queue_computed_0.get.return_value = ([], 10)
+                mock_queue_computed_0.get.return_value = 10  # Only cached_tokens, not (blocks, cached_tokens)
                 mock_queue_computed_1 = MagicMock()
-                mock_queue_computed_1.get.return_value = ([], 25)
+                mock_queue_computed_1.get.return_value = 25  # Only cached_tokens, not (blocks, cached_tokens)
 
                 scheduler.output_queues = {
                     (0, "get_token_count"): mock_queue_get_token_0,
@@ -206,9 +206,9 @@ class TestDPScheduler:
                 mock_queue_get_token_1 = MagicMock()
                 mock_queue_get_token_1.get.return_value = 50
                 mock_queue_computed_0 = MagicMock()
-                mock_queue_computed_0.get.return_value = ([], 0)
+                mock_queue_computed_0.get.return_value = 0  # Only cached_tokens, not (blocks, cached_tokens)
                 mock_queue_computed_1 = MagicMock()
-                mock_queue_computed_1.get.return_value = ([], 0)
+                mock_queue_computed_1.get.return_value = 0  # Only cached_tokens, not (blocks, cached_tokens)
 
                 scheduler.output_queues = {
                     (0, "get_token_count"): mock_queue_get_token_0,
@@ -292,7 +292,7 @@ class TestDPScheduler:
                     req_ids=[],
                     resumed_req_ids=[],
                     new_token_ids=[],
-                    all_token_ids=[],
+                    all_token_ids={},
                     new_block_ids=[],
                     num_computed_tokens=[],
                     num_output_tokens=[],
@@ -310,7 +310,7 @@ class TestDPScheduler:
                     req_ids=[],
                     resumed_req_ids=[],
                     new_token_ids=[],
-                    all_token_ids=[],
+                    all_token_ids={},
                     new_block_ids=[],
                     num_computed_tokens=[],
                     num_output_tokens=[],
@@ -369,7 +369,7 @@ class TestDPScheduler:
                     req_ids=["req1"],
                     resumed_req_ids=["req1"],
                     new_token_ids=[[1, 2, 3]],
-                    all_token_ids=[[1, 2, 3, 4, 5]],
+                    all_token_ids={"req1": [1, 2, 3, 4, 5]},
                     new_block_ids=[[10, 11]],
                     num_computed_tokens=[5],
                     num_output_tokens=[3],
@@ -380,7 +380,7 @@ class TestDPScheduler:
                     req_ids=["req2"],
                     resumed_req_ids=[],
                     new_token_ids=[[6, 7]],
-                    all_token_ids=[[6, 7, 8, 9]],
+                    all_token_ids={"req2": [6, 7, 8, 9]},
                     new_block_ids=[[20, 21]],
                     num_computed_tokens=[4],
                     num_output_tokens=[2],
@@ -393,6 +393,10 @@ class TestDPScheduler:
                 assert combined.req_ids == ["req1", "req2"]
                 assert combined.resumed_req_ids == ["req1"]
                 assert combined.new_token_ids == [[1, 2, 3], [6, 7]]
+                assert combined.all_token_ids == {
+                    "req1": [1, 2, 3, 4, 5],
+                    "req2": [6, 7, 8, 9]
+                }
                 assert combined.num_computed_tokens == [5, 4]
                 assert combined.num_output_tokens == [3, 2]
 

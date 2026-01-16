@@ -18,8 +18,6 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
 from vllm.v1 import utils as vllm_utils
-from vllm.v1.core.kv_cache_utils import (get_kv_cache_groups, get_num_blocks,
-                                         get_uniform_page_size)
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
@@ -32,7 +30,6 @@ from tpu_inference.layers.common.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
-from tpu_inference.runner.kv_cache import get_attention_page_size_bytes
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 logger = init_logger(__name__)
@@ -266,7 +263,7 @@ class TPUWorker:
 
     def determine_available_memory(self) -> int:
         gpu_memory_utilization = self.cache_config.gpu_memory_utilization
-        hbm_usage = utils.hbm_usage_bytes(jax.local_devices())
+        hbm_usage = utils.hbm_usage_bytes(self.devices)
         total_hbm_limit = total_hbm_used = 0
         for used, limit in hbm_usage:
             total_hbm_used += used
@@ -393,37 +390,7 @@ class TPUWorker:
         # responsible for this translation. When vLLM can be modified, this
         # method should be changed to return `dict[str, AbstractKVCacheSpec]`,
         # and the vLLM side should be updated to handle the translation.
-        kv_cache_spec = self.model_runner.get_kv_cache_spec()
-
-        if len(kv_cache_spec) == 0:
-            return kv_cache_spec
-
-        # TODO(kyuyeunk): Instead of checking page_size_bytes here, introduce
-        # feature that allows overriding page_size_bytes of KVCacheSpec.
-        vllm_page_size_bytes = get_uniform_page_size(
-            list(kv_cache_spec.values()))
-        attention_page_size_bytes = get_attention_page_size_bytes(
-            self.model_runner.mesh, kv_cache_spec)
-
-        if vllm_page_size_bytes != attention_page_size_bytes:
-            logger.info(
-                f"Page size calculated by vLLM ({vllm_page_size_bytes} Bytes) "
-                f"does not match with actual page size used by the kernel "
-                f"({attention_page_size_bytes} Bytes). Recalculating number of "
-                f"KV blocks using actual page size.")
-
-            kv_cache_groups = get_kv_cache_groups(self.vllm_config,
-                                                  kv_cache_spec)
-            group_size = max(
-                len(group.layer_names) for group in kv_cache_groups)
-            available_memory = self.determine_available_memory()
-            num_blocks = get_num_blocks(self.vllm_config, group_size,
-                                        available_memory,
-                                        attention_page_size_bytes)
-            cache_config = self.vllm_config.cache_config
-            cache_config.num_gpu_blocks_override = num_blocks
-
-        return kv_cache_spec
+        return self.model_runner.get_kv_cache_spec()
 
     def initialize_from_config(
         self,

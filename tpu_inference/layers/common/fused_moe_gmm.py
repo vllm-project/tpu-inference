@@ -125,7 +125,7 @@ def tensor_sharded_gmm_merged_column_parallel(
 ) -> list[jax.Array]:
 
     def _gmm(lhs, rhs, rhs_scale, rhs_bias, group_sizes):
-        m, g, n, k = lhs.shape[0], *rhs.shape
+        m, g, k, n = lhs.shape[0], *rhs.shape
         tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
         return gmm(
             lhs,
@@ -135,7 +135,6 @@ def tensor_sharded_gmm_merged_column_parallel(
             rhs_bias=rhs_bias,
             preferred_element_type=lhs.dtype,
             tiling=(tm, tk, tn),
-            transpose_rhs=True,
             group_offset=jnp.array(0),
         )
 
@@ -148,9 +147,8 @@ def tensor_sharded_gmm_merged_column_parallel(
         _gmm,
         mesh=mesh,
         in_specs=(P(ShardingAxisName.MLP_DATA,
-                    None), P(None, ShardingAxisName.MLP_TENSOR,
-                             None), rhs_scale_spec, rhs_bias_spec,
-                  P(ShardingAxisName.MLP_DATA)),
+                    None), P(None, None, ShardingAxisName.MLP_TENSOR),
+                  rhs_scale_spec, rhs_bias_spec, P(ShardingAxisName.MLP_DATA)),
         out_specs=(P(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR)),
         check_vma=False,
     )(lhs, rhs, rhs_scale, rhs_bias, group_sizes)
@@ -172,7 +170,7 @@ def tensor_sharded_gmm_row_parallel(
 ) -> jax.Array:
 
     def _gmm_all_reduce(lhs, rhs, rhs_scale, rhs_bias, group_sizes):
-        m, g, n, k = lhs.shape[0], *rhs.shape
+        m, g, k, n = lhs.shape[0], *rhs.shape
         tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
         if rhs_bias is not None:
             shard_id = jax.lax.axis_index(ShardingAxisName.MLP_TENSOR).sum()
@@ -185,7 +183,6 @@ def tensor_sharded_gmm_row_parallel(
             rhs_bias=rhs_bias,
             preferred_element_type=lhs.dtype,
             tiling=(tm, tk, tn),
-            transpose_rhs=True,
             group_offset=jnp.array(0),
         )
         return jax.lax.psum(out, axis_name=ShardingAxisName.MLP_TENSOR)
@@ -198,8 +195,9 @@ def tensor_sharded_gmm_row_parallel(
         _gmm_all_reduce,
         mesh=mesh,
         in_specs=(P(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR),
-                  P(None, None, ShardingAxisName.MLP_TENSOR), rhs_scale_spec,
-                  rhs_bias_spec, P(ShardingAxisName.MLP_DATA)),
+                  P(None, ShardingAxisName.MLP_TENSOR,
+                    None), rhs_scale_spec, rhs_bias_spec,
+                  P(ShardingAxisName.MLP_DATA)),
         out_specs=(P(ShardingAxisName.MLP_DATA)),
         check_vma=False,
     )(lhs, rhs, rhs_scale, rhs_bias, group_sizes)
@@ -223,7 +221,7 @@ def expert_sharded_gmm(
     group_offset = jnp.arange(0, num_experts, num_experts_per_shard)
 
     def _gmm(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset):
-        m, g, n, k = lhs.shape[0], *rhs.shape
+        m, g, k, n = lhs.shape[0], *rhs.shape
         tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
 
         gmm_res = gmm(
@@ -234,7 +232,6 @@ def expert_sharded_gmm(
             group_sizes=group_sizes,
             preferred_element_type=lhs.dtype,
             tiling=(tm, tk, tn),
-            transpose_rhs=True,
             group_offset=group_offset[0],
         )
         return gmm_res
@@ -398,7 +395,7 @@ def fused_moe_func(
         Output of moe operation [num_tokens, hidden_size]
     """
     num_tokens, hidden_size = hidden_states.shape
-    global_num_experts, _, padded_hidden_size = w1.shape
+    global_num_experts, padded_hidden_size, _ = w1.shape
     dtype = hidden_states.dtype
 
     assert (num_tokens * topk) % 16 == 0, (

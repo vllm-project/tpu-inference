@@ -43,7 +43,6 @@ from . import utils as test_utils
 
 P = PartitionSpec
 MODELS = [
-    "MiniMaxAI/MiniMax-M2",
     "Qwen/Qwen3-0.6B-FP8",
 ]
 

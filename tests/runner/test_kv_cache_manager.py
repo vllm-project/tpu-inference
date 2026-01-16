@@ -19,11 +19,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
-from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, VllmConfig)
 from vllm.sampling_params import SamplingType
+from vllm.v1.attention.backend import AttentionType
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheTensor,
                                         MLAAttentionSpec, SlidingWindowSpec)
@@ -31,6 +31,7 @@ from vllm.v1.request import Request
 
 from tpu_inference import utils as common_utils
 from tpu_inference.runner.input_batch import CachedRequestState
+from tpu_inference.runner.kv_cache import get_attention_page_size_bytes
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
@@ -269,19 +270,28 @@ class TestKVCacheManager:
 
         kv_cache_spec = self.runner.get_kv_cache_spec()
 
+        block_size = self.runner.vllm_config.cache_config.block_size
+        num_kv_heads = common_utils.get_padded_num_heads(
+            num_kv_heads, self.runner.mesh.shape["model"])
+        head_size = common_utils.get_padded_head_dim(head_size)
+
         expected_full_attn_spec = FullAttentionSpec(
-            block_size=self.runner.vllm_config.cache_config.block_size,
-            num_kv_heads=common_utils.get_padded_num_heads(
-                num_kv_heads, self.runner.mesh.shape["model"]),
-            head_size=common_utils.get_padded_head_dim(head_size),
-            dtype=torch.bfloat16)
-        expected_sliding_window_spec = SlidingWindowSpec(
-            block_size=self.runner.vllm_config.cache_config.block_size,
-            num_kv_heads=common_utils.get_padded_num_heads(
-                num_kv_heads, self.runner.mesh.shape["model"]),
-            head_size=common_utils.get_padded_head_dim(head_size),
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
             dtype=torch.bfloat16,
-            sliding_window=sliding_window)
+            page_size_padded=get_attention_page_size_bytes(
+                self.runner.mesh, block_size, num_kv_heads, head_size,
+                self.runner.kv_cache_dtype, False))
+        expected_sliding_window_spec = SlidingWindowSpec(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=torch.bfloat16,
+            sliding_window=sliding_window,
+            page_size_padded=get_attention_page_size_bytes(
+                self.runner.mesh, block_size, num_kv_heads, head_size,
+                self.runner.kv_cache_dtype, False))
         assert len(kv_cache_spec) == 20
         for i in range(10):
             assert kv_cache_spec[f'layer.{i}'] == expected_full_attn_spec
@@ -342,12 +352,18 @@ class TestKVCacheManager:
         kv_cache_spec = self.runner.get_kv_cache_spec()
 
         assert len(kv_cache_spec) == num_layers
+        block_size = self.runner.vllm_config.cache_config.block_size
+        num_kv_heads = common_utils.get_padded_num_heads(
+            num_kv_heads, self.runner.mesh.shape["model"])
+        head_size = common_utils.get_padded_head_dim(head_size)
         expected_full_attn_spec = FullAttentionSpec(
-            block_size=self.runner.vllm_config.cache_config.block_size,
-            num_kv_heads=common_utils.get_padded_num_heads(
-                num_kv_heads, self.runner.mesh.shape["model"]),
-            head_size=common_utils.get_padded_head_dim(head_size),
-            dtype=torch.bfloat16)
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=torch.bfloat16,
+            page_size_padded=get_attention_page_size_bytes(
+                self.runner.mesh, block_size, num_kv_heads, head_size,
+                self.runner.kv_cache_dtype, False))
         for i in range(num_layers):
             assert kv_cache_spec[f'layer.{i}'] == expected_full_attn_spec
         assert len(self.runner.kv_cache_manager.shared_kv_cache_layers) == 0
