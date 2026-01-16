@@ -16,7 +16,7 @@
 
 # This script runs the lm_eval model accuracy test and checks the results against a threshold.
 
-set -e # Exit immediately if a command exits with a non-zero status.
+set -ex # Exit immediately if a command exits with a non-zero status.
 
 # Function to display usage
 usage() {
