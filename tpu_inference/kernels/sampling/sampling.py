@@ -8,7 +8,7 @@ import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.kernels.sampling.top_p_and_sample import top_p_and_sample
+from tpu_inference.kernels.sampling.top_p_and_sample import top_p_and_sample, _top_p_and_sample
 from tpu_inference.kernels.sampling.divide_and_filter_topk import top_bounded_k
 from tpu_inference.kernels.sampling.bitonic_topk import bitonic_topk
 
@@ -137,7 +137,7 @@ def topk_topp_and_sample_shmap(
     # Pass global sharded axis offset to maintain jax.random.categorical sampled values
     dim0_offset = jax.lax.axis_index(batch_axis) * topk_logits.shape[0]
     vocab_size=logits.shape[1] * jax.lax.axis_size(vocab_axis)
-    return top_p_and_sample(
+    return _top_p_and_sample(
       topk_logits,
       topk_idxs,
       rng_key,
