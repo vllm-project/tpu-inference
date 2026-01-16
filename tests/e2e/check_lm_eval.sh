@@ -80,8 +80,8 @@ echo "Evaluation output:"
 echo "$output"
 
 # Thresholds
-flex_threshold=0.87
-strict_threshold=0.72
+flex_threshold=0.99
+strict_threshold=0.99
 
 flex_score=$(echo "$output" | grep "flexible-extract" | awk -F'|' '{print $8}' | xargs)
 strict_score=$(echo "$output" | grep "strict-match" | awk -F'|' '{print $8}' | xargs)
