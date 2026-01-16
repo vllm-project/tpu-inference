@@ -37,7 +37,7 @@ from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
 from tpu_inference.layers.jax.moe.deepseek_v3_moe import DeepSeekV3Router
 from tpu_inference.layers.jax.moe.moe import MoE
-from tpu_inference.layers.jax.moe.utils import select_moe_backend
+from tpu_inference.layers.jax.moe.utils import select_moe_backend, MoEBackend
 from tpu_inference.layers.jax.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
 from tpu_inference.logger import init_logger
@@ -547,43 +547,44 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                             up_w, up_s = stacked_tensors.pop(layer_num + "up_proj")
                             down_w, down_s = stacked_tensors.pop(layer_num + "down_proj")
                             
-                            is_moe_kernel = model_for_loading.use_moe_kernel
-                            
+                            is_moe_kernel = model_for_loading.moe_backend in [
+                                MoEBackend.FUSED_MOE, MoEBackend.VLLM_MOE
+                            ]
+                            gate_name = loaded_name.replace(proj_type, "gate_proj")
+                            up_name   = loaded_name.replace(proj_type, "up_proj")
+                            down_name = loaded_name.replace(proj_type, "down_proj")
                             if is_moe_kernel:
                                 # (E, D, F) -> (E, 2, D, F)
                                 fused_w = torch.stack([gate_w, up_w], dim=1)
                                 fused_s = torch.stack([gate_s, up_s], dim=1) if gate_s is not None and up_s is not None else None
                                 
-                                fused_name = f"model.layers.{layer_num}.mlp.experts.0.gate_upproj_fused.weight"
-                                w_bytes, w_shards = self._load_individual_weight(
+                                fused_name = loaded_name.replace(proj_type, "gate_upproj_fused")
+                                weight_bytes, weight_shards = self._load_individual_weight(
                                     fused_name, fused_w, model_params, model_for_loading.mesh, scale=fused_s)
                                 
-                                w_bytes_down, w_shards_down = self._load_individual_weight(
+                                weight_bytes_down, weight_shards_down = self._load_individual_weight(
                                     loaded_name, down_w, model_params, model_for_loading.mesh, scale=down_s)
                                 
                                 # Update cumulative memory
-                                w_bytes += w_bytes_down
-                                w_shards += w_shards_down
+                                weight_bytes += weight_bytes_down
+                                weight_shards += weight_shards_down
                                 
                             else:
-                                w_bytes, w_shards = self._load_individual_weight(
-                                    loaded_name, gate_w, model_params, model_for_loading.mesh, scale=gate_s)
+
+                                weight_bytes, weight_shards = self._load_individual_weight(
+                                    gate_name, gate_w, model_params, model_for_loading.mesh, scale=gate_s)
                                 
-                                w_bytes_up, w_shards_up = self._load_individual_weight(
-                                    loaded_name, up_w, model_params, model_for_loading.mesh, scale=up_s)
-                                w_bytes += w_bytes_up
-                                w_shards += w_shards_up
+                                weight_bytes_up, weight_shards_up = self._load_individual_weight(
+                                    up_name, up_w, model_params, model_for_loading.mesh, scale=up_s)
+                                weight_bytes += weight_bytes_up
+                                weight_shards += weight_shards_up
                                 
-                                w_bytes_down, w_shards_down = self._load_individual_weight(
-                                    loaded_name, down_w, model_params, model_for_loading.mesh, scale=down_s)
-                                w_bytes += w_bytes_down
-                                w_shards += w_shards_down
-                        weight_bytes, weight_shards = self._load_individual_weight(
-                            loaded_name,
-                            stacked_weights,
-                            model_params,
-                            model_for_loading.mesh,
-                            scale=stacked_scales)
+                                weight_bytes_down, weight_shards_down = self._load_individual_weight(
+                                    down_name, down_w, model_params, model_for_loading.mesh, scale=down_s)
+                                weight_bytes += weight_bytes_down
+                                weight_shards += weight_shards_down
+                        else:
+                            continue
                         if self.is_verbose:
                             cumulative_global_memory += weight_bytes
                             cumulative_local_memory += weight_shards
@@ -593,6 +594,8 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                             logger.info(
                                 f"Cumulative local memory: {cumulative_local_memory} GB"
                             )
+                    else:
+                        continue
                 else:
                     if self.use_mla_kernel and "kv_b_proj" in loaded_name:
                         # loaded_weight shape: (num_heads * (d_k + d_v), kv_lora_rank)
