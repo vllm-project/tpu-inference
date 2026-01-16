@@ -187,6 +187,10 @@ def test_get_jax_dtype_from_str_dtype():
     """
     Test the get_jax_dtype_from_str_dtype function
     """
+    assert get_jax_dtype_from_str_dtype("int8") == jnp.int8
+    assert get_jax_dtype_from_str_dtype("bfloat16") == jnp.bfloat16
+    assert get_jax_dtype_from_str_dtype("fp8") == jnp.float8_e4m3fn
+    assert get_jax_dtype_from_str_dtype("fp8_e4m3") == jnp.float8_e4m3fn
     assert get_jax_dtype_from_str_dtype("fp8_e5m2") == jnp.float8_e5m2
 
 
