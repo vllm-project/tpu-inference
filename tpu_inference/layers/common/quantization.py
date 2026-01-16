@@ -165,6 +165,39 @@ def dequantize_tensor_from_mxfp4_packed(
     )
 
 
+def pad_and_dequantize_tensor(
+    tensor_q: jax.Array,
+    scale: jax.Array,
+    axis: tuple[int, ...],
+    block_size: tuple[int, ...],
+    out_dtype: jnp.dtype = jnp.bfloat16,
+) -> jax.Array:
+    """Pad tensor to align with scale dimensions, dequantize, then slice back.
+    
+    Some models (e.g., DeepSeek V3) store weights that were padded during
+    quantization, then trimmed.
+    
+    Args:        
+        tensor_q: Quantized tensor (may be smaller than scale implies).
+        scale: Quantization scale.
+        axis: Axes that were quantized.
+        block_size: Block size used during quantization (e.g., (128, 128)).
+        out_dtype: Dtype of the output.
+
+    Returns:
+        Dequantized tensor with original (unpadded) shape.
+    """
+    orig_shape = tensor_q.shape
+
+    pad_width = [[0, 0] for _ in range(tensor_q.ndim)]
+    for ax, bs in zip(axis, block_size):
+        pad_width[ax][1] = scale.shape[ax] * bs - tensor_q.shape[ax]
+
+    tensor = dequantize_tensor(jnp.pad(tensor_q, pad_width), scale, axis,
+                               out_dtype)
+    return tensor[tuple(slice(0, dim_size) for dim_size in orig_shape)]
+
+
 def quantize_tensor(
     dtype: jnp.dtype,
     tensor: jax.Array,
