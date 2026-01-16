@@ -37,10 +37,10 @@ def _get_tuning_file_path(device_name: str) -> str:
     if "lite" in norm_name:
         norm_name = "tpu_v5e"
 
-    # Assume data is in tpu_inference/kernels/tuned_data/rpa/
+    # Assume data is in tpu_inference/kernels/tuned_data/ragged_paged_attention/v3/
     # Use pathlib for robust resolution relative to this file
     # file: tpu_inference/kernels/ragged_paged_attention/v3/tuned_block_sizes.py
-    # target: tpu_inference/kernels/tuned_data/rpa/{norm_name}.json
+    # target: tpu_inference/kernels/tuned_data/ragged_paged_attention/v3/{norm_name}.json
     base_path = pathlib.Path(__file__).parent.resolve()
     # Go up from v3 -> rag_paged_att -> kernels -> tuned_data -> rpa
     data_dir = base_path.parent.parent / "tuned_data" / "ragged_paged_attention" / "v3"

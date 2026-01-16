@@ -435,7 +435,7 @@ def tune_rpa(
     norm_name = utils.get_registry_file_name(tpu_version)
 
     print(
-        f"\n[Output for tpu-inference/kernels/tuned_data/rpa/{norm_name}.json]:"
+        f"\n[Output for tpu-inference/kernels/tuned_data/ragged_paged_attention/v3/{norm_name}.json]:"
     )
 
     # Ensure top-level keys (page_size) are strings for JSON
@@ -445,7 +445,8 @@ def tune_rpa(
     if update_registry:
         base_dir = os.path.dirname(os.path.dirname(
             os.path.dirname(__file__)))  # tpu_inference/
-        data_dir = os.path.join(base_dir, "kernels/tuned_data/rpa")
+        data_dir = os.path.join(
+            base_dir, "kernels/tuned_data/ragged_paged_attention/v3")
         target_file = os.path.join(data_dir, f"{norm_name}.json")
 
         console.print(f"[bold]Updating registry at {target_file}...[/bold]")
