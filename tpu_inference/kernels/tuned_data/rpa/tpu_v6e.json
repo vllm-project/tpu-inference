@@ -2249,21 +2249,26 @@
             "schema_version": "1.0"
           },
           "stats": {
-            "compile_time_s": 0.3727099059615284,
-            "latency_avg_ns": 501660.0,
+            "compile_time_s": 0.37352737598121166,
+            "latency_avg_ns": 1007740.0,
             "latency_std_ns": 0.0,
-            "lower_time_s": 0.5772033340763301
+            "lower_time_s": 0.5822098930366337
           }
         },
         "max_model_len-2048-sw-None": {
           "config": {
             "num_kv_pages_per_block": 16,
-            "num_q_per_block": 64
+            "num_q_per_block": 128
           },
           "metadata": {
             "schema_version": "1.0"
           },
-          "stats": {}
+          "stats": {
+            "compile_time_s": 13.131879896856844,
+            "latency_avg_ns": 1552010.0,
+            "latency_std_ns": 0.0,
+            "lower_time_s": 0.5894636840093881
+          }
         },
         "max_model_len-256-sw-None": {
           "config": {
@@ -3112,22 +3117,32 @@
         "max_model_len-128-sw-None": {
           "config": {
             "num_kv_pages_per_block": 1,
-            "num_q_per_block": 8
+            "num_q_per_block": 32
           },
           "metadata": {
             "schema_version": "1.0"
           },
-          "stats": {}
+          "stats": {
+            "compile_time_s": 1.8642655001021922,
+            "latency_avg_ns": 3528230.0,
+            "latency_std_ns": 0.0,
+            "lower_time_s": 1.2811242160387337
+          }
         },
         "max_model_len-2048-sw-None": {
           "config": {
-            "num_kv_pages_per_block": 4,
-            "num_q_per_block": 8
+            "num_kv_pages_per_block": 2,
+            "num_q_per_block": 128
           },
           "metadata": {
             "schema_version": "1.0"
           },
-          "stats": {}
+          "stats": {
+            "compile_time_s": 7.32762835198082,
+            "latency_avg_ns": 6452510.0,
+            "latency_std_ns": 0.0,
+            "lower_time_s": 1.3080437660682946
+          }
         },
         "max_model_len-256-sw-None": {
           "config": {
@@ -3333,17 +3348,27 @@
           "metadata": {
             "schema_version": "1.0"
           },
-          "stats": {}
+          "stats": {
+            "compile_time_s": 0.98454031907022,
+            "latency_avg_ns": 1015380.0,
+            "latency_std_ns": 0.0,
+            "lower_time_s": 0.48242907505482435
+          }
         },
         "max_model_len-2048-sw-None": {
           "config": {
-            "num_kv_pages_per_block": 16,
-            "num_q_per_block": 32
+            "num_kv_pages_per_block": 8,
+            "num_q_per_block": 64
           },
           "metadata": {
             "schema_version": "1.0"
           },
-          "stats": {}
+          "stats": {
+            "compile_time_s": 7.115774883888662,
+            "latency_avg_ns": 1942700.0,
+            "latency_std_ns": 0.0,
+            "lower_time_s": 0.5389481040183455
+          }
         },
         "max_model_len-256-sw-None": {
           "config": {
@@ -6910,6 +6935,50 @@
             "schema_version": "1.0"
           },
           "stats": {}
+        }
+      }
+    }
+  },
+  "16": {
+    "q_bfloat16_kv_bfloat16": {
+      "q_head-64_kv_head-32_head-128": {
+        "max_model_len-1024-sw-None": {
+          "config": {
+            "num_kv_pages_per_block": 32,
+            "num_q_per_block": 32
+          },
+          "stats": {
+            "compile_time_s": 5.4396930111106485,
+            "latency_avg_ns": 2355260.0,
+            "latency_std_ns": 0.0,
+            "lower_time_s": 1.6904528809245676
+          }
+        },
+        "max_model_len-2048-sw-None": {
+          "config": {
+            "num_kv_pages_per_block": 32,
+            "num_q_per_block": 32
+          },
+          "stats": {
+            "compile_time_s": 2.8395975991152227,
+            "latency_avg_ns": 2926200.0,
+            "latency_std_ns": 0.0,
+            "lower_time_s": 1.6051886030472815
+          }
+        }
+      },
+      "q_head-64_kv_head-8_head-256": {
+        "max_model_len-8192-sw-None": {
+          "config": {
+            "num_kv_pages_per_block": 32,
+            "num_q_per_block": 32
+          },
+          "stats": {
+            "compile_time_s": 3.5545022620353848,
+            "latency_avg_ns": 21097680.0,
+            "latency_std_ns": 0.0,
+            "lower_time_s": 0.6962532917968929
+          }
         }
       }
     }

@@ -343,17 +343,17 @@
   "128,128,8192,int8,int8": {
     "config": {
       "batch_block_size": 128,
-      "in_block_size": 1024,
+      "in_block_size": 4096,
       "out_block_size": 128
     },
     "metadata": {
       "schema_version": "1.0"
     },
     "stats": {
-      "compile_time_s": 0.11525416909717023,
-      "latency_avg_ns": 78540.0,
+      "compile_time_s": 0.28989724698476493,
+      "latency_avg_ns": 71230.0,
       "latency_std_ns": 0.0,
-      "lower_time_s": 0.019450699910521507
+      "lower_time_s": 0.019600080093368888
     }
   },
   "128,1280,8192,int8,int8": {
@@ -444,6 +444,19 @@
     },
     "stats": {}
   },
+  "128,2560,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 1280,
+      "out_block_size": 2560
+    },
+    "stats": {
+      "compile_time_s": 0.7280679021496326,
+      "latency_avg_ns": 160560.0,
+      "latency_std_ns": 0.0,
+      "lower_time_s": 0.020848209969699383
+    }
+  },
   "128,28672,4096,int8,int8": {
     "config": {
       "batch_block_size": 128,
@@ -519,7 +532,12 @@
     "metadata": {
       "schema_version": "1.0"
     },
-    "stats": {}
+    "stats": {
+      "compile_time_s": 0.24398198793642223,
+      "latency_avg_ns": 158480.0,
+      "latency_std_ns": 0.0,
+      "lower_time_s": 0.016273929039016366
+    }
   },
   "128,4608,3584,int8,int8": {
     "config": {
@@ -763,6 +781,19 @@
     },
     "stats": {}
   },
+  "16,2560,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 1024,
+      "out_block_size": 1280
+    },
+    "stats": {
+      "compile_time_s": 0.1371432989835739,
+      "latency_avg_ns": 157870.0,
+      "latency_std_ns": 0.0,
+      "lower_time_s": 0.020720200147479773
+    }
+  },
   "16,28672,4096,int8,int8": {
     "config": {
       "batch_block_size": 16,
@@ -832,13 +863,18 @@
   "16,4096,4096,int8,int8": {
     "config": {
       "batch_block_size": 16,
-      "in_block_size": 4096,
-      "out_block_size": 1024
+      "in_block_size": 256,
+      "out_block_size": 4096
     },
     "metadata": {
       "schema_version": "1.0"
     },
-    "stats": {}
+    "stats": {
+      "compile_time_s": 0.1345289689488709,
+      "latency_avg_ns": 159050.0,
+      "latency_std_ns": 0.0,
+      "lower_time_s": 0.020188769092783332
+    }
   },
   "16,4608,3584,int8,int8": {
     "config": {
@@ -2039,6 +2075,19 @@
     },
     "stats": {}
   },
+  "32,2560,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 1280,
+      "out_block_size": 2560
+    },
+    "stats": {
+      "compile_time_s": 0.3204505071043968,
+      "latency_avg_ns": 159430.0,
+      "latency_std_ns": 0.0,
+      "lower_time_s": 0.01979359914548695
+    }
+  },
   "32,28672,4096,int8,int8": {
     "config": {
       "batch_block_size": 32,
@@ -2108,13 +2157,18 @@
   "32,4096,4096,int8,int8": {
     "config": {
       "batch_block_size": 32,
-      "in_block_size": 4096,
-      "out_block_size": 1024
+      "in_block_size": 512,
+      "out_block_size": 2048
     },
     "metadata": {
       "schema_version": "1.0"
     },
-    "stats": {}
+    "stats": {
+      "compile_time_s": 0.13844158919528127,
+      "latency_avg_ns": 159210.0,
+      "latency_std_ns": 0.0,
+      "lower_time_s": 0.019967130152508616
+    }
   },
   "32,4608,3584,int8,int8": {
     "config": {
@@ -2996,6 +3050,19 @@
     },
     "stats": {}
   },
+  "64,2560,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 1280,
+      "out_block_size": 1280
+    },
+    "stats": {
+      "compile_time_s": 0.25217080814763904,
+      "latency_avg_ns": 157950.0,
+      "latency_std_ns": 0.0,
+      "lower_time_s": 0.02153536886908114
+    }
+  },
   "64,28672,4096,int8,int8": {
     "config": {
       "batch_block_size": 64,
@@ -3066,12 +3133,17 @@
     "config": {
       "batch_block_size": 64,
       "in_block_size": 1024,
-      "out_block_size": 4096
+      "out_block_size": 1024
     },
     "metadata": {
       "schema_version": "1.0"
     },
-    "stats": {}
+    "stats": {
+      "compile_time_s": 0.17275318806059659,
+      "latency_avg_ns": 158460.0,
+      "latency_std_ns": 0.0,
+      "lower_time_s": 0.02125569013878703
+    }
   },
   "64,4608,3584,int8,int8": {
     "config": {
