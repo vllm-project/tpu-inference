@@ -1,4 +1,5 @@
-#!/bin/sh
+#!/bin/bash
+
 # Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -54,8 +55,6 @@
 # echo "=== End of Diagnostics ==="
 # # --- Buildkite CLI Diagnostic Section End ---
 
-
-#!/bin/bash
 set -e
 
 IMAGE_NAME="validate-yml-test"
@@ -116,16 +115,26 @@ fi
 
 echo "--- 3. Running Container and verifying bk CLI"
 # Execute 'bk configure' inside the container followed by a verification command
-docker run --rm \
+# docker run --rm \
+#   -e BK_TOKEN="$AGENT_TOKEN" \
+#   -e BK_ORG="$ORG_SLUG" \
+#   "$IMAGE_NAME" \
+#   bash -c "
+#     echo 'Configuring bk CLI...'
+#     bk configure --org \"\$BK_ORG\" --token \"\$BK_TOKEN\"
+    
+#     echo 'Verifying connection (executing: bk agent list)...'
+#     bk agent list --limit 1
+#   "
+
+# echo "--- ✅ Test sequence completed"
+
+docker run \
+  --privileged \
+  --net host \
+  --shm-size=16G \
+  --rm \
   -e BK_TOKEN="$AGENT_TOKEN" \
   -e BK_ORG="$ORG_SLUG" \
   "$IMAGE_NAME" \
-  bash -c "
-    echo 'Configuring bk CLI...'
-    bk configure --org \"\$BK_ORG\" --token \"\$BK_TOKEN\"
-    
-    echo 'Verifying connection (executing: bk agent list)...'
-    bk agent list --limit 1
-  "
-
-echo "--- ✅ Test sequence completed"
+  "$@"

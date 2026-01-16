@@ -16,4 +16,7 @@ RUN mkdir -p /etc/apt/keyrings && \
     apt-get update && apt-get install -y bk && \
     rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+WORKDIR /workspace/tpu_inference
+COPY . .
+
+CMD ["/bin/bash"]

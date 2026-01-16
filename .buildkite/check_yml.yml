@@ -17,4 +17,4 @@ steps:
      agents:
         queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
      commands:
-       - bash .buildkite/scripts/check_yml_syntax.sh
+       - .buildkite/scripts/check_yml_syntax.sh bash /workspace/tpu_inference/.buildkite/scripts/validate_all_pipelines.sh
