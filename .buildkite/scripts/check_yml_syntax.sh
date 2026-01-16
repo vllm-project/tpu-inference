@@ -104,7 +104,8 @@ docker build --no-cache -f docker/Dockerfile.validateyml -t "${IMAGE_NAME}" .
 echo "--- 2. Extracting Token from Agent configuration"
 # sudo is required because /etc/buildkite-agent/ is usually restricted to root
 if [ -f /etc/buildkite-agent/buildkite-agent.cfg ]; then
-    AGENT_TOKEN=$(sudo grep '^token=' /etc/buildkite-agent/buildkite-agent.cfg | cut -d'"' -f2)
+    ls -l /etc/buildkite-agent/buildkite-agent.cfg
+    AGENT_TOKEN=$(grep '^token=' /etc/buildkite-agent/buildkite-agent.cfg | cut -d'"' -f2)
     echo "✅ Token extracted successfully (Prefix: ${AGENT_TOKEN:0:4}...)"
 else
     echo "❌ Configuration file not found. Please check the path."
