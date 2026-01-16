@@ -93,7 +93,7 @@ def topk_topp_and_sample_shmap(
   Returns:
     Sampled token indices.
   """
-  batch_axis, vocab_axis = (ShardingAxisName.MLP_DATA, ShardingAxisName.VOCAB)
+  batch_axis, vocab_axis = (ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR)
   def shmap_topk(logits, k):
     topk_logits, topk_idxs = top_bounded_k(
       logits,
