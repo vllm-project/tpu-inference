@@ -46,7 +46,7 @@ fi
 # Benchmark/Serve Settings
 MAX_MODEL_LEN=4096
 MAX_BATCHED_TOKENS=4096
-NUM_PROMPTS=50
+NUM_PROMPTS=500
 OUTPUT_LEN_OVERRIDE=20 # Max tokens to generate for safety classification.
 
 # --- DATA PATHS ---
@@ -161,10 +161,9 @@ from pathlib import Path
 
 # The path to the processed_questions directory
 questions_dir = Path('$MM_SAFETYBENCH_DIR') / 'data' / 'processed_questions'
-image_dir = Path('$MM_SAFETYBENCH_IMAGE_DIR')
+image_dir = Path('$MM_SAFETYBENCH_IMAGE_DIR') / 'MM-SafetyBench(imgs)'
 output_file = Path('/tmp/mm_safety_bench.jsonl')
 num_prompts = int(os.environ['NUM_PROMPTS'])
-print('This is num_prompts: , ', num_prompts)
 
 with output_file.open('w') as f:
     for json_file in sorted(questions_dir.glob('*.json')):
@@ -261,8 +260,8 @@ run_multimodal_performance_benchmark() {
     # Server startup
     (vllm serve "$MODEL_NAME" \
         --tensor-parallel-size "$TP_SIZE" \
-        --max-model-len="$MAX_MODEL_LEN" \
-        --max-num-batched-tokens="$MAX_BATCHED_TOKENS" \
+        --max-model-len "$MAX_MODEL_LEN" \
+        --max-num-batched-tokens "$MAX_BATCHED_TOKENS" \
         --limit-mm-per-prompt '{"image": 1}' \
         --mm-processor-kwargs '{"max_pixels": 1003520}' \
         --disable-chunked-mm-input \
