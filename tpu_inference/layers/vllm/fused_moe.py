@@ -72,11 +72,19 @@ def fused_moe_apply(
             case FusedMoEBackend.FUSED_MOE:
                 subc_quant_w1_sz = None
                 subc_quant_w2_sz = None
-                if layer.moe_quant_config.per_out_ch_quant or layer.moe_quant_config.is_block_quantized:
+                if weights.w13_weight_scale is not None and weights.w2_weight_scale is not None:
                     padded_hidden_size = weights.w13_weight.shape[-2]
-                    subc_quant_w1_sz = padded_hidden_size
+                    # NB: w13_weight_scale: (num_experts, 2, hidden_size // subc_quant_w1_sz, 1, intermediate_size)
+                    assert padded_hidden_size % weights.w13_weight_scale.shape[
+                        2] == 0
+                    subc_quant_w1_sz = padded_hidden_size // weights.w13_weight_scale.shape[
+                        2]
                     intermediate_size = weights.w13_weight.shape[-1]
-                    subc_quant_w2_sz = intermediate_size
+                    # NB: w2_weight_scale: (num_experts, intermediate_size // subc_quant_w2_sz, 1, hidden_size)
+                    assert intermediate_size % weights.w2_weight_scale.shape[
+                        1] == 0
+                    subc_quant_w2_sz = intermediate_size // weights.w2_weight_scale.shape[
+                        1]
 
                 actual_hidden_size = x.shape[-1]
                 padding_size = weights.w13_weight.shape[-2] - actual_hidden_size
