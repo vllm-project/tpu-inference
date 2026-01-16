@@ -30,7 +30,7 @@ while IFS= read -r file; do
     echo "Validating: $file"
     ((TOTAL++))
 
-    if bk pipeline validate "$file"; then
+    if bk pipeline validate -f "$file"; then
         echo "✅ [PASSED] $file"
     else
         echo "❌ [FAILED] $file"
