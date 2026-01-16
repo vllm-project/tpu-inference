@@ -185,12 +185,16 @@ class TestLlamaGuard4WeightLoader:
 
     @pytest.fixture
     def weight_loader(self):
-        return LlamaGuard4WeightLoader(
-            vllm_config=MockVllmConfig("test-model"),
-            hidden_size=5120,
-            attn_heads=40,
-            num_key_value_heads=8,
-            attn_head_dim=128)
+        with patch(
+            "tpu_inference.models.jax.utils.weight_utils.model_weights_generator",
+            return_value=[]
+        ):
+            return LlamaGuard4WeightLoader(
+                vllm_config=MockVllmConfig("test-model"),
+                hidden_size=5120,
+                attn_heads=40,
+                num_key_value_heads=8,
+                attn_head_dim=128)
 
     @pytest.mark.parametrize("hf_key, expected", [
         ("language_model.model.layers.15.self_attn.q_proj.weight",
@@ -214,10 +218,14 @@ class TestLlamaGuard4WeightLoader:
         vllm_config = MockVllmConfig(model_name="llama-guard-4-small-test",
                                      random_weights=False)
 
-        model = LlamaGuard4ForCausalLM(vllm_config, rng, mesh)
+        with patch(
+            "tpu_inference.models.jax.utils.weight_utils.model_weights_generator",
+            return_value=[]
+        ):
+            model = LlamaGuard4ForCausalLM(vllm_config, rng, mesh)
 
-        hidden_size = 5120
-        vocab_size = 202048
+        hidden_size = 128
+        vocab_size = 1024
 
         original_weight = jnp.ones((vocab_size, hidden_size))
         dummy_weights = [

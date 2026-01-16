@@ -23,6 +23,7 @@ import torch
 from flax import nnx
 from jax.sharding import Mesh
 from vllm.config import ModelConfig
+import os
 
 # Assuming the model file is named deepseek_v3.py
 from tpu_inference.models.jax.deepseek_v3 import (DeepSeekV3,
@@ -121,15 +122,19 @@ class TestDeepSeekV3:
             # Check a layer norm (should be 1s usually, but check existence)
             assert model.final_norm.scale.value.shape == (7168, )
 
-    @patch("tpu_inference.models.jax.deepseek_v3.DeepSeekV3WeightLoader")
-    def test_load_weights_called(self, mock_loader_cls, mock_config, rng,
-                                 mesh):
+    @patch("tpu_inference.models.jax.deepseek_v3.DeepSeekV3.WeightLoader")
+    @patch(
+        "tpu_inference.models.jax.utils.weight_utils.model_weights_generator",
+        return_value=[],
+    )
+    def test_load_weights_called(
+        self, mock_weights_generator, mock_loader_cls, mock_config, rng, mesh
+    ):
         model = DeepSeekV3(mock_config, rng, mesh)
-        mock_loader_instance = mock_loader_cls.return_value
 
         model.load_weights(rng)
 
-        mock_loader_instance.load_weights.assert_called_once_with(model)
+        model.weight_loader.load_weights.assert_called_once_with(model)
 
 
 class TestDeepSeekV3WeightLoader:
@@ -138,7 +143,7 @@ class TestDeepSeekV3WeightLoader:
     def loader(self, mock_config):
         # We need to mock the generator so it doesn't try to download files
         with patch(
-                "tpu_inference.models.jax.deepseek_v3.model_weights_generator",
+                "tpu_inference.models.jax.utils.weight_utils.model_weights_generator",
                 return_value=[]):
             return DeepSeekV3WeightLoader(vllm_config=mock_config,
                                           num_layers=2,
@@ -226,6 +231,11 @@ class TestDeepSeekV3WeightLoader:
             assert k_weight.shape == (2, 4, 8)
             assert v_weight.shape == (2, 4, 8)
 
+    
+    @pytest.mark.skipif(
+        os.environ.get("IS_FOR_V7X") != "true", 
+        reason="MXFP4/FP4 weights are only supported on v7 TPU hardware"
+    )
     def test_load_individual_weight_with_mxfp4(self, loader, mesh):
         """Tests the logic for unpacking MXFP4 weights."""
         name = "layers.0.attn.kernel_q_down_proj_DA"
