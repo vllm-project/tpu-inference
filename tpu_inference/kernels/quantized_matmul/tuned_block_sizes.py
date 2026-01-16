@@ -3,6 +3,7 @@
 
 import json
 import os
+import pathlib
 from typing import NamedTuple
 
 from tpu_inference.logger import init_logger
@@ -36,11 +37,13 @@ def _get_tuning_file_path(tpu_slug: str) -> str:
     fname = f"{tpu_slug}.json"
 
     # Assume data is in tpu_inference/kernels/tuned_data/matmul/
-    # This file is in tpu_inference/kernels/quantized_matmul/
-    # So we go up: ../tuned_data/matmul/
-    base_dir = os.path.dirname(__file__)
-    data_dir = os.path.join(base_dir, "../tuned_data/quantized_matmul")
-    return os.path.join(data_dir, fname)
+    # file: tpu_inference/kernels/quantized_matmul/tuned_block_sizes.py
+    # target: tpu_inference/kernels/tuned_data/quantized_matmul/{fname}
+    base_path = pathlib.Path(__file__).parent.resolve()
+    # Go up from quantized_matmul -> kernels -> tuned_data -> quantized_matmul
+    data_dir = base_path.parent / "tuned_data" / "quantized_matmul"
+
+    return str(data_dir / fname)
 
 
 def _load_tuning_data(tpu_slug: str) -> dict:
