@@ -137,6 +137,33 @@ def get_device_name(num_devices: int | None = None):
     return kind
 
 
+def get_tpu_generation() -> int:
+    """Returns the numeric generation of the TPU (e.g. 5, 6, 7)."""
+    try:
+        name = get_device_name()
+        # format is "TPU v{gen}{suffix}"
+        # e.g. "TPU v5e", "TPU v7", "TPU v6e"
+        if name.startswith("TPU v"):
+            # Extract the first character after "TPU v" which should be the generation
+            return int(name[5])
+    except Exception:
+        pass
+    return -1
+
+
+def get_tpu_name_slug() -> str:
+    """Returns the normalized TPU name slug for filenames (e.g. 'tpu_v5e', 'tpu_v7')."""
+    try:
+        name = get_device_name()
+        return name.lower().replace(" ", "_")
+    except Exception as e:
+        # Fallback if JAX not initialized or other error
+        logger.warning(
+            f"get_tpu_name_slug failed: {e}. Device kind: {jax.devices()[0].device_kind if jax.devices() else 'None'}"
+        )
+        return "tpu_unknown"
+
+
 def get_device_hbm_limit() -> int:
 
     device_kind = get_device_name()
