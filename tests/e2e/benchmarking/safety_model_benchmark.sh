@@ -269,6 +269,7 @@ run_multimodal_performance_benchmark() {
 
     waitForServerReady
 
+    # Warm up
     vllm bench serve \
         --model "$MODEL_NAME" \
         --dataset-name custom \
@@ -277,6 +278,17 @@ run_multimodal_performance_benchmark() {
         --backend "openai-chat" \
         --endpoint "/v1/chat/completions" \
         2>&1 | tee -a "$BENCHMARK_LOG_FILE"
+
+    # Test run
+    vllm bench serve \
+        --model "$MODEL_NAME" \
+        --dataset-name custom \
+        --dataset-path /tmp/mm_safety_bench.jsonl \
+        --num-prompts "$NUM_PROMPTS" \
+        --backend "openai-chat" \
+        --endpoint "/v1/chat/completions" \
+        2>&1 | tee -a "$BENCHMARK_LOG_FILE"
+
 
     ACTUAL_THROUGHPUT=$(awk '/Request throughput \(req\/s\):/ {print $NF}' "$BENCHMARK_LOG_FILE")
 
