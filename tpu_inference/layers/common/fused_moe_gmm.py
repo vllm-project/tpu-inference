@@ -412,7 +412,7 @@ def fused_moe_func(
 
     assert gating_output.shape == (num_tokens, global_num_experts)
 
-    topk_weights = topk_weights = scoring_fn(scoring_func, gating_output)
+    topk_weights = scoring_fn(scoring_func, gating_output)
     # All-gather topk weights for attention dp
     topk_weights = jax.lax.with_sharding_constraint(
         topk_weights, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
