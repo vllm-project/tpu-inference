@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import contextlib
+import csv
 import json
 import logging
 import os
@@ -108,13 +109,12 @@ def deep_update(source: Dict[str, Any],
 def update_json_registry(path: str, new_data: Dict[str, Any]):
     """Updates an existing JSON registry with new data."""
     if os.path.exists(path):
-        try:
-            with open(path, 'r') as f:
+        with open(path, 'r') as f:
+            try:
                 existing_data = json.load(f)
-        except json.JSONDecodeError:
-            console.print(
-                f"[red]Error decoding {path}. Creating new file.[/red]")
-            existing_data = {}
+            except json.JSONDecodeError as e:
+                console.print(f"[red]Error decoding {path}: {e}[/red]")
+                raise
     else:
         console.print(f"[yellow]Creating new registry at {path}[/yellow]")
         existing_data = {}
@@ -127,6 +127,40 @@ def update_json_registry(path: str, new_data: Dict[str, Any]):
     console.print(f"[green]Successfully updated {path}[/green]")
 
 
+class CsvResultLogger:
+    """Context manager for streaming results to CSV."""
+
+    def __init__(self, filepath: Optional[str], fieldnames: list[str]):
+        self.filepath = filepath
+        self.fieldnames = fieldnames
+        self.file = None
+        self.writer = None
+
+    def __enter__(self):
+        if not self.filepath:
+            return None
+
+        try:
+            self.file = open(self.filepath, 'w', newline='')
+            self.writer = csv.DictWriter(self.file, fieldnames=self.fieldnames)
+            self.writer.writeheader()
+            console.print(f"Streaming results to {self.filepath}")
+            return self
+        except IOError as e:
+            console.print(
+                f"[red]Error opening CSV file {self.filepath}: {e}[/red]")
+            return None
+
+    def flush(self):
+        """Flushes the underlying file buffer."""
+        if self.file:
+            self.file.flush()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.file:
+            self.file.close()
+
+
 # --- Profiling Utilities (Aligned with Tokamax) ---
 
 
@@ -134,7 +168,7 @@ class XprofProfileSession(contextlib.AbstractContextManager):
     """Hermetic JAX Profiler for measuring XLA Op time (Total Accelerator Time).
     
     Parses XPlane traces to extract true device execution time, excluding Python dispatch.
-    Aligned with Tokamax `XprofProfileSession`.
+    Reference: https://github.com/google-deepmind/tokamax/blob/main/tokamax/profiling/xprof.py
     """
 
     def __init__(self):
@@ -197,9 +231,8 @@ class XprofProfileSession(contextlib.AbstractContextManager):
                     self._profile = jax.profiler.ProfileData.from_serialized_xspace(
                         files[0].read_bytes())
                 else:
-                    # Fallback for older JAX or missing utility
-                    logging.warning(
-                        "jax.profiler.ProfileData not found. Cannot parse XProf."
+                    raise ImportError(
+                        "jax.profiler.ProfileData not found. Please upgrade JAX."
                     )
             finally:
                 self._profile_tempdir.cleanup()

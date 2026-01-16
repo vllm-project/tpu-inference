@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import collections
-import csv
 import itertools
 import json
 import os
@@ -184,35 +183,25 @@ def tune_matmul(
     console.print(f"Generated {len(configs)} configurations to tune.")
 
     # Setup CSV with context manager
-    import contextlib
-    csv_context = open(csv_file, 'w',
-                       newline='') if csv_file else contextlib.nullcontext()
+    fieldnames = [
+        "batch_size",
+        "out_feature",
+        "in_feature",
+        "x_q_dtype",
+        "w_q_dtype",
+        "batch_block_size",
+        "out_block_size",
+        "in_block_size",
+        "time_ns",
+        "time_std_ns",
+        "compile_time_s",
+        "lower_time_s",
+        "is_best",
+    ]
 
-    with csv_context as csv_f:
-        csv_writer = None
-        if csv_f:
-            try:
-                fieldnames = [
-                    "batch_size",
-                    "out_feature",
-                    "in_feature",
-                    "x_q_dtype",
-                    "w_q_dtype",
-                    "batch_block_size",
-                    "out_block_size",
-                    "in_block_size",
-                    "time_ns",
-                    "time_std_ns",
-                    "compile_time_s",
-                    "lower_time_s",
-                    "is_best",
-                ]
-                csv_writer = csv.DictWriter(csv_f, fieldnames=fieldnames)
-                csv_writer.writeheader()
-                console.print(f"Streaming results to {csv_file}")
-            except IOError as e:
-                console.print(f"Error opening CSV file {csv_file}: {e}")
-                return
+    with utils.CsvResultLogger(csv_file, fieldnames) as csv_logger:
+        if not csv_logger and csv_file:
+            return
 
         results = collections.defaultdict(list)
         results_best = {}  # Track best per key for is_best flag
@@ -250,7 +239,7 @@ def tune_matmul(
                     TestResult(tuned_value, latency_ns, std_ns, compile_time_s,
                                lower_time_s))
 
-                if csv_writer:
+                if csv_logger:
                     row = {
                         "batch_size": tuned_key.n_batch,
                         "out_feature": tuned_key.n_out,
@@ -266,8 +255,8 @@ def tune_matmul(
                         "lower_time_s": lower_time_s,
                         "is_best": is_best,
                     }
-                    csv_writer.writerow(row)
-                    csv_f.flush()
+                    csv_logger.writer.writerow(row)
+                    csv_logger.flush()
 
                 progress.update(task, advance=1)
 
@@ -298,7 +287,6 @@ def tune_matmul(
             },
         }
 
-    # Print JSON output
     # Print JSON output
     tpu_version = tpu_utils.get_tpu_name_slug()
     norm_name = utils.get_registry_file_name(tpu_version)

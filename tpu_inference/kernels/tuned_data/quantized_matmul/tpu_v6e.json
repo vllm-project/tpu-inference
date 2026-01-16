@@ -350,10 +350,10 @@
       "schema_version": "1.0"
     },
     "stats": {
-      "compile_time_s": 0.28989724698476493,
-      "latency_avg_ns": 71230.0,
+      "compile_time_s": 0.29435985698364675,
+      "latency_avg_ns": 77490.0,
       "latency_std_ns": 0.0,
-      "lower_time_s": 0.019600080093368888
+      "lower_time_s": 0.02043440006673336
     }
   },
   "128,1280,8192,int8,int8": {
