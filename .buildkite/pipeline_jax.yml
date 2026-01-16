@@ -281,6 +281,7 @@ steps:
      soft_fail: true
      env:
        IS_FOR_V7X: "${IS_FOR_V7X}"
+       VLLM_XLA_CHECK_RECOMPILATION: "0"
      agents:
        queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
      commands:
