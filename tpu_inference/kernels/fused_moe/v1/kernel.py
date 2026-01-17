@@ -1236,7 +1236,6 @@ def fused_ep_moe(
     *,
     renormalize_topk_logits: bool = False,
     act_fn: str = "silu",
-    # TODO(xw32): for testing ci purposes. Revert before merge.
     subc_quant_w1_sz: int | None = None,
     subc_quant_w2_sz: int | None = None,
     w1_scale: (
