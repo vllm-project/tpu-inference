@@ -35,6 +35,7 @@ class ShardingAxisNameBase:
     SEQUENCE = ('data', 'attn_dp')
     ATTN_DATA = ('data', 'attn_dp')
     MLP_DATA = 'data'
+    TENSOR = 'model'
     ATTN_HEAD = 'model'
     ATTN_TENSOR = None
     MLP_TENSOR = ('attn_dp', 'model', 'expert')
@@ -42,6 +43,20 @@ class ShardingAxisNameBase:
     EXPERT = ('attn_dp', 'expert', 'model')
     VOCAB = ('expert', 'attn_dp', 'model')
 
+class ShardingAxisName2DTP:
+    """sharding class for sharding MoE tensors on 2D tensor parallelism."""
+    SEQUENCE = ('data', 'attn_dp')
+    ATTN_DATA = ('data', 'attn_dp')
+    MLP_DATA = 'data'
+    TENSOR = ('model', 'expert')
+    ATTN_HEAD = ('model', 'expert')
+    ATTN_TENSOR = None
+    MLP_TENSOR = ('attn_dp', 'model', 'expert')
+    MOE_TENSOR = ('attn_dp', 'model')
+    EXPERT = ('attn_dp', 'expert', 'expert')
+    VOCAB = ('model', 'attn_dp', 'expert')
+    MODEL_1 = 'model'
+    MODEL_2 = 'expert'
 
 class ShardingAxisName2D:
     """Sharding axis names for 2D data parallelism scenarios.
@@ -61,8 +76,11 @@ class ShardingAxisName2D:
 
 
 try:
+    _use_2d_tp_sharding = envs.USE_2D_TP
     _use_base_sharding = envs.NEW_MODEL_DESIGN
-    if _use_base_sharding:
+    if _use_2d_tp_sharding:
+        ShardingAxisName = ShardingAxisName2DTP
+    elif _use_base_sharding:
         ShardingAxisName = ShardingAxisNameBase
     else:
         ShardingAxisName = ShardingAxisName2D

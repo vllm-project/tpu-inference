@@ -117,14 +117,14 @@ def unpermute_fn(processed_tokens: jax.Array,
                   sort_indices: jax.Array,
                   router_weights_TX: jax.Array,
                   num_experts_per_tok: int,
-                  hidden_size: int,
                   output_dtype):
     """Stateless global unpermute logic."""
     with jax.named_scope("unpermute"):
         unsorted_tokens_tD = sort_activations_fn(
             processed_tokens, jnp.argsort(sort_indices))
+        local_D = unsorted_tokens_tD.shape[-1]
         reshaped_tokens_TXD = unsorted_tokens_tD.reshape(
-            -1, num_experts_per_tok, hidden_size)
+            -1, num_experts_per_tok, local_D)
     
     with jax.named_scope("combine_weights"):
         tokens_f32 = reshaped_tokens_TXD.astype(jnp.float32)
