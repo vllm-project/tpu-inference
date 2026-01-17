@@ -15,6 +15,7 @@ from tpu_inference.layers.common.attention_interface import (
     sharded_flash_attention,
 )
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.multi_modal_utils import (
     merge_multimodal_embeddings,
@@ -576,8 +577,8 @@ class Qwen3VLTextAttention(nnx.Module):
         if self.kv_cache_quantized_dtype:
             k_scale = self._k_scale
             v_scale = self._v_scale
-            k, v = utils.quantize_kv(k, v, self.kv_cache_quantized_dtype,
-                                     k_scale, v_scale)
+            k, v = quantize_kv(self.kv_cache_quantized_dtype, k, v, k_scale,
+                               v_scale)
 
         new_kv_cache, outputs = attention(
             kv_cache,
