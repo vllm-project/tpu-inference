@@ -20,7 +20,7 @@ set -ex # Exit immediately if a command exits with a non-zero status.
 
 # Function to display usage
 usage() {
-    echo "Usage: $0 --model_name <model_name> --use_moe_ep_kernel <0|1> --tensor_parallel_size <size> --max_model_len <length> --max_num_batched_tokens <num> --max_gen_toks <num> --enable_expert_parallel <0|1>"
+    echo "Usage: $0 --model_name <model_name> --use_moe_ep_kernel <0|1> --tensor_parallel_size <size> --max_model_len <length> --max_num_batched_tokens <num> --max_gen_toks <num> --enable_expert_parallel <0|1> --flex_threshold <float> --strict_threshold <float>"
     echo ""
     echo "All parameters are required."
     echo ""
@@ -32,6 +32,8 @@ usage() {
     echo "  --max_num_batched_tokens <num>  Maximum number of batched tokens."
     echo "  --max_gen_toks <num>            Maximum number of generated tokens."
     echo "  --enable_expert_parallel <0|1>  Whether to enable expert parallel."
+    echo "  --flex_threshold <float>        Threshold for flexible-extract score."
+    echo "  --strict_threshold <float>      Threshold for strict-match score."
     echo "  -h, --help                      Display this help message."
     exit 1
 }
@@ -44,6 +46,8 @@ MAX_MODEL_LEN=""
 MAX_NUM_BATCHED_TOKENS=""
 MAX_GEN_TOKS=""
 ENABLE_EXPERT_PARALLEL=""
+FLEX_THRESHOLD=""
+STRICT_THRESHOLD=""
 
 # Parse named arguments
 while [[ "$#" -gt 0 ]]; do
@@ -55,6 +59,8 @@ while [[ "$#" -gt 0 ]]; do
         --max_num_batched_tokens) MAX_NUM_BATCHED_TOKENS="$2"; shift ;;
         --max_gen_toks) MAX_GEN_TOKS="$2"; shift ;;
         --enable_expert_parallel) ENABLE_EXPERT_PARALLEL="$2"; shift ;;
+        --flex_threshold) FLEX_THRESHOLD="$2"; shift ;;
+        --strict_threshold) STRICT_THRESHOLD="$2"; shift ;;
         -h|--help) usage ;;
         *) echo "Unknown parameter passed: $1"; usage ;;
     esac
@@ -62,7 +68,7 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 # Check if all parameters are provided
-if [ -z "$MODEL_NAME" ] || [ -z "$USE_MOE_EP_KERNEL" ] || [ -z "$TENSOR_PARALLEL_SIZE" ] || [ -z "$MAX_MODEL_LEN" ] || [ -z "$MAX_NUM_BATCHED_TOKENS" ] || [ -z "$MAX_GEN_TOKS" ] || [ -z "$ENABLE_EXPERT_PARALLEL" ]; then
+if [ -z "$MODEL_NAME" ] || [ -z "$USE_MOE_EP_KERNEL" ] || [ -z "$TENSOR_PARALLEL_SIZE" ] || [ -z "$MAX_MODEL_LEN" ] || [ -z "$MAX_NUM_BATCHED_TOKENS" ] || [ -z "$MAX_GEN_TOKS" ] || [ -z "$ENABLE_EXPERT_PARALLEL" ] || [ -z "$FLEX_THRESHOLD" ] || [ -z "$STRICT_THRESHOLD" ]; then
     echo "Error: All parameters are required."
     usage
 fi
@@ -79,8 +85,6 @@ output=$(VLLM_XLA_CHECK_RECOMPILATION=0 USE_MOE_EP_KERNEL=${USE_MOE_EP_KERNEL} M
 echo "Evaluation output:"
 echo "$output"
 
-flex_threshold=0.85
-strict_threshold=0.70
 
 flex_score=$(echo "$output" | grep "flexible-extract" | awk -F'|' '{print $8}' | xargs)
 strict_score=$(echo "$output" | grep "strict-match" | awk -F'|' '{print $8}' | xargs)
@@ -96,8 +100,8 @@ if ! [[ "$strict_score" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
     exit 1
 fi
 
-is_flex_ok=$(awk -v val="$flex_score" -v threshold="$flex_threshold" 'BEGIN {print (val >= threshold)}')
-is_strict_ok=$(awk -v val="$strict_score" -v threshold="$strict_threshold" 'BEGIN {print (val >= threshold)}')
+is_flex_ok=$(awk -v val="$flex_score" -v threshold="$FLEX_THRESHOLD" 'BEGIN {print (val >= threshold)}')
+is_strict_ok=$(awk -v val="$strict_score" -v threshold="$STRICT_THRESHOLD" 'BEGIN {print (val >= threshold)}')
 
 if [ "$is_flex_ok" -eq 1 ] && [ "$is_strict_ok" -eq 1 ]; then
   echo "Accuracy check passed!"
@@ -105,10 +109,10 @@ if [ "$is_flex_ok" -eq 1 ] && [ "$is_strict_ok" -eq 1 ]; then
 else
   echo "Accuracy check failed!"
   if [ "$is_flex_ok" -ne 1 ]; then
-    echo "flexible-extract score $flex_score is below threshold $flex_threshold"
+    echo "flexible-extract score $flex_score is below threshold $FLEX_THRESHOLD"
   fi
   if [ "$is_strict_ok" -ne 1 ]; then
-    echo "strict-match score $strict_score is below threshold $strict_threshold"
+    echo "strict-match score $strict_score is below threshold $STRICT_THRESHOLD"
   fi
   exit 1
 fi
