@@ -1,3 +1,16 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Grouped matrix multiplication kernels for TPU written in Pallas.
 Updated: Optimized Quantized Path (Flattened Loop).
 """
@@ -131,7 +144,7 @@ def make_group_metadata(
     )
 
     partial_tile_mask = jnp.logical_or((group_offsets[:-1] % tm) == 0,
-                                     group_sizes == 0)
+                                       group_sizes == 0)
 
     if visit_empty_groups:
         partial_tile_mask = jnp.where(group_sizes == 0, 0, partial_tile_mask)
@@ -233,10 +246,10 @@ def gmm(
                 f"group_offset must be a ()-shaped array. Got: {group_offset.shape}."
             )
         group_offset = group_offset[None]
-    
+
     num_current_groups = rhs.shape[0]
     num_total_groups = group_sizes.shape[0]
-    
+
     _validate_args(
         lhs=lhs,
         rhs=rhs,
@@ -246,8 +259,8 @@ def gmm(
     )
 
     m = lhs.shape[0]
-    k = rhs.shape[1] 
-    n = rhs.shape[2] 
+    k = rhs.shape[1]
+    n = rhs.shape[2]
 
     if callable(tiling):
         tiling = tiling(m, k, n)
@@ -264,7 +277,7 @@ def gmm(
         num_quant_blocks = rhs_scale.shape[1]
     else:
         num_quant_blocks = 1
-    
+
     block_size = k // num_quant_blocks
 
     if tk > block_size or block_size % tk != 0:
@@ -272,7 +285,7 @@ def gmm(
 
     # tiles_k is now the TOTAL number of K tiles
     tiles_k, k_rem = _calculate_irregular_num_tiles(k, tk)
-    
+
     # Calculate tiles per block for indexing logic
     tiles_per_block = tiles_k // num_quant_blocks
 
@@ -322,7 +335,10 @@ def gmm(
                 mask_k_rem_lhs = partial(mask_k_rem, dim=1)
                 mask_k_rem_rhs = partial(mask_k_rem, dim=0)
             else:
-                def _wrapper(x): return x
+
+                def _wrapper(x):
+                    return x
+
                 mask_k_rem_lhs = _wrapper
                 mask_k_rem_rhs = _wrapper
 
@@ -338,23 +354,25 @@ def gmm(
             )
 
             if rhs_scale is not None:
-                partial_acc *= jnp.broadcast_to(rhs_scale[...], partial_acc.shape)
+                partial_acc *= jnp.broadcast_to(rhs_scale[...],
+                                                partial_acc.shape)
 
             acc = acc_scratch[...] + partial_acc
 
             if is_last_k_tile:
                 loaded_out = out[...].astype(jnp.float32)
-                
+
                 # Check if we need to add existing_out (only read once at the end)
                 if existing_out is not None:
                     prev_grid_id = jnp.where(grid_id > 0, grid_id - 1, 0)
                     is_first_processed_group = grid_id == 0
-                    m_tile_changed = m_tile_ids[grid_id] != m_tile_ids[prev_grid_id]
-                    first_time_seeing_out = jnp.logical_or(is_first_processed_group, m_tile_changed)
-                    
-                    acc = jax.lax.select(first_time_seeing_out, 
-                                         acc + existing_out[...], 
-                                         acc)
+                    m_tile_changed = m_tile_ids[grid_id] != m_tile_ids[
+                        prev_grid_id]
+                    first_time_seeing_out = jnp.logical_or(
+                        is_first_processed_group, m_tile_changed)
+
+                    acc = jax.lax.select(first_time_seeing_out,
+                                         acc + existing_out[...], acc)
 
                 if rhs_bias is not None:
                     acc += rhs_bias[...].astype(jnp.float32)
@@ -371,7 +389,7 @@ def gmm(
                 acc_scratch[...] = acc
 
         is_last_k_tile = k_i == (tiles_k - 1)
-        
+
         # Simple loop structure (pipeline-able)
         lax.cond(
             is_last_k_tile,
@@ -391,18 +409,20 @@ def gmm(
         del group_offsets, m_tile_ids
         return group_ids[grid_id] - group_offset[0], k_i, n_i
 
-    def rhs_scale_transform_indices(n_i, grid_id, k_i, group_metadata, group_offset):
+    def rhs_scale_transform_indices(n_i, grid_id, k_i, group_metadata,
+                                    group_offset):
         # RHS Scale: (group, num_blocks, 1, n).
         # We must map the global tile index k_i to the block index.
         group_offsets, group_ids, m_tile_ids = group_metadata
         del group_offsets, m_tile_ids
-        
+
         # Calculate block index
         block_idx = k_i // tiles_per_block
-        
+
         return group_ids[grid_id] - group_offset[0], block_idx, 0, n_i
 
-    def rhs_bias_transform_indices(n_i, grid_id, k_i, group_metadata, group_offset):
+    def rhs_bias_transform_indices(n_i, grid_id, k_i, group_metadata,
+                                   group_offset):
         # RHS Bias: (group, 1, n).
         group_offsets, group_ids, m_tile_ids = group_metadata
         del group_offsets, m_tile_ids, k_i
@@ -415,14 +435,14 @@ def gmm(
         return m_tile_ids[grid_id], n_i
 
     out_block_spec = pl.BlockSpec((tm, tn), out_transform_indices)
-    
+
     if existing_out is None:
         in_out_block_spec: Any = None
         input_output_aliases = {}
     else:
         in_out_block_spec = out_block_spec
-        input_output_aliases = {} 
-    
+        input_output_aliases = {}
+
     lhs_block_spec = pl.BlockSpec((tm, tk), lhs_transform_indices)
     rhs_block_spec = pl.BlockSpec((None, tk, tn), rhs_transform_indices)
 
@@ -438,13 +458,13 @@ def gmm(
     else:
         rhs_bias_block_spec = pl.BlockSpec((None, 1, tn),
                                            rhs_bias_transform_indices)
-    
+
     # Cost Estimate Logic
     lhs_bytes = lhs.size * lhs.itemsize
     # RHS is read fully (K * N) across the K loop
-    rhs_bytes = (k * n) * rhs.itemsize 
+    rhs_bytes = (k * n) * rhs.itemsize
     if rhs_scale is not None:
-        # Scales are read multiple times? 
+        # Scales are read multiple times?
         # Pallas caches, but for estimate: we read N * num_blocks
         rhs_bytes += (num_quant_blocks * n) * rhs_scale.itemsize
     if rhs_bias is not None:
@@ -460,7 +480,7 @@ def gmm(
 
     # Grid Spec: Flattened
     # (tiles_n, num_active_tiles, tiles_k)
-    
+
     call_gmm = pl.pallas_call(
         kernel,
         out_shape=jax.ShapeDtypeStruct((m, n), preferred_element_type),
@@ -496,7 +516,7 @@ def gmm(
         rhs_bias,
         existing_out,
     )
-    
+
     if existing_out is None and num_current_groups < num_total_groups:
         out = _zero_uninitialized_memory(
             out,

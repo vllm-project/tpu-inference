@@ -17,12 +17,11 @@ import enum
 import jax
 import jax.numpy as jnp
 from jax.experimental import xla_metadata
-# from jax.experimental.pallas.ops.tpu.megablox.gmm import gmm as megablox_gmm
-from tpu_inference.kernels.megablox.gmm_ds import gmm as megablox_gmm
-
 from qwix._src.core.ragged_dot import ragged_dot as qwix_ragged_dot
 
 from tpu_inference import envs
+# from jax.experimental.pallas.ops.tpu.megablox.gmm import gmm as megablox_gmm
+from tpu_inference.kernels.megablox.gmm_ds import gmm as megablox_gmm
 from tpu_inference.layers.common.fused_moe_gmm import \
     round_up_to_multiple_of_128_within_limit
 from tpu_inference.layers.jax.layers import FlaxUtils
@@ -258,19 +257,17 @@ def gmm_fn(inputs, kernel, group_sizes, tile_size, moe_backend, dtype,
             kernel_qvalue = kernel
             kernel_scale = None
         m = inputs.shape[0]
-        _, k, n = kernel.shape
+        _, k, n = kernel_qvalue.shape
         tm = round_up_to_multiple_of_128_within_limit(m, 512)
         tk = round_up_to_multiple_of_128_within_limit(k, 2048)
         tn = round_up_to_multiple_of_128_within_limit(n, 2048)
 
-        output = megablox_gmm(
-            lhs=inputs,
-            rhs=kernel_qvalue,
-            rhs_scale=kernel_scale,
-            group_sizes=group_sizes,
-            preferred_element_type=dtype,
-            tiling=(tm, tk, tn)
-        )
+        output = megablox_gmm(lhs=inputs,
+                              rhs=kernel_qvalue,
+                              rhs_scale=kernel_scale,
+                              group_sizes=group_sizes,
+                              preferred_element_type=dtype,
+                              tiling=(tm, tk, tn))
 
     elif moe_backend == MoEBackend.RAGGED_DOT:
         inputs = manually_quantize_qwix_activation(
