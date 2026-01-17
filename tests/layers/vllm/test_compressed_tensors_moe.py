@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import tempfile
 
 import jax.numpy as jnp
@@ -42,8 +41,6 @@ from . import utils as test_utils
 # yapf: enable
 
 P = PartitionSpec
-
-os.environ['VLLM_DISABLE_SHARED_EXPERTS_STREAM'] = '1'
 
 MODEL = 'BCCard/Qwen3-30B-A3B-FP8-Dynamic'
 
