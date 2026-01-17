@@ -16,11 +16,10 @@ from typing import Optional
 
 import jax
 from flax import nnx
-from vllm.model_executor.layers.quantization.base_config import \
-    QuantizationConfig
 
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.vllm.quantization import JaxQuantizeMethodBase
+from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 
 
 class JaxQuantizedEinsumMethod(JaxQuantizeMethodBase):
@@ -51,7 +50,7 @@ class JaxEinsum(nnx.Einsum, JaxModule):
                  kernel_shape: tuple[int, ...],
                  rngs,
                  bias_shape: Optional[tuple[int, ...]] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
+                 quant_config: Optional[VllmQuantConfig] = None,
                  prefix: str = "",
                  **kwargs):
         nnx.Einsum.__init__(self,
@@ -79,6 +78,10 @@ class JaxEinsum(nnx.Einsum, JaxModule):
             self.quant_method = None
 
     def __call__(self, inputs: jax.Array) -> jax.Array:
-        if self.quant_method is None:
-            return super().__call__(inputs)
-        return self.quant_method.apply_jax(self, inputs)
+        if self.quant_method is not None:
+            return self.quant_method.apply_jax(self, inputs)
+
+        if self.bias is not None:
+            return jax.numpy.einsum(self.einsum_str, inputs,
+                                    self.weight) + self.bias
+        return jax.numpy.einsum(self.einsum_str, inputs, self.weight)

@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from abc import abstractmethod
-
 import torch
 import torchax
 from flax import nnx
@@ -28,11 +26,9 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.quantization.base_config import \
-    QuantizationConfig
 
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.jax.einsum import JaxEinsum as JaxLinearBase
+from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.vllm.process_weights.linear_weights import \
     get_model_matmul_fusion_assignment
 from tpu_inference.layers.vllm.quantization import JaxQuantizeMethodBase
@@ -41,7 +37,7 @@ from tpu_inference.utils import TPU_SECOND_LAST_MINOR, get_mesh_shape_product
 # yapf: enable
 
 Module = torch.nn.Module | nnx.Module
-LinearBase = VllmLinearBase | JaxLinearBase
+LinearBase = VllmLinearBase | JaxModule
 P = PartitionSpec
 
 logger = init_logger(__name__)
@@ -51,6 +47,7 @@ class VllmQuantLinearConfig:
 
     def __init__(self, vllm_config: VllmConfig, mesh: Mesh, layer: LinearBase):
         assert isinstance(layer, LinearBase)
+        from tpu_inference.layers.jax.einsum import JaxEinsum
 
         self.mesh = mesh
         self.output_sizes = [layer.output_size]
@@ -84,7 +81,7 @@ class VllmQuantLinearConfig:
                 layer._get_name())
         elif isinstance(layer, ReplicatedLinear):
             self.weight_sharding = P(None, None)
-        elif isinstance(layer, JaxLinearBase):
+        elif isinstance(layer, JaxEinsum):
             ...
         else:
             logger.warning(
@@ -133,12 +130,6 @@ class VllmQuantConfig:
         moe_config.moe_parallel_config.use_ep = use_ep
         return moe_config
 
-
-class JaxQuantizationConfig(JaxCommonConfig, QuantizationConfig):
-    """Extended quantization config for JAX.
-    """
-
-    @abstractmethod
-    def get_quant_method(self, layer: Module,
+    def get_quant_method(self, layer: JaxModule | torch.nn.Module,
                          prefix: str) -> JaxQuantizeMethodBase | None:
-        raise NotImplementedError
+        raise NotImplementedError()

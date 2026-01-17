@@ -32,12 +32,12 @@ from vllm.model_executor.layers.quantization import \
 
 from tpu_inference.layers.common.quant_methods import (UNQUANTIZED,
                                                        get_tpu_quant_method)
-from tpu_inference.layers.jax import JaxModule
-from tpu_inference.layers.jax.einsum import JaxEinsum as JaxLinearBase
-from tpu_inference.layers.jax.einsum import JaxQuantizedEinsumMethod
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
+from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.jax.einsum import JaxEinsum as JaxLinearBase
+from tpu_inference.layers.jax.einsum import JaxQuantizedEinsumMethod
 from tpu_inference.layers.vllm.fused_moe import (FusedMoEBackend,
                                                  fused_moe_apply,
                                                  select_moe_backend)
@@ -46,6 +46,7 @@ from tpu_inference.layers.vllm.process_weights.fused_moe_weights import (
 from tpu_inference.layers.vllm.process_weights.linear_weights import (
     LinearWeights, process_linear_weights, shard_linear_weights,
     to_parameter_list)
+from tpu_inference.layers.vllm.quantization import JaxQuantizeMethodBase
 from tpu_inference.layers.vllm.quantization.configs import (
     VllmQuantConfig, VllmQuantLinearConfig)
 from tpu_inference.logger import init_logger
@@ -58,7 +59,7 @@ logger = init_logger(__name__)
 
 
 @register_quantization_config(get_tpu_quant_method(UNQUANTIZED))
-class VllmUnquantizedConfig(QuantizationConfig, VllmQuantConfig):
+class VllmUnquantizedConfig(VllmQuantConfig):
 
     @classmethod
     def get_name(cls) -> str:

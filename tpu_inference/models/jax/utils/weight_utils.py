@@ -664,18 +664,24 @@ class StandardWeightLoader(BaseWeightLoader):
         self.vllm_config = vllm_config
         self.mesh = mesh
 
-    def load_weights(self, model: nnx.Module, mappings: dict):
+    def load_weights(self,
+                     model: nnx.Module,
+                     mappings: dict | MetadataMap,
+                     keep_hf_weight_suffix_when_match: list[str] = []):
         """
         Calls the generic load_hf_weights utility, passing the correct
         weights iterator.
         """
-        # The logic to get metadata_map and call load_hf_weights moves here.
-        metadata_map = get_default_maps(self.vllm_config.model_config,
-                                        self.mesh, mappings)
+        if isinstance(mappings, MetadataMap):
+            metadata_map = mappings
+        else:
+            metadata_map = get_default_maps(self.vllm_config.model_config,
+                                            self.mesh, mappings)
 
-        load_hf_weights(vllm_config=self.vllm_config,
-                        model=model,
-                        metadata_map=metadata_map,
-                        mesh=self.mesh,
-                        pp_missing_layers=getattr(model, 'pp_missing_layers',
-                                                  []))
+        load_hf_weights(
+            vllm_config=self.vllm_config,
+            model=model,
+            metadata_map=metadata_map,
+            mesh=self.mesh,
+            pp_missing_layers=getattr(model, 'pp_missing_layers', []),
+            keep_hf_weight_suffix_when_match=keep_hf_weight_suffix_when_match)

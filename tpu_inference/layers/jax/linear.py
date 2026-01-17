@@ -14,11 +14,8 @@
 
 from typing import Optional
 
-import jax
-from vllm.model_executor.layers.quantization.base_config import \
-    QuantizationConfig
-
 from tpu_inference.layers.jax.einsum import JaxEinsum, JaxQuantizedEinsumMethod
+from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 
 JaxQuantizedLinearMethod = JaxQuantizedEinsumMethod
 
@@ -41,8 +38,7 @@ class JaxLinear(JaxEinsum):
                  rngs,
                  *,
                  use_bias: bool = True,
-                 param_dtype: jax.numpy.dtype = jax.numpy.float32,
-                 quant_config: Optional[QuantizationConfig] = None,
+                 quant_config: Optional[VllmQuantConfig] = None,
                  prefix: str = "",
                  **kwargs):
         JaxEinsum.__init__(self,
