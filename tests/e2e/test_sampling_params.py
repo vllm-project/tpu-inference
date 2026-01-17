@@ -125,6 +125,19 @@ class TestTopP:
         # Both should produce identical outputs since temperature=0
         assert outputs1[0].outputs[0].text == outputs2[0].outputs[0].text
 
+    def test_top_p_one_skips_masking(self, llm: LLM):
+        """Test that top_p=1.0 (disable) produces valid outputs via optimization path."""
+        prompt = "The quick brown fox"
+        # Explicitly setting top_p=1.0 triggers the `if p < 1.0` optimization
+        sampling_params = SamplingParams(temperature=0.7,
+                                         top_p=1.0,
+                                         max_tokens=10)
+
+        outputs = llm.generate([prompt], sampling_params)
+        text = outputs[0].outputs[0].text
+        assert text and len(
+            text) > 0, "Output should not be empty with top_p=1.0"
+
 
 class TestTopK:
     """Tests for top_k sampling parameter."""
@@ -174,6 +187,58 @@ class TestTopK:
 
         # Both should produce identical outputs since temperature=0
         assert outputs1[0].outputs[0].text == outputs2[0].outputs[0].text
+
+    def test_top_k_negative_skips_masking(self, llm: LLM):
+        """Test that top_k=-1 (disable) produces valid outputs via optimization path."""
+        prompt = "The quick brown fox"
+        # Explicitly setting top_k=-1 triggers the `if k > 0` optimization
+        # (assuming -1 maps to 0 or triggers the disabled state internally)
+        sampling_params = SamplingParams(temperature=0.7,
+                                         top_k=-1,
+                                         max_tokens=10)
+
+        outputs = llm.generate([prompt], sampling_params)
+        text = outputs[0].outputs[0].text
+        assert text and len(
+            text) > 0, "Output should not be empty with top_k=-1"
+
+    def test_top_k_negative_is_not_greedy(self, llm: LLM):
+        """Test that top_k=-1 results in considering all tokens (not greedy)."""
+        # Previously, top_k <= 0 might have been clamped to 1 (greedy).
+        # This test verifies that top_k=-1 allows for diversity given high temperature.
+        prompt = "Write a random word:"
+        sampling_params = SamplingParams(temperature=1.5,
+                                         top_k=-1,
+                                         max_tokens=10)
+
+        unique_outputs = set()
+        # Run a few times to ensure we get variation
+        for _ in range(5):
+            outputs = llm.generate([prompt], sampling_params)
+            unique_outputs.add(outputs[0].outputs[0].text)
+
+        assert len(unique_outputs) > 1, (
+            "top_k=-1 should allow for diversity and not force greedy decoding"
+        )
+
+    def test_large_top_k_is_not_greedy(self, llm: LLM):
+        """Test that top_k > vocab_size results in considering all tokens."""
+        # Previously, top_k >= vocab_size might have been clamped to 1 (greedy).
+        # This test verifies it behaves like 'all tokens' (diversity).
+        prompt = "Write a random word:"
+        sampling_params = SamplingParams(
+            temperature=1.5,
+            top_k=1_000_000,  # Larger than vocab
+            max_tokens=10)
+
+        unique_outputs = set()
+        for _ in range(5):
+            outputs = llm.generate([prompt], sampling_params)
+            unique_outputs.add(outputs[0].outputs[0].text)
+
+        assert len(unique_outputs) > 1, (
+            "Large top_k should allow for diversity and not force greedy decoding"
+        )
 
 
 class TestLogprobs:
@@ -267,3 +332,14 @@ class TestCombinedParameters:
         # Should have logprobs
         assert output.logprobs is not None
         assert len(output.logprobs) > 0
+
+    def test_optimization_boundaries(self, llm: LLM):
+        """Test specific boundary conditions for optimizations (top_k=-1, top_p=1.0)."""
+        prompt = "Testing optimizations"
+        sampling_params = SamplingParams(
+            temperature=0.7,
+            top_k=-1,  # Should skip top_k masking
+            top_p=1.0,  # Should skip top_p masking
+            max_tokens=5)
+        outputs = llm.generate([prompt], sampling_params)
+        assert len(outputs[0].outputs[0].text) > 0
