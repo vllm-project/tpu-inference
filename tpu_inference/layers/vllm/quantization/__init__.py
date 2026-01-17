@@ -16,14 +16,10 @@ import copy
 from abc import abstractmethod
 from typing import Type
 
-import jax
-from flax import nnx
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizationConfig
-from vllm.model_executor.layers.quantization.base_config import \
-    QuantizeMethodBase as VllmQuantizeMethodBase
 
 from tpu_inference.layers.common import quant_methods
 
@@ -31,7 +27,6 @@ from tpu_inference.layers.common import quant_methods
 def get_tpu_quantization_config(vllm_config: VllmConfig,
                                 mesh: Mesh) -> QuantizationConfig:
     from tpu_inference.layers.vllm.quantization.awq import VllmAWQConfig
-    from tpu_inference.layers.vllm.quantization.common import JaxCommonConfig
     from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors import \
         VllmCompressedTensorsConfig  # noqa: E501
     from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
@@ -61,16 +56,3 @@ def get_tpu_quantization_config(vllm_config: VllmConfig,
         quant_config.get_name())
     return VllmConfig.get_quantization_config(model_config,
                                               vllm_config.load_config)
-
-
-class JaxQuantizeMethodBase(VllmQuantizeMethodBase):
-    """Extended quantize method base for JAX.
-    """
-
-    @abstractmethod
-    def create_weights_jax(self, layer: nnx.Module, *args, **kwargs) -> None:
-        raise NotImplementedError()
-
-    @abstractmethod
-    def apply_jax(self, layer: nnx.Module, *args, **kwargs) -> jax.Array:
-        raise NotImplementedError

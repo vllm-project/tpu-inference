@@ -15,13 +15,27 @@
 from typing import Optional
 
 import jax
+from flax import nnx
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizationConfig
 
-from tpu_inference.layers.jax.linear import JaxLinear
+from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.vllm.quantization import JaxQuantizeMethodBase
 
 
-class JaxEinsum(JaxLinear):
+class JaxQuantizedEinsumMethod(JaxQuantizeMethodBase):
+    """Quantization method for JAX Einsum layer.
+    """
+
+    def create_weights_jax(self, layer: JaxModule) -> None:
+        """Create weights for JAX Einsum layer."""
+        raise NotImplementedError()
+
+    def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
+        raise NotImplementedError()
+
+
+class JaxEinsum(nnx.Einsum, JaxModule):
     """Einsum layer for JAX.
 
     Args:
@@ -35,84 +49,36 @@ class JaxEinsum(JaxLinear):
     def __init__(self,
                  einsum_str: str,
                  kernel_shape: tuple[int, ...],
+                 rngs,
                  bias_shape: Optional[tuple[int, ...]] = None,
                  quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "",
                  **kwargs):
-        # Only einsum_str that satisfies:
-        #  * contracting dimensions are consecutive and in the same order in both inputs (i.e., 'abc,acd->bd' 'abc,cbd->ad' not supported)
-        #  * contracting dimensions are the last dimensions of the first input (i.e. 'bca,bcd->ad' not supported)
-        #  * non-contracting dimensions from the second input are consecutive and in the same order in the output (i.e. 'abc,dbce->ade' not supported)
-        # is allowed.
-        input_strs, output_str = einsum_str.strip(' ').split("->")
-        input_a, input_b = input_strs.split(",")
-        assert len(input_b) == len(
-            kernel_shape
-        ), f"Length of input_b ({len(input_b)}) must match the length of kernel_shape ({len(kernel_shape)})."
+        nnx.Einsum.__init__(self,
+                            rngs=rngs,
+                            einsum_str=einsum_str,
+                            kernel_shape=kernel_shape,
+                            bias_shape=bias_shape,
+                            **kwargs)
+        # For compatibility. HF model use 'weight' as name suffix, we alias `self.kernel` to
+        # `self.weight` such that `named_parameters()` can match the names in HF models.
+        self.weight = self.kernel
+        delattr(self, 'kernel')
+        # For compatibility with vLLM. e.g. `JaxCommonLinearConfig` is used in both flax_nnx
+        # and vllm implementations, and it's looking for `layer.output_size` attribute.
+        self.output_size = 0
 
-        # Find contracting dimensions
-        if input_a[-1] not in input_b:
-            raise ValueError(
-                f"Invalid einsum_str: {einsum_str}, contracting dimensions must be the last dimensions of the first input."
-            )
-        idx_last_contract_b = input_b.index(input_a[-1])
-        idx_first_contract_b = 0
-        for i in range(idx_last_contract_b + 1):
-            if input_b[i] in input_a:
-                idx_first_contract_b = i
-                break
-        if input_b[idx_first_contract_b:idx_last_contract_b +
-                   1] not in input_a:
-            raise ValueError(
-                f"Invalid einsum_str: {einsum_str}, contracting dimensions ({input_b[idx_first_contract_b:idx_last_contract_b + 1]}) must be in the same order and consecutive in both inputs."
-            )
-        if len(input_a) - 1 != idx_last_contract_b + 1 - idx_first_contract_b:
-            raise NotImplementedError(
-                f"Only support input has just one non-contracting dimension which is sequence dimension, got {input_a.strip(input_b[idx_first_contract_b:idx_last_contract_b + 1])}."
-            )
-        in_features, out_features = 1, 1
-        for c in kernel_shape[idx_first_contract_b:idx_last_contract_b + 1]:
-            in_features *= c
-        if idx_first_contract_b == 0:
-            out_features_str = input_b[idx_last_contract_b + 1:]
-            self._out_reshape_dims = tuple(kernel_shape[idx_last_contract_b +
-                                                        1:])
-            for i, c in enumerate(kernel_shape[idx_last_contract_b + 1:]):
-                out_features *= c
-                assert bias_shape[
-                    i] == c if bias_shape is not None else True, f"Bias shape {bias_shape} does not match output dimension {c}."
-        elif idx_last_contract_b == len(input_b) - 1:
-            out_features_str = input_b[:idx_first_contract_b]
-            self._out_reshape_dims = tuple(kernel_shape[:idx_first_contract_b])
-            for i, c in enumerate(kernel_shape[:idx_first_contract_b]):
-                out_features *= c
-                assert bias_shape[
-                    i] == c if bias_shape is not None else True, f"Bias shape {bias_shape} does not match output dimension {c}."
+        if quant_config is None:
+            self.quant_method = None
+        elif (quant_method := quant_config.get_quant_method(self,
+                                                            prefix=prefix)):
+            assert isinstance(quant_method, JaxQuantizedEinsumMethod)
+            self.quant_method = quant_method
+            self.quant_method.create_weights_jax(self)
         else:
-            raise ValueError(
-                f"Invalid einsum_str: {einsum_str}, contracting dimensions ({input_b[idx_first_contract_b:idx_last_contract_b + 1]}) must be either the first or last dimensions of the second input ({input_b})."
-            )
-
-        if out_features_str not in output_str:
-            raise ValueError(
-                f"Invalid einsum_str: {einsum_str}, non-contracting dimensions from the second input ({out_features_str}) must be in the same order and consecutive in the output ({output_str})."
-            )
-        elif output_str[0:len(out_features_str)] == out_features_str:
-            self._out_reshape_dims += (-1, )
-        else:
-            self._out_reshape_dims = (-1, ) + self._out_reshape_dims
-
-        JaxLinear.__init__(self,
-                           in_features,
-                           out_features,
-                           use_bias=bias_shape is not None,
-                           quant_config=quant_config,
-                           **kwargs)
-        self.einsum_str = einsum_str
-        self.weight.value = self.weight.value.reshape(kernel_shape)
-        if self.bias is not None:
-            self.bias.value = self.bias.value.reshape(bias_shape)
-
-        # TODO(lk-chen): reduce kernel's sharding
+            self.quant_method = None
 
     def __call__(self, inputs: jax.Array) -> jax.Array:
+        if self.quant_method is None:
+            return super().__call__(inputs)
         return self.quant_method.apply_jax(self, inputs)

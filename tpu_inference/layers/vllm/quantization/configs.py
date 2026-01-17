@@ -22,12 +22,14 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEConfig
 # yapf: disable
-from vllm.model_executor.layers.linear import ColumnParallelLinear
-from vllm.model_executor.layers.linear import LinearBase as VllmLinearBase
-from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               MergedColumnParallelLinear,
+                                               LinearBase,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.quantization.base_config import \
+    QuantizationConfig
 
 from tpu_inference.layers.common.process_weights.linear_weights import \
     get_model_matmul_fusion_assignment
@@ -37,8 +39,6 @@ from tpu_inference.utils import TPU_SECOND_LAST_MINOR, get_mesh_shape_product
 
 # yapf: enable
 
-Module = torch.nn.Module | nnx.Module
-LinearBase = VllmLinearBase | JaxLinearBase
 P = PartitionSpec
 
 logger = init_logger(__name__)
@@ -80,8 +80,6 @@ class VllmQuantLinearConfig(QuantLinearConfig):
                 layer._get_name())
         elif isinstance(layer, ReplicatedLinear):
             self.weight_sharding = P(None, None)
-        elif isinstance(layer, JaxLinearBase):
-            ...
         else:
             logger.warning(
                 "Unsupported linear layer type of %s. Can potentially yield "
