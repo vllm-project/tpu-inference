@@ -49,6 +49,8 @@ def find_all_layer_type(module: torch.nn.Module, layer_type: torch.nn.Module):
     return ret
 
 
+# TODO(kyuyeunk): Consolidate all reference implementation used for unit tests
+# into a single file.
 def ref_moe(x,
             router_logits,
             w1,

@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import tempfile
 
 import jax.numpy as jnp
 import pytest
 import torch
+import torch.nn.functional as F
 import torchax
 from compressed_tensors.quantization import QuantizationArgs
 from jax.sharding import PartitionSpec
@@ -40,6 +42,8 @@ from . import utils as test_utils
 # yapf: enable
 
 P = PartitionSpec
+
+os.environ['VLLM_DISABLE_SHARED_EXPERTS_STREAM'] = '1'
 
 MODEL = 'BCCard/Qwen3-30B-A3B-FP8-Dynamic'
 
@@ -66,6 +70,28 @@ def setup_environment():
             distributed_init_method=f"file://{temp_file}",
             backend="gloo")
         ensure_model_parallel_initialized(1, 1)
+
+
+def _ref_math_in_bf16(w1, w2, w3, x, router_logits, top_k):
+    seqlen = x.shape[0]
+    expert_weights = F.softmax(router_logits, dim=-1)
+    expert_weights, expert_indices = torch.topk(expert_weights, top_k, dim=-1)
+    expert_weights /= expert_weights.sum(dim=-1, keepdim=True)
+
+    # cond ffn
+    # e = total num of exp = 160
+    # t = seqlen
+    # o = config.imtermediate size
+    # i = config.dim
+    x1 = torch.einsum("ti, eoi -> teo", x, w1)
+    x1 = F.silu(x1)
+    x3 = torch.einsum("ti, eoi -> teo", x, w3)
+    expert_outs = torch.einsum("teo, eio -> tei", (x1 * x3), w2)
+
+    seq_indexes = torch.arange(seqlen, device='jax').unsqueeze(1)
+    expert_outs = expert_outs[seq_indexes, expert_indices]
+    out = torch.einsum("tai,ta -> ti", expert_outs, expert_weights)
+    return out
 
 
 @pytest.mark.parametrize(
@@ -138,11 +164,9 @@ def test_fused_moe_method(mesh, num_tokens, intermediate_size, hidden_size,
         num_local_experts=num_experts,
         moe_parallel_config=FusedMoEParallelConfig(
             tp_size=1,
-            pcp_size=1,
             dp_size=1,
             ep_size=1,
             tp_rank=0,
-            pcp_rank=0,
             dp_rank=0,
             ep_rank=0,
             use_ep=use_ep,
@@ -169,20 +193,10 @@ def test_fused_moe_method(mesh, num_tokens, intermediate_size, hidden_size,
                               top_k=topk,
                               renormalize=True)
 
-        result_reference = test_utils.ref_moe(
-            x,
-            router_logits,
-            torch.cat([
-                layer.w13_weight.to(torch.bfloat16) * layer.w13_weight_scale,
-                layer.w3_weight.to(torch.bfloat16) * layer.w3_weight_scale
-            ],
-                      dim=1),
+        result_reference = _ref_math_in_bf16(
+            layer.w13_weight.to(torch.bfloat16) * layer.w13_weight_scale,
             layer.w2_weight.to(torch.bfloat16) * layer.w2_weight_scale,
-            w1_bias=None,
-            w2_bias=None,
-            top_k=topk,
-            renormalize=True,
-            activation="silu",
-        )
+            layer.w3_weight.to(torch.bfloat16) * layer.w3_weight_scale, x,
+            router_logits, topk)
 
         assert jnp.allclose(result.jax(), result_reference.jax())
