@@ -188,9 +188,9 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
             # TODO (jacobplatin): remove or clean this up
             self.scale_shape_map_for_random_weight_loading = {
                 # MoE experts (3D)
-                "custom_module.kernel_down_proj_EFD": (256, 8, 7168),
-                "custom_module.kernel_gating_EDF": (256, 28, 2048),
-                "custom_module.kernel_up_proj_EDF": (256, 28, 2048),
+                "custom_module.kernel_down_proj_EFD": (256, 1, 7168),
+                "custom_module.kernel_gating_EDF": (256, 4, 2048),
+                "custom_module.kernel_up_proj_EDF": (256, 4, 2048),
                 # Shared experts (2D)
                 "shared_experts.kernel_down_proj_FD": (8, 7168),
                 "shared_experts.kernel_gating_DF": (28, 2048),

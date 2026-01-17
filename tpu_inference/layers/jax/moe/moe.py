@@ -212,7 +212,7 @@ class MoE(nnx.Module):
             if self.moe_backend == MoEBackend.MEGABLX_GMM or self.moe_backend == MoEBackend.RAGGED_DOT:
 
                 if self.quantized_dtype:
-                    gating_up_proj_spec = (PartitionSpec(*self.edf_sharding), PartitionSpec(*self.edf_sharding))
+                    gating_up_proj_spec = (PartitionSpec(*self.edf_sharding), PartitionSpec(self.edf_sharding[0], None, self.edf_sharding[2]))
                     down_proj_spec = (PartitionSpec(*self.efd_sharding), PartitionSpec(self.efd_sharding[0], None, self.efd_sharding[2]))
                 else:
                     gating_up_proj_spec = PartitionSpec(*self.edf_sharding)
