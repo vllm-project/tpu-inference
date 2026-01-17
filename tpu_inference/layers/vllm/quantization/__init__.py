@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import copy
-from abc import abstractmethod
 from typing import Type
 
 from jax.sharding import Mesh
@@ -22,19 +21,18 @@ from vllm.model_executor.layers.quantization.base_config import \
     QuantizationConfig
 
 from tpu_inference.layers.common import quant_methods
+from tpu_inference.layers.vllm.quantization.awq import VllmAWQConfig
+from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors import \
+    VllmCompressedTensorsConfig
+from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
+from tpu_inference.layers.vllm.quantization.fp8 import VllmFp8Config
+from tpu_inference.layers.vllm.quantization.mxfp4 import VllmMxfp4Config
+from tpu_inference.layers.vllm.quantization.unquantized import \
+    VllmUnquantizedConfig
 
 
 def get_tpu_quantization_config(vllm_config: VllmConfig,
                                 mesh: Mesh) -> QuantizationConfig:
-    from tpu_inference.layers.vllm.quantization.awq import VllmAWQConfig
-    from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors import \
-        VllmCompressedTensorsConfig  # noqa: E501
-    from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
-    from tpu_inference.layers.vllm.quantization.fp8 import VllmFp8Config
-    from tpu_inference.layers.vllm.quantization.mxfp4 import VllmMxfp4Config
-    from tpu_inference.layers.vllm.quantization.unquantized import \
-        VllmUnquantizedConfig
-
     model_config = copy.deepcopy(vllm_config.model_config)
     # TODO(kyuyeunk): Add support for "tpu_int8".
     method_to_config: dict[str | None, Type[QuantizationConfig]] = {

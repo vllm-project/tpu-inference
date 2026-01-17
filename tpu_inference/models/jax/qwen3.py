@@ -26,14 +26,15 @@ from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.jax import JaxModule
-from tpu_inference.layers.jax.einsum import JaxEinsum
+from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.rope_interface import apply_rope
-from tpu_inference.layers.vllm.quantization.common import JaxQuantizationConfig
+from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.qwen2 import Qwen2DecoderLayer
 from tpu_inference.models.jax.qwen2 import Qwen2MLP as Qwen3MLP
 from tpu_inference.models.jax.qwen2 import Qwen2Model
-from tpu_inference.models.jax.utils.weight_utils import StandardWeightLoader
+from tpu_inference.models.jax.utils.weight_utils import (StandardWeightLoader,
+                                                         get_default_maps)
 
 logger = init_logger(__name__)
 
@@ -44,7 +45,7 @@ class Qwen3Attention(JaxModule):
 
     def __init__(self, config: Qwen3Config, dtype: jnp.dtype, rng: nnx.Rngs,
                  mesh: Mesh, kv_cache_dtype: str,
-                 quant_config: JaxQuantizationConfig):
+                 quant_config: VllmQuantConfig):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
@@ -170,7 +171,7 @@ class Qwen3DecoderLayer(Qwen2DecoderLayer):
 
     def __init__(self, config: Qwen3Config, dtype: jnp.dtype, rng: nnx.Rngs,
                  mesh: Mesh, kv_cache_dtype: str,
-                 quant_config: JaxQuantizationConfig):
+                 quant_config: VllmQuantConfig):
         rms_norm_eps = config.rms_norm_eps
         hidden_size = config.hidden_size
 
@@ -310,5 +311,12 @@ class Qwen3ForCausalLM(JaxModule):
             })
 
         loader = self.WeightLoader(self.vllm_config, self.mesh)
-        reshape map add weight suffix
-        loader.load_weights(self, mappings)
+        metadata_map = get_default_maps(self.vllm_config.model_config,
+                                        self.mesh, mappings)
+        metadata_map.reshape_map = {
+            k + ".weight": v
+            for k, v in metadata_map.reshape_map.items()
+        }
+        loader.load_weights(self,
+                            metadata_map,
+                            keep_hf_weight_suffix_when_match=['mlp', 'proj'])

@@ -24,11 +24,11 @@ from vllm.config import VllmConfig
 from tpu_inference import utils
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import JaxLinear
-from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.jax.rope_interface import apply_rope
-from tpu_inference.layers.vllm.quantization.common import JaxQuantizationConfig
+from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import StandardWeightLoader
 
@@ -40,7 +40,7 @@ init_fn = nnx.initializers.uniform()
 class Qwen2MLP(JaxModule):
 
     def __init__(self, config: Qwen2Config, dtype: jnp.dtype, rng: nnx.Rngs,
-                 quant_config: JaxQuantizationConfig):
+                 quant_config: VllmQuantConfig):
         hidden_size = config.hidden_size
         intermediate_size = config.intermediate_size
         act = config.hidden_act
@@ -196,7 +196,7 @@ class Qwen2DecoderLayer(JaxModule):
 
     def __init__(self, config: Qwen2Config, dtype: jnp.dtype, rng: nnx.Rngs,
                  mesh: Mesh, kv_cache_dtype: str,
-                 quant_config: JaxQuantizationConfig):
+                 quant_config: VllmQuantConfig):
         rms_norm_eps = config.rms_norm_eps
         hidden_size = config.hidden_size
 
@@ -365,20 +365,6 @@ class Qwen2ForCausalLM(nnx.Module):
             "model.layers.*.input_layernorm.scale",
             "model.layers.*.post_attention_layernorm":
             "model.layers.*.post_attention_layernorm.scale",
-            "model.layers.*.self_attn.k_proj":
-            "model.layers.*.self_attn.k_proj.kernel",
-            "model.layers.*.self_attn.o_proj":
-            "model.layers.*.self_attn.o_proj.kernel",
-            "model.layers.*.self_attn.q_proj":
-            "model.layers.*.self_attn.q_proj.kernel",
-            "model.layers.*.self_attn.v_proj":
-            "model.layers.*.self_attn.v_proj.kernel",
-            "model.layers.*.self_attn.q_proj.bias":
-            "model.layers.*.self_attn.q_proj.bias",
-            "model.layers.*.self_attn.k_proj.bias":
-            "model.layers.*.self_attn.k_proj.bias",
-            "model.layers.*.self_attn.v_proj.bias":
-            "model.layers.*.self_attn.v_proj.bias",
             "model.norm": "model.norm.scale",
         }
 

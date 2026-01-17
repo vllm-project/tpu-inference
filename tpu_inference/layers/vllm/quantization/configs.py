@@ -12,24 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from abc import abstractmethod
-
-import torch
 import torchax
-from flax import nnx
 from jax.sharding import Mesh, PartitionSpec
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEConfig
 # yapf: disable
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               MergedColumnParallelLinear,
                                                LinearBase,
+                                               MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.quantization.base_config import \
-    QuantizationConfig
 
 from tpu_inference.layers.common.process_weights.linear_weights import \
     get_model_matmul_fusion_assignment
@@ -126,13 +120,3 @@ class VllmQuantConfig:
         use_ep = self.vllm_config.parallel_config.enable_expert_parallel
         moe_config.moe_parallel_config.use_ep = use_ep
         return moe_config
-
-
-class JaxQuantizationConfig(JaxCommonConfig, QuantizationConfig):
-    """Extended quantization config for JAX.
-    """
-
-    @abstractmethod
-    def get_quant_method(self, layer: Module,
-                         prefix: str) -> JaxQuantizeMethodBase | None:
-        raise NotImplementedError

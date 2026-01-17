@@ -12,12 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections.abc import Generator
 from typing import Any, Optional
 
 import jax
 import torch
-import vllm.model_executor.layers.linear as vllm_linear
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
@@ -28,6 +26,8 @@ from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
                                                   UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig, QuantizeMethodBase)
 
 from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, process_linear_weights, shard_linear_weights,
@@ -47,7 +47,6 @@ from tpu_inference.layers.vllm.quantization.configs import (
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product
 
-Module = torch.nn.Module | JaxModule
 P = PartitionSpec
 
 logger = init_logger(__name__)
@@ -94,10 +93,6 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
 
     def __init__(self, linear_config: VllmQuantLinearConfig):
         super().__init__(linear_config)
-
-    def create_weights_jax(self, layer: JaxModule) -> None:
-        assert isinstance(layer, JaxLinearBase)
-        # no-op, `weight` is already created in JaxLinear
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = t2j(layer.weight, use_dlpack=False)
@@ -174,6 +169,7 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
                                          out_sharding))
 
         return out
+
 
 class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
