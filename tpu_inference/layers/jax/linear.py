@@ -15,27 +15,15 @@
 from typing import Optional
 
 import jax
-from flax import nnx
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizationConfig
 
-from tpu_inference.layers.jax import JaxModule
-from tpu_inference.layers.vllm.quantization import JaxQuantizeMethodBase
+from tpu_inference.layers.jax.einsum import JaxEinsum, JaxQuantizedEinsumMethod
+
+JaxQuantizedLinearMethod = JaxQuantizedEinsumMethod
 
 
-class JaxQuantizedLinearMethod(JaxQuantizeMethodBase):
-    """Quantization method for JAX linear layer.
-    """
-
-    def create_weights_jax(self, layer: JaxModule) -> None:
-        """Create weights for JAX linear layer."""
-        raise NotImplementedError()
-
-    def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
-        raise NotImplementedError()
-
-
-class JaxLinear(nnx.Linear, JaxModule):
+class JaxLinear(JaxEinsum):
     """Linear layer for JAX.
 
     Args:
@@ -48,31 +36,20 @@ class JaxLinear(nnx.Linear, JaxModule):
     """
 
     def __init__(self,
-                 *args,
+                 input_size: int,
+                 output_size: int,
                  rngs,
+                 *,
+                 use_bias: bool = True,
+                 param_dtype: jax.numpy.dtype = jax.numpy.float32,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = "",
                  **kwargs):
-        assert quant_config is not None, "Even though not a quantized model, VllmUnquantizedConfig must be provided."
-        from tpu_inference.layers.vllm.quantization.common import \
-            JaxQuantizationConfig
-        assert isinstance(quant_config, JaxQuantizationConfig)
-
-        nnx.Linear.__init__(self, *args, rngs=rngs, **kwargs)
-        self.einsum_str = "mn,np->mp"
-        # For compatibility. HF model use 'weight' as name suffix, we alias `self.kernel` to
-        # `self.weight` such that `named_parameters()` can match the names in HF models. We also
-        # apply transpose here to match HF weight layout.
-        self.weight = self.kernel
-        delattr(self, 'kernel')
-        # For compatibility with vLLM. e.g. `JaxCommonLinearConfig` is used in both flax_nnx
-        # and vllm implementations, and it's looking for `layer.output_size` attribute.
-        self.output_size = self.out_features
-
-        quant_method = quant_config.get_quant_method(self, prefix=prefix)
-        assert isinstance(quant_method, JaxQuantizedLinearMethod)
-        self.quant_method = quant_method
-        self.quant_method.create_weights_jax(self)
-
-    def __call__(self, x: jax.Array) -> jax.Array:
-        return self.quant_method.apply_jax(self, x)
+        JaxEinsum.__init__(self,
+                           rngs=rngs,
+                           einsum_str="mn,np->mp",
+                           kernel_shape=(input_size, output_size),
+                           bias_shape=(output_size, ) if use_bias else None,
+                           quant_config=quant_config,
+                           prefix=prefix,
+                           **kwargs)

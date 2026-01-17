@@ -33,8 +33,8 @@ from vllm.model_executor.layers.quantization import \
 from tpu_inference.layers.common.quant_methods import (UNQUANTIZED,
                                                        get_tpu_quant_method)
 from tpu_inference.layers.jax import JaxModule
-from tpu_inference.layers.jax.linear import JaxLinear as JaxLinearBase
-from tpu_inference.layers.jax.linear import JaxQuantizedLinearMethod
+from tpu_inference.layers.jax.einsum import JaxEinsum as JaxLinearBase
+from tpu_inference.layers.jax.einsum import JaxQuantizedEinsumMethod
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
@@ -94,7 +94,7 @@ class VllmUnquantizedConfig(QuantizationConfig, VllmQuantConfig):
 
 
 class VllmUnquantizedLinearMethod(UnquantizedLinearMethod,
-                                  JaxQuantizedLinearMethod):
+                                  JaxQuantizedEinsumMethod):
 
     def __init__(self, linear_config: VllmQuantLinearConfig):
         self.linear_config = linear_config

@@ -293,6 +293,7 @@ def _load_and_shard_weight(vllm_config,
                            mesh: Mesh,
                            hf_key: str,
                            hf_weight: jax.Array,
+                           keep_hf_weight_suffix_when_match: list[str],
                            keep_original_dtype_keys_regex: list[str]
                            | None = None,
                            pp_missing_layers: list[str] | None = None):
@@ -327,8 +328,9 @@ def _load_and_shard_weight(vllm_config,
         )
         hf_weight = hf_weight.astype(model_config.dtype)
 
-    if hf_key.endswith(
-            ".weight") and "mlp" not in hf_key and "proj" not in hf_key:
+    if hf_key.endswith(".weight") and all(
+            substr not in hf_key
+            for substr in keep_hf_weight_suffix_when_match):
         hf_key = hf_key.removesuffix(".weight")
 
     # Find the corresponding model key using the HF key
@@ -433,6 +435,7 @@ def _load_hf_weights_on_thread(
     metadata_map: "MetadataMap",
     mesh: Mesh,
     weights_file: str,
+    keep_hf_weight_suffix_when_match: list[str],
     filter_regex: Optional[str] = None,
     keep_original_dtype_keys_regex: Optional[list[str]] = None,
     pp_missing_layers: list[str] | None = None,
@@ -453,8 +456,9 @@ def _load_hf_weights_on_thread(
             mesh,
             hf_key,
             hf_weight,
-            keep_original_dtype_keys_regex,
-            pp_missing_layers,
+            keep_original_dtype_keys_regex=keep_original_dtype_keys_regex,
+            pp_missing_layers=pp_missing_layers,
+            keep_hf_weight_suffix_when_match=keep_hf_weight_suffix_when_match,
         )
 
 
@@ -467,8 +471,16 @@ def load_hf_weights(
     is_draft_model: bool = False,
     keep_original_dtype_keys_regex: Optional[list[str]] = None,
     pp_missing_layers: list[str] | None = None,
+    keep_hf_weight_suffix_when_match: list[str] = [],
 ):
-    """Load weights into a JAX model from either an iterator or files."""
+    """Load weights into a JAX model from either an iterator or files.
+    
+    For tensors whose name matches any string in `keep_hf_weight_suffix_when_match`, the
+    '.weight' suffix in HF keys will be kept.
+    Some models are refactored to have identical parameter names as HF models, so the suffix
+    does not need to be removed for those parameters. Eventually we want to get rid of
+    the ".weight" suffix removal logic altogether.
+    """
     params = nnx.state(model)
     try:
         shardings = nnx.get_named_sharding(params, mesh)
@@ -496,8 +508,10 @@ def load_hf_weights(
                 mesh,
                 hf_key,
                 hf_weight_jax,
-                keep_original_dtype_keys_regex,
+                keep_original_dtype_keys_regex=keep_original_dtype_keys_regex,
                 pp_missing_layers=pp_missing_layers,
+                keep_hf_weight_suffix_when_match=
+                keep_hf_weight_suffix_when_match,
             )
     else:
         # File-based path (multi-threaded)
@@ -526,6 +540,8 @@ def load_hf_weights(
                     keep_original_dtype_keys_regex=
                     keep_original_dtype_keys_regex,
                     pp_missing_layers=pp_missing_layers,
+                    keep_hf_weight_suffix_when_match=
+                    keep_hf_weight_suffix_when_match,
                 ) for weights_file in weights_files
             ]
             for future in futures:

@@ -28,10 +28,11 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.quantization.base_config import \
+    QuantizationConfig
 
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.jax.linear import JaxLinear as JaxLinearBase
-from tpu_inference.layers.jax.linear import QuantizationConfig
+from tpu_inference.layers.jax.einsum import JaxEinsum as JaxLinearBase
 from tpu_inference.layers.vllm.process_weights.linear_weights import \
     get_model_matmul_fusion_assignment
 from tpu_inference.layers.vllm.quantization import JaxQuantizeMethodBase
