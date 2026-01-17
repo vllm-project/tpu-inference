@@ -82,6 +82,13 @@ class TPUWorker:
         self.pp_config = PPConfig(rank, ip, prev_worker_ip,
                                   self.parallel_config.pipeline_parallel_size)
 
+        # Explicitly trigger RunAI download on the worker if needed.
+        # This handles downloading config.json and other non-weight files to the
+        # worker's local cache before VllmModelWrapper initialization.
+        if hasattr(self.model_config, "maybe_pull_model_tokenizer_for_runai"):
+            self.model_config.maybe_pull_model_tokenizer_for_runai(
+                self.model_config.model, self.model_config.tokenizer)
+
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils.import_utils import init_cached_hf_modules
