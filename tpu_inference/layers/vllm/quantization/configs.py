@@ -40,7 +40,8 @@ logger = init_logger(__name__)
 class VllmQuantLinearConfig:
 
     def __init__(self, vllm_config: VllmConfig, mesh: Mesh, layer: LinearBase):
-        assert isinstance(layer, LinearBase)
+        from tpu_inference.layers.jax.linear import JaxEinsum
+        assert isinstance(layer, LinearBase | JaxEinsum)
 
         self.mesh = mesh
         self.output_sizes = [layer.output_size]
@@ -111,7 +112,8 @@ class VllmQuantConfig:
         cls.mesh = mesh
 
     def get_linear_config(self, layer: LinearBase) -> VllmQuantLinearConfig:
-        assert isinstance(layer, LinearBase)
+        from tpu_inference.layers.jax.linear import JaxEinsum
+        assert isinstance(layer, LinearBase | JaxEinsum)
         return VllmQuantLinearConfig(self.vllm_config, self.mesh, layer)
 
     def get_moe_config(self, layer: FusedMoE) -> FusedMoEConfig:
