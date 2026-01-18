@@ -832,8 +832,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         Only returns prompt logprobs when a request COMPLETES its prefill
         in the current step.
         """
-        from vllm.v1.outputs import LogprobsTensors
-
         prompt_logprobs_dict: dict[str, LogprobsTensors] = {}
 
         # Check which requests need prompt_logprobs AND are completing prefill
@@ -841,8 +839,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         token_offset = 0
         for req_id in self.input_batch.req_ids[:num_reqs]:
+            # Skip invalid entries
+            if req_id is None:
+                continue
+
+            # Skip if not in current batch
+            if req_id not in self.input_batch.req_id_to_index:
+                continue
+
             num_scheduled = scheduler_output.num_scheduled_tokens.get(
                 req_id, 0)
+            if num_scheduled == 0:
+                continue
 
             req_state = self.requests.get(req_id)
             if req_state is None:
@@ -892,18 +900,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         all_logprobs_np = np.asarray(jax.device_get(all_logprobs))
 
         for req_id, num_prompt_logprobs, start_offset, prompt_len in reqs_completing_prefill:
-            req_state = self.requests[req_id]
+            # Double-check req_id is still valid (defensive)
+            if req_id not in self.input_batch.req_id_to_index:
+                continue
+
+            req_state = self.requests.get(req_id)
+            if req_state is None:
+                continue
+
             req_idx = self.input_batch.req_id_to_index[req_id]
             num_computed = req_state.num_computed_tokens
 
             num_prompt_tokens_this_step = prompt_len - num_computed
-            # Logprobs for positions 0 to num_tokens-2 predict tokens 1 to num_tokens-1
             num_logprob_tokens = num_prompt_tokens_this_step - 1
 
             if num_logprob_tokens <= 0:
                 continue
 
-            # Get the actual next token ids (tokens at positions 1 to num_tokens-1)
+            # Get the actual next token ids
             next_token_ids = self.input_batch.token_ids_cpu[
                 req_idx, num_computed + 1:num_computed +
                 num_prompt_tokens_this_step].astype(np.int64)
@@ -912,18 +926,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             req_logprobs = all_logprobs_np[start_offset:start_offset +
                                            num_logprob_tokens]
 
-            # For prompt logprobs, we only need the selected token's logprob
-            # Shape: [num_logprob_tokens, 1]
+            # Get the selected token's logprob
             selected_logprobs = req_logprobs[np.arange(num_logprob_tokens),
                                              next_token_ids]
 
-            # Compute ranks of selected tokens (how many tokens have higher logprob)
+            # Compute ranks of selected tokens
             selected_token_ranks = np.sum(req_logprobs
                                           > selected_logprobs[:, np.newaxis],
                                           axis=-1).astype(np.int64)
 
-            # Create LogprobsTensors with just the selected token
-            # Shape: [num_logprob_tokens, 1]
             logprobs_tensors = LogprobsTensors(
                 logprob_token_ids=torch.from_numpy(
                     next_token_ids.reshape(-1, 1)),
