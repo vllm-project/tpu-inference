@@ -154,6 +154,7 @@ class ExecuteModelState:
     attn_metadata: AttentionMetadata
     input_ids: Optional[jax.Array]
     hidden_states: jax.Array
+    hidden_states_all: Optional[jax.Array]
     logits: jax.Array
     aux_hidden_states: Optional[jax.Array]
     spec_decode_metadata: Optional[SpecDecodeMetadata]
@@ -575,6 +576,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # This can happen in pipeline parallel case.
             return EMPTY_MODEL_RUNNER_OUTPUT
 
+        hidden_states_all = self.execute_model_state.hidden_states_all
+
         (scheduler_output, attn_metadata, input_ids, hidden_states, logits,
          aux_hidden_states, spec_decode_metadata, kv_connector_output,
          logits_indices_selector,
@@ -601,10 +604,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 logits,
                 arange,
             )
-        return self._sample_from_logits(
-            scheduler_output, attn_metadata, input_ids, hidden_states, logits,
-            aux_hidden_states, spec_decode_metadata, kv_connector_output,
-            logits_indices_selector, padded_num_reqs)
+        return self._sample_from_logits(scheduler_output,
+                                        attn_metadata,
+                                        input_ids,
+                                        hidden_states,
+                                        logits,
+                                        aux_hidden_states,
+                                        spec_decode_metadata,
+                                        kv_connector_output,
+                                        logits_indices_selector,
+                                        padded_num_reqs,
+                                        hidden_states_all=hidden_states_all)
 
     def _modify_prev_results(self):
         # If copy to host has not been done, we just wait.
@@ -788,6 +798,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 assert isinstance(hidden_states, JaxIntermediateTensors)
                 hidden_states.kv_connector_output = kv_connector_output
                 return attn_metadata, hidden_states
+            hidden_states_all = hidden_states
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
             logits = self.compute_logits_fn(
@@ -801,6 +812,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             attn_metadata=attn_metadata,
             input_ids=input_ids,
             hidden_states=hidden_states,
+            hidden_states_all=hidden_states_all,
             logits=logits,
             aux_hidden_states=aux_hidden_states,
             spec_decode_metadata=spec_decode_metadata,
@@ -808,6 +820,75 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logits_indices_selector=logits_indices_selector,
             padded_num_reqs=padded_num_reqs)
         return attn_metadata, None
+
+    def _get_prompt_logprobs_dict(
+        self,
+        hidden_states_all: jax.Array,
+        scheduler_output: "VllmSchedulerOutput",
+        num_reqs: int,
+    ) -> dict[str, Optional[list]]:
+        """Compute prompt logprobs for requests that need them."""
+        prompt_logprobs_dict: dict[str, Optional[list]] = {}
+
+        # Check which requests need prompt_logprobs
+        reqs_needing_logprobs = []
+        for req_id in self.input_batch.req_ids[:num_reqs]:
+            req_state = self.requests.get(req_id)
+            if req_state is None:
+                prompt_logprobs_dict[req_id] = None
+                continue
+            sampling_params = getattr(req_state, 'sampling_params', None)
+            if sampling_params is not None and getattr(
+                    sampling_params, 'prompt_logprobs', None) is not None:
+                reqs_needing_logprobs.append(req_id)
+            else:
+                prompt_logprobs_dict[req_id] = None
+
+        if not reqs_needing_logprobs:
+            return prompt_logprobs_dict
+
+        # Compute logits for ALL positions
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        all_hidden = hidden_states_all[:total_num_scheduled_tokens]
+        all_logits = self.compute_logits_fn(self.state, all_hidden, None)
+
+        # Compute log softmax to get logprobs
+        all_logprobs = jax.nn.log_softmax(all_logits, axis=-1)
+        all_logprobs_np = np.asarray(jax.device_get(all_logprobs))
+
+        # Build prompt_logprobs for each request that needs it
+        token_offset = 0
+        for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+            num_tokens = scheduler_output.num_scheduled_tokens.get(req_id, 0)
+
+            if req_id not in reqs_needing_logprobs:
+                token_offset += num_tokens
+                continue
+
+            req_state = self.requests[req_id]
+
+            # Get the input token ids for this request
+            req_idx = self.input_batch.req_id_to_index[req_id]
+            num_computed = req_state.num_computed_tokens
+
+            # Build logprobs list: [None, {token: logprob}, ...]
+            # First token has no prior context, so None
+            req_prompt_logprobs = [None]
+
+            # For positions 1..num_tokens-1, get logprob of actual token
+            for j in range(num_tokens - 1):
+                pos = token_offset + j
+                # The token at position j+1 is predicted by logits at position j
+                next_token_id = int(
+                    self.input_batch.token_ids_cpu[req_idx,
+                                                   num_computed + j + 1])
+                logprob = float(all_logprobs_np[pos, next_token_id])
+                req_prompt_logprobs.append({next_token_id: logprob})
+
+            prompt_logprobs_dict[req_id] = req_prompt_logprobs
+            token_offset += num_tokens
+
+        return prompt_logprobs_dict
 
     def _sample_from_logits(
         self,
@@ -821,6 +902,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         kv_connector_output: Optional[KVConnectorOutput],
         logits_indices_selector: Optional[List[int]] = None,
         padded_num_reqs: Optional[int] = None,
+        hidden_states_all=None
     ) -> ModelRunnerOutput | AsyncTPUModelRunnerOutput:
         if padded_num_reqs is None:
             padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
@@ -910,9 +992,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.input_batch.req_ids[:num_reqs]), "req_ids contains None"
         req_ids = cast(list[str], self.input_batch.req_ids[:num_reqs])
 
-        prompt_logprobs_dict = {}
-        for req_id in self.input_batch.req_ids[:num_reqs]:
-            prompt_logprobs_dict[req_id] = None
+        if hidden_states_all is not None:
+            prompt_logprobs_dict = self._get_prompt_logprobs_dict(
+                hidden_states_all, scheduler_output, num_reqs)
+        else:
+            prompt_logprobs_dict = {
+                req_id: None
+                for req_id in self.input_batch.req_ids[:num_reqs]
+            }
 
         # If async scheduler enabled
         if self.scheduler_config.async_scheduling:
