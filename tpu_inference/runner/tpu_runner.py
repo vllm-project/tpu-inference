@@ -24,7 +24,6 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
-import torch
 import vllm.envs as vllm_envs
 from flax import nnx
 from jax.experimental import mesh_utils
@@ -41,7 +40,7 @@ from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              DraftTokenIds, KVConnectorOutput, LogprobsLists,
-                             LogprobsTensors, ModelRunnerOutput)
+                             ModelRunnerOutput)
 from vllm.v1.request import Request
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.worker.kv_connector_model_runner_mixin import \
@@ -155,7 +154,6 @@ class ExecuteModelState:
     attn_metadata: AttentionMetadata
     input_ids: Optional[jax.Array]
     hidden_states: jax.Array
-    hidden_states_all: Optional[jax.Array]
     logits: jax.Array
     aux_hidden_states: Optional[jax.Array]
     spec_decode_metadata: Optional[SpecDecodeMetadata]
@@ -579,18 +577,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         (scheduler_output, attn_metadata, input_ids, hidden_states, logits,
          aux_hidden_states, spec_decode_metadata, kv_connector_output,
-         logits_indices_selector, padded_num_reqs, hidden_states_all) = (
-             self.execute_model_state.scheduler_output,
-             self.execute_model_state.attn_metadata,
-             self.execute_model_state.input_ids,
-             self.execute_model_state.hidden_states,
-             self.execute_model_state.logits,
-             self.execute_model_state.aux_hidden_states,
-             self.execute_model_state.spec_decode_metadata,
-             self.execute_model_state.kv_connector_output,
-             self.execute_model_state.logits_indices_selector,
-             self.execute_model_state.padded_num_reqs,
-             self.execute_model_state.hidden_states_all)
+         logits_indices_selector,
+         padded_num_reqs) = (self.execute_model_state.scheduler_output,
+                             self.execute_model_state.attn_metadata,
+                             self.execute_model_state.input_ids,
+                             self.execute_model_state.hidden_states,
+                             self.execute_model_state.logits,
+                             self.execute_model_state.aux_hidden_states,
+                             self.execute_model_state.spec_decode_metadata,
+                             self.execute_model_state.kv_connector_output,
+                             self.execute_model_state.logits_indices_selector,
+                             self.execute_model_state.padded_num_reqs)
         self.execute_model_state = None
 
         if grammar_output is not None:
@@ -604,17 +601,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 logits,
                 arange,
             )
-        return self._sample_from_logits(scheduler_output,
-                                        attn_metadata,
-                                        input_ids,
-                                        hidden_states,
-                                        logits,
-                                        aux_hidden_states,
-                                        spec_decode_metadata,
-                                        kv_connector_output,
-                                        logits_indices_selector,
-                                        padded_num_reqs,
-                                        hidden_states_all=hidden_states_all)
+        return self._sample_from_logits(
+            scheduler_output, attn_metadata, input_ids, hidden_states, logits,
+            aux_hidden_states, spec_decode_metadata, kv_connector_output,
+            logits_indices_selector, padded_num_reqs)
 
     def _modify_prev_results(self):
         # If copy to host has not been done, we just wait.
@@ -798,7 +788,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 assert isinstance(hidden_states, JaxIntermediateTensors)
                 hidden_states.kv_connector_output = kv_connector_output
                 return attn_metadata, hidden_states
-            hidden_states_all = hidden_states
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
             logits = self.compute_logits_fn(
@@ -812,7 +801,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             attn_metadata=attn_metadata,
             input_ids=input_ids,
             hidden_states=hidden_states,
-            hidden_states_all=hidden_states_all,
             logits=logits,
             aux_hidden_states=aux_hidden_states,
             spec_decode_metadata=spec_decode_metadata,
@@ -820,146 +808,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logits_indices_selector=logits_indices_selector,
             padded_num_reqs=padded_num_reqs)
         return attn_metadata, None
-
-    def _get_prompt_logprobs_dict(
-        self,
-        hidden_states_all: jax.Array,
-        scheduler_output: "VllmSchedulerOutput",
-        num_reqs: int,
-    ) -> dict[str, "LogprobsTensors"]:
-        """Compute prompt logprobs for requests that need them.
-        
-        Only returns prompt logprobs when a request COMPLETES its prefill
-        in the current step.
-        """
-
-        # Build set of valid req_ids that will be in ModelRunnerOutput
-        current_req_ids = set(self.input_batch.req_ids[:num_reqs]) - {None}
-
-        # Also check against scheduler_output to ensure consistency
-        scheduled_req_ids = set(scheduler_output.num_scheduled_tokens.keys())
-        valid_req_ids = current_req_ids & scheduled_req_ids
-
-        if not valid_req_ids:
-            return {}
-
-        prompt_logprobs_dict: dict[str, LogprobsTensors] = {}
-
-        # Check which requests need prompt_logprobs AND are completing prefill
-        reqs_completing_prefill: list[tuple[str, int, int, int]] = []
-
-        token_offset = 0
-        for req_id in self.input_batch.req_ids[:num_reqs]:
-            if req_id is None or req_id not in valid_req_ids:
-                continue
-
-            num_scheduled = scheduler_output.num_scheduled_tokens.get(
-                req_id, 0)
-            if num_scheduled == 0:
-                token_offset += num_scheduled
-                continue
-
-            req_state = self.requests.get(req_id)
-            if req_state is None:
-                token_offset += num_scheduled
-                continue
-
-            sampling_params = getattr(req_state, 'sampling_params', None)
-            if sampling_params is None or sampling_params.prompt_logprobs is None:
-                token_offset += num_scheduled
-                continue
-
-            # Check if we're in prefill phase and completing it
-            num_computed = req_state.num_computed_tokens
-            prompt_token_ids = getattr(req_state, 'prompt_token_ids', None)
-            if prompt_token_ids is None:
-                token_offset += num_scheduled
-                continue
-
-            prompt_len = len(prompt_token_ids)
-            tokens_after_step = num_computed + num_scheduled
-
-            # Skip if already past prefill (decode phase)
-            if num_computed >= prompt_len:
-                token_offset += num_scheduled
-                continue
-
-            # Skip if prefill not completing in this step
-            if tokens_after_step < prompt_len:
-                token_offset += num_scheduled
-                continue
-
-            num_prompt_logprobs = sampling_params.prompt_logprobs
-            reqs_completing_prefill.append(
-                (req_id, num_prompt_logprobs, token_offset, prompt_len))
-            token_offset += num_scheduled
-
-        if not reqs_completing_prefill:
-            return {}
-
-        # Compute logits for ALL positions
-        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        all_hidden = hidden_states_all[:total_num_scheduled_tokens]
-        all_logits = self.compute_logits_fn(self.state, all_hidden, None)
-
-        # Compute log softmax to get logprobs
-        all_logprobs = jax.nn.log_softmax(all_logits, axis=-1)
-        all_logprobs_np = np.asarray(jax.device_get(all_logprobs))
-
-        for req_id, num_prompt_logprobs, start_offset, prompt_len in reqs_completing_prefill:
-            # Final validation: skip if req_id won't be in output
-            if req_id not in valid_req_ids:
-                continue
-
-            req_state = self.requests.get(req_id)
-            if req_state is None:
-                continue
-
-            req_idx = self.input_batch.req_id_to_index.get(req_id)
-            if req_idx is None:
-                continue
-
-            num_computed = req_state.num_computed_tokens
-
-            num_prompt_tokens_this_step = prompt_len - num_computed
-            num_logprob_tokens = num_prompt_tokens_this_step - 1
-
-            if num_logprob_tokens <= 0:
-                continue
-
-            # Get the actual next token ids
-            next_token_ids = self.input_batch.token_ids_cpu[
-                req_idx, num_computed + 1:num_computed +
-                num_prompt_tokens_this_step].astype(np.int64)
-
-            # Get logprobs for this request's positions
-            req_logprobs = all_logprobs_np[start_offset:start_offset +
-                                           num_logprob_tokens]
-
-            # Get the selected token's logprob
-            selected_logprobs = req_logprobs[np.arange(num_logprob_tokens),
-                                             next_token_ids]
-
-            # Compute ranks of selected tokens
-            selected_token_ranks = np.sum(req_logprobs
-                                          > selected_logprobs[:, np.newaxis],
-                                          axis=-1).astype(np.int64)
-
-            logprobs_tensors = LogprobsTensors(
-                logprob_token_ids=torch.from_numpy(
-                    next_token_ids.reshape(-1, 1)),
-                logprobs=torch.from_numpy(
-                    selected_logprobs.astype(np.float32).reshape(-1, 1)),
-                selected_token_ranks=torch.from_numpy(selected_token_ranks),
-            )
-
-            prompt_logprobs_dict[req_id] = logprobs_tensors
-
-        # Final filter: only return req_ids that are definitely in current batch
-        return {
-            k: v
-            for k, v in prompt_logprobs_dict.items() if k in current_req_ids
-        }
 
     def _sample_from_logits(
         self,
@@ -973,7 +821,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         kv_connector_output: Optional[KVConnectorOutput],
         logits_indices_selector: Optional[List[int]] = None,
         padded_num_reqs: Optional[int] = None,
-        hidden_states_all=None
     ) -> ModelRunnerOutput | AsyncTPUModelRunnerOutput:
         if padded_num_reqs is None:
             padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
@@ -987,6 +834,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
             self.mesh, self.input_batch, padded_num_reqs, sharding=sharding)
 
+        # TODO(pooyam): Should we move this to `_prepare_inputs`?
         if tpu_sampling_metadata.do_sampling:
             self.rng_params_for_sampling, step_rng = jax.random.split(
                 self.rng_params_for_sampling)
@@ -1006,7 +854,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             else:
                 bonus_rng = step_rng
                 rejection_rng = step_rng
-
             bonus_logits = self._select_from_array_fn(
                 logits, spec_decode_metadata.bonus_logits_indices)
             bonus_token_ids = sample(
@@ -1015,7 +862,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 bonus_logits,
                 tpu_sampling_metadata,
             )
-
             target_logits = self._select_from_array_fn(
                 logits, spec_decode_metadata.target_logits_indices)
             next_tokens = self.rejection_sampler(
@@ -1036,6 +882,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         num_reqs = self.input_batch.num_reqs
 
+        # Update the cache state concurrently. Code above will not block until
+        # We use `selected_token_ids`. Add mark_step if post-processing changes
         request_seq_lens: list[tuple[int, CachedRequestState, int]] = []
         discard_sampled_tokens_req_indices = []
         for i, req_id in zip(range(num_reqs), self.input_batch.req_ids):
@@ -1046,9 +894,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             if seq_len >= req_state.num_tokens:
                 request_seq_lens.append((i, req_state, seq_len))
             else:
+                # Ignore the sampled token from the partial request.
+                # Rewind the generator state as if the token was not sampled.
                 generator = self.input_batch.generators.get(i)
                 if generator is not None:
+                    # This relies on cuda-specific torch-internal impl details
                     generator.set_offset(generator.get_offset() - 4)
+
+                # Record the index of the request that should not be sampled,
+                # so that we could clear the sampled tokens before returning.
                 discard_sampled_tokens_req_indices.append(i)
 
         assert all(
@@ -1056,44 +910,32 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.input_batch.req_ids[:num_reqs]), "req_ids contains None"
         req_ids = cast(list[str], self.input_batch.req_ids[:num_reqs])
 
-        # --- LOGPROBS LOGIC ---
-        if hidden_states_all is not None:
-            prompt_logprobs_dict = self._get_prompt_logprobs_dict(
-                hidden_states_all, scheduler_output, num_reqs)
-        else:
-            prompt_logprobs_dict = {
-                req_id: None
-                for req_id in self.input_batch.req_ids[:num_reqs]
-            }
-
-        # --- HELPER FOR SAFETY PATCH ---
-        def _patch_req_id_to_index(base_map):
-            patched_map = copy.deepcopy(base_map)
-            if scheduler_output.num_scheduled_tokens:
-                for sched_req_id in scheduler_output.num_scheduled_tokens.keys(
-                ):
-                    if sched_req_id not in patched_map:
-                        # Map missing request to -1 (dummy index) to prevent Scheduler crash
-                        patched_map[sched_req_id] = -1
-            return patched_map
+        prompt_logprobs_dict = {}
+        for req_id in self.input_batch.req_ids[:num_reqs]:
+            prompt_logprobs_dict[req_id] = None
 
         # If async scheduler enabled
         if self.scheduler_config.async_scheduling:
+            # Get previous results from TPU and replace the placeholder.
             if self._pre_async_results is not None:
                 assert not self.speculative_config and spec_decode_metadata is None, "Async scheduler does not support speculative decoding yet."
                 self._modify_prev_results()
 
+            # Set placeholder for next tokens that is not yet generated
             placeholder_req_id_to_index: dict[
                 str, int] = self._update_placeholder(
                     discard_sampled_tokens_req_indices, request_seq_lens,
                     logits_indices_selector)
 
             if logprobs is not None:
+                # Map logprobs back to the pre-dp shuffling order
                 logprobs_lists = _jax_logprobs_to_lists(
                     logprobs, logits_indices_selector)
+
             else:
                 logprobs_lists = None
 
+            # Save the previous results
             next_tokens = jax.copy_to_host_async(next_tokens)
             self._pre_async_results = AsyncPreResults(
                 req_ids=req_ids,
@@ -1104,30 +946,26 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 placeholder_req_id_to_index=placeholder_req_id_to_index,
                 logits_indices_selector=logits_indices_selector)
 
-            # --- APPLY SAFETY PATCH (ASYNC PATH) ---
-            patched_req_id_to_index = _patch_req_id_to_index(
-                self.input_batch.req_id_to_index)
-
             # Return Model output to executor
             model_runner_output = ModelRunnerOutput(
                 req_ids=req_ids,
-                req_id_to_index=patched_req_id_to_index,  # Use patched map
-                sampled_token_ids=[],
+                req_id_to_index=copy.deepcopy(
+                    self.input_batch.req_id_to_index),
+                sampled_token_ids=[],  # Fill in async get
                 logprobs=logprobs_lists,
                 prompt_logprobs_dict=prompt_logprobs_dict,
                 pooler_output=[],
                 kv_connector_output=kv_connector_output,
             )
-
+            # Return async_model_runner_output
             async_model_runner_output = AsyncTPUModelRunnerOutput(
                 model_runner_output, next_tokens, num_reqs,
                 discard_sampled_tokens_req_indices, logits_indices_selector)
-
             return async_model_runner_output
 
-        # --- SYNC PATH ---
         if spec_decode_metadata is None:
             next_tokens = np.asarray(jax.device_get(next_tokens))
+            # Map tokens back to the pre-dp shuffling order
             if logits_indices_selector is not None:
                 next_tokens = next_tokens[logits_indices_selector]
             selected_token_ids = np.expand_dims(next_tokens[:num_reqs], 1)
@@ -1138,9 +976,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 spec_decode_metadata.draft_lengths_cpu, num_reqs,
                 spec_decode_metadata.draft_token_ids.shape[0])
 
+        # Mask out the sampled tokens that should not be sampled.
         for i in discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
-
+        # Append sampled tokens
         for req_idx, req_state, _ in request_seq_lens:
             sampled_ids = valid_sampled_token_ids[req_idx]
             if not sampled_ids:
@@ -1152,6 +991,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 "Sampled token IDs exceed the max model length. "
                 f"Total number of tokens: {end_idx} > max_model_len: "
                 f"{self.max_model_len}")
+
             self.input_batch.token_ids_cpu[req_idx,
                                            start_idx:end_idx] = sampled_ids
             self.input_batch.num_tokens_no_spec[req_idx] = end_idx
@@ -1159,6 +999,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             req_state.output_token_ids.extend(sampled_ids)
 
         if logprobs is not None:
+            # Map logprobs back to the pre-dp shuffling order
             logprobs_lists = _jax_logprobs_to_lists(logprobs,
                                                     logits_indices_selector)
         else:
@@ -1175,20 +1016,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     input_ids,
                 )
 
-        # --- APPLY SAFETY PATCH (SYNC PATH) ---
-        patched_req_id_to_index = _patch_req_id_to_index(
-            self.input_batch.req_id_to_index)
-
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
-            req_id_to_index=patched_req_id_to_index,  # Use patched map
+            req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
             kv_connector_output=kv_connector_output,
         )
-
         return model_runner_output
 
     @functools.partial(jax.jit, static_argnums=(0, ))

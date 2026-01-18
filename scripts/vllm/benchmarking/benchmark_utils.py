@@ -106,11 +106,6 @@ def postprocess_text_mmlu(preds: List[str],
         # Currently, the chat-template parsing rules are based on the gpt-oss format.
         # We will need to add rules for other models, as their output formats may differ.
 
-        output = re.sub(r'<think>.*</think>',
-                        '',
-                        output,
-                        flags=re.DOTALL | re.IGNORECASE)
-
         # To match 'assistantfinal' block.
         final_block_match = re.search(r"assistant.*final(.*)", output,
                                       re.IGNORECASE | re.DOTALL)
