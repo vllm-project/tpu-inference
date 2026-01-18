@@ -837,8 +837,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         prompt_logprobs_dict: dict[str, LogprobsTensors] = {}
 
         # Check which requests need prompt_logprobs AND are completing prefill
-        reqs_completing_prefill: list[tuple[str, int, int, int]] = [
-        ]  # (req_id, num_prompt_logprobs, start_offset, num_prompt_tokens)
+        reqs_completing_prefill: list[tuple[str, int, int, int]] = []
 
         token_offset = 0
         for req_id in self.input_batch.req_ids[:num_reqs]:
@@ -863,8 +862,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 continue
 
             prompt_len = len(prompt_token_ids)
-
-            # After this step, how many tokens will be computed?
             tokens_after_step = num_computed + num_scheduled
 
             # Skip if already past prefill (decode phase)
@@ -872,19 +869,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 token_offset += num_scheduled
                 continue
 
-            # Skip if prefill not completing in this step (chunked prefill, more chunks to come)
+            # Skip if prefill not completing in this step
             if tokens_after_step < prompt_len:
                 token_offset += num_scheduled
                 continue
 
-            # This request is completing its prefill in this step
             num_prompt_logprobs = sampling_params.prompt_logprobs
             reqs_completing_prefill.append(
                 (req_id, num_prompt_logprobs, token_offset, prompt_len))
             token_offset += num_scheduled
 
         if not reqs_completing_prefill:
-            return {}  # Return empty dict - this is important!
+            return {}
 
         # Compute logits for ALL positions
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -895,66 +891,44 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         all_logprobs = jax.nn.log_softmax(all_logits, axis=-1)
         all_logprobs_np = np.asarray(jax.device_get(all_logprobs))
 
-        # Build prompt_logprobs for each request completing prefill
         for req_id, num_prompt_logprobs, start_offset, prompt_len in reqs_completing_prefill:
             req_state = self.requests[req_id]
             req_idx = self.input_batch.req_id_to_index[req_id]
             num_computed = req_state.num_computed_tokens
 
-            # Number of prompt tokens being processed in this step
-            # (may be less than prompt_len if chunked)
             num_prompt_tokens_this_step = prompt_len - num_computed
-
-            # Number of prompt logprobs to compute (excluding first token which has no prior)
-            # We compute logprobs for tokens at positions 1 to num_prompt_tokens_this_step-1
+            # Logprobs for positions 0 to num_tokens-2 predict tokens 1 to num_tokens-1
             num_logprob_tokens = num_prompt_tokens_this_step - 1
 
             if num_logprob_tokens <= 0:
                 continue
 
-            # num_prompt_logprobs + 1 to include the selected token
-            num_logprobs_to_return = min(num_prompt_logprobs + 1,
-                                         self.vocab_size)
+            # Get the actual next token ids (tokens at positions 1 to num_tokens-1)
+            next_token_ids = self.input_batch.token_ids_cpu[
+                req_idx, num_computed + 1:num_computed +
+                num_prompt_tokens_this_step].astype(np.int64)
 
-            # Get logprobs for this request's prompt tokens
+            # Get logprobs for this request's positions
             req_logprobs = all_logprobs_np[start_offset:start_offset +
                                            num_logprob_tokens]
 
-            # Get top-k logprobs for each position
-            top_indices = np.argpartition(req_logprobs,
-                                          -num_logprobs_to_return,
-                                          axis=-1)[:, -num_logprobs_to_return:]
-            top_logprobs = np.take_along_axis(req_logprobs,
-                                              top_indices,
-                                              axis=-1)
+            # For prompt logprobs, we only need the selected token's logprob
+            # Shape: [num_logprob_tokens, 1]
+            selected_logprobs = req_logprobs[np.arange(num_logprob_tokens),
+                                             next_token_ids]
 
-            # Sort by logprob descending
-            sort_order = np.argsort(-top_logprobs, axis=-1)
-            top_indices = np.take_along_axis(top_indices, sort_order, axis=-1)
-            top_logprobs = np.take_along_axis(top_logprobs,
-                                              sort_order,
-                                              axis=-1)
+            # Compute ranks of selected tokens (how many tokens have higher logprob)
+            selected_token_ranks = np.sum(req_logprobs
+                                          > selected_logprobs[:, np.newaxis],
+                                          axis=-1).astype(np.int64)
 
-            # Get the actual next token ids and compute their ranks
-            next_token_ids = self.input_batch.token_ids_cpu[
-                req_idx,
-                num_computed + 1:num_computed + num_prompt_tokens_this_step]
-
-            selected_token_ranks = np.zeros(num_logprob_tokens, dtype=np.int64)
-            for j in range(num_logprob_tokens):
-                next_token_id = int(next_token_ids[j])
-                rank_in_topk = np.where(top_indices[j] == next_token_id)[0]
-                if len(rank_in_topk) > 0:
-                    selected_token_ranks[j] = rank_in_topk[0]
-                else:
-                    selected_token_ranks[j] = int(
-                        np.sum(req_logprobs[j] > req_logprobs[j,
-                                                              next_token_id]))
-
+            # Create LogprobsTensors with just the selected token
+            # Shape: [num_logprob_tokens, 1]
             logprobs_tensors = LogprobsTensors(
-                logprob_token_ids=torch.from_numpy(top_indices.astype(
-                    np.int64)),
-                logprobs=torch.from_numpy(top_logprobs.astype(np.float32)),
+                logprob_token_ids=torch.from_numpy(
+                    next_token_ids.reshape(-1, 1)),
+                logprobs=torch.from_numpy(
+                    selected_logprobs.astype(np.float32).reshape(-1, 1)),
                 selected_token_ranks=torch.from_numpy(selected_token_ranks),
             )
 
