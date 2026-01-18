@@ -15,8 +15,9 @@
 from typing import List, Protocol
 
 from flax import nnx
-from vllm.distributed import get_pp_group
 from vllm.distributed.utils import get_pp_indices
+
+from tpu_inference.distributed.jax_parallel_state import get_pp_group
 
 
 class PPMissingLayer(nnx.Module):

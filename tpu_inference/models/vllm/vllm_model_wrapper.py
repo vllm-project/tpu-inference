@@ -36,6 +36,8 @@ from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm.sequence import IntermediateTensors
 
+from tpu_inference.distributed.jax_parallel_state import \
+    get_pp_group as jax_get_pp_group
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
@@ -97,6 +99,22 @@ class VllmModelWrapper:
 
         self.vllm_config.quant_config = get_tpu_quantization_config(
             self.vllm_config, self.mesh)
+        self._apply_pp_patch()
+
+    def _apply_pp_patch(self):
+        # patch `get_pp_group` in vLLM to jax's get_pp_group.
+        import sys
+
+        import vllm.distributed as vllm_dist
+        import vllm.distributed.parallel_state as vllm_ps
+
+        vllm_ps.get_pp_group = jax_get_pp_group
+        vllm_dist.get_pp_group = jax_get_pp_group
+
+        for module_name, module in sys.modules.items():
+            if module_name.startswith("vllm.model_executor.models"):
+                if hasattr(module, "get_pp_group"):
+                    setattr(module, "get_pp_group", jax_get_pp_group)
 
     def load_weights(self):
         # Set up to load the model into CPU first.
