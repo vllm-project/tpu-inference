@@ -24,6 +24,7 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
+import torch
 import vllm.envs as vllm_envs
 from flax import nnx
 from jax.experimental import mesh_utils
@@ -40,7 +41,7 @@ from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              DraftTokenIds, KVConnectorOutput, LogprobsLists,
-                             ModelRunnerOutput)
+                             LogprobsTensors, ModelRunnerOutput)
 from vllm.v1.request import Request
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.worker.kv_connector_model_runner_mixin import \
@@ -576,21 +577,20 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # This can happen in pipeline parallel case.
             return EMPTY_MODEL_RUNNER_OUTPUT
 
-        hidden_states_all = self.execute_model_state.hidden_states_all
-
         (scheduler_output, attn_metadata, input_ids, hidden_states, logits,
          aux_hidden_states, spec_decode_metadata, kv_connector_output,
-         logits_indices_selector,
-         padded_num_reqs) = (self.execute_model_state.scheduler_output,
-                             self.execute_model_state.attn_metadata,
-                             self.execute_model_state.input_ids,
-                             self.execute_model_state.hidden_states,
-                             self.execute_model_state.logits,
-                             self.execute_model_state.aux_hidden_states,
-                             self.execute_model_state.spec_decode_metadata,
-                             self.execute_model_state.kv_connector_output,
-                             self.execute_model_state.logits_indices_selector,
-                             self.execute_model_state.padded_num_reqs)
+         logits_indices_selector, padded_num_reqs, hidden_states_all) = (
+             self.execute_model_state.scheduler_output,
+             self.execute_model_state.attn_metadata,
+             self.execute_model_state.input_ids,
+             self.execute_model_state.hidden_states,
+             self.execute_model_state.logits,
+             self.execute_model_state.aux_hidden_states,
+             self.execute_model_state.spec_decode_metadata,
+             self.execute_model_state.kv_connector_output,
+             self.execute_model_state.logits_indices_selector,
+             self.execute_model_state.padded_num_reqs,
+             self.execute_model_state.hidden_states_all)
         self.execute_model_state = None
 
         if grammar_output is not None:
@@ -826,21 +826,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         hidden_states_all: jax.Array,
         scheduler_output: "VllmSchedulerOutput",
         num_reqs: int,
-    ) -> dict[str, Optional[list]]:
+    ) -> dict[str, Optional["LogprobsTensors"]]:
         """Compute prompt logprobs for requests that need them."""
-        prompt_logprobs_dict: dict[str, Optional[list]] = {}
+
+        prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]] = {}
 
         # Check which requests need prompt_logprobs
-        reqs_needing_logprobs = []
+        reqs_needing_logprobs: list[tuple[str, int]] = [
+        ]  # (req_id, num_prompt_logprobs)
         for req_id in self.input_batch.req_ids[:num_reqs]:
             req_state = self.requests.get(req_id)
             if req_state is None:
                 prompt_logprobs_dict[req_id] = None
                 continue
             sampling_params = getattr(req_state, 'sampling_params', None)
-            if sampling_params is not None and getattr(
-                    sampling_params, 'prompt_logprobs', None) is not None:
-                reqs_needing_logprobs.append(req_id)
+            if sampling_params is not None and sampling_params.prompt_logprobs is not None:
+                num_prompt_logprobs = sampling_params.prompt_logprobs
+                reqs_needing_logprobs.append((req_id, num_prompt_logprobs))
             else:
                 prompt_logprobs_dict[req_id] = None
 
@@ -858,34 +860,84 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Build prompt_logprobs for each request that needs it
         token_offset = 0
+        reqs_needing_logprobs_dict = dict(reqs_needing_logprobs)
+
         for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
             num_tokens = scheduler_output.num_scheduled_tokens.get(req_id, 0)
 
-            if req_id not in reqs_needing_logprobs:
+            if req_id not in reqs_needing_logprobs_dict:
                 token_offset += num_tokens
                 continue
 
+            num_prompt_logprobs = reqs_needing_logprobs_dict[req_id]
             req_state = self.requests[req_id]
 
             # Get the input token ids for this request
             req_idx = self.input_batch.req_id_to_index[req_id]
             num_computed = req_state.num_computed_tokens
 
-            # Build logprobs list: [None, {token: logprob}, ...]
-            # First token has no prior context, so None
-            req_prompt_logprobs = [None]
+            # Number of prompt logprobs to return (excluding first token which has no prior)
+            # We compute logprobs for tokens at positions 1 to num_tokens-1
+            # (the logprob of token i is computed from hidden state at position i-1)
+            num_logprob_tokens = num_tokens - 1
 
-            # For positions 1..num_tokens-1, get logprob of actual token
-            for j in range(num_tokens - 1):
-                pos = token_offset + j
-                # The token at position j+1 is predicted by logits at position j
-                next_token_id = int(
-                    self.input_batch.token_ids_cpu[req_idx,
-                                                   num_computed + j + 1])
-                logprob = float(all_logprobs_np[pos, next_token_id])
-                req_prompt_logprobs.append({next_token_id: logprob})
+            if num_logprob_tokens <= 0:
+                prompt_logprobs_dict[req_id] = None
+                token_offset += num_tokens
+                continue
 
-            prompt_logprobs_dict[req_id] = req_prompt_logprobs
+            # For each position, we need: top-k token ids, their logprobs, and rank of selected token
+            # num_prompt_logprobs + 1 to include the selected token
+            num_logprobs_to_return = num_prompt_logprobs + 1
+
+            # Get logprobs for positions [0, num_tokens-1) which predict tokens [1, num_tokens)
+            req_logprobs = all_logprobs_np[token_offset:token_offset +
+                                           num_logprob_tokens]
+
+            # Get top-k logprobs for each position
+            # Shape: [num_logprob_tokens, num_logprobs_to_return]
+            top_indices = np.argpartition(req_logprobs,
+                                          -num_logprobs_to_return,
+                                          axis=-1)[:, -num_logprobs_to_return:]
+            top_logprobs = np.take_along_axis(req_logprobs,
+                                              top_indices,
+                                              axis=-1)
+
+            # Sort by logprob descending
+            sort_order = np.argsort(-top_logprobs, axis=-1)
+            top_indices = np.take_along_axis(top_indices, sort_order, axis=-1)
+            top_logprobs = np.take_along_axis(top_logprobs,
+                                              sort_order,
+                                              axis=-1)
+
+            # Get the actual next token ids and their ranks
+            next_token_ids = self.input_batch.token_ids_cpu[req_idx,
+                                                            num_computed +
+                                                            1:num_computed +
+                                                            num_tokens]
+
+            # Compute ranks of selected tokens
+            selected_token_ranks = np.zeros(num_logprob_tokens, dtype=np.int64)
+            for j in range(num_logprob_tokens):
+                next_token_id = int(next_token_ids[j])
+                # Find rank (0-indexed position in sorted top-k, or vocab_size if not in top-k)
+                rank_in_topk = np.where(top_indices[j] == next_token_id)[0]
+                if len(rank_in_topk) > 0:
+                    selected_token_ranks[j] = rank_in_topk[0]
+                else:
+                    # Token not in top-k, compute actual rank
+                    selected_token_ranks[j] = np.sum(
+                        req_logprobs[j] > req_logprobs[j, next_token_id])
+
+            # Create LogprobsTensors
+            logprobs_tensors = LogprobsTensors(
+                logprob_token_ids=torch.from_numpy(top_indices.astype(
+                    np.int64)),
+                logprobs=torch.from_numpy(top_logprobs.astype(np.float32)),
+                selected_token_ranks=torch.from_numpy(selected_token_ranks),
+            )
+
+            prompt_logprobs_dict[req_id] = logprobs_tensors
             token_offset += num_tokens
 
         return prompt_logprobs_dict
