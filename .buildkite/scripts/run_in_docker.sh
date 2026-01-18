@@ -73,8 +73,6 @@ else
   exit 1
 fi
 
-# Some test scripts set tp=2 on IS_FOR_V7X=true to mitigate test failures.
-# TODO (Qiliang Cui) Investigate why tensor-parallel-size=1 breaks in tpu7x.
 
 exec docker run \
   --privileged \
@@ -92,7 +90,6 @@ exec docker run \
   ${QUANTIZATION:+-e QUANTIZATION="$QUANTIZATION"} \
   ${NEW_MODEL_DESIGN:+-e NEW_MODEL_DESIGN="$NEW_MODEL_DESIGN"} \
   ${USE_V6E8_QUEUE:+-e USE_V6E8_QUEUE="$USE_V6E8_QUEUE"} \
-  ${IS_FOR_V7X:+-e IS_FOR_V7X="$IS_FOR_V7X"} \
   ${SKIP_ACCURACY_TESTS:+-e SKIP_ACCURACY_TESTS="$SKIP_ACCURACY_TESTS"} \
   ${VLLM_MLA_DISABLE:+-e VLLM_MLA_DISABLE="$VLLM_MLA_DISABLE"} \
   "${IMAGE_NAME}:${BUILDKITE_COMMIT}" \

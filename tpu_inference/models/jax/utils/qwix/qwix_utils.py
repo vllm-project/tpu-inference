@@ -374,7 +374,7 @@ def apply_qwix_quantization(
             qwix_quantize_nnx_model, qwix_config=qwix_config)
         # NOTE: it's REALLY important `qwix_quantize_nnx_model_with_config` is jitted
         # or else you'll run into hanging
-        model_or_model_fn = nnx.jit(
+        model_or_model_fn = jax.jit(
             qwix_quantize_nnx_model_with_config,
             donate_argnums=(0, ),
             static_argnames=(

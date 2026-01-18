@@ -262,7 +262,7 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
                 logger.info("Use customized mesh: %s", mesh)
                 return mesh
 
-    return jax.make_mesh(axis_shapes, axis_names, devices=devices)
+    return jax.make_mesh(axis_shapes, axis_names, devices=devices, axis_types=(jax.sharding.AxisType.Auto,) * len(axis_names))
 
 
 def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:

@@ -59,7 +59,7 @@ upload_pipeline() {
     VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
-    
+
     # Upload JAX pipeline for v6 (default)
     buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
 
@@ -68,10 +68,9 @@ upload_pipeline() {
     export KEY_PREFIX="tpu7x_"
     export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
     export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
-    export IS_FOR_V7X="true"
     export COV_FAIL_UNDER="67"
     buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
-    unset LABEL_PREFIX KEY_PREFIX TPU_QUEUE_SINGLE TPU_QUEUE_MULTI IS_FOR_V7X COV_FAIL_UNDER
+    unset LABEL_PREFIX KEY_PREFIX TPU_QUEUE_SINGLE TPU_QUEUE_MULTI COV_FAIL_UNDER
 
     # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
     buildkite-agent pipeline upload .buildkite/main.yml
@@ -87,16 +86,15 @@ if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     # Note: upload are inserted in reverse order, so promote LKG should upload before tests
     buildkite-agent pipeline upload .buildkite/pipeline_integration.yml
-    
+
     # Upload JAX pipeline for v7
     export LABEL_PREFIX="TPU7x "
     export KEY_PREFIX="tpu7x_"
     export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
     export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
-    export IS_FOR_V7X="true"
     export COV_FAIL_UNDER="67"
     buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
-    unset LABEL_PREFIX KEY_PREFIX TPU_QUEUE_SINGLE TPU_QUEUE_MULTI IS_FOR_V7X COV_FAIL_UNDER
+    unset LABEL_PREFIX KEY_PREFIX TPU_QUEUE_SINGLE TPU_QUEUE_MULTI COV_FAIL_UNDER
 
     # Upload JAX pipeline for v6 (default)
     buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
@@ -116,7 +114,7 @@ else
     # Fetch the response body and save to a temporary file
     GITHUB_PR_RESPONSE_FILE="github_api_logs.json"
     curl -s "$API_URL" -o "$GITHUB_PR_RESPONSE_FILE"
-    
+
     # Upload the full response body as a Buildkite artifact
     echo "Uploading GitHub API response as artifact..."
     buildkite-agent artifact upload "$GITHUB_PR_RESPONSE_FILE"
