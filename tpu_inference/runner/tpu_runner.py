@@ -832,6 +832,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         Only returns prompt logprobs when a request COMPLETES its prefill
         in the current step.
         """
+
+        # Build set of valid req_ids that will be in ModelRunnerOutput
+        current_req_ids = set(self.input_batch.req_ids[:num_reqs]) - {None}
+
+        # Also check against scheduler_output to ensure consistency
+        scheduled_req_ids = set(scheduler_output.num_scheduled_tokens.keys())
+        valid_req_ids = current_req_ids & scheduled_req_ids
+
+        if not valid_req_ids:
+            return {}
+
         prompt_logprobs_dict: dict[str, LogprobsTensors] = {}
 
         # Check which requests need prompt_logprobs AND are completing prefill
@@ -839,17 +850,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         token_offset = 0
         for req_id in self.input_batch.req_ids[:num_reqs]:
-            # Skip invalid entries
-            if req_id is None:
-                continue
-
-            # Skip if not in current batch
-            if req_id not in self.input_batch.req_id_to_index:
+            if req_id is None or req_id not in valid_req_ids:
                 continue
 
             num_scheduled = scheduler_output.num_scheduled_tokens.get(
                 req_id, 0)
             if num_scheduled == 0:
+                token_offset += num_scheduled
                 continue
 
             req_state = self.requests.get(req_id)
@@ -900,15 +907,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         all_logprobs_np = np.asarray(jax.device_get(all_logprobs))
 
         for req_id, num_prompt_logprobs, start_offset, prompt_len in reqs_completing_prefill:
-            # Double-check req_id is still valid (defensive)
-            if req_id not in self.input_batch.req_id_to_index:
+            # Final validation: skip if req_id won't be in output
+            if req_id not in valid_req_ids:
                 continue
 
             req_state = self.requests.get(req_id)
             if req_state is None:
                 continue
 
-            req_idx = self.input_batch.req_id_to_index[req_id]
+            req_idx = self.input_batch.req_id_to_index.get(req_id)
+            if req_idx is None:
+                continue
+
             num_computed = req_state.num_computed_tokens
 
             num_prompt_tokens_this_step = prompt_len - num_computed
@@ -945,7 +955,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             prompt_logprobs_dict[req_id] = logprobs_tensors
 
-        return prompt_logprobs_dict
+        # Final filter: only return req_ids that are definitely in current batch
+        return {
+            k: v
+            for k, v in prompt_logprobs_dict.items() if k in current_req_ids
+        }
 
     def _sample_from_logits(
         self,
