@@ -470,12 +470,16 @@ def ref_ragged_paged_attention_per_token_non_jit(
         if soft_cap is not None:
             attn = soft_cap * jnp.tanh(attn / soft_cap)
         attn += jnp.where(mask, mask_value, 0.0)
-        attn = jax.nn.softmax(attn, axis=-1).astype(v.dtype)
+        attn = jax.nn.softmax(attn, axis=-1)
 
-        v = v.astype(jnp.float32) * v_scales_active
-        v = v.astype(attn.dtype)
+        v_scales_T = jnp.transpose(v_scales_active, (1, 2, 0))
+        attn = attn * v_scales_T
 
-        out = jnp.einsum("hqk,khd->qhd", attn, v).astype(queries.dtype)
+        out = jnp.einsum("hqk,khd->qhd",
+                         attn,
+                         v,
+                         preferred_element_type=jnp.float32).astype(
+                             queries.dtype)
         result = result.at[q_start:q_end].set(out)
 
     return result, kv_cache, k_scale_cache, v_scale_cache

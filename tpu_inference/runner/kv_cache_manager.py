@@ -259,6 +259,14 @@ class KVCacheManager:
             num_blocks_list.append(num_blocks)
             for layer_name in kv_cache_tensor.shared_by:
                 self.runner.layer_name_to_kvcache_index[layer_name] = i
+            shape = list(kv_cache.shape)
+            shape[-1] = 1
+            shape = tuple(shape)
+            # copy the tuple and assign the last dim to 1
+            self.runner.k_scale_caches.append(
+                jnp.zeros(shape, dtype=jnp.float32))
+            self.runner.v_scale_caches.append(
+                jnp.zeros(shape, dtype=jnp.float32))
 
         if self.shared_kv_cache_layers:
             for layer_name, target_layer_name in self.shared_kv_cache_layers.items(
@@ -271,6 +279,7 @@ class KVCacheManager:
             f"Init kv-cache | "
             f"num_layers={len(kv_caches)} | "
             f"shape=(num_blocks, {kv_caches[0].shape[1:]}) | "
+            f"shape of scales=(num_blocks, {self.runner.k_scale_caches[0].shape[1:]}) | "
             f"num_blocks={num_blocks_list} | "
             f"sharding={kv_caches[0].sharding} | "
             f"dtype={kv_caches[0].dtype} | "

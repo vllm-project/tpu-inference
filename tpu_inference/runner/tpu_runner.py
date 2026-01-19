@@ -288,11 +288,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.k_scale_caches: list[jax.Array] = []
         self.v_scale_caches: list[jax.Array] = []
 
-        for _ in range(32):
-            shape = (5230, 128, 8, 1)
-            self.k_scale_caches.append(jnp.zeros(shape, dtype=jnp.float32))
-            self.v_scale_caches.append(jnp.zeros(shape, dtype=jnp.float32))
-
     def _init_random(self):
         if self.model_config.seed is None:
             self.model_config.seed = 0
