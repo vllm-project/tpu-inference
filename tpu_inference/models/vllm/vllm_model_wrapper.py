@@ -198,7 +198,8 @@ class VllmModelWrapper:
                 "xla_tpu_all_gather_collective_matmul_mode":
                 "post_spmd_conservative",
                 "xla_tpu_reduce_scatter_collective_matmul_mode":
-                "post_spmd_conservative"
+                "post_spmd_conservative",
+                "xla_tpu_emit_tracing_vwaits": "true",
             },
             static_argnames=("layer_name_to_kvcache_index", "is_first_rank",
                              "is_last_rank"),

@@ -308,6 +308,9 @@ class PhasedBasedProfiler:
         }
         self.default_profiling_options = jax.profiler.ProfileOptions()
         self.default_profiling_options.python_tracer_level = envs.PYTHON_TRACER_LEVEL
+        self.default_profiling_options.advanced_configuration = {
+            "tpu_trace_mode": "TRACE_COMPUTE_AND_SYNC"
+        }
 
         self.current_phase: str = ""
 
