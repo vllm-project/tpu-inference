@@ -55,7 +55,7 @@ def get_requirements() -> List[str]:
         _read_requirements("requirements.txt")
 
         # For TPU v7x build
-        if os.getenv("IS_FOR_V7X", "false").lower() == "true":
+        if os.getenv("IS_FOR_V7X", "true").lower() == "true":
             print("Overriding and adding packages from requirements_v7x.txt")
             _read_requirements("requirements_v7x.txt")
     except (FileNotFoundError, IOError):
@@ -70,8 +70,8 @@ def get_requirements() -> List[str]:
 
 def get_version():
     version = os.getenv("VLLM_VERSION_OVERRIDE", "0.0.0").strip()
-    if os.getenv("IS_FOR_V7X", "false").lower() == "true":
-        version = f"{version}+ironwood"
+    if os.getenv("IS_FOR_V7X", "true").lower() == "false":
+        version = f"{version}.post6"
 
     return version
 

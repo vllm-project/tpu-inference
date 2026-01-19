@@ -65,16 +65,10 @@ jobs:
       run:
         python3 -m pip install build
 
-    - name: Build package for TPU v6e (sdist and wheel)
+    - name: Build package (sdist and wheel)
       env:
           VLLM_VERSION_OVERRIDE: ${{ steps.vars.outputs.VERSION }}
           IS_FOR_V7X: "false"
-      run: python3 -m build
-
-    - name: Build package for TPU v7x (sdist and wheel)
-      env:
-          VLLM_VERSION_OVERRIDE: ${{ steps.vars.outputs.VERSION }}
-          IS_FOR_V7X: "true"
       run: python3 -m build
 
     - name: Publish package distributions to PyPI
