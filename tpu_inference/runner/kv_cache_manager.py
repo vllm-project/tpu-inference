@@ -278,6 +278,7 @@ class KVCacheManager:
             f"Init kv-cache | "
             f"num_layers={len(kv_caches)} | "
             f"shape=(num_blocks, {kv_caches[0].shape[1:]}) | "
+            f"shape of scales=(num_blocks, {self.runner.k_scale_caches[0].shape[1:]}) | "
             f"num_blocks={num_blocks_list} | "
             f"sharding={kv_caches[0].sharding} | "
             f"dtype={kv_caches[0].dtype} | "
