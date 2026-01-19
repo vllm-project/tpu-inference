@@ -234,6 +234,10 @@ def _get_nnx_model(
     return jit_model
 
 
+def _not_support(*args, **kwargs):
+    raise NotImplementedError("The action on this path is not supported yet.")
+
+
 # TODO(pooyam): We need to refactor this. This is returning a bunch of functions that do not work with all models and this is not very easy to see from the code.
 def get_flax_model(
     vllm_config: VllmConfig,
@@ -345,7 +349,7 @@ def get_flax_model(
         "get_mrope_input_positions_fn": get_mrope_input_positions_fn,
     }
 
-    return model_fn, compute_logits_fn, combine_hidden_states_fn, multimodal_fns, state, lora_manager, model
+    return model_fn, compute_logits_fn, _not_support, combine_hidden_states_fn, multimodal_fns, state, lora_manager, model
 
 
 def get_vllm_model(
@@ -366,9 +370,10 @@ def get_vllm_model(
 
     jit_model = model.jit_step_func()
     compute_logits_fn = model.jit_compute_logits_func()
+    pooler_fn = model.build_pooler_func()
     # the model needs to be returned because lora weights are neither torch.nn.parameter nor torch.nn.buffer. After we load the lora weights and set it to the torch.nn.Module, we can shard it and move it to TPU.
     combine_hidden_states_fn = None
-    return jit_model, compute_logits_fn, combine_hidden_states_fn, None, params, lora_manager, model
+    return jit_model, compute_logits_fn, pooler_fn, combine_hidden_states_fn, None, params, lora_manager, model
 
 
 def get_model(
