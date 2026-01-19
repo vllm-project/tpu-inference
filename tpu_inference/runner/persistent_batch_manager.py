@@ -137,7 +137,7 @@ class PersistentBatchManager:
                 prompt_token_ids=new_req_data.prompt_token_ids,
                 mm_features=new_req_data.mm_features,
                 sampling_params=sampling_params,
-                pooling_params=None,
+                pooling_params=new_req_data.pooling_params,
                 generator=None,
                 block_ids=new_req_data.block_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,

@@ -25,7 +25,8 @@ from torchax.interop import torch_view
 from vllm.v1.attention.backend import AttentionType
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.vllm.attention import (PallasAttentionBackend,
+from tpu_inference.layers.vllm.attention import (AttentionBackend,
+                                                 AttentionDispatcher,
                                                  PallasAttentionBackendImpl)
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     set_vllm_model_wrapper_context
@@ -113,14 +114,13 @@ def mesh():
     return Mesh(devices.reshape((-1, 1, 1)), ("data", "attn_dp", "model"))
 
 
-class TestPallasAttentionBackend:
+class TestAttentionBackend:
 
     def test_get_name(self):
-        assert PallasAttentionBackend.get_name() == "FLASH_ATTN"
+        assert AttentionBackend.get_name() == "FLASH_ATTN"
 
     def test_get_impl_cls(self):
-        assert PallasAttentionBackend.get_impl_cls(
-        ) == PallasAttentionBackendImpl
+        assert AttentionBackend.get_impl_cls() == AttentionDispatcher
 
 
 class TestPallasAttentionBackendImpl:

@@ -68,7 +68,7 @@ class Eagle3Proposer:
 
     def load_model(self, target_model: Any) -> None:
         """Loads the draft model."""
-        self.model_fn, self.compute_logits_fn, self.combine_hidden_states_fn, _, self.state, _, _ = get_model(
+        self.model_fn, self.compute_logits_fn, self.pooler_fn, self.combine_hidden_states_fn, _, self.state, _, _ = get_model(
             self.vllm_config, self.rng_key, self.mesh, is_draft_model=True)
 
         draft_embed_tokens = getattr(self.state.model, 'embed_tokens', None)
