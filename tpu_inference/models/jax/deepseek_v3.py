@@ -152,9 +152,13 @@ class DeepSeekV3(nnx.Module):
                     "replicate_attn_weights", False):
                     nhd_sharding=()
                     anh_sharding=()
+                    q_da_sharding=()
+                    kv_da_sharding=()
                 else:
                     nhd_sharding=(ShardingAxisName.MLP_TENSOR, None, None)
                     anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None)
+                    q_da_sharding=(None, ShardingAxisName.VOCAB)
+                    kv_da_sharding=(None, ShardingAxisName.VOCAB)
 
             else:
                 query_tnh_spec=P(None, ShardingAxisName.MLP_TENSOR, None)
@@ -192,11 +196,12 @@ class DeepSeekV3(nnx.Module):
                 attn_o_tnh=attn_o_tnh_spec,
                 # TODO: bz branch is: q_da_sharding=('model', None),
                 # q_da_sharding=(None, ShardingAxisName.VOCAB),
-                q_da_sharding=(None, ShardingAxisName.MOE_TENSOR),
+                q_da_sharding=q_da_sharding,
                 anh_sharding=anh_sharding,
                 # TODO bz branch is kv_da_sharding=('model', None),
                 # kv_da_sharding=(None, ShardingAxisName.VOCAB),
-                kv_da_sharding=(None, ShardingAxisName.MOE_TENSOR),
+                # kv_da_sharding=(None, ShardingAxisName.MOE_TENSOR),
+                kv_da_sharding=kv_da_sharding,
                 nhd_sharding=nhd_sharding)
 
         for i in range(first_k_dense_replace):
