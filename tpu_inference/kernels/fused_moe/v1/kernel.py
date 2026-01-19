@@ -195,68 +195,68 @@ def ref_moe(
 
 
 def _fused_ep_moe_kernel(
-    # Input
-    tokens_hbm,  # (local_num_tokens, t_packing, hidden_size // t_packing)
-    w1_hbm,  # (local_num_experts, 2, hidden_size, intermediate_size)
-    w2_hbm,  # (local_num_experts, intermediate_size, hidden_size)
-    # TODO(jevinjiang): We choose F32 scale for easier slicing. The extra
-    # latency should be hidden in the pipeline overlaping. But is there a better
-    # way to do this?
+        # Input
+        tokens_hbm,  # (local_num_tokens, t_packing, hidden_size // t_packing)
+        w1_hbm,  # (local_num_experts, 2, hidden_size, intermediate_size)
+        w2_hbm,  # (local_num_experts, intermediate_size, hidden_size)
+        # TODO(jevinjiang): We choose F32 scale for easier slicing. The extra
+        # latency should be hidden in the pipeline overlaping. But is there a better
+        # way to do this?
     w1_scale_hbm,  # None | F32(local_num_experts, 2, cdiv(hidden_size, subc_quant_w1_sz), 1, intermediate_size)
-    w2_scale_hbm,  # None | F32(local_num_experts, cdiv(intermediate_size, subc_quant_w2_sz), 1, hidden_size)
-    b1_hbm,  # None | F32(local_num_experts, 2, 1, intermediate_size)
-    b2_hbm,  # None | F32(local_num_experts, 1, hidden_size)
-    gating_hbm,  # (local_num_tokens, padded_num_experts)
-    a2a_g_hbm,  # (num_experts, bt, t_packing, hidden_size // t_packing)
-    # Output
+        w2_scale_hbm,  # None | F32(local_num_experts, cdiv(intermediate_size, subc_quant_w2_sz), 1, hidden_size)
+        b1_hbm,  # None | F32(local_num_experts, 2, 1, intermediate_size)
+        b2_hbm,  # None | F32(local_num_experts, 1, hidden_size)
+        gating_hbm,  # (local_num_tokens, padded_num_experts)
+        a2a_g_hbm,  # (num_experts, bt, t_packing, hidden_size // t_packing)
+        # Output
     output_hbm,  # (local_num_tokens, hidden_size)
-    # Scratch
+        # Scratch
     t2e_routing_x2_smem,  # <bt_sem_id> (2, bt, padded_top_k)
-    d2e_count_x2_smem,  # <bt_sem_id> (2, num_devices, 1, padded_num_experts)
-    expert_offsets_x2_smem,  # <bt_sem_id> (2, 2, padded_num_experts): for a2a_s and a2a_g
-    expert_starts_x2_smem,  # <bt_sem_id> (2, 1, padded_num_experts)
-    expert_sizes_x2_smem,  # <bt_sem_id> (2, 1, padded_num_experts)
-    a2a_s_sends_x2_smem,  # <e_sem_id> (2,)
-    a2a_s_x2_vmem,  # <e_sem_id> (2, bt * num_devices, t_packing, hidden_size // t_packing)
-    a2a_s_acc_x2_vmem,  # <e_sem_id> (2, bt * num_devices, t_packing, hidden_size // t_packing)
-    ### Accumulation for gathered tokens:
+        d2e_count_x2_smem,  # <bt_sem_id> (2, num_devices, 1, padded_num_experts)
+        expert_offsets_x2_smem,  # <bt_sem_id> (2, 2, padded_num_experts): for a2a_s and a2a_g
+        expert_starts_x2_smem,  # <bt_sem_id> (2, 1, padded_num_experts)
+        expert_sizes_x2_smem,  # <bt_sem_id> (2, 1, padded_num_experts)
+        a2a_s_sends_x2_smem,  # <e_sem_id> (2,)
+        a2a_s_x2_vmem,  # <e_sem_id> (2, bt * num_devices, t_packing, hidden_size // t_packing)
+        a2a_s_acc_x2_vmem,  # <e_sem_id> (2, bt * num_devices, t_packing, hidden_size // t_packing)
+        ### Accumulation for gathered tokens:
     a2a_g_acc_vmem,  # (top_k, bt, t_packing, hidden_size // t_packing)
-    ### Expert weight double buffering:
+        ### Expert weight double buffering:
     b_gating_x2_vmem,  # <bt_sem_id> (2, bt, padded_num_experts)
-    b_output_x2_vmem,  # <bt_sem_id> (2, bt, hidden_size)
-    b_w1_x2_vmem,  # <bw_sem_id> (2, t_packing, bd1 // t_packing, bf)
-    b_w3_x2_vmem,  # <bw_sem_id> (2, t_packing, bd1 // t_packing, bf)
-    b_w2_x2_vmem,  # <bw_sem_id> (2, t_packing, bf, bd2 // t_packing)
-    b_w1_scale_x2_vmem,  # None | <bw_sem_id> (2, t_packing, bd1 // t_packing // subc_quant_w1_sz, 1, bf)
-    b_w3_scale_x2_vmem,  # None | <bw_sem_id> (2, t_packing, bd1 // t_packing // subc_quant_w1_sz, 1, bf)
-    b_w2_scale_x2_vmem,  # None | <bw_sem_id> (2, t_packing, bf // subc_quant_w2_sz, 1, bd2 // t_packing)
-    b_b1_x2_vmem,  # None | <bw_sem_id> (2, 1, bf)
-    b_b3_x2_vmem,  # None | <bw_sem_id> (2, 1, bf)
-    b_b2_x2_vmem,  # None | <bw_sem_id> (2, t_packing, 1, bd2 // t_packing)
-    b_acc_vmem,  # F32(2, bt * num_devices, 1, bf)
-    ### Semaphores:
+        b_output_x2_vmem,  # <bt_sem_id> (2, bt, hidden_size)
+        b_w1_x2_vmem,  # <bw_sem_id> (2, t_packing, bd1 // t_packing, bf)
+        b_w3_x2_vmem,  # <bw_sem_id> (2, t_packing, bd1 // t_packing, bf)
+        b_w2_x2_vmem,  # <bw_sem_id> (2, t_packing, bf, bd2 // t_packing)
+        b_w1_scale_x2_vmem,  # None | <bw_sem_id> (2, t_packing, bd1 // t_packing // subc_quant_w1_sz, 1, bf)
+        b_w3_scale_x2_vmem,  # None | <bw_sem_id> (2, t_packing, bd1 // t_packing // subc_quant_w1_sz, 1, bf)
+        b_w2_scale_x2_vmem,  # None | <bw_sem_id> (2, t_packing, bf // subc_quant_w2_sz, 1, bd2 // t_packing)
+        b_b1_x2_vmem,  # None | <bw_sem_id> (2, 1, bf)
+        b_b3_x2_vmem,  # None | <bw_sem_id> (2, 1, bf)
+        b_b2_x2_vmem,  # None | <bw_sem_id> (2, t_packing, 1, bd2 // t_packing)
+        b_acc_vmem,  # F32(2, bt * num_devices, 1, bf)
+        ### Semaphores:
     local_sems,  # (2, 5): 2 x [b_gating_sem, b_w1_sem, b_w2_sem, b_w3_sem, b_output_sem]
-    send_sems,  # <e_sem_id> (2,)
-    recv_sems,  # <e_sem_id> (2,)
-    a2a_gather_sem,
-    a2a_acc_sem,
-    *,
-    top_k: int,
-    renormalize_topk_logits: bool,
-    ep_axis_name: str,
-    act_fn: str,
-    subc_quant_w1_sz: int | None = None,
-    subc_quant_w2_sz: int | None = None,
-    # Kernel tuning params.
-    bt: int,  # Block size of local_num_tokens.
-    bf: int,  # Block size of intermediate_size.
-    bd1: int,  # Block size of hidden_size in w1.
-    bd2: int,  # Block size of hidden_size in w2.
-    btc: int,  # Compute size of block tokens for active expert.
-    bfc: int,  # Compute size of block intermediate_size.
-    bd1c: int,  # Compute size of block hidden_size.
-    bd2c: int,  # Compute size of block hidden_size.
-    scoring_func: str,
+        send_sems,  # <e_sem_id> (2,)
+        recv_sems,  # <e_sem_id> (2,)
+        a2a_gather_sem,
+        a2a_acc_sem,
+        *,
+        top_k: int,
+        renormalize_topk_logits: bool,
+        ep_axis_name: str,
+        act_fn: str,
+        scoring_func: str,
+        subc_quant_w1_sz: int | None = None,
+        subc_quant_w2_sz: int | None = None,
+        # Kernel tuning params.
+        bt: int,  # Block size of local_num_tokens.
+        bf: int,  # Block size of intermediate_size.
+        bd1: int,  # Block size of hidden_size in w1.
+        bd2: int,  # Block size of hidden_size in w2.
+        btc: int,  # Compute size of block tokens for active expert.
+        bfc: int,  # Compute size of block intermediate_size.
+        bd1c: int,  # Compute size of block hidden_size.
+        bd2c: int,  # Compute size of block hidden_size.
 ):
     my_id = lax.axis_index(ep_axis_name)
     num_devices = lax.axis_size(ep_axis_name)

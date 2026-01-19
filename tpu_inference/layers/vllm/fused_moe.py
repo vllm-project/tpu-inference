@@ -96,13 +96,13 @@ def fused_moe_apply(
                     top_k=layer.top_k,
                     renormalize_topk_logits=layer.renormalize,
                     act_fn=layer.activation,
+                    scoring_func=layer.scoring_func,
                     subc_quant_w1_sz=subc_quant_w1_sz,
                     subc_quant_w2_sz=subc_quant_w2_sz,
                     w1_scale=weights.w13_weight_scale,
                     w2_scale=weights.w2_weight_scale,
                     b1=weights.w13_bias,
                     b2=weights.w2_bias,
-                    scoring_func=layer.scoring_func,
                     **extra_backend_kwargs,
                 )[:, :actual_hidden_size]
             case FusedMoEBackend.GMM_EP | FusedMoEBackend.GMM_TP:
