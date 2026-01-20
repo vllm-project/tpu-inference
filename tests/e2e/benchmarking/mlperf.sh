@@ -152,10 +152,6 @@ if [ "$USE_V6E8_QUEUE" == "True" ]; then
     # Set to 8 if job is in 8 chips queue.
     # TODO (Qiliang Cui) Rename USE_V6E8_QUEUE to USE_8_CHIPS_QUEUE
     extra_serve_args+=(--tensor-parallel-size 8)
-elif [ "$IS_FOR_V7X" == "true" ]; then
-    # Set the default value to 2 for tpu v7x
-    # TODO (Qiliang Cui) Investigate why tensor-parallel-size=1 breaks in tpu7x
-    extra_serve_args+=(--tensor-parallel-size 2)
 else
     extra_serve_args+=(--tensor-parallel-size 1)
 fi

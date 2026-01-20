@@ -1,12 +1,12 @@
 # ==============================================================================
 # Dockerfile.pypi Purpose:
-# This Dockerfile is used for building and testing vLLM-TPU as a distributable 
-# Python package. 
+# This Dockerfile is used for building and testing vLLM-TPU as a distributable
+# Python package.
 #
 # Key differences from the standard Dockerfile:
 # 1. It builds a redistributable wheel (.whl) for vllm-tpu.
 # 2. It installs the 'tpu-inference' package from a package index.
-# 3. Use this file if you are verifying the PyPI distribution flow or need 
+# 3. Use this file if you are verifying the PyPI distribution flow or need
 #    a production-ready wheel installation rather than an editable source build.
 # ==============================================================================
 
@@ -16,7 +16,6 @@ ARG VLLM_COMMIT_HASH=""
 
 FROM $BASE_IMAGE
 
-ARG IS_FOR_V7X="false"
 ARG IS_TEST="false"
 
 # Install some basic utilities
