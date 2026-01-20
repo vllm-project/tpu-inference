@@ -328,6 +328,12 @@ def _load_and_shard_weight(vllm_config,
         )
         hf_weight = hf_weight.astype(model_config.dtype)
 
+    # For tensors whose name matches any string in `keep_hf_weight_suffix_when_match`, the
+    # '.weight' suffix in HF keys will be kept.
+    # Context: some models are being refactored to have identical parameter names as HF
+    # models, so the suffix does not need to be removed for those parameters. Eventually
+    # we want to get rid of the ".weight" suffix removal logic altogether.
+    # TODO(#1479): remove this argument and related logic after the refactoring is done.
     if hf_key.endswith(".weight") and all(
             substr not in hf_key
             for substr in keep_hf_weight_suffix_when_match):
@@ -672,6 +678,17 @@ class StandardWeightLoader(BaseWeightLoader):
         """
         Calls the generic load_hf_weights utility, passing the correct
         weights iterator.
+
+        `mappings` can be either a MetadataMap or a dict mapping, if it's
+        * a dict, the default MetadataMap will be created with get_default_maps.
+        * a MetadataMap, it will be used directly. This is useful for cases
+        where caller needs to customize the reshape/transpose/pad maps, e.g.
+        update the key of tranpose_map from "q_proj" to "q_proj.weight".
+
+        Context: some models are being refactored to have identical parameter names as HF
+        models, so these parameters keeps ".weight" suffix. Eventually
+        we want to get rid of the ".weight" suffix removal logic altogether.
+        TODO(#1479): remove this argument and related logic after the refactoring is done.
         """
         if isinstance(mappings, MetadataMap):
             metadata_map = mappings
