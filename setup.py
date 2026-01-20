@@ -55,21 +55,28 @@ def get_requirements() -> List[str]:
         _read_requirements("requirements.txt")
 
         # For TPU v7x build
+        # TODO: Temporary workaround. The v7x requirements will be consolidated, and this block will be removed,
+        # once the JAX package fix is released, since v6e/v7x differentiation will no longer be required.
         if os.getenv("IS_FOR_V7X", "true").lower() == "true":
             print("Overriding and adding packages from requirements_v7x.txt")
             _read_requirements("requirements_v7x.txt")
     except (FileNotFoundError, IOError):
         print("Failed to read requirements.txt in vllm_tpu.")
 
-    # For Debugging
-    print(list(req_map.values()))
-
     # Convert the dictionary values back into a list for install_requires
-    return list(req_map.values())
+    requirements = list(req_map.values())
+
+    # for debugging
+    print(f"consolidated requirements: {requirements}")
+
+    return requirements
 
 
 def get_version():
     version = os.getenv("VLLM_VERSION_OVERRIDE", "0.0.0").strip()
+
+    # TODO: Temporary workaround. The v7x requirements will be consolidated, and this block will be removed,
+    # once the JAX package fix is released, since v6e/v7x differentiation will no longer be required.
     if os.getenv("IS_FOR_V7X", "true").lower() == "false":
         version = f"{version}.post6"
 
