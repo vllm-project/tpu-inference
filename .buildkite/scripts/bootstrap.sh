@@ -35,25 +35,24 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
         echo "Warning: PR diff failed. Falling back to single commit check."
         FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r -m "$BUILDKITE_COMMIT")
     fi
+    
+    echo "Files changed:"
+    echo "$FILES_CHANGED"
+
+    # Filter out files we want to skip builds for.
+    NON_SKIPPABLE_FILES=$(echo "$FILES_CHANGED" | grep -vE "(\.md$|\.ico$|\.png$|^README$|^docs\/)")
+
+    if [ -z "$NON_SKIPPABLE_FILES" ]; then
+      echo "Only documentation or icon files changed. Skipping build."
+      # No pipeline will be uploaded, and the build will complete.
+      exit 0
+    else
+      echo "Code files changed. Proceeding with pipeline upload."
+    fi
 else
-    echo "Non-PR build. Checking the latest commit."
-    # -m ensures merge commits show files brought into the branch
-    FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r -m "$BUILDKITE_COMMIT")
+    echo "Non-PR build. Bypassing file change check."
 fi
 
-echo "Files changed:"
-echo "$FILES_CHANGED"
-
-# Filter out files we want to skip builds for.
-NON_SKIPPABLE_FILES=$(echo "$FILES_CHANGED" | grep -vE "(\.md$|\.ico$|\.png$|^README$|^docs\/)")
-
-if [ -z "$NON_SKIPPABLE_FILES" ]; then
-  echo "Only documentation or icon files changed. Skipping build."
-  # No pipeline will be uploaded, and the build will complete.
-  exit 0
-else
-  echo "Code files changed. Proceeding with pipeline upload."
-fi
 
 upload_pipeline() {
     VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
