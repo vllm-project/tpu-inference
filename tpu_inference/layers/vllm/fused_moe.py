@@ -19,7 +19,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoE
 
 from tpu_inference import envs
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe

@@ -28,7 +28,7 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoE
 
 from tpu_inference.layers.vllm.fused_moe import FusedMoEBackend
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
