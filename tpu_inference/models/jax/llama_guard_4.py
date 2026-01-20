@@ -13,12 +13,10 @@
 # limitations under the License.
 
 import re
-from typing import Any, List, Optional, Tuple, Callable 
-from PIL import Image
+from typing import Any, Callable, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 import torch
 from flax import nnx
 from flax.typing import PRNGKey
@@ -44,7 +42,6 @@ from tpu_inference.models.jax.utils.weight_utils import (
     transpose_params)
 
 logger = init_logger(__name__)
-
 
 
 class LlamaGuard4ForCausalLM(nnx.Module):
@@ -253,31 +250,33 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         nnx.display(self.lm_head)
 
     @nnx.jit
-    def _compute_vision_features_jit(self, pixel_values: jax.Array) -> jax.Array:
+    def _compute_vision_features_jit(self,
+                                     pixel_values: jax.Array) -> jax.Array:
         # Note: We transpose here inside the JIT if input is NHWC
         if pixel_values.ndim == 4 and pixel_values.shape[-1] == 3:
-             pixel_values = jnp.transpose(pixel_values, (0, 3, 1, 2))
-             
+            pixel_values = jnp.transpose(pixel_values, (0, 3, 1, 2))
+
         vision_outputs = self.vision_model(pixel_values)
         projected = self.multi_modal_projector(vision_outputs)
         return projected
 
     def precompile_vision_encoder(self, run_compilation_fn: Callable) -> None:
-        warmup_config = self.vllm_config.additional_config.get("vision_warmup_config")
+        warmup_config = self.vllm_config.additional_config.get(
+            "vision_warmup_config")
         if not warmup_config:
             return
 
         image_shapes = warmup_config.get("image_shapes", [])
-        
+
         for (h, w) in image_shapes:
             # Create dummy input: Batch=1, H, W, Channels=3
             dummy_pixel_values = jnp.ones((1, h, w, 3), dtype=jnp.bfloat16)
-            
+
             # Tell the runner to trace/compile the function above
             run_compilation_fn(
-                "vision_encoder_projector", # Unique key
-                self._compute_vision_features_jit, # Function to compile
-                dummy_pixel_values # Dummy args
+                "vision_encoder_projector",  # Unique key
+                self._compute_vision_features_jit,  # Function to compile
+                dummy_pixel_values  # Dummy args
             )
 
     def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
@@ -366,7 +365,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         projected_vision_features = self.multi_modal_projector(
             self.vision_model(pixel_values))
 
-        num_total_tiles = projected_vision_features.shape[0]
+        # num_total_tiles = projected_vision_features.shape[0]
         tokens_per_tile = projected_vision_features.shape[1]
         hidden_dim = projected_vision_features.shape[2]
 
@@ -378,8 +377,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             tile_counts = patches_per_image.tolist()
         else:
             tile_counts = list(patches_per_image)
-        if isinstance(tile_counts, list) and isinstance(
-                tile_counts[0], list):
+        if isinstance(tile_counts, list) and isinstance(tile_counts[0], list):
             import itertools
             tile_counts = list(itertools.chain.from_iterable(tile_counts))
         split_sizes = [c * tokens_per_tile for c in tile_counts]

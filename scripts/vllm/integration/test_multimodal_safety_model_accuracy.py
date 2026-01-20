@@ -7,7 +7,6 @@ applies the model's specific chat template, and asserts the final classification
 accuracy against the CI's required minimum threshold.
 """
 import json
-import os
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 from unittest.mock import patch
@@ -42,6 +41,7 @@ HAZARD_MAPPING = {
 }
 
 # --- MODEL CONFIGURATION SUITES (Generic Setup) ---
+
 
 def get_llama_guard_4_config():
     """Configuration specific to the Llama Guard 4 model."""
@@ -80,7 +80,9 @@ MODEL_CONFIG_MAP = {
 
 # --- DATA LOADING FUNCTION ---
 
-def load_mm_safety_bench(image_dir: Path) -> List[Tuple[List[Dict[str, Any]], str]]:
+
+def load_mm_safety_bench(
+        image_dir: Path) -> List[Tuple[List[Dict[str, Any]], str]]:
     """
     Loads MM-SafetyBench.
     Robustly searches for 'processed_questions' and handles nested unzip structures.
@@ -102,76 +104,87 @@ def load_mm_safety_bench(image_dir: Path) -> List[Tuple[List[Dict[str, Any]], st
         if debug_path.exists():
             for item in debug_path.iterdir():
                 print(f" - {item}")
-        
-        pytest.fail(
-            f"Could not find 'processed_questions' dir. \n"
-            f"Checked:\n 1. {path_attempt_1}\n 2. {path_attempt_2}"
-        )
+
+        pytest.fail(f"Could not find 'processed_questions' dir. \n"
+                    f"Checked:\n 1. {path_attempt_1}\n 2. {path_attempt_2}")
 
     print(f"Found processed_questions at: {questions_dir}")
 
     test_cases = []
-    
+
     # Iterate over every scenario JSON file (e.g., 01-Illegal_Activity.json)
     json_files = sorted(questions_dir.glob("*.json"))
-    
+
     if not json_files:
-        pytest.fail(f"Found 'processed_questions' directory at {questions_dir}, but it contains no .json files.")
+        pytest.fail(
+            f"Found 'processed_questions' directory at {questions_dir}, but it contains no .json files."
+        )
 
     for json_file in json_files:
         scenario_name = json_file.stem  # e.g., "01-Illegal_Activity"
-        
+
         with open(json_file, "r") as f:
             data = json.load(f)
-            
+
         # MM-SafetyBench JSONs are dictionaries keyed by ID strings ("0", "1", "2"...)
         for question_id, entry in data.items():
             # 1. Get the prompt
-            prompt_text = entry.get("Rephrased Question(SD)") or entry.get("Rephrased Question")
-            
+            prompt_text = entry.get("Rephrased Question(SD)") or entry.get(
+                "Rephrased Question")
+
             # 2. Find the image
             img_filename = f"{question_id}.jpg"
-            
+
             # Check logical paths (Standard, Flattened, Nested Zip variants)
             possible_paths = [
-                image_dir / scenario_name / "SD" / img_filename,       
-                image_dir / scenario_name / img_filename,              
+                image_dir / scenario_name / "SD" / img_filename,
+                image_dir / scenario_name / img_filename,
                 image_dir / scenario_name / "SD_TYPO" / img_filename,
                 # Fix for the nested folder found in debug: MM-SafetyBench(imgs)
-                image_dir / "MM-SafetyBench(imgs)" / scenario_name / "SD" / img_filename,
-                image_dir / "MM-SafetyBench(imgs)" / scenario_name / img_filename,
+                image_dir / "MM-SafetyBench(imgs)" / scenario_name / "SD" /
+                img_filename,
+                image_dir / "MM-SafetyBench(imgs)" / scenario_name /
+                img_filename,
             ]
-            
+
             final_image_path = None
             for p in possible_paths:
                 if p.exists():
                     final_image_path = p
                     break
-            
+
             # If image missing, skip (prevents partial test cases)
             if final_image_path is None:
                 continue
 
             # 3. Construct the conversation
             conversation = [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt_text},
-                    {"type": "image", "image_path": final_image_path}
-                ]
+                "role":
+                "user",
+                "content": [{
+                    "type": "text",
+                    "text": prompt_text
+                }, {
+                    "type": "image",
+                    "image_path": final_image_path
+                }]
             }]
-            
+
             # 4. Set Expected Label
             # A safety model (Llama Guard) *should* classify these attacks as "unsafe".
             test_cases.append((conversation, "unsafe"))
 
     if len(test_cases) == 0:
-         # Print debug info before failing
-         print(f"DEBUG: Listing contents of image_dir ({image_dir}):")
-         if image_dir.exists():
-             for child in image_dir.iterdir():
-                 print(f"  - {child.name} ({'dir' if child.is_dir() else 'file'})")
-         pytest.fail(f"Loaded 0 test cases. Images were not found in {image_dir} matching JSON entries.")
+        # Print debug info before failing
+        print(f"DEBUG: Listing contents of image_dir ({image_dir}):")
+        if image_dir.exists():
+            for child in image_dir.iterdir():
+                print(
+                    f"  - {child.name} ({'dir' if child.is_dir() else 'file'})"
+                )
+        pytest.fail(
+            f"Loaded 0 test cases. Images were not found in {image_dir} matching JSON entries."
+        )
 
     print(f"Loaded {len(test_cases)} test cases from MM-SafetyBench.")
     return test_cases
@@ -246,8 +259,7 @@ def test_multimodal_safety_model_accuracy_check(
 
     if expected_threshold is None:
         pytest.fail(
-            "The --expected-value (MINIMUM_ACCURACY_THRESHOLD) must be set."
-        )
+            "The --expected-value (MINIMUM_ACCURACY_THRESHOLD) must be set.")
 
     # Standard parameters (fixed for this classification model type)
     max_tokens = 128
@@ -271,9 +283,8 @@ def test_multimodal_safety_model_accuracy_check(
     # 3. Initialize LLM (Mocking the disagg path if necessary)
     if disagg_utils.is_disagg_enabled():
         # NOTE: This assumes the required Disagg classes are accessible/mocked by the runner
-        from tpu_inference.core.core_tpu import (
-            DisaggEngineCore, DisaggEngineCoreProc
-        )
+        from tpu_inference.core.core_tpu import (DisaggEngineCore,
+                                                 DisaggEngineCoreProc)
         with patch("vllm.v1.engine.core.EngineCore", DisaggEngineCore), patch(
                 "vllm.v1.engine.core.EngineCoreProc", DisaggEngineCoreProc):
             llm = LLM(**llm_args)
@@ -294,23 +305,21 @@ def test_multimodal_safety_model_accuracy_check(
             if content_block.get("type") == "image":
                 image_objects.append(Image.open(content_block["image_path"]))
 
-        prompt_str = tokenizer.apply_chat_template(
-            conv,
-            tokenize=False,
-            add_generation_prompt=True,
-            **CONFIG["TEMPLATE_ARGS"]
-        )
-        tokenized_prompt = tokenizer.encode(prompt_str, add_special_tokens=False)
+        prompt_str = tokenizer.apply_chat_template(conv,
+                                                   tokenize=False,
+                                                   add_generation_prompt=True,
+                                                   **CONFIG["TEMPLATE_ARGS"])
+        tokenized_prompt = tokenizer.encode(prompt_str,
+                                            add_special_tokens=False)
 
         multi_modal_data = {
             "image":
             image_objects[0] if len(image_objects) == 1 else image_objects
         } if image_objects else None
-        
-        prompts.append(TokensPrompt(
-            prompt_token_ids=tokenized_prompt,
-            multi_modal_data=multi_modal_data
-        ))
+
+        prompts.append(
+            TokensPrompt(prompt_token_ids=tokenized_prompt,
+                         multi_modal_data=multi_modal_data))
 
     # 5. Run Inference
     outputs = llm.generate(prompts, sampling_params, use_tqdm=True)

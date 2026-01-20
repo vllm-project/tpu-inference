@@ -190,7 +190,7 @@ class SegmentIds(NamedTuple):
 
 
 @dataclass(kw_only=True)
-class Llama4VisionAttention(nnx.Module): 
+class Llama4VisionAttention(nnx.Module):
     hidden_size: int
     num_attention_heads: int
     num_key_value_heads: int
@@ -263,21 +263,20 @@ class Llama4VisionAttention(nnx.Module):
                                           self.dtype,
                                           random_init=random_init)
 
-    def __call__(
-            self,
-            x,
-            is_prefill,
-            kv_cache: KVCache,
-            attention_metadata: AttentionMetadata,
-            freqs_cis: jax.Array,
-            use_attention_rope: bool = True,
-            **kwargs):
+    def __call__(self,
+                 x,
+                 is_prefill,
+                 kv_cache: KVCache,
+                 attention_metadata: AttentionMetadata,
+                 freqs_cis: jax.Array,
+                 use_attention_rope: bool = True,
+                 **kwargs):
 
-        md = attention_metadata
+        # md = attention_metadata
         x = jnp.asarray(x, self.dtype)
         x_SD = nnx.with_sharding_constraint(x, self.activation_attention_td)
         x_q_TD = nnx.with_sharding_constraint(x, self.activation_q_td)
-        
+
         rope_scaling = self.rope_scaling
         rope_theta = self.rope_theta
         H = self.head_dim
@@ -298,7 +297,7 @@ class Llama4VisionAttention(nnx.Module):
             k_SKH += self.bias_k_proj_KH.value[None, ...]
 
             if use_attention_rope:
-                k_SKH = apply_rope(k_SKH, freqs_cis, H, rope_theta, 
+                k_SKH = apply_rope(k_SKH, freqs_cis, H, rope_theta,
                                    rope_scaling, self.rope_input_ordering)
             k_SKH = nnx.with_sharding_constraint(k_SKH, self.keyvalue_skh)
 
@@ -308,7 +307,7 @@ class Llama4VisionAttention(nnx.Module):
             v_SKH += self.bias_v_proj_KH.value[None, ...]
             v_SKH = nnx.with_sharding_constraint(v_SKH, self.keyvalue_skh)
 
-        q_scale = k_scale = v_scale = None
+        # q_scale = k_scale = v_scale = None
         if self.kv_cache_quantized_dtype:
             k_scale = self._k_scale
             v_scale = self._v_scale
@@ -316,29 +315,32 @@ class Llama4VisionAttention(nnx.Module):
                                        v_SKH, k_scale, v_scale)
 
         T_attn, N, H = q_TNH.shape
-        B = 1 
+        B = 1
         BLOCK_SIZE = 128
         pad_len = (BLOCK_SIZE - (T_attn % BLOCK_SIZE)) % BLOCK_SIZE
 
         # Pad Q/K/V
-        q_TNH = jnp.pad(q_TNH, [(0, pad_len), (0, 0), (0, 0)], constant_values=0)
-        q_TNH = jnp.expand_dims(q_TNH, axis=0) 
-        k_SKH = jnp.pad(k_SKH, [(0, pad_len), (0, 0), (0, 0)], constant_values=0)
+        q_TNH = jnp.pad(q_TNH, [(0, pad_len), (0, 0), (0, 0)],
+                        constant_values=0)
+        q_TNH = jnp.expand_dims(q_TNH, axis=0)
+        k_SKH = jnp.pad(k_SKH, [(0, pad_len), (0, 0), (0, 0)],
+                        constant_values=0)
         k_SKH = jnp.expand_dims(k_SKH, axis=0)
-        v_SKH = jnp.pad(v_SKH, [(0, pad_len), (0, 0), (0, 0)], constant_values=0)
+        v_SKH = jnp.pad(v_SKH, [(0, pad_len), (0, 0), (0, 0)],
+                        constant_values=0)
         v_SKH = jnp.expand_dims(v_SKH, axis=0)
 
         q_BNTH = jnp.transpose(q_TNH, (0, 2, 1, 3))
         k_BKTH = jnp.transpose(k_SKH, (0, 2, 1, 3))
         v_BKTH = jnp.transpose(v_SKH, (0, 2, 1, 3))
 
-        T_padded = T_attn + pad_len
-        
+        # T_padded = T_attn + pad_len
+
         # Mask Padding
         valid_ids = jnp.zeros((B, T_attn), dtype=jnp.int32)
         pad_ids = jnp.ones((B, pad_len), dtype=jnp.int32)
         segment_ids_q = jnp.concatenate([valid_ids, pad_ids], axis=1)
-        
+
         segment_ids = SegmentIds(q=segment_ids_q, kv=segment_ids_q)
 
         with jax.named_scope("flash_attn_op"):
@@ -350,7 +352,7 @@ class Llama4VisionAttention(nnx.Module):
             new_kv_cache = kv_cache
 
         outputs_TBH = jnp.transpose(outputs_BNTH, (2, 0, 1, 3))
-        outputs_TBH = outputs_TBH[:T_attn, ...] 
+        outputs_TBH = outputs_TBH[:T_attn, ...]
         outputs_TNH = jnp.squeeze(outputs_TBH, axis=1)
 
         with jax.named_scope("o_proj"):
@@ -359,5 +361,5 @@ class Llama4VisionAttention(nnx.Module):
             o_TD += self.bias_o_proj_D.value
             o_TD = nnx.with_sharding_constraint(
                 o_TD, self.activation_attention_out_td)
-                
+
         return new_kv_cache, o_TD

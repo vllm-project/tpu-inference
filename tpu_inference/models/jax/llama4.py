@@ -18,7 +18,6 @@ from typing import List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
@@ -650,8 +649,10 @@ class Llama4WeightLoader:
 
 # --- Vision Classes ---
 
+
 def gelu_jax(x):
     return jax.nn.gelu(x)
+
 
 class JAXUnfoldConvolution(nnx.Module):
 
@@ -699,6 +700,7 @@ class JAXUnfoldConvolution(nnx.Module):
         hidden_states = self.linear(patches)
 
         return hidden_states
+
 
 class JAXLlama4VisionMLP(nnx.Module):
 
@@ -761,11 +763,10 @@ class JAXLlama4VisionEncoderLayer(nnx.Module):
             rngs=rngs,
             rope_input_ordering="interleaved",
             temperature_tuning=False,
-            use_qk_norm=False, 
-            mesh=mesh,  
+            use_qk_norm=False,
+            mesh=mesh,
             is_causal=False,  # Forces bidirectional mask for ViT Encoder
-            temperature_tuning_floor_scale=
-            0, 
+            temperature_tuning_floor_scale=0,
             temperature_tuning_scale=0.0,
             activation_attention_td=None,
             activation_attention_out_td=None,
@@ -798,20 +799,17 @@ class JAXLlama4VisionEncoderLayer(nnx.Module):
         hidden_state = self.input_layernorm(hidden_state)
 
         original_shape = hidden_state.shape
-        B, S, D = original_shape 
+        B, S, D = original_shape
 
         hidden_state_2D = hidden_state.reshape(-1, original_shape[-1])
 
-        vision_metadata = AttentionMetadata(input_positions=jnp.array([])
-        )
+        vision_metadata = AttentionMetadata(input_positions=jnp.array([]))
         new_kv_cache, attention_output_2D = self.self_attn(
             x=hidden_state_2D,
-            is_prefill=
-            True, 
+            is_prefill=True,
             kv_cache=None,  # Vision Encoder does not use KV cache
-            attention_metadata=
-            vision_metadata, 
-            freqs_cis=freqs_ci_stacked, 
+            attention_metadata=vision_metadata,
+            freqs_cis=freqs_ci_stacked,
             use_attention_rope=True,
             **kwargs)
         attention_output = attention_output_2D.reshape(original_shape)
@@ -830,7 +828,7 @@ class JAXLlama4VisionEncoderLayer(nnx.Module):
         hidden_state = hidden_state_2D.reshape(B, S, D)
 
         hidden_state = residual + hidden_state
-   
+
         return hidden_state
 
 
@@ -853,11 +851,12 @@ class JAXLlama4VisionEncoder(nnx.Module):
         ]
 
     def __call__(self, hidden_states: jax.Array, freqs_ci_stacked: jax.Array,
-                 **kwargs) -> jax.Array: 
+                 **kwargs) -> jax.Array:
         for encoder_layer in self.layers:
             hidden_states = encoder_layer(hidden_states, freqs_ci_stacked,
                                           **kwargs)
         return hidden_states
+
 
 def jax_pixel_shuffle(input_tensor: jax.Array,
                       shuffle_ratio: float) -> jax.Array:
@@ -873,15 +872,13 @@ def jax_pixel_shuffle(input_tensor: jax.Array,
     reshaped_tensor = input_tensor.reshape(batch_size, height,
                                            int(width * shuffle_ratio),
                                            int(channels / shuffle_ratio))
-    reshaped_tensor = reshaped_tensor.transpose(
-        0, 2, 1, 3)
+    reshaped_tensor = reshaped_tensor.transpose(0, 2, 1, 3)
 
     # Reshape 2: [batch_size, height * shuffle_ratio, width * shuffle_ratio, channels / (shuffle_ratio^2)]
     reshaped_tensor = reshaped_tensor.reshape(
         batch_size, int(height * shuffle_ratio), int(width * shuffle_ratio),
         int(channels / (shuffle_ratio**2)))
-    reshaped_tensor = reshaped_tensor.transpose(
-        0, 2, 1, 3) 
+    reshaped_tensor = reshaped_tensor.transpose(0, 2, 1, 3)
 
     # Reshape back to [batch_size, num_new_patches, channels_out]
     output_tensor = reshaped_tensor.reshape(batch_size, -1,
@@ -982,8 +979,7 @@ class JAXLlama4VisionModel(nnx.Module):
         self.norm_eps = cfg.norm_eps
         self.num_channels = cfg.num_channels
 
-        self.num_patches = (self.image_size //
-                            self.patch_size)**2 + 1
+        self.num_patches = (self.image_size // self.patch_size)**2 + 1
 
         self.patch_embedding = JAXUnfoldConvolution(cfg,
                                                     rngs=rngs,
@@ -1043,7 +1039,7 @@ class JAXLlama4VisionModel(nnx.Module):
         else:
             b, c, h, w = input_shape
             t = 1
-        
+
         # 1. Unfold convolution (uses our new explicit reshape logic)
         hidden_states = self.patch_embedding(pixel_values)
 

@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import vllm.envs as envs
-
 from PIL import Image
 from vllm import LLM, EngineArgs
 from vllm.inputs import TokensPrompt
@@ -14,7 +14,6 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from tpu_inference.core import disagg_utils
 
-import json
 
 def get_llama_guard_4_config():
     """Configuration specific to the Llama Guard 4 model."""
@@ -53,7 +52,8 @@ MODEL_CONFIG_MAP = {
 }
 
 
-def load_mm_safety_bench(image_dir: Path) -> List[Tuple[List[Dict[str, Any]], str]]:
+def load_mm_safety_bench(
+        image_dir: Path) -> List[Tuple[List[Dict[str, Any]], str]]:
     """
     Loads MM-SafetyBench from the specific directory structure:
     root/
@@ -66,7 +66,7 @@ def load_mm_safety_bench(image_dir: Path) -> List[Tuple[List[Dict[str, Any]], st
     # Assuming image_dir is .../data/images, we go up one level to find processed_questions
     dataset_root = image_dir.parent
     questions_dir = dataset_root / "processed_questions"
-    
+
     if not questions_dir.exists():
         # Fallback: maybe the user passed the root 'data' folder directly?
         if (image_dir / "processed_questions").exists():
@@ -74,63 +74,70 @@ def load_mm_safety_bench(image_dir: Path) -> List[Tuple[List[Dict[str, Any]], st
             questions_dir = image_dir / "processed_questions"
             image_dir = image_dir / "images"
         else:
-            raise FileNotFoundError(f"Could not find 'processed_questions' dir relative to {image_dir}")
+            raise FileNotFoundError(
+                f"Could not find 'processed_questions' dir relative to {image_dir}"
+            )
 
     test_cases = []
-    
+
     # Iterate over every scenario JSON file (e.g., 01-Illegal_Activity.json)
     for json_file in sorted(questions_dir.glob("*.json")):
         scenario_name = json_file.stem  # e.g., "01-Illegal_Activity"
-        
+
         with open(json_file, "r") as f:
             data = json.load(f)
-            
+
         # MM-SafetyBench JSONs are dictionaries keyed by ID strings ("0", "1", "2"...)
         for question_id, entry in data.items():
             # 1. Get the prompt
             # The benchmark provides specific prompts for SD images
-            prompt_text = entry.get("Rephrased Question(SD)") or entry.get("Rephrased Question")
-            
+            prompt_text = entry.get("Rephrased Question(SD)") or entry.get(
+                "Rephrased Question")
+
             # 2. Find the image
             # Standard structure is images/{scenario}/SD/{id}.jpg
             # We try 'SD' first, but if your download is flattened, we try the root scenario folder.
             img_filename = f"{question_id}.jpg"
-            
+
             # Check logical paths
             possible_paths = [
-                image_dir / scenario_name / "SD" / img_filename,       # Standard
-                image_dir / scenario_name / img_filename,              # Flattened
-                image_dir / scenario_name / "SD_TYPO" / img_filename,  # Variant
+                image_dir / scenario_name / "SD" / img_filename,  # Standard
+                image_dir / scenario_name / img_filename,  # Flattened
+                image_dir / scenario_name / "SD_TYPO" /
+                img_filename,  # Variant
             ]
-            
+
             final_image_path = None
             for p in possible_paths:
                 if p.exists():
                     final_image_path = p
                     break
-            
+
             # If image missing, skip or warn (skipping here to prevent crash)
             if final_image_path is None:
                 continue
 
             # 3. Construct the conversation
             conversation = [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt_text},
-                    {"type": "image", "image_path": final_image_path}
-                ]
+                "role":
+                "user",
+                "content": [{
+                    "type": "text",
+                    "text": prompt_text
+                }, {
+                    "type": "image",
+                    "image_path": final_image_path
+                }]
             }]
-            
+
             # 4. Set Expected Label
-            # MM-SafetyBench contains malicious attacks. 
+            # MM-SafetyBench contains malicious attacks.
             # A safety model (Llama Guard) *should* classify them as "unsafe".
             # Note: We use generic "unsafe" because external datasets don't have S-codes.
             test_cases.append((conversation, "unsafe"))
 
     print(f"Loaded {len(test_cases)} test cases from MM-SafetyBench.")
     return test_cases
-
 
 
 def load_custom_mm_dataset(
@@ -281,7 +288,6 @@ def main(args: dict):
         raise ValueError(
             f"Only 'custom-mm' benchmark is supported, found: {benchmark}")
 
-    
     test_cases = load_custom_mm_dataset(image_dir)
     llm = LLM(**args)
 
@@ -295,23 +301,21 @@ def main(args: dict):
             if content_block.get("type") == "image":
                 image_objects.append(Image.open(content_block["image_path"]))
 
-        prompt_str = tokenizer.apply_chat_template(
-            conversation,
-            tokenize=False,
-            add_generation_prompt=True,
-            **CONFIG["TEMPLATE_ARGS"]
-        )
-        tokenized_prompt = tokenizer.encode(prompt_str, add_special_tokens=False)
-        
+        prompt_str = tokenizer.apply_chat_template(conversation,
+                                                   tokenize=False,
+                                                   add_generation_prompt=True,
+                                                   **CONFIG["TEMPLATE_ARGS"])
+        tokenized_prompt = tokenizer.encode(prompt_str,
+                                            add_special_tokens=False)
+
         multi_modal_data = {
             "image":
             image_objects[0] if len(image_objects) == 1 else image_objects
         } if image_objects else None
-        
-        prompts_for_generation.append(TokensPrompt(
-            prompt_token_ids=tokenized_prompt,
-            multi_modal_data=multi_modal_data
-        ))
+
+        prompts_for_generation.append(
+            TokensPrompt(prompt_token_ids=tokenized_prompt,
+                         multi_modal_data=multi_modal_data))
 
     sampling_params = llm.get_default_sampling_params()
     sampling_params.logprobs = 10

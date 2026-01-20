@@ -22,8 +22,9 @@ import os
 
 import vllm.envs as vllm_envs
 from vllm import LLM, EngineArgs
-from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.inputs import TokensPrompt
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+
 from tpu_inference.core import disagg_utils
 
 

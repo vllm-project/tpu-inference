@@ -169,9 +169,8 @@ class MultiModalManager:
                 self.runner.encoder_cache[req_id] = {}
 
             if isinstance(
-                    output,
-                (jax.Array, jnp.ndarray
-                 )) and not image_grid_thw:  #Non-video multimodal model logic (image_grid_thw is specific to MM models that take video as input)
+                    output, (jax.Array, jnp.ndarray)
+            ) and not image_grid_thw:  #Non-video multimodal model logic (image_grid_thw is specific to MM models that take video as input)
                 # JAX specific scatter logic (avoids .new_full and torch-specific indexing)
                 mask = jnp.array(pos_info.is_embed.cpu().numpy())
                 num_placeholders = mask.shape[0]
@@ -228,8 +227,7 @@ class MultiModalManager:
                 assert encoder_output is not None,\
                       f"Encoder cache miss for {mm_hash}."
 
-                if hasattr(encoder_output,
-                           'new_full'): 
+                if hasattr(encoder_output, 'new_full'):
                     import torch
                     encoder_output_np = encoder_output.to(
                         torch.float32).cpu().numpy()
