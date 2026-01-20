@@ -189,23 +189,9 @@ steps:
        IS_FOR_V7X: "${IS_FOR_V7X}"
      agents:
        queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
+     if: build.env("NIGHTLY") == "1" && build.env("IS_FOR_V7X") == "true"
      commands:
-       - |
-         if [[ "$$NIGHTLY" == "1" ]]; then
-           if [[ "$$IS_FOR_V7X" == "true" ]]; then
-               .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh -m jrplatin/DeepSeek-R1-1D-Subchannel-256  --use-dummy-weights
-           else
-               buildkite-agent step update "label" "🚫 (Skipped) JAX unit tests - kernels"
-               buildkite-agent annotate "Step skipped because no changes were detected in kernel files." --style "info" --context "skip-kernels"
-               echo "Skipping: test disabled on v6 (b/467105149)"
-               exit 0
-           fi
-         else
-           buildkite-agent step update "label" "🚫 (Skipped) JAX unit tests - kernels"
-           buildkite-agent annotate "Step skipped because no changes were detected in kernel files." --style "info" --context "skip-kernels"
-           echo "Skipping: NIGHTLY environment variable not set"
-           exit 0
-         fi
+       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh -m jrplatin/DeepSeek-R1-1D-Subchannel-256  --use-dummy-weights
 
    - label: "${LABEL_PREFIX}lora e2e tests for JAX + vLLM models multi chips"
      key: ${KEY_PREFIX}test_13
