@@ -14,4 +14,4 @@ Feature,CorrectnessTest,PerformanceTest
 "data_parallelism",❌,unverified
 "runai_model_streamer_loader",✅,N/A
 "sampling_params",✅,N/A
-"structured_decoding",✅,N/A
+"structured_decoding",❌,N/A
