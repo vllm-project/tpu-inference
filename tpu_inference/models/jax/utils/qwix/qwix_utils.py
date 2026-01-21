@@ -479,7 +479,7 @@ def get_default_qwix_quantization_config(
             )
 
         return config
-    if model_type == "llama4" and quant_method == "compressed-tensors":
+    elif model_type == "llama4" and quant_method == "compressed-tensors":
         return DEFAULT_LLAMA4_FP8_CONFIG
     # MXFP4 (GPT-OSS): provide a default configuration to quantize MoE experts via Qwix
     elif model_type == "gpt_oss" and quant_method == "mxfp4":
