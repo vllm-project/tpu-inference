@@ -442,8 +442,7 @@ class Llama4ForCausalLM(nnx.Module):
         self.embedder = Embedder(vocab_size=self.vocab_size,
                                  hidden_size=self.hidden_size,
                                  dtype=dtype,
-                                 vd_sharding=(('data', 'expert', 'model'),
-                                              None),
+                                 vd_sharding=(('data', 'model'), None),
                                  rngs=self.rng,
                                  random_init=force_random_weights)
 
@@ -579,8 +578,8 @@ class Llama4ForCausalLM(nnx.Module):
                               hidden_size=self.hidden_size,
                               dtype=dtype,
                               rngs=self.rng,
-                              vd_sharding=(('data', 'expert', 'model'), None),
-                              dv_sharding=(None, ('data', 'expert', 'model')),
+                              vd_sharding=(('data', 'model'), None),
+                              dv_sharding=(None, ('data', 'model')),
                               random_init=force_random_weights)
         if self.is_verbose:
             self._print_model_architecture()
