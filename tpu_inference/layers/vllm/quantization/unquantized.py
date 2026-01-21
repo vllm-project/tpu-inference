@@ -16,12 +16,12 @@ from typing import Any, Optional
 
 import jax
 import torch
+import vllm.model_executor.layers.linear as vllm_linear
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
 from vllm.attention.layer import Attention
-import vllm.model_executor.layers.linear as vllm_linear
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
                                                   UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.quantization import \
@@ -91,7 +91,7 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
                                   jax_common.UnquantizedLinearMethod):
 
     def __init__(self, linear_config: VllmQuantLinearConfig):
-        self.linear_config = linear_config
+        super().__init__(linear_config)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = t2j(layer.weight, use_dlpack=False)

@@ -47,7 +47,8 @@ class UnquantizedLinearMethod:
 
     def _apply_split(self,
                      x_jax: jax.Array,
-                     weight_generator: Generator,
+                     weight_generator: Generator[tuple[int, jax.Array], None,
+                                                 None],
                      bias_jax: Optional[jax.Array] = None) -> jax.Array:
 
         outs = []
