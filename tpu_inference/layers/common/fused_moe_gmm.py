@@ -302,13 +302,14 @@ def expert_sharded_gmm(
     input_offsets = jnp.concatenate(input_offsets, axis=0)
     output_offsets = input_offsets
     recv_sizes = send_sizes
+    data_sharding = NamedSharding(mesh, data_p_spec)
 
-    send_sizes = jax.lax.with_sharding_constraint(send_sizes, data_p_spec)
+    send_sizes = jax.lax.with_sharding_constraint(send_sizes, data_sharding)
     input_offsets = jax.lax.with_sharding_constraint(input_offsets,
-                                                     data_p_spec)
+                                                     data_sharding)
     output_offsets = jax.lax.with_sharding_constraint(output_offsets,
-                                                      data_p_spec)
-    recv_sizes = jax.lax.with_sharding_constraint(recv_sizes, ep_data_p_spec)
+                                                      data_sharding)
+    recv_sizes = jax.lax.with_sharding_constraint(recv_sizes, data_sharding)
 
     def _ragged_all_to_all(operand, input_offsets, send_sizes, output_offsets,
                            recv_sizes):
