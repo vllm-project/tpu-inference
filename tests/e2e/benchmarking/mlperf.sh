@@ -281,8 +281,18 @@ for model_name in $model_list; do
         max_batched_tokens=1024
         if [ "$model_name" == "meta-llama/Llama-4-Scout-17B-16E-Instruct" ]; then
             current_serve_args+=(--hf-overrides '{"architectures": ["Llama4ForCausalLM"]}')
-        elif [ "$model_name" == "jrplatin/DeepSeek-R1-1D-Subchannel-256" ]; then
-            current_serve_args+=(--hf_overrides '{"num_hidden_layers": 12}')
+	fi
+    fi
+
+    if [ "$model_name" == "jrplatin/DeepSeek-R1-1D-Subchannel-256" ]; then
+        max_batched_tokens=1024
+	current_serve_args+=(--tensor-parallel-size 8)
+	current_serve_args+=(--hf_overrides '{"num_hidden_layers": 12}')
+	if [ "$VLLM_MLA_DISABLE" != "1" ]; then
+	    max_batched_tokens=128
+            current_serve_args+=(--no-async-scheduling)
+	    current_serve_args+=(--no-enable-prefix-caching)
+	    current_serve_args+=(--additional_config '{"sharding": {"sharding_strategy": {"enable_dp_attention": true, "tensor_parallelism": 8}}}')
         fi
     fi
 
