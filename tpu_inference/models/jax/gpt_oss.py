@@ -26,8 +26,8 @@ from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
 
 from tpu_inference.layers.common.quant_methods import MXFP4
-from tpu_inference.layers.common.quantization import (
-    dequantize_tensor_from_mxfp4_packed, e8m0_to_fp32, u8_unpack_e2m1)
+from tpu_inference.layers.common.quantization import (e8m0_to_fp32,
+                                                      u8_unpack_e2m1)
 from tpu_inference.layers.jax.attention.gpt_oss_attention import (
     AttentionMetadata, GptOssAttention)
 from tpu_inference.layers.jax.constants import KVCacheType
@@ -97,7 +97,7 @@ class GptOss(nnx.Module):
             hidden_size=hidden_size,
             dtype=dtype,
             rngs=self.rng,
-            vd_sharding=P(('data', 'model'), None),
+            vd_sharding=P('model', None),
             random_init=self.random_init,
         )
 
@@ -192,8 +192,9 @@ class GptOss(nnx.Module):
             hidden_size=hidden_size,
             dtype=dtype,
             rngs=self.rng,
-            vd_sharding=P(('data', 'model'), None),
-            dv_sharding=P(None, ('data', 'model')),
+            vd_sharding=P('model', None),
+            dv_sharding=P(None, 'model'),
+            prelogit_td=P('data', None),
             random_init=self.random_init,
         )
 
@@ -276,11 +277,14 @@ class GptOss(nnx.Module):
              transforms["transpose"], None),
             "model.layers.*.mlp.router.bias":
             ("layers.*.custom_module.router.bias_E", None, None),
-            "model.layers.*.mlp.experts.gate_up_proj":
-            ("layers.*.custom_module.mlp1_weight_EDF2", swap_mlp_transform,
-             None),
-            "model.layers.*.mlp.experts.gate_up_proj_bias":
-            ("layers.*.custom_module.mlp1_bias_EF2", None, None),
+            "model.layers.*.mlp.experts.gate_up_proj": ([
+                "layers.*.custom_module.gate_proj_kernel",
+                "layers.*.custom_module.up_proj_kernel"
+            ], swap_mlp_transform, None),
+            "model.layers.*.mlp.experts.gate_up_proj_bias": ([
+                "layers.*.custom_module.gate_proj_bias",
+                "layers.*.custom_module.up_proj_bias"
+            ], None, None),
             "model.layers.*.mlp.experts.down_proj":
             ("layers.*.custom_module.mlp2_weight_EFD", swap_mlp_transform,
              None),
@@ -309,57 +313,88 @@ class GptOss(nnx.Module):
             for loaded_name, loaded_weight in pool.items():
                 hf_pattern = re.sub(r"layers\.(\d+)", "layers.*", loaded_name)
                 if hf_pattern not in mappings:
-                    logger.warning(
-                        f"No mapping found for checkpoint tensor: {loaded_name}. Skipping."
-                    )
                     continue
 
                 jax_path_template, transform_fn, target_shape = mappings[
                     hf_pattern]
-
                 layer_num_match = re.search(r"layers\.(\d+)", loaded_name)
-                jax_path = jax_path_template
-                if layer_num_match:
+                layer_num = layer_num_match.group(
+                    1) if layer_num_match else None
+
+                # Handle Split Mappings (1-to-2)
+                is_split_mapping = isinstance(jax_path_template, list)
+
+                if is_split_mapping:
+                    if isinstance(loaded_weight, tuple):
+                        # MXFP4 Split logic
+                        # Slicing the blocks and scales along the intermediate dimension (even=gate, odd=up)
+                        blocks_u8, scales_u8 = loaded_weight
+                        # Shape check: blocks typically have (E, F/16, 16) where F is combined dim
+                        gate_bundle = (blocks_u8[..., ::2, :],
+                                       scales_u8[..., ::2])
+                        up_bundle = (blocks_u8[..., 1::2, :], scales_u8[...,
+                                                                        1::2])
+
+                        bundles = [gate_bundle, up_bundle]
+                        for i, path_template in enumerate(jax_path_template):
+                            jax_path = path_template.replace("*", layer_num)
+                            model_weight = get_param(model_params, jax_path)
+
+                            b_u8, s_u8 = bundles[i]
+                            # Using the u8_unpack_e2m1 from your current quantization module
+                            codes_fp32_t = u8_unpack_e2m1(b_u8).astype(
+                                jnp.float32)
+                            scales_fp32_t = e8m0_to_fp32(s_u8)
+
+                            self._load_mxfp4(
+                                model_weight=model_weight,
+                                codes_fp32_t=codes_fp32_t,
+                                scales_fp32_t=scales_fp32_t,
+                                transform_fn=transform_fn,
+                            )
+                    else:
+                        # Interleaved split: even=gate, odd=up
+                        gate_w = loaded_weight[..., ::2]
+                        up_w = loaded_weight[..., 1::2]
+
+                        splits = [gate_w, up_w]
+                        for i, path_template in enumerate(jax_path_template):
+                            jax_path = path_template.replace("*", layer_num)
+                            model_weight = get_param(model_params, jax_path)
+                            self._load_regular_param(
+                                model_weight=model_weight,
+                                loaded_weight=splits[i],
+                                cast_type=model_weight.value.dtype,
+                                transform_fn=transform_fn,
+                                target_shape=None,
+                                jax_path_template=path_template,
+                            )
+                else:
+                    # Standard 1-to-1 loading path
                     jax_path = jax_path_template.replace(
-                        "*", layer_num_match.group(1))
+                        "*", layer_num) if layer_num else jax_path_template
+                    model_weight = get_param(model_params, jax_path)
 
-                model_weight = get_param(model_params, jax_path)
-
-                prepared_weight = loaded_weight
-                if isinstance(loaded_weight, tuple):
-                    # Loaded weight is an MXFP4 tuple
-                    blocks_u8, scales_u8 = loaded_weight
-                    # Quantized param (QArray): set qvalue/scale directly and skip regular path
-                    if hasattr(model_weight, "array"):  # QArray check
+                    if isinstance(loaded_weight, tuple):
+                        blocks_u8, scales_u8 = loaded_weight
                         codes_fp32_t = u8_unpack_e2m1(blocks_u8).astype(
                             jnp.float32)
                         scales_fp32_t = e8m0_to_fp32(scales_u8)
-                        self._load_mxfp4(
-                            model_weight=model_weight,
-                            codes_fp32_t=codes_fp32_t,
-                            scales_fp32_t=scales_fp32_t,
-                            transform_fn=transform_fn,
-                        )
-                        if is_verbose:
-                            print_param_info(model_weight, loaded_name)
-                        continue
-                    # Not a QArray: dequantize MXFP4 to BF16 full weights
-                    prepared_weight = dequantize_tensor_from_mxfp4_packed(
-                        blocks_u8, scales_u8)
-
-                # Single regular-tensor load call (BF16 or dequantized MXFP4)
-                cast_type = model_weight.value.dtype
-                self._load_regular_param(
-                    model_weight=model_weight,
-                    loaded_weight=prepared_weight,
-                    cast_type=cast_type,
-                    transform_fn=transform_fn,
-                    target_shape=target_shape,
-                    jax_path_template=jax_path_template,
-                )
+                        self._load_mxfp4(model_weight, codes_fp32_t,
+                                         scales_fp32_t, transform_fn)
+                    else:
+                        self._load_regular_param(model_weight, loaded_weight,
+                                                 model_weight.value.dtype,
+                                                 transform_fn, target_shape,
+                                                 jax_path_template)
 
                 if is_verbose:
-                    print_param_info(model_weight, loaded_name)
+                    # In split cases, we only print the first param info to avoid clutter
+                    info_weight = get_param(
+                        model_params, jax_path_template[0].replace(
+                            "*",
+                            layer_num)) if is_split_mapping else model_weight
+                    print_param_info(info_weight, loaded_name)
 
         nnx.update(self, model_params)
 

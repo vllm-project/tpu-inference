@@ -32,12 +32,11 @@ from tpu_inference.layers.common.attention_interface import \
     sharded_flash_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.qwen2 import Qwen2ForCausalLM
+from tpu_inference.models.jax.qwen2 import Qwen2Model
 # from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from tpu_inference.models.jax.utils.multi_modal_utils import (
     MultiModalEmbeddings, merge_multimodal_embeddings)
-from tpu_inference.models.jax.utils.weight_utils import (get_default_maps,
-                                                         load_hf_weights)
+from tpu_inference.models.jax.utils.weight_utils import StandardWeightLoader
 
 logger = init_logger(__name__)
 
@@ -749,6 +748,7 @@ class Qwen2_5_VisionTransformer(nnx.Module):
 
 
 class Qwen2_5_VLForConditionalGeneration(nnx.Module):
+    WeightLoader = StandardWeightLoader
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
                  mesh: Mesh) -> None:
@@ -768,7 +768,7 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             mesh=mesh,
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
         )
-        self.language_model = Qwen2ForCausalLM(vllm_config, rng_key, mesh)
+        self.model = Qwen2Model(vllm_config, self.rng, mesh)
 
     def get_mrope_input_positions(
         self,
@@ -1040,7 +1040,7 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             self, input_ids: jax.Array,
             multimodal_embeddings: Optional[jax.Array]) -> jax.Array:
 
-        inputs_embeds = self.language_model.model.embed(input_ids)
+        inputs_embeds = self.model.embed(input_ids)
 
 
         if multimodal_embeddings is not None \
@@ -1060,8 +1060,8 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         *args,
     ) -> tuple[list[jax.Array], jax.Array, List[jax.Array]]:
         # The logic of choosing between input_ids and inputs_embeds is
-        # handled inside self.language_model.__call__
-        kv_caches, x, [] = self.language_model(
+        # handled inside self.model.__call__
+        kv_caches, x = self.model(
             kv_caches=kv_caches,
             input_ids=input_ids,
             attention_metadata=attention_metadata,
@@ -1070,42 +1070,43 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         return kv_caches, x, []
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        return self.language_model.compute_logits(hidden_states)
+        if self.vllm_config.model_config.hf_config.tie_word_embeddings:
+            logits = jnp.dot(hidden_states, self.model.lm_head.value.T)
+        else:
+            logits = jnp.dot(hidden_states, self.model.lm_head.value)
+        return logits
 
     def load_weights(self, rng_key: jax.Array) -> None:
         self.rng = nnx.Rngs(rng_key)
-        self.language_model.rng = self.rng
-
         # Key: path to a HF layer weight
         # Value: a tuple of (path to a nnx layer weight, nnx weight sharding)
 
         mappings = {
-            "model.embed_tokens": "language_model.model.embed.embedding",
+            "model.embed_tokens": "model.embed.embedding",
             "model.layers.*.input_layernorm":
-            "language_model.model.layers.*.input_layernorm.scale",
+            "model.layers.*.input_layernorm.scale",
             "model.layers.*.mlp.down_proj":
-            "language_model.model.layers.*.mlp.down_proj.kernel",
+            "model.layers.*.mlp.down_proj.kernel",
             "model.layers.*.mlp.gate_proj":
-            "language_model.model.layers.*.mlp.gate_proj.kernel",
-            "model.layers.*.mlp.up_proj":
-            "language_model.model.layers.*.mlp.up_proj.kernel",
+            "model.layers.*.mlp.gate_proj.kernel",
+            "model.layers.*.mlp.up_proj": "model.layers.*.mlp.up_proj.kernel",
             "model.layers.*.post_attention_layernorm":
-            "language_model.model.layers.*.post_attention_layernorm.scale",
+            "model.layers.*.post_attention_layernorm.scale",
             "model.layers.*.self_attn.k_proj":
-            "language_model.model.layers.*.self_attn.k_proj.kernel",
+            "model.layers.*.self_attn.k_proj.kernel",
             "model.layers.*.self_attn.o_proj":
-            "language_model.model.layers.*.self_attn.o_proj.kernel",
+            "model.layers.*.self_attn.o_proj.kernel",
             "model.layers.*.self_attn.q_proj":
-            "language_model.model.layers.*.self_attn.q_proj.kernel",
+            "model.layers.*.self_attn.q_proj.kernel",
             "model.layers.*.self_attn.v_proj":
-            "language_model.model.layers.*.self_attn.v_proj.kernel",
+            "model.layers.*.self_attn.v_proj.kernel",
             "model.layers.*.self_attn.q_proj.bias":
-            "language_model.model.layers.*.self_attn.q_proj.bias",
+            "model.layers.*.self_attn.q_proj.bias",
             "model.layers.*.self_attn.k_proj.bias":
-            "language_model.model.layers.*.self_attn.k_proj.bias",
+            "model.layers.*.self_attn.k_proj.bias",
             "model.layers.*.self_attn.v_proj.bias":
-            "language_model.model.layers.*.self_attn.v_proj.bias",
-            "model.norm": "language_model.model.norm.scale",
+            "model.layers.*.self_attn.v_proj.bias",
+            "model.norm": "model.norm.scale",
             "visual.blocks.*.attn.proj.bias": "visual.blocks.*.attn.proj.bias",
             "visual.blocks.*.attn.proj": "visual.blocks.*.attn.proj.kernel",
             "visual.blocks.*.attn.qkv.bias":
@@ -1137,15 +1138,11 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         hf_config = self.vllm_config.model_config.hf_config
         if not hf_config.tie_word_embeddings:
             mappings.update({
-                "lm_head": "language_model.model.lm_head",
+                "lm_head": "model.lm_head",
             })
 
-        metadata_map = get_default_maps(self.vllm_config.model_config,
-                                        self.mesh, mappings)
-        load_hf_weights(vllm_config=self.vllm_config,
-                        model=self,
-                        metadata_map=metadata_map,
-                        mesh=self.mesh)
+        loader = self.WeightLoader(self.vllm_config, self.mesh)
+        loader.load_weights(self, mappings)
 
     def precompile_vision_encoder(
         self,

@@ -32,7 +32,7 @@ from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
 from tpu_inference.layers.vllm.linear import sharded_quantized_matmul
 from tpu_inference.layers.vllm.process_weights.linear_weights import (
-    LinearWeights, process_lienar_weights, shard_linear_weights,
+    LinearWeights, process_linear_weights, shard_linear_weights,
     to_parameter_list)
 from tpu_inference.layers.vllm.quantization.configs import \
     VllmQuantLinearConfig
@@ -95,7 +95,7 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
             else:
                 weight_scale = jnp.squeeze(weight_scale, -1)
 
-            return process_lienar_weights(
+            return process_linear_weights(
                 LinearWeights(
                     weight=weight,
                     weight_scale=weight_scale,

@@ -121,15 +121,18 @@ class TestDeepSeekV3:
             # Check a layer norm (should be 1s usually, but check existence)
             assert model.final_norm.scale.value.shape == (7168, )
 
-    @patch("tpu_inference.models.jax.deepseek_v3.DeepSeekV3WeightLoader")
-    def test_load_weights_called(self, mock_loader_cls, mock_config, rng,
-                                 mesh):
+    @patch("tpu_inference.models.jax.deepseek_v3.DeepSeekV3.WeightLoader")
+    @patch(
+        "tpu_inference.models.jax.utils.weight_utils.model_weights_generator",
+        return_value=[],
+    )
+    def test_load_weights_called(self, mock_weights_generator, mock_loader_cls,
+                                 mock_config, rng, mesh):
         model = DeepSeekV3(mock_config, rng, mesh)
-        mock_loader_instance = mock_loader_cls.return_value
 
         model.load_weights(rng)
 
-        mock_loader_instance.load_weights.assert_called_once_with(model)
+        model.weight_loader.load_weights.assert_called_once_with(model)
 
 
 class TestDeepSeekV3WeightLoader:
@@ -138,7 +141,7 @@ class TestDeepSeekV3WeightLoader:
     def loader(self, mock_config):
         # We need to mock the generator so it doesn't try to download files
         with patch(
-                "tpu_inference.models.jax.deepseek_v3.model_weights_generator",
+                "tpu_inference.models.jax.utils.weight_utils.model_weights_generator",
                 return_value=[]):
             return DeepSeekV3WeightLoader(vllm_config=mock_config,
                                           num_layers=2,
@@ -399,3 +402,106 @@ class TestDeepSeekV3WeightLoader:
             # Verify the scale was applied to the MockVariable's internal QArray structure
             # (In the model code: base_model_weight.array.scale.value = maybe_sharded_scale)
             assert mock_var.array.scale.value is not None
+
+
+# TODO (jacobplatin): remove once refactoring is complete
+class TestDeepSeekV3NativeFP8:
+    """Tests specifically for the native FP8 path with quantization blocks."""
+
+    @pytest.fixture
+    def fp8_config(self):
+        """Creates a config with native FP8 block sizes enabled."""
+        config = MockVllmConfig()
+        # quantization_config={"weight_block_size": [128, 128]})
+        config.model_config.hf_config.quantization_config = {
+            "quant_method": "fp8",
+            "weight_block_size": [128, 128]
+        }
+
+        return config
+
+    @pytest.fixture
+    def fp8_loader(self, fp8_config):
+        with patch(
+                "tpu_inference.models.jax.utils.weight_utils.model_weights_generator",
+                return_value=[]):
+            return DeepSeekV3WeightLoader(vllm_config=fp8_config,
+                                          num_layers=1,
+                                          hidden_size=256,
+                                          q_lora_rank=64,
+                                          kv_lora_rank=64,
+                                          attn_heads=4,
+                                          qk_nope_head_dim=32,
+                                          qk_rope_head_dim=16,
+                                          v_head_dim=32,
+                                          num_local_experts=8,
+                                          model_dtype=jnp.bfloat16,
+                                          use_mla_kernel=True)
+
+    def test_native_fp8_initialization(self, fp8_loader):
+        """Verifies that the loader detects native FP8 mode from config."""
+        assert fp8_loader.is_native_fp8_model is True
+        assert fp8_loader.quantization_block_size_n == 128
+        assert fp8_loader.quantization_block_size_k == 128
+
+    def test_load_individual_weight_repeat_logic(self, fp8_loader, mesh):
+        """
+        Tests the logic where the scale is repeated when scale dimension matches
+        block dimension logic but is smaller than weight dimension.
+        """
+        name = "layers.0.custom_module.kernel_gating_DF"
+
+        # Weight Dim 0: 256. Block size: 128. 256 // 128 = 2.
+        # Scale Dim 0: 1.
+        # Logic check: (256 // 128 != 1) and (256 // 1 != 1).
+        # Outcome: Should repeat scale on axis 0 by 128, then slice to 256.
+
+        weight_shape = (256, 128)
+        scale_shape = (1, 128)
+        # Expected shape after repeating (1, 128) -> (128, 128)
+        expected_scale_shape = (128, 128)
+
+        weight = torch.randn(weight_shape).to(torch.float8_e4m3fn)
+        scale = torch.ones(scale_shape, dtype=torch.float8_e4m3fn)
+
+        mock_var = MockVariable(weight_shape, dtype=jnp.float8_e4m3fn)
+        mock_params = {
+            "layers": {
+                "0": {
+                    "custom_module": {
+                        "kernel_gating_DF": mock_var
+                    }
+                }
+            }
+        }
+
+        with patch("tpu_inference.models.jax.deepseek_v3.get_param", return_value=mock_var), \
+             patch("jax.make_array_from_callback") as mock_make_array:
+
+            # Mock return for the make_array call
+            # We use side_effect to return appropriate dtypes for weight vs scale
+            def side_effect(shape, *args, **kwargs):
+                if shape == weight_shape:
+                    return jnp.zeros(shape, dtype=jnp.float8_e4m3fn)
+                elif shape == expected_scale_shape:
+                    # Scale should match the MockVariable's scale dtype (float32)
+                    return jnp.zeros(shape, dtype=jnp.float32)
+                return jnp.zeros(shape)
+
+            mock_make_array.side_effect = side_effect
+
+            fp8_loader._load_individual_weight(name,
+                                               weight,
+                                               mock_params,
+                                               mesh,
+                                               scale=scale)
+
+            # The loader logic repeats the scale: scale.repeat(128, axis=0)[:256]
+            # (1, 128) -> (128, 128) via repeat.
+            scale_call_found = False
+            for call_args in mock_make_array.call_args_list:
+                shape_arg = call_args[0][0]
+                if shape_arg == expected_scale_shape:
+                    scale_call_found = True
+
+            assert scale_call_found, f"Expected scale with shape {expected_scale_shape} to be created."

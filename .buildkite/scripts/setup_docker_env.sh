@@ -81,12 +81,9 @@ setup_environment() {
       TPU_INFERENCE_HASH="$BUILDKITE_COMMIT"
   fi
 
-  # TODO (ranlihao): unpin after the upstream is stable.
-  VLLM_COMMIT_HASH="0dd5dee9b9bc88453f5f3eacfde751e6b9ba4871"
-
   docker build \
       --build-arg VLLM_COMMIT_HASH="${VLLM_COMMIT_HASH}" \
       --build-arg IS_FOR_V7X="${IS_FOR_V7X:-false}" \
       --build-arg IS_TEST="true" \
-      --no-cache -f docker/${DOCKERFILE_NAME} -t "${IMAGE_NAME}:${TPU_INFERENCE_HASH}" .
+      --no-cache -f docker/"${DOCKERFILE_NAME}" -t "${IMAGE_NAME}:${TPU_INFERENCE_HASH}" .
 }

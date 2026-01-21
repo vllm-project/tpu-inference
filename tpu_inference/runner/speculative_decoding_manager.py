@@ -72,10 +72,8 @@ class SpeculativeDecodingManager:
             assert isinstance(self.runner.drafter, NgramProposer)
             self._draft_token_ids = self.runner.drafter.propose(
                 sampled_token_ids[:self.runner.input_batch.num_reqs],
-                self.runner.input_batch.req_ids,
                 self.runner.input_batch.num_tokens_no_spec,
-                self.runner.input_batch.token_ids_cpu,
-                self.runner.input_batch.spec_decode_unsupported_reqs)
+                self.runner.input_batch.token_ids_cpu)
         elif self.runner.speculative_config.method == "eagle3":
             self._draft_token_ids = self.propose_eagle3_draft_token_ids(
                 sampled_token_ids,

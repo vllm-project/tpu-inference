@@ -160,23 +160,24 @@ class TestLlamaGuard4ForCausalLM:
 
             assert jnp.all(final_norm_scale == 1.0)
 
-    @patch("tpu_inference.models.jax.llama_guard_4.LlamaGuard4WeightLoader")
-    def test_load_weights_called_correctly(self, mock_loader_cls, rng, mesh):
+    def test_load_weights_called_correctly(self, rng, mesh):
         """Tests that the weight loader is called correctly for checkpoint loading."""
         vllm_config = MockVllmConfig(model_name="llama-guard-4-test",
                                      random_weights=False)
         model = LlamaGuard4ForCausalLM(vllm_config, rng, mesh)
 
-        mock_loader_instance = MagicMock()
-        mock_loader_cls.return_value = mock_loader_instance
-        model.load_weights(rng)
+        with patch.object(LlamaGuard4ForCausalLM,
+                          'WeightLoader') as mock_loader_cls:
+            mock_loader_instance = MagicMock()
+            mock_loader_cls.return_value = mock_loader_instance
+            model.load_weights(rng)
 
-        mock_loader_cls.assert_called_once_with(vllm_config=vllm_config,
-                                                hidden_size=128,
-                                                attn_heads=4,
-                                                num_key_value_heads=2,
-                                                attn_head_dim=32)
-        mock_loader_instance.load_weights.assert_called_once_with(model)
+            mock_loader_cls.assert_called_once_with(vllm_config=vllm_config,
+                                                    hidden_size=128,
+                                                    attn_heads=4,
+                                                    num_key_value_heads=2,
+                                                    attn_head_dim=32)
+            mock_loader_instance.load_weights.assert_called_once_with(model)
 
 
 class TestLlamaGuard4WeightLoader:

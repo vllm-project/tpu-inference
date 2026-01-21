@@ -47,10 +47,10 @@ def _validate_args(
         raise ValueError(f"Expected 3-tensor for 'rhs' but got {rhs.ndim=}.")
     common.assert_is_supported_dtype(rhs.dtype)
 
-    if lhs.shape[1] != rhs.shape[2]:
+    if lhs.shape[1] != rhs.shape[1]:
         raise ValueError(
             "Expected 'lhs' and 'rhs' to have the same number of input features."
-            f" But instead got {lhs.shape[1]=} and {rhs.shape[2]=}")
+            f" But instead got {lhs.shape[1]=} and {rhs.shape[1]=}")
 
     # Validate 'group_sizes'.
     if group_sizes.dtype != jnp.int32:
@@ -58,7 +58,7 @@ def _validate_args(
             f"Expected 32-bit integer 'group_sizes' but got {group_sizes.dtype=}."
         )
 
-    num_groups, out_size, in_size = rhs.shape
+    num_groups, in_size, out_size = rhs.shape
 
     if rhs_scale is not None:
         # Validate 'rhs_scale'.
@@ -319,7 +319,6 @@ LutFn = Callable[[int, int, int], Optional[tuple[int, int, int]]]
     static_argnames=[
         "preferred_element_type",
         "tiling",
-        "transpose_rhs",
         "interpret",
     ],
 )
@@ -333,7 +332,6 @@ def gmm(
     tiling: tuple[int, int, int] | LutFn | None = (128, 128, 128),
     group_offset: jnp.ndarray | None = None,
     existing_out: jnp.ndarray | None = None,
-    transpose_rhs: bool = False,
     interpret: bool = False,
 ) -> jnp.ndarray:
     """Compute lhs[sizes[i-1]:sizes[i], :] @ rhs for each group 'i'.
@@ -349,17 +347,12 @@ def gmm(
     group_offset: The group in group sizes to start computing from. This is
       particularly useful for when rhs num_groups is sharded.
     existing_out: Existing output to write to.
-    transpose_rhs: True if the rhs needs to be transposed.
     interpret: Whether or not to run the kernel in interpret mode, helpful for
       testing and debugging.
 
   Returns:
     A 2d, jnp.ndarray with shape [m, n].
   """
-
-    # TODO(kyuyeunk): Instead of transpose_rhs==True, modify logic to only
-    # transpose_rhs==False instead as it simplifies the logic in kernel.
-    assert transpose_rhs
 
     if existing_out is not None:
         assert isinstance(existing_out, jax.Array)
@@ -386,7 +379,7 @@ def gmm(
     )
 
     # Gather shape information.
-    m, k, n = (lhs.shape[0], lhs.shape[1], rhs.shape[1])
+    m, k, n = (lhs.shape[0], lhs.shape[1], rhs.shape[-1])
 
     # If tiling is callable, look up the problem dimensions in the LUT. If no
     # tuned tile dimensions are available throw an error.
@@ -472,7 +465,7 @@ def gmm(
         def _accum(is_last_k_tile, is_first_b_tile):
             if is_last_k_tile:
                 mask_k_rem_lhs = partial(mask_k_rem, dim=1)
-                mask_k_rem_rhs = partial(mask_k_rem, dim=1)
+                mask_k_rem_rhs = partial(mask_k_rem, dim=0)
             else:
 
                 def _wrapper(x):
@@ -484,11 +477,10 @@ def gmm(
             loaded_lhs = lhs[...]
             loaded_rhs = rhs[...]
 
-            acc = acc_scratch[...] + jax.lax.dot_general(
+            acc = acc_scratch[...] + jnp.dot(
                 mask_k_rem_lhs(loaded_lhs),
                 mask_k_rem_rhs(loaded_rhs),
                 preferred_element_type=jnp.float32,
-                dimension_numbers=(((1, ), (1, )), ((), ())),
             )
 
             if is_last_k_tile:
@@ -542,7 +534,7 @@ def gmm(
         # NOTE: If we're working on only a shard of the rhs we need to adjust the
         # group index we load from to account for this. The group_ids are in the
         # "unsharded" domain.
-        return group_ids[grid_id] - group_offset[0], n_i, b_i * tiles_k + k_i
+        return group_ids[grid_id] - group_offset[0], b_i * tiles_k + k_i, n_i
 
     def rhs_scale_transform_indices(n_i, grid_id, b_i, k_i, group_metadata,
                                     group_offset):
@@ -572,7 +564,7 @@ def gmm(
         input_output_aliases = {7: 0}
 
     lhs_block_spec = pl.BlockSpec((tm, tk), lhs_transform_indices)
-    rhs_block_spec = pl.BlockSpec((None, tn, tk), rhs_transform_indices)
+    rhs_block_spec = pl.BlockSpec((None, tk, tn), rhs_transform_indices)
 
     if rhs_scale is None:
         rhs_scale_block_spec = None

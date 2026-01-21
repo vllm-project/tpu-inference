@@ -89,6 +89,7 @@ steps:
        - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_topk_topp_sampler.py
 
    - label: "TPU Test 9: test_multimodal.py"
+     # TODO: test_multimodal.py has been removed from the upstream; to re-enable this pipeline, a new torchax test needs to be added.
      key: tpu_test_9
      soft_fail: true
      agents:

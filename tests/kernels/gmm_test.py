@@ -59,7 +59,7 @@ def reference_gmm(
     rhs_bias: jax.Array | None = None,
     group_offset: jax.Array | None = None,
 ):
-    num_groups, out_size, in_size = rhs.shape
+    num_groups, in_size, out_size = rhs.shape
     assert lhs.shape[1] == in_size
 
     if group_offset is None:
@@ -86,9 +86,9 @@ def reference_gmm(
             block_start = block * block_size
             block_end = block_start + block_size
             lhs_block = lhs_slice[:, block_start:block_end].astype(jnp.float32)
-            rhs_block = rhs_slice[:, block_start:block_end].astype(jnp.float32)
+            rhs_block = rhs_slice[block_start:block_end, :].astype(jnp.float32)
 
-            acc = jnp.einsum("bd,hd->bh", lhs_block, rhs_block)
+            acc = jnp.einsum("bd,dh->bh", lhs_block, rhs_block)
             if rhs_scale is not None:
                 acc *= rhs_scale[group][block]
             out += acc
@@ -106,8 +106,8 @@ class GmmTest(jtu.JaxTestCase):
 
     @parameterized.product(
         batch_size=[128],
-        in_size=[1024],
-        out_size=[1024],
+        in_size=[512, 1024],
+        out_size=[512, 1024],
         num_groups=[16, 32],
         has_bias=[True, False],
     )
@@ -115,7 +115,7 @@ class GmmTest(jtu.JaxTestCase):
         key = jax.random.key(0)
 
         lhs = jax.random.normal(key, (batch_size, in_size), dtype=jnp.bfloat16)
-        rhs = jax.random.normal(key, (num_groups, out_size, in_size),
+        rhs = jax.random.normal(key, (num_groups, in_size, out_size),
                                 dtype=jnp.bfloat16)
         rhs_bias = None
         if has_bias:
@@ -133,7 +133,6 @@ class GmmTest(jtu.JaxTestCase):
             rhs,
             group_sizes,
             rhs_bias=rhs_bias,
-            transpose_rhs=True,
             preferred_element_type=jnp.bfloat16,
         )
 
@@ -141,8 +140,8 @@ class GmmTest(jtu.JaxTestCase):
 
     @parameterized.product(
         batch_size=[128],
-        in_size=[1024],
-        out_size=[1024],
+        in_size=[512, 1024],
+        out_size=[512, 1024],
         num_groups=[16, 32],
         has_bias=[True, False],
         weight_dtype=[jnp.int8, jnp.float8_e5m2, jnp.float4_e2m1fn],
@@ -164,13 +163,12 @@ class GmmTest(jtu.JaxTestCase):
         key = jax.random.key(0)
 
         lhs = jax.random.normal(key, (batch_size, in_size), dtype=jnp.bfloat16)
-        rhs = jax.random.normal(key, (num_groups, out_size, in_size),
+        rhs = jax.random.normal(key, (num_groups, in_size, out_size),
                                 dtype=jnp.bfloat16)
         rhs_q, rhs_scale = quantize_tensor(rhs,
                                            weight_dtype,
-                                           axis=2,
+                                           axis=1,
                                            block_size=block_size)
-        rhs_scale = jnp.swapaxes(rhs_scale, 1, 2)
         rhs_scale = jnp.expand_dims(rhs_scale, axis=2)
 
         rhs_bias = None
@@ -194,7 +192,6 @@ class GmmTest(jtu.JaxTestCase):
             group_sizes,
             rhs_scale=rhs_scale,
             rhs_bias=rhs_bias,
-            transpose_rhs=True,
             preferred_element_type=jnp.bfloat16,
         )
 

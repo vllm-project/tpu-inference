@@ -8,7 +8,7 @@ from jax._src import test_util as jtu
 from tpu_inference.kernels.quantized_matmul import (kernel, tuned_block_sizes,
                                                     util)
 
-xla_quantized_matmul = kernel.xla_quantized_matmul
+xla_quantized_matmul = util.xla_quantized_matmul
 quantized_matmul_kernel = kernel.quantized_matmul_kernel
 quantize_tensor = util.quantize_tensor
 get_tuned_block_sizes = tuned_block_sizes.get_tuned_block_sizes
