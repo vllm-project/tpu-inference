@@ -22,7 +22,7 @@ notify:
     if: build.state == "failed" && build.branch == "main"
 
 steps:
-   - label: "Upload Tests for Models & Features"
+   - label: "Uddploadd Tests for Models & Features"
      <<: *run-on-nightly-or-tag
      agents:
        queue: cpu
