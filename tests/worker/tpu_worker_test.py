@@ -58,6 +58,16 @@ def mock_vllm_config():
     return config
 
 
+@pytest.fixture
+def mock_get_pp_group():
+    with patch("tpu_inference.distributed.jax_parallel_state.get_pp_group",
+               return_value=MagicMock(is_first_rank=True,
+                                      is_last_rank=True,
+                                      rank_in_group=0,
+                                      world_size=1)):
+        yield
+
+
 class TestTPUWorker:
     """Test suite for the TPUWorker class."""
 
@@ -122,7 +132,7 @@ class TestTPUWorker:
     @patch('tpu_inference.worker.tpu_worker.ensure_kv_transfer_initialized')
     def test_init_device_with_provided_devices(
             self, mock_ensure_kv_transfer_initialized, mock_jax, mock_utils,
-            mock_runner_cls, mock_vllm_config):
+            mock_runner_cls, mock_vllm_config, mock_get_pp_group):
         """Tests init_device when devices are provided during construction."""
         mock_devices = ['tpu:0', 'tpu:1']
         worker = TPUWorker(vllm_config=mock_vllm_config,
