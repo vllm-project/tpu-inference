@@ -27,9 +27,12 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.executor.ray_distributed_executor import \
     RayDistributedExecutor as RayDistributedExecutorV1
 from vllm.v1.executor.ray_executor import RayWorkerMetaData
-from vllm.v1.executor.ray_utils import RayWorkerWrapper, _wait_until_pg_ready
+from vllm.v1.executor.ray_utils import RayWorkerWrapper as RayWorkerWrapperV1
+from vllm.v1.executor.ray_utils import _wait_until_pg_ready
 
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.jax_intermediate_tensor import \
+    JaxIntermediateTensors
 
 try:
     from ray._private.state import available_resources_per_node
@@ -372,3 +375,15 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
     # as we pass the kv_parameters through proxy server
     def get_kv_connector_handshake_metadata(self) -> None:
         pass
+
+
+class RayWorkerWrapper(RayWorkerWrapperV1):
+    """
+    Ray worker wrapper for TPU.
+
+    The implementation is similar to vllm/v1/executor/ray_utils.py
+    except the intermediate tensor is JaxIntermediateTensors.
+    """
+
+    def _is_intermediate_tensors(self, output) -> bool:
+        return isinstance(output, JaxIntermediateTensors)
