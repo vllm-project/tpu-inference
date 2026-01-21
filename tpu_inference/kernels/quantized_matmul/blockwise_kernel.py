@@ -12,7 +12,8 @@ from tpu_inference.kernels.quantized_matmul import util
 from tpu_inference.kernels.quantized_matmul.tuned_block_sizes import (
     TunedValue, get_device_vmem_limit, get_tuned_block_sizes)
 from tpu_inference.kernels.quantized_matmul.util import (get_kernel_name,
-                                                         next_multiple)
+                                                         next_multiple,
+                                                         unfold_args)
 
 quantize_tensor = util.quantize_tensor
 
@@ -20,9 +21,9 @@ quantize_tensor = util.quantize_tensor
 @functools.partial(
     jax.jit,
     static_argnames=[
-        'block_size',
-        'x_q_dtype',
-        'tuned_value',
+        "block_size",
+        "x_q_dtype",
+        "tuned_value",
     ],
 )
 def quantized_matmul_kernel(
@@ -37,22 +38,22 @@ def quantized_matmul_kernel(
 ) -> jax.Array:
     """Quantized matmul kernel with blockwise support.
 
-  Args:
-    x: Input unquantized array.
-    w_q: Weight quantized array. [n_output_features, n_input_features]
-    w_scale: Weight quantization scale. [n_input_features // block_size, 1, n_output_features]
-    w_zp: Weight zero point for asymmetric quantization.
-    block_size: Block size for subchannel quantization.
-    x_q_dtype: Quantization type of the input. If None or if the value is the
-      same as x.dtype, then no quantization is applied.
-    tuned_value: Kernel tuned values for optimal performance.
+    Args:
+      x: Input unquantized array.
+      w_q: Weight quantized array. [n_output_features, n_input_features]
+      w_scale: Weight quantization scale. [n_input_features // block_size, 1, n_output_features]
+      w_zp: Weight zero point for asymmetric quantization.
+      block_size: Block size for subchannel quantization.
+      x_q_dtype: Quantization type of the input. If None or if the value is the
+        same as x.dtype, then no quantization is applied.
+      tuned_value: Kernel tuned values for optimal performance.
 
-  Returns:
-    Quantized matmul result.
-  """
+    Returns:
+      Quantized matmul result.
+    """
 
     if w_zp is not None:
-        raise NotImplementedError('zero_point is not supported.')
+        raise NotImplementedError("zero_point is not supported.")
 
     if x_q_dtype is None:
         x_q_dtype = x.dtype
@@ -102,6 +103,7 @@ def quantized_matmul_kernel(
     # used per batch.
     save_x_q = quantize_activation and n_in == 1 and n_out > 1
 
+    # TODO(amandaliang): Make this configurable.
     acc_dtype = jnp.bfloat16
     if quantize_activation and jnp.issubdtype(w_q.dtype, jnp.integer):
         acc_dtype = jnp.int32
@@ -135,78 +137,74 @@ def quantized_matmul_kernel(
         is_first_step = pid_k == 0
         is_last_step = pid_k == (orig_n_in // in_block_size - 1)
 
-        @pl.when(is_first_step)
-        def _init():
-            acc_scratch[...] = jnp.zeros_like(acc_scratch)
+        def accum(is_first_step, is_last_step):
+            accumulators = [None] * steps_n
 
-        # Pre-calculate all quantized blocks for this tile. Relieves register
-        # pressure during the compute phase.
-        lhs_q_list = []
-        lhs_scale_list = []
-        rhs_q_list = []
-        rhs_scale_list = []
+            for i in range(steps_k):
+                k_start, k_end = i * block_size, (i + 1) * block_size
+                lhs_sub = lhs_ref[:, k_start:k_end].astype(jnp.float32)
+                lhs_q, lhs_scale = util.quantize_block(lhs_sub, 1, x_q_dtype)
+                lhs_scale = lhs_scale.astype(acc_dtype)
 
-        for i in range(steps_k):
-            k_start, k_end = i * block_size, (i + 1) * block_size
+                rhs_q_full = rhs_ref[:, k_start:k_end]
+                rhs_scale_full = w_scales_ref[i, :, :].astype(acc_dtype)
 
-            lhs_sub = lhs_ref[:, k_start:k_end].astype(jnp.float32)
-            l_q, l_s = util.quantize_block(lhs_sub, 1, x_q_dtype)
-            lhs_q_list.append(l_q)
-            lhs_scale_list.append(l_s.astype(acc_dtype))
-            rhs_q_list.append(rhs_ref[:, k_start:k_end])
-            rhs_scale_list.append(w_scales_ref[i, :, :].astype(acc_dtype))
+                for j in range(steps_n):
+                    n_start, n_end = j * compute_tile_n, (j +
+                                                          1) * compute_tile_n
 
-        accumulators = [
-            jnp.zeros((batch_block_size, compute_tile_n), dtype=acc_dtype)
-            for _ in range(steps_n)
-        ]
-        for i in range(steps_k):
-            lhs_q = lhs_q_list[i]
-            lhs_scale = lhs_scale_list[i]
-            rhs_q_full = rhs_q_list[i]
-            rhs_scale_full = rhs_scale_list[i]
+                    rhs_q_slice = rhs_q_full[n_start:n_end, :]
+                    rhs_scale_slice = rhs_scale_full[:, n_start:n_end]
+                    if jnp.issubdtype(x_q_dtype, jnp.integer):
+                        preferred_element_type = jnp.int32
+                    else:
+                        preferred_element_type = jnp.float32
+                    dot_res = jax.lax.dot_general(
+                        lhs_q,
+                        rhs_q_slice,
+                        (((1, ), (1, )), ((), ())),
+                        preferred_element_type=preferred_element_type,
+                    )
+                    res = dot_res.astype(acc_dtype)
+                    res = res * lhs_scale
+                    res = res * rhs_scale_slice
+                    if i == 0:
+                        accumulators[j] = res
+                    else:
+                        accumulators[j] += res
 
-            for j in range(steps_n):
-                n_start, n_end = j * compute_tile_n, (j + 1) * compute_tile_n
+            acc_block = jnp.concatenate(accumulators, axis=1)
 
-                rhs_q_slice = (rhs_q_full[n_start:n_end, :])
-                rhs_scale_slice = rhs_scale_full[:, n_start:n_end]
-                if x_q_dtype == jnp.int4 or x_q_dtype == jnp.int8:
-                    preferred_element_type = jnp.int32
-                else:
-                    preferred_element_type = jnp.float32
-                dot_res = jax.lax.dot_general(
-                    lhs_q,
-                    rhs_q_slice.astype(lhs_q.dtype),
-                    (((1, ), (1, )), ((), ())),
-                    preferred_element_type=preferred_element_type,
-                )
-                res = dot_res.astype(acc_dtype)
-                res = res * lhs_scale
-                res = res * rhs_scale_slice
+            if not is_first_step:
+                acc_block += acc_scratch[...]
 
-                accumulators[j] += res
-        acc_block = jnp.concatenate(accumulators, axis=1)
-        acc_scratch[...] += acc_block
+            if is_last_step:
+                out_ref[...] = acc_block.astype(out_ref.dtype)
+            else:
+                acc_scratch[...] = acc_block
 
-        @pl.when(is_last_step)
-        def _write():
-            out_ref[...] = acc_scratch[...].astype(out_ref.dtype)
+        unfold_args((is_first_step, is_last_step), (), accum)
 
     kernel = pl.pallas_call(
         kernel,
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=0,
             in_specs=[
-                pl.BlockSpec((batch_block_size, in_block_size),
-                             lambda b, o, i: (b, i),
-                             memory_space=pltpu.VMEM),  # x
-                pl.BlockSpec((out_block_size, in_block_size),
-                             lambda b, o, i: (o, i),
-                             memory_space=pltpu.VMEM),  # w_q
-                pl.BlockSpec((steps_k, 1, out_block_size),
-                             lambda _, o, i: (i, 0, o),
-                             memory_space=pltpu.VMEM)
+                pl.BlockSpec(
+                    (batch_block_size, in_block_size),
+                    lambda b, o, i: (b, i),
+                    memory_space=pltpu.VMEM,
+                ),  # x
+                pl.BlockSpec(
+                    (out_block_size, in_block_size),
+                    lambda b, o, i: (o, i),
+                    memory_space=pltpu.VMEM,
+                ),  # w_q
+                pl.BlockSpec(
+                    (steps_k, 1, out_block_size),
+                    lambda _, o, i: (i, 0, o),
+                    memory_space=pltpu.VMEM,
+                ),
             ],  # w_scale
             out_specs=pl.BlockSpec((batch_block_size, out_block_size),
                                    lambda b, o, i: (b, o)),
@@ -218,7 +216,7 @@ def quantized_matmul_kernel(
         out_shape=jax.ShapeDtypeStruct((padded_n_batch, padded_n_out),
                                        x.dtype),
         compiler_params=pltpu.CompilerParams(
-            dimension_semantics=('parallel', 'parallel', 'arbitrary'),
+            dimension_semantics=("parallel", "parallel", "arbitrary"),
             vmem_limit_bytes=vmem_limit_bytes,
         ),
     )
