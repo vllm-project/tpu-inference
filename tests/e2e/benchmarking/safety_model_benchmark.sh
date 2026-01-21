@@ -8,11 +8,14 @@
 # DESCRIPTION:
 # This script provides a unified entry point to run both Accuracy (offline pytest)
 # and Performance (API server) tests for any safety classification model defined
-# in the test configuration (e.g., Llama-Guard-4-12B).
+# in the test configuration (e.g., Llama-Guard-4-12B). It now supports multimodal
+# inputs using a custom dataset for performance benchmarks.
 #
 # USAGE:
-# 1. Run Accuracy Check: bash safety_model_benchmark.sh --mode accuracy
-# 2. Run Performance Benchmark: bash safety_model_benchmark.sh --mode performance
+# 1. Run Text-Only Accuracy Check: bash tests/e2e/benchmarking/safety_model_benchmark.sh --mode accuracy --benchmark text-only
+# 2. Run Multimodal Accuracy Check: bash tests/e2e/benchmarking/safety_model_benchmark.sh --mode accuracy --benchmark multimodal
+# 3. Run Text-Only Performance Benchmark: bash tests/e2e/benchmarking/safety_model_benchmark.sh --mode performance --benchmark text-only
+# 4. Run Multimodal Performance Benchmark: bash tests/e2e/benchmarking/safety_model_benchmark.sh --mode performance --benchmark multimodal
 #
 # REQUIRED ENVIRONMENT VARIABLES (Example Values for Llama Guard 4):
 # export TEST_MODEL="meta-llama/Llama-Guard-4-12B"
@@ -35,13 +38,11 @@ export TIMEOUT_SECONDS=600
 # shellcheck disable=SC2269
 MINIMUM_ACCURACY_THRESHOLD=${MINIMUM_ACCURACY_THRESHOLD}
 CI_MAX_TEST_CASES=100
-if [ "$TP_SIZE" -eq 1 ]; then
-    TARGET_THROUGHPUT="225.00" # New threshold for single device
-elif [ "$TP_SIZE" -ge 8 ]; then
-    TARGET_THROUGHPUT="487.00" # Threshold for high-parallelism (TP=8)
-else
-    TARGET_THROUGHPUT="487.00"
-fi
+TEXT_ONLY_REQUEST_THROUGHPUT_TP1="78.00"
+TEXT_ONLY_REQUEST_THROUGHPUT_TP8="199.00"
+MULTIMODAL_REQUEST_THROUGHPUT_TP1="106.00"
+MULTIMODAL_REQUEST_THROUGHPUT_TP8="122.00"
+
 
 # Benchmark/Serve Settings
 MAX_MODEL_LEN=4096
@@ -57,7 +58,7 @@ LOCAL_JSONL_FILE="/tmp/airr_official_1.0_demo_en_us_prompt_set_release.jsonl"
 
 # MM-SafetyBench Data Paths
 MM_SAFETYBENCH_REPO="https://github.com/isXinLiu/MM-SafetyBench.git"
-MM_SAFETYBENCH_ZIP_URL="https://drive.usercontent.google.com/corp/download?id=1xjW9k-aGkmwycqGCXbru70FaSKhSDcR_&export=download&authuser=0"
+
 MM_SAFETYBENCH_DIR="/tmp/MM-SafetyBench"
 MM_SAFETYBENCH_IMAGE_DIR="${MM_SAFETYBENCH_DIR}/data/imgs"
 # ------------------
@@ -208,7 +209,7 @@ run_accuracy_check() {
         cd "$CONFTEST_DIR" || { echo "Error: Failed to find conftest directory: $CONFTEST_DIR"; exit 1; }
         echo "Running pytest from: $(pwd)"
 
-        python -m pytest -s -rP "$RELATIVE_TEST_FILE":::test_safety_model_accuracy_check \
+        python -m pytest -s -rP "$RELATIVE_TEST_FILE"::test_safety_model_accuracy_check \
             -W ignore::DeprecationWarning \
             --tensor-parallel-size "$TP_SIZE" \
             --model-name "$MODEL_NAME" \
@@ -221,6 +222,15 @@ run_accuracy_check() {
 run_performance_benchmark() {
     echo -e "\n--- Running Performance Benchmark (Mode: PERFORMANCE) ---"
 
+    local TARGET_THROUGHPUT
+    if [ "$TP_SIZE" -eq 1 ]; then
+        TARGET_THROUGHPUT="$TEXT_ONLY_REQUEST_THROUGHPUT_TP1"
+    elif [ "$TP_SIZE" -ge 8 ]; then
+        TARGET_THROUGHPUT="$TEXT_ONLY_REQUEST_THROUGHPUT_TP8"
+    else
+        TARGET_THROUGHPUT="$TEXT_ONLY_REQUEST_THROUGHPUT_TP8" # Default to TP8 if not 1
+    fi
+
     vllm bench serve \
         --model "$MODEL_NAME" \
         --endpoint "/v1/completions" \
@@ -231,14 +241,14 @@ run_performance_benchmark() {
         --custom-output-len "$OUTPUT_LEN_OVERRIDE" \
         2>&1 | tee "$BENCHMARK_LOG_FILE"
 
-    ACTUAL_THROUGHPUT=$(awk '/Output token throughput \(tok\/s\):/ {print $NF}' "$BENCHMARK_LOG_FILE")
+    ACTUAL_THROUGHPUT=$(awk '/Request throughput \(req\/s\):/ {print $NF}' "$BENCHMARK_LOG_FILE")
 
     if [ -z "$ACTUAL_THROUGHPUT" ]; then
-        echo "Error: Output token throughput NOT FOUND in benchmark logs."
+        echo "Error: Request throughput NOT FOUND in benchmark logs."
         return 1
     fi
 
-    echo "Actual Output Token Throughput: $ACTUAL_THROUGHPUT tok/s"
+    echo "Actual Request Throughput: $ACTUAL_THROUGHPUT req/s"
 
     if awk -v actual="$ACTUAL_THROUGHPUT" -v target="$TARGET_THROUGHPUT" 'BEGIN { exit !(actual >= target) }'; then
         echo "PERFORMANCE CHECK PASSED: $ACTUAL_THROUGHPUT >= $TARGET_THROUGHPUT"
@@ -251,6 +261,15 @@ run_performance_benchmark() {
 
 run_multimodal_performance_benchmark() {
     echo -e "\n--- Running Multimodal Performance Benchmark (Mode: PERFORMANCE, Benchmark: MULTIMODAL) ---"
+
+    local TARGET_THROUGHPUT
+    if [ "$TP_SIZE" -eq 1 ]; then
+        TARGET_THROUGHPUT="$MULTIMODAL_REQUEST_THROUGHPUT_TP1"
+    elif [ "$TP_SIZE" -ge 8 ]; then
+        TARGET_THROUGHPUT="$MULTIMODAL_REQUEST_THROUGHPUT_TP8"
+    else
+        TARGET_THROUGHPUT="$MULTIMODAL_REQUEST_THROUGHPUT_TP8" # Default to TP8 if not 1
+    fi
 
     download_mm_safetybench_dataset || return 1
     create_multimodal_dataset
