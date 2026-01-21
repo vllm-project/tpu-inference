@@ -22,11 +22,15 @@ from transformers import Qwen3Config
 from vllm.config import VllmConfig
 
 from tpu_inference import utils
+from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
+from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.jax_intermediate_tensor import \
+    JaxIntermediateTensors
 from tpu_inference.models.jax.qwen2 import Qwen2DecoderLayer
 from tpu_inference.models.jax.qwen2 import Qwen2MLP as Qwen3MLP
 from tpu_inference.models.jax.qwen2 import Qwen2Model
@@ -202,37 +206,52 @@ class Qwen3Model(Qwen2Model):
         rms_norm_eps = hf_config.rms_norm_eps
         hidden_size = hf_config.hidden_size
 
-        self.embed = nnx.Embed(
-            num_embeddings=vocab_size,
-            features=hidden_size,
-            param_dtype=dtype,
-            embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
-            rngs=rng,
-        )
-        self.layers = [
-            Qwen3DecoderLayer(
+        self.is_first_rank = get_pp_group().is_first_rank
+        self.is_last_rank = get_pp_group().is_last_rank
+
+        if self.is_first_rank or (hf_config.tie_word_embeddings
+                                  and self.is_last_rank):
+            self.embed = nnx.Embed(
+                num_embeddings=vocab_size,
+                features=hidden_size,
+                param_dtype=dtype,
+                embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
+                rngs=rng,
+            )
+        else:
+            self.embed = PPMissingLayer()
+
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            hf_config.num_hidden_layers,
+            lambda: Qwen3DecoderLayer(
                 config=hf_config,
                 dtype=dtype,
                 rng=rng,
                 mesh=mesh,
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
-                kv_cache_dtype=vllm_config.cache_config.cache_dtype)
-            for _ in range(hf_config.num_hidden_layers)
-        ]
-        self.norm = nnx.RMSNorm(
-            hidden_size,
-            epsilon=rms_norm_eps,
-            param_dtype=dtype,
-            scale_init=nnx.with_partitioning(init_fn, (None, )),
-            rngs=rng,
-        )
-        if model_config.hf_config.tie_word_embeddings:
-            self.lm_head = self.embed.embedding
-        else:
-            self.lm_head = nnx.Param(
-                init_fn(rng.params(), (hidden_size, vocab_size), dtype),
-                sharding=(None, "model"),
+                kv_cache_dtype=vllm_config.cache_config.cache_dtype))
+
+        if self.is_last_rank:
+            self.norm = nnx.RMSNorm(
+                hidden_size,
+                epsilon=rms_norm_eps,
+                param_dtype=dtype,
+                scale_init=nnx.with_partitioning(init_fn, (None, )),
+                rngs=rng,
             )
+        else:
+            self.norm = PPMissingLayer()
+
+        if self.is_last_rank:
+            if model_config.hf_config.tie_word_embeddings:
+                self.lm_head = self.embed.embedding
+            else:
+                self.lm_head = nnx.Param(
+                    init_fn(rng.params(), (hidden_size, vocab_size), dtype),
+                    sharding=(None, "model"),
+                )
+        else:
+            self.lm_head = PPMissingLayer()
 
 
 class Qwen3ForCausalLM(nnx.Module):
@@ -250,17 +269,30 @@ class Qwen3ForCausalLM(nnx.Module):
             mesh=mesh,
         )
 
+        self.pp_missing_layers = []
+        for path, module in nnx.iter_graph(self.model):
+            if isinstance(module, PPMissingLayer):
+                # the path should be sth like ('layers', '0')
+                self.pp_missing_layers.append('.'.join([str(s) for s in path]))
+
     def __call__(
         self,
         kv_caches: List[jax.Array],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
+        inputs_embeds: Optional[jax.Array] = None,
+        _input_positions=None,
+        _layer_name_to_kv_cache=None,
+        _lora_metadata=None,
+        intermediate_tensors: JaxIntermediateTensors | None = None,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
         kv_caches, x = self.model(
             kv_caches,
             input_ids,
             attention_metadata,
+            inputs_embeds,
+            intermediate_tensors,
         )
         return kv_caches, x, []
 
