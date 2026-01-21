@@ -39,7 +39,7 @@ MAX_ALLOWED_PAGE_INDICES_N = (
 )  # Based on experiments on v5e, 256x1024 results in smem oom but 128x1024 not. TODO: Adjust this based on TPU version.
 
 ragged_paged_attention = rpa.ref_ragged_paged_attention
-ragged_paged_attention_per_token = rpa_per_token.ref_ragged_paged_attention_per_token_hybrid
+ragged_paged_attention_per_token = rpa_per_token.ref_ragged_paged_attention_pate
 get_kv_cache_shape = rpa.get_kv_cache_shape
 
 ragged_paged_attention_hd64 = rpa_hd64.ragged_paged_attention_hd64
@@ -319,13 +319,13 @@ def sharded_ragged_paged_attention(
         P(ShardingAxisName.ATTN_DATA),  # page_indices
         P(ShardingAxisName.ATTN_DATA),  # cu_q_lens
         P(ShardingAxisName.ATTN_DATA),  # distribution
-        kv_scale_spec,  # k_scale_cache
-        kv_scale_spec,  # v_scale_cache
+        # kv_scale_spec,  # k_scale_cache
+        # kv_scale_spec,  # v_scale_cache
     )
-    out_specs = (qkv_spec, kv_cache_spec, kv_scale_spec, kv_scale_spec)
+    out_specs = (qkv_spec, kv_cache_spec)  # , kv_scale_spec, kv_scale_spec)
 
-    args = (q, k, v, kv_cache, kv_lens, page_indices, cu_q_lens, distribution,
-            k_scale, v_scale)
+    args = (q, k, v, kv_cache, kv_lens, page_indices, cu_q_lens, distribution)
+    #     k_scale, v_scale)
 
     use_hd64 = q.shape[-1] == 64
     func = ragged_paged_attention_hd64 if use_hd64 else ragged_paged_attention
@@ -392,7 +392,8 @@ def attention(
     # jax.debug.print("Step {i} BEFORE: Writing V scales with mean: {x} {y}", i=0, x=jnp.mean(v_scale), y=v_scale.shape)
 
     # (T, N, H)
-    output, kv_cache, k_scale_cache, v_scale_cache = sharded_ragged_paged_attention(
+    # , k_scale_cache, v_scale_cache
+    output, kv_cache = sharded_ragged_paged_attention(
         mesh,
         q,
         k,
@@ -413,4 +414,4 @@ def attention(
     # jax.debug.print("Step {i} AFTER: Writing K scales with mean: {x}", i=0, x=jnp.mean(k_scale_cache))
     # jax.debug.print("Step {i} AFTER: Writing V scales with mean: {x}", i=0, x=jnp.mean(v_scale_cache))
 
-    return kv_cache, output, k_scale_cache, v_scale_cache
+    return kv_cache, output  # , k_scale_cache, v_scale_cache

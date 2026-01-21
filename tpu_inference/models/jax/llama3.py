@@ -173,9 +173,11 @@ class LlamaAttention(nnx.Module):
         #     # q_scale = self._q_scale
         #     k_scale = self._k_scale
         #     v_scale = self._v_scale
-        #     k, v = quantize_kv(self.kv_cache_quantized_dtype, k, v, k_scale,
-        #                        v_scale)
-        new_kv_cache, outputs, new_k_scale_cache, new_v_scale_cache = attention(
+        from tpu_inference.layers.common.quantization import quantize_kv
+
+        k, v = quantize_kv(self.kv_cache_quantized_dtype, k, v, 1.0, 1.0)
+        #  new_k_scale_cache, new_v_scale_cache
+        new_kv_cache, outputs = attention(
             kv_cache,
             q,
             k,
@@ -189,7 +191,7 @@ class LlamaAttention(nnx.Module):
         )
         # (T, D)
         o = self.o_proj(outputs)
-        return new_kv_cache, o, new_k_scale_cache, new_v_scale_cache
+        return new_kv_cache, o  # , new_k_scale_cache, new_v_scale_cache
 
 
 class LlamaDecoderLayer(nnx.Module):
@@ -233,7 +235,8 @@ class LlamaDecoderLayer(nnx.Module):
         attention_metadata: AttentionMetadata,
     ) -> Tuple[jax.Array, jax.Array]:
         hidden_states = self.input_layernorm(x)
-        kv_cache, attn_output, k_scale_cache, v_scale_cache = self.self_attn(
+        # , k_scale_cache, v_scale_cache
+        kv_cache, attn_output = self.self_attn(
             kv_cache,
             k_scale_cache,
             v_scale_cache,
@@ -246,7 +249,7 @@ class LlamaDecoderLayer(nnx.Module):
         attn_output = self.post_attention_layernorm(attn_output)
         outputs = self.mlp(attn_output)
         outputs = residual + outputs
-        return kv_cache, outputs, k_scale_cache, v_scale_cache
+        return kv_cache, outputs  # , k_scale_cache, v_scale_cache
 
 
 class LlamaModel(nnx.Module):
@@ -340,7 +343,8 @@ class LlamaModel(nnx.Module):
             kv_cache = kv_caches[i]
             k_scale_cache = k_scale_caches[i]
             v_scale_cache = v_scale_caches[i]
-            kv_cache, x, k_scale_cache, v_scale_cache = layer(
+            # , k_scale_cache, v_scale_cache
+            kv_cache, x = layer(
                 kv_cache,
                 k_scale_cache,
                 v_scale_cache,
@@ -348,8 +352,8 @@ class LlamaModel(nnx.Module):
                 attention_metadata,
             )
             kv_caches[i] = kv_cache
-            k_scale_caches[i] = k_scale_cache
-            v_scale_caches[i] = v_scale_cache
+            # k_scale_caches[i] = k_scale_cache
+            # v_scale_caches[i] = v_scale_cache
         # if not self.is_last_rank:
         #     # Note: add aux_hidden_states to make the output spec consistent.
         #     return kv_caches, JaxIntermediateTensors({"hidden_states":
