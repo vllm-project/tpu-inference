@@ -5,7 +5,7 @@ import numpy as np
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import (
     ragged_paged_attention, ref_ragged_paged_attention)
 from tpu_inference.kernels.ragged_paged_attention.v3.per_token_scale_kernel import \
-    ref_ragged_paged_attention_per_token_non_jit
+    ref_ragged_paged_attention_per_token_non_jit, ref_ragged_paged_attention_quantized, ref_ragged_paged_attention_per_token_hybrid
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (
     align_to, cdiv, get_dtype_packing)
 from tpu_inference.layers.common.quantization import quantize_kv
@@ -198,9 +198,30 @@ args_pt = (
     k_scale_cache,
     v_scale_cache  # Initialized to 1.0
 )
+pt_out, _, _, _ = ref_ragged_paged_attention_per_token_hybrid(*args_pt)
+
+print_diff("Per-Token (hybrid) vs Baseline", pt_out, baseline_out)
+
 pt_out, _, _, _ = ref_ragged_paged_attention_per_token_non_jit(*args_pt)
 
 print_diff("Per-Token vs Baseline", pt_out, baseline_out)
+
+args_pt = (
+    q,
+    k,
+    v,
+    kv_cache_quant,  # Initialized with quantized data
+    kv_lens,
+    page_indices,
+    cu_q_lens,
+    distribution,
+    k_scale_cache,
+    v_scale_cache  # Initialized to 1.0
+)
+# pt_out, _, _, _ = ref_ragged_paged_attention_per_token_jit(*args_pt)
+
+# print_diff("Per-Token Kernel vs Baseline", pt_out, baseline_out)
+
 
 # --- RUN 3: PER-TENSOR SCALING ---
 print("Running Per-Tensor Quantized (Ref)...")
@@ -218,7 +239,8 @@ args_tensor = (
     cu_q_lens,
     distribution)
 # Note: Explicitly passing k_scale/v_scale is important if they are not None defaults
-tensor_out, _ = ref_ragged_paged_attention(*args_tensor,
+# ref_ragged_paged_attention
+tensor_out, _ = ref_ragged_paged_attention_quantized(*args_tensor,
                                            k_scale=1.0,
                                            v_scale=1.0)
 

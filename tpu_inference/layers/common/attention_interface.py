@@ -39,7 +39,7 @@ MAX_ALLOWED_PAGE_INDICES_N = (
 )  # Based on experiments on v5e, 256x1024 results in smem oom but 128x1024 not. TODO: Adjust this based on TPU version.
 
 ragged_paged_attention = rpa.ref_ragged_paged_attention
-ragged_paged_attention_per_token = rpa_per_token.ref_ragged_paged_attention_per_token_non_jit
+ragged_paged_attention_per_token = rpa_per_token.ref_ragged_paged_attention_per_token_hybrid
 get_kv_cache_shape = rpa.get_kv_cache_shape
 
 ragged_paged_attention_hd64 = rpa_hd64.ragged_paged_attention_hd64
