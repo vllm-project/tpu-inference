@@ -11,7 +11,6 @@ from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingType
 from vllm.utils.collection_utils import swap_dict_values
 from vllm.v1.core.sched.output import NewRequestData
-from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 
 from tpu_inference.runner.block_table import MultiGroupBlockTable
 
@@ -177,10 +176,6 @@ class InputBatch:
 
         sampling_params = request.sampling_params
 
-        if (self.is_spec_decode
-                and is_spec_decode_unsupported(sampling_params)):
-            self.spec_decode_unsupported_reqs.add(req_id)
-
         if sampling_params.sampling_type == SamplingType.GREEDY:
             # Avoid later division by zero.
             self.temperature_cpu[req_index] = -1.0
@@ -191,8 +186,9 @@ class InputBatch:
 
         self.top_p_cpu[req_index] = sampling_params.top_p
         top_k = sampling_params.top_k
-        if top_k <= 0 or top_k >= self.vocab_size:
-            top_k = 1
+        # Default to -1 (considering all tokens)
+        if top_k >= self.vocab_size:
+            top_k = -1
         self.top_k_cpu[req_index] = top_k
         if sampling_params.min_tokens:
             self.min_tokens[req_index] = (sampling_params.min_tokens,

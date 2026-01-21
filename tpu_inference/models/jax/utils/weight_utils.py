@@ -293,6 +293,7 @@ def _load_and_shard_weight(vllm_config,
                            mesh: Mesh,
                            hf_key: str,
                            hf_weight: jax.Array,
+                           keep_hf_weight_suffix_when_match: list[str],
                            keep_original_dtype_keys_regex: list[str]
                            | None = None,
                            pp_missing_layers: list[str] | None = None):
@@ -327,19 +328,27 @@ def _load_and_shard_weight(vllm_config,
         )
         hf_weight = hf_weight.astype(model_config.dtype)
 
-    if hf_key.endswith(".weight"):
+    # For tensors whose name matches any string in `keep_hf_weight_suffix_when_match`, the
+    # '.weight' suffix in HF keys will be kept.
+    # Context: some models are being refactored to have identical parameter names as HF
+    # models, so the suffix does not need to be removed for those parameters. Eventually
+    # we want to get rid of the ".weight" suffix removal logic altogether.
+    # TODO(#1479): remove this argument and related logic after the refactoring is done.
+    if hf_key.endswith(".weight") and all(
+            substr not in hf_key
+            for substr in keep_hf_weight_suffix_when_match):
         hf_key = hf_key.removesuffix(".weight")
 
     # Find the corresponding model key using the HF key
     if "layers" in hf_key:
         layer_num = re.search(r"layers\.(\d+)", hf_key).group(1)
         layer_key = re.sub(r"layers\.\d+", "layers.*", hf_key)
-        model_key = name_map[layer_key]
+        model_key = name_map.get(layer_key, layer_key)
         model_key = re.sub(r"layers\.\*", f"layers.{layer_num}", model_key)
     elif "blocks" in hf_key:
         layer_num = re.search(r"blocks\.(\d+)", hf_key).group(1)
         layer_key = re.sub(r"blocks\.\d+", "blocks.*", hf_key)
-        model_key = name_map[layer_key]
+        model_key = name_map.get(layer_key, layer_key)
         model_key = re.sub(r"blocks\.\*", f"blocks.{layer_num}", model_key)
     else:
         if hf_key not in name_map and hf_key == "lm_head":
@@ -432,6 +441,7 @@ def _load_hf_weights_on_thread(
     metadata_map: "MetadataMap",
     mesh: Mesh,
     weights_file: str,
+    keep_hf_weight_suffix_when_match: list[str],
     filter_regex: Optional[str] = None,
     keep_original_dtype_keys_regex: Optional[list[str]] = None,
     pp_missing_layers: list[str] | None = None,
@@ -452,8 +462,9 @@ def _load_hf_weights_on_thread(
             mesh,
             hf_key,
             hf_weight,
-            keep_original_dtype_keys_regex,
-            pp_missing_layers,
+            keep_original_dtype_keys_regex=keep_original_dtype_keys_regex,
+            pp_missing_layers=pp_missing_layers,
+            keep_hf_weight_suffix_when_match=keep_hf_weight_suffix_when_match,
         )
 
 
@@ -466,16 +477,25 @@ def load_hf_weights(
     is_draft_model: bool = False,
     keep_original_dtype_keys_regex: Optional[list[str]] = None,
     pp_missing_layers: list[str] | None = None,
+    keep_hf_weight_suffix_when_match: list[str] = [],
 ):
-    """Load weights into a JAX model from either an iterator or files."""
+    """Load weights into a JAX model from either an iterator or files.
+
+    For tensors whose name matches any string in `keep_hf_weight_suffix_when_match`, the
+    '.weight' suffix in HF keys will be kept.
+    Some models are being refactored to have identical parameter names as HF models, so the suffix
+    does not need to be removed for those parameters. Eventually we want to get rid of
+    the ".weight" suffix removal logic altogether.
+    TODO(#1479): remove this argument and related logic after the refactoring is done.
+    """
     params = nnx.state(model)
     try:
         shardings = nnx.get_named_sharding(params, mesh)
     except TypeError:
         shardings = params
     weights_iterator = None
-    if hasattr(vllm_config.model_config, "model_weights_iterator"):
-        weights_iterator = vllm_config.model_config.model_weights_iterator
+    if hasattr(vllm_config.model_config, "runai_model_weights_iterator"):
+        weights_iterator = vllm_config.model_config.runai_model_weights_iterator
     env = torchax.default_env()
     # The weights_iterator is used in RunAI model streamer integration.
     if weights_iterator is not None:
@@ -495,8 +515,10 @@ def load_hf_weights(
                 mesh,
                 hf_key,
                 hf_weight_jax,
-                keep_original_dtype_keys_regex,
+                keep_original_dtype_keys_regex=keep_original_dtype_keys_regex,
                 pp_missing_layers=pp_missing_layers,
+                keep_hf_weight_suffix_when_match=
+                keep_hf_weight_suffix_when_match,
             )
     else:
         # File-based path (multi-threaded)
@@ -525,6 +547,8 @@ def load_hf_weights(
                     keep_original_dtype_keys_regex=
                     keep_original_dtype_keys_regex,
                     pp_missing_layers=pp_missing_layers,
+                    keep_hf_weight_suffix_when_match=
+                    keep_hf_weight_suffix_when_match,
                 ) for weights_file in weights_files
             ]
             for future in futures:
@@ -619,3 +643,63 @@ def transfer_state_with_mappings(src_state,
 
     tgt_state = tgt_state.from_flat_path(tgt_flat)
     return tgt_state
+
+
+class BaseWeightLoader:
+
+    def __init__(self, vllm_config: VllmConfig, **kwargs):
+        self.vllm_config = vllm_config
+        self.names_and_weights_generator = model_weights_generator(
+            model_name_or_path=vllm_config.model_config.model,
+            download_dir=vllm_config.load_config.download_dir,
+            **kwargs,
+        )
+
+    def get_weights_iterator(self):
+        weights_iterator = getattr(self.vllm_config.model_config,
+                                   "runai_model_weights_iterator", None)
+        if weights_iterator:
+            return weights_iterator
+        else:
+            return self.names_and_weights_generator
+
+
+class StandardWeightLoader(BaseWeightLoader):
+
+    def __init__(self, vllm_config: VllmConfig, mesh: Mesh):
+        super().__init__(vllm_config, framework="pt")
+        self.vllm_config = vllm_config
+        self.mesh = mesh
+
+    def load_weights(self,
+                     model: nnx.Module,
+                     mappings: dict | MetadataMap,
+                     keep_hf_weight_suffix_when_match: list[str] = []):
+        """
+        Calls the generic load_hf_weights utility, passing the correct
+        weights iterator.
+
+        `mappings` can be either a MetadataMap or a dict mapping, if it's
+        * a dict, the default MetadataMap will be created with get_default_maps.
+        * a MetadataMap, it will be used directly. This is useful for cases
+        where caller needs to customize the reshape/transpose/pad maps, e.g.
+        update the key of tranpose_map from "q_proj" to "q_proj.weight".
+
+        Context: some models are being refactored to have identical parameter names as HF
+        models, so these parameters keeps ".weight" suffix. Eventually
+        we want to get rid of the ".weight" suffix removal logic altogether.
+        TODO(#1479): remove this argument and related logic after the refactoring is done.
+        """
+        if isinstance(mappings, MetadataMap):
+            metadata_map = mappings
+        else:
+            metadata_map = get_default_maps(self.vllm_config.model_config,
+                                            self.mesh, mappings)
+
+        load_hf_weights(
+            vllm_config=self.vllm_config,
+            model=model,
+            metadata_map=metadata_map,
+            mesh=self.mesh,
+            pp_missing_layers=getattr(model, 'pp_missing_layers', []),
+            keep_hf_weight_suffix_when_match=keep_hf_weight_suffix_when_match)

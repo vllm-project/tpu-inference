@@ -18,6 +18,7 @@ from typing import Any, List, Optional, Tuple
 import jax
 import jax.numpy as jnp
 import torch
+import torchax
 from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
@@ -31,14 +32,134 @@ from tpu_inference.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
 from tpu_inference.layers.jax.misc import shard_put
 from tpu_inference.layers.jax.transformer_block import TransformerBlock
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.utils.weight_utils import (
-    get_param, model_weights_generator, print_param_info, reshape_params,
-    transpose_params)
+from tpu_inference.models.jax.utils.weight_utils import (BaseWeightLoader,
+                                                         get_param,
+                                                         print_param_info,
+                                                         reshape_params,
+                                                         transpose_params)
 
 logger = init_logger(__name__)
 
 
+class LlamaGuard4WeightLoader(BaseWeightLoader):
+
+    def __init__(self, vllm_config: VllmConfig, hidden_size, attn_heads,
+                 num_key_value_heads, attn_head_dim):
+        super().__init__(vllm_config,
+                         framework="flax",
+                         filter_regex="language_model")
+        # Set is_runai_streamer so we can use this in load_weights
+        self.is_runai_streamer = getattr(
+            getattr(vllm_config, 'load_config', None), 'load_format',
+            None) == 'runai_streamer'
+        self.is_verbose = getattr(vllm_config.additional_config, "is_verbose",
+                                  False)
+        self._transpose_map = {
+            "q_proj": (2, 0, 1),
+            "k_proj": (2, 0, 1),
+            "v_proj": (2, 0, 1),
+            "o_proj": (1, 2, 0),
+            "lm_head": (1, 0),
+            "feed_forward.down_proj": (1, 0),
+            "feed_forward.gate_proj": (1, 0),
+            "feed_forward.up_proj": (1, 0),
+            "mlp.down_proj": (1, 0),
+            "mlp.gate_proj": (1, 0),
+            "mlp.up_proj": (1, 0),
+        }
+        self._weight_shape_map = {
+            "q_proj": (attn_heads, attn_head_dim, hidden_size),
+            "k_proj": (num_key_value_heads, attn_head_dim, hidden_size),
+            "v_proj": (num_key_value_heads, attn_head_dim, hidden_size),
+            "o_proj": (hidden_size, attn_heads, attn_head_dim),
+        }
+
+        self._loaded_to_standardized_keys = {
+            "language_model.model.embed_tokens.weight":
+            "embedder.input_embedding_table_VD",
+            "language_model.lm_head.weight":
+            "lm_head.input_embedding_table_DV",
+            "language_model.model.norm.weight":
+            "final_norm.scale",
+            "language_model.model.layers.*.input_layernorm.weight":
+            "layers.*.pre_attention_norm.scale",
+            "language_model.model.layers.*.post_attention_layernorm.weight":
+            "layers.*.pre_mlp_norm.scale",
+            "language_model.model.layers.*.self_attn.q_proj.weight":
+            "layers.*.attn.kernel_q_proj_DNH",
+            "language_model.model.layers.*.self_attn.k_proj.weight":
+            "layers.*.attn.kernel_k_proj_DKH",
+            "language_model.model.layers.*.self_attn.v_proj.weight":
+            "layers.*.attn.kernel_v_proj_DKH",
+            "language_model.model.layers.*.self_attn.o_proj.weight":
+            "layers.*.attn.kernel_o_proj_NHD",
+            "language_model.model.layers.*.feed_forward.gate_proj.weight":
+            "layers.*.custom_module.kernel_gating_DF",
+            "language_model.model.layers.*.feed_forward.up_proj.weight":
+            "layers.*.custom_module.kernel_up_proj_DF",
+            "language_model.model.layers.*.feed_forward.down_proj.weight":
+            "layers.*.custom_module.kernel_down_proj_FD",
+        }
+
+    def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
+        if "layer" in loaded_key:
+            layer_num = re.search(r"layers\.(\d+)", loaded_key).group(1)
+            layer_key = re.sub(r"layers\.\d+", "layers.*", loaded_key)
+            mapped_key = self._loaded_to_standardized_keys.get(
+                layer_key, loaded_key)
+            mapped_key = re.sub(r"layers\.\*", f"layers.{layer_num}",
+                                mapped_key)
+        else:
+            mapped_key = self._loaded_to_standardized_keys.get(
+                loaded_key, loaded_key)
+        return mapped_key
+
+    def load_weights(self, model_for_loading: nnx.Module):
+        model_params = nnx.state(model_for_loading)
+        with jax.default_device(jax.devices("cpu")[0]):
+            for loaded_name, loaded_weight in self.get_weights_iterator():
+                # The RunAI model streamer yields weights as PyTorch tensors, while the
+                # LlamaGuard4WeightLoader expects JAX arrays. This block converts the
+                # tensors to the expected format when the streamer is active, mirroring
+                # the conversion logic in load_hf_weights() used by other weight loaders.
+                if self.is_runai_streamer:
+                    env = torchax.default_env()
+                    loaded_weight = env.t2j_copy(loaded_weight)
+                if loaded_name.endswith(".bias"):
+                    continue
+                if "vision_model" in loaded_name or "multi_modal_projector" in loaded_name:
+                    continue
+
+                mapped_name = self.map_loaded_to_standardized_name(loaded_name)
+                model_weight = get_param(model_params, mapped_name)
+
+                if not loaded_name.endswith(".bias"):
+                    # For other layers, continue to use the transpose_params helper.
+                    loaded_weight = reshape_params(loaded_name, loaded_weight,
+                                                   self._weight_shape_map)
+                    loaded_weight = transpose_params(loaded_name,
+                                                     loaded_weight,
+                                                     self._transpose_map)
+                if model_weight.value.shape != loaded_weight.shape:
+                    raise ValueError(
+                        f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
+                        f"does not match model shape for {mapped_name}: {model_weight.value.shape}!"
+                    )
+                logger.debug(
+                    f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
+                )
+
+                model_weight.value = shard_put(loaded_weight,
+                                               model_weight.sharding,
+                                               mesh=model_for_loading.mesh)
+                if self.is_verbose:
+                    print_param_info(model_weight, loaded_name)
+
+        nnx.update(model_for_loading, model_params)
+
+
 class LlamaGuard4ForCausalLM(nnx.Module):
+    WeightLoader = LlamaGuard4WeightLoader
 
     def __init__(self,
                  vllm_config: VllmConfig,
@@ -211,7 +332,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
     def load_weights(self, rng: jax.Array, cache_dir: Optional[str] = None):
         self.rng = nnx.Rngs(rng)
 
-        weight_loader = LlamaGuard4WeightLoader(
+        weight_loader = self.WeightLoader(
             vllm_config=self.vllm_config,
             hidden_size=self.hidden_size,
             attn_heads=self.num_attention_heads,
@@ -265,111 +386,3 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         Computes the embeddings for text input (used for input to fusion).
         """
         return self.embedder.encode(input_ids)
-
-
-class LlamaGuard4WeightLoader:
-
-    def __init__(self, vllm_config: VllmConfig, hidden_size, attn_heads,
-                 num_key_value_heads, attn_head_dim):
-        self.names_and_weights_generator = model_weights_generator(
-            model_name_or_path=vllm_config.model_config.model,
-            framework="flax",
-            filter_regex="language_model",
-            download_dir=vllm_config.load_config.download_dir)
-        self.is_verbose = getattr(vllm_config.additional_config, "is_verbose",
-                                  False)
-        self._transpose_map = {
-            "q_proj": (2, 0, 1),
-            "k_proj": (2, 0, 1),
-            "v_proj": (2, 0, 1),
-            "o_proj": (1, 2, 0),
-            "lm_head": (1, 0),
-            "feed_forward.down_proj": (1, 0),
-            "feed_forward.gate_proj": (1, 0),
-            "feed_forward.up_proj": (1, 0),
-            "mlp.down_proj": (1, 0),
-            "mlp.gate_proj": (1, 0),
-            "mlp.up_proj": (1, 0),
-        }
-        self._weight_shape_map = {
-            "q_proj": (attn_heads, attn_head_dim, hidden_size),
-            "k_proj": (num_key_value_heads, attn_head_dim, hidden_size),
-            "v_proj": (num_key_value_heads, attn_head_dim, hidden_size),
-            "o_proj": (hidden_size, attn_heads, attn_head_dim),
-        }
-
-        self._loaded_to_standardized_keys = {
-            "language_model.model.embed_tokens.weight":
-            "embedder.input_embedding_table_VD",
-            "language_model.lm_head.weight":
-            "lm_head.input_embedding_table_DV",
-            "language_model.model.norm.weight":
-            "final_norm.scale",
-            "language_model.model.layers.*.input_layernorm.weight":
-            "layers.*.pre_attention_norm.scale",
-            "language_model.model.layers.*.post_attention_layernorm.weight":
-            "layers.*.pre_mlp_norm.scale",
-            "language_model.model.layers.*.self_attn.q_proj.weight":
-            "layers.*.attn.kernel_q_proj_DNH",
-            "language_model.model.layers.*.self_attn.k_proj.weight":
-            "layers.*.attn.kernel_k_proj_DKH",
-            "language_model.model.layers.*.self_attn.v_proj.weight":
-            "layers.*.attn.kernel_v_proj_DKH",
-            "language_model.model.layers.*.self_attn.o_proj.weight":
-            "layers.*.attn.kernel_o_proj_NHD",
-            "language_model.model.layers.*.feed_forward.gate_proj.weight":
-            "layers.*.custom_module.kernel_gating_DF",
-            "language_model.model.layers.*.feed_forward.up_proj.weight":
-            "layers.*.custom_module.kernel_up_proj_DF",
-            "language_model.model.layers.*.feed_forward.down_proj.weight":
-            "layers.*.custom_module.kernel_down_proj_FD",
-        }
-
-    def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
-        if "layer" in loaded_key:
-            layer_num = re.search(r"layers\.(\d+)", loaded_key).group(1)
-            layer_key = re.sub(r"layers\.\d+", "layers.*", loaded_key)
-            mapped_key = self._loaded_to_standardized_keys.get(
-                layer_key, loaded_key)
-            mapped_key = re.sub(r"layers\.\*", f"layers.{layer_num}",
-                                mapped_key)
-        else:
-            mapped_key = self._loaded_to_standardized_keys.get(
-                loaded_key, loaded_key)
-        return mapped_key
-
-    def load_weights(self, model_for_loading: nnx.Module):
-        model_params = nnx.state(model_for_loading)
-        with jax.default_device(jax.devices("cpu")[0]):
-            for loaded_name, loaded_weight in self.names_and_weights_generator:
-                if loaded_name.endswith(".bias"):
-                    continue
-                if "vision_model" in loaded_name or "multi_modal_projector" in loaded_name:
-                    continue
-
-                mapped_name = self.map_loaded_to_standardized_name(loaded_name)
-                model_weight = get_param(model_params, mapped_name)
-
-                if not loaded_name.endswith(".bias"):
-                    # For other layers, continue to use the transpose_params helper.
-                    loaded_weight = reshape_params(loaded_name, loaded_weight,
-                                                   self._weight_shape_map)
-                    loaded_weight = transpose_params(loaded_name,
-                                                     loaded_weight,
-                                                     self._transpose_map)
-                if model_weight.value.shape != loaded_weight.shape:
-                    raise ValueError(
-                        f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
-                        f"does not match model shape for {mapped_name}: {model_weight.value.shape}!"
-                    )
-                logger.debug(
-                    f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
-                )
-
-                model_weight.value = shard_put(loaded_weight,
-                                               model_weight.sharding,
-                                               mesh=model_for_loading.mesh)
-                if self.is_verbose:
-                    print_param_info(model_weight, loaded_name)
-
-        nnx.update(model_for_loading, model_params)

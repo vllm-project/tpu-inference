@@ -14,11 +14,12 @@ from tpu_inference.layers.common.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.registry import AttentionBackendEnum
-    from vllm.attention.selector import AttentionSelectorConfig
-    from vllm.config import BlockSize, ModelConfig, VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config.cache import BlockSize
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams, SamplingType
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+    from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     BlockSize = None
     ModelConfig = None
@@ -54,13 +55,16 @@ class TpuPlatform(Platform):
     def get_attn_backend_cls(cls, selected_backend: "AttentionBackendEnum",
                              attn_selector_config: "AttentionSelectorConfig",
                              **kwargs) -> str:
-        from vllm.attention.backends.registry import AttentionBackendEnum
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-        if selected_backend != AttentionBackendEnum.PALLAS:
-            logger.info("Cannot use %s backend on TPU.", selected_backend)
-
-        logger.info("Using Pallas V1 backend.")
-        return "tpu_inference.layers.vllm.attention.PallasAttentionBackend"
+        # Invoke @register_backend in the module.
+        import tpu_inference.layers.vllm.attention  # noqa: F401
+        if selected_backend != AttentionBackendEnum.FLASH_ATTN:
+            logger.info("Cannot use %s backend on TPU. Setting to FLASH_ATTN.",
+                        selected_backend)
+            selected_backend = AttentionBackendEnum.FLASH_ATTN
+        logger.info("Using %s backend.", selected_backend.name)
+        return selected_backend.get_path()
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
@@ -144,9 +148,8 @@ class TpuPlatform(Platform):
         if compilation_config.backend == "":
             compilation_config.backend = "openxla"
 
-        # TODO(cuiq): remove this dependency.
         if vllm_config.model_config:
-            from vllm.v1.attention.backends.pallas import \
+            from tpu_inference.layers.vllm.attention import \
                 PallasAttentionBackend
             cache_config.block_size = PallasAttentionBackend.get_page_size(
                 vllm_config)  # type: ignore[assignment]
@@ -174,7 +177,9 @@ class TpuPlatform(Platform):
             else:
                 logger.info("Force using MultiprocExecutor for JAX on "
                             "single host with pipeline parallelism.")
-                parallel_config.distributed_executor_backend = "mp"
+                from tpu_inference.executors.multiproc_executor import \
+                    MultiprocExecutor
+                parallel_config.distributed_executor_backend = MultiprocExecutor
         elif multihost_backend == "ray":
             from tpu_inference.executors.ray_distributed_executor import \
                 RayDistributedExecutor

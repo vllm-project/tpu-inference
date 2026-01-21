@@ -22,6 +22,9 @@ from jax._src import dtypes
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+from tpu_inference.kernels.fused_moe.v1.tuned_block_sizes import \
+    get_tuned_block_sizes
+
 P = jax.sharding.PartitionSpec
 
 cdiv = pl.cdiv
@@ -80,15 +83,16 @@ def ref_moe(
         *,
         renormalize_topk_logits: bool = False,
         act_fn: str = "silu",
-        subc_quant_wsz: int | None = None,
+        subc_quant_w1_sz: int | None = None,
+        subc_quant_w2_sz: int | None = None,
         w1_scale:
     (
         jax.Array | None
-    ) = None,  # F32(num_experts, 2, hidden_size //subc_quant_wsz, 1, intermediate_size)
+    ) = None,  # F32(num_experts, 2, hidden_size //subc_quant_w1_sz, 1, intermediate_size)
         w2_scale:
     (
         jax.Array | None
-    ) = None,  # F32(num_experts, intermediate_size // subc_quant_wsz, 1, hidden_size)
+    ) = None,  # F32(num_experts, intermediate_size // subc_quant_w2_sz, 1, hidden_size)
         b1: jax.Array
     | None = None,  # F32(num_experts, 2, 1, intermediate_size)
         b2: jax.Array | None = None,  # F32(num_experts, 1, hidden_size)
@@ -123,11 +127,12 @@ def ref_moe(
             expert_w1 = w1[expert_id, 0].astype(jnp.float32)
             expert_w3 = w1[expert_id, 1].astype(jnp.float32)
             if w1_scale is not None:
+                assert subc_quant_w1_sz is not None
                 expert_w1 *= jnp.repeat(w1_scale[expert_id, 0, :, 0],
-                                        subc_quant_wsz,
+                                        subc_quant_w1_sz,
                                         axis=0)[:hidden_size]
                 expert_w3 *= jnp.repeat(w1_scale[expert_id, 1, :, 0],
-                                        subc_quant_wsz,
+                                        subc_quant_w1_sz,
                                         axis=0)[:hidden_size]
             expert_weight_1 = jnp.concat(
                 [expert_w1, expert_w3],
@@ -135,8 +140,9 @@ def ref_moe(
             expert_weight_2 = w2[expert_id].astype(
                 jnp.float32)  # [intermediate_size, hidden_size]
             if w2_scale is not None:
+                assert subc_quant_w2_sz is not None
                 expert_weight_2 *= jnp.repeat(w2_scale[expert_id, :, 0],
-                                              subc_quant_wsz,
+                                              subc_quant_w2_sz,
                                               axis=0)[:intermediate_size]
 
             # First linear layer with SwiGLU activation
@@ -184,8 +190,8 @@ def _fused_ep_moe_kernel(
         # TODO(jevinjiang): We choose F32 scale for easier slicing. The extra
         # latency should be hidden in the pipeline overlaping. But is there a better
         # way to do this?
-    w1_scale_hbm,  # None | F32(local_num_experts, 2, cdiv(hidden_size, subc_quant_wsz), 1, intermediate_size)
-        w2_scale_hbm,  # None | F32(local_num_experts, cdiv(intermediate_size, subc_quant_wsz), 1, hidden_size)
+    w1_scale_hbm,  # None | F32(local_num_experts, 2, cdiv(hidden_size, subc_quant_w1_sz), 1, intermediate_size)
+        w2_scale_hbm,  # None | F32(local_num_experts, cdiv(intermediate_size, subc_quant_w2_sz), 1, hidden_size)
         b1_hbm,  # None | F32(local_num_experts, 2, 1, intermediate_size)
         b2_hbm,  # None | F32(local_num_experts, 1, hidden_size)
         gating_hbm,  # (local_num_tokens, padded_num_experts)
@@ -209,9 +215,9 @@ def _fused_ep_moe_kernel(
         b_w1_x2_vmem,  # <bw_sem_id> (2, t_packing, bd1 // t_packing, bf)
         b_w3_x2_vmem,  # <bw_sem_id> (2, t_packing, bd1 // t_packing, bf)
         b_w2_x2_vmem,  # <bw_sem_id> (2, t_packing, bf, bd2 // t_packing)
-        b_w1_scale_x2_vmem,  # None | <bw_sem_id> (2, t_packing, bd1 // t_packing // subc_quant_wsz, 1, bf)
-        b_w3_scale_x2_vmem,  # None | <bw_sem_id> (2, t_packing, bd1 // t_packing // subc_quant_wsz, 1, bf)
-        b_w2_scale_x2_vmem,  # None | <bw_sem_id> (2, t_packing, bf // subc_quant_wsz, 1, bd2 // t_packing)
+        b_w1_scale_x2_vmem,  # None | <bw_sem_id> (2, t_packing, bd1 // t_packing // subc_quant_w1_sz, 1, bf)
+        b_w3_scale_x2_vmem,  # None | <bw_sem_id> (2, t_packing, bd1 // t_packing // subc_quant_w1_sz, 1, bf)
+        b_w2_scale_x2_vmem,  # None | <bw_sem_id> (2, t_packing, bf // subc_quant_w2_sz, 1, bd2 // t_packing)
         b_b1_x2_vmem,  # None | <bw_sem_id> (2, 1, bf)
         b_b3_x2_vmem,  # None | <bw_sem_id> (2, 1, bf)
         b_b2_x2_vmem,  # None | <bw_sem_id> (2, t_packing, 1, bd2 // t_packing)
@@ -227,7 +233,8 @@ def _fused_ep_moe_kernel(
         renormalize_topk_logits: bool,
         ep_axis_name: str,
         act_fn: str,
-        subc_quant_wsz: int | None = None,
+        subc_quant_w1_sz: int | None = None,
+        subc_quant_w2_sz: int | None = None,
         # Kernel tuning params.
         bt: int,  # Block size of local_num_tokens.
         bf: int,  # Block size of intermediate_size.
@@ -271,14 +278,23 @@ def _fused_ep_moe_kernel(
     bd1c_per_t_packing = bd1c // t_packing
     bd2c_per_t_packing = bd2c // t_packing
 
-    if subc_quant_wsz is not None:
-        assert subc_quant_wsz % 256 == 0
-        assert bd1c_per_t_packing == subc_quant_wsz
-        assert bfc == subc_quant_wsz
-        assert bd1 % subc_quant_wsz == 0
-        assert bf % subc_quant_wsz == 0
-        assert bd1_per_t_packing % subc_quant_wsz == 0
-        assert h_per_t_packing % subc_quant_wsz == 0
+    if subc_quant_w1_sz is not None:
+        if subc_quant_w1_sz < hidden_size:
+            assert subc_quant_w1_sz % 256 == 0
+            assert bd1c_per_t_packing == subc_quant_w1_sz
+            assert bd1 % subc_quant_w1_sz == 0
+            assert bd1_per_t_packing % subc_quant_w1_sz == 0
+            assert h_per_t_packing % subc_quant_w1_sz == 0
+        else:
+            assert subc_quant_w1_sz == hidden_size
+
+    if subc_quant_w2_sz is not None:
+        if subc_quant_w2_sz < intermediate_size:
+            assert subc_quant_w2_sz % 256 == 0
+            assert bfc == subc_quant_w2_sz
+            assert bf % subc_quant_w2_sz == 0
+        else:
+            assert subc_quant_w2_sz == intermediate_size
 
     num_bt = cdiv(local_num_tokens, bt)
     num_bf = cdiv(intermediate_size, bf)
@@ -571,14 +587,14 @@ def _fused_ep_moe_kernel(
                 sem=local_sems.at[bw1_sem_id, 1],
             ).start()
             if w1_scale_hbm is not None:
-                assert subc_quant_wsz is not None
+                assert subc_quant_w1_sz is not None
                 pltpu.make_async_copy(
                     src_ref=w1_scale_hbm.at[
                         local_e_id,
                         0,
                         pl.ds(
-                            offset // subc_quant_wsz,
-                            bd1_per_t_packing // subc_quant_wsz,
+                            offset // subc_quant_w1_sz,
+                            cdiv(bd1_per_t_packing, subc_quant_w1_sz),
                         ),
                         pl.ds(0, 1),
                         pl.ds(bf_id * bf, bf),
@@ -608,12 +624,16 @@ def _fused_ep_moe_kernel(
                 sem=local_sems.at[bw2_sem_id, 2],
             ).start()
             if w2_scale_hbm is not None:
-                assert subc_quant_wsz is not None
+                assert subc_quant_w2_sz is not None
                 pltpu.make_async_copy(
                     src_ref=w2_scale_hbm.at[
                         local_e_id,
-                        pl.ds(bf_id * bf // subc_quant_wsz, bf //
-                              subc_quant_wsz),
+                        pl.ds(
+                            bf_id * bf //
+                            subc_quant_w2_sz,  # 0 for per-channel quantization
+                            cdiv(bf, subc_quant_w2_sz
+                                 ),  # 1 for per-channel quantization
+                        ),
                         pl.ds(0, 1),
                         pl.ds(offset, bd2_per_t_packing),
                     ],
@@ -643,14 +663,16 @@ def _fused_ep_moe_kernel(
                 sem=local_sems.at[bw3_sem_id, 3],
             ).start()
             if w1_scale_hbm is not None:
-                assert subc_quant_wsz is not None
+                assert subc_quant_w1_sz is not None
                 pltpu.make_async_copy(
                     src_ref=w1_scale_hbm.at[
                         local_e_id,
                         1,
                         pl.ds(
-                            offset // subc_quant_wsz,
-                            bd1_per_t_packing // subc_quant_wsz,
+                            offset //
+                            subc_quant_w1_sz,  # 0 for per-channel quantization
+                            cdiv(bd1_per_t_packing, subc_quant_w1_sz
+                                 ),  # 1 for per-channel quantization
                         ),
                         pl.ds(0, 1),
                         pl.ds(bf_id * bf, bf),
@@ -769,19 +791,21 @@ def _fused_ep_moe_kernel(
         if w1_scale_vmem is not None:
             assert w1_scale_vmem.shape == (
                 t_packing,
-                bd1_per_t_packing // subc_quant_wsz,
+                cdiv(bd1_per_t_packing, subc_quant_w1_sz),
                 1,
                 bf,
             )
-            assert bd1c_per_t_packing == subc_quant_wsz
+            if subc_quant_w1_sz < hidden_size:
+                assert bd1c_per_t_packing == subc_quant_w1_sz
         if w3_scale_vmem is not None:
             assert w3_scale_vmem.shape == (
                 t_packing,
-                bd1_per_t_packing // subc_quant_wsz,
+                cdiv(bd1_per_t_packing, subc_quant_w1_sz),
                 1,
                 bf,
             )
-            assert bd1c_per_t_packing == subc_quant_wsz
+            if subc_quant_w1_sz < hidden_size:
+                assert bd1c_per_t_packing == subc_quant_w1_sz
 
         num_loops = cdiv(dyn_sz, btc)
         repack_ty = jnp.dtype(f"int{t_bitwidth}")
@@ -810,7 +834,8 @@ def _fused_ep_moe_kernel(
                         if w1_scale_vmem is not None:
                             w1_scale_slices = (
                                 p_id,
-                                bd1c_id,
+                                (bd1c_id * bd1c_per_t_packing) //
+                                subc_quant_w1_sz,
                                 pl.ds(0, 1),
                                 pl.ds(bfc_id * bfc, bfc),
                             )
@@ -828,7 +853,8 @@ def _fused_ep_moe_kernel(
                         if w3_scale_vmem is not None:
                             w3_scale_slices = (
                                 p_id,
-                                bd1c_id,
+                                (bd1c_id * bd1c_per_t_packing) //
+                                subc_quant_w1_sz,
                                 pl.ds(0, 1),
                                 pl.ds(bfc_id * bfc, bfc),
                             )
@@ -855,7 +881,6 @@ def _fused_ep_moe_kernel(
                                 b3 = jnp.broadcast_to(
                                     b3_vmem[*b3_scale_slices], acc1.shape)
                                 acc3 += b3
-
                             acc1_vmem[*acc_slices] = acc1
                             acc3_vmem[*acc_slices] = acc3
                         else:
@@ -884,11 +909,12 @@ def _fused_ep_moe_kernel(
         if w2_scale_vmem is not None:
             assert w2_scale_vmem.shape == (
                 t_packing,
-                bf // subc_quant_wsz,
+                cdiv(bf, subc_quant_w2_sz),
                 1,
                 bd2_per_t_packing,
             )
-            assert bfc == subc_quant_wsz
+            if subc_quant_w2_sz < intermediate_size:
+                assert bfc == subc_quant_w2_sz
 
         num_loops = cdiv(dyn_sz, btc)
         assert bd2c % (t_packing * 128) == 0, (bd2c, t_packing)
@@ -929,7 +955,7 @@ def _fused_ep_moe_kernel(
                         if w2_scale_vmem is not None:
                             w2_scale_slices = (
                                 p_id,
-                                bfc_id,
+                                (bfc_id * bfc) // subc_quant_w2_sz,
                                 pl.ds(0, 1),
                                 pl.ds(bd2c_id * bd2c_per_t_packing,
                                       bd2c_per_t_packing),
@@ -1187,7 +1213,8 @@ def _fused_ep_moe_kernel(
         "top_k",
         "renormalize_topk_logits",
         "act_fn",
-        "subc_quant_wsz",
+        "subc_quant_w1_sz",
+        "subc_quant_w2_sz",
         "bt",
         "bf",
         "bd1",
@@ -1209,24 +1236,25 @@ def fused_ep_moe(
     *,
     renormalize_topk_logits: bool = False,
     act_fn: str = "silu",
-    subc_quant_wsz: int | None = None,
+    subc_quant_w1_sz: int | None = None,
+    subc_quant_w2_sz: int | None = None,
     w1_scale: (
         jax.Array | None
-    ) = None,  # F32(num_experts, 2, hidden_size // subc_quant_wsz, 1, intermediate_size)
+    ) = None,  # F32(num_experts, 2, hidden_size // subc_quant_w1_sz, 1, intermediate_size)
     w2_scale: (
         jax.Array | None
-    ) = None,  # F32(num_experts, intermediate_size // subc_quant_wsz, 1, hidden_size)
+    ) = None,  # F32(num_experts, intermediate_size // subc_quant_w2_sz, 1, hidden_size)
     b1: jax.Array | None = None,  # F32(num_experts, 2, 1, intermediate_size)
     b2: jax.Array | None = None,  # F32(num_experts, 1, hidden_size)
     # Kernel tuning parameters.
-    bt: int,
-    bf: int,
-    bd1: int,
-    bd2: int,
-    btc: int,
-    bfc: int,
-    bd1c: int,
-    bd2c: int,
+    bt: int | None = None,
+    bf: int | None = None,
+    bd1: int | None = None,
+    bd2: int | None = None,
+    btc: int | None = None,
+    bfc: int | None = None,
+    bd1c: int | None = None,
+    bd2c: int | None = None,
     ep_axis_name: str = "model",
 ):
     # TODO(jevinjiang): move all these assertions to validation function.
@@ -1281,6 +1309,20 @@ def fused_ep_moe(
     padded_top_k = align_to(top_k, 128)
     t_dtype = tokens.dtype
     t_packing = get_dtype_packing(t_dtype)
+    assert w1.dtype == w2.dtype
+    w_packing = get_dtype_packing(w1.dtype)
+
+    if None in {bt, bf, bd1, bd2, btc, bfc, bd1c, bd2c}:
+        bt, bf, bd1, bd2, btc, bfc, bd1c, bd2c = get_tuned_block_sizes(
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            num_experts=num_experts,
+            top_k=top_k,
+            t_packing=t_packing,
+            w_packing=w_packing,
+            num_tokens=num_tokens,
+            ep_size=ep_size,
+        )
 
     # Override bt
     if local_num_tokens <= t_packing * 8:
@@ -1301,23 +1343,39 @@ def fused_ep_moe(
         raise ValueError(
             f"Expected {local_num_tokens=} to be aligned to {bt=}.")
 
-    if subc_quant_wsz is not None:
-        if subc_quant_wsz <= 0:
-            raise ValueError(f"Expected {subc_quant_wsz=} to be non-negative.")
-        if subc_quant_wsz % 256 != 0:
+    if subc_quant_w1_sz is not None:
+        if subc_quant_w1_sz <= 0:
             raise ValueError(
-                "Expected {subc_quant_wsz=} to be aligned to 256.")
-        if hidden_size % subc_quant_wsz != 0:
+                f"Expected {subc_quant_w1_sz=} to be non-negative.")
+        if subc_quant_w1_sz % 256 != 0:
             raise ValueError(
-                f"Expected {hidden_size=} to be aligned to {subc_quant_wsz=}.")
-        if intermediate_size % subc_quant_wsz != 0:
+                "Expected {subc_quant_w1_sz=} to be aligned to 256.")
+        if hidden_size % subc_quant_w1_sz != 0:
             raise ValueError(
-                f"Expected {intermediate_size=} to be aligned to {subc_quant_wsz=}."
+                f"Expected {hidden_size=} to be aligned to {subc_quant_w1_sz=}."
             )
-        # We force compute size of contracting dim to be subc_quant_wsz. So we can
-        # apply same scale after matmul and accumulation.
-        bd1c = subc_quant_wsz * t_packing
-        bfc = subc_quant_wsz
+        # We force compute size of contracting dim to be subc_quant_w1_sz. So we can
+        # apply same scale after matmul and accumulation. It only makes sense for
+        # non per-channel quantization
+        if subc_quant_w1_sz < hidden_size:
+            bd1c = subc_quant_w1_sz * t_packing
+
+    if subc_quant_w2_sz is not None:
+        if subc_quant_w2_sz <= 0:
+            raise ValueError(
+                f"Expected {subc_quant_w2_sz=} to be non-negative.")
+        if subc_quant_w2_sz % 256 != 0:
+            raise ValueError(
+                "Expected {subc_quant_w2_sz=} to be aligned to 256.")
+        if intermediate_size % subc_quant_w2_sz != 0:
+            raise ValueError(
+                f"Expected {intermediate_size=} to be aligned to {subc_quant_w2_sz=}."
+            )
+        # We force compute size of contracting dim to be subc_quant_w2_sz. So we can
+        # apply same scale after matmul and accumulation. It only makes sense for
+        # non per-channel quantization
+        if subc_quant_w2_sz < intermediate_size:
+            bfc = subc_quant_w2_sz
 
     if bfc % 128 != 0:
         raise ValueError(f"Expected {bfc=} to be aligned to 128.")
@@ -1343,10 +1401,11 @@ def fused_ep_moe(
     # Note: we should dump scale as the kernel expected shape in the
     # checkpoint offline or reshape right after weight loading.
     if w1_scale is not None:
+        assert subc_quant_w1_sz is not None
         expected_w1_scale_shape = (
             num_experts,
             2,
-            hidden_size // subc_quant_wsz,
+            hidden_size // subc_quant_w1_sz,
             1,
             intermediate_size,
         )
@@ -1357,9 +1416,10 @@ def fused_ep_moe(
             w1_scale = w1_scale.astype(jnp.float32)
 
     if w2_scale is not None:
+        assert subc_quant_w2_sz is not None
         expected_w2_scale_shape = (
             num_experts,
-            intermediate_size // subc_quant_wsz,
+            intermediate_size // subc_quant_w2_sz,
             1,
             hidden_size,
         )
@@ -1405,7 +1465,8 @@ def fused_ep_moe(
             renormalize_topk_logits=renormalize_topk_logits,
             ep_axis_name=ep_axis_name,
             act_fn=act_fn,
-            subc_quant_wsz=subc_quant_wsz,
+            subc_quant_w1_sz=subc_quant_w1_sz,
+            subc_quant_w2_sz=subc_quant_w2_sz,
             bt=bt,
             bf=bf,
             bd1=bd1,
@@ -1482,7 +1543,7 @@ def fused_ep_moe(
                     (
                         2,
                         t_packing,
-                        bd1 // t_packing // subc_quant_wsz,
+                        cdiv(bd1 // t_packing, subc_quant_w1_sz),
                         1,
                         bf,
                     ),
@@ -1493,7 +1554,7 @@ def fused_ep_moe(
                     (
                         2,
                         t_packing,
-                        bd1 // t_packing // subc_quant_wsz,
+                        cdiv(bd1 // t_packing, subc_quant_w1_sz),
                         1,
                         bf,
                     ),
@@ -1504,7 +1565,7 @@ def fused_ep_moe(
                     (
                         2,
                         t_packing,
-                        bf // subc_quant_wsz,
+                        cdiv(bf, subc_quant_w2_sz),
                         1,
                         bd2 // t_packing,
                     ),
