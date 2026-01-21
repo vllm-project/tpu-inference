@@ -114,19 +114,7 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
         if self.moe_backend == FusedMoEBackend.FUSED_MOE:
             # When fused moe kernle is used, we pass extra arguments like
             # tuned block sizes to the kernel.
-            self.extra_backend_kwargs = dict(
-                subc_quant_wsz=REQUANTIZED_BLOCK_SIZE,
-                ep_axis_name=ep_axis_name,
-                # TODO: Use autotune table once we have it.
-                bt=256,
-                bf=1024,
-                bd1=1024,
-                bd2=1024,
-                btc=256,
-                bfc=1024,
-                bd1c=1024,
-                bd2c=1024,
-            )
+            self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name, )
 
     def get_fused_moe_quant_config(
             self, layer: torch.nn.Module) -> FusedMoEQuantConfig | None:
@@ -226,12 +214,13 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
             w2_bias=jax_view(layer.w2_bias),
         )
 
-        return fused_moe_apply(
-            layer,
-            x,
-            router_logits,
-            weights,
-            self.moe_backend,
-            self.mesh,
-            self.extra_backend_kwargs,
-        )
+        return torch_view(
+            fused_moe_apply(
+                layer,
+                jax_view(x),
+                jax_view(router_logits),
+                weights,
+                self.moe_backend,
+                self.mesh,
+                self.extra_backend_kwargs,
+            ))

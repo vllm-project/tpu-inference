@@ -214,18 +214,7 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         if self.moe_backend == FusedMoEBackend.FUSED_MOE:
             # When fused moe kernle is used, we pass extra arguments like
             # tuned block sizes to the kernel.
-            self.extra_backend_kwargs = dict(
-                ep_axis_name=ep_axis_name,
-                # TODO: Use autotune table once we have it.
-                bt=64,
-                bf=1536,
-                bd1=1536,
-                bd2=1536,
-                btc=64,
-                bfc=1536,
-                bd1c=1536,
-                bd2c=1536,
-            )
+            self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name, )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         assert isinstance(layer, FusedMoE)
@@ -298,12 +287,13 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2_bias=jax_view(layer.w2_bias) if self.moe.has_bias else None,
         )
 
-        return fused_moe_apply(
-            layer,
-            x,
-            router_logits,
-            weights,
-            self.moe_backend,
-            self.mesh,
-            self.extra_backend_kwargs,
-        )
+        return torch_view(
+            fused_moe_apply(
+                layer,
+                jax_view(x),
+                jax_view(router_logits),
+                weights,
+                self.moe_backend,
+                self.mesh,
+                self.extra_backend_kwargs,
+            ))

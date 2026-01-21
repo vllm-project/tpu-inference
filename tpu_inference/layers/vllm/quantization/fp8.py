@@ -251,18 +251,7 @@ class VllmFp8MoEMethod(Fp8MoEMethod):
 
         self.extra_backend_kwargs = {}
         if self.moe_backend == FusedMoEBackend.FUSED_MOE:
-            self.extra_backend_kwargs = dict(
-                ep_axis_name=ep_axis_name,
-                # TODO: Use autotune table once we have it.
-                bt=256,
-                bf=1024,
-                bd1=1024,
-                bd2=1024,
-                btc=256,
-                bfc=1024,
-                bd1c=1024,
-                bd2c=1024,
-            )
+            self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name, )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         assert isinstance(layer, FusedMoE)
@@ -349,12 +338,13 @@ class VllmFp8MoEMethod(Fp8MoEMethod):
             w2_bias=jax_view(layer.w2_bias) if self.moe.has_bias else None,
         )
 
-        return fused_moe_apply(
-            layer,
-            x,
-            router_logits,
-            weights,
-            self.moe_backend,
-            self.mesh,
-            self.extra_backend_kwargs,
-        )
+        return torch_view(
+            fused_moe_apply(
+                layer,
+                jax_view(x),
+                jax_view(router_logits),
+                weights,
+                self.moe_backend,
+                self.mesh,
+                self.extra_backend_kwargs,
+            ))

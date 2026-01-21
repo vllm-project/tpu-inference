@@ -14,8 +14,8 @@ from qwix._src.providers import ptq
 import tpu_inference.models.jax.utils.qwix.qwix_utils as quantize_qwix  # noqa: E402
 from tpu_inference.models.common.model_loader import apply_qwix_quantization
 from tpu_inference.models.jax.utils.qwix.qwix_utils import (
-    DEFAULT_MAX_NUM_BLOCKS_PER_REQ, DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS,
-    DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS)
+    DEFAULT_DEEPSEEK_FP8_CONFIG, DEFAULT_MAX_NUM_BLOCKS_PER_REQ,
+    DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS, DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS)
 
 mock_nnx = MagicMock()
 mock_jax = MagicMock()
@@ -934,6 +934,69 @@ class TestGetDefaultQwixQuantizationConfig(unittest.TestCase):
         }
 
         with self.assertRaises(AssertionError):
+            quantize_qwix.get_default_qwix_quantization_config(
+                hf_config, False)
+
+    def test_deepseek_v3_fp8_block_size_2d_subchannel(self):
+        """Test DeepSeek V3 raises ValueError on invalid block size format."""
+        hf_config = MagicMock()
+        hf_config.model_type = "deepseek_v3"
+        hf_config.quantization_config = {
+            "quant_method": "fp8",
+            "weight_block_size": [128, 128]
+        }
+        hf_config._name_or_path = "deepseek-ai/DeepSeek-V3"
+
+        result = quantize_qwix.get_default_qwix_quantization_config(
+            hf_config, False)
+
+        assert result == DEFAULT_DEEPSEEK_FP8_CONFIG
+
+    def test_deepseek_v3_native_fp8_success(self):
+        """Test DeepSeek V3 native FP8 checkpoint detection (valid model)."""
+        hf_config = MagicMock()
+        hf_config.model_type = "deepseek_v3"
+        # Correct block size for native FP8 checkpoints
+        hf_config.quantization_config = {
+            "quant_method": "fp8",
+            "weight_block_size": [128, 128]
+        }
+        # A name from NATIVE_FP8_CHECKPOINT_MODELS
+        hf_config._name_or_path = "deepseek-ai/DeepSeek-V3"
+
+        result = quantize_qwix.get_default_qwix_quantization_config(
+            hf_config, False)
+
+        self.assertEqual(result, DEFAULT_DEEPSEEK_FP8_CONFIG)
+
+    def test_deepseek_v3_native_fp8_case_insensitive(self):
+        """Test that native FP8 model name checking is case insensitive."""
+        hf_config = MagicMock()
+        hf_config.model_type = "deepseek_v3"
+        hf_config.quantization_config = {
+            "quant_method": "fp8",
+            "weight_block_size": [128, 128]
+        }
+        # Mixed case input, should still match "deepseek-ai/deepseek-r1"
+        hf_config._name_or_path = "DeepSeek-AI/DeepSeek-R1"
+
+        result = quantize_qwix.get_default_qwix_quantization_config(
+            hf_config, False)
+
+        self.assertEqual(result, DEFAULT_DEEPSEEK_FP8_CONFIG)
+
+    def test_deepseek_v3_native_fp8_invalid_model_name(self):
+        """Test DeepSeek V3 native FP8 detection raises error on unknown model."""
+        hf_config = MagicMock()
+        hf_config.model_type = "deepseek_v3"
+        hf_config.quantization_config = {
+            "quant_method": "fp8",
+            "weight_block_size": [128, 128]
+        }
+        hf_config._name_or_path = "unknown/model-path"
+
+        with self.assertRaisesRegex(ValueError,
+                                    "Expected to find DeepSeek checkpoint"):
             quantize_qwix.get_default_qwix_quantization_config(
                 hf_config, False)
 

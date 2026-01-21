@@ -39,18 +39,6 @@ steps:
     commands:
       - |
         .buildkite/scripts/record_step_result.sh runai_model_streamer_loader_CorrectnessTest
- - label: "Record correctness test result for runai_model_streamer_loader"
-    key: "record_runai_model_streamer_loader_CorrectnessTest"
-    depends_on: "runai_model_streamer_loader_CorrectnessTest"
-    env:
-      CI_TARGET: "runai_model_streamer_loader"
-      CI_STAGE: "CorrectnessTest"
-      CI_CATEGORY: "feature support matrix"
-    agents:
-      queue: cpu
-    commands:
-      - |
-        .buildkite/scripts/record_step_result.sh runai_model_streamer_loader_CorrectnessTest
   - label: "Correctness tests for runai_model_streamer_loader with codegemma"
     key: "runai_model_streamer_loader_CorrectnessTest_codegemma"
     soft_fail: true

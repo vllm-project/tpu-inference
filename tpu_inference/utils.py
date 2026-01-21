@@ -158,9 +158,18 @@ def pathways_hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
     live_arrays = jax.live_arrays()
     hbm_used = defaultdict(int)
     hbm_limit = get_device_hbm_limit()
+
+    # Track unique buffers to avoid double-counting when multiple Python
+    # variables reference the same underlying JAX array (e.g., a = jnp.ones(10); b = a)
+    seen_buffers = set()
+
     for array in live_arrays:
         for buffer in array.addressable_shards:
-            hbm_used[buffer.data.device] += buffer.data.nbytes
+            buffer_id = id(buffer.data)
+            if buffer_id not in seen_buffers:
+                seen_buffers.add(buffer_id)
+                hbm_used[buffer.data.device] += buffer.data.nbytes
+
     return [(hbm_used[device], hbm_limit) for device in devices]
 
 

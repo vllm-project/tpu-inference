@@ -78,7 +78,17 @@ _original_loads = multiprocessing.reduction.ForkingPickler.loads
 
 def _cloudpickle_dumps(obj, protocol=None):
     """Use cloudpickle for serialization."""
-    return cloudpickle.dumps(obj, protocol=protocol)
+    try:
+        return cloudpickle.dumps(obj, protocol=protocol)
+    except Exception as e:
+        obj_type = type(obj).__name__
+        logger.error(f"Error pickling {obj_type}: {e}")
+        if isinstance(obj, tuple) and len(obj) == 2:
+            cmd, data = obj
+            logger.error(
+                f"Failed to pickle command: {cmd}, data type: {type(data).__name__}"
+            )
+        raise
 
 
 def _cloudpickle_loads(data):
@@ -199,9 +209,12 @@ def _scheduler_worker_process(
                     request = data
                     blocks, cached_tokens = scheduler.kv_cache_manager.get_computed_blocks(
                         request)
-                    output_queues[command.value].put((blocks, cached_tokens))
+                    # Only return cached_tokens, not blocks, to avoid circular reference issues
+                    # The blocks object contains a linked list structure that can cause recursion errors during pickling
+                    output_queues[command.value].put(cached_tokens)
 
                 case SchedulerCommand.SHUTDOWN:
+                    logger.info(f"Rank {rank}: Shutting down")
                     scheduler.shutdown()
                     output_queues[command.value].put(None)  # Signal completion
                     break
@@ -269,6 +282,15 @@ class DPScheduler(SchedulerInterface):
         self.assigned_dp_rank: Dict[str, int] = {}  # req_id -> dp_rank
         self.cached_schedulers_output = deque()
         self._create_per_rank_configs(kv_cache_config)
+
+        # Initialize NONE_HASH global before forking worker processes
+        # This ensures all workers inherit the initialized value
+        if vllm_config.cache_config.enable_prefix_caching:
+            from vllm.utils.hashing import get_hash_fn_by_name
+            from vllm.v1.core.kv_cache_utils import init_none_hash
+            caching_hash_fn = get_hash_fn_by_name(
+                vllm_config.cache_config.prefix_caching_hash_algo)
+            init_none_hash(caching_hash_fn)
 
         # The original scheduler class could be Scheduler or AsyncScheduler
         original_scheduler_cls = vllm_config.scheduler_config._original_scheduler_cls
@@ -374,7 +396,7 @@ class DPScheduler(SchedulerInterface):
         best_cache_rank = None
         best_cache_tokens = 0
         for rank in range(self.dp_size):
-            blocks, cached_tokens = self._get_result_from_queue(
+            cached_tokens = self._get_result_from_queue(
                 rank, SchedulerCommand.GET_COMPUTED_BLOCKS)
             if cached_tokens > best_cache_tokens:
                 best_cache_tokens = cached_tokens
@@ -499,7 +521,7 @@ class DPScheduler(SchedulerInterface):
         combined_req_ids = []
         combined_resumed_req_ids = []
         combined_new_token_ids = []
-        combined_all_token_ids = []
+        combined_all_token_ids = {}
         combined_new_block_ids = []
         combined_num_computed_tokens = []
         combined_num_output_tokens = []
@@ -510,7 +532,7 @@ class DPScheduler(SchedulerInterface):
             combined_req_ids.extend(cached_data.req_ids)
             combined_resumed_req_ids.extend(cached_data.resumed_req_ids)
             combined_new_token_ids.extend(cached_data.new_token_ids)
-            combined_all_token_ids.extend(cached_data.all_token_ids)
+            combined_all_token_ids.update(cached_data.all_token_ids)
             combined_new_block_ids.extend(cached_data.new_block_ids)
             combined_num_computed_tokens.extend(
                 cached_data.num_computed_tokens)
