@@ -373,8 +373,14 @@ def expert_sharded_gmm(
 
 @functools.partial(
     jax.jit,
-    static_argnames=("topk", "renormalize", "mesh", "use_ep", "activation",
-                     "scoring_func"),
+    static_argnames=(
+        "topk",
+        "renormalize",
+        "mesh",
+        "use_ep",
+        "activation",
+        "scoring_func",
+    ),
 )
 def fused_moe_func(
     hidden_states: jax.Array,

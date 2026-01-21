@@ -59,7 +59,8 @@ def scoring_fn(scoring: str, x):
         case "sigmoid":
             return jax.nn.sigmoid(x)
         case _:
-            raise RuntimeError(f"Unsupported scoring function: {scoring}")
+            raise NotImplementedError(
+                f"Unsupported scoring function: {scoring}")
 
 
 def swigluoai(gate: jax.Array,
@@ -82,7 +83,7 @@ def activation_fn(acc1, acc3, act_fn):
     elif act_fn == "swigluoai":
         return swigluoai(acc1, acc3)
     else:
-        raise RuntimeError(f"Unsupported activation function: {act_fn}")
+        raise NotImplementedError(f"Unsupported activation function: {act_fn}")
 
 
 def ref_moe(
