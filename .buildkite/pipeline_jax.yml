@@ -233,10 +233,6 @@ steps:
      commands:
        - .buildkite/scripts/run_in_docker.sh \
              bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_layers.py'
-         else
-           echo "Skipping: NIGHTLY environment variable not set"
-           exit 0
-         fi
 
    - label: "${LABEL_PREFIX}E2E lm_eval accuracy check qwen3 coder with fused moe."
      key: ${KEY_PREFIX}test_17
