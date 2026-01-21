@@ -16,13 +16,20 @@ from typing import Any, Optional
 
 import jax
 import torch
+<<<<<<< HEAD
 
+=======
+import vllm.model_executor.layers.linear as vllm_linear
+>>>>>>> 4f8de635 (fix)
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
 from vllm.attention.layer import Attention
+<<<<<<< HEAD
 from vllm.model_executor.layers import linear as vllm_linear
+=======
+>>>>>>> 4f8de635 (fix)
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
                                                   UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.quantization import \
