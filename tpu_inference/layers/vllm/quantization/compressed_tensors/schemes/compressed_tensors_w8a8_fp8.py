@@ -30,14 +30,14 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import \
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     GroupShape
 
+from tpu_inference.layers.common.process_weights.linear_weights import (
+    LinearWeights, process_linear_weights, shard_linear_weights,
+    to_parameter_list)
 from tpu_inference.layers.common.quantization import (dequantize_tensor,
                                                       quantize_tensor)
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
 from tpu_inference.layers.vllm.linear import sharded_quantized_matmul
-from tpu_inference.layers.vllm.process_weights.linear_weights import (
-    LinearWeights, process_linear_weights, shard_linear_weights,
-    to_parameter_list)
 from tpu_inference.layers.vllm.quantization.configs import \
     VllmQuantLinearConfig
 from tpu_inference.logger import init_logger
