@@ -1,6 +1,6 @@
 Feature,CorrectnessTest,PerformanceTest
 "CP",unverified,unverified
-"DP",❌,N/A
+"DP",✅,unverified
 "EP",unverified,unverified
 "PP",✅,✅
 "SP",unverified,unverified
