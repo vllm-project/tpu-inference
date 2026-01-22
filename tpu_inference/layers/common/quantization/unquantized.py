@@ -35,7 +35,7 @@ class UnquantizedLinearMethod:
                      x_jax: jax.Array,
                      weight_jax: jax.Array,
                      bias_jax: Optional[jax.Array] = None,
-                     einsum_str: str = "mn,np->mp") -> jax.Array:
+                     einsum_str: str = "mn,pn->mp") -> jax.Array:
         outs = jnp.einsum(einsum_str, x_jax, weight_jax)
         if bias_jax is not None:
             outs += bias_jax
