@@ -33,7 +33,7 @@ OPTIONS=""
 LONGOPTS=model:,tp:,req_tput_limit_1k_1k:,output_token_tput_limit_1k_1k:,total_token_tput_limit_1k_1k:,req_tput_limit_1k_8k:,output_token_tput_limit_1k_8k:,total_token_tput_limit_1k_8k:,req_tput_limit_8k_1k:,output_token_tput_limit_8k_1k:,total_token_tput_limit_8k_1k:
 
 # Parse arguments
-if [[ ! PARSED = $(getopt --options="$OPTIONS" --longoptions=$LONGOPTS --name "$0" -- "$@") ]]; then
+if ! PARSED=$(getopt --options="$OPTIONS" --longoptions=$LONGOPTS --name "$0" -- "$@"); then
   exit 2
 fi
 eval set -- "$PARSED"
