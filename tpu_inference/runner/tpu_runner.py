@@ -89,12 +89,6 @@ INVALID_TOKEN_ID = -1
 # Smallest output size
 MIN_NUM_SEQS = 8
 
-DUMMY_METADATA = AttentionMetadata(
-    input_positions=[],
-    block_tables=[],
-    request_distribution=[0, 0, 0],
-)
-
 
 class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
     """Holds asynchronous model output specifically from a TPU runner.
@@ -564,7 +558,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called "
                                "after execute_model() returns None.")
-        _, output = self._execute_model(scheduler_output, intermediate_tensors)
+        output = self._execute_model(scheduler_output, intermediate_tensors)
         return output
 
     def sample_tokens(
@@ -691,14 +685,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self,
         scheduler_output: "VllmSchedulerOutput",
         intermediate_tensors: Optional[JaxIntermediateTensors] = None,
-    ) -> tuple[AttentionMetadata, JaxIntermediateTensors | ModelRunnerOutput
-               | None]:
+    ) -> JaxIntermediateTensors | ModelRunnerOutput | None:
         self.persistent_batch_manager.update_states(
             scheduler_output, self.get_mrope_input_positions_fn)
         if not scheduler_output.total_num_scheduled_tokens:
             if has_kv_transfer_group():
-                return DUMMY_METADATA, self.kv_connector_no_forward(
-                    scheduler_output, self.vllm_config)
+                return self.kv_connector_no_forward(scheduler_output,
+                                                    self.vllm_config)
 
             # Return empty ModelRunnerOutput if there's no work to do.
             # TODO(fhzhang): We rely on empty cycles to remove requests in input batch. Fix it to reduce overhead.
@@ -710,7 +703,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     "Should not schedule a request that does nothing!")
                 # raise Exception(
                 #     "Should not schedule a request that does nothing!")
-            return DUMMY_METADATA, EMPTY_MODEL_RUNNER_OUTPUT
+            return EMPTY_MODEL_RUNNER_OUTPUT
 
         # TODO(pooyam): I guess we can remove returning sampling_metadata in `_prepare_inputs` after https://github.com/njhill/vllm/commit/b7433ca1a47732394b1bdea4099d98389515954b
         (
@@ -787,7 +780,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             if not get_pp_group().is_last_rank:
                 assert isinstance(hidden_states, JaxIntermediateTensors)
                 hidden_states.kv_connector_output = kv_connector_output
-                return attn_metadata, hidden_states
+                return hidden_states
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
             logits = self.compute_logits_fn(
@@ -807,7 +800,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             kv_connector_output=kv_connector_output,
             logits_indices_selector=logits_indices_selector,
             padded_num_reqs=padded_num_reqs)
-        return attn_metadata, None
+        return None
 
     def _sample_from_logits(
         self,
