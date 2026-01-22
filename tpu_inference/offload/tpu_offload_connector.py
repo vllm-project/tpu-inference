@@ -186,16 +186,21 @@ GATHER_TPU_BLOCKS_CALLS = Counter(
     "Total number of times gather_tpu_blocks has been called.")
 
 TRANSFER_AND_GEGISTER_CPU_CHUNKS_CALLS = Counter(
-    "vllm__transfer_and_register_cpu_chunks_calls_total",
+    "vllm_transfer_and_register_cpu_chunks_calls_total",
     "Total number of times _transfer_and_register_cpu_chunks has been called.")
 
 SAVE_BLOCKS_TO_CPU_CALLS = Counter(
     "vllm_save_blocks_to_cpu_calls_total",
     "Total number of times _save_blocks_to_cpu has been called.")
 
+# NOTE(jcgu): not suggest to use; every model_execute will trigger this fn call.
 START_LOAD_KV_CALLS = Counter(
     "vllm_start_load_kv_calls_total",
     "Total number of times start_to_load has been called.")
+
+LOAD_KV_REQUESTS = Counter(
+    "vllm_num_requests_with_real_kv_load",
+    "Total number of requests with kv load operations.")
 
 GET_KV_CONNECTOR_STATS_CALLS = Counter(
     "vllm_get_kv_connector_stats_calls_total",
@@ -271,40 +276,37 @@ LOAD_KV_SIZE_BLOCKS = Counter(
     'Total number of KV cache blocks loaded from CPU to TPU')
 
 STAGING_BUFFER_BLOCKS_FOR_SAVE = Gauge(
-    'vllm_kv_cache_staging_buffer_blocks_for_save_total', 
-    'Total occupied staging blocks for save'
-)
+    'vllm_kv_cache_staging_buffer_blocks_for_save_total',
+    'Total occupied staging blocks for save')
 STAGING_BUFFER_BLOCKS_FOR_LOAD = Gauge(
-    'vllm_kv_cache_staging_buffer_blocks_for_load_total', 
-    'Total occupied staging blocks for load'
-)
+    'vllm_kv_cache_staging_buffer_blocks_for_load_total',
+    'Total occupied staging blocks for load')
 
 STAGING_BUFFER_BLOCKS_FOR_SAVE_ALLOCATE = Gauge(
-    'vllm_kv_cache_staging_buffer_blocks_for_save_allocate', 
-    'Total allocated staging blocks for save'
-)
+    'vllm_kv_cache_staging_buffer_blocks_for_save_allocate',
+    'Total allocated staging blocks for save')
 
 STAGING_BUFFER_BLOCKS_FOR_SAVE_FREE = Gauge(
-    'vllm_kv_cache_staging_buffer_blocks_for_save_free', 
-    'Total freed staging blocks for save'
-)
+    'vllm_kv_cache_staging_buffer_blocks_for_save_free',
+    'Total freed staging blocks for save')
 
 STAGING_BUFFER_BLOCKS_FOR_LOAD_ALLOCATE = Gauge(
-    'vllm_kv_cache_staging_buffer_blocks_for_load_allocate', 
-    'Total allocated staging blocks for load'
-)
+    'vllm_kv_cache_staging_buffer_blocks_for_load_allocate',
+    'Total allocated staging blocks for load')
 
 STAGING_BUFFER_BLOCKS_FOR_LOAD_FREE = Gauge(
-    'vllm_kv_cache_staging_buffer_blocks_for_load_free', 
-    'Total freed staging blocks for load'
+    'vllm_kv_cache_staging_buffer_blocks_for_load_free',
+    'Total freed staging blocks for load')
+
+KV_HIT_WITH_LOAD_BUF = Counter(
+    'vllm_kv_cache_hit_with_load_staging_buf',
+    'Total number of times of KV cache hit with allocated staging buffer for load by scheduler, but not yet loaded; there will be no load if the request is not scheduled.'
 )
 
-LOAD_KV_CALLS = Counter(
-    'vllm_kv_cache_load_calls_total',
-    'Total number of KV cache load actual calls after available block adjust')
-BLOCK_TO_LOAD_COUNTER = Counter(
-    'vllm_kv_cache_block_to_load_counter',
-    'Total number of times has blocks to load')
+KV_HIT_WITH_LOAD = Counter(
+    'vllm_kv_cache_hit_with_load',
+    'Total number of times of KV cache hit with blocks to load by scheduler, but not yet loaded; there will be no load if no staging buffer or the request is not scheduled.'
+)
 
 # we keep our operations at vllm's block granularity,
 # and want to provide the following three preferences when handling
@@ -779,7 +781,7 @@ class TPUOffloadConnectorScheduler():
         )
 
         if num_blocks_to_load > 0:
-            BLOCK_TO_LOAD_COUNTER.inc()
+            KV_HIT_WITH_LOAD.inc()
             # TODO: add metrics here to verify there is blocks to load ever
             # planning staging blocks for load
             num_avail_staging_blocks = self.staging_buffer_manager.get_num_free_staging_blocks(
@@ -799,7 +801,7 @@ class TPUOffloadConnectorScheduler():
             if num_blocks_to_load > 0:
                 # NOTE(jcgu): put dummy chunk / block ids;
                 # fill real ids later when the requests gets scheduled
-                LOAD_KV_CALLS.inc()
+                KV_HIT_WITH_LOAD_BUF.inc()
                 src_chunk_ids = [-1] * num_blocks_to_load
                 dummy_dst_blocks = [-1] * num_blocks_to_load
                 self._pre_load_specs[request.request_id] = LoadSpec(
@@ -816,7 +818,8 @@ class TPUOffloadConnectorScheduler():
                 STAGING_BUFFER_BLOCKS_FOR_LOAD.set(
                     self.staging_buffer_manager.get_num_blocks_for_load())
                 STAGING_BUFFER_BLOCKS_FOR_LOAD_ALLOCATE.set(
-                    self.staging_buffer_manager.get_num_total_allocate_blocks_for_load())
+                    self.staging_buffer_manager.
+                    get_num_total_allocate_blocks_for_load())
 
         # record the matched tokens in the cache, it will be needed in
         # init save_spec
@@ -1050,8 +1053,9 @@ class TPUOffloadConnectorScheduler():
                     STAGING_BUFFER_BLOCKS_FOR_SAVE.set(
                         self.staging_buffer_manager.get_num_blocks_for_save())
                     STAGING_BUFFER_BLOCKS_FOR_SAVE_ALLOCATE.set(
-                        self.staging_buffer_manager.get_num_total_allocate_blocks_for_save())
-                
+                        self.staging_buffer_manager.
+                        get_num_total_allocate_blocks_for_save())
+
                     if adjusted_num_total_tokens > tracker.save_watermark:
                         logger.info(
                             f"      -> Old watermark {tracker.save_watermark}, new save_watermark count: {adjusted_num_total_tokens}"
@@ -1297,15 +1301,13 @@ class TPUOffloadConnectorScheduler():
         STAGING_BUFFER_BLOCKS_FOR_LOAD_FREE.set(
             self.staging_buffer_manager.get_num_total_free_blocks_for_load())
 
-        # TODO add a warning here for the # of save and load 
-        logger.warning(
-            (
-                f"Number of save blocks allocate {self.staging_buffer_manager.get_num_total_allocate_blocks_for_save()}. "
-                f"Number of save blocks free {self.staging_buffer_manager.get_num_total_free_blocks_for_save()}. "
-                f"Number of load blocks allocate {self.staging_buffer_manager.get_num_total_allocate_blocks_for_load()}. "
-                f"Number of load blocks free {self.staging_buffer_manager.get_num_total_free_blocks_for_load()}."
-            )
-        )
+        # TODO add a warning here for the # of save and load
+        logger.warning((
+            f"Number of save blocks allocate {self.staging_buffer_manager.get_num_total_allocate_blocks_for_save()}. "
+            f"Number of save blocks free {self.staging_buffer_manager.get_num_total_free_blocks_for_save()}. "
+            f"Number of load blocks allocate {self.staging_buffer_manager.get_num_total_allocate_blocks_for_load()}. "
+            f"Number of load blocks free {self.staging_buffer_manager.get_num_total_free_blocks_for_load()}."
+        ))
         return metadata
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
@@ -1361,7 +1363,8 @@ class TPUOffloadConnectorScheduler():
                 STAGING_BUFFER_BLOCKS_FOR_SAVE.set(
                     self.staging_buffer_manager.get_num_blocks_for_save())
                 STAGING_BUFFER_BLOCKS_FOR_SAVE_FREE.set(
-                    self.staging_buffer_manager.get_num_total_free_blocks_for_save())
+                    self.staging_buffer_manager.
+                    get_num_total_free_blocks_for_save())
 
                 # update in-flight save
                 for saved_chunk_id in saved_chunk_ids:
@@ -1395,7 +1398,8 @@ class TPUOffloadConnectorScheduler():
                 STAGING_BUFFER_BLOCKS_FOR_LOAD.set(
                     self.staging_buffer_manager.get_num_blocks_for_load())
                 STAGING_BUFFER_BLOCKS_FOR_LOAD_FREE.set(
-                    self.staging_buffer_manager.get_num_total_free_blocks_for_load())
+                    self.staging_buffer_manager.
+                    get_num_total_free_blocks_for_load())
                 # update in-flight save
                 for loaded_chunk_id in loaded_chunk_ids:
                     assert loaded_chunk_id in self._reqs_being_loaded[req_id]
@@ -1423,7 +1427,8 @@ class TPUOffloadConnectorScheduler():
             STAGING_BUFFER_BLOCKS_FOR_SAVE.set(
                 self.staging_buffer_manager.get_num_blocks_for_save())
             STAGING_BUFFER_BLOCKS_FOR_SAVE_FREE.set(
-                self.staging_buffer_manager.get_num_total_free_blocks_for_save())
+                self.staging_buffer_manager.get_num_total_free_blocks_for_save(
+                ))
 
         # load
         for req_id in connector_output.finished_recving or []:
@@ -1436,10 +1441,10 @@ class TPUOffloadConnectorScheduler():
                 f"  freed {num_freed_blocks} staging blocks (load) from {req_id}"
             )
             STAGING_BUFFER_BLOCKS_FOR_LOAD.set(
-                    self.staging_buffer_manager.get_num_blocks_for_load())
+                self.staging_buffer_manager.get_num_blocks_for_load())
             STAGING_BUFFER_BLOCKS_FOR_LOAD_FREE.set(
-                    self.staging_buffer_manager.get_num_total_free_blocks_for_load())
-
+                self.staging_buffer_manager.get_num_total_free_blocks_for_load(
+                ))
 
         _finished_reqs = list(self._finished_reqs_w_pending_ops)
         for req_id in _finished_reqs:
@@ -2184,6 +2189,7 @@ class TPUOffloadConnectorWorker:
             if not (meta.load_spec and meta.load_spec.can_load):
                 continue
 
+            LOAD_KV_REQUESTS.inc()
             request_load_start_time = time.time()
             logger.info(
                 "TPUOffloadConnectorWorker: Starting KV cache load process.")
