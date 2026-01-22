@@ -295,8 +295,7 @@ def expert_sharded_gmm(
 
     def _compute_input_offsets(send_sizes_local):
         input_offset_shard = jnp.concatenate(
-            (jnp.array([0]),
-             send_sizes_local.cumsum()[:-1]))
+            (jnp.array([0]), send_sizes_local.cumsum()[:-1]))
         return input_offset_shard
 
     input_offsets = jax.shard_map(
