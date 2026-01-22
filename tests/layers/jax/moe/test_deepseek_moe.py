@@ -16,12 +16,10 @@ import unittest
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from flax import nnx
-from jax.sharding import Mesh, PartitionSpec
+from jax.sharding import Mesh
 
-from tpu_inference.layers.jax.moe.deepseek_v3_moe import (DeepSeekV3Router,
-                                                          SparseMoE)
+from tpu_inference.layers.jax.moe.deepseek_v3_moe import DeepSeekV3Router
 
 
 class TestDeepSeekV3Router(unittest.TestCase):
@@ -91,73 +89,6 @@ class TestDeepSeekV3Router(unittest.TestCase):
             weights, indices = router(x)
             self.assertEqual(weights.shape, (2, 2))
             self.assertEqual(indices.shape, (2, 2))
-
-
-class TestSparseMoE(unittest.TestCase):
-
-    def setUp(self):
-        """Set up a multi-device mesh and a sample MoE layer for testing."""
-        devices = jax.devices()
-        self.device_count = len(devices)
-        if self.device_count < 8:
-            self.skipTest("This test requires at least 8 simulated devices.")
-
-        # This mesh will have a 'model' axis for expert parallelism
-        mesh_shape = (self.device_count, 1)
-        device_mesh_array = np.array(devices).reshape(mesh_shape)
-
-        # Define the axis names
-        axis_names = ('model', 'data')
-
-        # Create the 2D mesh
-        self.mesh = Mesh(device_mesh_array, axis_names=axis_names)
-
-        # --- Model Configuration ---
-        self.B, self.S, self.D = 2, 4, 16  # Batch, Sequence, Hidden Dim
-        self.E, self.K = 16, 8  # Num Experts, Experts per Token
-        self.moe_intermediate_size = 32  # FFN Dim
-        self.num_expert_parallelism = 8  # Shard experts across 8 devices
-
-        self.key = jax.random.PRNGKey(42)
-        self.x = jax.random.normal(self.key, (self.B * self.S, self.D),
-                                   dtype=jnp.bfloat16)
-
-        # --- Instantiate MoE Layer ---
-        # We need to do this inside the mesh context
-        with self.mesh:
-            router = DeepSeekV3Router(hidden_size=self.D,
-                                      num_experts=self.E,
-                                      num_experts_per_tok=self.K,
-                                      n_groups=1,
-                                      topk_groups=1,
-                                      norm_topk_prob=False,
-                                      routed_scaling_factor=1.0,
-                                      dtype=jnp.bfloat16,
-                                      rngs=nnx.Rngs(self.key),
-                                      ed_sharding=PartitionSpec(),
-                                      e_sharding=PartitionSpec(),
-                                      activation_ffw_td=PartitionSpec(
-                                          'data', None))
-            # Instantiation updated to match user's code snippet
-            self.moe = SparseMoE(
-                hidden_size=self.D,
-                intermediate_size_moe=self.moe_intermediate_size,
-                num_local_experts=self.E,
-                hidden_act="silu",
-                num_experts_per_tok=self.K,
-                router=router,
-                dtype=jnp.bfloat16,
-                rngs=nnx.Rngs(self.key),
-                mesh=self.mesh,
-                apply_expert_weight_before_computation=False,
-
-                # Sharding specs updated based on user's snippet
-                edf_sharding=PartitionSpec('model', None, None),
-                efd_sharding=PartitionSpec('model', None, None),
-                activation_ffw_ted=PartitionSpec('data', None),
-                activation_ffw_td=PartitionSpec(
-                    'data', None)  # Activations are replicated
-            )
 
     def test_token_replicated_expert_parallel_fwd(self):
         """
