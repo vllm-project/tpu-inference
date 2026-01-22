@@ -292,14 +292,19 @@ def expert_sharded_gmm(
     # In the working example, input_offsets would be [0, 3, 5, 10]
     dp_size = get_mesh_shape_product(mesh, ShardingAxisName.MLP_DATA)
     shard_size = send_sizes.shape[0] // dp_size
-    input_offsets = []
-    for i in range(dp_size):
-        offset = i * shard_size
+
+    def _compute_input_offsets(send_sizes_local):
         input_offset_shard = jnp.concatenate(
             (jnp.array([0]),
-             send_sizes[offset:offset + shard_size].cumsum()[:-1]))
-        input_offsets.append(input_offset_shard)
-    input_offsets = jnp.concatenate(input_offsets, axis=0)
+             send_sizes_local.cumsum()[:-1]))
+        return input_offset_shard
+
+    input_offsets = jax.shard_map(
+        _compute_input_offsets,
+        mesh=mesh,
+        in_specs=data_p_spec,
+        out_specs=data_p_spec,
+    )(send_sizes)
     output_offsets = input_offsets
     recv_sizes = send_sizes
     data_sharding = NamedSharding(mesh, data_p_spec)
