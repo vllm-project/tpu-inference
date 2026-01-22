@@ -231,6 +231,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         rank: int = 0,
         is_first_rank: bool = True,
         is_last_rank: bool = True,
+        mlrun: Any = None,
     ):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -243,6 +244,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
         self.device_config = vllm_config.device_config
+        self.mlrun = mlrun
 
         self.devices = devices
         self.dtype = self.model_config.dtype
@@ -377,7 +379,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.phase_based_profiler = None
         if self.phased_profiling_dir:
             self.phase_based_profiler = runner_utils.PhasedBasedProfiler(
-                self.phased_profiling_dir)
+                self.phased_profiling_dir, self.mlrun)
 
     def _init_mm(self) -> None:
         self.is_multimodal_model = None
