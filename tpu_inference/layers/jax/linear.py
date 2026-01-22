@@ -78,10 +78,10 @@ class JaxEinsum(nnx.Einsum, JaxModule):
         if self.quant_method is not None:
             return self.quant_method.apply_jax(self, inputs)
 
+        output = jax.numpy.einsum(self.einsum_str, inputs, self.weight)
         if self.bias is not None:
-            return jax.numpy.einsum(self.einsum_str, inputs,
-                                    self.weight) + self.bias
-        return jax.numpy.einsum(self.einsum_str, inputs, self.weight)
+            output += self.bias
+        return output
 
 
 class JaxLinear(JaxEinsum):

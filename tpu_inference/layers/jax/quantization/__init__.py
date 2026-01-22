@@ -40,15 +40,15 @@ def get_tpu_quantization_config(vllm_config: VllmConfig):
 class QuantizeMethodBase(ABC):
     """Base class for different quantized methods."""
 
-    def create_weights(self, layer: JaxModule, *weight_args,
-                       **extra_weight_attrs):
+    def create_weights_jax(self, layer: JaxModule, *weight_args,
+                           **extra_weight_attrs):
         """Create weights for a layer.
 
         The weights will be set as attributes of the layer."""
         pass
 
     @abstractmethod
-    def apply(self, layer: JaxModule, *args, **kwargs) -> jax.Array:
+    def apply_jax(self, layer: JaxModule, *args, **kwargs) -> jax.Array:
         """Apply the weights in layer to the input tensor.
 
         Expects create_weights to have been called before on the layer."""

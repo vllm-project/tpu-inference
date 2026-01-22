@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import tempfile
 import unittest
-from unittest import mock
 
 import jax
 from flax import nnx
@@ -99,13 +99,18 @@ class TestJaxLinear(unittest.TestCase):
         # get_tensor_model_parallel_rank() and
         # get_tensor_model_parallel_world_size() even though disable_tp=True, which
         # causes error during initialization. So we mock them here.
-        with mock.patch(
-                "vllm.model_executor.parameter.get_tensor_model_parallel_rank",
-                return_value=0,
-        ), mock.patch(
-                "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
-                return_value=1,
-        ), set_current_vllm_config(vllm_config):
+        with set_current_vllm_config(vllm_config):
+            from vllm.distributed.parallel_state import (
+                ensure_model_parallel_initialized,
+                init_distributed_environment)
+            temp_file = tempfile.mkstemp()[1]
+            init_distributed_environment(
+                1,
+                0,
+                local_rank=0,
+                distributed_init_method=f"file://{temp_file}",
+                backend="gloo")
+            ensure_model_parallel_initialized(1, 1)
             # vllm linear layer
             vllm_mlp = VllmMLP(
                 hidden_size=hidden_size,

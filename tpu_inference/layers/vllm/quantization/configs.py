@@ -44,9 +44,9 @@ class VllmQuantLinearConfig(QuantLinearConfig):
         assert isinstance(layer, LinearBase)
 
         super().__init__(
-            mesh,
             enable_sp=vllm_config.compilation_config.pass_config.enable_sp,
             output_sizes=[layer.output_size])
+        self.mesh = mesh
 
         if isinstance(layer, RowParallelLinear):
             self.weight_sharding = P(None, ShardingAxisName.ATTN_HEAD)

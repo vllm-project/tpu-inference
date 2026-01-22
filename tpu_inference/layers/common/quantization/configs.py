@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -21,9 +20,7 @@ from tpu_inference.utils import get_mesh_shape_product
 
 class QuantLinearConfig:
 
-    def __init__(self, mesh: Mesh, *, enable_sp: bool,
-                 output_sizes: list[int]):
-        self.mesh = mesh
+    def __init__(self, *, enable_sp: bool, output_sizes: list[int]):
         self.output_sizes = output_sizes
         self.weight_sharding = P(None, None)
         self.fuse_matmuls = True
