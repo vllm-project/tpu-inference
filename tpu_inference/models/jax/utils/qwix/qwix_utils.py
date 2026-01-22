@@ -30,7 +30,7 @@ from tpu_inference.utils import device_array
 logger = init_logger(__name__)
 
 QUANTIZATION_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "configs")
-DEFAULT_NUM_BLOCKS_FOR_JIT_KV_CACHE = 2000
+DEFAULT_NUM_BLOCKS_FOR_JIT_KV_CACHE = 2048
 DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS = 512
 DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS = 256
 DEFAULT_MAX_NUM_BLOCKS_PER_REQ = 16
