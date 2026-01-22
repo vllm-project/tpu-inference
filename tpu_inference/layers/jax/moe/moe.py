@@ -28,8 +28,9 @@ from qwix._src.providers import ptq
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
-from tpu_inference.layers.jax.moe.dense_moe import DenseMoEEngine
-from tpu_inference.layers.jax.moe.sparse_moe import SparseMoEEngine
+from tpu_inference.layers.jax.moe.dense_moe import (
+    dense_moe_fwd, dense_moe_fwd_preapply_router_weights)
+from tpu_inference.layers.jax.moe.sparse_moe import sparse_moe_distributed_fwd
 from tpu_inference.layers.jax.moe.utils import MoEBackend
 from tpu_inference.layers.vllm.fused_moe import fused_moe_func
 from tpu_inference.models.jax.utils.qwix.qwix_utils import \
@@ -211,6 +212,7 @@ class MoE(nnx.Module):
 
             if self.moe_backend == MoEBackend.MEGABLX_GMM or self.moe_backend == MoEBackend.RAGGED_DOT:
                 in_specs = (
+                    PartitionSpec(),  # replicated MoE instance
                     PartitionSpec(*self.activation_ffw_td),  # Sharded x_TD
                     PartitionSpec(),  # Replicated router_weights_TX
                     PartitionSpec(),  # Replicated selected_experts_TX
@@ -227,7 +229,7 @@ class MoE(nnx.Module):
                     mesh=self.mesh,
                     in_specs=in_specs,
                     out_specs=out_specs,
-                    check_rep=False)(self.sparse_engine.distributed_fwd)
+                    check_rep=False)(sparse_moe_distributed_fwd)
 
                 kernel_gating_EDF = self._process_weight_for_qwix(
                     self.kernel_gating_EDF,
@@ -242,7 +244,7 @@ class MoE(nnx.Module):
                     channelwise_axes=[0, 2],
                     tiled_axes={})
 
-                return mapped_moe_fwd(x_TD, weights_TX, indices_TX,
+                return mapped_moe_fwd(self, x_TD, weights_TX, indices_TX,
                                       kernel_gating_EDF, kernel_up_proj_EDF,
                                       kernel_down_proj_EFD)
 
@@ -259,10 +261,10 @@ class MoE(nnx.Module):
                 # weighting the expert outputs.
                 if self.apply_expert_weight_before_computation:
                     with jax.named_scope("pre_computing_weight"):
-                        return self.dense_engine.moe_fwd_preapply_router_weights(
-                            x_TD, full_weights_TE)
+                        return dense_moe_fwd_preapply_router_weights(
+                            self, x_TD, full_weights_TE)
                 else:
-                    return self.dense_engine.moe_fwd(x_TD, full_weights_TE)
+                    return dense_moe_fwd(self, x_TD, full_weights_TE)
 
     def __post_init__(self, rngs: nnx.Rngs):
         """Generates the kernels (weights) for the router and experts (gating, up-projection, and down-projection layers)."""
@@ -351,9 +353,6 @@ class MoE(nnx.Module):
         self.is_batch_sharded_by_expert = (
             self.expert_axis_name is not None) and (self.expert_axis_name
                                                     == self.data_axis_name)
-
-        self.sparse_engine = SparseMoEEngine(self)
-        self.dense_engine = DenseMoEEngine(self)
 
     def _process_weight_for_qwix(self,
                                  weight_param,
