@@ -14,9 +14,6 @@
 
 from jax.sharding import PartitionSpec as P
 
-from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.utils import get_mesh_shape_product
-
 
 class QuantLinearConfig:
 
@@ -28,9 +25,4 @@ class QuantLinearConfig:
         self.input_sharding = None
         self.output_sharding = None
 
-        self.tp_size = get_mesh_shape_product(self.mesh,
-                                              ShardingAxisName.MLP_TENSOR)
-
         self.bias_sharding = P(self.weight_sharding[0])
-        self.n_shards = get_mesh_shape_product(self.mesh,
-                                               self.weight_sharding[0])

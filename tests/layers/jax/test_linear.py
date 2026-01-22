@@ -140,7 +140,7 @@ class TestJaxLinear(unittest.TestCase):
     def test_sharding_assignment(self):
         """Tests sharding assignment of JaxLinear layer."""
 
-        mesh = jax.make_mesh((4, ), ('model', ))
+        mesh = Mesh(jax.devices('cpu')[:1], ("model", ))
         unquantize_config = get_tpu_quantization_config(
             VllmConfig(model_config=ModelConfig(model="Qwen/Qwen3-0.6B")),
             mesh)
