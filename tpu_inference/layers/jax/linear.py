@@ -22,18 +22,6 @@ from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 
 
-class JaxQuantizedLinearMethod(QuantizeMethodBase):
-    """Quantization method for JAX Einsum layer.
-    """
-
-    def create_weights_jax(self, layer: JaxModule) -> None:
-        """Create weights for JAX Einsum layer."""
-        raise NotImplementedError()
-
-    def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
-        raise NotImplementedError()
-
-
 class JaxEinsum(nnx.Einsum, JaxModule):
     """Einsum layer for JAX.
 
@@ -68,7 +56,7 @@ class JaxEinsum(nnx.Einsum, JaxModule):
             self.quant_method = None
         elif (quant_method := quant_config.get_quant_method(self,
                                                             prefix=prefix)):
-            assert isinstance(quant_method, JaxQuantizedLinearMethod)
+            assert isinstance(quant_method, QuantizeMethodBase)
             self.quant_method = quant_method
             self.quant_method.create_weights_jax(self)
         else:
