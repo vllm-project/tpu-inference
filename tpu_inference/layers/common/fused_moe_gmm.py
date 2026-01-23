@@ -291,7 +291,6 @@ def expert_sharded_gmm(
     send_sizes = group_sizes.reshape(-1, num_experts_per_shard).sum(axis=1)
     # In the working example, input_offsets would be [0, 3, 5, 10]
     dp_size = get_mesh_shape_product(mesh, ShardingAxisName.MLP_DATA)
-    shard_size = send_sizes.shape[0] // dp_size
 
     def _compute_input_offsets(send_sizes_local):
         input_offset_shard = jnp.concatenate(
