@@ -31,6 +31,7 @@ RUN apt-get update && apt-get install -y \
     libomp-dev \
     procps \
     curl \
+    netcat-openbsd \
     rclone \
     wget \
     ca-certificates \
