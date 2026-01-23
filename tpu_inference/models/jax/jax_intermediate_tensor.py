@@ -60,7 +60,7 @@ class JaxIntermediateTensors:
     @classmethod
     def from_torch(cls, torch_obj: IntermediateTensors):
         kv_connector_output = getattr(torch_obj, 'kv_connector_output', None)
-        jax_tensors = {k: jax_view(v) for k, v in torch_obj.tensors.items()}
+        jax_tensors = {k: jax_view(v) for k, v in torch_obj.items()}
         return cls(jax_tensors, kv_connector_output)
 
     def to_torch(self) -> IntermediateTensors:
