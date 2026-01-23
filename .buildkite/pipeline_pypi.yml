@@ -49,4 +49,4 @@ steps:
       MAX_NUM_BATCHED_TOKENS: 4096
      commands:
       - |
-       .buildkite/scripts/run_with_pypi.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
+        .buildkite/scripts/run_with_pypi.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh

@@ -162,8 +162,7 @@ steps:
        queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
      if: build.env("NIGHTLY") == "1"
      commands:
-       - .buildkite/scripts/run_in_docker.sh \
-             bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py'
+       - .buildkite/scripts/run_in_docker.sh bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py'
 
    - label: "${LABEL_PREFIX}E2E MLPerf tests for JAX + vLLM models on multiple chips"
      key: ${KEY_PREFIX}test_11
@@ -204,8 +203,7 @@ steps:
        queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
      if: build.env("NIGHTLY") == "1"
      commands:
-       - .buildkite/scripts/run_in_docker.sh \
-             bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py'
+       - .buildkite/scripts/run_in_docker.sh bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py'
 
    - label: "${LABEL_PREFIX}lora unit tests on single chip"
      key: ${KEY_PREFIX}test_15
@@ -231,8 +229,7 @@ steps:
        queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
      if: build.env("NIGHTLY") == "1"
      commands:
-       - .buildkite/scripts/run_in_docker.sh \
-             bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_layers.py'
+       - .buildkite/scripts/run_in_docker.sh bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_layers.py'
 
    - label: "${LABEL_PREFIX}E2E lm_eval accuracy check qwen3 coder with fused moe."
      key: ${KEY_PREFIX}test_17
