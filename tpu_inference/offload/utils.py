@@ -22,7 +22,7 @@ NONE_HASH = 0
 
 logger = init_logger(__name__)
 
-CPU_OFFLOADING_SWAP_OP_TYPE = Literal["jax", "pallas"]
+CPU_OFFLOADING_SWAP_OP_TYPE = Literal["jax", "pallas", "jax_copy"]
 
 
 @dataclass(order=True)
@@ -120,6 +120,110 @@ SwapFn = Callable[
 KVCacheSwapFn = Callable[[List[jax.Array]], List[jax.Array]]
 
 
+def _split_per_shard_to_chunks(
+    per_shard_data: List[List[jax.Array]],
+    split_size_list: List[int],
+) -> List[List[List[jax.Array]]]:
+    """Split per-shard layer data into per-block chunks.
+
+    Args:
+        per_shard_data: List[List[jax.Array]] — layers × device shards,
+            where each shard has all blocks concatenated along axis 0.
+        split_size_list: sizes to split along axis 0 (one per block).
+
+    Returns:
+        List[List[List[jax.Array]]] — layers × blocks × device shards.
+    """
+    chunks_on_cpu = []
+    for layer_shards in per_shard_data:
+        split_per_shard = [
+            jax.lax.split(shard, split_size_list, axis=0)
+            for shard in layer_shards
+        ]
+        num_blocks = len(split_per_shard[0])
+        layer_chunks = [[
+            split_per_shard[s][b] for s in range(len(layer_shards))
+        ] for b in range(num_blocks)]
+        chunks_on_cpu.append(layer_chunks)
+    return chunks_on_cpu
+
+
+def jax_copy_swap_kv_caches(
+    src_kv_caches,
+    src_sharding: jax.sharding.NamedSharding,
+    dst_sharding: jax.sharding.NamedSharding,
+    direction: Literal["h2d", "d2h"],
+):
+    """Swap in / out multi-layer kv_cache by copying individual device shards.
+
+    For d2h: accesses each device shard separately, copies it, and returns
+        a list of list of single-device arrays (one inner list per layer).
+    For h2d: accepts a list of lists. Each inner element can be either:
+        - jax.Array (old format): transferred via device_put with dst_sharding
+        - List[jax.Array] (new per-shard format): each shard is device_put
+          individually and reassembled via make_array_from_single_device_arrays
+
+    Args:
+        src_kv_caches: For d2h: List[jax.Array] (one per layer).
+                       For h2d: List[List[jax.Array | List[jax.Array]]]
+                           (layers × blocks, each block in old or new format).
+        src_sharding: kv_caches' original sharding
+        dst_sharding: kv_caches' target sharding (different memory_kind)
+        direction: h2d -> swap_in, d2h -> swap_out
+    Returns:
+        d2h: List[List[jax.Array]] — per-layer lists of copied shards.
+        h2d: List[List[jax.Array]] — per-layer lists of blocks on device.
+    """
+    if direction == "d2h":
+        # Copy each device shard individually and return as list of lists.
+        dst_memory_kind = dst_sharding.memory_kind
+        result = []
+        for kv_cache in src_kv_caches:
+            shards = [
+                jax.device_put(
+                    shard.data,
+                    jax.sharding.SingleDeviceSharding(
+                        shard.device, memory_kind=dst_memory_kind))
+                for shard in kv_cache.addressable_shards
+            ]
+            result.append(shards)
+        return result
+    else:  # h2d
+        dst_memory_kind = dst_sharding.memory_kind
+        devices = list(dst_sharding.mesh.devices.flat)
+        result = []
+        for layer_blocks in src_kv_caches:
+            layer_result = []
+            for block in layer_blocks:
+                if isinstance(block, list):
+                    # New format: block is a list of per-device shards.
+                    copied_shards = [
+                        jax.device_put(
+                            shard,
+                            jax.sharding.SingleDeviceSharding(
+                                devices[i], memory_kind=dst_memory_kind))
+                        for i, shard in enumerate(block)
+                    ]
+                    shard_shape = copied_shards[0].shape
+                    spec = dst_sharding.spec
+                    global_shape = tuple(
+                        shard_shape[i] *
+                        (dst_sharding.mesh.shape[spec[i]]
+                         if i < len(spec) and spec[i] is not None else 1)
+                        for i in range(len(shard_shape)))
+                    arr = jax.make_array_from_single_device_arrays(
+                        shape=global_shape,
+                        sharding=dst_sharding,
+                        arrays=copied_shards,
+                    )
+                    layer_result.append(arr)
+                else:
+                    # Old format: block is a single jax.Array.
+                    layer_result.append(jax.device_put(block, dst_sharding))
+            result.append(layer_result)
+        return result
+
+
 # NOTE(jcgu): keep the same interface as the pallas one
 def jax_swap_kv_caches(
     src_kv_caches: List[jax.Array],
@@ -197,8 +301,10 @@ def get_kv_cache_swap_fn(
     Returns:
         A tuple containing the jitted swap-in and swap-out functions.
     """
-    _swap_fn: SwapFn = pallas_swap_kv_caches if swap_op_type == "pallas" else jax_swap_kv_caches
-    if jitted:
+    _swap_fn: SwapFn = (pallas_swap_kv_caches if swap_op_type == "pallas" else
+                        jax_copy_swap_kv_caches
+                        if swap_op_type == "jax_copy" else jax_swap_kv_caches)
+    if jitted and swap_op_type != "jax_copy":
         _swap_in_fn = jax.jit(
             _swap_fn,
             static_argnames=["src_sharding", "dst_sharding", "direction"],
