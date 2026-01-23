@@ -12,26 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import enum
 from dataclasses import InitVar, dataclass
-from functools import partial
-from typing import Optional, Tuple
+from typing import Tuple
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 from flax.typing import Sharding
-from jax.sharding import PartitionSpec
 from jaxtyping import Float
-from qwix._src.core.ragged_dot import ragged_dot as qwix_ragged_dot
-from qwix._src.providers import ptq
 
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
-from tpu_inference.layers.jax.moe.moe import CombineExperts, MoE, MoEBackend
 from tpu_inference.layers.jax.moe.utils import MoEBackend
-from tpu_inference.models.jax.utils.qwix.qwix_utils import (
-    manually_quantize_qwix_activation, manually_quantize_qwix_weight)
 
 modeling_flax_utils = FlaxUtils()
 
@@ -114,13 +106,13 @@ class DeepSeekV3Router(nnx.Module):
 
         if self.moe_backend == MoEBackend.FUSED_MOE or self.moe_backend == MoEBackend.VLLM_MOE:
             return scores_TE
-        
+
         else:
             original_scores_TE = scores_TE
             topk_indices_TX = self.get_topk_indices(scores_TE)
             weights_TX = jnp.take_along_axis(original_scores_TE,
-                                            topk_indices_TX,
-                                            axis=-1)
+                                             topk_indices_TX,
+                                             axis=-1)
 
             if self.norm_topk_prob:
                 weights_TX /= jnp.sum(weights_TX, axis=-1)[..., None] + 1e-20
@@ -143,5 +135,3 @@ class DeepSeekV3Router(nnx.Module):
                                    dtype=self.router_bias_dtype,
                                    sharding=self.e_sharding,
                                    random_init=self.random_init)
-
-

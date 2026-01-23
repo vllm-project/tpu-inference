@@ -49,7 +49,8 @@ def _swigluoai(x1: jax.Array,
     return gated_activation * (x2 + 1)
 
 
-def _round_up_to_multiple_of_128_within_limit(x: int, limit: int) -> int:
+# TODO (jacobplatin): make this more generic
+def round_up_to_multiple_of_128_within_limit(x: int, limit: int) -> int:
     """
     Rounds the given integer `x` up to the nearest multiple of 128, without
     exceeding the specified `limit`.
@@ -106,12 +107,12 @@ def _get_tiling_size_for_gmm_kernel(m: int, k: int, n: int,
     # 2m//g can be either greater or less than 512. If there are 32 tokens and
     # topk=2, m=topk * num_tokens=64, in this case, 2*m//g will be less than
     # 512.
-    tm = _round_up_to_multiple_of_128_within_limit(2 * m // g, 512)
+    tm = round_up_to_multiple_of_128_within_limit(2 * m // g, 512)
     tm = min(tm, m)  # there's a requirement that m % tm == 0
     # k/n correspond to n_input_features/n_output_features in the matmul so they
     # are normally greater than 2048, unless the num shards is large.
-    tk = _round_up_to_multiple_of_128_within_limit(k, 2048)
-    tn = _round_up_to_multiple_of_128_within_limit(n, 2048)
+    tk = round_up_to_multiple_of_128_within_limit(k, 2048)
+    tn = round_up_to_multiple_of_128_within_limit(n, 2048)
     return tm, tk, tn
 
 
@@ -211,10 +212,10 @@ def expert_sharded_gmm(
     rhs_scale: jax.Array | None,
     rhs_bias: jax.Array | None,
     group_sizes: jax.Array,
-    is_last_expert: bool,
+    is_last_gmm: bool,
     mesh: Mesh,
 ) -> jax.Array:
-    ep_size = get_mesh_shape_product(mesh, ShardingAxisName.MLP_TENSOR)
+    ep_size = get_mesh_shape_product(mesh, ShardingAxisName.EXPERT)
     ep_p_spec = P(ShardingAxisName.EXPERT)
     num_experts = rhs.shape[0]
     num_experts_per_shard = num_experts // ep_size
@@ -254,7 +255,7 @@ def expert_sharded_gmm(
     #       0, 0, 0, 0     0, 0, 0, 0     0, 0, 0, 0     D, D, D, D
     #        shard-0        shard-1        shard-2        shard-3
     # Each shards has 3 (row A), 2 (row B), 5 (row C) and 4 (row D).
-    lhs_spec = ep_p_spec if is_last_expert else P()
+    lhs_spec = ep_p_spec if is_last_gmm else P()
     rhs_spec = ep_p_spec
     rhs_scale_spec = None if rhs_scale is None else ep_p_spec
     rhs_bias_spec = None if rhs_bias is None else ep_p_spec
@@ -273,7 +274,7 @@ def expert_sharded_gmm(
         check_vma=False,
     )(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset)
 
-    if not is_last_expert:
+    if not is_last_gmm:
         return gmm_res
 
     # For i-th shard, it is responsible groups (AKA experts) from
@@ -290,6 +291,16 @@ def expert_sharded_gmm(
     input_offsets = jnp.concatenate((jnp.array([0]), send_sizes.cumsum()[:-1]))
     output_offsets = input_offsets
     recv_sizes = send_sizes
+
+    replicated_sharding = NamedSharding(mesh, P())
+    send_sizes = jax.lax.with_sharding_constraint(send_sizes,
+                                                  replicated_sharding)
+    input_offsets = jax.lax.with_sharding_constraint(input_offsets,
+                                                     replicated_sharding)
+    output_offsets = jax.lax.with_sharding_constraint(output_offsets,
+                                                      replicated_sharding)
+    recv_sizes = jax.lax.with_sharding_constraint(recv_sizes,
+                                                  replicated_sharding)
 
     def _ragged_all_to_all(operand, input_offsets, send_sizes, output_offsets,
                            recv_sizes):
@@ -445,7 +456,7 @@ def fused_moe_func(
             w1_scale,
             w1_bias,
             group_sizes,
-            is_last_expert=False,
+            is_last_gmm=False,
             mesh=mesh,
         )
         x1, x2 = jnp.split(x, 2, -1)
@@ -458,7 +469,7 @@ def fused_moe_func(
             w2_scale,
             w2_bias,
             group_sizes,
-            is_last_expert=True,
+            is_last_gmm=True,
             mesh=mesh,
         )
     else:

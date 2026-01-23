@@ -11,3 +11,26 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+from typing import Iterator
+
+from flax import nnx
+
+
+class JaxModule(nnx.Module):
+    """Base module for JAX layers, extending flax.nnx.Module.
+    """
+
+    def named_parameters(self,
+                         prefix: str = "") -> Iterator[tuple[str, nnx.Param]]:
+        """Yields the named parameters of the module."""
+        params = nnx.state(self, nnx.Param)
+
+        def _traverse_params(params, path=()):
+            if hasattr(params, 'items'):
+                for name, value in params.items():
+                    yield from _traverse_params(value, path + (str(name), ))
+            else:
+                yield ".".join(path), params
+
+        yield from _traverse_params(params, path=(prefix, ) if prefix else ())

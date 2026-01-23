@@ -26,25 +26,33 @@ RUN apt-get update && apt-get install -y \
 
 # Install tpu_inference
 WORKDIR /workspace/tpu_inference
+COPY requirements.txt .
+RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt --retries 3
 COPY requirements_benchmarking.txt .
 # These are needed for the E2E benchmarking tests (i.e. tests/e2e/benchmarking/mlperf.sh)
 RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements_benchmarking.txt --retries 3
+# Install test requirements
+COPY requirements_test.txt .
+RUN  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then \
+        pip install -r requirements_test.txt --retries 3; \
+    fi
+# TODO (jacobplatin): remove when v7x is supported in JAX/Libtpu officially
 COPY requirements_v7x.txt .
 RUN --mount=type=cache,target=/root/.cache/pip if [ "$IS_FOR_V7X" = "true" ]; then \
         pip install -r requirements_v7x.txt; \
     fi
-# Install test requirements
-COPY requirements_test.txt .
-Run  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then \
-        pip install -r requirements_test.txt --retries 3; \
-    fi
 COPY . .
+# Build tpu_inference
+RUN python3 -m pip install build
+RUN TPU_INFERENCE_VERSION=$(date -u +%Y%m%d) && \
+    echo $TPU_INFERENCE_VERSION > /tmp/version.txt && \
+    VLLM_VERSION_OVERRIDE=${TPU_INFERENCE_VERSION} python3 -m build
 
 # Build vllm-tpu wheel
 WORKDIR /workspace
 ARG VLLM_COMMIT_HASH
-RUN TPU_INFERENCE_VERSION=$(pip index versions tpu-inference --pre 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.dev[0-9]+" | head -n 1) && VLLM_TPU_VERSION=${TPU_INFERENCE_VERSION} && \
-    bash tpu_inference/.buildkite/scripts/build_vllm_tpu.sh ${TPU_INFERENCE_VERSION} ${VLLM_TPU_VERSION} ${VLLM_COMMIT_HASH}
+RUN TPU_INFERENCE_VERSION=$(cat /tmp/version.txt) && VLLM_TPU_VERSION=${TPU_INFERENCE_VERSION} && \
+    bash tpu_inference/.buildkite/scripts/build_vllm_tpu.sh --local "${TPU_INFERENCE_VERSION}" "${VLLM_TPU_VERSION}" "${VLLM_COMMIT_HASH}"
 
 # Install vllm-tpu wheel
 RUN pip install --no-cache-dir vllm/dist/*.whl

@@ -1,4 +1,3 @@
-#!/bin/bash
 # Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,12 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Exit on error, exit on unset variable, fail on pipe errors.
-set -euo pipefail
+from abc import ABC, abstractmethod
+from typing import Optional
 
-# Build vllm-tpu with local tpu-inference (using docker/Dockerfile.pypi instead of docker/Dockerfile).
-export RUN_WITH_PYPI="true"
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
+from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 
-# shellcheck disable=SC1091
-source "$SCRIPT_DIR/run_in_docker.sh"
+
+class QuantizationConfig(ABC):
+
+    @abstractmethod
+    def get_quant_method(self, layer: JaxModule,
+                         prefix: str) -> Optional[QuantizeMethodBase]:
+        raise NotImplementedError
