@@ -508,6 +508,26 @@ def fused_moe_func(
             is_last_gmm=True,
             mesh=mesh,
         )
+
+        # On TP, the unsort / summing topk are handled before all-reduce
+        # So it is not needed here.
+        def _finalize_output(x_local, topk_argsort_revert_indices_local,
+                             topk_weights_local):
+            x_local = x_local[topk_argsort_revert_indices_local].reshape(
+                -1, topk, padded_hidden_size)
+            x_local = x_local * jnp.expand_dims(topk_weights_local, axis=-1)
+            x_local = x_local.sum(axis=-2)
+            return x_local
+
+        x = jax.shard_map(
+            _finalize_output,
+            mesh=mesh,
+            in_specs=(P(ShardingAxisName.MLP_DATA,
+                        None), P(ShardingAxisName.MLP_DATA),
+                      P(ShardingAxisName.MLP_DATA, None)),
+            out_specs=(P(ShardingAxisName.ATTN_DATA, None)),
+            check_vma=False,
+        )(x, topk_argsort_revert_indices, topk_weights)
     else:
         x1, x2 = tensor_sharded_gmm_merged_column_parallel(
             x,
