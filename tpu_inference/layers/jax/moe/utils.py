@@ -140,9 +140,9 @@ def local_permute_fn(inputs,
     """Stateless local permutation logic."""
     # global_group_sizes: (tokens parallelism, num_total_experts)
     # all_shard_local_sizes: (tokens parallelism, num local experts in the shard)
+    start_index = shard_index * local_expert_size
     all_shard_local_sizes = jax.lax.dynamic_slice_in_dim(global_group_sizes,
-                                                         shard_index *
-                                                         local_expert_size,
+                                                         start_index,
                                                          local_expert_size,
                                                          axis=1)
     local_sizes = all_shard_local_sizes.reshape(-1)
@@ -248,7 +248,8 @@ def gmm_fn(inputs, kernel, group_sizes, tile_size, moe_backend, dtype,
         inputs = jnp.pad(inputs, ((0, pad_amount), (0, 0)))
 
     if moe_backend == MoEBackend.MEGABLX_GMM:
-        m, _, k, n = inputs.shape[0], *kernel.shape
+        m = inputs.shape[0]
+        _, k, n = kernel.shape
         tm = round_up_to_multiple_of_128_within_limit(m, 512)
         tk = round_up_to_multiple_of_128_within_limit(k, 2048)
         tn = round_up_to_multiple_of_128_within_limit(n, 2048)
