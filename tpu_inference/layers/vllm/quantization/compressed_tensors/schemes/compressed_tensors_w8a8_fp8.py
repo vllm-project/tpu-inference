@@ -25,15 +25,19 @@ from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import \
     CompressedTensorsW8A8Fp8
+from vllm.model_executor.layers.quantization.utils.fp8_utils import \
+    W8A8BlockFp8LinearOp
+from vllm.model_executor.layers.quantization.utils.quant_utils import \
+    GroupShape
 
+from tpu_inference.layers.common.process_weights.linear_weights import (
+    LinearWeights, process_linear_weights, shard_linear_weights,
+    to_parameter_list)
 from tpu_inference.layers.common.quantization import (dequantize_tensor,
                                                       quantize_tensor)
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
 from tpu_inference.layers.vllm.linear import sharded_quantized_matmul
-from tpu_inference.layers.vllm.process_weights.linear_weights import (
-    LinearWeights, process_linear_weights, shard_linear_weights,
-    to_parameter_list)
 from tpu_inference.layers.vllm.quantization.configs import \
     VllmQuantLinearConfig
 from tpu_inference.logger import init_logger
@@ -51,7 +55,21 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
         is_static_input_scheme: bool,
         linear_config: VllmQuantLinearConfig,
     ):
-        super().__init__(weight_quant, is_static_input_scheme)
+        self.weight_quant = weight_quant
+        self.strategy = weight_quant.strategy
+        self.out_dtype = torch.get_default_dtype()
+        self.is_static_input_scheme = is_static_input_scheme
+        self.weight_block_size = self.weight_quant.block_structure
+
+        if self.weight_block_size is not None:
+            assert not self.is_static_input_scheme
+            self.act_q_group_shape = GroupShape(1, self.weight_block_size[0])
+            self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
+                weight_group_shape=GroupShape(*self.weight_block_size),
+                act_quant_group_shape=self.act_q_group_shape,
+                cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
+                use_aiter_and_is_supported=self.use_aiter_and_is_supported,
+            )
 
         self.linear_config = linear_config
 

@@ -30,7 +30,7 @@ from tpu_inference.utils import device_array
 logger = init_logger(__name__)
 
 QUANTIZATION_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "configs")
-DEFAULT_NUM_BLOCKS_FOR_JIT_KV_CACHE = 2000
+DEFAULT_NUM_BLOCKS_FOR_JIT_KV_CACHE = 2048
 DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS = 512
 DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS = 256
 DEFAULT_MAX_NUM_BLOCKS_PER_REQ = 16
@@ -511,11 +511,17 @@ def get_default_qwix_quantization_config(
             for rule in config["qwix"]["rules"]:
                 if "tile_size" in rule:
                     rule["tile_size"] = tile_size
+                # TODO (jacobplatin): need to make this MUCH more robust, but basically the TPU-friendly checkpoints
+                # always (for now) keep FP8 for the attention layers but can be FP4 or FP8 for the MLP layers
+                mlp_dtype = hf_quant_config.get("tpu_settings",
+                                                {}).get("mlp_dtype", None)
+                if mlp_dtype is not None and rule[
+                        "weight_qtype"] == "float4_e2m1fn":
+                    rule["weight_qtype"] = mlp_dtype
         else:
             raise ValueError(
                 f"Invalid weight_block_size config: {block_size}, expected a list/tuple of length 2"
             )
-
         return config
     elif model_type == "llama4" and quant_method == "compressed-tensors":
         return DEFAULT_LLAMA4_FP8_CONFIG
@@ -675,7 +681,8 @@ def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
     logger.info("Done initializing Qwix-quantized model with random weights")
 
 
-def manually_quantize_qwix_weight(name: str, weight: jax.Array, qtype: jnp.dtype,
+def manually_quantize_qwix_weight(name: str, weight: jax.Array,
+                                  qtype: jnp.dtype,
                                   channelwise_axes: List[int],
                                   tiled_axes: dict,
                                   calibration_method: str) -> QArray:

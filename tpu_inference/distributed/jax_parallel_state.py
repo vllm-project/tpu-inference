@@ -61,6 +61,7 @@ def init_pp_distributed_environment(ip: str, rank: int, world_size: int,
                                     device: Any, need_pp: bool):
     global _PP
     _PP = GroupCoordinator(rank, world_size)
+
     if need_pp:
         port_number = BASE_JAX_PORT + rank
         server_address = f"{ip}:{port_number}"

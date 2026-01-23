@@ -1,4 +1,3 @@
-#!/bin/bash
 # Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,12 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Exit on error, exit on unset variable, fail on pipe errors.
-set -euo pipefail
+from jax.sharding import PartitionSpec as P
 
-# Build vllm-tpu with local tpu-inference (using docker/Dockerfile.pypi instead of docker/Dockerfile).
-export RUN_WITH_PYPI="true"
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 
-# shellcheck disable=SC1091
-source "$SCRIPT_DIR/run_in_docker.sh"
+class QuantLinearConfig:
+
+    def __init__(self, *, enable_sp: bool, output_sizes: list[int]):
+        self.output_sizes = output_sizes
+        self.weight_sharding = P(None, None)
+        self.fuse_matmuls = True
+        self.enable_sp = enable_sp
+        self.input_sharding = None
+        self.output_sharding = None
+
+        self.bias_sharding = P(self.weight_sharding[0])
