@@ -49,6 +49,7 @@ def _swigluoai(x1: jax.Array,
     return gated_activation * (x2 + 1)
 
 
+# TODO (jacobplatin): make this more generic
 def round_up_to_multiple_of_128_within_limit(x: int, limit: int) -> int:
     """
     Rounds the given integer `x` up to the nearest multiple of 128, without
