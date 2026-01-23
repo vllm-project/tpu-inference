@@ -368,7 +368,6 @@ class MoE(nnx.Module):
             self.expert_axis_name is not None) and (self.expert_axis_name
                                                     == self.data_axis_name)
 
-
     def _process_weight_for_qwix(self,
                                  name,
                                  weight_param,
