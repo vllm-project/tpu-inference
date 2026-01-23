@@ -47,10 +47,10 @@ class UnquantizedLinearMethod:
 
     def _apply_split(self,
                      x_jax: jax.Array,
-                     weight_generator: Sequence[jax.Array],
+                     weights: Sequence[jax.Array],
                      bias_jax: Optional[jax.Array] = None) -> jax.Array:
         outs = []
-        for i, weight_jax in enumerate(weight_generator):
+        for i, weight_jax in enumerate(weights):
             out = jnp.einsum("mn,pn->mp", x_jax, weight_jax)
             if bias_jax is not None:
                 out += bias_jax[i]
