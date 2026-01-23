@@ -34,7 +34,8 @@ from tpu_inference.layers.common.process_weights.linear_weights import (
     to_parameter_list)
 from tpu_inference.layers.common.quant_methods import (UNQUANTIZED,
                                                        get_tpu_quant_method)
-from tpu_inference.layers.common.quantization import unquantized as jax_common
+from tpu_inference.layers.common.quantization import \
+    unquantized as common_unquantized
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.fused_moe import (FusedMoEBackend,
                                                  fused_moe_apply,
@@ -88,7 +89,7 @@ class VllmUnquantizedConfig(QuantizationConfig, VllmQuantConfig):
 
 
 class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
-                                  jax_common.UnquantizedLinearMethod):
+                                  common_unquantized.UnquantizedLinearMethod):
 
     def __init__(self, linear_config: VllmQuantLinearConfig):
         super().__init__(linear_config)
@@ -157,14 +158,10 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
                 out_jax = self._apply_fused(x_jax, weight_jax, bias_jax)
                 out: torch.Tensor = torch_view(out_jax)
             else:
+                assert isinstance(layer.weight, torch.nn.ParameterList)
 
-                def weight_enumerate():
-                    assert isinstance(layer.weight, torch.nn.ParameterList)
-                    for i, w in enumerate(layer.weight):
-                        yield i, jax_view(w)
-
-                out_jax = self._apply_split(x_jax, weight_enumerate(),
-                                            bias_jax)
+                out_jax = self._apply_split(
+                    x_jax, [jax_view(w) for w in layer.weight], bias_jax)
                 out: torch.Tensor = torch_view(out_jax)
 
             if out_sharding := self.linear_config.get_output_sharding(out):

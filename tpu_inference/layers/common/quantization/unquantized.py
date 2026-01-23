@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Generator, Optional
+from typing import Optional, Sequence
 
 import jax
 from jax import numpy as jnp
@@ -47,12 +47,10 @@ class UnquantizedLinearMethod:
 
     def _apply_split(self,
                      x_jax: jax.Array,
-                     weight_generator: Generator[tuple[int, jax.Array], None,
-                                                 None],
+                     weight_generator: Sequence[jax.Array],
                      bias_jax: Optional[jax.Array] = None) -> jax.Array:
-
         outs = []
-        for i, weight_jax in weight_generator:
+        for i, weight_jax in enumerate(weight_generator):
             out = jnp.einsum("mn,pn->mp", x_jax, weight_jax)
             if bias_jax is not None:
                 out += bias_jax[i]
