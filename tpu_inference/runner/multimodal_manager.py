@@ -139,7 +139,8 @@ class MultiModalManager:
                             torch.float32).numpy().astype(jnp.bfloat16)
                     else:
                         batched_mm_inputs[key] = value.numpy()
-            batched_mm_inputs.pop('image_grid_thw')
+            if 'image_grid_thw' in batched_mm_inputs:
+                batched_mm_inputs.pop('image_grid_thw')
 
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
@@ -167,10 +168,28 @@ class MultiModalManager:
             if req_id not in self.runner.encoder_cache:
                 self.runner.encoder_cache[req_id] = {}
 
-            self.runner.encoder_cache[mm_hash] = scatter_mm_placeholders(
-                output,
-                is_embed=pos_info.is_embed,
-            )
+            if isinstance(
+                    output, (jax.Array, jnp.ndarray)
+            ) and not image_grid_thw:  #Non-video multimodal model logic (image_grid_thw is specific to MM models that take video as input)
+                # JAX specific scatter logic (avoids .new_full and torch-specific indexing)
+                mask = jnp.array(pos_info.is_embed.cpu().numpy())
+                num_placeholders = mask.shape[0]
+                embed_dim = output.shape[-1]
+
+                # Create base filled with NaN to match vLLM standard behavior
+                placeholders = jnp.full((num_placeholders, embed_dim),
+                                        jnp.nan,
+                                        dtype=output.dtype)
+
+                # JAX arrays are immutable, use .at[...].set(...)
+                self.runner.encoder_cache[mm_hash] = placeholders.at[mask].set(
+                    output)
+            else:
+                # Default vLLM behavior for PyTorch models
+                self.runner.encoder_cache[mm_hash] = scatter_mm_placeholders(
+                    output,
+                    is_embed=pos_info.is_embed,
+                )
 
     def gather_mm_embeddings(self, scheduler_output: "VllmSchedulerOutput",
                              target_pad_len: int) -> list[jax.Array]:
@@ -207,10 +226,20 @@ class MultiModalManager:
                 encoder_output = self.runner.encoder_cache.get(mm_hash, None)
                 assert encoder_output is not None,\
                       f"Encoder cache miss for {mm_hash}."
-                encoder_output = self.runner.encoder_cache[mm_hash]
+
+                if hasattr(encoder_output, 'new_full'):
+                    import torch
+                    encoder_output_np = encoder_output.to(
+                        torch.float32).cpu().numpy()
+                    encoder_output = jnp.array(encoder_output_np,
+                                               dtype=jnp.bfloat16)
 
                 if (is_embed := pos_info.is_embed) is not None:
                     is_embed = is_embed[start_idx:end_idx]
+
+                    if isinstance(encoder_output, jax.Array) and hasattr(
+                            is_embed, 'cpu'):
+                        is_embed = is_embed.cpu().numpy()
 
                 mm_embeds_item = gather_mm_placeholders(
                     encoder_output[start_idx:end_idx],

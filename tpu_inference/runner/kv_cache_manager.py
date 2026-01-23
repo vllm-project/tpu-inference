@@ -21,10 +21,10 @@ import numpy as np
 import vllm.envs as envs
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.ops.mappings import t2j_dtype
+from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.config import get_layers_from_vllm_config
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backend import AttentionType
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec, MLAAttentionSpec,
                                         SlidingWindowSpec)
@@ -82,14 +82,12 @@ class KVCacheManager:
                                          num_kv_heads=num_kv_heads,
                                          head_size=head_size,
                                          dtype=self.runner.kv_cache_dtype,
-                                         sliding_window=sliding_window,
-                                         page_size_padded=page_size_bytes)
+                                         sliding_window=sliding_window)
             else:
                 return FullAttentionSpec(block_size=block_size,
                                          num_kv_heads=num_kv_heads,
                                          head_size=head_size,
-                                         dtype=self.runner.kv_cache_dtype,
-                                         page_size_padded=page_size_bytes)
+                                         dtype=self.runner.kv_cache_dtype)
 
     def get_kv_cache_spec(self):
         # TODO(xiang): this hack tricks engine core to init successfully
