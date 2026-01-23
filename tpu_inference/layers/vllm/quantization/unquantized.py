@@ -160,8 +160,8 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
             else:
                 assert isinstance(layer.weight, torch.nn.ParameterList)
 
-                out_jax = self._apply_split(
-                    x_jax, [jax_view(w) for w in layer.weight], bias_jax)
+                out_jax = self._apply_split(x_jax, jax_view(layer.weight),
+                                            bias_jax)
                 out: torch.Tensor = torch_view(out_jax)
 
             if out_sharding := self.linear_config.get_output_sharding(out):
