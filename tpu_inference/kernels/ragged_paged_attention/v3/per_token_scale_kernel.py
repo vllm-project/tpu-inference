@@ -17,6 +17,7 @@ specifically designed for TPU and compatible with a wide range of model
 specifications. It supports mixed prefill and decoding, enhancing throughput
 during inference.
 """
+import functools
 
 import jax
 import jax.numpy as jnp
@@ -27,6 +28,195 @@ from tpu_inference.kernels.ragged_paged_attention.v3.util import (
 DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
 
 DEFAULT_VMEM_LIMIT_BYTES = 100 * 1024 * 1024
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=(
+        "max_q_len",
+        "sm_scale",
+        "sliding_window",
+        "soft_cap",
+        "mask_value",
+        "q_scale",
+        "k_scale",
+        "v_scale",
+    ),
+)
+def ref_ragged_paged_attention_pate(
+    queries: jax.Array,
+    keys: jax.Array,
+    values: jax.Array,
+    kv_cache: jax.Array,
+    kv_lens: jax.Array,
+    page_indices: jax.Array,
+    cu_q_lens: jax.Array,
+    distribution: jax.Array,
+    *,
+    max_q_len: int | None = None,
+    sm_scale: float = 1.0,
+    sliding_window: int | None = None,
+    soft_cap: float | None = None,
+    mask_value: float | None = DEFAULT_MASK_VALUE,
+    q_scale: float | None = None,
+    k_scale: float | None = None,
+    v_scale: float | None = None,
+):
+    if mask_value is None:
+        mask_value = DEFAULT_MASK_VALUE
+
+    if max_q_len is None:
+        max_q_len = queries.shape[0]
+
+    # Initialization
+    actual_head_dim = queries.shape[2]
+    actual_num_q_heads = queries.shape[1]
+    actual_num_kv_heads = keys.shape[1]
+
+    pad_width = ((0, max_q_len), (0, 0), (0, 0))
+    queries_padded = jnp.pad(queries, pad_width)
+
+    merged_kv = merge_kv(keys, values)
+    merged_kv_padded = jnp.pad(merged_kv,
+                               ((0, max_q_len), (0, 0), (0, 0), (0, 0)))
+
+    _, page_size, num_kv_heads_x2_per_kv_packing, kv_packing, head_dim = (
+        kv_cache.shape)
+    num_kv_heads_x2 = num_kv_heads_x2_per_kv_packing * kv_packing
+    actual_num_q_heads_per_kv_head = actual_num_q_heads // actual_num_kv_heads
+    max_num_seqs = kv_lens.shape[0]
+    num_page_indices = page_indices.shape[0]
+    pages_per_seq = num_page_indices // max_num_seqs
+
+    output_buffer = jnp.zeros(
+        (queries.shape[0] + max_q_len, actual_num_q_heads, actual_head_dim),
+        dtype=queries.dtype,
+    )
+
+    # "Kernel" to run via fori loop
+    def body_fn(i, val):
+        curr_kv_cache, curr_outputs = val
+
+        q_start = cu_q_lens[i]
+        q_end = cu_q_lens[i + 1]
+        actual_q_len = q_end - q_start
+        kv_len = kv_lens[i]
+
+        q_chunk = jax.lax.dynamic_slice_in_dim(queries_padded,
+                                               q_start,
+                                               max_q_len,
+                                               axis=0)
+        q_chunk_sliced = q_chunk[:, :, :actual_head_dim]
+        new_kv_chunk = jax.lax.dynamic_slice_in_dim(merged_kv_padded,
+                                                    q_start,
+                                                    max_q_len,
+                                                    axis=0)
+
+        indices_start = i * pages_per_seq
+        seq_page_indices = jax.lax.dynamic_slice(page_indices,
+                                                 (indices_start, ),
+                                                 (pages_per_seq, ))
+        gathered_kv = curr_kv_cache[seq_page_indices]
+        gathered_shape = gathered_kv.shape
+        gathered_kv_flat = gathered_kv.reshape(-1, *gathered_shape[-3:])
+
+        chunk_mask = jnp.arange(max_q_len) < actual_q_len
+        chunk_mask_expanded = chunk_mask[:, None, None, None]
+        new_kv_chunk_clean = jnp.where(chunk_mask_expanded, new_kv_chunk, 0.0)
+
+        update_start_idx = kv_len - actual_q_len
+        scatter_indices = update_start_idx + jnp.arange(max_q_len)
+
+        safe_scatter_indices = jnp.where(
+            chunk_mask,
+            scatter_indices,
+            gathered_kv_flat.shape[0] + 1  # Force OOB
+        )
+
+        gathered_kv_flat = gathered_kv_flat.at[safe_scatter_indices].set(
+            new_kv_chunk_clean, mode="drop")
+
+        curr_kv_cache = curr_kv_cache.at[seq_page_indices].set(
+            gathered_kv_flat.reshape(gathered_shape))
+
+        # Prepare K/V
+        kv_reshaped = gathered_kv_flat.reshape(-1, num_kv_heads_x2, head_dim)
+        kv_reshaped = kv_reshaped[:, :actual_num_kv_heads * 2, :]
+        kv_reshaped = kv_reshaped.reshape(-1, actual_num_kv_heads,
+                                          head_dim * 2)
+        k = kv_reshaped[:, :, :head_dim][:, :, :actual_head_dim]
+        v = kv_reshaped[:, :, head_dim:][:, :, :actual_head_dim]
+        k = jnp.nan_to_num(k, nan=0.0)
+        v = jnp.nan_to_num(v, nan=0.0)
+        k = jnp.repeat(k, actual_num_q_heads_per_kv_head, axis=1)
+        v = jnp.repeat(v, actual_num_q_heads_per_kv_head, axis=1)
+
+        # Prepare Q
+        q_curr = q_chunk_sliced
+        if q_scale is not None:
+            q_curr = q_curr / q_scale
+            if jnp.issubdtype(k.dtype, jnp.floating):
+                dtype_info = jnp.finfo(k.dtype)
+                minval = float(dtype_info.min)
+                maxval = float(dtype_info.max)
+                q_curr = jnp.clip(q_curr, min=minval, max=maxval)
+            q_curr = q_curr.astype(k.dtype)
+
+        # Attention
+        attn = jnp.einsum("qhd,khd->hqk",
+                          q_curr,
+                          k,
+                          preferred_element_type=jnp.float32)
+        attn *= sm_scale
+        if k_scale is not None:
+            attn *= k_scale
+        if q_scale is not None:
+            attn *= q_scale
+
+        # Masking
+        q_idxs = jnp.arange(max_q_len)
+        kv_idxs = jnp.arange(k.shape[0])
+
+        q_span = (kv_len - actual_q_len) + q_idxs[:, None]
+        kv_span = kv_idxs[None, :]
+
+        causal_mask = q_span >= kv_span
+        valid_q_mask = q_idxs[:, None] < actual_q_len
+        valid_k_mask = kv_idxs[None, :] < kv_len
+
+        mask = causal_mask & valid_q_mask & valid_k_mask
+        if sliding_window is not None:
+            mask = mask & (q_span - sliding_window < kv_span)
+
+        if soft_cap is not None:
+            attn = soft_cap * jnp.tanh(attn / soft_cap)
+
+        attn = jnp.where(mask, attn, mask_value)
+        attn = jax.nn.softmax(attn, axis=-1).astype(v.dtype)
+
+        out_chunk = jnp.einsum("hqk,khd->qhd", attn, v).astype(queries.dtype)
+        if v_scale is not None:
+            out_chunk *= v_scale
+
+        # Zero out invalid q rows in output
+        out_chunk = jnp.where(q_idxs[:, None, None] < actual_q_len, out_chunk,
+                              0.0)
+
+        # Update output buffer
+        curr_outputs = jax.lax.dynamic_update_slice_in_dim(curr_outputs,
+                                                           out_chunk,
+                                                           q_start,
+                                                           axis=0)
+
+        return curr_kv_cache, curr_outputs
+
+    num_seqs = distribution[-1]
+    init_val = (kv_cache, output_buffer)
+    final_kv_cache, final_outputs = jax.lax.fori_loop(0, num_seqs, body_fn,
+                                                      init_val)
+
+    # Remove padding before returning
+    return final_outputs[:queries.shape[0]], final_kv_cache
 
 
 def quantize_kv_per_token(key: jax.Array, value: jax.Array,
@@ -106,381 +296,315 @@ def merge_kv(
     )
     return kv
 
-def ref_ragged_paged_attention_per_token(
-    queries: jax.
-    Array,  # [max_num_tokens, actual_num_q_heads, actual_head_dim]
-    keys: jax.Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim]
-    values: jax.
-    Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim]
-    kv_cache: jax.
-    Array,  # [total_num_pages, page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
-    kv_lens: jax.Array,  # i32[max_num_seqs]
-    page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
-    cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
-    distribution: jax.Array,  # i32[3]
-    k_scale_cache: jax.Array,  # [total_num_pages, page_size, num_kv_heads, 1]
-    v_scale_cache: jax.Array,  # [total_num_pages, page_size, num_kv_heads, 1]
-    *,
-    sm_scale: float = 1.0,
-    sliding_window: int | None = None,
-    soft_cap: float | None = None,
-    mask_value: float | None = None,
-):
-    if mask_value is None:
-        mask_value = -1e30
 
-    # --- Static Shape Analysis ---
-    actual_head_dim = queries.shape[2]
-    actual_num_q_heads = queries.shape[1]
-    actual_num_kv_heads = keys.shape[1]
-
-    total_num_pages, page_size, num_kv_heads_x2_pk, kv_packing, head_dim = kv_cache.shape
-    num_kv_heads_x2 = num_kv_heads_x2_pk * kv_packing
-
-    max_num_seqs = kv_lens.shape[0]
-    num_page_indices = page_indices.shape[0]
-
-    # Calculate pages per sequence (Must be a static property of input shapes)
-    # This assumes page_indices is rectangular [sequences, pages_per_seq] flattened
-    pages_per_seq = num_page_indices // max_num_seqs
-
-    # Define a static buffer size for operations inside the loop.
-    max_ctx_len = 16
-
-    actual_num_q_heads_per_kv_head = actual_num_q_heads // actual_num_kv_heads
-
-    # --- Pre-processing ---
-    # Performed on the full batch once
-    k_q, v_q, k_scale, v_scale = quantize_kv_per_token(keys, values,
-                                                       kv_cache.dtype)
-    merged_kv = merge_kv(k_q, v_q)
-
-    # --- JIT-compatible Loop Body ---
-    def body_fn(i, val):
-        result, kv_cache_state, k_scale_cache_state, v_scale_cache_state = val
-
-        # 1. Fetch Dynamic Bounds
-        q_start = cu_q_lens[i]
-        q_end = cu_q_lens[i + 1]
-        q_len = q_end - q_start  # Dynamic
-
-        kv_len = kv_lens[i]  # Dynamic
-
-        # 2. Get Page Indices (Static Size Slice)
-        indices_start = i * pages_per_seq
-        # Use dynamic_slice with STATIC slice size (pages_per_seq)
-        indices = jax.lax.dynamic_slice(page_indices, (indices_start, ),
-                                        (pages_per_seq, ))
-
-        # 3. Gather KV Cache
-        # Since 'indices' has a static shape, this gather results in a static shape
-        gathered_kv = kv_cache_state[indices]
-        g_shape = gathered_kv.shape
-        gathered_kv_flat = gathered_kv.reshape(
-            -1, *g_shape[-3:])  # [max_ctx_len, ...]
-
-        # 4. Update KV Cache (Using masking instead of slicing)
-        # We want to write merged_kv[q_start : q_start+q_len] into gathered_kv_flat at offset (kv_len - q_len)
-        write_start = kv_len - q_len
-
-        # Extract a window of max_ctx_len from merged_kv
-        # This pads with zeros if we go off the end of merged_kv, which is fine as those vals are masked out later
-        new_kv_window = jax.lax.dynamic_slice(
-            merged_kv, (q_start, 0, 0, 0), (max_ctx_len, *merged_kv.shape[1:]))
-
-        # Use dynamic_update_slice to insert the new data.
-        # It handles cropping automatically if the write goes past the end of gathered_kv_flat.
-        # This is safe because indices >= kv_len in gathered_kv_flat are garbage/unused space.
-        gathered_kv_flat = jax.lax.dynamic_update_slice(
-            gathered_kv_flat, new_kv_window, (write_start, 0, 0, 0))
-
-        # Scatter update back to global kv_cache
-        kv_cache_state = kv_cache_state.at[indices].set(
-            gathered_kv_flat.reshape(g_shape))
-
-        # 5. Update Scales (Same logic as KV)
-        # K Scale
-        gathered_k_s = k_scale_cache_state[indices]
-        gk_shape = gathered_k_s.shape
-        gathered_k_s_flat = gathered_k_s.reshape(-1, *gk_shape[-2:])
-
-        new_k_s_window = jax.lax.dynamic_slice(
-            k_scale, (q_start, 0, 0), (max_ctx_len, *k_scale.shape[1:]))
-        gathered_k_s_flat = jax.lax.dynamic_update_slice(
-            gathered_k_s_flat, new_k_s_window, (write_start, 0, 0))
-        k_scale_cache_state = k_scale_cache_state.at[indices].set(
-            gathered_k_s_flat.reshape(gk_shape))
-
-        # V Scale
-        gathered_v_s = v_scale_cache_state[indices]
-        gv_shape = gathered_v_s.shape
-        gathered_v_s_flat = gathered_v_s.reshape(-1, *gv_shape[-2:])
-
-        new_v_s_window = jax.lax.dynamic_slice(
-            v_scale, (q_start, 0, 0), (max_ctx_len, *v_scale.shape[1:]))
-        gathered_v_s_flat = jax.lax.dynamic_update_slice(
-            gathered_v_s_flat, new_v_s_window, (write_start, 0, 0))
-        v_scale_cache_state = v_scale_cache_state.at[indices].set(
-            gathered_v_s_flat.reshape(gv_shape))
-
-        # 6. Prepare Attention Inputs (Local Dequantization)
-        # Q: Fetch static window from global
-        q_window = jax.lax.dynamic_slice(
-            queries, (q_start, 0, 0),
-            (max_ctx_len, actual_num_q_heads, actual_head_dim))
-
-        # K, V: From local gathered cache
-        kv_re = gathered_kv_flat.reshape(
-            -1, num_kv_heads_x2,
-            head_dim)[:, :actual_num_kv_heads * 2, :].reshape(
-                -1, actual_num_kv_heads, head_dim * 2)
-        k_local = kv_re[:, :, :head_dim][:, :, :actual_head_dim]
-        v_local = kv_re[:, :, head_dim:][:, :, :actual_head_dim]
-
-        k_local = jnp.repeat(k_local, actual_num_q_heads_per_kv_head, axis=1)
-        v_local = jnp.repeat(v_local, actual_num_q_heads_per_kv_head, axis=1)
-
-        ks_active = jnp.repeat(gathered_k_s_flat.reshape(
-            -1, actual_num_kv_heads, 1),
-                               actual_num_q_heads_per_kv_head,
-                               axis=1)
-        vs_active = jnp.repeat(gathered_v_s_flat.reshape(
-            -1, actual_num_kv_heads, 1),
-                               actual_num_q_heads_per_kv_head,
-                               axis=1)
-        # 7. Compute Attention
-        attn = jnp.einsum("qhd,khd->hqk",
-                          q_window,
-                          k_local,
-                          preferred_element_type=jnp.float32)
-
-        k_scales_T = jnp.transpose(ks_active, (1, 2, 0))
-        attn = attn * k_scales_T * sm_scale
-
-        # 8. Masking
-        idx_q = jnp.arange(max_ctx_len)[None, :, None]  # [1, Q, 1]
-        context_capacity = pages_per_seq * page_size
-        idx_k = jnp.arange(context_capacity)[None, None, :]  # [1, 1, 1024]
-
-        q_logical = (kv_len - q_len) + idx_q
-        k_logical = idx_k
-
-        # Mask 1: Valid lengths
-        valid_mask = (idx_q < q_len) & (idx_k < kv_len)
-
-        # Mask 2: Causal
-        causal_mask = q_logical >= k_logical
-        mask = ~causal_mask
-
-        if sliding_window is not None:
-            mask = mask | (q_logical - sliding_window >= k_logical)
-
-        final_mask = mask | (~valid_mask)
-
-        if soft_cap is not None:
-            attn = soft_cap * jnp.tanh(attn / soft_cap)
-
-        attn = jnp.where(final_mask, mask_value, attn)
-        attn = jax.nn.softmax(attn, axis=-1).astype(v_local.dtype)
-
-        v_scaled = v_local.astype(jnp.float32) * vs_active
-        v_scaled = v_scaled.astype(attn.dtype)
-
-        out_padded = jnp.einsum("hqk,khd->qhd", attn,
-                                v_scaled).astype(queries.dtype)
-
-        # 9. Write Result
-        # We have out_padded [max_ctx_len, H, D], but only first q_len rows are valid.
-        # We need to write this to result[q_start:].
-        # To avoid overwriting other sequences in the 'result' array, we must read-mix-write.
-
-        # Read current result at target location
-        current_res_slice = jax.lax.dynamic_slice(
-            result, (q_start, 0, 0),
-            (max_ctx_len, actual_num_q_heads, actual_head_dim))
-
-        # Mix
-        update_mask = jnp.arange(max_ctx_len)[:, None, None] < q_len
-        mixed_out = jnp.where(update_mask, out_padded, current_res_slice)
-
-        # Write back mixed result
-        result = jax.lax.dynamic_update_slice(result, mixed_out,
-                                              (q_start, 0, 0))
-
-        return result, kv_cache_state, k_scale_cache_state, v_scale_cache_state
-
-    # Execute Loop
-    init_state = (queries, kv_cache, k_scale_cache, v_scale_cache)
-    final_state = jax.lax.fori_loop(0, distribution[-1], body_fn, init_state)
-
-    return final_state
-
-
-
-@jax.jit(static_argnames=("actual_num_q_heads_per_kv_head"))
-def _quantized_attn_block(
-    q,          # [q_len, num_q_heads, head_dim]
-    k,          # [kv_len, num_kv_heads, head_dim] (Int or Float)
-    v,          # [kv_len, num_kv_heads, head_dim] (Int or Float)
-    sm_scale,
-    q_scale,    # Scalar OR [q_len, num_q_heads, 1]
-    k_scale,    # Scalar OR [kv_len, num_kv_heads, 1]
-    v_scale,    # Scalar OR [kv_len, num_kv_heads, 1]
-    mask_value,
-    soft_cap,
-    sliding_window,
-    actual_num_q_heads_per_kv_head
-):
-    """
-    JIT-compiled inner block.
-    JAX broadcasting handles Scalar vs Vector scales automatically.
-    """
-
-    # 1. Dequantize / Scale Q
-    if q_scale is not None:
-        q = q * q_scale # Broadcasts if vector
-
-    # 2. Dequantize K (Lazy casting to float32 for compute)
-    # If k is int8/fp4, this cast + multiply handles the dequantization
-    # k = k.astype(jnp.float32)
-    if k_scale is not None:
-        k = k * k_scale # Broadcasts: [N, H, D] * [N, H, 1] or [N, H, D] * Scalar
-
-    # 3. Repeat K/V for GQA (Grouped Query Attention)
-    # k shape: [kv_len, kv_heads, dim] -> [kv_len, q_heads, dim]
-    k = jnp.repeat(k, actual_num_q_heads_per_kv_head, axis=1)
-
-    # 4. Attention Logits
-    # q: [q_len, H, D], k: [kv_len, H, D] -> [H, q_len, kv_len]
-    attn = jnp.einsum("qhd,khd->hqk", q, k, preferred_element_type=jnp.float32)
-    attn *= sm_scale
-
-    # 5. Masking
-    q_len = q.shape[0]
-    kv_len = k.shape[0]
-
-    # Causal / Sliding Window Mask logic
-    # Note: We rely on relative positions here.
-    # For exact causal masking in ragged, we usually rely on the loop providing
-    # valid q/k windows. Assuming standard causal setup:
-    q_idx = jnp.arange(q_len)[:, None]
-    k_idx = jnp.arange(kv_len)[None, :]
-    # Shift q_idx by (kv_len - q_len) to align with the end of the KV sequence
-    q_pos = q_idx + (kv_len - q_len)
-
-    mask = q_pos < k_idx # Causal mask
-    if sliding_window is not None:
-        mask = jnp.logical_or(mask, q_pos - sliding_window >= k_idx)
-
-    if soft_cap is not None:
-        attn = soft_cap * jnp.tanh(attn / soft_cap)
-
-    attn = jnp.where(mask, mask_value, attn)
-    attn_weights = jax.nn.softmax(attn, axis=-1).astype(v.dtype)
-
-    # 6. Dequantize V
-    # v = v.astype(jnp.float32)
-    if v_scale is not None:
-        v = v * v_scale # Broadcasts automatically
-
-    v = jnp.repeat(v, actual_num_q_heads_per_kv_head, axis=1)
-
-    # 7. Compute Output
-    # [H, q_len, kv_len] @ [kv_len, H, D] -> [q_len, H, D]
-    out = jnp.einsum("hqk,khd->qhd", attn_weights, v)
-
-    return out.astype(q.dtype)
-
-
-def ref_ragged_paged_attention_quantized(
+@functools.partial(
+    jax.jit,
+    static_argnames=(
+        "max_q_len",
+        "sm_scale",
+        "sliding_window",
+        "soft_cap",
+        "mask_value",
+        "q_scale",
+        "k_scale",
+        "v_scale",
+    ),
+)
+def ref_ragged_paged_attention_pate_per_token(
     queries: jax.Array,
-    keys: jax.Array,  # Source of K (can be quant or unquant)
-    values: jax.Array, # Source of V
+    keys: jax.Array,
+    values: jax.Array,
     kv_cache: jax.Array,
     kv_lens: jax.Array,
     page_indices: jax.Array,
     cu_q_lens: jax.Array,
     distribution: jax.Array,
+    k_scale_cache: jax.Array,  # Added argument
+    v_scale_cache: jax.Array,  # Added argument
     *,
+    max_q_len: int | None = None,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
     mask_value: float | None = DEFAULT_MASK_VALUE,
-    q_scale: jax.Array | float | None = None,
-    k_scale: jax.Array | float | None = None, # Can be Scalar or Array
-    v_scale: jax.Array | float | None = None, # Can be Scalar or Array
+    q_scale: float | None = None,
+    k_scale: float | None = None,
+    v_scale: float | None = None,
 ):
-    if mask_value is None: mask_value = DEFAULT_MASK_VALUE
+    if mask_value is None:
+        mask_value = DEFAULT_MASK_VALUE
 
-    # --- Setup Shapes ---
+    if max_q_len is None:
+        max_q_len = queries.shape[0]
+
+    # Initialization
     actual_head_dim = queries.shape[2]
     actual_num_q_heads = queries.shape[1]
     actual_num_kv_heads = keys.shape[1]
-    actual_num_q_heads_per_kv_head = actual_num_q_heads // actual_num_kv_heads
 
-    # 1. Merge KV for easier handling (Simulating the pre-fill/append)
-    # Note: In a real test, you might simply rely on kv_cache being pre-filled.
-    # This logic assumes we update the cache first, then attend.
-    merged_kv = merge_kv(keys, values)
+    pad_width = ((0, max_q_len), (0, 0), (0, 0))
+    queries_padded = jnp.pad(queries, pad_width)
 
-    # Extract Cache Layout info
-    _, page_size, num_kv_heads_x2_per_kv_packing, kv_packing, head_dim = kv_cache.shape
+    # 1. Quantize Keys/Values and extract per-token scales
+    # k_q, v_q: [max_num_tokens, actual_num_kv_heads, head_dim]
+    # k_scale_new, v_scale_new: [max_num_tokens, actual_num_kv_heads, 1]
+    k_q, v_q, k_scale_new, v_scale_new = quantize_kv_per_token(
+        keys, values, kv_cache.dtype)
+
+    merged_kv = merge_kv(k_q, v_q)
+
+    # Pad merged KV
+    merged_kv_padded = jnp.pad(merged_kv,
+                               ((0, max_q_len), (0, 0), (0, 0), (0, 0)))
+
+    # Pad Scales
+    # Shape: [N, H_kv, 1] -> Pad N dimension
+    scale_pad_width = ((0, max_q_len), (0, 0), (0, 0))
+    k_scale_padded = jnp.pad(k_scale_new, scale_pad_width)
+    v_scale_padded = jnp.pad(v_scale_new, scale_pad_width)
+
+    _, page_size, num_kv_heads_x2_per_kv_packing, kv_packing, head_dim = (
+        kv_cache.shape)
     num_kv_heads_x2 = num_kv_heads_x2_per_kv_packing * kv_packing
-
+    actual_num_q_heads_per_kv_head = actual_num_q_heads // actual_num_kv_heads
     max_num_seqs = kv_lens.shape[0]
-    pages_per_seq = page_indices.shape[0] // max_num_seqs
+    num_page_indices = page_indices.shape[0]
+    pages_per_seq = num_page_indices // max_num_seqs
 
-    result = queries
+    output_buffer = jnp.zeros(
+        (queries.shape[0] + max_q_len, actual_num_q_heads, actual_head_dim),
+        dtype=queries.dtype,
+    )
 
-    # 2. Iterate Sequences (Python Loop - Handles Raggedness)
-    for i in range(distribution[-1]):
+    # "Kernel" to run via fori loop
+    def body_fn(i, val):
+        # Unpack state, now including scale caches
+        curr_kv_cache, curr_outputs, curr_k_scale_cache, curr_v_scale_cache = val
+
         q_start = cu_q_lens[i]
         q_end = cu_q_lens[i + 1]
-        q_len = q_end - q_start
+        actual_q_len = q_end - q_start
         kv_len = kv_lens[i]
 
-        # -- Cache Update Logic (Standard) --
+        # ---------------------------------------------------------
+        # Slice Inputs (Q, KV, K_scale, V_scale)
+        # ---------------------------------------------------------
+        q_chunk = jax.lax.dynamic_slice_in_dim(queries_padded,
+                                               q_start,
+                                               max_q_len,
+                                               axis=0)
+        q_chunk_sliced = q_chunk[:, :, :actual_head_dim]
+
+        new_kv_chunk = jax.lax.dynamic_slice_in_dim(merged_kv_padded,
+                                                    q_start,
+                                                    max_q_len,
+                                                    axis=0)
+
+        new_k_scale_chunk = jax.lax.dynamic_slice_in_dim(k_scale_padded,
+                                                         q_start,
+                                                         max_q_len,
+                                                         axis=0)
+
+        new_v_scale_chunk = jax.lax.dynamic_slice_in_dim(v_scale_padded,
+                                                         q_start,
+                                                         max_q_len,
+                                                         axis=0)
+
+        # ---------------------------------------------------------
+        # Gather Caches (KV, K_scale, V_scale)
+        # ---------------------------------------------------------
         indices_start = i * pages_per_seq
-        indices_end = indices_start + cdiv(kv_len, page_size)
-        indices = page_indices[indices_start:indices_end]
+        seq_page_indices = jax.lax.dynamic_slice(page_indices,
+                                                 (indices_start, ),
+                                                 (pages_per_seq, ))
 
-        # 2a. Update Main Cache
-        gathered_kv = kv_cache[indices]
-        g_shape = gathered_kv.shape
-        gathered_kv = gathered_kv.reshape(-1, *g_shape[-3:])
-        # Update current tokens
-        gathered_kv = gathered_kv.at[kv_len - q_len:kv_len].set(merged_kv[q_start:q_end])
-        kv_cache = kv_cache.at[indices].set(gathered_kv.reshape(g_shape))
+        # KV Cache Gather
+        gathered_kv = curr_kv_cache[seq_page_indices]
+        gathered_shape = gathered_kv.shape
+        gathered_kv_flat = gathered_kv.reshape(-1, *gathered_shape[-3:])
 
-        # -- Prepare Attention Inputs --
-        # Re-gather (or just use what we have in memory) to ensure we attend to what is in cache
-        # Unpack from [pages, page_size, heads_packed, packing, dim] -> [linear, heads, dim]
-        kv_linear = gathered_kv.reshape(
-            -1, num_kv_heads_x2, head_dim
-        )[:, :actual_num_kv_heads * 2, :].reshape(-1, actual_num_kv_heads, head_dim * 2)
+        # Scale Cache Gather
+        # Shape in cache: [pages, page_size, num_kv_heads, 1]
+        gathered_k_scales = curr_k_scale_cache[seq_page_indices]
+        g_scale_shape = gathered_k_scales.shape
+        gathered_k_scales_flat = gathered_k_scales.reshape(
+            -1, *g_scale_shape[-2:])
 
-        k_seq = kv_linear[:kv_len, :, :head_dim][:, :, :actual_head_dim]
-        v_seq = kv_linear[:kv_len, :, head_dim:][:, :, :actual_head_dim]
+        gathered_v_scales = curr_v_scale_cache[seq_page_indices]
+        gathered_v_scales_flat = gathered_v_scales.reshape(
+            -1, *g_scale_shape[-2:])
 
-        q_seq = queries[q_start:q_end, :, :actual_head_dim]
+        # ---------------------------------------------------------
+        # Update Caches
+        # ---------------------------------------------------------
+        chunk_mask = jnp.arange(max_q_len) < actual_q_len
 
+        # Prepare Mask for KV
+        chunk_mask_expanded = chunk_mask[:, None, None, None]
+        new_kv_chunk_clean = jnp.where(chunk_mask_expanded, new_kv_chunk, 0.0)
 
-        # 3. Call JIT Kernel
-        # If k_scale is an array, it must match k_seq length.
-        # If you haven't implemented scale caching yet, pass k_scale=None to test baseline,
-        # or pass a scalar to test per-tensor.
+        # Prepare Mask for Scales
+        chunk_mask_scales = chunk_mask[:, None, None]
+        new_k_scale_chunk_clean = jnp.where(chunk_mask_scales,
+                                            new_k_scale_chunk, 0.0)
+        new_v_scale_chunk_clean = jnp.where(chunk_mask_scales,
+                                            new_v_scale_chunk, 0.0)
 
-        out_block = _quantized_attn_block(
-            q_seq, k_seq, v_seq,
-            sm_scale,
-            None, 1.0, 1.0,
-            mask_value, soft_cap, sliding_window,
-            actual_num_q_heads_per_kv_head
+        update_start_idx = kv_len - actual_q_len
+        scatter_indices = update_start_idx + jnp.arange(max_q_len)
+
+        # Determine safe indices
+        safe_scatter_indices = jnp.where(
+            chunk_mask,
+            scatter_indices,
+            gathered_kv_flat.shape[0] + 1  # Force OOB
         )
 
-        result = result.at[q_start:q_end].set(out_block)
+        # Apply Updates via Scatter
+        gathered_kv_flat = gathered_kv_flat.at[safe_scatter_indices].set(
+            new_kv_chunk_clean, mode="drop")
 
-    return result, kv_cache
+        gathered_k_scales_flat = gathered_k_scales_flat.at[
+            safe_scatter_indices].set(new_k_scale_chunk_clean, mode="drop")
+
+        gathered_v_scales_flat = gathered_v_scales_flat.at[
+            safe_scatter_indices].set(new_v_scale_chunk_clean, mode="drop")
+
+        # Write back to main caches
+        curr_kv_cache = curr_kv_cache.at[seq_page_indices].set(
+            gathered_kv_flat.reshape(gathered_shape))
+
+        curr_k_scale_cache = curr_k_scale_cache.at[seq_page_indices].set(
+            gathered_k_scales_flat.reshape(g_scale_shape))
+
+        curr_v_scale_cache = curr_v_scale_cache.at[seq_page_indices].set(
+            gathered_v_scales_flat.reshape(g_scale_shape))
+
+        # ---------------------------------------------------------
+        # Prepare K/V and Scales for Attention
+        # ---------------------------------------------------------
+        # 1. Extract K/V
+        kv_reshaped = gathered_kv_flat.reshape(-1, num_kv_heads_x2, head_dim)
+        kv_reshaped = kv_reshaped[:, :actual_num_kv_heads * 2, :]
+        kv_reshaped = kv_reshaped.reshape(-1, actual_num_kv_heads,
+                                          head_dim * 2)
+        k = kv_reshaped[:, :, :head_dim][:, :, :actual_head_dim]
+        v = kv_reshaped[:, :, head_dim:][:, :, :actual_head_dim]
+        k = jnp.nan_to_num(k, nan=0.0)
+        v = jnp.nan_to_num(v, nan=0.0)
+
+        # GQA Repeat K/V
+        k = jnp.repeat(k, actual_num_q_heads_per_kv_head, axis=1)
+        v = jnp.repeat(v, actual_num_q_heads_per_kv_head, axis=1)
+
+        # 2. Extract Scales
+        # gathered_k_scales_flat is [tokens, num_kv_heads, 1]
+        k_scales_active = gathered_k_scales_flat
+        v_scales_active = gathered_v_scales_flat
+
+        # GQA Repeat Scales
+        k_scales_active = jnp.repeat(k_scales_active,
+                                     actual_num_q_heads_per_kv_head,
+                                     axis=1)
+        v_scales_active = jnp.repeat(v_scales_active,
+                                     actual_num_q_heads_per_kv_head,
+                                     axis=1)
+
+        # ---------------------------------------------------------
+        # Prepare Q
+        # ---------------------------------------------------------
+        q_curr = q_chunk_sliced
+        if q_scale is not None:
+            q_curr = q_curr / q_scale
+            if jnp.issubdtype(k.dtype, jnp.floating):
+                dtype_info = jnp.finfo(k.dtype)
+                minval = float(dtype_info.min)
+                maxval = float(dtype_info.max)
+                q_curr = jnp.clip(q_curr, min=minval, max=maxval)
+            q_curr = q_curr.astype(k.dtype)
+
+        # ---------------------------------------------------------
+        # Attention Calculation
+        # ---------------------------------------------------------
+        # Q shape: [q_len, num_q_heads, head_dim]
+        # K shape: [kv_len_padded, num_q_heads, head_dim]
+        attn = jnp.einsum("qhd,khd->hqk",
+                          q_curr,
+                          k,
+                          preferred_element_type=jnp.float32)
+
+        # Apply K Per-Token Scales
+        # attn: [num_q_heads, q_len, kv_len]
+        # k_scales_active: [kv_len, num_q_heads, 1]
+        # We need k_scale to be broadcastable to [num_q_heads, q_len, kv_len]
+        # Transpose k_scales to [num_q_heads, 1, kv_len]
+        k_scales_T = jnp.transpose(k_scales_active, (1, 2, 0))
+        attn = attn * k_scales_T
+
+        attn *= sm_scale
+        if k_scale is not None:
+            attn *= k_scale
+        if q_scale is not None:
+            attn *= q_scale
+
+        # Masking
+        q_idxs = jnp.arange(max_q_len)
+        kv_idxs = jnp.arange(k.shape[0])
+
+        q_span = (kv_len - actual_q_len) + q_idxs[:, None]
+        kv_span = kv_idxs[None, :]
+
+        causal_mask = q_span >= kv_span
+        valid_q_mask = q_idxs[:, None] < actual_q_len
+        valid_k_mask = kv_idxs[None, :] < kv_len
+
+        mask = causal_mask & valid_q_mask & valid_k_mask
+        if sliding_window is not None:
+            mask = mask & (q_span - sliding_window < kv_span)
+
+        if soft_cap is not None:
+            attn = soft_cap * jnp.tanh(attn / soft_cap)
+
+        attn = jnp.where(mask, attn, mask_value)
+        attn = jax.nn.softmax(attn, axis=-1)
+
+        # Apply V Per-Token Scales
+        # v_scales_active: [kv_len, num_q_heads, 1]
+        # Transpose to [num_q_heads, 1, kv_len]
+        v_scales_T = jnp.transpose(v_scales_active, (1, 2, 0))
+        attn = attn * v_scales_T
+
+        out_chunk = jnp.einsum("hqk,khd->qhd",
+                               attn,
+                               v,
+                               preferred_element_type=jnp.float32).astype(
+                                   queries.dtype)
+        if v_scale is not None:
+            out_chunk *= v_scale
+
+        # Zero out invalid q rows in output
+        out_chunk = jnp.where(q_idxs[:, None, None] < actual_q_len, out_chunk,
+                              0.0)
+
+        # Update output buffer
+        curr_outputs = jax.lax.dynamic_update_slice_in_dim(curr_outputs,
+                                                           out_chunk,
+                                                           q_start,
+                                                           axis=0)
+
+        return curr_kv_cache, curr_outputs, curr_k_scale_cache, curr_v_scale_cache
+
+    num_seqs = distribution[-1]
+    # Initialize loop with scale caches
+    init_val = (kv_cache, output_buffer, k_scale_cache, v_scale_cache)
+    final_kv_cache, final_outputs, final_k_scale_cache, final_v_scale_cache = jax.lax.fori_loop(
+        0, num_seqs, body_fn, init_val)
+
+    # Remove padding before returning.
+    # Returning updated scale caches to match the non-jit version's style.
+    return final_outputs[:queries.shape[
+        0]], final_kv_cache, final_k_scale_cache, final_v_scale_cache
+
 
 def ref_ragged_paged_attention_per_token_non_jit(
     queries: jax.
@@ -714,23 +838,13 @@ def get_kv_cache_shape(
     )
 
 
-
-
-
-
-
-
-
-
-
-
 @jax.jit(static_argnames=("mask_value", "soft_cap", "sliding_window"))
 def _attn_math_block(
-    q,          # [q_len, num_q_heads, head_dim]
-    k,          # [kv_len, num_kv_heads, head_dim] (Quantized or Float)
-    v,          # [kv_len, num_kv_heads, head_dim] (Quantized or Float)
-    k_scale,    # [kv_len, num_kv_heads, 1] (Per-Token) OR Scalar (Per-Tensor)
-    v_scale,    # [kv_len, num_kv_heads, 1] (Per-Token) OR Scalar (Per-Tensor)
+    q,  # [q_len, num_q_heads, head_dim]
+    k,  # [kv_len, num_kv_heads, head_dim] (Quantized or Float)
+    v,  # [kv_len, num_kv_heads, head_dim] (Quantized or Float)
+    k_scale,  # [kv_len, num_kv_heads, 1] (Per-Token) OR Scalar (Per-Tensor)
+    v_scale,  # [kv_len, num_kv_heads, 1] (Per-Token) OR Scalar (Per-Tensor)
     sm_scale,
     mask_value,
     soft_cap,
@@ -751,7 +865,7 @@ def _attn_math_block(
     k_idx = jnp.arange(kv_len)[None, :]
     q_pos = q_idx + (kv_len - q_len)
 
-    mask = q_pos < k_idx # Causal
+    mask = q_pos < k_idx  # Causal
     if sliding_window is not None:
         mask = jnp.logical_or(mask, q_pos - sliding_window >= k_idx)
 
@@ -764,121 +878,9 @@ def _attn_math_block(
     v_scales_T = jnp.transpose(v_scale, (1, 2, 0))
     attn = attn * v_scales_T
 
-    out = jnp.einsum("hqk,khd->qhd", attn, v, preferred_element_type=jnp.float32)
+    out = jnp.einsum("hqk,khd->qhd",
+                     attn,
+                     v,
+                     preferred_element_type=jnp.float32)
 
     return out.astype(q.dtype)
-
-
-def ref_ragged_paged_attention_per_token_hybrid(
-    queries: jax.Array,
-    keys: jax.Array,
-    values: jax.Array,
-    kv_cache: jax.Array,
-    kv_lens: jax.Array,
-    page_indices: jax.Array,
-    cu_q_lens: jax.Array,
-    distribution: jax.Array,
-    k_scale_cache: jax.Array,
-    v_scale_cache: jax.Array,
-    *,
-    sm_scale: float = 1.0,
-    sliding_window: int | None = None,
-    soft_cap: float | None = None,
-    mask_value: float | None = -1e30, # Recommend explicit negative float
-):
-    if mask_value is None: mask_value = -1e30
-
-    # 1. Setup & Dimensions
-    actual_head_dim = queries.shape[2]
-    actual_num_q_heads = queries.shape[1]
-    actual_num_kv_heads = keys.shape[1]
-    actual_num_q_heads_per_kv_head = actual_num_q_heads // actual_num_kv_heads
-
-    # 2. Quantize Input (New Tokens)
-    # k_q, v_q are quantized. k_scale, v_scale are float32 scalars or vectors
-    k_q, v_q, k_scale, v_scale = quantize_kv_per_token(keys, values, kv_cache.dtype)
-    merged_kv = merge_kv(k_q, v_q)
-
-    # Cache shape helper
-    _, page_size, num_kv_heads_x2_per_kv_packing, kv_packing, head_dim = kv_cache.shape
-    num_kv_heads_x2 = num_kv_heads_x2_per_kv_packing * kv_packing
-    max_num_seqs = kv_lens.shape[0]
-    pages_per_seq = page_indices.shape[0] // max_num_seqs
-
-    result = queries
-
-    # 3. Main Loop (Python - Handles Ragged Indexing)
-    # The JIT compilation happens on the first call to _attn_math_block
-    for i in range(distribution[-1]):
-        # Get ragged indices (Python integers)
-        q_start = int(cu_q_lens[i])
-        q_end = int(cu_q_lens[i + 1])
-        q_len = q_end - q_start
-        kv_len = int(kv_lens[i])
-
-        indices_start = i * pages_per_seq
-        indices_end = indices_start + cdiv(kv_len, page_size)
-        indices = page_indices[indices_start:indices_end]
-
-        # --- A. Update KV Cache ---
-        # Get pages, flatten, update, scatter back
-        gathered_kv = kv_cache[indices]
-        g_shape = gathered_kv.shape
-        # Flatten: [Num_Pages * Page_Size, ...]
-        gathered_kv = gathered_kv.reshape(-1, *g_shape[-3:])
-
-        # Write new quantized data
-        gathered_kv = gathered_kv.at[kv_len - q_len:kv_len].set(merged_kv[q_start:q_end])
-        kv_cache = kv_cache.at[indices].set(gathered_kv.reshape(g_shape))
-
-        # --- B. Update Scale Caches ---
-        # 1. K Scales
-        gathered_k_scales = k_scale_cache[indices]
-        gk_shape = gathered_k_scales.shape
-        gathered_k_scales = gathered_k_scales.reshape(-1, *gk_shape[-2:]) # [Linear, Heads, 1]
-
-        gathered_k_scales = gathered_k_scales.at[kv_len - q_len:kv_len].set(k_scale[q_start:q_end])
-        k_scale_cache = k_scale_cache.at[indices].set(gathered_k_scales.reshape(gk_shape))
-
-        # 2. V Scales
-        gathered_v_scales = v_scale_cache[indices]
-        gv_shape = gathered_v_scales.shape
-        gathered_v_scales = gathered_v_scales.reshape(-1, *gv_shape[-2:])
-
-        gathered_v_scales = gathered_v_scales.at[kv_len - q_len:kv_len].set(v_scale[q_start:q_end])
-        v_scale_cache = v_scale_cache.at[indices].set(gathered_v_scales.reshape(gv_shape))
-
-        # --- C. Prepare JIT Inputs ---
-        # Extract the full sequence history for attention
-
-        # Unpack KV from [Linear, Packed...] to [Linear, Heads, Dim]
-        kv_unpacked = gathered_kv.reshape(
-            -1, num_kv_heads_x2, head_dim
-        )[:, :actual_num_kv_heads * 2, :].reshape(-1, actual_num_kv_heads, head_dim * 2)
-
-        k_seq = kv_unpacked[:kv_len, :, :head_dim][:, :, :actual_head_dim]
-        v_seq = kv_unpacked[:kv_len, :, head_dim:][:, :, :actual_head_dim]
-
-        q_seq = queries[q_start:q_end, :, :actual_head_dim]
-
-        # Get Scales for full sequence (already gathered locally)
-        k_scales_seq = gathered_k_scales[:kv_len]
-        v_scales_seq = gathered_v_scales[:kv_len]
-
-        # Repeat k/v and k/v scales for GQA
-        k_seq = jnp.repeat(k_seq, actual_num_q_heads_per_kv_head, axis=1)
-        v_seq = jnp.repeat(v_seq, actual_num_q_heads_per_kv_head, axis=1)
-        k_scales_seq = jnp.repeat(k_scales_seq, actual_num_q_heads_per_kv_head, axis=1)
-        v_scales_seq = jnp.repeat(v_scales_seq, actual_num_q_heads_per_kv_head, axis=1)
-
-
-        # --- D. Execute JIT Math Block ---
-        out_block = _attn_math_block(
-            q_seq, k_seq, v_seq,
-            k_scales_seq, v_scales_seq,
-            sm_scale, mask_value, soft_cap, sliding_window,
-        )
-
-        result = result.at[q_start:q_end].set(out_block)
-
-    return result, kv_cache, k_scale_cache, v_scale_cache

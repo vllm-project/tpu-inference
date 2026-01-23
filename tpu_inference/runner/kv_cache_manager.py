@@ -259,14 +259,19 @@ class KVCacheManager:
             num_blocks_list.append(num_blocks)
             for layer_name in kv_cache_tensor.shared_by:
                 self.runner.layer_name_to_kvcache_index[layer_name] = i
-            shape = list(kv_cache.shape)
-            shape[-1] = 1
-            shape = tuple(shape)
-            # copy the tuple and assign the last dim to 1
-            self.runner.k_scale_caches.append(
-                jnp.zeros(shape, dtype=jnp.float32))
-            self.runner.v_scale_caches.append(
-                jnp.zeros(shape, dtype=jnp.float32))
+
+            scale_shape = (num_blocks, representative_spec.block_size,
+                           representative_spec.num_kv_heads, 1)
+
+            def _allocate_scale():
+                return jnp.zeros(scale_shape, dtype=jnp.float32)
+
+            # Use JIT to allocate directly on device with correct sharding
+            sharded_allocate_scale = jax.jit(_allocate_scale,
+                                             out_shardings=kv_cache.sharding)
+
+            self.runner.k_scale_caches.append(sharded_allocate_scale())
+            self.runner.v_scale_caches.append(sharded_allocate_scale())
 
         if self.shared_kv_cache_layers:
             for layer_name, target_layer_name in self.shared_kv_cache_layers.items(

@@ -205,6 +205,8 @@ class CompilationManager:
         def model_fn_wrapper(
             state,
             kv_caches,
+            k_scale_caches,
+            v_scale_caches,
             input_ids,
             attention_metadata,
             positions,
@@ -215,7 +217,7 @@ class CompilationManager:
             is_first_rank,
             is_last_rank,
         ):
-            kv_caches, hidden_states, _ = self.runner.model_fn(
+            kv_caches, hidden_states, _, k_scale_caches, v_scale_caches = self.runner.model_fn(
                 state, kv_caches, k_scale_caches, v_scale_caches, input_ids,
                 attention_metadata, inputs_embeds, positions,
                 layer_name_to_kvcache_index, lora_metadata,
@@ -238,6 +240,8 @@ class CompilationManager:
                 model_fn_wrapper,
                 self.runner.state,
                 self.runner.kv_caches,
+                self.runner.k_scale_caches,
+                self.runner.v_scale_caches,
                 input_ids,
                 attention_metadata,
                 positions,

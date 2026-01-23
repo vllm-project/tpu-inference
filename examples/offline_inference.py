@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
-
 import vllm.envs as vllm_envs
 from vllm import LLM, EngineArgs
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -104,7 +102,7 @@ def main(args: dict):
 
 if __name__ == "__main__":
     # Skip long warmup for local simple test.
-    os.environ['SKIP_JAX_PRECOMPILE'] = '1'
+    # os.environ['SKIP_JAX_PRECOMPILE'] = '1'
 
     parser = create_parser()
     args: dict = vars(parser.parse_args())
