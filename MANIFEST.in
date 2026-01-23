@@ -1,3 +1,4 @@
 include requirements.txt
 include README.md
 include tpu_inference/models/jax/utils/quantization/configs/*.yaml
+recursive-include tpu_inference/kernels/tuned_data *.json

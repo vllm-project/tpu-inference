@@ -1,0 +1,5374 @@
+{
+    "128": {
+        "q_bfloat16_kv_bfloat16": {
+            "q_head-128_kv_head-16_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    8
+                ]
+            },
+            "q_head-128_kv_head-1_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    8
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    16
+                ]
+            },
+            "q_head-128_kv_head-1_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    8
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    8
+                ]
+            },
+            "q_head-128_kv_head-2_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    16
+                ]
+            },
+            "q_head-128_kv_head-2_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    16
+                ]
+            },
+            "q_head-128_kv_head-4_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    16
+                ]
+            },
+            "q_head-128_kv_head-4_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    16
+                ]
+            },
+            "q_head-128_kv_head-8_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    16
+                ]
+            },
+            "q_head-128_kv_head-8_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    8
+                ]
+            },
+            "q_head-16_kv_head-1_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    32
+                ]
+            },
+            "q_head-16_kv_head-1_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    32
+                ]
+            },
+            "q_head-16_kv_head-2_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    32
+                ]
+            },
+            "q_head-16_kv_head-2_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-16_kv_head-2_head-64": {
+                "max_model_len-1024-sw-128": [
+                    2,
+                    32
+                ],
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-128": [
+                    1,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-128": [
+                    2,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-128": [
+                    2,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-128": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    32
+                ],
+                "max_model_len-512-sw-128": [
+                    2,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-128": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    32
+                ]
+            },
+            "q_head-16_kv_head-4_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    64
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    64
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    64
+                ]
+            },
+            "q_head-16_kv_head-4_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    64
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    128
+                ]
+            },
+            "q_head-16_kv_head-8_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    64
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    64
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    64
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    128
+                ]
+            },
+            "q_head-16_kv_head-8_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    64
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    64
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    64
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    64
+                ]
+            },
+            "q_head-2_kv_head-1_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    128
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    64
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    128
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    128
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    128
+                ]
+            },
+            "q_head-2_kv_head-1_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    128
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    64
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    64
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    128
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    128
+                ]
+            },
+            "q_head-32_kv_head-16_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-16_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    4,
+                    16
+                ]
+            },
+            "q_head-32_kv_head-1_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-1_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-2_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-2_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-4_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-4_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-4_head-64": {
+                "max_model_len-1024-sw-128": [
+                    2,
+                    32
+                ],
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-128": [
+                    1,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-128": [
+                    2,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-128": [
+                    2,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-128": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    32
+                ],
+                "max_model_len-512-sw-128": [
+                    2,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-128": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-8_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    64
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    64
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    64
+                ]
+            },
+            "q_head-32_kv_head-8_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    32
+                ]
+            },
+            "q_head-4_kv_head-1_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    128
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    128
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    128
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    128
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    128
+                ]
+            },
+            "q_head-4_kv_head-1_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    64
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    128
+                ]
+            },
+            "q_head-4_kv_head-2_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    128
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    128
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    64
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    128
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    128
+                ]
+            },
+            "q_head-4_kv_head-2_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    128
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    64
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    128
+                ]
+            },
+            "q_head-64_kv_head-16_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    16
+                ]
+            },
+            "q_head-64_kv_head-16_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    4,
+                    8
+                ]
+            },
+            "q_head-64_kv_head-1_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    32
+                ]
+            },
+            "q_head-64_kv_head-1_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    16
+                ]
+            },
+            "q_head-64_kv_head-2_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    16
+                ]
+            },
+            "q_head-64_kv_head-2_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    16
+                ]
+            },
+            "q_head-64_kv_head-32_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    4,
+                    8
+                ]
+            },
+            "q_head-64_kv_head-4_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-64_kv_head-4_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    32
+                ]
+            },
+            "q_head-64_kv_head-8_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-64_kv_head-8_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    16
+                ]
+            },
+            "q_head-64_kv_head-8_head-64": {
+                "max_model_len-1024-sw-128": [
+                    2,
+                    16
+                ],
+                "max_model_len-1024-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-128-sw-128": [
+                    1,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-128": [
+                    2,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-128": [
+                    2,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-4096-sw-128": [
+                    2,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    16
+                ],
+                "max_model_len-512-sw-128": [
+                    2,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-8192-sw-128": [
+                    2,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-8_kv_head-1_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    64
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    32
+                ]
+            },
+            "q_head-8_kv_head-1_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    32
+                ]
+            },
+            "q_head-8_kv_head-2_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    64
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    64
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    64
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    64
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    128
+                ]
+            },
+            "q_head-8_kv_head-2_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    128
+                ]
+            },
+            "q_head-8_kv_head-2_head-64": {
+                "max_model_len-1024-sw-128": [
+                    2,
+                    32
+                ],
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-128": [
+                    1,
+                    64
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    64
+                ],
+                "max_model_len-2048-sw-128": [
+                    2,
+                    64
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-128": [
+                    2,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-128": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    32
+                ],
+                "max_model_len-512-sw-128": [
+                    2,
+                    64
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-128": [
+                    2,
+                    64
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    32
+                ]
+            },
+            "q_head-8_kv_head-4_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    64
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    64
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    64
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    128
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    128
+                ]
+            },
+            "q_head-8_kv_head-4_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    128
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    128
+                ]
+            }
+        },
+        "q_bfloat16_kv_float8_e4m3fn": {
+            "q_head-128_kv_head-16_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    8
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    8
+                ]
+            },
+            "q_head-128_kv_head-2_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    16
+                ]
+            },
+            "q_head-128_kv_head-2_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    8
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    8
+                ]
+            },
+            "q_head-128_kv_head-4_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    8
+                ]
+            },
+            "q_head-128_kv_head-4_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    16
+                ]
+            },
+            "q_head-128_kv_head-8_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    16
+                ]
+            },
+            "q_head-128_kv_head-8_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    8
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    8
+                ]
+            },
+            "q_head-16_kv_head-2_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    32
+                ]
+            },
+            "q_head-16_kv_head-2_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    32
+                ]
+            },
+            "q_head-16_kv_head-4_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    32
+                ]
+            },
+            "q_head-16_kv_head-4_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    32
+                ]
+            },
+            "q_head-16_kv_head-8_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    64
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    64
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    64
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    64
+                ]
+            },
+            "q_head-16_kv_head-8_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    64
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    64
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    64
+                ]
+            },
+            "q_head-2_kv_head-2_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    64
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    64
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    128
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    64
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    128
+                ]
+            },
+            "q_head-2_kv_head-2_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    64
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    128
+                ]
+            },
+            "q_head-32_kv_head-16_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-16_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    16
+                ]
+            },
+            "q_head-32_kv_head-2_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-2_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-4_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-4_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-8_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-8_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-4_kv_head-2_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    64
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    64
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    128
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    128
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    128
+                ]
+            },
+            "q_head-4_kv_head-2_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    64
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    64
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    128
+                ]
+            },
+            "q_head-64_kv_head-16_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    16
+                ]
+            },
+            "q_head-64_kv_head-16_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    8
+                ]
+            },
+            "q_head-64_kv_head-2_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    16
+                ]
+            },
+            "q_head-64_kv_head-2_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    16
+                ]
+            },
+            "q_head-64_kv_head-32_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    8
+                ]
+            },
+            "q_head-64_kv_head-4_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    16
+                ]
+            },
+            "q_head-64_kv_head-4_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    16
+                ]
+            },
+            "q_head-64_kv_head-8_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    16
+                ]
+            },
+            "q_head-64_kv_head-8_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    16
+                ]
+            },
+            "q_head-8_kv_head-2_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    32
+                ]
+            },
+            "q_head-8_kv_head-2_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    128
+                ]
+            },
+            "q_head-8_kv_head-4_head-128": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    64
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    64
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    64
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    64
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    64
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    128
+                ]
+            },
+            "q_head-8_kv_head-4_head-256": {
+                "max_model_len-1024-sw-None": [
+                    8,
+                    64
+                ],
+                "max_model_len-128-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    32,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    32,
+                    128
+                ]
+            }
+        }
+    },
+    "256": {
+        "q_bfloat16_kv_bfloat16": {
+            "q_head-128_kv_head-16_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    4,
+                    8
+                ]
+            },
+            "q_head-128_kv_head-1_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    16
+                ]
+            },
+            "q_head-128_kv_head-1_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    8
+                ]
+            },
+            "q_head-128_kv_head-2_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    8
+                ]
+            },
+            "q_head-128_kv_head-2_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    16
+                ]
+            },
+            "q_head-128_kv_head-4_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    16
+                ]
+            },
+            "q_head-128_kv_head-4_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    16
+                ]
+            },
+            "q_head-128_kv_head-8_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    16
+                ]
+            },
+            "q_head-128_kv_head-8_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    4,
+                    8
+                ]
+            },
+            "q_head-16_kv_head-1_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-16_kv_head-1_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-16_kv_head-2_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-16_kv_head-2_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    32
+                ]
+            },
+            "q_head-16_kv_head-2_head-64": {
+                "max_model_len-1024-sw-128": [
+                    1,
+                    32
+                ],
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-128": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-128": [
+                    1,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-128": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-128": [
+                    1,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-128": [
+                    1,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-16_kv_head-4_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    128
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    64
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    128
+                ]
+            },
+            "q_head-16_kv_head-4_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    64
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    128
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    128
+                ]
+            },
+            "q_head-16_kv_head-8_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    128
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    128
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    64
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    64
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    128
+                ]
+            },
+            "q_head-16_kv_head-8_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    64
+                ],
+                "max_model_len-2048-sw-None": [
+                    4,
+                    64
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    4,
+                    64
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    4,
+                    64
+                ]
+            },
+            "q_head-2_kv_head-1_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    128
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    128
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    128
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    64
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    128
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    64
+                ]
+            },
+            "q_head-2_kv_head-1_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    128
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    64
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    64
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    128
+                ]
+            },
+            "q_head-32_kv_head-16_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    4,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-16_head-256": {
+                "max_model_len-1024-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    2,
+                    16
+                ]
+            },
+            "q_head-32_kv_head-1_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-1_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-2_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-2_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-4_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-4_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    64
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-4_head-64": {
+                "max_model_len-1024-sw-128": [
+                    1,
+                    32
+                ],
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-128": [
+                    1,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-128": [
+                    1,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-128": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-128": [
+                    1,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-128": [
+                    1,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-8_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    64
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    64
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    64
+                ]
+            },
+            "q_head-32_kv_head-8_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    4,
+                    32
+                ]
+            },
+            "q_head-4_kv_head-1_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    128
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    64
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    128
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    128
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    128
+                ]
+            },
+            "q_head-4_kv_head-1_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    64
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    64
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    128
+                ]
+            },
+            "q_head-4_kv_head-2_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    64
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    64
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    128
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    128
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    128
+                ]
+            },
+            "q_head-4_kv_head-2_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    64
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    128
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    64
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    128
+                ]
+            },
+            "q_head-64_kv_head-16_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    4,
+                    16
+                ]
+            },
+            "q_head-64_kv_head-16_head-256": {
+                "max_model_len-1024-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    2,
+                    8
+                ]
+            },
+            "q_head-64_kv_head-1_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    16
+                ]
+            },
+            "q_head-64_kv_head-1_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    16
+                ]
+            },
+            "q_head-64_kv_head-2_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    16
+                ]
+            },
+            "q_head-64_kv_head-2_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    16
+                ]
+            },
+            "q_head-64_kv_head-32_head-128": {
+                "max_model_len-1024-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    2,
+                    8
+                ]
+            },
+            "q_head-64_kv_head-4_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    32
+                ]
+            },
+            "q_head-64_kv_head-4_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    4,
+                    32
+                ]
+            },
+            "q_head-64_kv_head-8_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    32
+                ]
+            },
+            "q_head-64_kv_head-8_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    4,
+                    16
+                ]
+            },
+            "q_head-64_kv_head-8_head-64": {
+                "max_model_len-1024-sw-128": [
+                    1,
+                    16
+                ],
+                "max_model_len-1024-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-2048-sw-128": [
+                    1,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-128": [
+                    1,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-4096-sw-128": [
+                    1,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-512-sw-128": [
+                    1,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-8192-sw-128": [
+                    1,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    16
+                ]
+            },
+            "q_head-8_kv_head-1_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    64
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-8_kv_head-1_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    128
+                ]
+            },
+            "q_head-8_kv_head-2_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    128
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    128
+                ]
+            },
+            "q_head-8_kv_head-2_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    128
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    128
+                ]
+            },
+            "q_head-8_kv_head-2_head-64": {
+                "max_model_len-1024-sw-128": [
+                    1,
+                    64
+                ],
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-128": [
+                    1,
+                    64
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-128": [
+                    1,
+                    64
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    64
+                ],
+                "max_model_len-4096-sw-128": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-128": [
+                    1,
+                    64
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    64
+                ],
+                "max_model_len-8192-sw-128": [
+                    1,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-8_kv_head-4_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    128
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    128
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    64
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    128
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    128
+                ]
+            },
+            "q_head-8_kv_head-4_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    64
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    128
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    4,
+                    128
+                ]
+            }
+        },
+        "q_bfloat16_kv_float8_e4m3fn": {
+            "q_head-128_kv_head-16_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    8
+                ]
+            },
+            "q_head-128_kv_head-2_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    8
+                ]
+            },
+            "q_head-128_kv_head-2_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    8
+                ]
+            },
+            "q_head-128_kv_head-4_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    8
+                ]
+            },
+            "q_head-128_kv_head-4_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    16
+                ]
+            },
+            "q_head-128_kv_head-8_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    16
+                ]
+            },
+            "q_head-128_kv_head-8_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    8
+                ]
+            },
+            "q_head-16_kv_head-2_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-16_kv_head-2_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-16_kv_head-4_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-16_kv_head-4_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    64
+                ]
+            },
+            "q_head-16_kv_head-8_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    64
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    64
+                ]
+            },
+            "q_head-16_kv_head-8_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    64
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    64
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    64
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    64
+                ]
+            },
+            "q_head-2_kv_head-2_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    128
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    128
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    64
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    64
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    128
+                ]
+            },
+            "q_head-2_kv_head-2_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    128
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    64
+                ]
+            },
+            "q_head-32_kv_head-16_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-16_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    4,
+                    16
+                ]
+            },
+            "q_head-32_kv_head-2_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-2_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-4_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-4_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-8_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-32_kv_head-8_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    32
+                ]
+            },
+            "q_head-4_kv_head-2_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    128
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    64
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    64
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    128
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    128
+                ]
+            },
+            "q_head-4_kv_head-2_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    64
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    128
+                ]
+            },
+            "q_head-64_kv_head-16_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    16
+                ]
+            },
+            "q_head-64_kv_head-16_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    4,
+                    8
+                ]
+            },
+            "q_head-64_kv_head-2_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    16
+                ]
+            },
+            "q_head-64_kv_head-2_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    8
+                ]
+            },
+            "q_head-64_kv_head-32_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-2048-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    4,
+                    8
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    4,
+                    8
+                ]
+            },
+            "q_head-64_kv_head-4_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    16
+                ]
+            },
+            "q_head-64_kv_head-4_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    8
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    8
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    16
+                ]
+            },
+            "q_head-64_kv_head-8_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    16
+                ]
+            },
+            "q_head-64_kv_head-8_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    16
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    16
+                ],
+                "max_model_len-4096-sw-None": [
+                    8,
+                    16
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    16
+                ],
+                "max_model_len-8192-sw-None": [
+                    8,
+                    16
+                ]
+            },
+            "q_head-8_kv_head-2_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    64
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    64
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-8_kv_head-2_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    32
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    32
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    32
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    32
+                ]
+            },
+            "q_head-8_kv_head-4_head-128": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    64
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    128
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    64
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    64
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    128
+                ]
+            },
+            "q_head-8_kv_head-4_head-256": {
+                "max_model_len-1024-sw-None": [
+                    4,
+                    64
+                ],
+                "max_model_len-2048-sw-None": [
+                    8,
+                    64
+                ],
+                "max_model_len-256-sw-None": [
+                    1,
+                    32
+                ],
+                "max_model_len-4096-sw-None": [
+                    16,
+                    128
+                ],
+                "max_model_len-512-sw-None": [
+                    2,
+                    32
+                ],
+                "max_model_len-8192-sw-None": [
+                    16,
+                    128
+                ]
+            }
+        }
+    }
+}

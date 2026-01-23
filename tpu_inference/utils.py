@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import re
 import time
 from collections import defaultdict
 from collections.abc import Sequence
@@ -135,6 +136,39 @@ def get_device_name(num_devices: int | None = None):
     if num_devices is not None:
         kind += f'-{num_devices}'
     return kind
+
+
+def get_tpu_generation() -> int:
+    """Returns the numeric generation of the TPU (e.g. 5, 6, 7)."""
+    try:
+        kind = get_device_name()
+    except (RuntimeError, IndexError):
+        # Fallback for non-TPU environments (e.g. CPU test)
+        return -1
+
+    match = re.search(r'TPU v(\d+)', kind)
+    if match:
+        return int(match.group(1))
+    return -1
+
+
+def get_tpu_name_slug(name: str | None = None) -> str:
+    """Returns a standardized slug for the TPU device (e.g. tpu_v5e, tpu_v6e, tpu_v7)."""
+    if name is None:
+        try:
+            name = get_device_name()
+        except (RuntimeError, IndexError):
+            return "cpu"
+
+    # Remove chip count suffix if present
+    if '-' in name:
+        name = name.split('-')[0]
+
+    name = name.lower()
+    if 'lite' in name:
+        return 'tpu_v5e'  # Special case for v5 Lite -> v5e normalization
+
+    return name.replace(" ", "_")
 
 
 def get_device_hbm_limit() -> int:
