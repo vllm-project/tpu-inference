@@ -31,13 +31,13 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import \
     GroupShape
 
 from tpu_inference.layers.common.linear import sharded_quantized_matmul
+from tpu_inference.layers.common.process_weights.linear_weights import (
+    LinearWeights, process_linear_weights, shard_linear_weights,
+    to_parameter_list)
 from tpu_inference.layers.common.quantization import (dequantize_tensor,
                                                       quantize_tensor)
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
-from tpu_inference.layers.vllm.process_weights.linear_weights import (
-    LinearWeights, process_linear_weights, shard_linear_weights,
-    to_parameter_list)
 from tpu_inference.layers.vllm.quantization.configs import \
     VllmQuantLinearConfig
 from tpu_inference.logger import init_logger
@@ -193,10 +193,11 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
             outs *= weight_scale_jax
             outs = outs.astype(x_jax.dtype)
         else:
-            outs = sharded_quantized_matmul(x_jax, weight_jax,
+            outs = sharded_quantized_matmul(x_jax,
+                                            weight_jax,
                                             weight_scale_jax,
-                                            self.linear_config.mesh,
-                                            self.linear_config.weight_sharding)
+                                            self.linear_config.weight_sharding,
+                                            mesh=self.linear_config.mesh)
 
         if bias is not None and not layer.skip_bias_add:
             outs += jax_view(bias)
@@ -236,9 +237,11 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                 out = out.astype(x_jax.dtype)
             else:
                 out = sharded_quantized_matmul(
-                    x_jax, weight_jax, weight_scale_jax,
-                    self.linear_config.mesh,
-                    self.linear_config.weight_sharding)
+                    x_jax,
+                    weight_jax,
+                    weight_scale_jax,
+                    self.linear_config.weight_sharding,
+                    mesh=self.linear_config.mesh)
 
             if bias is not None and not layer.skip_bias_add:
                 out += jax_view(bias[i])

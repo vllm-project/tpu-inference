@@ -196,8 +196,8 @@ class VllmCompressedTensorsW8A8Int8(CompressedTensorsW8A8Int8):
             x_jax,
             weight_jax,
             weight_scale_jax,
-            self.linear_config.mesh,
             self.linear_config.weight_sharding,
+            mesh=self.linear_config.mesh,
         )
         if bias is not None and not layer.skip_bias_add:
             outs += jax_view(bias)
@@ -222,8 +222,8 @@ class VllmCompressedTensorsW8A8Int8(CompressedTensorsW8A8Int8):
                 x_jax,
                 weight_jax,
                 weight_scale_jax,
-                self.linear_config.mesh,
                 self.linear_config.weight_sharding,
+                mesh=self.linear_config.mesh,
             )
             if bias is not None and not layer.skip_bias_add:
                 out += jax_view(bias[i])
