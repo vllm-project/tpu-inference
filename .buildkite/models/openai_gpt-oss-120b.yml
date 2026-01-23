@@ -36,31 +36,31 @@ steps:
       - |
         .buildkite/scripts/record_step_result.sh openai_gpt-oss-120b_UnitTest
 
-  - label: "Integration tests for openai/gpt-oss-120b"
-    key: "openai_gpt-oss-120b_IntegrationTest"
+  - label: "Accuracy for openai/gpt-oss-120b"
+    key: "openai_gpt-oss-120b_Accuracy"
     depends_on: "record_openai_gpt-oss-120b_UnitTest"
     agents:
       queue: tpu_v6e_8_queue
     soft_fail: true
     commands:
       - |
-        buildkite-agent meta-data set "openai_gpt-oss-120b_IntegrationTest" "unverified"
-  - label: "Record integration test result for openai/gpt-oss-120b"
-    key: "record_openai_gpt-oss-120b_IntegrationTest"
-    depends_on: "openai_gpt-oss-120b_IntegrationTest"
+        buildkite-agent meta-data set "openai_gpt-oss-120b_Accuracy" "unverified"
+  - label: "Record accuracy result for openai/gpt-oss-120b"
+    key: "record_openai_gpt-oss-120b_Accuracy"
+    depends_on: "openai_gpt-oss-120b_Accuracy"
     env:
       CI_TARGET: openai/gpt-oss-120b
-      CI_STAGE: "IntegrationTest"
+      CI_STAGE: "Accuracy/Correctness"
       CI_CATEGORY: "text-only"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh openai_gpt-oss-120b_IntegrationTest
+        .buildkite/scripts/record_step_result.sh openai_gpt-oss-120b_Accuracy
 
   - label: "Performance benchmarks for openai/gpt-oss-120b"
     key: "openai_gpt-oss-120b_Benchmark"
-    depends_on: "record_openai_gpt-oss-120b_IntegrationTest"
+    depends_on: "record_openai_gpt-oss-120b_Accuracy"
     agents:
       queue: tpu_v6e_8_queue
     soft_fail: true
