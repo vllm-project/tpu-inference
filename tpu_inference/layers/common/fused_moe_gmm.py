@@ -49,7 +49,8 @@ def _swigluoai(x1: jax.Array,
     return gated_activation * (x2 + 1)
 
 
-def _round_up_to_multiple_of_128_within_limit(x: int, limit: int) -> int:
+# TODO (jacobplatin): make this more generic
+def round_up_to_multiple_of_128_within_limit(x: int, limit: int) -> int:
     """
     Rounds the given integer `x` up to the nearest multiple of 128, without
     exceeding the specified `limit`.
@@ -106,12 +107,12 @@ def _get_tiling_size_for_gmm_kernel(m: int, k: int, n: int,
     # 2m//g can be either greater or less than 512. If there are 32 tokens and
     # topk=2, m=topk * num_tokens=64, in this case, 2*m//g will be less than
     # 512.
-    tm = _round_up_to_multiple_of_128_within_limit(2 * m // g, 512)
+    tm = round_up_to_multiple_of_128_within_limit(2 * m // g, 512)
     tm = min(tm, m)  # there's a requirement that m % tm == 0
     # k/n correspond to n_input_features/n_output_features in the matmul so they
     # are normally greater than 2048, unless the num shards is large.
-    tk = _round_up_to_multiple_of_128_within_limit(k, 2048)
-    tn = _round_up_to_multiple_of_128_within_limit(n, 2048)
+    tk = round_up_to_multiple_of_128_within_limit(k, 2048)
+    tn = round_up_to_multiple_of_128_within_limit(n, 2048)
     return tm, tk, tn
 
 
