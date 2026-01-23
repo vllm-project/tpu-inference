@@ -1,4 +1,4 @@
-Model,UnitTest,IntegrationTest,Benchmark
+Model,UnitTest,Accuracy/Correctness,Benchmark
 "moonshotai/Kimi-K2-Thinking",unverified,unverified,unverified
 "Qwen/Qwen3-Coder-480B-A35B-Instruct",unverified,unverified,unverified
 "meta-llama/Llama-3.3-70B-Instruct",✅,✅,✅

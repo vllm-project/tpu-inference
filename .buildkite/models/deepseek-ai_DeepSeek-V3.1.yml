@@ -36,31 +36,31 @@ steps:
       - |
         .buildkite/scripts/record_step_result.sh deepseek-ai_DeepSeek-V3_1_UnitTest
 
-  - label: "Integration tests for deepseek-ai/DeepSeek-V3.1"
-    key: "deepseek-ai_DeepSeek-V3_1_IntegrationTest"
+  - label: "Accuracy for deepseek-ai/DeepSeek-V3.1"
+    key: "deepseek-ai_DeepSeek-V3_1_Accuracy"
     depends_on: "record_deepseek-ai_DeepSeek-V3_1_UnitTest"
     agents:
       queue: tpu_v6e_8_queue
     soft_fail: true
     commands:
       - |
-        buildkite-agent meta-data set "deepseek-ai_DeepSeek-V3_1_IntegrationTest" "unverified"
-  - label: "Record integration test result for deepseek-ai/DeepSeek-V3.1"
-    key: "record_deepseek-ai_DeepSeek-V3_1_IntegrationTest"
-    depends_on: "deepseek-ai_DeepSeek-V3_1_IntegrationTest"
+        buildkite-agent meta-data set "deepseek-ai_DeepSeek-V3_1_Accuracy" "unverified"
+  - label: "Record accuracy result for deepseek-ai/DeepSeek-V3.1"
+    key: "record_deepseek-ai_DeepSeek-V3_1_Accuracy"
+    depends_on: "deepseek-ai_DeepSeek-V3_1_Accuracy"
     env:
       CI_TARGET: deepseek-ai/DeepSeek-V3.1
-      CI_STAGE: "IntegrationTest"
+      CI_STAGE: "Accuracy/Correctness"
       CI_CATEGORY: "text-only"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh deepseek-ai_DeepSeek-V3_1_IntegrationTest
+        .buildkite/scripts/record_step_result.sh deepseek-ai_DeepSeek-V3_1_Accuracy
 
   - label: "Performance benchmarks for deepseek-ai/DeepSeek-V3.1"
     key: "deepseek-ai_DeepSeek-V3_1_Benchmark"
-    depends_on: "record_deepseek-ai_DeepSeek-V3_1_IntegrationTest"
+    depends_on: "record_deepseek-ai_DeepSeek-V3_1_Accuracy"
     agents:
       queue: tpu_v6e_8_queue
     soft_fail: true
