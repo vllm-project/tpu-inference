@@ -22,8 +22,7 @@ from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
 from vllm.attention.layer import Attention
-from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
-                                                  FusedMoERouter)
+from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig, FusedMoEQuantConfig, mxfp4_w4a16_moe_quant_config)
 from vllm.model_executor.layers.linear import LinearBase
@@ -124,6 +123,10 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
             w2_bias=layer.w2_bias,
         )
 
+    @property
+    def is_monolithic(self) -> bool:
+        return True
+
     def process_weights_after_loading(self, layer: torch.nn.Module):
         assert isinstance(layer, FusedMoE)
         assert layer.moe_config.has_bias, "mxfp4 quantization alwyas use bias."
@@ -196,10 +199,9 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
         layer.w13_bias = Parameter(weights.w13_bias, requires_grad=False)
         layer.w2_bias = Parameter(weights.w2_bias, requires_grad=False)
 
-    def apply(
+    def apply_monolithic(
         self,
         layer: FusedMoE,
-        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:

@@ -22,8 +22,7 @@ from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
 from vllm.attention.layer import Attention
-from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
-                                                  FusedMoERouter)
+from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
@@ -249,6 +248,7 @@ class VllmFp8MoEMethod(Fp8MoEMethod):
         self.block_quant: bool = self.weight_block_size is not None
         self.weight_scale_name = ("weight_scale_inv"
                                   if self.block_quant else "weight_scale")
+        self.fp8_backend = None
 
         self.mesh = mesh
         self.moe_backend = select_moe_backend(self.moe)
@@ -257,9 +257,9 @@ class VllmFp8MoEMethod(Fp8MoEMethod):
         if self.moe_backend == FusedMoEBackend.FUSED_MOE:
             self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name, )
 
-    def get_fused_moe_quant_config(self, layer: torch.nn.Module):
-        # Override quant config fused moe
-        pass
+    @property
+    def is_monolithic(self) -> bool:
+        return True
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         assert isinstance(layer, FusedMoE)
@@ -326,10 +326,9 @@ class VllmFp8MoEMethod(Fp8MoEMethod):
         layer.w2_weight_scale_inv = Parameter(weights.w2_weight_scale,
                                               requires_grad=False)
 
-    def apply(
+    def apply_monolithic(
         self,
         layer: FusedMoE,
-        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:

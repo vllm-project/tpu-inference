@@ -23,7 +23,6 @@ from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
 from vllm.attention.layer import Attention
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
-                                                  FusedMoERouter,
                                                   UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
@@ -217,6 +216,10 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             # tuned block sizes to the kernel.
             self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name, )
 
+    @property
+    def is_monolithic(self) -> bool:
+        return True
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         assert isinstance(layer, FusedMoE)
 
@@ -271,10 +274,9 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             layer.w13_bias = Parameter(weights.w13_bias, requires_grad=False)
             layer.w2_bias = Parameter(weights.w2_bias, requires_grad=False)
 
-    def apply(
+    def apply_monolithic(
         self,
         layer: FusedMoE,
-        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
