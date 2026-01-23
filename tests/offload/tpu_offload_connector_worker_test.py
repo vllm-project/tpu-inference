@@ -14,7 +14,7 @@ import numpy as np
 from absl.testing import parameterized
 from jax._src import compilation_cache as cc
 from jax._src import test_util as jtu
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
 from tpu_inference.logger import init_logger
@@ -117,7 +117,9 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
                     f"Not enough devices to create mesh of shape {axis_shapes}."
                 )
             device_array = devices[:num_required_devices].reshape(axis_shapes)
-            return jax.sharding.Mesh(device_array, axis_names)
+            return jax.sharding.Mesh(
+                device_array, axis_names,
+                tuple([AxisType.Explicit] * len(axis_shapes)))
         except RuntimeError:
             return None
 
@@ -192,6 +194,7 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
     @parameterized.named_parameters(
         dict(testcase_name="_jax", swap_op_type="jax"),
         dict(testcase_name="_pallas", swap_op_type="pallas"),
+        dict(testcase_name="_jax_copy", swap_op_type="jax_copy"),
     )
     def test_precompile_run_success(self, swap_op_type: str):
         """
@@ -257,6 +260,20 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
             num_blocks_to_save=5,
             num_requests=6,
             use_precompiled_swap_ops=True,
+        ),
+        dict(
+            testcase_name="_multi_blocks_with_compile_jax_copy",
+            num_blocks_to_save=5,
+            num_requests=1,
+            use_precompiled_swap_ops=True,
+            swap_op_type="jax_copy",
+        ),
+        dict(
+            testcase_name="_multi_requests_multi_blocks_with_compile_jax_copy",
+            num_blocks_to_save=5,
+            num_requests=6,
+            use_precompiled_swap_ops=True,
+            swap_op_type="jax_copy",
         ),
         dict(
             testcase_name="_multi_blocks_with_compile_pallas",
@@ -429,6 +446,13 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
             num_requests=6,
             use_precompiled_swap_ops=True,
             swap_op_type="jax",
+        ),
+        dict(
+            testcase_name="_multi_requests_multi_blocks_compile_jax_copy",
+            num_blocks_to_operate=5,
+            num_requests=6,
+            use_precompiled_swap_ops=True,
+            swap_op_type="jax_copy",
         ),
         dict(
             testcase_name="_multi_requests_multi_blocks_compile_pallas",

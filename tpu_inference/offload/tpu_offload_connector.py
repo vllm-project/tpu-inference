@@ -123,6 +123,7 @@ from tpu_inference.offload.offload_manager import (LRUCacheManager,
                                                    StagingBufferManager)
 from tpu_inference.offload.utils import (CPU_OFFLOADING_SWAP_OP_TYPE,
                                          CpuChunkId, KVCacheSwapFn, ReqId,
+                                         _split_per_shard_to_chunks,
                                          get_kv_cache_swap_fn,
                                          jitted_insert_kv_cache_slices)
 from tpu_inference.runner.kv_cache_manager import KVCacheManager
@@ -1706,10 +1707,14 @@ class TPUOffloadConnectorWorker:
 
                 # 3. Pre-compile CPU -> TPU transfer (used in load)
                 split_size_list = [self.block_size] * num_blocks
-                chunked_dummy_kv_cpu = jax.tree.map(
-                    lambda flat_layer_cache: jax.lax.split(
-                        flat_layer_cache, split_size_list, axis=0),
-                    dummy_kv_cpu)
+                if isinstance(dummy_kv_cpu[0], list):
+                    chunked_dummy_kv_cpu = _split_per_shard_to_chunks(
+                        dummy_kv_cpu, split_size_list)
+                else:
+                    chunked_dummy_kv_cpu = jax.tree.map(
+                        lambda flat_layer_cache: jax.lax.split(
+                            flat_layer_cache, split_size_list, axis=0),
+                        dummy_kv_cpu)
 
                 chunked_dummy_kv_tpu = self.swap_in_fn(chunked_dummy_kv_cpu)
                 jax.block_until_ready(chunked_dummy_kv_tpu)
@@ -1793,6 +1798,9 @@ class TPUOffloadConnectorWorker:
             split_size_list = [self.block_size] * num_blocks
             flat_kv_caches_cpu = self.swap_out_fn(flat_kv_caches_tpu)
             jax.block_until_ready(flat_kv_caches_cpu)
+            if isinstance(flat_kv_caches_cpu[0], list):
+                return _split_per_shard_to_chunks(flat_kv_caches_cpu,
+                                                  split_size_list)
             return jax.tree.map(
                 lambda flat_layer_cache: jax.lax.split(
                     flat_layer_cache, split_size_list, axis=0),
@@ -1819,15 +1827,23 @@ class TPUOffloadConnectorWorker:
                 for layer_cache in flat_kv_caches_tpu
             ]
 
-            # Swap the bucket to CPU, result is a flat tensor for this bucket. We are doing the chunking inside this function to avoid returning any jnp.concatenate
-            # of kv cache for the the bucketed blocks
+            # Swap the bucket to CPU, result is a flat tensor for this bucket.
             cpu_chunk_flat_per_layer = self.swap_out_fn(tpu_chunk)
             jax.block_until_ready(cpu_chunk_flat_per_layer)
             # Split the flat bucket tensor into block-sized chunks and append
             split_size_list = [self.block_size] * decomposed_block_size
-            for i, layer_cache in enumerate(cpu_chunk_flat_per_layer):
-                chunks = jax.lax.split(layer_cache, split_size_list, axis=0)
-                final_chunks_per_layer[i].extend(chunks)
+            if isinstance(cpu_chunk_flat_per_layer[0], list):
+                # Per-shard format
+                per_shard_chunks = _split_per_shard_to_chunks(
+                    cpu_chunk_flat_per_layer, split_size_list)
+                for i in range(self.num_layers):
+                    final_chunks_per_layer[i].extend(per_shard_chunks[i])
+            else:
+                for i, layer_cache in enumerate(cpu_chunk_flat_per_layer):
+                    chunks = jax.lax.split(layer_cache,
+                                           split_size_list,
+                                           axis=0)
+                    final_chunks_per_layer[i].extend(chunks)
 
             token_offset += chunk_size_in_tokens
 
@@ -2022,10 +2038,16 @@ class TPUOffloadConnectorWorker:
                     # NOTE(jcgu): we keep cpu_chunk_size == block_size
                     split_size_list = [self.cpu_chunk_size
                                        ] * num_blocks_to_save
-                    chunks_on_cpu = jax.tree.map(
-                        lambda flat_layer_cache: jax.lax.split(
-                            flat_layer_cache, split_size_list, axis=0),
-                        flat_kv_caches_cpu)
+                    if isinstance(flat_kv_caches_cpu[0], list):
+                        # Per-shard format: List[List[jax.Array]] (layers × shards)
+                        # Split each shard, then regroup by block index.
+                        chunks_on_cpu = _split_per_shard_to_chunks(
+                            flat_kv_caches_cpu, split_size_list)
+                    else:
+                        chunks_on_cpu = jax.tree.map(
+                            lambda flat_layer_cache: jax.lax.split(
+                                flat_layer_cache, split_size_list, axis=0),
+                            flat_kv_caches_cpu)
 
             if chunks_on_cpu and chunks_on_cpu[0]:
                 jax.block_until_ready(chunks_on_cpu)
@@ -2039,8 +2061,14 @@ class TPUOffloadConnectorWorker:
                     f"request {req_id} to CPU in {duration:.4f} seconds.")
 
         if not self.no_op_swap_out:
+
+            def _chunk_nbytes(chunk):
+                if isinstance(chunk, list):
+                    return sum(s.nbytes for s in chunk)
+                return chunk.nbytes
+
             total_size_bytes = sum(
-                sum(chunk.nbytes for chunk in layer_chunks)
+                sum(_chunk_nbytes(chunk) for chunk in layer_chunks)
                 for layer_chunks in chunks_on_cpu)
             logger.info(
                 f"Total size of chunks_on_cpu: {total_size_bytes / 1024**2:.2f} MB"
