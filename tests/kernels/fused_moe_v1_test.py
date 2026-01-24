@@ -270,24 +270,32 @@ class MoEKernelTest(jtu.JaxTestCase):
 
     @parameterized.product(scoring_fn=["softmax", "sigmoid"])
     def test_scoring_fn(self, scoring_fn):
+        dtype = jnp.bfloat16
+        top_k = 8
+        num_experts = 128
+        hidden_size = 1024
+        intermediate_size = 1024
+        num_tokens = 8 * 32
         self._test_moe(
-            dtype=jnp.bfloat16,
-            top_k=8,
-            num_experts=128,
-            hidden_size=1024,
-            intermediate_size=1024,
-            num_tokens=8 * 32,
+            dtype=dtype,
+            top_k=top_k,
+            num_experts=num_experts,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            num_tokens=num_tokens,
             seed=1234,
             renormalize_topk_logits=True,
             scoring_fn=scoring_fn,
             bt=32,
-            bf=1024,
-            bd1=1024,
-            bd2=1024,
+            bf=512,
+            bd1=512,
+            bd2=512,
             btc=32,
             bfc=256,
             bd1c=256,
             bd2c=256,
+            atol=
+            4e-1,  # loosen tolerance as jax.lax.top_k and get_top_k aren't identical on ties
         )
 
     def test_benchmark_qwen_235(self):
