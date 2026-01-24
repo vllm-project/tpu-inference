@@ -237,3 +237,63 @@ def _sharded_device_put(tensor: jax.Array, sharding) -> jax.Array:
                                                     sharding,
                                                     x_split,
                                                     dtype=tensor.dtype)
+
+
+def prepare_incremental_loading(model: torch.nn.Module, mesh: Mesh) -> None:
+    """
+    Traverses the model and attaches a generic weight_loader to any parameter
+    that doesn't already have one (i.e. wasn't handled by unquantized.py).
+    """
+
+    # Helper to create a generic loader for a specific sharding spec
+    def create_generic_loader(layer, param_name, sharding_spec):
+        def generic_loader(param: torch.nn.Parameter, loaded_weight: torch.Tensor):
+
+            # Check if we are loading the correct parameter
+            # We need to find if 'param' corresponds to 'param_name' in 'layer'
+            # (In this simple closure we assume 1:1 mapping created below)
+            
+            # Immediately shard
+            sharded_tensor = _convert_to_torchax_and_shard(
+                loaded_weight, 
+                NamedSharding(mesh, sharding_spec)
+            )
+            param.data = sharded_tensor
+            
+        return generic_loader
+
+    for name, module in model.named_modules():
+        # Determine sharding strategy for this module
+        # This logic mirrors MODULE_TYPE_TO_SHARDING_FUNC but returns specs instead of applying them
+        
+        # We iterate parameters of the module
+        for param_name, param in module.named_parameters(recurse=False):
+            print(f"Processing {name}.{param_name}")
+            if hasattr(param, "weight_loader"):
+                print(f"  Found weight_loader for {name}.{param_name}")
+                continue
+            print(f"  No weight_loader found for {name}.{param_name}")
+            # Default to Replicated
+            sharding_spec = P() 
+
+            if isinstance(module, VocabParallelEmbedding) and param_name == "weight":
+                 sharding_spec = P(ShardingAxisName.MLP_TENSOR, None)
+            elif isinstance(module, ParallelLMHead) and param_name == "weight":
+                 sharding_spec = P(ShardingAxisName.MLP_TENSOR, None)
+            elif isinstance(module, ParallelLMHead) and param_name == "bias":
+                 sharding_spec = P(ShardingAxisName.MLP_TENSOR)
+
+            # TODO: Add LoRA handling here if needed, or ensure they are handled elsewhere.
+            # For now, most other layers like Norms are small and safe to replicate.
+
+            # We need to register the parameter on meta device if it's not already
+            # (Though vLLM might have already initialized it on CPU/Meta)
+            # If it is on CPU with valid data, we should shard it NOW.
+            if param.device.type != "meta" and not isinstance(param, torchax.tensor.Tensor):
+                # If it has data, shard it immediately (this handles small params init by vLLM directly)
+                # But wait, vllm_get_model might force device="cpu". 
+                # If we init on meta, param.data is empty.
+                pass
+            
+            # Attach loader
+            setattr(param, "weight_loader", create_generic_loader(module, param_name, sharding_spec))

@@ -32,7 +32,7 @@ from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
-from vllm.model_executor.model_loader import get_model as vllm_get_model
+from vllm.model_executor.model_loader import get_model, _LOAD_FORMAT_TO_MODEL_LOADER
 from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm.sequence import IntermediateTensors
 
@@ -41,7 +41,13 @@ from tpu_inference.distributed.jax_parallel_state import \
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
-    shard_model_to_tpu
+    shard_model_to_tpu, prepare_incremental_loading
+from vllm.model_executor.model_loader.utils import (
+    initialize_model,
+    process_weights_after_loading,
+)
+
+from vllm.utils.torch_utils import set_default_torch_dtype
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
@@ -83,6 +89,82 @@ class _VllmRunner(torch.nn.Module):
 
     def compute_logits(self, hidden_state: torch.Tensor) -> torch.Tensor:
         return self.vllm_model.compute_logits(hidden_state)
+
+        # >>> from vllm.config.load import LoadConfig
+        # >>> from vllm.model_executor.model_loader import (
+        # ...     get_model_loader,
+        # ...     register_model_loader,
+        # ... )
+        # >>> from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+        # >>>
+        # >>> @register_model_loader("my_loader")
+        # ... class MyModelLoader(BaseModelLoader):
+        # ...     def download_model(self):
+        # ...         pass
+        # ...
+        # ...     def load_weights(self):
+        # ...         pass
+        # >>>
+        # >>> load_config = LoadConfig(load_format="my_loader")
+        # >>> type(get_model_loader(load_config))
+
+
+from vllm.config.load import LoadConfig
+from vllm.model_executor.model_loader import (
+    get_model_loader,
+    register_model_loader,
+)
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
+
+
+@register_model_loader("incremental")
+class IncrementalModelLoader(DefaultModelLoader):
+    def __init__(self, load_config: LoadConfig, mesh: Mesh):
+        super().__init__(load_config)
+        self.mesh = mesh
+
+    def load_model(
+        self, vllm_config: VllmConfig, model_config: ModelConfig
+    ) -> nn.Module:
+        """Load a model with the given configurations."""
+        device_config = vllm_config.device_config
+        load_config = vllm_config.load_config
+        load_device = (
+            device_config.device if load_config.device is None else load_config.device
+        )
+        target_device = torch.device(load_device)
+        with set_default_torch_dtype(model_config.dtype):
+            with target_device:
+                model = initialize_model(
+                    vllm_config=vllm_config, model_config=model_config
+                )
+            # Prepare for incremental loading
+            prepare_incremental_loading(model, self.mesh)
+
+            # Quantization does not happen in `load_weights` but after it
+            self.load_weights(model, model_config)
+            process_weights_after_loading(model, model_config, target_device)
+
+        return model.eval()
+
+def get_model_loader(load_config: LoadConfig, mesh: Mesh) -> BaseModelLoader:
+    """Get a model loader based on the load format."""
+    load_format = load_config.load_format
+    if load_format not in _LOAD_FORMAT_TO_MODEL_LOADER:
+        raise ValueError(f"Load format `{load_format}` is not supported")
+    if load_format == "incremental":
+        return IncrementalModelLoader(load_config, mesh)
+    return _LOAD_FORMAT_TO_MODEL_LOADER[load_format](load_config)
+
+
+def vllm_get_model(
+    *, vllm_config: VllmConfig, model_config: ModelConfig | None = None, mesh: Mesh
+) -> nn.Module:
+    loader = get_model_loader(vllm_config.load_config, mesh )
+    if model_config is None:
+        model_config = vllm_config.model_config
+    return loader.load_model(vllm_config=vllm_config, model_config=model_config)
+
 
 
 class VllmModelWrapper:
