@@ -295,7 +295,7 @@ class MoEKernelTest(jtu.JaxTestCase):
             bd1c=256,
             bd2c=256,
             atol=
-            4e-1,  # loosen tolerance as jax.lax.top_k and get_top_k aren't identical on ties
+            4e-1,  # loosen tolerance as jax.lax.top_k and get_top_k aren't identical on ties (related: https://github.com/jax-ml/jax/issues/34620)
         )
 
     def test_benchmark_qwen_235(self):
