@@ -254,6 +254,8 @@ class QuantizedMatmulKernelTest(jtu.JaxTestCase):
         n_input_features: int,
         n_output_features: int,
     ):
+        if not jtu.is_device_tpu_at_least(version=7):
+            self.skipTest("Expect TPUv7+")
         self._test_quantized_matmul(
             dtype,
             jnp.float4_e2m1fn,
