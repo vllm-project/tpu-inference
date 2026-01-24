@@ -142,7 +142,7 @@ class MoEKernelTest(jtu.JaxTestCase):
         bd1c,
         bd2c,
         act_fn="silu",
-        scoring_func="softmax",
+        scoring_fn="softmax",
         w_dtype=None,
         subc_quant_w1_sz=None,
         subc_quant_w2_sz=None,
@@ -179,7 +179,7 @@ class MoEKernelTest(jtu.JaxTestCase):
             top_k=top_k,
             renormalize_topk_logits=renormalize_topk_logits,
             act_fn=act_fn,
-            scoring_func=scoring_func,
+            scoring_fn=scoring_fn,
             subc_quant_w1_sz=subc_quant_w1_sz,
             subc_quant_w2_sz=subc_quant_w2_sz,
             w1_scale=w1_scale,
@@ -205,7 +205,7 @@ class MoEKernelTest(jtu.JaxTestCase):
             b2=b2,
             renormalize_topk_logits=renormalize_topk_logits,
             act_fn=act_fn,
-            scoring_fn=scoring_func,
+            scoring_fn=scoring_fn,
             subc_quant_w1_sz=subc_quant_w1_sz,
             subc_quant_w2_sz=subc_quant_w2_sz,
             w1_scale=w1_scale,
@@ -268,8 +268,8 @@ class MoEKernelTest(jtu.JaxTestCase):
             bd2c=256,
         )
 
-    @parameterized.product(scoring_func=["softmax", "sigmoid"])
-    def test_scoring_func(self, scoring_func):
+    @parameterized.product(scoring_fn=["softmax", "sigmoid"])
+    def test_scoring_fn(self, scoring_fn):
         self._test_moe(
             dtype=jnp.bfloat16,
             top_k=8,
@@ -279,7 +279,7 @@ class MoEKernelTest(jtu.JaxTestCase):
             num_tokens=8 * 32,
             seed=1234,
             renormalize_topk_logits=True,
-            scoring_func=scoring_func,
+            scoring_fn=scoring_fn,
             bt=32,
             bf=1024,
             bd1=1024,
