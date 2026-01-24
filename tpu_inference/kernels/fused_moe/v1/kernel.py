@@ -51,7 +51,7 @@ def broadcast_minor(src, shape):
                            axis=-1)[..., :shape[-1]]
 
 
-def scoring_fn(scoring: str, x):
+def apply_scoring_fn(scoring: str, x):
     x = x.astype(jnp.float32)
     match scoring:
         case "softmax":
@@ -75,7 +75,7 @@ def swigluoai(gate: jax.Array,
     return (up + 1.0) * glu
 
 
-def activation_fn(acc1, acc3, act_fn):
+def apply_act_fn(acc1, acc3, act_fn):
     if act_fn == "silu":
         return jax.nn.silu(acc1) * acc3
     elif act_fn == "gelu":
@@ -95,7 +95,7 @@ def ref_moe(
         *,
         renormalize_topk_logits: bool = False,
         act_fn: str = "silu",
-        scoring_func: str = "softmax",
+        scoring_fn: str = "softmax",
         subc_quant_w1_sz: int | None = None,
         subc_quant_w2_sz: int | None = None,
         w1_scale:
@@ -113,8 +113,8 @@ def ref_moe(
     n_tokens = tokens.shape[0]  # num_tokens
 
     # Compute gating scores for all experts
-    gating_logits = scoring_fn(scoring_func,
-                               gating_output)  # [num_tokens, n_experts]
+    gating_logits = apply_scoring_fn(scoring_fn,
+                                     gating_output)  # [num_tokens, n_experts]
 
     # Select top-k experts per token
     top_k_logits, top_k_indices = lax.top_k(
@@ -170,7 +170,7 @@ def ref_moe(
                 gmm1_w3_proj += b1[expert_id:expert_id + 1, 1, 0]
 
             # Apply gated activation: activation(gate) * up
-            act = activation_fn(gmm1_w1_proj, gmm1_w3_proj, act_fn)
+            act = apply_act_fn(gmm1_w1_proj, gmm1_w3_proj, act_fn)
 
             # Second linear layer (down projection)
             gmm_2_out = act @ expert_weight_2  # [1, hidden_size]
@@ -246,7 +246,7 @@ def _fused_ep_moe_kernel(
         renormalize_topk_logits: bool,
         ep_axis_name: str,
         act_fn: str,
-        scoring_func: str,
+        scoring_fn: str,
         subc_quant_w1_sz: int | None = None,
         subc_quant_w2_sz: int | None = None,
         # Kernel tuning params.
@@ -956,7 +956,7 @@ def _fused_ep_moe_kernel(
                                             btc), pl.ds(bfc_id * bfc, bfc))
                         acc1 = acc1_vmem[*acc_slices]
                         acc3 = acc3_vmem[*acc_slices]
-                        act = activation_fn(acc1, acc3, act_fn)
+                        act = apply_act_fn(acc1, acc3, act_fn)
                         w2 = w2_vmem[
                             p_id,
                             pl.ds(bfc_id * bfc, bfc),
@@ -1138,7 +1138,7 @@ def _fused_ep_moe_kernel(
         wait_fetch_b_gating(bt_id)
 
         b_gating = b_gating_x2_vmem[bt_sem_id]
-        b_gating_score = scoring_fn(scoring_func, b_gating)
+        b_gating_score = apply_scoring_fn(scoring_fn, b_gating)
         top_k_logits_lst, t2e_routing, expert_sizes, expert_starts = get_top_k(
             b_gating_score, top_k, renormalize_topk_logits)
 
@@ -1227,7 +1227,7 @@ def _fused_ep_moe_kernel(
         "top_k",
         "renormalize_topk_logits",
         "act_fn",
-        "scoring_func",
+        "scoring_fn",
         "subc_quant_w1_sz",
         "subc_quant_w2_sz",
         "bt",
@@ -1251,7 +1251,7 @@ def fused_ep_moe(
     *,
     renormalize_topk_logits: bool = False,
     act_fn: str = "silu",
-    scoring_func: str = "softmax",
+    scoring_fn: str = "softmax",
     subc_quant_w1_sz: int | None = None,
     subc_quant_w2_sz: int | None = None,
     w1_scale: (
@@ -1481,7 +1481,7 @@ def fused_ep_moe(
             renormalize_topk_logits=renormalize_topk_logits,
             ep_axis_name=ep_axis_name,
             act_fn=act_fn,
-            scoring_func=scoring_func,
+            scoring_fn=scoring_fn,
             subc_quant_w1_sz=subc_quant_w1_sz,
             subc_quant_w2_sz=subc_quant_w2_sz,
             bt=bt,

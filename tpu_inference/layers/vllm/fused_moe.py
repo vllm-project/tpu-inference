@@ -96,7 +96,7 @@ def fused_moe_apply(
                     top_k=layer.top_k,
                     renormalize_topk_logits=layer.renormalize,
                     act_fn=layer.activation,
-                    scoring_func=layer.scoring_func,
+                    scoring_fn=layer.scoring_func,
                     subc_quant_w1_sz=subc_quant_w1_sz,
                     subc_quant_w2_sz=subc_quant_w2_sz,
                     w1_scale=weights.w13_weight_scale,

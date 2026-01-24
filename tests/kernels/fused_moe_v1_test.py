@@ -205,7 +205,7 @@ class MoEKernelTest(jtu.JaxTestCase):
             b2=b2,
             renormalize_topk_logits=renormalize_topk_logits,
             act_fn=act_fn,
-            scoring_func=scoring_func,
+            scoring_fn=scoring_func,
             subc_quant_w1_sz=subc_quant_w1_sz,
             subc_quant_w2_sz=subc_quant_w2_sz,
             w1_scale=w1_scale,
