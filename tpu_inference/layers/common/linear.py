@@ -85,7 +85,10 @@ def sharded_quantized_matmul(x: jax.Array,
                 output = blockwise_quantized_matmul_kernel(
                     x, w_q, w_s, x_q_dtype=x_q_dtype, block_size=block_size)
             else:
-                output = quantized_matmul_kernel(x, w_q, w_s, x_q_dtype=w_q.dtype)
+                output = quantized_matmul_kernel(x,
+                                                 w_q,
+                                                 w_s,
+                                                 x_q_dtype=w_q.dtype)
         else:
             output = xla_quantized_matmul(x, w_q, w_s)
         if in_axis:

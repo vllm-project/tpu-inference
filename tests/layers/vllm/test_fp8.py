@@ -493,7 +493,7 @@ def test_fused_moe(use_ep, num_devices, num_tokens, intermediate_size,
 def test_process_weights_after_loading_for_blockwise_quant(
         requant_block_size, requant_weight_dtype):
     if not jtu.is_device_tpu_at_least(version=7):
-            pytest.skip("Expect TPUv7+")
+        pytest.skip("Expect TPUv7+")
     mesh = test_utils.get_spmd_mesh()
     dtype = torch.bfloat16
 
