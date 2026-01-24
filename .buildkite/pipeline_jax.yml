@@ -125,8 +125,7 @@ steps:
              python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels \
              --ignore=/workspace/tpu_inference/tests/kernels/ragged_paged_attention_kernel_v2_test.py \
              --ignore=/workspace/tpu_inference/tests/kernels/ragged_kv_cache_update_v2_test.py \
-             --ignore=/workspace/tpu_inference/tests/kernels/collectives \
-             --ignore=/workspace/tpu_inference/tests/kernels/fused_moe_v1_test.py
+             --ignore=/workspace/tpu_inference/tests/kernels/collectives
          else
            buildkite-agent step update "label" "🚫 (Skipped) JAX unit tests - kernels"
            buildkite-agent annotate "Step skipped because no changes were detected in kernel files." --style "info" --context "skip-kernels"
