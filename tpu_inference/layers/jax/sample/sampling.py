@@ -48,6 +48,49 @@ def sample(
         return greedy_sampled
 
     logits = logits.astype(jnp.float32)
+
+    # If current sequence length < min_tokens, we must mask out stop tokens.
+    if (tpu_sampling_metadata.min_tokens is not None
+            and tpu_sampling_metadata.stop_token_ids is not None):
+
+        # [TRACE LOG] This prints ONCE when the model first loads/compiles.
+        # It confirms the code is actually being included in the graph.
+        print("DEBUG: JAX is compiling the min_tokens logic path!")
+
+        # Check which requests haven't reached min_tokens yet
+        # (B,) boolean array
+        should_enforce_min = tpu_sampling_metadata.seq_lens < tpu_sampling_metadata.min_tokens
+
+        # [RUNTIME LOG] This prints EVERY time the model generates a token.
+        # We limit it to the first request [0] to avoid spamming 64 lines per step.
+        jax.debug.print("DEBUG RUNTIME: Len={x} Min={y} Enforce={z}",
+                        x=tpu_sampling_metadata.seq_lens[0],
+                        y=tpu_sampling_metadata.min_tokens[0],
+                        z=should_enforce_min[0])
+
+        # We need to mask logits for stop tokens.
+        # Since scattering (at[].set) on sharded arrays can be tricky,
+        # we define a vectorized function to apply per-row.
+        def _mask_stop_tokens(logit_row, stop_ids, enforce):
+            # If enforce is False, return row unchanged
+            # If enforce is True, set stop_ids to -inf
+
+            # Helper to perform the update
+            def _apply_mask(l_row):
+                # Filter out padding (-1) in stop_ids by only updating valid indices
+                # Note: jax.numpy.at ignores negative indices usually, but to be safe:
+                valid_mask = stop_ids != -1
+                # We essentially want: l_row[stop_ids] = -inf where valid
+                # We use 'min' to avoid overwriting if it's already -inf? No, just set.
+                return l_row.at[stop_ids].set(
+                    jnp.where(valid_mask, -1e12, l_row.at[stop_ids].get()))
+
+            return jax.lax.cond(enforce, _apply_mask, lambda x: x, logit_row)
+
+        # Vectorize over the batch
+        logits = jax.vmap(_mask_stop_tokens)(
+            logits, tpu_sampling_metadata.stop_token_ids, should_enforce_min)
+
     # Only apply top-k masking if k > 0 for each token
     top_k = tpu_sampling_metadata.top_k
     should_apply_topk = jnp.expand_dims(top_k > 0, axis=-1)
