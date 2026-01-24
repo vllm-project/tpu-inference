@@ -26,19 +26,19 @@ from tpu_inference.layers.common.utils import \
 from tpu_inference.utils import get_mesh_shape_product
 
 
-def scoring_fn(scoring: str, x: jax.Array) -> jax.Array:
+def apply_scoring_fn(scoring_fn: str, x: jax.Array) -> jax.Array:
     x = x.astype(jnp.float32)
-    match scoring:
+    match scoring_fn:
         case "softmax":
             return jax.nn.softmax(x, axis=-1)
         case "sigmoid":
             return jax.nn.sigmoid(x)
         case _:
             raise NotImplementedError(
-                f"FusedMoE does not support {scoring} scoring")
+                f"FusedMoE does not support {scoring_fn} scoring function")
 
 
-def activation_fn(activation: str, x1: jax.Array, x2: jax.Array) -> jax.Array:
+def apply_act_fn(activation: str, x1: jax.Array, x2: jax.Array) -> jax.Array:
     match activation:
         case "silu":
             return jax.nn.silu(x1) * x2
@@ -46,7 +46,7 @@ def activation_fn(activation: str, x1: jax.Array, x2: jax.Array) -> jax.Array:
             return _swigluoai(x1, x2)
         case _:
             raise NotImplementedError(
-                f"FusedMoE does not support {activation} activation")
+                f"FusedMoE does not support {activation} activation function")
 
 
 def _swigluoai(x1: jax.Array,
@@ -379,7 +379,7 @@ def expert_sharded_gmm(
         "mesh",
         "use_ep",
         "activation",
-        "scoring_func",
+        "scoring_fn",
     ),
 )
 def fused_moe_func(
@@ -396,7 +396,7 @@ def fused_moe_func(
     mesh: Mesh,
     use_ep: bool,
     activation: str,
-    scoring_func: str,
+    scoring_fn: str,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -414,6 +414,7 @@ def fused_moe_func(
         mesh: mesh to perform moe.
         use_ep: use expert parallelism.
         activation: activation function to perform on the output of w1.
+        scoring_fn: scoring function to apply on gating_output.
 
     Returns:
         Output of moe operation [num_tokens, hidden_size]
@@ -428,7 +429,7 @@ def fused_moe_func(
 
     assert gating_output.shape == (num_tokens, global_num_experts)
 
-    topk_weights = scoring_fn(scoring_func, gating_output)
+    topk_weights = apply_scoring_fn(scoring_fn, gating_output)
     # All-gather topk weights for attention dp
     topk_weights = jax.lax.with_sharding_constraint(
         topk_weights, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
@@ -474,7 +475,7 @@ def fused_moe_func(
         )
         x1, x2 = jnp.split(x, 2, -1)
 
-        x = activation_fn(activation, x1, x2)
+        x = apply_act_fn(activation, x1, x2)
 
         x = expert_sharded_gmm(
             x,
@@ -495,7 +496,7 @@ def fused_moe_func(
             mesh=mesh,
         )
 
-        x = activation_fn(activation, x1, x2)
+        x = apply_act_fn(activation, x1, x2)
 
         x = tensor_sharded_gmm_row_parallel(
             x,

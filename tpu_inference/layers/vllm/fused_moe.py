@@ -120,7 +120,7 @@ def fused_moe_apply(
                     mesh=mesh,
                     use_ep=layer.use_ep,
                     activation=layer.activation,
-                    scoring_func=layer.scoring_func,
+                    scoring_fn=layer.scoring_func,
                 )
 
         return output
