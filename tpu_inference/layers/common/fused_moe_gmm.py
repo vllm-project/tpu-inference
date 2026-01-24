@@ -200,7 +200,7 @@ def tensor_sharded_gmm_row_parallel(
         )
 
         # Perform local reverse sort and reduction on the topk experts of
-        # a token. This will save psum size by 1/8 compared with psum first
+        # a token. Psum size will be 1/top_k compared with psum first
         # and run reduction later
         out = out[topk_argsort_revert_indices_local].reshape((-1, topk, n))
         out = out * jnp.expand_dims(topk_weights_local, axis=-1)
