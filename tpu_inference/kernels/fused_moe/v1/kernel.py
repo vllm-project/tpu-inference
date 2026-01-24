@@ -51,16 +51,16 @@ def broadcast_minor(src, shape):
                            axis=-1)[..., :shape[-1]]
 
 
-def apply_scoring_fn(scoring: str, x):
+def apply_scoring_fn(scoring_fn: str, x):
     x = x.astype(jnp.float32)
-    match scoring:
+    match scoring_fn:
         case "softmax":
             return jax.nn.softmax(x, axis=-1)
         case "sigmoid":
             return jax.nn.sigmoid(x)
         case _:
             raise NotImplementedError(
-                f"Unsupported scoring function: {scoring}")
+                f"Unsupported scoring function: {scoring_fn}")
 
 
 def swigluoai(gate: jax.Array,
