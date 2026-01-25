@@ -72,6 +72,8 @@ from tpu_inference.runner.lora_utils import LoraUtils
 from tpu_inference.runner.multimodal_manager import MultiModalManager
 from tpu_inference.runner.persistent_batch_manager import \
     PersistentBatchManager
+from tpu_inference.runner.profiler import (PhasedBasedProfiler,
+                                           get_batch_composition_stats)
 from tpu_inference.runner.speculative_decoding_manager import (
     SpecDecodeMetadata, SpeculativeDecodingManager)
 from tpu_inference.runner.structured_decoding_manager import \
@@ -369,7 +371,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.phased_profiling_dir = envs.PHASED_PROFILING_DIR
         self.phase_based_profiler = None
         if self.phased_profiling_dir:
-            self.phase_based_profiler = runner_utils.PhasedBasedProfiler(
+            self.phase_based_profiler = PhasedBasedProfiler(
                 self.phased_profiling_dir)
 
     def _init_mm(self) -> None:
@@ -1329,7 +1331,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Please see runner_utils.PhasedBasedProfiler for details
         if self.phase_based_profiler:
-            batch_composition_stats = runner_utils.get_batch_composition_stats(
+            batch_composition_stats = get_batch_composition_stats(
                 self.input_batch, total_num_scheduled_tokens, num_reqs,
                 padded_total_num_scheduled_tokens, scheduler_output)
 

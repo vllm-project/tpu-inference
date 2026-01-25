@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     ENABLE_QUANTIZED_MATMUL_KERNEL: bool = False
     REQUANTIZE_BLOCK_SIZE: int | None = None
     REQUANTIZE_WEIGHT_DTYPE: str = "float8_e4m3fn"
+    PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR: int = 15
 
 
 def env_with_choices(
@@ -143,6 +144,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Directory to store phased profiling output
     "PHASED_PROFILING_DIR":
     lambda: os.getenv("PHASED_PROFILING_DIR", ""),
+    # Number of steps to enable phased profiler.
+    "PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR":
+    lambda: int(os.getenv("PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR") or "15"),
     # Python tracer level for profiling
     "PYTHON_TRACER_LEVEL":
     lambda: int(os.getenv("PYTHON_TRACER_LEVEL") or "1"),
@@ -166,6 +170,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Ray compiled DAG channel type for TPU
     "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE":
     env_with_choices("VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE", "shm", ["shm"]),
+    # Enable kernel based quantized matmul. Disable uses compiler version.
     "ENABLE_QUANTIZED_MATMUL_KERNEL":
     lambda: bool(int(os.getenv("ENABLE_QUANTIZED_MATMUL_KERNEL") or "0")),
     # Specify block quantization size
