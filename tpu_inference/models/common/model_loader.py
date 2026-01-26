@@ -11,7 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import os
+from safetensors.flax import load_file as load_safetensors
 import functools
 from typing import Any, Optional
 
@@ -218,6 +219,35 @@ def _get_nnx_model(
                 del vllm_config.model_config.runai_model_weights_iterator
             else:
                 model.load_weights(rng)
+
+            # === BUG FIX START: Manual Local Safetensors Loading ===
+            # If load_weights failed to populate local weights (leaving ShapeDtypeStruct),
+            # we force load them here.
+            model_path = vllm_config.model
+            if os.path.isdir(model_path):
+                safetensors_file = os.path.join(model_path, "model.safetensors")
+                # Check if file exists and if model is still abstract (ShapeDtypeStruct)
+                # We check one random leaf to see if it's concrete or abstract
+                is_still_abstract = False
+                try:
+                    # Helper to check leaf
+                    first_leaf = jax.tree_util.tree_leaves(nnx.state(model))[0]
+                    if isinstance(first_leaf, jax.ShapeDtypeStruct):
+                        is_still_abstract = True
+                except Exception:
+                    pass
+
+                if os.path.exists(safetensors_file) and is_still_abstract:
+                    print(f"DEBUG: Local model detected at {safetensors_file} and model is abstract. Loading weights manually...")
+                    flat_params = load_safetensors(safetensors_file)
+                    try:
+                        model.update_state(flat_params)
+                    except Exception:
+                        from flax.traverse_util import unflatten_dict
+                        model.update_state(unflatten_dict(flat_params, sep='.'))
+                    print("DEBUG: Local weights loaded successfully.")
+            # === BUG FIX END ===
+
             jit_model = create_jit_model(
                 model,
                 use_qwix_on_abstract_model=should_apply_qwix_on_abstract_model)
