@@ -283,6 +283,15 @@ class DPScheduler(SchedulerInterface):
         self.cached_schedulers_output = deque()
         self._create_per_rank_configs(kv_cache_config)
 
+        # Initialize NONE_HASH global before forking worker processes
+        # This ensures all workers inherit the initialized value
+        if vllm_config.cache_config.enable_prefix_caching:
+            from vllm.utils.hashing import get_hash_fn_by_name
+            from vllm.v1.core.kv_cache_utils import init_none_hash
+            caching_hash_fn = get_hash_fn_by_name(
+                vllm_config.cache_config.prefix_caching_hash_algo)
+            init_none_hash(caching_hash_fn)
+
         # The original scheduler class could be Scheduler or AsyncScheduler
         original_scheduler_cls = vllm_config.scheduler_config._original_scheduler_cls
 

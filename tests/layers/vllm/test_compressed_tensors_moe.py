@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import tempfile
+from unittest.mock import MagicMock, patch
 
 import jax.numpy as jnp
 import pytest
@@ -43,6 +44,16 @@ from . import utils as test_utils
 P = PartitionSpec
 
 MODEL = 'BCCard/Qwen3-30B-A3B-FP8-Dynamic'
+
+
+@pytest.fixture(autouse=True)
+def mock_get_pp_group():
+    with patch("tpu_inference.distributed.jax_parallel_state.get_pp_group",
+               return_value=MagicMock(is_first_rank=True,
+                                      is_last_rank=True,
+                                      rank_in_group=0,
+                                      world_size=1)):
+        yield
 
 
 @pytest.fixture(autouse=True)

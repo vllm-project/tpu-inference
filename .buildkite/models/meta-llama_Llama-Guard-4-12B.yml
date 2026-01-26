@@ -39,7 +39,7 @@ steps:
 
   - label: "Performance benchmarks for meta-llama/Llama-Guard-4-12B"
     key: "meta-llama_Llama-Guard-4-12B_Benchmark"
-    depends_on: "record_meta-llama_Llama-Guard-4-12B_IntegrationTest"
+    depends_on: "record_meta-llama_Llama-Guard-4-12B_Accuracy"
     soft_fail: true
     env:
       TEST_MODEL: meta-llama/Llama-Guard-4-12B
@@ -64,8 +64,8 @@ steps:
         .buildkite/scripts/record_step_result.sh meta-llama_Llama-Guard-4-12B_Benchmark
 
 
-  - label: "Integration tests for meta-llama/Llama-Guard-4-12B"
-    key: "meta-llama_Llama-Guard-4-12B_IntegrationTest"
+  - label: "Accuracy for meta-llama/Llama-Guard-4-12B"
+    key: "meta-llama_Llama-Guard-4-12B_Accuracy"
     depends_on: "record_meta-llama_Llama-Guard-4-12B_UnitTest"
     agents:
       queue: tpu_v6e_queue
@@ -77,15 +77,15 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/safety_model_benchmark.sh --mode accuracy
-  - label: "Record integration test result for meta-llama/Llama-Guard-4-12B"
-    key: "record_meta-llama_Llama-Guard-4-12B_IntegrationTest"
-    depends_on: "meta-llama_Llama-Guard-4-12B_IntegrationTest"
+  - label: "Record accuracy result for meta-llama/Llama-Guard-4-12B"
+    key: "record_meta-llama_Llama-Guard-4-12B_Accuracy"
+    depends_on: "meta-llama_Llama-Guard-4-12B_Accuracy"
     env:
       CI_TARGET: meta-llama/Llama-Guard-4-12B
-      CI_STAGE: "IntegrationTest"
+      CI_STAGE: "Accuracy/Correctness"
       CI_CATEGORY: "text-only"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh meta-llama_Llama-Guard-4-12B_IntegrationTest
+        .buildkite/scripts/record_step_result.sh meta-llama_Llama-Guard-4-12B_Accuracy

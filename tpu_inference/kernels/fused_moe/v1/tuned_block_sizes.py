@@ -13,6 +13,10 @@
 # limitations under the License.
 """Auto-tuned block sizes for Fused MoE kernel."""
 
+from tpu_inference.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 # TODO(jevinjiang): create sharable util
 def cdiv(a, b):
@@ -143,6 +147,107 @@ TUNED_BLOCK_SIZES = {
         1536,
         1536,
     ),
+    # for qwen3-coder-480b, we use a temporary huristic block size here. Need to tune for better performance.
+    (6144, 2560, 160, 8, 2, 4, 16, 8): (
+        64,
+        1280,
+        1536,
+        1536,
+        64,
+        1280,
+        1536,
+        1536,
+    ),
+    (6144, 2560, 160, 8, 2, 4, 32, 8): (
+        64,
+        1280,
+        1536,
+        1536,
+        64,
+        1280,
+        1536,
+        1536,
+    ),
+    (6144, 2560, 160, 8, 2, 4, 64, 8): (
+        64,
+        1280,
+        1536,
+        1536,
+        64,
+        1280,
+        1536,
+        1536,
+    ),
+    (6144, 2560, 160, 8, 2, 4, 128, 8): (
+        64,
+        1280,
+        1536,
+        1536,
+        64,
+        1280,
+        1536,
+        1536,
+    ),
+    (6144, 2560, 160, 8, 2, 4, 256, 8): (
+        64,
+        1280,
+        1536,
+        1536,
+        64,
+        1280,
+        1536,
+        1536,
+    ),
+    (6144, 2560, 160, 8, 2, 4, 512, 8): (
+        64,
+        1280,
+        1536,
+        1536,
+        64,
+        1280,
+        1536,
+        1536,
+    ),
+    (6144, 2560, 160, 8, 2, 4, 1024, 8): (
+        64,
+        1280,
+        1536,
+        1536,
+        64,
+        1280,
+        1536,
+        1536,
+    ),
+    (6144, 2560, 160, 8, 2, 4, 2048, 8): (
+        64,
+        1280,
+        1536,
+        1536,
+        64,
+        1280,
+        1536,
+        1536,
+    ),
+    (6144, 2560, 160, 8, 2, 4, 4096, 8): (
+        64,
+        1280,
+        1536,
+        1536,
+        64,
+        1280,
+        1536,
+        1536,
+    ),
+    (6144, 2560, 160, 8, 2, 4, 8192, 8): (
+        64,
+        1280,
+        1536,
+        1536,
+        64,
+        1280,
+        1536,
+        1536,
+    ),
 }
 
 
@@ -215,4 +320,8 @@ def get_tuned_block_sizes(
         ep_size,
     )
 
+    if key not in TUNED_BLOCK_SIZES:
+        logger.warning_once(
+            f'[Fused MOE kernel] using default block sizes for key: {key}: {get_default_block_sizes(*key)}'
+        )
     return TUNED_BLOCK_SIZES.get(key, get_default_block_sizes(*key))

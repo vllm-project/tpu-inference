@@ -20,8 +20,9 @@ import numpy as np
 from flax import nnx
 from jax.sharding import Mesh, PartitionSpec
 
-from tpu_inference.layers.jax.moe.deepseek_v3_moe import (DeepSeekV3Router,
-                                                          SparseMoE)
+from tpu_inference.layers.jax.moe.deepseek_v3_moe import DeepSeekV3Router
+from tpu_inference.layers.jax.moe.moe import MoE, Router
+from tpu_inference.layers.jax.moe.utils import MoEBackend
 
 
 class TestDeepSeekV3Router(unittest.TestCase):
@@ -93,10 +94,10 @@ class TestDeepSeekV3Router(unittest.TestCase):
             self.assertEqual(indices.shape, (2, 2))
 
 
-class TestSparseMoE(unittest.TestCase):
+class TestMoE(unittest.TestCase):
 
     def setUp(self):
-        """Set up a multi-device mesh and a sample MoE layer for testing."""
+        """Set up a multi-device mesh for testing."""
         devices = jax.devices()
         self.device_count = len(devices)
         if self.device_count < 8:
@@ -113,123 +114,177 @@ class TestSparseMoE(unittest.TestCase):
         self.mesh = Mesh(device_mesh_array, axis_names=axis_names)
 
         # --- Model Configuration ---
-        self.B, self.S, self.D = 2, 4, 16  # Batch, Sequence, Hidden Dim
-        self.E, self.K = 16, 8  # Num Experts, Experts per Token
-        self.moe_intermediate_size = 32  # FFN Dim
-        self.num_expert_parallelism = 8  # Shard experts across 8 devices
-
+        self.B, self.S, self.D = 2, 8, 32  # Batch, Sequence, Hidden Dim
+        self.E, self.K = 8, 2  # Num Experts (Total), Experts per Token
+        self.moe_intermediate_size = 64
+        self.dtype = jnp.bfloat16
         self.key = jax.random.PRNGKey(42)
-        self.x = jax.random.normal(self.key, (self.B * self.S, self.D),
-                                   dtype=jnp.bfloat16)
 
-        # --- Instantiate MoE Layer ---
-        # We need to do this inside the mesh context
+        # Input data
+        self.x = jax.random.normal(self.key, (self.B * self.S, self.D),
+                                   dtype=self.dtype)
+
+    def _create_moe(self, backend: MoEBackend):
+        """Helper to instantiate the MoE layer within the mesh context."""
         with self.mesh:
-            router = DeepSeekV3Router(hidden_size=self.D,
-                                      num_experts=self.E,
-                                      num_experts_per_tok=self.K,
-                                      n_groups=1,
-                                      topk_groups=1,
-                                      norm_topk_prob=False,
-                                      routed_scaling_factor=1.0,
-                                      dtype=jnp.bfloat16,
-                                      rngs=nnx.Rngs(self.key),
-                                      ed_sharding=PartitionSpec(),
-                                      e_sharding=PartitionSpec(),
-                                      activation_ffw_td=PartitionSpec(
-                                          'data', None))
-            # Instantiation updated to match user's code snippet
-            self.moe = SparseMoE(
+            router = Router(
+                dtype=self.dtype,
+                hidden_size=self.D,
+                num_experts=self.E,
+                num_experts_per_tok=self.K,
+                router_act="softmax",  # Standard softmax routing
+                rngs=nnx.Rngs(self.key),
+                activation_ffw_td=PartitionSpec('data', 'model'),
+                ed_sharding=PartitionSpec(None, 'model'),
+                moe_backend=backend)
+
+            moe = MoE(
+                dtype=self.dtype,
+                num_local_experts=self.E,
                 hidden_size=self.D,
                 intermediate_size_moe=self.moe_intermediate_size,
-                num_local_experts=self.E,
                 hidden_act="silu",
-                num_experts_per_tok=self.K,
-                router=router,
-                dtype=jnp.bfloat16,
                 rngs=nnx.Rngs(self.key),
+                router=router,
                 mesh=self.mesh,
-                apply_expert_weight_before_computation=False,
 
-                # Sharding specs updated based on user's snippet
-                edf_sharding=PartitionSpec('model', None, None),
-                efd_sharding=PartitionSpec('model', None, None),
+                # Sharding Specs
+                activation_ffw_td=PartitionSpec('data', None),
                 activation_ffw_ted=PartitionSpec('data', None),
-                activation_ffw_td=PartitionSpec(
-                    'data', None)  # Activations are replicated
+                edf_sharding=PartitionSpec('model', None,
+                                           None),  # Expert par on axis 0
+                efd_sharding=PartitionSpec('model', None, None),
+                apply_expert_weight_before_computation=False,
+                moe_backend=backend,
+                num_experts_per_tok=self.K,
             )
+        return moe
 
-    def test_token_replicated_expert_parallel_fwd(self):
+    def _compute_ground_truth(self, moe_instance, x_input):
         """
-        Validates the MoE forward pass against a simple, dense equivalent.
-        This specifically tests the is_batch_sharded_by_expert=False path.
+        Computes the expected MoE output using a simple, sequential Python loop.
+        This serves as the 'Gold Standard' to verify distributed logic.
         """
-        # --- 1. Get the ACTUAL output from the complex distributed MoE layer ---
-        # The __call__ method will trigger the shard_map, which requires the mesh context.
-        with self.mesh:
-            actual_output = self.moe(self.x)
+        # 1. Get Router Decisions
+        # We run the router (which is replicated/simple) to get weights & indices
+        weights, indices = moe_instance.router(x_input)
 
-        # --- 2. Calculate the EXPECTED output using a simple, sequential process ---
-        # This serves as the "ground truth".
-
-        # Get router decisions (router params are replicated, so this is fine)
-        router_weights, selected_experts = self.moe.router(self.x)
-
-        # Gather the full, unsharded weights from all devices ---
-        # .value on a sharded param gives the *local* shard.
-        # jax.device_get() retrieves the *full* GlobalDeviceArray to the host.
-        gating_kernel_full = jax.device_get(self.moe.kernel_gating_EDF.value)
-        up_proj_kernel_full = jax.device_get(self.moe.kernel_up_proj_EDF.value)
+        # 2. Fetch Full Weights from Devices
+        # The MoE weights are sharded. We fetch them to CPU/Host as full arrays.
+        gating_kernel_full = jax.device_get(
+            moe_instance.kernel_gating_EDF.value)
+        up_proj_kernel_full = jax.device_get(
+            moe_instance.kernel_up_proj_EDF.value)
         down_proj_kernel_full = jax.device_get(
-            self.moe.kernel_down_proj_EFD.value)
+            moe_instance.kernel_down_proj_EFD.value)
 
-        # Check that we really got the full weights
-        self.assertEqual(gating_kernel_full.shape,
-                         (self.E, self.D, self.moe_intermediate_size))
+        # 3. Flatten for iteration
+        flat_x = x_input.reshape(-1, self.D)
+        flat_weights = weights.reshape(-1, self.K)
+        flat_indices = indices.reshape(-1, self.K)
 
-        # Flatten inputs for easier iteration
-        flat_x = self.x.reshape(self.B * self.S, self.D)
-        flat_weights = router_weights.reshape(self.B * self.S, self.K)
-        flat_experts = selected_experts.reshape(self.B * self.S, self.K)
+        expected_output = np.zeros_like(flat_x)
 
-        expected_output = jnp.zeros_like(flat_x)
+        # 4. Sequential computation per token per selected expert
+        for t in range(flat_x.shape[0]):
+            token_val = flat_x[t]
+            token_accum = np.zeros_like(token_val)
 
-        # Manually apply each expert to each token sequentially
-        for i in range(self.B * self.S):  # For each token
-            token_input = flat_x[i]
-            combined_expert_output = jnp.zeros(self.D, dtype=jnp.bfloat16)
+            for k in range(self.K):
+                expert_idx = flat_indices[t, k]
+                router_weight = flat_weights[t, k]
 
-            for k in range(self.K):  # For each chosen expert for that token
-                expert_idx = flat_experts[i, k]
-                weight = flat_weights[i, k]
+                # Extract specific expert weights
+                w_gating = gating_kernel_full[expert_idx]
+                w_up = up_proj_kernel_full[expert_idx]
+                w_down = down_proj_kernel_full[expert_idx]
 
-                # Get kernels from the *full* gathered arrays ---
-                gating_kernel = gating_kernel_full[expert_idx]
-                up_proj_kernel = up_proj_kernel_full[expert_idx]
-                down_proj_kernel = down_proj_kernel_full[expert_idx]
+                # Forward pass: Up(x) * SiLU(Gate(x))
+                gate_out = np.dot(token_val, w_gating)
+                up_out = np.dot(token_val, w_up)
 
-                # Perform the expert computation (dense matmuls)
-                gating_proj = jnp.dot(token_input, gating_kernel)
-                up_proj = jnp.dot(token_input, up_proj_kernel)
+                # SiLU activation
+                # silu(x) = x * sigmoid(x)
+                silu_out = gate_out * (1 / (1 + np.exp(-gate_out)))
 
-                # Note: Assuming 'silu' activation as specified in MoE init
-                fused = nnx.silu(gating_proj) * up_proj
+                expert_out = silu_out * up_out
 
-                expert_output = jnp.dot(fused, down_proj_kernel)
+                # Down projection
+                down_out = np.dot(expert_out, w_down)
 
-                # Apply router weight after computation (matches implementation)
-                combined_expert_output += weight * expert_output
+                # Weighted sum
+                token_accum += down_out * router_weight
 
-            expected_output = expected_output.at[i].set(combined_expert_output)
+            expected_output[t] = token_accum
 
-        expected_output = expected_output.reshape(self.B * self.S, self.D)
+        return jnp.array(expected_output, dtype=self.dtype)
 
-        # --- 3. Compare the results ---
+    def test_dense_backend_correctness(self):
+        """Verifies the DENSE_MAT backend against the sequential ground truth."""
+        moe = self._create_moe(MoEBackend.DENSE_MAT)
+
+        with self.mesh:
+            actual_output = moe(self.x)
+
+        expected_output = self._compute_ground_truth(moe, self.x)
+
+        # Dense matmul should be very numerically close
         self.assertTrue(
             jnp.allclose(actual_output, expected_output, atol=1e-2, rtol=1e-2),
-            f"The output of the distributed MoE does not match the dense equivalent.\n"
-            f"Actual:\n{actual_output}\n"
-            f"Expected:\n{expected_output}")
-        print(
-            "\n✅ Test Passed: Distributed MoE output matches the dense ground truth."
+            "Dense backend output does not match ground truth.")
+
+    def test_sparse_distributed_backend_correctness_ragged_dot(self):
+        """
+        Verifies the RAGGED_DOT (Sparse) backend with expert parallelism
+        against the sequential ground truth.
+        """
+        # 1. Instantiate MoE with RAGGED_DOT backend
+        # TODO: add MoEBackend.FUSED_MOE, MoEBackend.VLLM_MOE
+        for backend in [MoEBackend.RAGGED_DOT, MoEBackend.MEGABLX_GMM]:
+            moe = self._create_moe(backend)
+
+            # 2. Run Forward Pass (Distributed)
+            # The __call__ invokes shard_map internally for RAGGED_DOT
+            with self.mesh:
+                actual_output = moe(self.x)
+
+            # 3. Compute Ground Truth using the exact same weights
+            # (Weights are pulled from the initialized model)
+            expected_output = self._compute_ground_truth(moe, self.x)
+
+            # 4. Compare
+            # Due to permutation re-ordering and potential float precision diffs
+            # in different kernels, we allow a small tolerance.
+            diff = jnp.mean(jnp.abs(actual_output - expected_output))
+
+            self.assertTrue(
+                jnp.allclose(actual_output,
+                             expected_output,
+                             atol=5e-2,
+                             rtol=5e-2),
+                f"Sparse distributed output mismatch for backebd tyoe {backend}. Mean diff: {diff}"
+            )
+
+    def test_backend_consistency(self):
+        """
+        Ensures that if we initialize two models with identical seeds/weights,
+        Dense and Sparse backends yield the same result.
+        """
+        # This test requires careful weight synchronization or fixed seeds.
+        # Since nnx.Rngs(key) is deterministic, we just re-use the key.
+
+        # 1. Run Dense
+        moe_dense = self._create_moe(MoEBackend.DENSE_MAT)
+        with self.mesh:
+            out_dense = moe_dense(self.x)
+
+        # 2. Run Sparse
+        # We must re-init with same key to get same weights
+        moe_sparse = self._create_moe(MoEBackend.MEGABLX_GMM)
+        with self.mesh:
+            out_sparse = moe_sparse(self.x)
+
+        self.assertTrue(
+            jnp.allclose(out_dense, out_sparse, atol=5e-2, rtol=5e-2),
+            "Dense and Sparse backends produced different results for identical initialization."
         )
