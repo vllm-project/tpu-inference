@@ -24,7 +24,6 @@ from vllm.config import VllmConfig
 from tpu_inference import utils
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.qwen2 import Qwen2DecoderLayer
@@ -104,8 +103,8 @@ class Qwen3Attention(nnx.Module):
         )
 
         self._q_scale = 1.0
-        self._k_scale = 1.0
-        self._v_scale = 1.0
+        # self._k_scale = 1.0
+        # self._v_scale = 1.0
         self.kv_cache_quantized_dtype = None
         if kv_cache_dtype != "auto":
             self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
@@ -114,6 +113,8 @@ class Qwen3Attention(nnx.Module):
     def __call__(
         self,
         kv_cache: Optional[jax.Array],
+        k_scale_cache: Optional[jax.Array],
+        v_scale_cache: Optional[jax.Array],
         x: jax.Array,
         attention_metadata: AttentionMetadata,
     ) -> Tuple[jax.Array, jax.Array]:
@@ -133,15 +134,15 @@ class Qwen3Attention(nnx.Module):
         # v: (T, K, H)
         v = self.v_proj(x)
         # o: (T, N, H)
-        q_scale = k_scale = v_scale = None
-        if self.kv_cache_quantized_dtype:
-            # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
-            # q_scale = self._q_scale
-            k_scale = self._k_scale
-            v_scale = self._v_scale
-            k, v = quantize_kv(self.kv_cache_quantized_dtype, k, v, k_scale,
-                               v_scale)
-        new_kv_cache, outputs = attention(
+        # q_scale = k_scale = v_scale = None
+        # if self.kv_cache_quantized_dtype:
+        #     # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
+        #     # q_scale = self._q_scale
+        #     k_scale = self._k_scale
+        #     v_scale = self._v_scale
+        #     k, v = quantize_kv(self.kv_cache_quantized_dtype, k, v, k_scale,
+        #                        v_scale)
+        new_kv_cache, outputs, new_k_scale_cache, new_v_scale_cache = attention(
             kv_cache,
             q,
             k,
@@ -149,13 +150,13 @@ class Qwen3Attention(nnx.Module):
             attention_metadata,
             self.mesh,
             self.head_dim_original,
-            q_scale=q_scale,
-            k_scale=k_scale,
-            v_scale=v_scale,
+            q_scale=None,
+            k_scale=k_scale_cache,
+            v_scale=v_scale_cache,
         )
         # (T, D)
         o = self.o_proj(outputs)
-        return new_kv_cache, o
+        return new_kv_cache, o, new_k_scale_cache, new_v_scale_cache
 
 
 class Qwen3DecoderLayer(Qwen2DecoderLayer):
@@ -253,16 +254,20 @@ class Qwen3ForCausalLM(nnx.Module):
     def __call__(
         self,
         kv_caches: List[jax.Array],
+        k_scale_caches: List[jax.Array],
+        v_scale_caches: List[jax.Array],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
-        kv_caches, x = self.model(
+        kv_caches, x, k_scale_caches, v_scale_caches = self.model(
             kv_caches,
+            k_scale_caches,
+            v_scale_caches,
             input_ids,
             attention_metadata,
         )
-        return kv_caches, x, []
+        return kv_caches, x, [], k_scale_caches, v_scale_caches
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         if self.vllm_config.model_config.hf_config.tie_word_embeddings:

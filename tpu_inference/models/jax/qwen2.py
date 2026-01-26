@@ -220,12 +220,16 @@ class Qwen2DecoderLayer(nnx.Module):
     def __call__(
         self,
         kv_cache: jax.Array,
+        k_scale_cache: jax.Array,
+        v_scale_cache: jax.Array,
         x: jax.Array,
         attention_metadata: AttentionMetadata,
     ) -> Tuple[jax.Array, jax.Array]:
         hidden_states = self.input_layernorm(x)
-        kv_cache, attn_output = self.self_attn(
+        kv_cache, attn_output, k_scale_cache, v_scale_cache = self.self_attn(
             kv_cache,
+            k_scale_cache,
+            v_scale_cache,
             hidden_states,
             attention_metadata,
         )
@@ -235,7 +239,7 @@ class Qwen2DecoderLayer(nnx.Module):
         attn_output = self.post_attention_layernorm(attn_output)
         outputs = self.mlp(attn_output)
         outputs = residual + outputs
-        return kv_cache, outputs
+        return kv_cache, outputs, k_scale_cache, v_scale_cache
 
 
 class Qwen2Model(nnx.Module):
@@ -284,6 +288,8 @@ class Qwen2Model(nnx.Module):
     def __call__(
         self,
         kv_caches: List[jax.Array],
+        k_scale_caches,
+        v_scale_caches,
         input_ids: Optional[jax.Array],
         attention_metadata: AttentionMetadata,
         inputs_embeds: Optional[jax.Array] = None,
@@ -294,14 +300,20 @@ class Qwen2Model(nnx.Module):
             x = self.embed(input_ids)
         for i, layer in enumerate(self.layers):
             kv_cache = kv_caches[i]
-            kv_cache, x = layer(
+            k_scale_cache = k_scale_caches[i]
+            v_scale_cache = v_scale_caches[i]
+            kv_cache, x, k_scale_cache, v_scale_cache = layer(
                 kv_cache,
+                k_scale_cache,
+                v_scale_cache,
                 x,
                 attention_metadata,
             )
             kv_caches[i] = kv_cache
+            k_scale_caches[i] = k_scale_cache
+            v_scale_caches[i] = v_scale_cache
         x = self.norm(x)
-        return kv_caches, x
+        return kv_caches, x, k_scale_caches, v_scale_caches
 
 
 class Qwen2ForCausalLM(nnx.Module):
