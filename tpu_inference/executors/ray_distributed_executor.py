@@ -30,7 +30,6 @@ from vllm.v1.executor.ray_executor import RayWorkerMetaData
 from vllm.v1.executor.ray_utils import RayWorkerWrapper as RayWorkerWrapperV1
 from vllm.v1.executor.ray_utils import _wait_until_pg_ready
 
-from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
@@ -391,11 +390,7 @@ class RayWorkerWrapper(RayWorkerWrapperV1):
     The implementation is similar to vllm/v1/executor/ray_utils.py
     
     _is_intermediate_tensors: check whether the output is JaxIntermediateTensors.
-    _is_last_rank: check whether the worker is the last rank in the PP group.
     """
 
     def _is_intermediate_tensors(self, output) -> bool:
         return isinstance(output, JaxIntermediateTensors)
-
-    def _is_last_rank(self) -> bool:
-        return get_pp_group().is_last_rank
