@@ -64,7 +64,7 @@ else
 fi
 
 upload_pipeline() {
-    VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
+    VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git refs/heads/releases/v0.15.0 | awk '{ print $1}')
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     
@@ -90,7 +90,7 @@ upload_pipeline() {
 echo "--- Starting Buildkite Bootstrap"
 echo "Running in pipeline: $BUILDKITE_PIPELINE_SLUG"
 if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
-    VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
+    VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git refs/heads/releases/v0.15.0 | awk '{ print $1}')
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     # Note: upload are inserted in reverse order, so promote LKG should upload before tests
