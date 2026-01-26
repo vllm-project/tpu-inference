@@ -35,8 +35,8 @@ steps:
       - |
         .buildkite/scripts/record_step_result.sh {SANITIZED_MODEL_NAME}_UnitTest
 
-  - label: "Integration tests for {MODEL_NAME}"
-    key: "{SANITIZED_MODEL_NAME}_IntegrationTest"
+  - label: "Accuracy for {MODEL_NAME}"
+    key: "{SANITIZED_MODEL_NAME}_Accuracy"
     depends_on: "record_{SANITIZED_MODEL_NAME}_UnitTest"
     soft_fail: true
     agents:
@@ -48,22 +48,22 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
-  - label: "Record integration test result for {MODEL_NAME}"
-    key: "record_{SANITIZED_MODEL_NAME}_IntegrationTest"
-    depends_on: "{SANITIZED_MODEL_NAME}_IntegrationTest"
+  - label: "Record accuracy result for {MODEL_NAME}"
+    key: "record_{SANITIZED_MODEL_NAME}_Accuracy"
+    depends_on: "{SANITIZED_MODEL_NAME}_Accuracy"
     env:
       CI_TARGET: {MODEL_NAME}
-      CI_STAGE: "IntegrationTest"
+      CI_STAGE: "Accuracy/Correctness"
       CI_CATEGORY: "{CATEGORY}"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh {SANITIZED_MODEL_NAME}_IntegrationTest
+        .buildkite/scripts/record_step_result.sh {SANITIZED_MODEL_NAME}_Accuracy
 
   - label: "Performance benchmarks for {MODEL_NAME}"
     key: "{SANITIZED_MODEL_NAME}_Benchmark"
-    depends_on: "record_{SANITIZED_MODEL_NAME}_IntegrationTest"
+    depends_on: "record_{SANITIZED_MODEL_NAME}_Accuracy"
     soft_fail: true
     agents:
       queue: {QUEUE}

@@ -33,7 +33,7 @@ COPY requirements_benchmarking.txt .
 RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements_benchmarking.txt --retries 3
 # Install test requirements
 COPY requirements_test.txt .
-Run  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then \
+RUN  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then \
         pip install -r requirements_test.txt --retries 3; \
     fi
 # TODO (jacobplatin): remove when v7x is supported in JAX/Libtpu officially

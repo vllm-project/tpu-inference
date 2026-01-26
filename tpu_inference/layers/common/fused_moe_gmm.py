@@ -61,7 +61,8 @@ def _swigluoai(x1: jax.Array,
     return gated_activation * (x2 + 1)
 
 
-def _round_up_to_multiple_of_128_within_limit(x: int, limit: int) -> int:
+# TODO (jacobplatin): make this more generic
+def round_up_to_multiple_of_128_within_limit(x: int, limit: int) -> int:
     """
     Rounds the given integer `x` up to the nearest multiple of 128, without
     exceeding the specified `limit`.
@@ -118,12 +119,12 @@ def _get_tiling_size_for_gmm_kernel(m: int, k: int, n: int,
     # 2m//g can be either greater or less than 512. If there are 32 tokens and
     # topk=2, m=topk * num_tokens=64, in this case, 2*m//g will be less than
     # 512.
-    tm = _round_up_to_multiple_of_128_within_limit(2 * m // g, 512)
+    tm = round_up_to_multiple_of_128_within_limit(2 * m // g, 512)
     tm = min(tm, m)  # there's a requirement that m % tm == 0
     # k/n correspond to n_input_features/n_output_features in the matmul so they
     # are normally greater than 2048, unless the num shards is large.
-    tk = _round_up_to_multiple_of_128_within_limit(k, 2048)
-    tn = _round_up_to_multiple_of_128_within_limit(n, 2048)
+    tk = round_up_to_multiple_of_128_within_limit(k, 2048)
+    tn = round_up_to_multiple_of_128_within_limit(n, 2048)
     return tm, tk, tn
 
 
@@ -228,6 +229,8 @@ def expert_sharded_gmm(
 ) -> jax.Array:
     ep_size = get_mesh_shape_product(mesh, ShardingAxisName.EXPERT)
     ep_p_spec = P(ShardingAxisName.EXPERT)
+    ep_data_p_spec = P(ShardingAxisName.EXPERT_DATA)
+    data_p_spec = P(ShardingAxisName.MLP_DATA)
     num_experts = rhs.shape[0]
     num_experts_per_shard = num_experts // ep_size
     group_offset = jnp.arange(0, num_experts, num_experts_per_shard)
@@ -266,7 +269,7 @@ def expert_sharded_gmm(
     #       0, 0, 0, 0     0, 0, 0, 0     0, 0, 0, 0     D, D, D, D
     #        shard-0        shard-1        shard-2        shard-3
     # Each shards has 3 (row A), 2 (row B), 5 (row C) and 4 (row D).
-    lhs_spec = ep_p_spec if is_last_gmm else P()
+    lhs_spec = ep_data_p_spec if is_last_gmm else data_p_spec
     rhs_spec = ep_p_spec
     rhs_scale_spec = None if rhs_scale is None else ep_p_spec
     rhs_bias_spec = None if rhs_bias is None else ep_p_spec
@@ -278,10 +281,10 @@ def expert_sharded_gmm(
             rhs_spec,
             rhs_scale_spec,
             rhs_bias_spec,
-            P(),
+            data_p_spec,
             ep_p_spec,
         ),
-        out_specs=ep_p_spec,
+        out_specs=ep_data_p_spec,
         check_vma=False,
     )(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset)
 
@@ -298,20 +301,30 @@ def expert_sharded_gmm(
     # So reshaping to [num_tokens_per_shard, num_experts_per_shard] and applying
     # sum(axis=1) will get desired send_sizes shaped [num_tokens_per_shard].
     send_sizes = group_sizes.reshape(-1, num_experts_per_shard).sum(axis=1)
+
     # In the working example, input_offsets would be [0, 3, 5, 10]
-    input_offsets = jnp.concatenate((jnp.array([0]), send_sizes.cumsum()[:-1]))
+
+    def _compute_input_offsets(send_sizes_local):
+        input_offset_shard = jnp.concatenate(
+            (jnp.array([0]), send_sizes_local.cumsum()[:-1]))
+        return input_offset_shard
+
+    input_offsets = jax.shard_map(
+        _compute_input_offsets,
+        mesh=mesh,
+        in_specs=data_p_spec,
+        out_specs=data_p_spec,
+    )(send_sizes)
     output_offsets = input_offsets
     recv_sizes = send_sizes
+    data_sharding = NamedSharding(mesh, data_p_spec)
 
-    replicated_sharding = NamedSharding(mesh, P())
-    send_sizes = jax.lax.with_sharding_constraint(send_sizes,
-                                                  replicated_sharding)
+    send_sizes = jax.lax.with_sharding_constraint(send_sizes, data_sharding)
     input_offsets = jax.lax.with_sharding_constraint(input_offsets,
-                                                     replicated_sharding)
+                                                     data_sharding)
     output_offsets = jax.lax.with_sharding_constraint(output_offsets,
-                                                      replicated_sharding)
-    recv_sizes = jax.lax.with_sharding_constraint(recv_sizes,
-                                                  replicated_sharding)
+                                                      data_sharding)
+    recv_sizes = jax.lax.with_sharding_constraint(recv_sizes, data_sharding)
 
     def _ragged_all_to_all(operand, input_offsets, send_sizes, output_offsets,
                            recv_sizes):
@@ -365,8 +378,9 @@ def expert_sharded_gmm(
     return jax.shard_map(
         _ragged_all_to_all,
         mesh=mesh,
-        in_specs=(ep_p_spec, ep_p_spec, ep_p_spec, ep_p_spec, P()),
-        out_specs=(P(ShardingAxisName.MLP_DATA)),
+        in_specs=(ep_data_p_spec, ep_data_p_spec, ep_data_p_spec,
+                  ep_data_p_spec, data_p_spec),
+        out_specs=(data_p_spec),
         check_vma=False,
     )(gmm_res, input_offsets, send_sizes, output_offsets, recv_sizes)
 

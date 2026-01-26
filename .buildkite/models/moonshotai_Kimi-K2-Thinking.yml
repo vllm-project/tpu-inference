@@ -36,31 +36,31 @@ steps:
       - |
         .buildkite/scripts/record_step_result.sh moonshotai_Kimi-K2-Thinking_UnitTest
 
-  - label: "Integration tests for moonshotai/Kimi-K2-Thinking"
-    key: "moonshotai_Kimi-K2-Thinking_IntegrationTest"
+  - label: "Accuracy for moonshotai/Kimi-K2-Thinking"
+    key: "moonshotai_Kimi-K2-Thinking_Accuracy"
     depends_on: "record_moonshotai_Kimi-K2-Thinking_UnitTest"
     agents:
       queue: tpu_v6e_8_queue
     soft_fail: true
     commands:
       - |
-        buildkite-agent meta-data set "moonshotai_Kimi-K2-Thinking_IntegrationTest" "unverified"
-  - label: "Record integration test result for moonshotai/Kimi-K2-Thinking"
-    key: "record_moonshotai_Kimi-K2-Thinking_IntegrationTest"
-    depends_on: "moonshotai_Kimi-K2-Thinking_IntegrationTest"
+        buildkite-agent meta-data set "moonshotai_Kimi-K2-Thinking_Accuracy" "unverified"
+  - label: "Record accuracy result for moonshotai/Kimi-K2-Thinking"
+    key: "record_moonshotai_Kimi-K2-Thinking_Accuracy"
+    depends_on: "moonshotai_Kimi-K2-Thinking_Accuracy"
     env:
       CI_TARGET: moonshotai/Kimi-K2-Thinking
-      CI_STAGE: "IntegrationTest"
+      CI_STAGE: "Accuracy/Correctness"
       CI_CATEGORY: "text-only"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh moonshotai_Kimi-K2-Thinking_IntegrationTest
+        .buildkite/scripts/record_step_result.sh moonshotai_Kimi-K2-Thinking_Accuracy
 
   - label: "Performance benchmarks for moonshotai/Kimi-K2-Thinking"
     key: "moonshotai_Kimi-K2-Thinking_Benchmark"
-    depends_on: "record_moonshotai_Kimi-K2-Thinking_IntegrationTest"
+    depends_on: "record_moonshotai_Kimi-K2-Thinking_Accuracy"
     agents:
       queue: tpu_v6e_8_queue
     soft_fail: true

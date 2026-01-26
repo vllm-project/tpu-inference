@@ -36,31 +36,31 @@ steps:
       - |
         .buildkite/scripts/record_step_result.sh meta-llama_Llama-4-Maverick-17B-128E-Instruct_UnitTest
 
-  - label: "Integration tests for meta-llama/Llama-4-Maverick-17B-128E-Instruct"
-    key: "meta-llama_Llama-4-Maverick-17B-128E-Instruct_IntegrationTest"
+  - label: "Accuracy for meta-llama/Llama-4-Maverick-17B-128E-Instruct"
+    key: "meta-llama_Llama-4-Maverick-17B-128E-Instruct_Accuracy"
     depends_on: "record_meta-llama_Llama-4-Maverick-17B-128E-Instruct_UnitTest"
     agents:
       queue: tpu_v6e_8_queue
     soft_fail: true
     commands:
       - |
-        buildkite-agent meta-data set "meta-llama_Llama-4-Maverick-17B-128E-Instruct_IntegrationTest" "unverified"
-  - label: "Record integration test result for meta-llama/Llama-4-Maverick-17B-128E-Instruct"
-    key: "record_meta-llama_Llama-4-Maverick-17B-128E-Instruct_IntegrationTest"
-    depends_on: "meta-llama_Llama-4-Maverick-17B-128E-Instruct_IntegrationTest"
+        buildkite-agent meta-data set "meta-llama_Llama-4-Maverick-17B-128E-Instruct_Accuracy" "unverified"
+  - label: "Record accuracy result for meta-llama/Llama-4-Maverick-17B-128E-Instruct"
+    key: "record_meta-llama_Llama-4-Maverick-17B-128E-Instruct_Accuracy"
+    depends_on: "meta-llama_Llama-4-Maverick-17B-128E-Instruct_Accuracy"
     env:
       CI_TARGET: meta-llama/Llama-4-Maverick-17B-128E-Instruct
-      CI_STAGE: "IntegrationTest"
+      CI_STAGE: "Accuracy/Correctness"
       CI_CATEGORY: "multimodal"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh meta-llama_Llama-4-Maverick-17B-128E-Instruct_IntegrationTest
+        .buildkite/scripts/record_step_result.sh meta-llama_Llama-4-Maverick-17B-128E-Instruct_Accuracy
 
   - label: "Performance benchmarks for meta-llama/Llama-4-Maverick-17B-128E-Instruct"
     key: "meta-llama_Llama-4-Maverick-17B-128E-Instruct_Benchmark"
-    depends_on: "record_meta-llama_Llama-4-Maverick-17B-128E-Instruct_IntegrationTest"
+    depends_on: "record_meta-llama_Llama-4-Maverick-17B-128E-Instruct_Accuracy"
     agents:
       queue: tpu_v6e_8_queue
     soft_fail: true

@@ -40,6 +40,7 @@ class ShardingAxisNameBase:
     MLP_TENSOR = ('attn_dp', 'model', 'expert')
     MOE_TENSOR = ('attn_dp', 'model')
     EXPERT = ('attn_dp', 'expert', 'model')
+    EXPERT_DATA = ('data', 'attn_dp', 'expert', 'model')
     VOCAB = ('expert', 'attn_dp', 'model')
 
 
@@ -57,6 +58,7 @@ class ShardingAxisName2D:
     MLP_TENSOR = 'model'
     MOE_TENSOR = 'model'
     EXPERT = 'model'
+    EXPERT_DATA = ('data', 'model')
     VOCAB = ('data', 'model')
 
 

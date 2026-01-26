@@ -14,6 +14,7 @@
 
 import tempfile
 from unittest import mock
+from unittest.mock import MagicMock, patch
 
 import jax
 import jax.numpy as jnp
@@ -28,7 +29,7 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoE
 
 from tpu_inference.layers.vllm.fused_moe import FusedMoEBackend
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
@@ -71,6 +72,16 @@ def quantize_to_mxfp4(weight: torch.tensor):
     scale_exp = (scale_exp - e8m0_finfo.minexp).astype(jnp.uint8)
 
     return j2t(weight_packed), j2t(scale_exp)
+
+
+@pytest.fixture(autouse=True)
+def mock_get_pp_group():
+    with patch("tpu_inference.distributed.jax_parallel_state.get_pp_group",
+               return_value=MagicMock(is_first_rank=True,
+                                      is_last_rank=True,
+                                      rank_in_group=0,
+                                      world_size=1)):
+        yield
 
 
 @pytest.fixture(autouse=True)
