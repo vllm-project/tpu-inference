@@ -228,7 +228,7 @@ class TestMoEUtils(unittest.TestCase):
                      tile_size,
                      moe_backend=MoEBackend.RAGGED_DOT,
                      dtype=jnp.bfloat16,
-                     quantized_dtype=False)
+                     quantized_dtype=None)
 
         # Verify call
         mock_ragged_dot.assert_called_once()
@@ -254,7 +254,7 @@ class TestMoEUtils(unittest.TestCase):
                tile_size,
                moe_backend=MoEBackend.MEGABLX_GMM,
                dtype=jnp.bfloat16,
-               quantized_dtype=False)
+               quantized_dtype=None)
 
         mock_megablox.assert_called_once()
 
@@ -278,6 +278,6 @@ class TestMoEUtils(unittest.TestCase):
                tile_size,
                moe_backend=MoEBackend.MEGABLX_GMM,
                dtype=jnp.bfloat16,
-               quantized_dtype=True)
+               quantized_dtype=jnp.float8_e4m3fn)
 
         mock_megablox.assert_called_once()

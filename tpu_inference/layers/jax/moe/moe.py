@@ -154,7 +154,8 @@ class MoE(nnx.Module):
     # --- Sparse MoE Specific Attributes ---
     num_experts_per_tok: int = 1  # Required for Sparse, optional/derived for Dense
     tile_size: tuple[int, int, int] = (128, 128, 128)
-    quantized_dtype: Optional[jnp.dtype] = None
+    # NOTE: this is only needed for SparseMoE
+    qwix_quantized_weight_dtype: Optional[jnp.dtype] = None
 
     # --- MoE Kernel Specific Attributes ---
     renormalize: bool = True
@@ -208,8 +209,10 @@ class MoE(nnx.Module):
             weights_TX, indices_TX = self.router(x_TD)
 
             if self.moe_backend == MoEBackend.MEGABLX_GMM or self.moe_backend == MoEBackend.RAGGED_DOT:
-
-                if self.quantized_dtype:
+                # NOTE: for the qwix_quantized_weight_dtype case, we make the spec a tuple of 2 PartitionSpecs
+                # since the first entry corresponds to the weight and the second entry corresponds to the scale.
+                # For the scale, we don't shard on the "D" dimmension because this is the subchannel dimmension
+                if self.qwix_quantized_weight_dtype:
                     gating_up_proj_spec = (PartitionSpec(*self.edf_sharding),
                                            PartitionSpec(
                                                self.edf_sharding[0], None,
@@ -239,6 +242,10 @@ class MoE(nnx.Module):
                     out_specs=out_specs,
                     check_rep=False)(sparse_moe_distributed_fwd)
 
+                # TODO (jacobplatin): this is needed because of issues with Qwix quantizing the `shard_map` in SpraseMatmul
+                # Basically, during the abstract pass, we need to manually quantize the weights here for Qwix, but we'll
+                # override the actual weight/scale during loading (we just need to make sure Qwix quantizes the weight
+                # in the first place).
                 kernel_gating_EDF = self._process_weight_for_qwix(
                     "kernel_gating_EDF",
                     self.kernel_gating_EDF,
@@ -376,12 +383,11 @@ class MoE(nnx.Module):
         """
         weight = weight_param.value
 
-        if self.quantized_dtype:
+        if self.qwix_quantized_weight_dtype:
             if not isinstance(weight, ptq.WithAux):
-                weight = manually_quantize_qwix_weight(name, weight,
-                                                       self.quantized_dtype,
-                                                       channelwise_axes,
-                                                       tiled_axes, "absmax")
+                weight = manually_quantize_qwix_weight(
+                    name, weight, self.qwix_quantized_weight_dtype,
+                    channelwise_axes, tiled_axes, "absmax")
             return (weight.array.qvalue, weight.array.scale)
 
         return weight

@@ -266,14 +266,14 @@ def gmm_fn(inputs, kernel, group_sizes, tile_size, moe_backend, dtype,
                               tiling=(tm, tk, tn))
 
     elif moe_backend == MoEBackend.RAGGED_DOT:
-        # TODO: support more than just fp8_e4m3fn
+        # TODO (jacobplatin): support more than just fp8_e4m3fn for activations!
         inputs = manually_quantize_qwix_activation(
             inputs, "ragged_dot", jnp.float8_e4m3fn, [0], {},
             "absmax") if quantized_dtype else inputs
         ragged_dot_func = qwix_ragged_dot if quantized_dtype else jax.lax.ragged_dot
         if quantized_dtype:
             q_value, q_scale = kernel
-            kernel = QArray(q_value, q_scale, qtype=jnp.float8_e4m3fn)
+            kernel = QArray(q_value, q_scale, qtype=quantized_dtype)
         with set_xla_metadata(ragged_dot_tiling=",".join(
             [str(t) for t in tile_size]),
                               mosaic_fusion_group="ragged-dot"):
