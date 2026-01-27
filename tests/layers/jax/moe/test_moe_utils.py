@@ -175,7 +175,6 @@ class TestMoEUtils(unittest.TestCase):
 
         # We expect it to process the local experts
         self.assertEqual(list(size), [1, 1])
-        print(expert_ids)
         self.assertTrue(jnp.array_equal(expert_ids, jnp.array([0, 1, 1, 1])))
 
     def test_get_all_to_all_params_fn(self):

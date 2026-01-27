@@ -21,7 +21,7 @@ from qwix._src.core.qarray import QArray
 from qwix._src.core.ragged_dot import ragged_dot as qwix_ragged_dot
 
 from tpu_inference import envs
-from tpu_inference.kernels.megablox.gmm_ds import gmm as megablox_gmm
+from tpu_inference.kernels.megablox.gmm import gmm as megablox_gmm
 from tpu_inference.layers.common.fused_moe_gmm import \
     round_up_to_multiple_of_128_within_limit
 from tpu_inference.layers.jax.layers import FlaxUtils
@@ -257,6 +257,7 @@ def gmm_fn(inputs, kernel, group_sizes, tile_size, moe_backend, dtype,
         tk = round_up_to_multiple_of_128_within_limit(k, 2048)
         tn = round_up_to_multiple_of_128_within_limit(n, 2048)
 
+        # TODO (jacobplatin/bzgoogle): replace this with the DS-specific megablox
         output = megablox_gmm(lhs=inputs,
                               rhs=kernel_qvalue,
                               rhs_scale=kernel_scale,
