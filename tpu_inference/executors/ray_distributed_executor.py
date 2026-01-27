@@ -27,9 +27,12 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.executor.ray_distributed_executor import \
     RayDistributedExecutor as RayDistributedExecutorV1
 from vllm.v1.executor.ray_executor import RayWorkerMetaData
-from vllm.v1.executor.ray_utils import RayWorkerWrapper, _wait_until_pg_ready
+from vllm.v1.executor.ray_utils import RayWorkerWrapper as RayWorkerWrapperV1
+from vllm.v1.executor.ray_utils import _wait_until_pg_ready
 
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.jax_intermediate_tensor import \
+    JaxIntermediateTensors
 
 try:
     from ray._private.state import available_resources_per_node
@@ -347,6 +350,12 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
                 ip=ip,
                 prev_worker_ip=prev_ip,
             )
+            # NOTE(Chenyaaang): Adjust worker's rank to 0 if PP=1.
+            # Otherwise if we have 4 ray nodes each with 1 chip and use TP=4,
+            # We'll have 4 workers with rank 0,1,2,3 respectively. This
+            # contradicts with get_pp_group().
+            if self.parallel_config.pipeline_parallel_size == 1:
+                kwargs["rank"] = 0
             all_kwargs.append(kwargs)
         self.collective_rpc("init_worker", args=(all_kwargs, ))
         self.collective_rpc("init_device")
@@ -372,3 +381,16 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
     # as we pass the kv_parameters through proxy server
     def get_kv_connector_handshake_metadata(self) -> None:
         pass
+
+
+class RayWorkerWrapper(RayWorkerWrapperV1):
+    """
+    Ray worker wrapper for TPU.
+
+    The implementation is similar to vllm/v1/executor/ray_utils.py
+    
+    _is_intermediate_tensors: check whether the output is JaxIntermediateTensors.
+    """
+
+    def _is_intermediate_tensors(self, output) -> bool:
+        return isinstance(output, JaxIntermediateTensors)

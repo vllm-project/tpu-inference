@@ -49,7 +49,8 @@ def _swigluoai(x1: jax.Array,
     return gated_activation * (x2 + 1)
 
 
-def _round_up_to_multiple_of_128_within_limit(x: int, limit: int) -> int:
+# TODO (jacobplatin): make this more generic
+def round_up_to_multiple_of_128_within_limit(x: int, limit: int) -> int:
     """
     Rounds the given integer `x` up to the nearest multiple of 128, without
     exceeding the specified `limit`.
@@ -106,12 +107,12 @@ def _get_tiling_size_for_gmm_kernel(m: int, k: int, n: int,
     # 2m//g can be either greater or less than 512. If there are 32 tokens and
     # topk=2, m=topk * num_tokens=64, in this case, 2*m//g will be less than
     # 512.
-    tm = _round_up_to_multiple_of_128_within_limit(2 * m // g, 512)
+    tm = round_up_to_multiple_of_128_within_limit(2 * m // g, 512)
     tm = min(tm, m)  # there's a requirement that m % tm == 0
     # k/n correspond to n_input_features/n_output_features in the matmul so they
     # are normally greater than 2048, unless the num shards is large.
-    tk = _round_up_to_multiple_of_128_within_limit(k, 2048)
-    tn = _round_up_to_multiple_of_128_within_limit(n, 2048)
+    tk = round_up_to_multiple_of_128_within_limit(k, 2048)
+    tn = round_up_to_multiple_of_128_within_limit(n, 2048)
     return tm, tk, tn
 
 
@@ -125,7 +126,7 @@ def tensor_sharded_gmm_merged_column_parallel(
 ) -> list[jax.Array]:
 
     def _gmm(lhs, rhs, rhs_scale, rhs_bias, group_sizes):
-        m, g, n, k = lhs.shape[0], *rhs.shape
+        m, g, k, n = lhs.shape[0], *rhs.shape
         tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
         return gmm(
             lhs,
@@ -135,7 +136,6 @@ def tensor_sharded_gmm_merged_column_parallel(
             rhs_bias=rhs_bias,
             preferred_element_type=lhs.dtype,
             tiling=(tm, tk, tn),
-            transpose_rhs=True,
             group_offset=jnp.array(0),
         )
 
@@ -148,9 +148,8 @@ def tensor_sharded_gmm_merged_column_parallel(
         _gmm,
         mesh=mesh,
         in_specs=(P(ShardingAxisName.MLP_DATA,
-                    None), P(None, ShardingAxisName.MLP_TENSOR,
-                             None), rhs_scale_spec, rhs_bias_spec,
-                  P(ShardingAxisName.MLP_DATA)),
+                    None), P(None, None, ShardingAxisName.MLP_TENSOR),
+                  rhs_scale_spec, rhs_bias_spec, P(ShardingAxisName.MLP_DATA)),
         out_specs=(P(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR)),
         check_vma=False,
     )(lhs, rhs, rhs_scale, rhs_bias, group_sizes)
@@ -165,18 +164,30 @@ def tensor_sharded_gmm_merged_column_parallel(
 def tensor_sharded_gmm_row_parallel(
     lhs: jax.Array,
     rhs: jax.Array,
+    topk_argsort_revert_indices: jax.Array,
+    topk_weights: jax.Array,
     rhs_scale: jax.Array | None,
     rhs_bias: jax.Array | None,
     group_sizes: jax.Array,
+    topk: int,
     mesh: Mesh,
 ) -> jax.Array:
 
-    def _gmm_all_reduce(lhs, rhs, rhs_scale, rhs_bias, group_sizes):
-        m, g, n, k = lhs.shape[0], *rhs.shape
+    def _gmm_all_reduce(
+        lhs,
+        rhs,
+        topk_argsort_revert_indices_local,
+        topk_weights_local,
+        rhs_scale,
+        rhs_bias,
+        group_sizes,
+    ) -> jax.Array:
+        m, g, k, n = lhs.shape[0], *rhs.shape
         tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
         if rhs_bias is not None:
             shard_id = jax.lax.axis_index(ShardingAxisName.MLP_TENSOR).sum()
             rhs_bias = jnp.where(shard_id == 0, rhs_bias, 0)
+
         out = gmm(
             lhs,
             rhs,
@@ -185,9 +196,16 @@ def tensor_sharded_gmm_row_parallel(
             rhs_bias=rhs_bias,
             preferred_element_type=lhs.dtype,
             tiling=(tm, tk, tn),
-            transpose_rhs=True,
             group_offset=jnp.array(0),
         )
+
+        # Perform local reverse sort and reduction on the topk experts of
+        # a token. Psum size will be 1/top_k compared with psum first
+        # and run reduction later
+        out = out[topk_argsort_revert_indices_local].reshape((-1, topk, n))
+        out = out * jnp.expand_dims(topk_weights_local, axis=-1)
+        out = out.sum(axis=-2)
+
         return jax.lax.psum(out, axis_name=ShardingAxisName.MLP_TENSOR)
 
     num_blocks = 1 if rhs_scale is None else rhs_scale.shape[1]
@@ -198,11 +216,15 @@ def tensor_sharded_gmm_row_parallel(
         _gmm_all_reduce,
         mesh=mesh,
         in_specs=(P(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR),
-                  P(None, None, ShardingAxisName.MLP_TENSOR), rhs_scale_spec,
-                  rhs_bias_spec, P(ShardingAxisName.MLP_DATA)),
+                  P(None, ShardingAxisName.MLP_TENSOR,
+                    None), P(ShardingAxisName.MLP_DATA),
+                  P(ShardingAxisName.MLP_DATA,
+                    None), rhs_scale_spec, rhs_bias_spec,
+                  P(ShardingAxisName.MLP_DATA)),
         out_specs=(P(ShardingAxisName.MLP_DATA)),
         check_vma=False,
-    )(lhs, rhs, rhs_scale, rhs_bias, group_sizes)
+    )(lhs, rhs, topk_argsort_revert_indices, topk_weights, rhs_scale, rhs_bias,
+      group_sizes)
 
     return gmm_result.astype(lhs.dtype)
 
@@ -213,17 +235,19 @@ def expert_sharded_gmm(
     rhs_scale: jax.Array | None,
     rhs_bias: jax.Array | None,
     group_sizes: jax.Array,
-    is_last_expert: bool,
+    is_last_gmm: bool,
     mesh: Mesh,
 ) -> jax.Array:
-    ep_size = get_mesh_shape_product(mesh, ShardingAxisName.MLP_TENSOR)
+    ep_size = get_mesh_shape_product(mesh, ShardingAxisName.EXPERT)
     ep_p_spec = P(ShardingAxisName.EXPERT)
+    ep_data_p_spec = P(ShardingAxisName.EXPERT_DATA)
+    data_p_spec = P(ShardingAxisName.MLP_DATA)
     num_experts = rhs.shape[0]
     num_experts_per_shard = num_experts // ep_size
     group_offset = jnp.arange(0, num_experts, num_experts_per_shard)
 
     def _gmm(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset):
-        m, g, n, k = lhs.shape[0], *rhs.shape
+        m, g, k, n = lhs.shape[0], *rhs.shape
         tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
 
         gmm_res = gmm(
@@ -234,7 +258,6 @@ def expert_sharded_gmm(
             group_sizes=group_sizes,
             preferred_element_type=lhs.dtype,
             tiling=(tm, tk, tn),
-            transpose_rhs=True,
             group_offset=group_offset[0],
         )
         return gmm_res
@@ -257,7 +280,7 @@ def expert_sharded_gmm(
     #       0, 0, 0, 0     0, 0, 0, 0     0, 0, 0, 0     D, D, D, D
     #        shard-0        shard-1        shard-2        shard-3
     # Each shards has 3 (row A), 2 (row B), 5 (row C) and 4 (row D).
-    lhs_spec = ep_p_spec if is_last_expert else P()
+    lhs_spec = ep_data_p_spec if is_last_gmm else data_p_spec
     rhs_spec = ep_p_spec
     rhs_scale_spec = None if rhs_scale is None else ep_p_spec
     rhs_bias_spec = None if rhs_bias is None else ep_p_spec
@@ -269,14 +292,14 @@ def expert_sharded_gmm(
             rhs_spec,
             rhs_scale_spec,
             rhs_bias_spec,
-            P(),
+            data_p_spec,
             ep_p_spec,
         ),
-        out_specs=ep_p_spec,
+        out_specs=ep_data_p_spec,
         check_vma=False,
     )(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset)
 
-    if not is_last_expert:
+    if not is_last_gmm:
         return gmm_res
 
     # For i-th shard, it is responsible groups (AKA experts) from
@@ -289,10 +312,30 @@ def expert_sharded_gmm(
     # So reshaping to [num_tokens_per_shard, num_experts_per_shard] and applying
     # sum(axis=1) will get desired send_sizes shaped [num_tokens_per_shard].
     send_sizes = group_sizes.reshape(-1, num_experts_per_shard).sum(axis=1)
+
     # In the working example, input_offsets would be [0, 3, 5, 10]
-    input_offsets = jnp.concatenate((jnp.array([0]), send_sizes.cumsum()[:-1]))
+
+    def _compute_input_offsets(send_sizes_local):
+        input_offset_shard = jnp.concatenate(
+            (jnp.array([0]), send_sizes_local.cumsum()[:-1]))
+        return input_offset_shard
+
+    input_offsets = jax.shard_map(
+        _compute_input_offsets,
+        mesh=mesh,
+        in_specs=data_p_spec,
+        out_specs=data_p_spec,
+    )(send_sizes)
     output_offsets = input_offsets
     recv_sizes = send_sizes
+    data_sharding = NamedSharding(mesh, data_p_spec)
+
+    send_sizes = jax.lax.with_sharding_constraint(send_sizes, data_sharding)
+    input_offsets = jax.lax.with_sharding_constraint(input_offsets,
+                                                     data_sharding)
+    output_offsets = jax.lax.with_sharding_constraint(output_offsets,
+                                                      data_sharding)
+    recv_sizes = jax.lax.with_sharding_constraint(recv_sizes, data_sharding)
 
     def _ragged_all_to_all(operand, input_offsets, send_sizes, output_offsets,
                            recv_sizes):
@@ -346,8 +389,9 @@ def expert_sharded_gmm(
     return jax.shard_map(
         _ragged_all_to_all,
         mesh=mesh,
-        in_specs=(ep_p_spec, ep_p_spec, ep_p_spec, ep_p_spec, P()),
-        out_specs=(P(ShardingAxisName.MLP_DATA)),
+        in_specs=(ep_data_p_spec, ep_data_p_spec, ep_data_p_spec,
+                  ep_data_p_spec, data_p_spec),
+        out_specs=(data_p_spec),
         check_vma=False,
     )(gmm_res, input_offsets, send_sizes, output_offsets, recv_sizes)
 
@@ -398,7 +442,7 @@ def fused_moe_func(
         Output of moe operation [num_tokens, hidden_size]
     """
     num_tokens, hidden_size = hidden_states.shape
-    global_num_experts, _, padded_hidden_size = w1.shape
+    global_num_experts, padded_hidden_size, _ = w1.shape
     dtype = hidden_states.dtype
 
     assert (num_tokens * topk) % 16 == 0, (
@@ -448,7 +492,7 @@ def fused_moe_func(
             w1_scale,
             w1_bias,
             group_sizes,
-            is_last_expert=False,
+            is_last_gmm=False,
             mesh=mesh,
         )
         x1, x2 = jnp.split(x, 2, -1)
@@ -461,9 +505,29 @@ def fused_moe_func(
             w2_scale,
             w2_bias,
             group_sizes,
-            is_last_expert=True,
+            is_last_gmm=True,
             mesh=mesh,
         )
+
+        # On TP, the unsort / summing topk are handled before all-reduce
+        # So it is not needed here.
+        def _finalize_output(x_local, topk_argsort_revert_indices_local,
+                             topk_weights_local):
+            x_local = x_local[topk_argsort_revert_indices_local].reshape(
+                -1, topk, padded_hidden_size)
+            x_local = x_local * jnp.expand_dims(topk_weights_local, axis=-1)
+            x_local = x_local.sum(axis=-2)
+            return x_local
+
+        x = jax.shard_map(
+            _finalize_output,
+            mesh=mesh,
+            in_specs=(P(ShardingAxisName.MLP_DATA,
+                        None), P(ShardingAxisName.MLP_DATA),
+                      P(ShardingAxisName.MLP_DATA, None)),
+            out_specs=(P(ShardingAxisName.ATTN_DATA, None)),
+            check_vma=False,
+        )(x, topk_argsort_revert_indices, topk_weights)
     else:
         x1, x2 = tensor_sharded_gmm_merged_column_parallel(
             x,
@@ -479,28 +543,13 @@ def fused_moe_func(
         x = tensor_sharded_gmm_row_parallel(
             x,
             w2,
+            topk_argsort_revert_indices,
+            topk_weights,
             w2_scale,
             w2_bias,
             group_sizes,
+            topk=topk,
             mesh=mesh,
         )
-
-    def _finalize_output(x_local, topk_argsort_revert_indices_local,
-                         topk_weights_local):
-        x_local = x_local[topk_argsort_revert_indices_local].reshape(
-            -1, topk, padded_hidden_size)
-        x_local = x_local * jnp.expand_dims(topk_weights_local, axis=-1)
-        x_local = x_local.sum(axis=-2)
-        return x_local
-
-    x = jax.shard_map(
-        _finalize_output,
-        mesh=mesh,
-        in_specs=(P(ShardingAxisName.MLP_DATA,
-                    None), P(ShardingAxisName.MLP_DATA),
-                  P(ShardingAxisName.MLP_DATA, None)),
-        out_specs=(P(ShardingAxisName.ATTN_DATA, None)),
-        check_vma=False,
-    )(x, topk_argsort_revert_indices, topk_weights)
 
     return x[:num_tokens, :hidden_size]

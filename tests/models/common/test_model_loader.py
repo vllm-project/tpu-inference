@@ -84,6 +84,17 @@ def rng() -> jax.Array:
     return jax.random.PRNGKey(0)
 
 
+# --- Added jax get_pp_group Fixture ---
+@pytest.fixture
+def mock_get_pp_group():
+    with patch("tpu_inference.distributed.jax_parallel_state.get_pp_group",
+               return_value=MagicMock(is_first_rank=True,
+                                      is_last_rank=True,
+                                      rank_in_group=0,
+                                      world_size=1)):
+        yield
+
+
 # ==============================================================================
 # >> Test Cases
 # ==============================================================================
@@ -242,7 +253,7 @@ def test_get_flax_model(vllm_config, mesh):
     assert callable(compute_logits_fn)
 
 
-def test_get_vllm_model(mesh):
+def test_get_vllm_model(mock_get_pp_group, mesh):
     """
     An integration test for the main public function `get_vllm_model`.
     It verifies that the function returns two valid, JIT-compiled functions
@@ -275,7 +286,7 @@ def test_get_vllm_model(mesh):
     assert callable(compute_logits_fn)
 
 
-def test_get_vllm_model_random_weights(mesh):
+def test_get_vllm_model_random_weights(mock_get_pp_group, mesh):
     rng = jax.random.PRNGKey(42)
 
     engine_args = EngineArgs(model="Qwen/Qwen3-0.6B")

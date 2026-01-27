@@ -177,13 +177,18 @@ class TpuPlatform(Platform):
             else:
                 logger.info("Force using MultiprocExecutor for JAX on "
                             "single host with pipeline parallelism.")
-                parallel_config.distributed_executor_backend = "mp"
+                from tpu_inference.executors.multiproc_executor import \
+                    MultiprocExecutor
+                parallel_config.distributed_executor_backend = MultiprocExecutor
         elif multihost_backend == "ray":
             from tpu_inference.executors.ray_distributed_executor import \
                 RayDistributedExecutor
             parallel_config.distributed_executor_backend = RayDistributedExecutor
             logger.info(
                 "Force using RayDistributedExecutor for JAX on multihost.")
+            if parallel_config.pipeline_parallel_size > 1:
+                raise ValueError(
+                    "PP on Ray is disabled due to a pending change on vLLM.")
         else:
             logger.warning(
                 f"Unknown TPU multihost backend: {multihost_backend}. "
