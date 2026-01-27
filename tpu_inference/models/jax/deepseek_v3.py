@@ -879,8 +879,8 @@ class DeepSeekV3(nnx.Module):
                 dtype=dtype,
                 moe_backend=self.moe_backend,
                 activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
-                ed_sharding=(ShardingAxisName.MLP_TENSOR, None),
-                e_sharding=(ShardingAxisName.MLP_TENSOR, ))
+                ed_sharding=(None, None),
+                e_sharding=(None, ))
             custom_module = MoE(
                 dtype=dtype,
                 num_local_experts=num_local_experts,
@@ -891,10 +891,14 @@ class DeepSeekV3(nnx.Module):
                 mesh=self.mesh,
                 hidden_act=hidden_act,
                 rngs=self.rng,
-                activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
-                activation_ffw_ted=(ShardingAxisName.MLP_DATA, None, None),
-                edf_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
-                efd_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
+                activation_ffw_td=(ShardingAxisName.MLP_DATA,
+                                   ShardingAxisName.MODEL_1),
+                activation_ffw_ted=(ShardingAxisName.MLP_DATA, None,
+                                    ShardingAxisName.MODEL_1),
+                edf_sharding=(None, ShardingAxisName.MODEL_1,
+                              ShardingAxisName.MODEL_2),
+                efd_sharding=(None, ShardingAxisName.MODEL_2,
+                              ShardingAxisName.MODEL_1),
                 moe_backend=self.moe_backend,
                 quantized_dtype=self.weight_loader.quant_dtype
                 if self.weight_loader.is_model_quantized else None,
