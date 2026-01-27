@@ -27,7 +27,6 @@ from tpu_inference.utils import get_mesh_shape_product
 
 
 def apply_scoring_fn(scoring_fn: str, x: jax.Array) -> jax.Array:
-    x = x.astype(jnp.float32)
     match scoring_fn:
         case "softmax":
             return jax.nn.softmax(x, axis=-1)

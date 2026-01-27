@@ -52,7 +52,6 @@ def broadcast_minor(src, shape):
 
 
 def apply_scoring_fn(scoring_fn: str, x):
-    x = x.astype(jnp.float32)
     match scoring_fn:
         case "softmax":
             return jax.nn.softmax(x, axis=-1)
