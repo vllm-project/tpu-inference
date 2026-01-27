@@ -53,8 +53,8 @@ class Fp8LinearMethod:
                      layer: torch.nn.Module,
                      x: jax.Array,
                      weight_and_scale: Sequence[tuple[jax.Array, jax.Array]],
-                     bias: Optional[jax.Array],
-                     mesh: Mesh | None = None) -> jax.Array:
+                     bias: Optional[Sequence[jax.Array]] = None,
+                     mesh: Optional[Mesh] = None) -> jax.Array:
 
         outs = []
         for i, (weight, weight_scale) in enumerate(weight_and_scale):

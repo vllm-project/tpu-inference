@@ -201,11 +201,18 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
             else:
                 assert isinstance(layer.weight, torch.nn.ParameterList)
                 assert isinstance(layer.weight_scale, torch.nn.ParameterList)
+                # jax_view cannot handle ParameterList directly, so we explicitly
+                # convert them to list of jax.Array.
+                weight_and_scale = [
+                    (jax_view(w), jax_view(s))
+                    for w, s in zip(layer.weight, layer.weight_scale)
+                ]
+                if bias is not None:
+                    assert isinstance(bias, torch.nn.ParameterList)
+                    bias_jax = [jax_view(b) for b in bias]
                 out = self._apply_split(layer,
-                                        x_jax, [
-                                            zip(jax_view(layer.weight),
-                                                jax_view(layer.weight_scale))
-                                        ],
+                                        x_jax,
+                                        weight_and_scale,
                                         bias_jax,
                                         mesh=self.linear_config.mesh)
             return torch_view(out)

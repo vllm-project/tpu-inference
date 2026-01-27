@@ -49,9 +49,9 @@ def sharded_quantized_matmul(x: jax.Array,
     scale_sharding = P(out_axis, )
     out_sharding = P(None, out_axis)
 
-        x = jax.lax.with_sharding_constraint(
-            x,
-            NamedSharding(mesh, x_sharding) if mesh else x_sharding)
+    x = jax.lax.with_sharding_constraint(
+        x,
+        NamedSharding(mesh, x_sharding) if mesh else x_sharding)
 
     def wrapper(x, w_q, w_s):
         if envs.ENABLE_QUANTIZED_MATMUL_KERNEL:
