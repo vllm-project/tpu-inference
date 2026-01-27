@@ -185,7 +185,7 @@ class VllmModelWrapper:
         loading_end = time.time()
         total_loading_time = loading_end - loading_start
         logger.info(
-            f"Storage to TPU total model loading time: {total_loading_time:.2f}s"
+            f"Storage to TPU total weight loading time: {total_loading_time:.2f}s"
         )
         # Returning to the jax land, so we need to wrap it into a JaxValue.
         return jax_view(params_and_buffers), lora_manager
