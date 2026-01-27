@@ -51,6 +51,7 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     fi
 else
     echo "Non-PR build. Bypassing file change check."
+    FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r -m "$BUILDKITE_COMMIT")
 fi
 
 
