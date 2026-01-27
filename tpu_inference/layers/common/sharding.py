@@ -35,41 +35,18 @@ class ShardingAxisNameBase:
     SEQUENCE = ('data', 'attn_dp')
     ATTN_DATA = ('data', 'attn_dp')
     MLP_DATA = 'data'
-    ATTN_HEAD = 'model'
+    TENSOR = ('model', 'expert')
+    ATTN_HEAD = ('model', 'expert')
     ATTN_TENSOR = None
     MLP_TENSOR = ('attn_dp', 'model', 'expert')
     MOE_TENSOR = ('attn_dp', 'model')
     EXPERT = ('attn_dp', 'expert', 'model')
-    EXPERT_DATA = ('data', 'attn_dp', 'expert', 'model')
-    VOCAB = ('expert', 'attn_dp', 'model')
+    VOCAB = ('model', 'attn_dp', 'expert')
+    MODEL_1 = 'model'
+    MODEL_2 = 'expert'
 
 
-class ShardingAxisName2D:
-    """Sharding axis names for 2D data parallelism scenarios.
-    NOTE(wenxindongwork): The new MoE kernel expects a 2D mesh for now.
-    We should use ShardingAxisNameBase once the new MoE kernel supports
-    more general mesh shapes. For now, this is the default sharding axes.
-    """
-    SEQUENCE = 'data'
-    ATTN_DATA = 'data'
-    MLP_DATA = 'data'
-    ATTN_HEAD = 'model'
-    ATTN_TENSOR = None
-    MLP_TENSOR = 'model'
-    MOE_TENSOR = 'model'
-    EXPERT = 'model'
-    EXPERT_DATA = ('data', 'model')
-    VOCAB = ('data', 'model')
-
-
-try:
-    _use_base_sharding = envs.NEW_MODEL_DESIGN
-    if _use_base_sharding:
-        ShardingAxisName = ShardingAxisNameBase
-    else:
-        ShardingAxisName = ShardingAxisName2D
-except Exception:
-    ShardingAxisName = ShardingAxisName2D
+ShardingAxisName = ShardingAxisNameBase
 
 
 @dataclass
