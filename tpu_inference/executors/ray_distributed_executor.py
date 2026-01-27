@@ -350,6 +350,12 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
                 ip=ip,
                 prev_worker_ip=prev_ip,
             )
+            # NOTE(Chenyaaang): Adjust worker's rank to 0 if PP=1.
+            # Otherwise if we have 4 ray nodes each with 1 chip and use TP=4,
+            # We'll have 4 workers with rank 0,1,2,3 respectively. This
+            # contradicts with get_pp_group().
+            if self.parallel_config.pipeline_parallel_size == 1:
+                kwargs["rank"] = 0
             all_kwargs.append(kwargs)
         self.collective_rpc("init_worker", args=(all_kwargs, ))
         self.collective_rpc("init_device")
@@ -382,7 +388,8 @@ class RayWorkerWrapper(RayWorkerWrapperV1):
     Ray worker wrapper for TPU.
 
     The implementation is similar to vllm/v1/executor/ray_utils.py
-    except the intermediate tensor is JaxIntermediateTensors.
+    
+    _is_intermediate_tensors: check whether the output is JaxIntermediateTensors.
     """
 
     def _is_intermediate_tensors(self, output) -> bool:
