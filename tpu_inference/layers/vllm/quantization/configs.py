@@ -16,7 +16,7 @@ import torchax
 from jax.sharding import Mesh, PartitionSpec
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE, FusedMoEConfig
+from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEConfig
 # yapf: disable
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
@@ -25,9 +25,10 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 
-from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.vllm.process_weights.linear_weights import \
+from tpu_inference.layers.common.process_weights.linear_weights import \
     get_model_matmul_fusion_assignment
+from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import TPU_SECOND_LAST_MINOR, get_mesh_shape_product
 
 # yapf: enable
@@ -37,21 +38,20 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
-class VllmQuantLinearConfig:
+class VllmQuantLinearConfig(QuantLinearConfig):
 
     def __init__(self, vllm_config: VllmConfig, mesh: Mesh, layer: LinearBase):
         assert isinstance(layer, LinearBase)
 
+        super().__init__(
+            enable_sp=vllm_config.compilation_config.pass_config.enable_sp,
+            output_sizes=[layer.output_size])
         self.mesh = mesh
-        self.output_sizes = [layer.output_size]
-        self.weight_sharding = P(None, None)
-        self.fuse_matmuls = True
-        self.enable_sp = vllm_config.compilation_config.pass_config.enable_sp
-        self.input_sharding = None
-        self.output_sharding = None
-
         self.tp_size = get_mesh_shape_product(self.mesh,
                                               ShardingAxisName.MLP_TENSOR)
+
+        self.n_shards = get_mesh_shape_product(self.mesh,
+                                               self.weight_sharding[0])
 
         if isinstance(layer, RowParallelLinear):
             self.weight_sharding = P(None, ShardingAxisName.ATTN_HEAD)

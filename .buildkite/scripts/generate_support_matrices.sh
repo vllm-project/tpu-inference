@@ -25,7 +25,7 @@ LOCAL_TPU_VERSION="${BUILDKITE_TAG:-nightly_$(date +%Y%m%d)}"
 # Note: This script assumes the metadata keys contain newline-separated lists.
 mapfile -t model_list < <(buildkite-agent meta-data get "${MODEL_LIST_KEY}" --default "")
 mapfile -t metadata_feature_list < <(buildkite-agent meta-data get "${FEATURE_LIST_KEY}" --default "")
-MODEL_STAGES=("UnitTest" "IntegrationTest" "Benchmark")
+MODEL_STAGES=("UnitTest" "Accuracy/Correctness" "Benchmark")
 FEATURE_STAGES=("CorrectnessTest" "PerformanceTest")
 FEATURE_STAGES_QUANTIZATION=("QuantizationMethods" "RecommendedTPUGenerations" "CorrectnessTest" "PerformanceTest")
 FEATURE_STAGES_MICROBENCHMARKS=("CorrectnessTest" "PerformanceTest" "TPU Versions")
@@ -94,7 +94,7 @@ process_models() {
         local category_csv="${category_filename}_support_matrix.csv"
         # Initialize CSV if not exists
         if [ ! -f "$category_csv" ]; then
-            echo "Model,UnitTest,IntegrationTest,Benchmark" > "$category_csv"
+            echo "Model,UnitTest,Accuracy/Correctness,Benchmark" > "$category_csv"
             model_csv_files+=("$category_csv")
         fi
         # Build Row

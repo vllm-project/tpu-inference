@@ -36,31 +36,31 @@ steps:
       - |
         .buildkite/scripts/record_step_result.sh Qwen_Qwen3-Omni-30B-A3B-Instruct_UnitTest
 
-  - label: "Integration tests for Qwen/Qwen3-Omni-30B-A3B-Instruct"
-    key: "Qwen_Qwen3-Omni-30B-A3B-Instruct_IntegrationTest"
+  - label: "Accuracy for Qwen/Qwen3-Omni-30B-A3B-Instruct"
+    key: "Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy"
     depends_on: "record_Qwen_Qwen3-Omni-30B-A3B-Instruct_UnitTest"
     agents:
       queue: tpu_v6e_8_queue
     soft_fail: true
     commands:
       - |
-        buildkite-agent meta-data set "Qwen_Qwen3-Omni-30B-A3B-Instruct_IntegrationTest" "unverified"
-  - label: "Record integration test result for Qwen/Qwen3-Omni-30B-A3B-Instruct"
-    key: "record_Qwen_Qwen3-Omni-30B-A3B-Instruct_IntegrationTest"
-    depends_on: "Qwen_Qwen3-Omni-30B-A3B-Instruct_IntegrationTest"
+        buildkite-agent meta-data set "Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy" "unverified"
+  - label: "Record accuracy result for Qwen/Qwen3-Omni-30B-A3B-Instruct"
+    key: "record_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy"
+    depends_on: "Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy"
     env:
       CI_TARGET: Qwen/Qwen3-Omni-30B-A3B-Instruct
-      CI_STAGE: "IntegrationTest"
+      CI_STAGE: "Accuracy/Correctness"
       CI_CATEGORY: "multimodal"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh Qwen_Qwen3-Omni-30B-A3B-Instruct_IntegrationTest
+        .buildkite/scripts/record_step_result.sh Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy
 
   - label: "Performance benchmarks for Qwen/Qwen3-Omni-30B-A3B-Instruct"
     key: "Qwen_Qwen3-Omni-30B-A3B-Instruct_Benchmark"
-    depends_on: "record_Qwen_Qwen3-Omni-30B-A3B-Instruct_IntegrationTest"
+    depends_on: "record_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy"
     agents:
       queue: tpu_v6e_8_queue
     soft_fail: true

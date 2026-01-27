@@ -470,6 +470,7 @@ class Llama4ForCausalLM(nnx.Module):
 
             moe_ffw = MoE(
                 dtype=dtype,
+                mesh=self.mesh,
                 num_local_experts=self.num_local_experts,
                 apply_expert_weight_before_computation=True,
                 hidden_size=self.hidden_size,
