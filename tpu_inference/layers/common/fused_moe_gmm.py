@@ -164,18 +164,30 @@ def tensor_sharded_gmm_merged_column_parallel(
 def tensor_sharded_gmm_row_parallel(
     lhs: jax.Array,
     rhs: jax.Array,
+    topk_argsort_revert_indices: jax.Array,
+    topk_weights: jax.Array,
     rhs_scale: jax.Array | None,
     rhs_bias: jax.Array | None,
     group_sizes: jax.Array,
+    topk: int,
     mesh: Mesh,
 ) -> jax.Array:
 
-    def _gmm_all_reduce(lhs, rhs, rhs_scale, rhs_bias, group_sizes):
+    def _gmm_all_reduce(
+        lhs,
+        rhs,
+        topk_argsort_revert_indices_local,
+        topk_weights_local,
+        rhs_scale,
+        rhs_bias,
+        group_sizes,
+    ) -> jax.Array:
         m, g, k, n = lhs.shape[0], *rhs.shape
         tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
         if rhs_bias is not None:
             shard_id = jax.lax.axis_index(ShardingAxisName.MLP_TENSOR).sum()
             rhs_bias = jnp.where(shard_id == 0, rhs_bias, 0)
+
         out = gmm(
             lhs,
             rhs,
@@ -186,6 +198,14 @@ def tensor_sharded_gmm_row_parallel(
             tiling=(tm, tk, tn),
             group_offset=jnp.array(0),
         )
+
+        # Perform local reverse sort and reduction on the topk experts of
+        # a token. Psum size will be 1/top_k compared with psum first
+        # and run reduction later
+        out = out[topk_argsort_revert_indices_local].reshape((-1, topk, n))
+        out = out * jnp.expand_dims(topk_weights_local, axis=-1)
+        out = out.sum(axis=-2)
+
         return jax.lax.psum(out, axis_name=ShardingAxisName.MLP_TENSOR)
 
     num_blocks = 1 if rhs_scale is None else rhs_scale.shape[1]
@@ -197,11 +217,14 @@ def tensor_sharded_gmm_row_parallel(
         mesh=mesh,
         in_specs=(P(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR),
                   P(None, ShardingAxisName.MLP_TENSOR,
+                    None), P(ShardingAxisName.MLP_DATA),
+                  P(ShardingAxisName.MLP_DATA,
                     None), rhs_scale_spec, rhs_bias_spec,
                   P(ShardingAxisName.MLP_DATA)),
         out_specs=(P(ShardingAxisName.MLP_DATA)),
         check_vma=False,
-    )(lhs, rhs, rhs_scale, rhs_bias, group_sizes)
+    )(lhs, rhs, topk_argsort_revert_indices, topk_weights, rhs_scale, rhs_bias,
+      group_sizes)
 
     return gmm_result.astype(lhs.dtype)
 
@@ -485,6 +508,26 @@ def fused_moe_func(
             is_last_gmm=True,
             mesh=mesh,
         )
+
+        # On TP, the unsort / summing topk are handled before all-reduce
+        # So it is not needed here.
+        def _finalize_output(x_local, topk_argsort_revert_indices_local,
+                             topk_weights_local):
+            x_local = x_local[topk_argsort_revert_indices_local].reshape(
+                -1, topk, padded_hidden_size)
+            x_local = x_local * jnp.expand_dims(topk_weights_local, axis=-1)
+            x_local = x_local.sum(axis=-2)
+            return x_local
+
+        x = jax.shard_map(
+            _finalize_output,
+            mesh=mesh,
+            in_specs=(P(ShardingAxisName.MLP_DATA,
+                        None), P(ShardingAxisName.MLP_DATA),
+                      P(ShardingAxisName.MLP_DATA, None)),
+            out_specs=(P(ShardingAxisName.ATTN_DATA, None)),
+            check_vma=False,
+        )(x, topk_argsort_revert_indices, topk_weights)
     else:
         x1, x2 = tensor_sharded_gmm_merged_column_parallel(
             x,
@@ -500,28 +543,13 @@ def fused_moe_func(
         x = tensor_sharded_gmm_row_parallel(
             x,
             w2,
+            topk_argsort_revert_indices,
+            topk_weights,
             w2_scale,
             w2_bias,
             group_sizes,
+            topk=topk,
             mesh=mesh,
         )
-
-    def _finalize_output(x_local, topk_argsort_revert_indices_local,
-                         topk_weights_local):
-        x_local = x_local[topk_argsort_revert_indices_local].reshape(
-            -1, topk, padded_hidden_size)
-        x_local = x_local * jnp.expand_dims(topk_weights_local, axis=-1)
-        x_local = x_local.sum(axis=-2)
-        return x_local
-
-    x = jax.shard_map(
-        _finalize_output,
-        mesh=mesh,
-        in_specs=(P(ShardingAxisName.MLP_DATA,
-                    None), P(ShardingAxisName.MLP_DATA),
-                  P(ShardingAxisName.MLP_DATA, None)),
-        out_specs=(P(ShardingAxisName.ATTN_DATA, None)),
-        check_vma=False,
-    )(x, topk_argsort_revert_indices, topk_weights)
 
     return x[:num_tokens, :hidden_size]
