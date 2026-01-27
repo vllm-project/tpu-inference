@@ -22,7 +22,14 @@ ARG IS_TEST="false"
 # Install some basic utilities
 RUN apt-get update && apt-get install -y \
     git \
-    libopenblas-dev libopenmpi-dev libomp-dev
+    libopenmpi-dev \
+    libomp-dev \
+    procps \
+    curl \
+    rclone \
+    wget \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install tpu_inference
 WORKDIR /workspace/tpu_inference

@@ -15,7 +15,7 @@
 steps:
    - label: "${TEST_LABEL_PREFIX} PyPI Test Performance benchmarks for meta-llama/Llama-3.1-8B-Instruct"
      key: "${TEST_KEY_PREFIX}_pypi_meta-llama_Llama-3_1-8B-Instruct_Benchmark"
-     if: build.env("NIGHTLY") == "1"
+     # if: build.env("NIGHTLY") == "1"
      agents:
       queue: "${TPU_SMALL_CORE_QUEUE}"
      env:
@@ -35,7 +35,7 @@ steps:
 
    - label: "${TEST_LABEL_PREFIX} PyPI Test Performance benchmarks for Qwen/Qwen3-4B"
      key: "${TEST_KEY_PREFIX}_pypi_Qwen_Qwen3-4B_Benchmark"
-     if: build.env("NIGHTLY") == "1"
+     # if: build.env("NIGHTLY") == "1"
      depends_on: "record_verified_commit_hashes"
      agents:
       queue: "${TPU_SMALL_CORE_QUEUE}"
