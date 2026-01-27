@@ -59,6 +59,18 @@ upload_pipeline() {
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     
+    export RUN_KERNELS="false"
+    export RUN_COLLECTIVES="false"
+
+    # Enable tests if it is a Nightly build OR relevant files changed
+    if [[ "$NIGHTLY" == "1" ]] || echo "$FILES_CHANGED" | grep -qE '^(tpu_inference/kernels|tests/kernels|requirements.txt)'; then
+        export RUN_KERNELS="true"
+    fi
+
+    if [[ "$NIGHTLY" == "1" ]] || echo "$FILES_CHANGED" | grep -qE '^(tpu_inference/kernels/collectives|tests/kernels/collectives|requirements.txt)'; then
+        export RUN_COLLECTIVES="true"
+    fi
+
     # Upload JAX pipeline for v6 (default)
     buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
 
@@ -70,7 +82,7 @@ upload_pipeline() {
     export IS_FOR_V7X="true"
     export COV_FAIL_UNDER="67"
     buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
-    unset LABEL_PREFIX KEY_PREFIX TPU_QUEUE_SINGLE TPU_QUEUE_MULTI IS_FOR_V7X COV_FAIL_UNDER
+    unset LABEL_PREFIX KEY_PREFIX TPU_QUEUE_SINGLE TPU_QUEUE_MULTI IS_FOR_V7X COV_FAIL_UNDER RUN_KERNELS RUN_COLLECTIVES
 
     # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
     buildkite-agent pipeline upload .buildkite/main.yml
