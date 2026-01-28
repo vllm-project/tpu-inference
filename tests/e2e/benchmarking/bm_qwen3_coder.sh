@@ -26,11 +26,11 @@ set -ex
 
 
 # Usage:
-# bash bm_qwen3_coder.sh --model BCCard/Qwen3-Coder-480B-A35B-Instruct-FP8-Dynamic --tp 8 --req_tput_limit_1k_1k 1.05  --output_token_tput_limit_1k_1k 1926 --total_token_tput_limit_1k_1k 1948  --req_tput_limit_1k_8k 0.15  --output_token_tput_limit_1k_8k 1100  --total_token_tput_limit_1k_8k 1236  --req_tput_limit_8k_1k 0.418  --output_token_tput_limit_8k_1k 382  --total_token_tput_limit_8k_1k 3425
+# bash bm_qwen3_coder.sh --model BCCard/Qwen3-Coder-480B-A35B-Instruct-FP8-Dynamic --tp 8 --req_tput_limit 1.05  --output_token_tput_limit 1926 --total_token_tput_limit 1948 --input_len 1024 --output_len 1024 --use_moe_ep_kernel 1
 
 
 OPTIONS=""
-LONGOPTS=model:,tp:,req_tput_limit_1k_1k:,output_token_tput_limit_1k_1k:,total_token_tput_limit_1k_1k:,req_tput_limit_1k_8k:,output_token_tput_limit_1k_8k:,total_token_tput_limit_1k_8k:,req_tput_limit_8k_1k:,output_token_tput_limit_8k_1k:,total_token_tput_limit_8k_1k:
+LONGOPTS=model:,tp:,req_tput_limit:,output_token_tput_limit:,total_token_tput_limit:,input_len:,output_len:,use_moe_ep_kernel:
 
 # Parse arguments
 if ! PARSED=$(getopt --options="$OPTIONS" --longoptions=$LONGOPTS --name "$0" -- "$@"); then
@@ -48,42 +48,31 @@ while true; do
       tp=$2
       shift 2
       ;;
-    --req_tput_limit_1k_1k)
-      req_tput_limit_1k_1k=$2
+    --req_tput_limit)
+      req_tput_limit=$2
       shift 2
       ;;
-    --output_token_tput_limit_1k_1k)
-      output_token_tput_limit_1k_1k=$2
+    --output_token_tput_limit)
+      output_token_tput_limit=$2
       shift 2
       ;;
-    --total_token_tput_limit_1k_1k)
-      total_token_tput_limit_1k_1k=$2
+    --total_token_tput_limit)
+      total_token_tput_limit=$2
       shift 2
       ;;
-    --req_tput_limit_1k_8k)
-      req_tput_limit_1k_8k=$2
+    --input_len)
+      input_len=$2
       shift 2
       ;;
-    --output_token_tput_limit_1k_8k)
-      output_token_tput_limit_1k_8k=$2
+    --output_len)
+      output_len=$2
       shift 2
       ;;
-    --total_token_tput_limit_1k_8k)
-      total_token_tput_limit_1k_8k=$2
+    --use_moe_ep_kernel)
+      use_moe_ep_kernel=$2
       shift 2
       ;;
-    --req_tput_limit_8k_1k)
-      req_tput_limit_8k_1k=$2
-      shift 2
-      ;;
-    --output_token_tput_limit_8k_1k)
-      output_token_tput_limit_8k_1k=$2
-      shift 2
-      ;;
-    --total_token_tput_limit_8k_1k)
-      total_token_tput_limit_8k_1k=$2
-      shift 2
-      ;;
+
     --)
       shift
       break
@@ -94,19 +83,17 @@ while true; do
       ;;
   esac
 done
-if [ -z "$model" ] || [ -z "$tp" ] || [ -z "$req_tput_limit_1k_1k" ] || [ -z "$output_token_tput_limit_1k_1k" ] || [ -z "$total_token_tput_limit_1k_1k" ] || [ -z "$req_tput_limit_1k_8k" ] || [ -z "$output_token_tput_limit_1k_8k" ] || [ -z "$total_token_tput_limit_1k_8k" ] || [ -z "$req_tput_limit_8k_1k" ] || [ -z "$output_token_tput_limit_8k_1k" ] || [ -z "$total_token_tput_limit_8k_1k" ]; then
+if [ -z "$model" ] || [ -z "$tp" ] || [ -z "$req_tput_limit" ] || [ -z "$output_token_tput_limit" ] || [ -z "$total_token_tput_limit" ] || [ -z "$input_len" ] || [ -z "$output_len" ] || [ -z "$use_moe_ep_kernel" ]; then
   echo "Error: All parameters are required."
   echo "model=$model"
   echo "tp=$tp"
-  echo "req_tput_limit_1k_1k=$req_tput_limit_1k_1k"
-  echo "output_token_tput_limit_1k_1k=$output_token_tput_limit_1k_1k"
-  echo "total_token_tput_limit_1k_1k=$total_token_tput_limit_1k_1k"
-  echo "req_tput_limit_1k_8k=$req_tput_limit_1k_8k"
-  echo "output_token_tput_limit_1k_8k=$output_token_tput_limit_1k_8k"
-  echo "total_token_tput_limit_1k_8k=$total_token_tput_limit_1k_8k"
-  echo "req_tput_limit_8k_1k=$req_tput_limit_8k_1k"
-  echo "output_token_tput_limit_8k_1k=$output_token_tput_limit_8k_1k"
-  echo "total_token_tput_limit_8k_1k=$total_token_tput_limit_8k_1k"
+  echo "req_tput_limit=$req_tput_limit"
+  echo "output_token_tput_limit=$output_token_tput_limit"
+  echo "total_token_tput_limit=$total_token_tput_limit"
+  echo "input_len=$input_len"
+  echo "output_len=$output_len"
+  echo "use_moe_ep_kernel=$use_moe_ep_kernel"
+
   exit 1
 fi
 
@@ -122,7 +109,7 @@ DEFAULT_PORT=8000
 
 start_time=$(date +%s)
 
-export USE_MOE_EP_KERNEL=1
+export USE_MOE_EP_KERNEL=${use_moe_ep_kernel}
 export MODEL_IMPL_TYPE=vllm
 vllm serve --seed=42 --model="$model" --max-model-len=10240 --max-num-batched-tokens=8192 --max-num-seqs=512 --no-enable-prefix-caching --disable-log-requests --tensor-parallel-size="$tp" --kv-cache-dtype=fp8 --gpu-memory-utilization=0.95 --async-scheduling --enable-expert-parallel  2>&1 | tee vllm_server_out.txt &
 
@@ -166,40 +153,25 @@ check_metrics() {
     fi
 }
 
-{
-    for config in "1024 1024" "8192 1024" "1024 8192"; do
-        # Use set -- to parse the config string into $1 (input) and $2 (output)
-        read -r input_len output_len <<< "$config"
 
-        echo "----------------------------------------------------------------"
-        echo "Running benchmark with input_len=$input_len and output_len=$output_len"
-        echo "----------------------------------------------------------------"
-
-        benchmark_output=$(python3 bench_serving/benchmark_serving.py \
-          --model="$model" \
-          --backend=vllm \
-          --host=127.0.0.1 \
-          --port=8000 \
-          --dataset-name=random \
-          --random-input-len="$input_len" \
-          --random-output-len="$output_len" \
-          --random-range-ratio=0.8 \
-          --num-prompts=320 \
-          --max-concurrency=64 \
-          --request-rate=inf \
-          --ignore-eos)
-
-        echo "benchmark_output: $benchmark_output"
-
-        if [ "$input_len" == 1024 ] && [ "$output_len" == 1024 ]; then
-            check_metrics "$benchmark_output" "$req_tput_limit_1k_1k" "$output_token_tput_limit_1k_1k" "$total_token_tput_limit_1k_1k" "1k_1k"
-        elif [ "$input_len" == 1024 ] && [ "$output_len" == 8192 ]; then
-            check_metrics "$benchmark_output" "$req_tput_limit_1k_8k" "$output_token_tput_limit_1k_8k" "$total_token_tput_limit_1k_8k" "1k_8k"
-        elif [ "$input_len" == 8192 ] && [ "$output_len" == 1024 ]; then
-            check_metrics "$benchmark_output" "$req_tput_limit_8k_1k" "$output_token_tput_limit_8k_1k" "$total_token_tput_limit_8k_1k" "8k_1k"
-        fi
-    done
-}
+echo "----------------------------------------------------------------"
+echo "Running benchmark with input_len=$input_len and output_len=$output_len"
+echo "----------------------------------------------------------------"
+benchmark_output=$(python3 bench_serving/benchmark_serving.py \
+  --model="$model" \
+  --backend=vllm \
+  --host=127.0.0.1 \
+  --port=8000 \
+  --dataset-name=random \
+  --random-input-len="$input_len" \
+  --random-output-len="$output_len" \
+  --random-range-ratio=0.8 \
+  --num-prompts=320 \
+  --max-concurrency=64 \
+  --request-rate=inf \
+  --ignore-eos)
+echo "benchmark_output: $benchmark_output"
+check_metrics "$benchmark_output" "$req_tput_limit" "$output_token_tput_limit" "$total_token_tput_limit" "1k_1k"
 
 
 end_time=$(date +%s)

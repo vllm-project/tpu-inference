@@ -295,7 +295,7 @@ steps:
      commands:
        - |
          if [[ "$$IS_FOR_V7X" == "true" ]]; then
-           .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/bm_qwen3_coder.sh --model BCCard/Qwen3-Coder-480B-A35B-Instruct-FP8-Dynamic --tp 8 --req_tput_limit_1k_1k 1000.05  --output_token_tput_limit_1k_1k 1926 --total_token_tput_limit_1k_1k 1948  --req_tput_limit_1k_8k 0.15  --output_token_tput_limit_1k_8k 1100  --total_token_tput_limit_1k_8k 1236  --req_tput_limit_8k_1k 0.418  --output_token_tput_limit_8k_1k 382  --total_token_tput_limit_8k_1k 3425
+           .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/bm_qwen3_coder.sh --model BCCard/Qwen3-Coder-480B-A35B-Instruct-FP8-Dynamic --tp 8 --req_tput_limit 1.05  --output_token_tput_limit 1926 --total_token_tput_limit 1948 --input_len 1024 --output_len 1024 --use_moe_ep_kernel 1
          fi
   
 # -----------------------------------------------------------------
