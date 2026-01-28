@@ -24,7 +24,7 @@ from tpu_inference.layers.common.utils import \
 
 class UnquantizedLinearMethod:
     """Implements the forward method for unquantized linear layers.
-    
+
     This class will be shared in both vLLM and jax path.
     """
 
@@ -59,3 +59,29 @@ class UnquantizedLinearMethod:
             outs.append(out)
         out = jnp.concatenate(outs, axis=-1)
         return out
+
+
+class UnquantizedFusedMoEMethod:
+    """Implements the forward method for unquantized MoE layers.
+
+    This class will be shared in both vLLM and jax path.
+    """
+
+    def __init__(
+        self,
+        moe: vllm_fused_moe.FusedMoEConfig,
+        mesh: Mesh,
+        ep_axis_name: str = "model",
+    ):
+        self.mesh = mesh
+        self.moe_backend = select_moe_backend(self.moe)
+
+        self.extra_backend_kwargs = {}
+        if self.moe_backend == FusedMoEBackend.FUSED_MOE:
+            # When fused moe kernle is used, we pass extra arguments like
+            # tuned block sizes to the kernel.
+            self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name, )
+
+    @property
+    def is_monolithic(self) -> bool:
+        return True

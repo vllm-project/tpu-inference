@@ -26,7 +26,7 @@ from tpu_inference.layers.common.utils import \
 
 class Fp8LinearMethod:
     """Implements the forward method for fp8 linear layers.
-    
+
     This class will be shared in both vLLM and jax path.
     """
 
@@ -67,3 +67,37 @@ class Fp8LinearMethod:
                 out += bias[i]
             outs.append(out)
         return jnp.concatenate(outs, axis=-1)
+
+
+class Fp8MoEMEthod:
+    """Implements the forward method for fp8 MoE layers.
+
+    This class will be shared in both vLLM and jax path.
+    """
+
+    def apply_monolithic(
+        self,
+        layer: FusedMoE,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> torch.Tensor:
+
+        weights = FusedMoEWeights(
+            w13_weight=jax_view(layer.w13_weight),
+            w13_weight_scale=jax_view(layer.w13_weight_scale_inv),
+            w13_bias=jax_view(layer.w13_bias) if self.moe.has_bias else None,
+            w2_weight=jax_view(layer.w2_weight),
+            w2_weight_scale=jax_view(layer.w2_weight_scale_inv),
+            w2_bias=jax_view(layer.w2_bias) if self.moe.has_bias else None,
+        )
+
+        return torch_view(
+            fused_moe_apply(
+                layer,
+                jax_view(x),
+                jax_view(router_logits),
+                weights,
+                self.moe_backend,
+                self.mesh,
+                self.extra_backend_kwargs,
+            ))

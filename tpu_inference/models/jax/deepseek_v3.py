@@ -35,7 +35,7 @@ from tpu_inference.layers.jax.attention.deepseek_v3_attention import MLA
 from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
 from tpu_inference.layers.jax.moe.deepseek_v3_moe import DeepSeekV3Router
-from tpu_inference.layers.jax.moe.moe import MoE
+from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.moe.utils import MoEBackend, select_moe_backend
 from tpu_inference.layers.jax.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
@@ -881,7 +881,7 @@ class DeepSeekV3(nnx.Module):
                 activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
                 ed_sharding=(ShardingAxisName.MLP_TENSOR, None),
                 e_sharding=(ShardingAxisName.MLP_TENSOR, ))
-            custom_module = MoE(
+            custom_module = JaxMoE(
                 dtype=dtype,
                 num_local_experts=num_local_experts,
                 apply_expert_weight_before_computation=False,

@@ -32,6 +32,8 @@ from tpu_inference.layers.jax.moe.dense_moe import (
     dense_moe_fwd, dense_moe_fwd_preapply_router_weights)
 from tpu_inference.layers.jax.moe.sparse_moe import sparse_moe_distributed_fwd
 from tpu_inference.layers.jax.moe.utils import MoEBackend
+from tpu_inference.layers.jax.quantization import QuantizeMethodBase
+from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.layers.vllm.fused_moe import fused_moe_func
 from tpu_inference.models.jax.utils.qwix.qwix_utils import \
     manually_quantize_qwix_weight
@@ -125,7 +127,7 @@ class Router(nnx.Module):
 
 # --- Main Class for MoE ---
 @dataclass(kw_only=True)
-class MoE(nnx.Module):
+class JaxMoE(nnx.Module):
     """Mixture-of-Experts (MoE) Routed MLP Layer.
 
     This module implements a MoE layer with a router and multiple expert MLPs.
@@ -162,6 +164,10 @@ class MoE(nnx.Module):
     # --- MoE Kernel Specific Attributes ---
     renormalize: bool = True
 
+    # ---- Quantization Specific Attributes ----
+    quant_config: Optional[QuantizationConfig] = None
+    prefix: str = ""
+
     def __call__(self, x_TD: Float):
         """Performs the forward pass of the MoE layer.
 
@@ -171,6 +177,9 @@ class MoE(nnx.Module):
         Returns:
             Output array of shape (sequence_length, d_model) after passing through MoE.
         """
+        if self.quant_method is not None:
+            return self.quant_method.apply_jax(self, x_TD)
+
         x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
         if self.moe_backend == MoEBackend.FUSED_MOE:
@@ -268,6 +277,20 @@ class MoE(nnx.Module):
 
     def __post_init__(self, rngs: nnx.Rngs):
         """Generates the kernels (weights) for the router and experts (gating, up-projection, and down-projection layers)."""
+        if self.quant_config is None:
+            self.quant_method = None
+        elif (quant_method :=
+              self.quant_config.get_quant_method(self, prefix=self.prefix)):
+            # Ensure QuantizeMethodBase is imported or available in scope
+            assert isinstance(quant_method, QuantizeMethodBase)
+            self.quant_method = quant_method
+
+            # This triggers the quantization library to inspect 'self' and
+            # replace/wrap parameters.
+            self.quant_method.create_weights_jax(self)
+        else:
+            self.quant_method = None
+
         E = self.num_local_experts
         D = self.hidden_size
         F = self.intermediate_size_moe

@@ -20,10 +20,9 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
+from vllm.model_executor.layers import fused_moe as vllm_fused_moe
 from vllm.model_executor.layers import linear as vllm_linear
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
-                                                  UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import (
@@ -37,9 +36,7 @@ from tpu_inference.layers.common.quant_methods import (UNQUANTIZED,
 from tpu_inference.layers.common.quantization import \
     unquantized as common_unquantized
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.vllm.fused_moe import (FusedMoEBackend,
-                                                 fused_moe_apply,
-                                                 select_moe_backend)
+from tpu_inference.layers.vllm.fused_moe import (fused_moe_apply)
 from tpu_inference.layers.vllm.process_weights.fused_moe_weights import (
     FusedMoEWeights, process_moe_weights, shard_moe_weights)
 from tpu_inference.layers.vllm.quantization.configs import (
@@ -80,7 +77,7 @@ class VllmUnquantizedConfig(QuantizationConfig, VllmQuantConfig):
         if isinstance(layer, vllm_linear.LinearBase):
             linear_config = self.get_linear_config(layer)
             return VllmUnquantizedLinearMethod(linear_config)
-        if isinstance(layer, FusedMoE):
+        if isinstance(layer, vllm_fused_moe.FusedMoE):
             moe_config = self.get_moe_config(layer)
             return VllmUnquantizedFusedMoEMethod(moe_config, self.mesh)
         if isinstance(layer, Attention):
@@ -175,30 +172,22 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
         return out
 
 
-class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
+class VllmUnquantizedFusedMoEMethod(
+        vllm_fused_moe.UnquantizedFusedMoEMethod,
+        common_unquantized.UnquantizedFusedMoEMethod):
 
     def __init__(
         self,
-        moe: FusedMoEConfig,
+        moe: vllm_fused_moe.FusedMoEConfig,
         mesh: Mesh,
         ep_axis_name: str = "model",
     ):
-        super().__init__(moe)
-        self.mesh = mesh
-        self.moe_backend = select_moe_backend(self.moe)
-
-        self.extra_backend_kwargs = {}
-        if self.moe_backend == FusedMoEBackend.FUSED_MOE:
-            # When fused moe kernle is used, we pass extra arguments like
-            # tuned block sizes to the kernel.
-            self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name, )
-
-    @property
-    def is_monolithic(self) -> bool:
-        return True
+        vllm_fused_moe.UnquantizedFusedMoEMethod().__init__(moe)
+        common_unquantized.UnquantizedFusedMoEMethod.__init__(
+            self, moe, mesh, ep_axis_name)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        assert isinstance(layer, FusedMoE)
+        assert isinstance(layer, vllm_fused_moe.FusedMoE)
 
         w13_weight = t2j(layer.w13_weight, use_dlpack=False)
         w2_weight = t2j(layer.w2_weight, use_dlpack=False)
@@ -253,10 +242,12 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def apply_monolithic(
         self,
-        layer: FusedMoE,
+        layer: vllm_fused_moe.FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
+        return torch_view(super().apply_monolithic(layer, x, router_logits,
+                                                   self.moe.has_bias))
 
         weights = FusedMoEWeights(
             w13_weight=jax_view(layer.w13_weight),

@@ -17,8 +17,8 @@ from typing import Optional
 import jax
 
 from tpu_inference.layers.common.quantization import unquantized as jax_common
-from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
@@ -45,10 +45,15 @@ class UnquantizedLinearMethod(QuantizeMethodBase,
         return out
 
 
-class UnquantizedFusedMoEMethod(QuantizeMethodBase,
-                                jax_common.UnquantizedFusedMoEMethod):
+class Fp8MoEMethod(QuantizeMethodBase, jax_common.UnquantizedFusedMoEMethod):
     """Unquantized method for JAX FusedMoELayer.
     """
+
+    def create_weight_jax(self, layer: JaxModule) -> jax.Array:
+        assert isinstance(layer, JaxMoE)
+        # TODO: rngs, shape, sharding, dtype
+        layer.w13_weight_scale_inv = create_param()
+        layer.w2_weight_scale_inv = create_param()
 
     def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
         assert isinstance(layer, JaxEinsum)
@@ -65,13 +70,10 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase,
         return out
 
 
-class UnquantizedConfig(QuantizationConfig):
+class Fp8QuantizationConfig(QuantizationConfig):
 
     def get_quant_method(self, layer: JaxModule,
                          prefix: str) -> Optional[QuantizeMethodBase]:
-        if isinstance(layer, JaxEinsum):
-            linear_config = QuantLinearConfig(layer)
-            return UnquantizedLinearMethod(linear_config)
         if isinstance(layer, JaxMoE):
-            return UnquantizedFusedMoEMethod(layer.moe_config)
+            return Fp8MoEMethod(layer.moe_config)
         return None
