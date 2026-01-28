@@ -36,6 +36,7 @@ class MockVllmConfig:
         self.load_config = MagicMock()
         self.load_config.download_dir = None
         self.cache_config = MagicMock(cache_dtype=kv_cache_dtype)
+        self.quant_config = None
 
 
 @pytest.fixture(scope="module")
@@ -129,17 +130,17 @@ class TestQwen3ForCausalLM:
         assert attn.rope_theta == rope_theta
         assert attn.head_dim_original == original_head_dim
         assert attn.head_dim == head_dim
-        assert attn.q_proj.kernel.shape == (hidden_size, num_heads, head_dim)
-        assert attn.k_proj.kernel.shape == (hidden_size, num_kv_heads,
+        assert attn.q_proj.weight.shape == (hidden_size, num_heads, head_dim)
+        assert attn.k_proj.weight.shape == (hidden_size, num_kv_heads,
                                             head_dim)
-        assert attn.v_proj.kernel.shape == (hidden_size, num_kv_heads,
+        assert attn.v_proj.weight.shape == (hidden_size, num_kv_heads,
                                             head_dim)
-        assert attn.o_proj.kernel.shape == (num_heads, head_dim, hidden_size)
+        assert attn.o_proj.weight.shape == (num_heads, head_dim, hidden_size)
 
         mlp = layers[0].mlp
-        assert mlp.gate_proj.kernel.shape == (hidden_size, intermediate_size)
-        assert mlp.up_proj.kernel.shape == (hidden_size, intermediate_size)
-        assert mlp.down_proj.kernel.shape == (intermediate_size, hidden_size)
+        assert mlp.gate_proj.weight.shape == (hidden_size, intermediate_size)
+        assert mlp.up_proj.weight.shape == (hidden_size, intermediate_size)
+        assert mlp.down_proj.weight.shape == (intermediate_size, hidden_size)
 
         # Test model load
         model.load_weights(rng)
