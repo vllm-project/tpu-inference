@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import unittest
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -22,6 +24,17 @@ from jax.sharding import Mesh
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe, ref_moe
 
 jax.config.parse_flags_with_absl()
+
+
+def is_tpu_v7_or_newer():
+    try:
+        d = jax.devices()[0]
+        # Check for TPU v7 specific strings
+        is_v7 = "v7" in d.device_kind or "Trillium" in d.device_kind
+        # logical OR with the JAX utility if you trust it for some cases
+        return is_v7 or jtu.is_device_tpu_at_least(version=7)
+    except Exception:
+        return False
 
 
 def cdiv(a, b):
@@ -109,6 +122,7 @@ def sub_channel_quantize(x, quant_dtype, wsz=256):
 
 
 @jtu.with_config(jax_numpy_dtype_promotion="standard")
+@unittest.skipUnless(is_tpu_v7_or_newer(), "Test requires TPUv7+")
 class MoEKernelTest(jtu.JaxTestCase):
 
     def setUp(self):
