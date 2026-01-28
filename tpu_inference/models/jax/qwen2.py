@@ -365,6 +365,14 @@ class Qwen2ForCausalLM(nnx.Module):
             "model.layers.*.input_layernorm.scale",
             "model.layers.*.post_attention_layernorm":
             "model.layers.*.post_attention_layernorm.scale",
+            "model.layers.*.self_attn.k_proj":
+            "model.layers.*.self_attn.k_proj.kernel",
+            "model.layers.*.self_attn.o_proj":
+            "model.layers.*.self_attn.o_proj.kernel",
+            "model.layers.*.self_attn.q_proj":
+            "model.layers.*.self_attn.q_proj.kernel",
+            "model.layers.*.self_attn.v_proj":
+            "model.layers.*.self_attn.v_proj.kernel",
             "model.norm": "model.norm.scale",
         }
 
@@ -375,4 +383,6 @@ class Qwen2ForCausalLM(nnx.Module):
             })
 
         loader = self.WeightLoader(self.vllm_config, self.mesh)
-        loader.load_weights(self, mappings)
+        loader.load_weights(self,
+                            mappings,
+                            keep_hf_weight_suffix_when_match=['mlp'])

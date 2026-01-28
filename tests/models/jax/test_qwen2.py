@@ -141,9 +141,9 @@ class TestQwen2ForCausalLM:
         assert attn.o_proj.kernel.shape == (num_heads, head_dim, hidden_size)
 
         mlp = layers[0].mlp
-        assert mlp.gate_proj.kernel.shape == (hidden_size, intermediate_size)
-        assert mlp.up_proj.kernel.shape == (hidden_size, intermediate_size)
-        assert mlp.down_proj.kernel.shape == (intermediate_size, hidden_size)
+        assert mlp.gate_proj.weight.shape == (hidden_size, intermediate_size)
+        assert mlp.up_proj.weight.shape == (hidden_size, intermediate_size)
+        assert mlp.down_proj.weight.shape == (intermediate_size, hidden_size)
 
         # Test model load
         model.load_weights(rng)
