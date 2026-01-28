@@ -26,7 +26,8 @@ set -ex
 
 
 # Usage:
-# bash bm_qwen3_coder.sh --model BCCard/Qwen3-Coder-480B-A35B-Instruct-FP8-Dynamic --tp 8 --req_tput_limit 1.05  --output_token_tput_limit 1926 --total_token_tput_limit 1948 --input_len 1024 --output_len 1024 --use_moe_ep_kernel 1
+# bash tests/e2e/benchmarking/bm_qwen3_coder.sh --model BCCard/Qwen3-Coder-480B-A35B-Instruct-FP8-Dynamic --tp 8 --req_tput_limit 1.05  --output_token_tput_limit 1926 --total_token_tput_limit 1948 --input_len 1024 --output_len 1024 --use_moe_ep_kernel 1
+# bash tests/e2e/benchmarking/bm_qwen3_coder.sh --model Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 --tp 8 --req_tput_limit 1.05  --output_token_tput_limit 1926 --total_token_tput_limit 1948 --input_len 1024 --output_len 1024 --use_moe_ep_kernel 1
 
 
 OPTIONS=""
@@ -111,7 +112,8 @@ start_time=$(date +%s)
 
 export USE_MOE_EP_KERNEL=${use_moe_ep_kernel}
 export MODEL_IMPL_TYPE=vllm
-vllm serve --seed=42 --model="$model" --max-model-len=10240 --max-num-batched-tokens=8192 --max-num-seqs=512 --no-enable-prefix-caching --disable-log-requests --tensor-parallel-size="$tp" --kv-cache-dtype=fp8 --gpu-memory-utilization=0.95 --async-scheduling --enable-expert-parallel  2>&1 | tee vllm_server_out.txt &
+# vllm serve --seed=42 --model="$model" --max-model-len=10240 --max-num-batched-tokens=8192 --max-num-seqs=512 --no-enable-prefix-caching --disable-log-requests --tensor-parallel-size="$tp" --kv-cache-dtype=fp8 --gpu-memory-utilization=0.95 --async-scheduling --enable-expert-parallel   2>&1 | tee vllm_server_out.txt &
+vllm serve --seed=42 --model="$model" --max-model-len=10240 --max-num-batched-tokens=8192 --max-num-seqs=512 --no-enable-prefix-caching --disable-log-requests --tensor-parallel-size="$tp" --kv-cache-dtype=fp8 --gpu-memory-utilization=0.95 --no-async-scheduling --enable-expert-parallel   2>&1 | tee vllm_server_out.txt &
 
 # Need to put the nc command in a condition.
 # If we assign it to a variable, the nc command is supposed to fail at first. But the "set -e" will cause the script to exit immediately.
