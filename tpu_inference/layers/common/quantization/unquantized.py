@@ -45,10 +45,11 @@ class UnquantizedLinearMethod:
         out = jnp.concatenate(outs, axis=-1)
         return out
 
-    def _apply_split(self,
-                     x_jax: jax.Array,
-                     weights: Sequence[jax.Array],
-                     bias_jax: Optional[jax.Array] = None) -> jax.Array:
+    def _apply_split(
+            self,
+            x_jax: jax.Array,
+            weights: Sequence[jax.Array],
+            bias_jax: Optional[Sequence[jax.Array]] = None) -> jax.Array:
         outs = []
         for i, weight_jax in enumerate(weights):
             out = jnp.einsum("mn,pn->mp", x_jax, weight_jax)
