@@ -15,6 +15,7 @@
 import jax
 import pytest
 from flax import nnx
+from jax.sharding import Mesh
 from vllm.config import ModelConfig, VllmConfig
 
 from tpu_inference.layers.jax.norm import JaxRmsNorm
@@ -34,7 +35,7 @@ class TestJaxRmsNorm:
             self, rng_key, num_features, dtype):
         """Run the same input through JaxRmsNorm vs. flax RMSNorm and compare outputs.
         """
-        mesh = jax.make_mesh((4, ), ('model', ))
+        mesh = Mesh(jax.devices('cpu')[:1], ("model", ))
         unquantize_config = get_tpu_quantization_config(
             VllmConfig(model_config=ModelConfig(model="Qwen/Qwen3-0.6B")),
             mesh)
