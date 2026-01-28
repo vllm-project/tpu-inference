@@ -26,7 +26,7 @@ from tpu_inference.layers.common.utils import \
 
 class Fp8LinearMethod:
     """Implements the forward method for fp8 linear layers.
-    
+
     This class will be shared in both vLLM and jax path.
     """
 

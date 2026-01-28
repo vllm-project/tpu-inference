@@ -16,6 +16,7 @@ from typing import Optional, Sequence
 
 import jax
 from jax import numpy as jnp
+from vllm.model_executor.layers.fused_moe import (UnquantizedFusedMoEMethod)
 
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.common.utils import \
@@ -24,7 +25,7 @@ from tpu_inference.layers.common.utils import \
 
 class UnquantizedLinearMethod:
     """Implements the forward method for unquantized linear layers.
-    
+
     This class will be shared in both vLLM and jax path.
     """
 
@@ -59,3 +60,35 @@ class UnquantizedLinearMethod:
             outs.append(out)
         out = jnp.concatenate(outs, axis=-1)
         return out
+
+
+class UnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
+    """Implements the forward method for unquantized MoE layers.
+
+    This class will be shared in both vLLM and jax path.
+    """
+
+    def __init__(
+        self,
+        *args,
+        **kwargs,
+        # moe: FusedMoEConfig,
+        # mesh: Mesh,
+        # ep_axis_name: str = "model",
+    ):
+        pass
+        # super().__init__(moe)
+        # self.mesh = mesh
+        # self.moe_backend = select_moe_backend(self.moe)
+
+        # raise ValueError(moe, self.moe_backend)
+
+        # self.extra_backend_kwargs = {}
+        # if self.moe_backend == FusedMoEBackend.FUSED_MOE:
+        #     # When fused moe kernle is used, we pass extra arguments like
+        #     # tuned block sizes to the kernel.
+        #     self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name, )
+
+    @property
+    def is_monolithic(self) -> bool:
+        return True
