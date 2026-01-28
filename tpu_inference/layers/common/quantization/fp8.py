@@ -15,7 +15,6 @@
 from typing import Optional, Sequence
 
 import jax
-import torch
 from jax import numpy as jnp
 from jax.sharding import Mesh
 
@@ -34,8 +33,8 @@ class Fp8LinearMethod:
     def __init__(self, linear_config: QuantLinearConfig):
         self.linear_config = linear_config
 
-    def _apply_fused(self, layer: torch.nn.Module, x: jax.Array,
-                     weight_jax: jax.Array, weight_scale_jax: jax.Array,
+    def _apply_fused(self, x: jax.Array, weight_jax: jax.Array,
+                     weight_scale_jax: jax.Array,
                      bias: Optional[jax.Array]) -> jax.Array:
         outs = sharded_quantized_matmul(x,
                                         weight_jax,
@@ -43,14 +42,13 @@ class Fp8LinearMethod:
                                         self.linear_config.weight_sharding,
                                         mesh=self.linear_config.mesh)
 
-        if bias is not None and not layer.skip_bias_add:
+        if bias is not None:
             outs += bias
         outs = slice_sharded_tensor_for_concatenation(
             outs, self.linear_config.output_sizes, self.linear_config.n_shards)
         return jnp.concatenate(outs, axis=-1)
 
     def _apply_split(self,
-                     layer: torch.nn.Module,
                      x: jax.Array,
                      weight_and_scale: Sequence[tuple[jax.Array, jax.Array]],
                      bias: Optional[Sequence[jax.Array]] = None,
@@ -65,7 +63,7 @@ class Fp8LinearMethod:
                                            self.linear_config.weight_sharding,
                                            mesh=mesh)
 
-            if bias is not None and not layer.skip_bias_add:
+            if bias is not None:
                 out += bias[i]
             outs.append(out)
         return jnp.concatenate(outs, axis=-1)

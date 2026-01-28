@@ -187,8 +187,10 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
             if bias is not None:
                 layer.bias = to_parameter_list(weights.bias)
 
-    def apply(self, layer: torch.nn.Module, x: torch.Tensor,
-              bias: Optional[torch.Tensor]) -> torch.Tensor:
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         with jax.named_scope(layer._get_name()):
             x_jax = jax_view(x)
             bias_jax = jax_view(
@@ -196,8 +198,8 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
             if self.linear_config.fuse_matmuls:
                 weight_jax = jax_view(layer.weight)
                 weight_scale_jax = jax_view(layer.weight_scale)
-                out = self._apply_fused(layer, x_jax, weight_jax,
-                                        weight_scale_jax, bias_jax)
+                out = self._apply_fused(x_jax, weight_jax, weight_scale_jax,
+                                        bias_jax)
             else:
                 assert isinstance(layer.weight, torch.nn.ParameterList)
                 assert isinstance(layer.weight_scale, torch.nn.ParameterList)
@@ -207,11 +209,10 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
                     (jax_view(w), jax_view(s))
                     for w, s in zip(layer.weight, layer.weight_scale)
                 ]
-                if bias is not None:
+                if bias is not None and not layer.skip_bias_add:
                     assert isinstance(bias, torch.nn.ParameterList)
                     bias_jax = [jax_view(b) for b in bias]
-                out = self._apply_split(layer,
-                                        x_jax,
+                out = self._apply_split(x_jax,
                                         weight_and_scale,
                                         bias_jax,
                                         mesh=self.linear_config.mesh)
