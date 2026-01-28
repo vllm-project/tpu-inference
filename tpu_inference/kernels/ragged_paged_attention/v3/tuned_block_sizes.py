@@ -102,13 +102,11 @@ def get_tuned_block_sizes(
         try:
             entry = data[str(page_size_key)][dtypes][head_dims][extra]
 
-            # Handle new Schema (Rich Object) vs Old (List)
             if isinstance(entry, dict) and "config" in entry:
                 cfg = entry["config"]
                 bkv_p = cfg["num_kv_pages_per_block"]
                 bq = cfg["num_q_per_block"]
             else:
-                # Legacy List/Tuple format
                 bkv_p, bq = entry
 
         except (KeyError, TypeError):

@@ -130,13 +130,11 @@ def get_tuned_block_sizes(
         # JSON validation: value should be list [batch, out, in]
         val = data[json_key]
 
-        # Handle new Schema (Rich Object) vs Old (List)
         if isinstance(val, dict) and "config" in val:
             cfg = val["config"]
             return TunedValue(cfg["batch_block_size"], cfg["out_block_size"],
                               cfg["in_block_size"])
         else:
-            # Legacy List format
             return TunedValue(*val)
 
     tpu_version = get_tpu_version()
