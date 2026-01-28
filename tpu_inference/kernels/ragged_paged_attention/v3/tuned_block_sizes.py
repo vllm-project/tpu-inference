@@ -211,7 +211,7 @@ def get_simplified_raw_key(
         jnp.dtype(kv_dtype).name,
         next_power_of_2(num_q_heads_per_kv_head * actual_num_kv_heads),
         next_power_of_2(num_kv_heads_x2) // 2,
-        align_to(head_dim, 128),
+        head_dim if head_dim == 64 else align_to(head_dim, 128),
         next_power_of_2(max_model_len),
         sliding_window,
     )
