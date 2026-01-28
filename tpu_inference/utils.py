@@ -16,6 +16,7 @@ from jax._src.lib import xla_client as xc
 from jax._src.numpy.scalar_types import _ScalarMeta
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.ops.mappings import j2t_dtype, t2j_dtype
+from tpu_info.device import TpuChip, get_local_chips
 from vllm import envs as vllm_envs
 from vllm import utils
 
@@ -114,44 +115,18 @@ def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
     return usage
 
 
-def get_device_name(num_devices: int | None = None):
-    kind = jax.devices()[0].device_kind
-    if 'TPU' not in kind:
-        raise RuntimeError('Expected TPU devices')
-    suffix = ''
-    if kind.endswith(' lite'):
-        kind = kind[:-len(' lite')]
-        suffix = 'e'
-    elif kind.endswith('e'):
-        kind = kind[:-1]
-        suffix = 'e'
-    elif kind.endswith('p'):
-        kind = kind[:-1]
-        suffix = 'p'
-    elif kind == 'TPU7x':
+def get_device_name():
+    chip_info, _ = get_local_chips()
+    if chip_info.name == TpuChip.V7X:
         kind = 'TPU v7'
-    assert kind[:-1] == 'TPU v', kind
-    kind += suffix
-    if num_devices is not None:
-        kind += f'-{num_devices}'
+    else:
+        kind = f"TPU {chip_info.value.name}"
     return kind
 
 
 def get_device_hbm_limit() -> int:
-
-    device_kind = get_device_name()
-    if device_kind == "TPU v5p" or device_kind == "TPU v5":
-        return 95 * GBYTES
-    elif device_kind == "TPU v5e":
-        return 16 * GBYTES
-    elif device_kind == "TPU v6e" or device_kind == "TPU v4":
-        return 32 * GBYTES
-    elif device_kind == "TPU v7":
-        # 192 * GBYTES / 2 because each JAX device (v7x core) has
-        # 1/2 of the total chip HBM
-        return 96 * GBYTES
-    else:
-        raise ValueError(f"Unknown device kind: {device_kind}")
+    chip_info, _ = get_local_chips()
+    return chip_info.value.hbm_gib * GBYTES
 
 
 def pathways_hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:

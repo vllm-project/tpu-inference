@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import glob
 import os
 
 import requests
+from tpu_info.device import get_local_chips
 
 from tpu_inference import envs
 from tpu_inference.logger import init_logger
@@ -47,10 +47,8 @@ def get_tpu_metadata(key: str = "") -> str:
 
 
 def get_tpu_type() -> str:
-    tpu_type = envs.TPU_ACCELERATOR_TYPE
-    if tpu_type is None:
-        tpu_type = get_tpu_metadata(key="accelerator-type")
-    return tpu_type
+    chip_info, _ = get_local_chips()
+    return chip_info.name
 
 
 def get_node_name() -> str:
@@ -71,22 +69,10 @@ def get_node_worker_id() -> int:
 
 
 def get_num_cores_per_chip() -> int:
-    tpu_type = get_tpu_type()
-    if tpu_type.startswith(("v5litepod", "v6e")):
-        return 1
-    return 2
+    chip_info, _ = get_local_chips()
+    return chip_info.value.devices_per_chip
 
 
 def get_num_chips() -> int:
-    accel_files = glob.glob("/dev/accel*")
-    if accel_files:
-        return len(accel_files)
-    try:
-        vfio_entries = os.listdir("/dev/vfio")
-        numeric_entries = [
-            int(entry) for entry in vfio_entries if entry.isdigit()
-        ]
-        return len(numeric_entries)
-    except FileNotFoundError as e:
-        logger.error("Failed to detect number of TPUs: %s", e)
-        return 0
+    _, num_chips = get_local_chips()
+    return num_chips
