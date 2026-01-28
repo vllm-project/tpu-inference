@@ -1301,13 +1301,6 @@ class TPUOffloadConnectorScheduler():
         STAGING_BUFFER_BLOCKS_FOR_LOAD_FREE.set(
             self.staging_buffer_manager.get_num_total_free_blocks_for_load())
 
-        # TODO add a warning here for the # of save and load
-        logger.warning((
-            f"Number of save blocks allocate {self.staging_buffer_manager.get_num_total_allocate_blocks_for_save()}. "
-            f"Number of save blocks free {self.staging_buffer_manager.get_num_total_free_blocks_for_save()}. "
-            f"Number of load blocks allocate {self.staging_buffer_manager.get_num_total_allocate_blocks_for_load()}. "
-            f"Number of load blocks free {self.staging_buffer_manager.get_num_total_free_blocks_for_load()}."
-        ))
         return metadata
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
@@ -1487,13 +1480,6 @@ class TPUOffloadConnectorScheduler():
                 f"not_free_with_gather:{req_id}, {self._save_reqs_w_pending_gather[req_id]}"
             )
             delay_free = True
-        if req_id in self._reqs_being_saved and len(
-                self._reqs_being_saved[req_id]) > 0:
-            self._finished_reqs_w_pending_ops.add(req_id)
-            logger.info(
-                f"not_free_with_save:{req_id}, {self._reqs_being_saved[req_id]}"
-            )
-            delay_free = True
         if req_id in self._reqs_being_loaded and len(
                 self._reqs_being_loaded[req_id]) > 0:
             self._finished_reqs_w_pending_ops.add(req_id)
@@ -1505,7 +1491,6 @@ class TPUOffloadConnectorScheduler():
         if not delay_free:
             logger.info(f" finished request: {req_id}")
             self._save_reqs_w_pending_gather.pop(req_id, None)
-            self._reqs_being_saved.pop(req_id, None)
             self._reqs_being_loaded.pop(req_id, None)
 
         return delay_free, None
