@@ -152,7 +152,7 @@ def _verify_correctness(baseline_outputs,
     assert max_logprob_diff < 1, f"Max logprob difference {max_logprob_diff} is too large"
 
 
-def test_expert_parallelism_correctness(
+def test_expert_parallelism_correctness_via_gmm_kernel(
     model_name: str,
     test_prompts: list,
     sampling_params: SamplingParams,
@@ -183,7 +183,7 @@ def test_expert_parallelism_correctness(
 
 
 @pytest.mark.xfail(reason="Fused MoE accuracy issues on TPU")
-def test_expert_parallelism_fused_correctness(
+def test_expert_parallelism_correctness_via_fused_moe_kernel(
     model_name: str,
     test_prompts: list,
     sampling_params: SamplingParams,
