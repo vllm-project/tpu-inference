@@ -28,6 +28,7 @@ from vllm.utils.func_utils import supports_kw
 
 from tpu_inference import envs
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     apply_qwix_on_abstract_model, apply_qwix_quantization,
@@ -91,6 +92,8 @@ def _get_nnx_model(
     rng: jax.Array,
     mesh: Mesh,
 ) -> nnx.Module:
+
+    vllm_config.quant_config = get_tpu_quantization_config(vllm_config)
 
     def create_abstract_model() -> nnx.Module:
         """

@@ -26,3 +26,16 @@ class QuantLinearConfig:
         self.output_sharding = None
 
         self.bias_sharding = P(self.weight_sharding[0])
+
+
+class QuantFusedMoEConfig:
+
+    def __init__(self, *, enable_sp: bool, output_sizes: list[int]):
+        self.output_sizes = output_sizes
+        self.weight_sharding = P(None, None)
+        self.fuse_matmuls = True
+        self.enable_sp = enable_sp
+        self.input_sharding = None
+        self.output_sharding = None
+
+        self.bias_sharding = P(self.weight_sharding[0])

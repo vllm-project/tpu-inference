@@ -28,7 +28,7 @@ from tpu_inference.layers.jax.attention.llama4_attention import Llama4Attention
 from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
 from tpu_inference.layers.jax.misc import shard_put
-from tpu_inference.layers.jax.moe.moe import MoE, Router
+from tpu_inference.layers.jax.moe.moe import JaxMoE, Router
 from tpu_inference.layers.jax.transformer_block import \
     SharedExpertsTransformerBlock
 from tpu_inference.logger import init_logger
@@ -468,7 +468,7 @@ class Llama4ForCausalLM(nnx.Module):
                             ed_sharding=(None, None),
                             random_init=force_random_weights)
 
-            moe_ffw = MoE(
+            moe_ffw = JaxMoE(
                 dtype=dtype,
                 mesh=self.mesh,
                 num_local_experts=self.num_local_experts,
