@@ -33,6 +33,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 
+from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.vllm.fused_moe import FusedMoEBackend
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.fp8 import (VllmFp8Config,
@@ -339,7 +340,9 @@ def test_qkv_parallel_linear(model, bias, num_devices, enable_sp, fuse_matmuls,
             return_bias=False,
             quant_config=quant_config,
         )
-        linear_layer.quant_method.fuse_matmuls = fuse_matmuls
+        assert isinstance(linear_layer.quant_method.linear_config,
+                          QuantLinearConfig)
+        linear_layer.quant_method.linear_config.fuse_matmuls = fuse_matmuls
 
     initialize_layer_weights(linear_layer)
     ref_output, layer_output = return_ref_and_layer_output(linear_layer)
@@ -380,7 +383,9 @@ def test_merged_column_parallel_linear(model, bias, num_devices, fuse_matmuls,
             return_bias=False,
             quant_config=quant_config,
         )
-        linear_layer.quant_method.fuse_matmuls = fuse_matmuls
+        assert isinstance(linear_layer.quant_method.linear_config,
+                          QuantLinearConfig)
+        linear_layer.quant_method.linear_config.fuse_matmuls = fuse_matmuls
 
     initialize_layer_weights(linear_layer)
     ref_output, layer_output = return_ref_and_layer_output(linear_layer)

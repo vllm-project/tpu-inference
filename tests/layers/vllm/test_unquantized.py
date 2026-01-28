@@ -37,6 +37,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 
+from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.vllm.fused_moe import FusedMoEBackend
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.unquantized import (
@@ -426,7 +427,9 @@ def test_merged_column_parallel_linear(model, bias, num_devices, fuse_matmuls,
             return_bias=False,
             quant_config=quant_config,
         )
-        jax_merged_column_linear.quant_method.fuse_matmuls = fuse_matmuls
+        assert isinstance(jax_merged_column_linear.quant_method.linear_config,
+                          QuantLinearConfig)
+        jax_merged_column_linear.quant_method.linear_config.fuse_matmuls = fuse_matmuls
 
     jax_merged_column_linear.weight.data = weight_data
     if bias:
