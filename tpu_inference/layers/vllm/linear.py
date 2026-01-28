@@ -17,8 +17,9 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 from tpu_inference import envs
-from tpu_inference.kernels.quantized_matmul.kernel import (
-    quantized_matmul_kernel, xla_quantized_matmul)
+from tpu_inference.kernels.quantized_matmul.kernel import \
+    quantized_matmul_kernel
+from tpu_inference.kernels.quantized_matmul.util import xla_quantized_matmul
 
 
 def sharded_quantized_matmul(x: jax.Array, w_q: jax.Array, w_s: jax.Array,
@@ -39,26 +40,27 @@ def sharded_quantized_matmul(x: jax.Array, w_q: jax.Array, w_s: jax.Array,
 
     # NOTE (jacobplatin/kyuyeunk) there have been numeric issues (concerning) NaNs
     # with the kernel and thus we disable it for now.
-    if envs.ENABLE_QUANTIZED_MATMUL_KERNEL:
-        out_axis, in_axis = weight_sharding
-        x_sharding = P(None, in_axis)
-        scale_sharding = P(out_axis, )
-        out_sharding = P(None, out_axis)
+    out_axis, in_axis = weight_sharding
+    x_sharding = P(None, in_axis)
+    scale_sharding = P(out_axis, )
+    out_sharding = P(None, out_axis)
 
-        x = jax.lax.with_sharding_constraint(x,
-                                             NamedSharding(mesh, x_sharding))
+    x = jax.lax.with_sharding_constraint(x, NamedSharding(mesh, x_sharding))
 
-        def wrapper(x, w_q, w_s):
+    def wrapper(x, w_q, w_s):
+        if envs.ENABLE_QUANTIZED_MATMUL_KERNEL:
             output = quantized_matmul_kernel(x, w_q, w_s, x_q_dtype=w_q.dtype)
-            if in_axis:
-                output = jax.lax.psum(output, axis_name=in_axis)
-            return output
+        else:
+            output = xla_quantized_matmul(x, w_q, w_s)
 
-        return jax.shard_map(wrapper,
-                             mesh=mesh,
-                             in_specs=(x_sharding, weight_sharding,
-                                       scale_sharding),
-                             out_specs=(out_sharding),
-                             check_vma=False)(x, w_q, w_s)
-    else:
-        return xla_quantized_matmul(x, w_q, w_s)
+        if in_axis:
+            output = jax.lax.psum(output, axis_name=in_axis)
+        return output
+
+    return jax.shard_map(
+        wrapper,
+        mesh=mesh,
+        in_specs=(x_sharding, weight_sharding, scale_sharding),
+        out_specs=(out_sharding),
+        check_vma=False,
+    )(x, w_q, w_s)

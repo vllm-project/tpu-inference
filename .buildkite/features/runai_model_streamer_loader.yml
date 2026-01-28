@@ -39,3 +39,22 @@ steps:
     commands:
       - |
         .buildkite/scripts/record_step_result.sh runai_model_streamer_loader_CorrectnessTest
+  - label: "Correctness tests for runai_model_streamer_loader with codegemma"
+    key: "runai_model_streamer_loader_CorrectnessTest_codegemma"
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_codegemma
+  - label: "Record correctness test result for runai_model_streamer_loader with codegemma"
+    key: "record_runai_model_streamer_loader_CorrectnessTest_codegemma"
+    depends_on: "runai_model_streamer_loader_CorrectnessTest_codegemma"
+    env:
+      CI_TARGET: "runai_model_streamer_loader"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh runai_model_streamer_loader_CorrectnessTest_codegemma

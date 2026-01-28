@@ -37,8 +37,8 @@ steps:
       - |
         .buildkite/scripts/record_step_result.sh Qwen_Qwen2_5-VL-7B-Instruct_UnitTest
 
-  - label: "Integration tests for Qwen/Qwen2.5-VL-7B-Instruct"
-    key: "Qwen_Qwen2_5-VL-7B-Instruct_IntegrationTest"
+  - label: "Accuracy for Qwen/Qwen2.5-VL-7B-Instruct"
+    key: "Qwen_Qwen2_5-VL-7B-Instruct_Accuracy"
     depends_on: "record_Qwen_Qwen2_5-VL-7B-Instruct_UnitTest"
     agents:
       queue: tpu_v6e_8_queue
@@ -50,22 +50,22 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
-  - label: "Record integration test result for Qwen/Qwen2.5-VL-7B-Instruct"
-    key: "record_Qwen_Qwen2_5-VL-7B-Instruct_IntegrationTest"
-    depends_on: "Qwen_Qwen2_5-VL-7B-Instruct_IntegrationTest"
+  - label: "Record accuracy result for Qwen/Qwen2.5-VL-7B-Instruct"
+    key: "record_Qwen_Qwen2_5-VL-7B-Instruct_Accuracy"
+    depends_on: "Qwen_Qwen2_5-VL-7B-Instruct_Accuracy"
     env:
       CI_TARGET: Qwen/Qwen2.5-VL-7B-Instruct
-      CI_STAGE: "IntegrationTest"
+      CI_STAGE: "Accuracy/Correctness"
       CI_CATEGORY: "multimodal"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh Qwen_Qwen2_5-VL-7B-Instruct_IntegrationTest
+        .buildkite/scripts/record_step_result.sh Qwen_Qwen2_5-VL-7B-Instruct_Accuracy
 
   - label: "Performance benchmarks for Qwen/Qwen2.5-VL-7B-Instruct"
     key: "Qwen_Qwen2_5-VL-7B-Instruct_Benchmark"
-    depends_on: "record_Qwen_Qwen2_5-VL-7B-Instruct_IntegrationTest"
+    depends_on: "record_Qwen_Qwen2_5-VL-7B-Instruct_Accuracy"
     soft_fail: true
     agents:
       queue: tpu_v6e_queue

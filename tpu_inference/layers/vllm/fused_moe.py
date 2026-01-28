@@ -13,19 +13,22 @@
 # limitations under the License.
 
 from enum import Enum
+from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
-import torch
 from jax.sharding import Mesh
-from torchax.interop import jax_view, torch_view
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 
 from tpu_inference import envs
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
 from tpu_inference.layers.common.fused_moe_gmm import fused_moe_func
 from tpu_inference.logger import init_logger
+
+if TYPE_CHECKING:
+    from tpu_inference.layers.vllm.process_weights.fused_moe_weights import \
+        FusedMoEWeights
 
 logger = init_logger(__name__)
 
@@ -52,57 +55,66 @@ def select_moe_backend(moe: FusedMoEConfig):
 
 
 def fused_moe_apply(
-    layer: torch.nn.Module,
-    x: torch.Tensor,
-    router_logits: torch.Tensor,
+    layer: FusedMoE,
+    x: jax.Array,
+    gating_output: jax.Array,
+    weights: "FusedMoEWeights",
     moe_backend: FusedMoEBackend,
     mesh: Mesh,
     extra_backend_kwargs: dict,
-) -> torch.Tensor:
+) -> jax.Array:
     assert isinstance(layer, FusedMoE)
     if layer.scoring_func != "softmax":
         raise NotImplementedError("Only softmax is supported for scoring_func")
 
-    x = jax_view(x)
-    gating_output = jax_view(router_logits)
-
-    w13_weight = jax_view(layer.w13_weight)
-    w13_weight_scale = jax_view(getattr(layer, "w13_weight_scale", None))
-    w13_bias = jax_view(getattr(layer, "w13_bias", None))
-    w2_weight = jax_view(layer.w2_weight)
-    w2_weight_scale = jax_view(getattr(layer, "w2_weight_scale", None))
-    w2_bias = jax_view(getattr(layer, "w2_bias", None))
-
     with jax.named_scope(layer._get_name()):
         match moe_backend:
             case FusedMoEBackend.FUSED_MOE:
+                subc_quant_w1_sz = None
+                subc_quant_w2_sz = None
+                if weights.w13_weight_scale is not None and weights.w2_weight_scale is not None:
+                    padded_hidden_size = weights.w13_weight.shape[-2]
+                    # NB: w13_weight_scale: (num_experts, 2, hidden_size // subc_quant_w1_sz, 1, intermediate_size)
+                    assert padded_hidden_size % weights.w13_weight_scale.shape[
+                        2] == 0
+                    subc_quant_w1_sz = padded_hidden_size // weights.w13_weight_scale.shape[
+                        2]
+                    intermediate_size = weights.w13_weight.shape[-1]
+                    # NB: w2_weight_scale: (num_experts, intermediate_size // subc_quant_w2_sz, 1, hidden_size)
+                    assert intermediate_size % weights.w2_weight_scale.shape[
+                        1] == 0
+                    subc_quant_w2_sz = intermediate_size // weights.w2_weight_scale.shape[
+                        1]
+
                 actual_hidden_size = x.shape[-1]
-                padding_size = w13_weight.shape[-2] - actual_hidden_size
+                padding_size = weights.w13_weight.shape[-2] - actual_hidden_size
                 x = jnp.pad(x, ((0, 0), (0, padding_size)))
                 output = fused_ep_moe(
                     mesh=mesh,
                     tokens=x,
-                    w1=w13_weight,
-                    w2=w2_weight,
-                    w1_scale=w13_weight_scale,
-                    w2_scale=w2_weight_scale,
-                    b1=w13_bias,
-                    b2=w2_bias,
+                    w1=weights.w13_weight,
+                    w2=weights.w2_weight,
                     gating_output=gating_output,
                     top_k=layer.top_k,
                     renormalize_topk_logits=layer.renormalize,
                     act_fn=layer.activation,
+                    subc_quant_w1_sz=subc_quant_w1_sz,
+                    subc_quant_w2_sz=subc_quant_w2_sz,
+                    w1_scale=weights.w13_weight_scale,
+                    w2_scale=weights.w2_weight_scale,
+                    b1=weights.w13_bias,
+                    b2=weights.w2_bias,
                     **extra_backend_kwargs,
                 )[:, :actual_hidden_size]
             case FusedMoEBackend.GMM_EP | FusedMoEBackend.GMM_TP:
                 output = fused_moe_func(
                     hidden_states=x,
-                    w1=w13_weight,
-                    w2=w2_weight,
-                    w1_scale=w13_weight_scale,
-                    w2_scale=w2_weight_scale,
-                    w1_bias=w13_bias,
-                    w2_bias=w2_bias,
+                    w1=weights.w13_weight,
+                    w2=weights.w2_weight,
+                    w1_scale=weights.w13_weight_scale,
+                    w2_scale=weights.w2_weight_scale,
+                    w1_bias=weights.w13_bias,
+                    w2_bias=weights.w2_bias,
                     gating_output=gating_output,
                     topk=layer.top_k,
                     renormalize=layer.renormalize,
@@ -111,4 +123,4 @@ def fused_moe_apply(
                     activation=layer.activation,
                 )
 
-        return torch_view(output)
+        return output

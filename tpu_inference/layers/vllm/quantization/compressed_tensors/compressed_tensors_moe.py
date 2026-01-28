@@ -17,7 +17,7 @@ import torch
 from compressed_tensors.quantization import QuantizationArgs
 from jax.sharding import Mesh
 from torch.nn.parameter import Parameter
-from torchax.interop import torch_view
+from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
@@ -84,13 +84,12 @@ class VllmCompressedTensorsMoEMethod(CompressedTensorsMoEMethod):
 class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
                                             VllmQuantConfig):
 
-    def __init__(
-        self,
-        weight_quant: QuantizationArgs,
-        input_quant: QuantizationArgs,
-        moe: FusedMoEConfig,
-        mesh: Mesh,
-    ):
+    def __init__(self,
+                 weight_quant: QuantizationArgs,
+                 input_quant: QuantizationArgs,
+                 moe: FusedMoEConfig,
+                 mesh: Mesh,
+                 ep_axis_name: str = "model"):
         super().__init__(weight_quant, input_quant, moe)
 
         self.mesh = mesh
@@ -98,9 +97,11 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
 
         self.extra_backend_kwargs = {}
         if self.moe_backend == FusedMoEBackend.FUSED_MOE:
-            raise NotImplementedError(
-                "Per-channel quantization is not supported in FusedMoE kernel."
-            )
+            self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name, )
+
+    @property
+    def is_monolithic(self) -> bool:
+        return True
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """
@@ -122,6 +123,11 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         """
         assert isinstance(layer, FusedMoE)
 
+        # N.B
+        # layer.w13_weight: [num_experts, 2*moe_intermediate_size, hidden_size]
+        # layer.w13_weight_scale: [num_experts, 2*moe_intermediate_size, 1]
+        # layer.w2_weight: [num_experts, hidden_size, moe_intermediate_size]
+        # layer.w2_weight_scale: [num_experts, hidden_size, 1]
         w13_weight = t2j(layer.w13_weight, use_dlpack=False)
         w13_weight_scale = t2j(layer.w13_weight_scale, use_dlpack=False)
         w2_weight = t2j(layer.w2_weight, use_dlpack=False)
@@ -183,17 +189,29 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
             layer.w13_bias = Parameter(weights.w13_bias, requires_grad=False)
             layer.w2_bias = Parameter(weights.w2_bias, requires_grad=False)
 
-    def apply(
+    def apply_monolithic(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
-        return fused_moe_apply(
-            layer,
-            x,
-            router_logits,
-            self.moe_backend,
-            self.mesh,
-            self.extra_backend_kwargs,
+
+        weights = FusedMoEWeights(
+            w13_weight=jax_view(layer.w13_weight),
+            w13_weight_scale=jax_view(layer.w13_weight_scale),
+            w13_bias=jax_view(layer.w13_bias) if self.moe.has_bias else None,
+            w2_weight=jax_view(layer.w2_weight),
+            w2_weight_scale=jax_view(layer.w2_weight_scale),
+            w2_bias=jax_view(layer.w2_bias) if self.moe.has_bias else None,
         )
+
+        return torch_view(
+            fused_moe_apply(
+                layer,
+                jax_view(x),
+                jax_view(router_logits),
+                weights,
+                self.moe_backend,
+                self.mesh,
+                self.extra_backend_kwargs,
+            ))

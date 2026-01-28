@@ -14,8 +14,7 @@
 
 ARG BASE_IMAGE="python:3.12-slim-bookworm"
 # The latest main will be used if arg unspecified
-# TODO (ranlihao): unpin after the upstream is stable.
-ARG VLLM_COMMIT_HASH="0dd5dee9b9bc88453f5f3eacfde751e6b9ba4871"
+ARG VLLM_COMMIT_HASH=""
 
 FROM $BASE_IMAGE
 
@@ -33,6 +32,7 @@ RUN apt-get update && apt-get install -y \
     procps \
     curl \
     rclone \
+    wget \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -68,7 +68,7 @@ COPY requirements_benchmarking.txt .
 RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements_benchmarking.txt --retries 3
 # Install test requirements
 COPY requirements_test.txt .
-Run  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then \
+RUN  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then \
         pip install -r requirements_test.txt --retries 3; \
     fi
 COPY . .

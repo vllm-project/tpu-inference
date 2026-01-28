@@ -21,7 +21,7 @@ from jax.sharding import PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
@@ -32,13 +32,13 @@ from vllm.model_executor.layers.quantization.base_config import \
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
+from tpu_inference.layers.common.process_weights.linear_weights import (
+    LinearWeights, process_linear_weights, shard_linear_weights,
+    to_parameter_list)
 from tpu_inference.layers.common.quant_methods import AWQ, get_tpu_quant_method
 from tpu_inference.layers.common.quantization import awq_u32_unpack_u4
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
-from tpu_inference.layers.vllm.process_weights.linear_weights import (
-    LinearWeights, process_lienar_weights, shard_linear_weights,
-    to_parameter_list)
 from tpu_inference.layers.vllm.quantization.configs import (
     VllmQuantConfig, VllmQuantLinearConfig)
 from tpu_inference.layers.vllm.quantization.unquantized import \
@@ -117,7 +117,7 @@ class VllmAWQLinearMethod(AWQLinearMethod):
 
             zero_point = awq_u32_unpack_u4(zero_point)
 
-            return process_lienar_weights(
+            return process_linear_weights(
                 LinearWeights(
                     weight=weight,
                     weight_scale=weight_scale,

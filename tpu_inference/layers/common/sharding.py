@@ -24,7 +24,7 @@ from jax.sharding import Mesh
 from tpu_inference import envs, utils
 
 if TYPE_CHECKING:
-    from vllm.v1.configs.vllm_config import VllmConfig
+    from vllm.config import VllmConfig
 
 MESH_AXIS_NAMES = ("data", "attn_dp", "expert", "model")
 MESH_AXIS_NAMES_2D = ('data', 'model')
@@ -40,6 +40,7 @@ class ShardingAxisNameBase:
     MLP_TENSOR = ('attn_dp', 'model', 'expert')
     MOE_TENSOR = ('attn_dp', 'model')
     EXPERT = ('attn_dp', 'expert', 'model')
+    EXPERT_DATA = ('data', 'attn_dp', 'expert', 'model')
     VOCAB = ('expert', 'attn_dp', 'model')
 
 
@@ -57,6 +58,7 @@ class ShardingAxisName2D:
     MLP_TENSOR = 'model'
     MOE_TENSOR = 'model'
     EXPERT = 'model'
+    EXPERT_DATA = ('data', 'model')
     VOCAB = ('data', 'model')
 
 

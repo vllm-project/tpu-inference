@@ -69,13 +69,13 @@ class GptOssRouter(Router):
         return normalized_weights_TX, selected_experts_TX
 
 
-def _swiglu(x: Float, alpha: Float, limit: Float) -> Float:
-    """Implements the specific SwiGLU from the golden implementation."""
-    x_glu, x_linear = x[..., ::2], x[..., 1::2]
+def _swiglu_split(gate: Float, up: Float, alpha: Float, limit: Float) -> Float:
+    """Implements SwiGLU using separate Gate and Up projections."""
+    # Clip both inputs
+    x_glu = jnp.clip(gate, a_max=limit)
+    x_linear = jnp.clip(up, a_min=-limit, a_max=limit)
 
-    x_glu = jnp.clip(x_glu, a_max=limit)
-    x_linear = jnp.clip(x_linear, a_min=-limit, a_max=limit)
-
+    # Compute Activation: (Gate * Sigmoid(Alpha * Gate)) * (Up + 1)
     gated_activation = x_glu * jax.nn.sigmoid(alpha * x_glu)
 
     return gated_activation * (x_linear + 1)
@@ -139,15 +139,25 @@ class GptOssMoE(nnx.Module):
 
         weights_TX, indices_TX = self.router(x_TD)
 
-        # First MLP layer (up-projection)
+        # First MLP layer (Split Gate + Up)
         with jax.named_scope("MLP #1"):
-            up_proj_TEF2 = jnp.einsum('TD,EDF -> TEF', x_TD,
-                                      self.mlp1_weight_EDF2.value)
-            up_proj_TEF2 += self.mlp1_bias_EF2.value
+            # Independent Computation (Lazy Weaving)
 
-            fuse_TEF = _swiglu(up_proj_TEF2,
-                               alpha=self.swiglu_alpha,
-                               limit=self.swiglu_limit)
+            # Compute Gate
+            gate_TEF = jnp.einsum('TD,EDF -> TEF', x_TD,
+                                  self.gate_proj_kernel.value)
+            gate_TEF += self.gate_proj_bias.value
+
+            # Compute Up
+            up_TEF = jnp.einsum('TD,EDF -> TEF', x_TD,
+                                self.up_proj_kernel.value)
+            up_TEF += self.up_proj_bias.value
+
+            # Fuse via SwiGLU (using split helper)
+            fuse_TEF = _swiglu_split(gate_TEF,
+                                     up_TEF,
+                                     alpha=self.swiglu_alpha,
+                                     limit=self.swiglu_limit)
 
         # Second MLP layer (down-projection)
         with jax.named_scope("MLP #2"):
@@ -166,17 +176,36 @@ class GptOssMoE(nnx.Module):
 
         self.combine_experts = CombineExperts(dtype=self.dtype)
 
-        # MLP #1 Weights (Combined Gate and Up-projection) and Bias
-        self.mlp1_weight_EDF2 = create_param(
+        # Split MLP #1 into Gate and Up Projections
+        # This matches MaxText's structure (wi_0 and wi_1) 1-to-1.
+
+        # Gate Projection (wi_0)
+        self.gate_proj_kernel = create_param(
             rngs,
-            shape=(E, D, F * 2),
+            shape=(E, D, F),
             dtype=self.dtype,
             sharding=self.edf_sharding,
             random_init=self.random_init,
         )
-        self.mlp1_bias_EF2 = create_param(
+        self.gate_proj_bias = create_param(
             rngs,
-            shape=(E, F * 2),
+            shape=(E, F),
+            dtype=self.dtype,
+            sharding=self.ed_sharding,
+            random_init=self.random_init,
+        )
+
+        # Up Projection (wi_1)
+        self.up_proj_kernel = create_param(
+            rngs,
+            shape=(E, D, F),
+            dtype=self.dtype,
+            sharding=self.edf_sharding,
+            random_init=self.random_init,
+        )
+        self.up_proj_bias = create_param(
+            rngs,
+            shape=(E, F),
             dtype=self.dtype,
             sharding=self.ed_sharding,
             random_init=self.random_init,
