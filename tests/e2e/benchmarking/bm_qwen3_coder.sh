@@ -113,7 +113,7 @@ start_time=$(date +%s)
 export USE_MOE_EP_KERNEL=${use_moe_ep_kernel}
 export MODEL_IMPL_TYPE=vllm
 # vllm serve --seed=42 --model="$model" --max-model-len=10240 --max-num-batched-tokens=8192 --max-num-seqs=512 --no-enable-prefix-caching --disable-log-requests --tensor-parallel-size="$tp" --kv-cache-dtype=fp8 --gpu-memory-utilization=0.95 --async-scheduling --enable-expert-parallel   2>&1 | tee vllm_server_out.txt &
-vllm serve --seed=42 --model="$model" --max-model-len=10240 --max-num-batched-tokens=8192 --max-num-seqs=512 --no-enable-prefix-caching --disable-log-requests --tensor-parallel-size="$tp" --kv-cache-dtype=fp8 --gpu-memory-utilization=0.95 --no-async-scheduling --enable-expert-parallel   2>&1 | tee vllm_server_out.txt &
+VLLM_XLA_CHECK_RECOMPILATION=1 vllm serve --seed=42 --model="$model" --max-model-len=10240 --max-num-batched-tokens=8192 --max-num-seqs=512 --no-enable-prefix-caching --disable-log-requests --tensor-parallel-size="$tp" --kv-cache-dtype=fp8 --gpu-memory-utilization=0.95 --no-async-scheduling --enable-expert-parallel   2>&1 | tee vllm_server_out.txt &
 
 # Need to put the nc command in a condition.
 # If we assign it to a variable, the nc command is supposed to fail at first. But the "set -e" will cause the script to exit immediately.
@@ -171,7 +171,7 @@ benchmark_output=$(python3 bench_serving/benchmark_serving.py \
   --num-prompts=320 \
   --max-concurrency=64 \
   --request-rate=inf \
-  --ignore-eos)
+  --ignore-eos 2>&1 | tee vllm_benchmark_out.txt)
 echo "benchmark_output: $benchmark_output"
 check_metrics "$benchmark_output" "$req_tput_limit" "$output_token_tput_limit" "$total_token_tput_limit" "1k_1k"
 

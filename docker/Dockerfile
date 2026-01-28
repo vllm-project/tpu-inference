@@ -34,6 +34,7 @@ RUN apt-get update && apt-get install -y \
     netcat-openbsd \
     rclone \
     wget \
+    bc \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
