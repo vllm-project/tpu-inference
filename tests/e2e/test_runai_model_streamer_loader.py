@@ -45,6 +45,9 @@ def sampling_config():
     return SamplingParams(temperature=0, max_tokens=10, ignore_eos=True)
 
 
+# TODO(amacaskill): Once we have GKE owned GCS buckets, add a test for VLLM_XLA_CACHE_PATH set to GCS URI.
+
+
 def test_correctness_jax_uni_proc_executor(
     sampling_config: SamplingParams,
     monkeypatch: pytest.MonkeyPatch,
