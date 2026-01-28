@@ -24,6 +24,7 @@ from torchax.ops.mappings import t2j_dtype
 import tpu_inference.kernels.mla.v1.kernel as mla
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
+from tpu_inference import utils
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 
@@ -42,11 +43,7 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
     """Gets the KV cache shape based on the mesh configuration."""
 
     axis_name = ShardingAxisName.ATTN_HEAD
-
-    if isinstance(axis_name, (tuple, list)):
-        model_cnt = np.prod([mesh.shape[name] for name in axis_name])
-    else:
-        model_cnt = mesh.shape[axis_name]
+    model_cnt = utils.get_mesh_shape_product(mesh, axis_name)
 
     assert actual_num_kv_heads % model_cnt == 0
     # NOTE(chengjiyao): Currently, the attention kernel is tailored to the

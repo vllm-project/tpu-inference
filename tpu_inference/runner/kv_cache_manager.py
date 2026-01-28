@@ -98,11 +98,8 @@ class KVCacheManager:
         kv_cache_spec: dict[str, KVCacheSpec] = {}
 
         tp_axis_name = ShardingAxisName.ATTN_HEAD
-        if isinstance(tp_axis_name, (tuple, list)):
-            model_cnt = np.prod(
-                [self.runner.mesh.shape[name] for name in tp_axis_name])
-        else:
-            model_cnt = self.runner.mesh.shape[tp_axis_name]
+        model_cnt = common_utils.get_mesh_shape_product(
+            self.runner.mesh, tp_axis_name)
         # If use pure jax (MODEL_IMPL_TYPE=flax_nnx), we don't register
         # attention into compilation config.
         # Use FullAttentionSpec for each layer
