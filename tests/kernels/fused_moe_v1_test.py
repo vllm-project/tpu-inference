@@ -127,8 +127,6 @@ class MoEKernelTest(jtu.JaxTestCase):
 
     def setUp(self):
         super().setUp()
-        if not jtu.is_device_tpu_at_least(version=7):
-            self.skipTest("Expect TPUv7+")
         self.mesh_devices = sorted(
             jax.devices(),
             key=lambda x: (
