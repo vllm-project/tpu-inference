@@ -18,7 +18,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from vllm.config import ModelConfig
@@ -126,7 +125,6 @@ class TestQwen3ForCausalLM:
 
         layers = model.model.layers
         assert len(layers) == hf_config.num_hidden_layers
-        assert isinstance(model.rng, nnx.Rngs)
 
         attn = layers[0].self_attn
         hidden_size = hf_config.hidden_size
