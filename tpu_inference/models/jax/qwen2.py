@@ -25,7 +25,10 @@ from tpu_inference import utils
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
+from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.jax.linear import JaxLinear
 from tpu_inference.layers.jax.rope_interface import apply_rope
+from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import StandardWeightLoader
 
@@ -34,36 +37,40 @@ logger = init_logger(__name__)
 init_fn = nnx.initializers.uniform()
 
 
-class Qwen2MLP(nnx.Module):
+class Qwen2MLP(JaxModule):
 
-    def __init__(self, config: Qwen2Config, dtype: jnp.dtype, rng: nnx.Rngs):
+    def __init__(self, config: Qwen2Config, dtype: jnp.dtype, rng: nnx.Rngs,
+                 quant_config: VllmQuantConfig):
         hidden_size = config.hidden_size
         intermediate_size = config.intermediate_size
         act = config.hidden_act
 
-        self.gate_proj = nnx.Linear(
+        self.gate_proj = JaxLinear(
             hidden_size,
             intermediate_size,
             use_bias=False,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
+            quant_config=quant_config,
         )
-        self.up_proj = nnx.Linear(
+        self.up_proj = JaxLinear(
             hidden_size,
             intermediate_size,
             use_bias=False,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
+            quant_config=quant_config,
         )
-        self.down_proj = nnx.Linear(
+        self.down_proj = JaxLinear(
             intermediate_size,
             hidden_size,
             use_bias=False,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
+            quant_config=quant_config,
         )
         self.act_fn = modeling_flax_utils.ACT2FN[act]
 
@@ -185,10 +192,11 @@ class Qwen2Attention(nnx.Module):
         return new_kv_cache, o
 
 
-class Qwen2DecoderLayer(nnx.Module):
+class Qwen2DecoderLayer(JaxModule):
 
     def __init__(self, config: Qwen2Config, dtype: jnp.dtype, rng: nnx.Rngs,
-                 mesh: Mesh, kv_cache_dtype: str):
+                 mesh: Mesh, kv_cache_dtype: str,
+                 quant_config: VllmQuantConfig):
         rms_norm_eps = config.rms_norm_eps
         hidden_size = config.hidden_size
 
@@ -215,6 +223,7 @@ class Qwen2DecoderLayer(nnx.Module):
             config=config,
             dtype=dtype,
             rng=rng,
+            quant_config=quant_config,
         )
 
     def __call__(
@@ -238,7 +247,7 @@ class Qwen2DecoderLayer(nnx.Module):
         return kv_cache, outputs
 
 
-class Qwen2Model(nnx.Module):
+class Qwen2Model(JaxModule):
 
     def __init__(self, vllm_config: VllmConfig, rng: nnx.Rngs,
                  mesh: Mesh) -> None:
@@ -263,7 +272,8 @@ class Qwen2Model(nnx.Module):
                 rng=rng,
                 mesh=mesh,
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
-                kv_cache_dtype=vllm_config.cache_config.cache_dtype)
+                kv_cache_dtype=vllm_config.cache_config.cache_dtype,
+                quant_config=vllm_config.quant_config)
             for _ in range(hf_config.num_hidden_layers)
         ]
         self.norm = nnx.RMSNorm(
@@ -353,11 +363,6 @@ class Qwen2ForCausalLM(nnx.Module):
             "model.embed_tokens": "model.embed.embedding",
             "model.layers.*.input_layernorm":
             "model.layers.*.input_layernorm.scale",
-            "model.layers.*.mlp.down_proj":
-            "model.layers.*.mlp.down_proj.kernel",
-            "model.layers.*.mlp.gate_proj":
-            "model.layers.*.mlp.gate_proj.kernel",
-            "model.layers.*.mlp.up_proj": "model.layers.*.mlp.up_proj.kernel",
             "model.layers.*.post_attention_layernorm":
             "model.layers.*.post_attention_layernorm.scale",
             "model.layers.*.self_attn.k_proj":
@@ -368,12 +373,6 @@ class Qwen2ForCausalLM(nnx.Module):
             "model.layers.*.self_attn.q_proj.kernel",
             "model.layers.*.self_attn.v_proj":
             "model.layers.*.self_attn.v_proj.kernel",
-            "model.layers.*.self_attn.q_proj.bias":
-            "model.layers.*.self_attn.q_proj.bias",
-            "model.layers.*.self_attn.k_proj.bias":
-            "model.layers.*.self_attn.k_proj.bias",
-            "model.layers.*.self_attn.v_proj.bias":
-            "model.layers.*.self_attn.v_proj.bias",
             "model.norm": "model.norm.scale",
         }
 
@@ -384,4 +383,6 @@ class Qwen2ForCausalLM(nnx.Module):
             })
 
         loader = self.WeightLoader(self.vllm_config, self.mesh)
-        loader.load_weights(self, mappings)
+        loader.load_weights(self,
+                            mappings,
+                            keep_hf_weight_suffix_when_match=['mlp'])

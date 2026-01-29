@@ -113,6 +113,8 @@ class MoEKernelTest(jtu.JaxTestCase):
 
     def setUp(self):
         super().setUp()
+        if not jtu.is_device_tpu_at_least(version=7):
+            self.skipTest("Expect TPUv7+")
         self.mesh_devices = sorted(
             jax.devices(),
             key=lambda x: (
@@ -242,8 +244,6 @@ class MoEKernelTest(jtu.JaxTestCase):
 
     @parameterized.product(act_fn=["silu", "gelu", "swigluoai"], )
     def test_activation(self, act_fn):
-        if not jtu.is_device_tpu_at_least(version=7):
-            self.skipTest("Expect TPUv7+")
         dtype = jnp.bfloat16
         top_k = 8
         num_experts = 128
