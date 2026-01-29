@@ -430,22 +430,23 @@ class CompilationManager:
         else:
             index_paddings = self.runner.num_reqs_paddings
         dp_size = self.runner.vllm_config.sharding_config.total_dp_size
-        hs_partition_spec = PartitionSpec(
-            ShardingAxisName.ATTN_DATA) if dp_size > 1 else PartitionSpec(
-                ShardingAxisName.MLP_TENSOR)
-        hidden_states_sharding = NamedSharding(self.runner.mesh,
-                                               hs_partition_spec)
-        indices_partition_spec = PartitionSpec(
-            ShardingAxisName.ATTN_DATA) if dp_size > 1 else PartitionSpec()
-        indices_partition_sharding = NamedSharding(self.runner.mesh,
-                                                   indices_partition_spec)
+        if dp_size > 1:
+            hidden_states_sharding = NamedSharding(
+                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
+            indices_sharding = NamedSharding(
+                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
+        else:
+            # For dp_size=1, use None to match runtime behavior where
+            # device_array() uses PartitionSpec(None) by default
+            hidden_states_sharding = None
+            indices_sharding = None
         self._precompile_select_from_array_helper(
             name=f"worker{self.runner.rank} select all logits",
             source_paddings=self.runner.num_tokens_paddings,
             indices_paddings=index_paddings,
             hidden_dim=hsize,
             input_sharding=hidden_states_sharding,
-            indices_sharding=indices_partition_sharding,
+            indices_sharding=indices_sharding,
         )
 
         if self.runner.speculative_config:
