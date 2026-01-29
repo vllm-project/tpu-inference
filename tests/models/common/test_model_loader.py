@@ -30,6 +30,8 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.models.registry import ModelRegistry
 
+from tpu_inference.distributed.jax_parallel_state import \
+    init_pp_distributed_environment
 from tpu_inference.models.common import model_loader
 from tpu_inference.models.jax.qwen3 import Qwen3ForCausalLM
 
@@ -246,6 +248,11 @@ def test_get_flax_model(vllm_config, mesh):
     rng = jax.random.PRNGKey(42)
 
     # 1. Get the compiled model and logit computation functions
+    init_pp_distributed_environment(ip="",
+                                    rank=0,
+                                    world_size=1,
+                                    device=jax.devices()[0],
+                                    need_pp=False)
     model_fn, compute_logits_fn, *_ = model_loader.get_flax_model(
         vllm_config, rng, mesh)
 
