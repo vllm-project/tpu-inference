@@ -51,17 +51,16 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     else
       echo "Code files changed. Proceeding with pipeline upload."
     fi
+
+    # Validate modified YAML pipelines using bk pipeline validate
+    if .buildkite/scripts/validate_all_pipelines.sh "$NON_SKIPPABLE_FILES"; then
+      echo "All pipelines syntax are valid. Proceeding with pipeline upload."
+    else
+      echo "Some pipelines syntax are invalid. Failing build."
+      exit 1
+    fi
 else
     echo "Non-PR build. Bypassing file change check."
-fi
-
-
-# Validate modified YAML pipelines using bk pipeline validate
-if .buildkite/scripts/validate_all_pipelines.sh "$NON_SKIPPABLE_FILES"; then
-    echo "All pipelines syntax are valid. Proceeding with pipeline upload."
-else
-    echo "Some pipelines syntax are invalid. Failing build."
-    exit 1
 fi
 
 upload_pipeline() {
