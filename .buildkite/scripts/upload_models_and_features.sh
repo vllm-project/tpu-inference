@@ -13,7 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
+# Exit on error, exit on unset variable, fail on pipe errors.
+set -euo pipefail
 
 BUILDKITE_DIR=".buildkite"
 MODEL_LIST_KEY="model-list"
