@@ -74,6 +74,7 @@ def vllm_config() -> MagicMock:
     mock_config.additional_config = {}
     mock_config.cache_config = MagicMock(cache_dtype="auto")
     mock_config.parallel_config = ParallelConfig(pipeline_parallel_size=1)
+    mock_config.quant_config = None
     return mock_config
 
 

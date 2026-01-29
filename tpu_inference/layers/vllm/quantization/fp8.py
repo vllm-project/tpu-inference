@@ -21,16 +21,14 @@ from jax.sharding import Mesh, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
-from vllm.attention.layer import Attention
+from vllm.model_executor.layers import linear as vllm_linear
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.quantization import fp8 as vllm_fp8
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizeMethodBase
-from vllm.model_executor.layers.quantization.fp8 import (Fp8Config,
-                                                         Fp8LinearMethod,
-                                                         Fp8MoEMethod)
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
@@ -38,15 +36,13 @@ from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, process_linear_weights, shard_linear_weights,
     to_parameter_list)
 from tpu_inference.layers.common.quant_methods import FP8, get_tpu_quant_method
-from tpu_inference.layers.common.quantization import (dequantize_tensor,
-                                                      quantize_tensor)
+from tpu_inference.layers.common.quantization import dequantize_tensor
+from tpu_inference.layers.common.quantization import fp8 as common_fp8
+from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.common.utils import \
-    slice_sharded_tensor_for_concatenation
 from tpu_inference.layers.vllm.fused_moe import (FusedMoEBackend,
                                                  fused_moe_apply,
                                                  select_moe_backend)
-from tpu_inference.layers.vllm.linear import sharded_quantized_matmul
 from tpu_inference.layers.vllm.process_weights.fused_moe_weights import (
     FusedMoEWeights, process_moe_weights, quantize_moe_weights,
     shard_moe_weights)
@@ -63,7 +59,7 @@ logger = init_logger(__name__)
 
 
 @register_quantization_config(get_tpu_quant_method(FP8))
-class VllmFp8Config(Fp8Config, VllmQuantConfig):
+class VllmFp8Config(vllm_fp8.Fp8Config, VllmQuantConfig):
 
     @classmethod
     def get_name(cls):
@@ -71,8 +67,8 @@ class VllmFp8Config(Fp8Config, VllmQuantConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional[Union["LinearMethodBase", "QuantizeMethodBase"]]:
-        if isinstance(layer, LinearBase):
+    ) -> Optional[Union[vllm_linear.LinearMethodBase, QuantizeMethodBase]]:
+        if isinstance(layer, vllm_linear.LinearBase):
             linear_config = self.get_linear_config(layer)
             if is_layer_skipped(
                     prefix=prefix,
@@ -100,7 +96,8 @@ class VllmFp8Config(Fp8Config, VllmQuantConfig):
         return None
 
 
-class VllmFp8LinearMethod(Fp8LinearMethod):
+class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
+                          common_fp8.Fp8LinearMethod):
 
     def __init__(self, quant_config: VllmFp8Config,
                  linear_config: VllmQuantLinearConfig):
@@ -108,7 +105,7 @@ class VllmFp8LinearMethod(Fp8LinearMethod):
         self.linear_config = linear_config
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        assert isinstance(layer, LinearBase)
+        assert isinstance(layer, vllm_linear.LinearBase)
 
         assert self.block_quant
         weight = t2j(layer.weight, use_dlpack=False)
@@ -190,55 +187,42 @@ class VllmFp8LinearMethod(Fp8LinearMethod):
             if bias is not None:
                 layer.bias = to_parameter_list(weights.bias)
 
-    def apply(self, layer: torch.nn.Module, x: torch.Tensor,
-              bias: Optional[torch.Tensor]) -> torch.Tensor:
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         with jax.named_scope(layer._get_name()):
+            x_jax = jax_view(x)
+            bias_jax = jax_view(
+                bias) if bias is not None and not layer.skip_bias_add else None
             if self.linear_config.fuse_matmuls:
-                return self._apply_fused(layer, x, bias)
+                weight_jax = jax_view(layer.weight)
+                weight_scale_jax = jax_view(layer.weight_scale)
+                out = self._apply_fused(x_jax, weight_jax, weight_scale_jax,
+                                        bias_jax)
             else:
-                return self._apply_split(layer, x, bias)
-
-    def _apply_fused(self, layer: torch.nn.Module, x: torch.Tensor,
-                     bias: Optional[torch.Tensor]) -> torch.Tensor:
-        x_jax = jax_view(x)
-        weight_jax = jax_view(layer.weight)
-        weight_scale_jax = jax_view(layer.weight_scale)
-
-        outs = sharded_quantized_matmul(x_jax, weight_jax, weight_scale_jax,
-                                        self.linear_config.mesh,
-                                        self.linear_config.weight_sharding)
-
-        if bias is not None and not layer.skip_bias_add:
-            outs += jax_view(bias)
-        outs = slice_sharded_tensor_for_concatenation(
-            outs, self.linear_config.output_sizes, self.linear_config.n_shards)
-        return torch_view(jnp.concatenate(outs, axis=-1))
-
-    def _apply_split(self, layer: torch.nn.Module, x: torch.Tensor,
-                     bias: Optional[torch.Tensor]) -> torch.Tensor:
-        assert isinstance(layer.weight, torch.nn.ParameterList)
-
-        x_jax = jax_view(x)
-        outs = []
-        for i, (weight, weight_scale) in enumerate(
-                zip(layer.weight, layer.weight_scale)):
-            weight_jax = jax_view(weight)
-            weight_scale_jax = jax_view(weight_scale)
-
-            out = sharded_quantized_matmul(x_jax, weight_jax, weight_scale_jax,
-                                           self.linear_config.mesh,
-                                           self.linear_config.weight_sharding)
-
-            if bias is not None and not layer.skip_bias_add:
-                out += jax_view(bias[i])
-            outs.append(out)
-        return torch_view(jnp.concatenate(outs, axis=-1))
+                assert isinstance(layer.weight, torch.nn.ParameterList)
+                assert isinstance(layer.weight_scale, torch.nn.ParameterList)
+                # jax_view cannot handle ParameterList directly, so we explicitly
+                # convert them to list of jax.Array.
+                weight_and_scale = [
+                    (jax_view(w), jax_view(s))
+                    for w, s in zip(layer.weight, layer.weight_scale)
+                ]
+                if bias is not None and not layer.skip_bias_add:
+                    assert isinstance(bias, torch.nn.ParameterList)
+                    bias_jax = [jax_view(b) for b in bias]
+                out = self._apply_split(x_jax,
+                                        weight_and_scale,
+                                        bias_jax,
+                                        mesh=self.linear_config.mesh)
+            return torch_view(out)
 
 
-class VllmFp8MoEMethod(Fp8MoEMethod):
+class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
 
     def __init__(self,
-                 quant_config: Fp8Config,
+                 quant_config: vllm_fp8.Fp8Config,
                  layer: torch.nn.Module,
                  mesh: Mesh,
                  ep_axis_name: str = "model"):

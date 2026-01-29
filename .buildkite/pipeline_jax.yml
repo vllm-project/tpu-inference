@@ -127,9 +127,7 @@ steps:
              --ignore=/workspace/tpu_inference/tests/kernels/ragged_kv_cache_update_v2_test.py \
              --ignore=/workspace/tpu_inference/tests/kernels/collectives
          else
-           buildkite-agent step update "label" "🚫 (Skipped) JAX unit tests - kernels"
-           buildkite-agent annotate "Step skipped because no changes were detected in kernel files." --style "info" --context "skip-kernels"
-           echo "Skipping: no changes detected in kernels, tests/kernels, or requirements.txt"
+           echo "Skipping: Step requires either a NIGHTLY build or changes in kernels, kernel tests, or requirements.txt."
            exit 0
          fi
 
@@ -146,9 +144,7 @@ steps:
            .buildkite/scripts/run_in_docker.sh \
              python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels/collectives
          else
-           buildkite-agent step update "label" "🚫 (Skipped) JAX unit tests - kernels"
-           buildkite-agent annotate "Step skipped because no changes were detected in kernel files." --style "info" --context "skip-kernels"
-           echo "Skipping: no changes detected in kernels/collectives, tests/kernels/collectives, or requirements.txt"
+           echo "Skipping: Step requires either a NIGHTLY build or changes in kernels/collectives, tests, or requirements.txt."
            exit 0
          fi
 
@@ -238,12 +234,10 @@ steps:
        queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
      commands:
        - |
-         if [[ "$$IS_FOR_V7X" == "true" ]] && { [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels|tests/kernels|requirements.txt)'; }; then
+         if [[ "$$IS_FOR_V7X" == "true" ]] && { [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels|tests/kernels|requirements(_.*)?\.txt)'; }; then
            .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh  --model_name "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8" --use_moe_ep_kernel 1 --tensor_parallel_size 8 --max_model_len 2048 --max_num_batched_tokens 2048 --max_gen_toks 256 --enable_expert_parallel 1 --flex_threshold 0.85 --strict_threshold 0.70
          else
-           buildkite-agent step update "label" "🚫 (Skipped) JAX unit tests - kernels"
-           buildkite-agent annotate "Step skipped because no changes were detected in kernel files." --style "info" --context "skip-kernels"
-           echo "Skipping: test only runs on v7x."
+           echo "Skipping: Step requires TPU v7x and either a NIGHTLY build or kernel/requirements changes."
            exit 0
          fi
 
@@ -256,12 +250,10 @@ steps:
        queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
      commands:
        - |
-         if [[ "$$IS_FOR_V7X" == "true" ]] && { [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels|tests/kernels|requirements.txt)'; }; then
+         if [[ "$$IS_FOR_V7X" == "true" ]] && { [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels|tests/kernels|requirements(_.*)?\.txt)'; }; then
            .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh  --model_name "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8" --use_moe_ep_kernel 0 --tensor_parallel_size 8 --max_model_len 2048 --max_num_batched_tokens 2048 --max_gen_toks 256 --enable_expert_parallel 1 --flex_threshold 0.85 --strict_threshold 0.70
          else
-           buildkite-agent step update "label" "🚫 (Skipped) JAX unit tests - kernels"
-           buildkite-agent annotate "Step skipped because no changes were detected in kernel files." --style "info" --context "skip-kernels"
-           echo "Skipping: test only runs on v7x."
+           echo "Skipping: Step requires TPU v7x and either a NIGHTLY build or kernel/requirements changes."
            exit 0
          fi
 
@@ -274,12 +266,10 @@ steps:
        queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
      commands:
        - |
-         if [[ "$$IS_FOR_V7X" == "true" ]] && { [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels|tests/kernels|requirements.txt)'; }; then
+         if [[ "$$IS_FOR_V7X" == "true" ]] && { [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels|tests/kernels|requirements(_.*)?\.txt)'; }; then
            .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh  --model_name "openai/gpt-oss-120b" --use_moe_ep_kernel 1 --tensor_parallel_size 8 --max_model_len 2048 --max_num_batched_tokens 2048 --max_gen_toks 256 --enable_expert_parallel 1 --flex_threshold 0.50 --strict_threshold 0.25
          else
-           buildkite-agent step update "label" "🚫 (Skipped) JAX unit tests - kernels"
-           buildkite-agent annotate "Step skipped because no changes were detected in kernel files." --style "info" --context "skip-kernels"
-           echo "Skipping: test only runs on v7x."
+           echo "Skipping: Step requires TPU v7x and either a NIGHTLY build or kernel/requirements changes."
            exit 0
          fi
 
