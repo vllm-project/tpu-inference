@@ -626,6 +626,7 @@ class TestManualQwixQuantization(unittest.TestCase):
         self.weight = jnp.ones((4, 4))
         self.inputs = jnp.ones((8, 4))
         self.qtype = jnp.int8
+        self.name = "test_name"
         self.channelwise_axes = [0]
         self.tiled_axes = {}
         self.calibration_method = 'max'
@@ -636,6 +637,7 @@ class TestManualQwixQuantization(unittest.TestCase):
     def test_manually_quantize_qwix_weight(self, mock_create_param):
         """Test that manually_quantize_qwix_weight calls ptq.create_quantized_param correctly."""
         quantize_qwix.manually_quantize_qwix_weight(
+            name=self.name,
             weight=self.weight,
             qtype=self.qtype,
             channelwise_axes=self.channelwise_axes,
@@ -644,9 +646,10 @@ class TestManualQwixQuantization(unittest.TestCase):
 
         mock_create_param.assert_called_once()
         args, _ = mock_create_param.call_args
-        passed_weight, passed_how_to_quantize = args
+        passed_name, passed_weight, passed_how_to_quantize = args
 
         self.assertTrue(jnp.array_equal(passed_weight, self.weight))
+        self.assertEqual(passed_name, self.name)
         self.assertIsInstance(passed_how_to_quantize, ptq.qarray.HowToQuantize)
         self.assertEqual(passed_how_to_quantize.qtype, self.qtype)
         self.assertEqual(passed_how_to_quantize.channelwise_axes,

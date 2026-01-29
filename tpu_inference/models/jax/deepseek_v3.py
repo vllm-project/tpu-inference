@@ -864,7 +864,11 @@ class DeepSeekV3(nnx.Module):
                     fd_sharding=(ShardingAxisName.MLP_TENSOR, None)))
 
             self.layers.append(block)
-
+        # TODO (jacobplatin): this is very hacky for now, and we need to clean-up when
+        # the refactor occurs.  Basically, we assume that the MLP/MoE layers are in FP4
+        # unless specified otherwise, but we shouldn't be doing this.
+        moe_dtype = jnp.float8_e4m3fn if self.weight_loader.is_native_fp8_model else vllm_config.model_config.hf_config.quantization_config.get(
+            "tpu_settings", {}).get("mlp_dtype", jnp.float4_e2m1fn)
         for i in range(first_k_dense_replace, num_layers):
             is_moe_layer = ((i + 1) % interleave_moe_layer_step == 0)
             router = DeepSeekV3Router(
@@ -896,7 +900,7 @@ class DeepSeekV3(nnx.Module):
                 edf_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
                 efd_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
                 moe_backend=self.moe_backend,
-                quantized_dtype=self.weight_loader.quant_dtype
+                qwix_quantized_weight_dtype=moe_dtype
                 if self.weight_loader.is_model_quantized else None,
                 router=router) if is_moe_layer else DenseFFW(
                     dtype=dtype,

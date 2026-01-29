@@ -338,7 +338,7 @@ def gmm(
 
   Args:
     lhs: A 2d, jnp.ndarray with shape [m, k].
-    rhs: A 3d, jnp.ndarray with shape [num_groups, n, k].
+    rhs: A 3d, jnp.ndarray with shape [num_groups, k, n].
     group_sizes: A 1d, jnp.ndarray with shape [num_groups] and jnp.int32 dtype.
     preferred_element_type: jnp.dtype, the element type for the output matrix.
     rhs_scale: A 4d, jnp.ndarray with shape [num_groups, num_blocks, 1, n].
