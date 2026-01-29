@@ -35,13 +35,15 @@ class ShardingAxisNameBase:
     SEQUENCE = ('data', 'attn_dp')
     ATTN_DATA = ('data', 'attn_dp')
     MLP_DATA = 'data'
-    ATTN_HEAD = 'model'
+    TENSOR = ('model', 'expert')
+    ATTN_HEAD = ('model', 'expert')
     ATTN_TENSOR = None
     MLP_TENSOR = ('attn_dp', 'model', 'expert')
     MOE_TENSOR = ('attn_dp', 'model')
     EXPERT = ('attn_dp', 'expert', 'model')
-    EXPERT_DATA = ('data', 'attn_dp', 'expert', 'model')
-    VOCAB = ('expert', 'attn_dp', 'model')
+    VOCAB = ('model', 'attn_dp', 'expert')
+    MODEL_1 = 'model'
+    MODEL_2 = 'expert'
 
 
 class ShardingAxisName2D:
@@ -63,8 +65,9 @@ class ShardingAxisName2D:
 
 
 try:
+    _use_2d_tp_sharding = envs.USE_2D_TP
     _use_base_sharding = envs.NEW_MODEL_DESIGN
-    if _use_base_sharding:
+    if _use_2d_tp_sharding or _use_base_sharding:
         ShardingAxisName = ShardingAxisNameBase
     else:
         ShardingAxisName = ShardingAxisName2D
