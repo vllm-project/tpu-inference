@@ -30,6 +30,10 @@ P = jax.sharding.PartitionSpec
 
 SpongeDir: str | None = os.environ.get('TEST_UNDECLARED_OUTPUTS_DIR', None)
 
+# NB(xw32): To run the test:
+# pytest -s -v tests/kernels/collectives/reduce_scatter_matmul_kernel_test.py -k test_basic_ref_impl_reduce_scatter_matmul_on_bs
+# pytest -s -v tests/kernels/collectives/reduce_scatter_matmul_kernel_test.py -k test_basic_reduce_scatter_matmul_kernel_on_bs
+
 
 @jtu.with_config(jax_numpy_dtype_promotion='standard')
 class ReduceScatterMatmulTest(jtu.JaxTestCase):
