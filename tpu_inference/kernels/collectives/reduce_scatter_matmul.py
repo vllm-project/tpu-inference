@@ -304,7 +304,7 @@ def reduce_scatter_matmul_kernel(
         ],
         out_specs=pl.BlockSpec((bm, bn), lambda i, j: (i, j)),
         should_accumulate_out=False,
-        grid=(m // bm, n // bn),
+        grid=(m_shard_sz // bm, n_shard_sz // bn),
         dimension_semantics=(pltpu.PARALLEL, pltpu.PARALLEL),
     )
 
