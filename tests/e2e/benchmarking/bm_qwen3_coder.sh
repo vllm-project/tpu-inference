@@ -113,6 +113,9 @@ start_time=$(date +%s)
 # If needed, replace "--async-scheduling" with "--no-async-scheduling"
 export USE_MOE_EP_KERNEL=${use_moe_ep_kernel}
 export MODEL_IMPL_TYPE=vllm
+
+echo "bench_serving commit: $(git -C bench_serving rev-parse HEAD)"
+
 VLLM_XLA_CHECK_RECOMPILATION=1 vllm serve --seed=42 --model="$model" --max-model-len=10240 --max-num-batched-tokens=8192 --max-num-seqs=512 --no-enable-prefix-caching --disable-log-requests --tensor-parallel-size="$tp" --kv-cache-dtype=fp8 --gpu-memory-utilization=0.95 --async-scheduling --enable-expert-parallel   2>&1 | tee vllm_server_out.txt &
 
 # Need to put the nc command in a condition.
