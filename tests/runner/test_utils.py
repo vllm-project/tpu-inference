@@ -298,12 +298,12 @@ def test_determine_phase_from_batch_composition_stats(prefill_tokens,
 def profiler_fixture(tmp_path):
     """Fixture to set up a PhasedBasedProfiler with mocked dependencies."""
     target_module = "tpu_inference.runner.utils"
-    with patch(f"{target_module}.jax.profiler.start_trace") as mock_start, \
-         patch(f"{target_module}.jax.profiler.stop_trace") as mock_stop, \
-         patch("builtins.open", mock_open()) as mock_file, \
-         patch(f"{target_module}.datetime") as mock_datetime, \
-         patch(f"{target_module}.InferencePhase", InferencePhase), \
-         patch(f"{target_module}.determine_phase_from_batch_composition_stats") as mock_determine_phase:
+    with (patch(f"{target_module}.jax.profiler.start_trace") as mock_start, \
+          patch(f"{target_module}.jax.profiler.stop_trace") as mock_stop, \
+          patch("builtins.open", mock_open()) as mock_file, \
+          patch(f"{target_module}.datetime") as mock_datetime, \
+          patch(f"{target_module}.InferencePhase", InferencePhase), \
+          patch(f"{target_module}.determine_phase_from_batch_composition_stats") as mock_determine_phase):
 
         mock_now = MagicMock()
         mock_now.strftime.return_value = "2024_01_01_12_00_00"
@@ -316,6 +316,64 @@ def profiler_fixture(tmp_path):
             "profiler": profiler,
             "mock_start": mock_start,
             "mock_stop": mock_stop,
+            "mock_file": mock_file,
+            "mock_determine_phase": mock_determine_phase,
+        }
+
+@pytest.fixture
+def profiler_fixture_with_mlrun():
+    """Fixture to set up a PhasedBasedProfiler with mocked dependencies and mlrun."""
+    target_module = "tpu_inference.runner.utils"
+    with patch(f"{target_module}.jax.profiler.start_trace") as mock_start, \
+            patch(f"{target_module}.jax.profiler.stop_trace") as mock_stop, \
+            patch("builtins.open", mock_open()) as mock_file, \
+            patch(f"{target_module}.datetime") as mock_datetime, \
+            patch(f"{target_module}.InferencePhase", InferencePhase), \
+            patch(f"{target_module}.determine_phase_from_batch_composition_stats") as mock_determine_phase, \
+            patch("os.makedirs") as mock_makedirs:
+
+        mock_mlrun = MagicMock()
+        mock_now = MagicMock()
+        mock_now.strftime.return_value = "2024_01_01_12_00_00"
+        mock_datetime.datetime.now.return_value = mock_now
+
+        profiler = PhasedBasedProfiler(profile_dir="/test-dir", mlrun=mock_mlrun)
+        profiler.num_steps_to_profile_for = PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR
+
+        yield {
+            "profiler": profiler,
+            "mock_start": mock_start,
+            "mock_stop": mock_stop,
+            "mock_makedirs": mock_makedirs,
+            "mock_file": mock_file,
+            "mock_determine_phase": mock_determine_phase,
+            "mock_mlrun": mock_mlrun,
+        }
+
+@pytest.fixture
+def profiler_fixture_without_mlrun():
+    """Fixture to set up a PhasedBasedProfiler with mocked dependencies without mlrun."""
+    target_module = "tpu_inference.runner.utils"
+    with patch(f"{target_module}.jax.profiler.start_trace") as mock_start, \
+            patch(f"{target_module}.jax.profiler.stop_trace") as mock_stop, \
+            patch("builtins.open", mock_open()) as mock_file, \
+            patch(f"{target_module}.datetime") as mock_datetime, \
+            patch(f"{target_module}.InferencePhase", InferencePhase), \
+            patch(f"{target_module}.determine_phase_from_batch_composition_stats") as mock_determine_phase, \
+            patch("os.makedirs") as mock_makedirs:
+
+        mock_now = MagicMock()
+        mock_now.strftime.return_value = "2024_01_01_12_00_00"
+        mock_datetime.datetime.now.return_value = mock_now
+
+        profiler = PhasedBasedProfiler(profile_dir="/test-dir", mlrun=None)
+        profiler.num_steps_to_profile_for = PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR
+
+        yield {
+            "profiler": profiler,
+            "mock_start": mock_start,
+            "mock_stop": mock_stop,
+            "mock_makedirs": mock_makedirs,
             "mock_file": mock_file,
             "mock_determine_phase": mock_determine_phase,
         }
@@ -354,6 +412,50 @@ def test_phased_profiler_full_cycle(profiler_fixture):
     assert profiler.current_phase == ""
     assert mock_file(
     ).write.call_count == PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR + 1
+
+def test_phased_profiler_step_with_mldiagnostics(profiler_fixture_with_mlrun):
+    """Tests a profiling step with mlrun."""
+    profiler = profiler_fixture_with_mlrun["profiler"]
+    mock_start = profiler_fixture_with_mlrun["mock_start"]
+    mock_file = profiler_fixture_with_mlrun["mock_file"]
+    mock_determine_phase = profiler_fixture_with_mlrun["mock_determine_phase"]
+    mock_mlrun = profiler_fixture_with_mlrun["mock_mlrun"]
+
+    mock_mlrun.gcs_path="gs://bucket"
+    mock_mlrun.name="name"
+
+    stats = {"num_reqs": 2, "total_num_scheduled_tokens": 100}
+
+    # 1. Start profiling on PREFILL_HEAVY phase
+    mock_determine_phase.return_value = InferencePhase.PREFILL_HEAVY
+    profiler.step(stats)
+
+    assert profiler.mlrun == mock_mlrun
+    mock_start.assert_called_once_with(
+        "gs://bucket/name",
+        profiler_options=profiler.default_profiling_options)
+    mock_file.assert_called_once_with(
+        "gs://bucket/name/batch_composition_stats_2024_01_01_12_00_00.json", "w")
+
+def test_phased_profiler_step_without_mldiagnostics(profiler_fixture_without_mlrun):
+    """Tests a profiling step without mlrun."""
+    profiler = profiler_fixture_without_mlrun["profiler"]
+    mock_start = profiler_fixture_without_mlrun["mock_start"]
+    mock_file = profiler_fixture_without_mlrun["mock_file"]
+    mock_determine_phase = profiler_fixture_without_mlrun["mock_determine_phase"]
+
+    stats = {"num_reqs": 2, "total_num_scheduled_tokens": 100}
+
+    # 1. Start profiling on PREFILL_HEAVY phase
+    mock_determine_phase.return_value = InferencePhase.PREFILL_HEAVY
+    profiler.step(stats)
+
+    assert profiler.mlrun == None
+    mock_start.assert_called_once_with(
+        "/test-dir/prefill_heavy",
+        profiler_options=profiler.default_profiling_options)
+    mock_file.assert_called_once_with(
+        "/test-dir/prefill_heavy", "w")
 
 
 def test_phased_profiler_ignores_initial_request(profiler_fixture):

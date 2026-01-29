@@ -12,13 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import Mock, patch
 
+import datetime
 import pytest
 from vllm.config import ModelConfig
 from vllm.lora.request import LoRARequest
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import DraftTokenIds
+from unittest.mock import MagicMock
 
 # The class we are testing
 from tpu_inference.worker.tpu_worker import TPUWorker
@@ -57,6 +59,7 @@ def mock_vllm_config():
 
     return config
 
+MOCKED_NOW = datetime.datetime(2020, 1, 2, 3, 4, 0)
 
 @pytest.fixture
 def mock_get_pp_group():
@@ -89,6 +92,170 @@ class TestTPUWorker:
         assert worker.is_driver_worker
         assert worker.profile_dir is None
         assert worker.devices == ['tpu:0']
+
+    @patch('socket.gethostname')
+    @patch('datetime.datetime')
+    @patch('tpu_inference.worker.tpu_worker.vllm_envs')
+    @patch('google_cloud_mldiagnostics.machinelearning_run')
+    def test_init_with_mldiagnostics(self, mock_machinelearning_run, mock_envs,
+                                     mock_datetime, mock_gethostname, monkeypatch, mock_vllm_config):
+        """Tests successful initialization of TPUWorker with enabled mldiagnostics."""
+
+        mock_gethostname.return_value = "host1"
+        mock_datetime.now.return_value = MOCKED_NOW
+
+        mock_mlrun = Mock()
+        mock_mlrun.name = "run-id"
+        mock_mlrun.gcs_path = "gs://gs-path"
+        mock_machinelearning_run.return_value = mock_mlrun
+        monkeypatch.setenv("ENABLE_GOOGLE_DIAGON_ML_DIAGNOSTICS", "true")
+        mock_envs.VLLM_TORCH_PROFILER_DIR = "gs://gs-path"
+
+        worker = TPUWorker(vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test_method",
+                           is_driver_worker=True,
+                           devices=['tpu:0'])
+        assert worker.vllm_config == mock_vllm_config
+        assert worker.mlrun == mock_mlrun
+        assert worker.profile_dir == "gs://gs-path/run-id"
+        mock_machinelearning_run.assert_called_once_with(
+            name="vllm-host1-2020-01-02 03:04:00",
+            environment="prod",
+            gcs_path="gs://gs-path",
+            region=None,
+        )
+
+    @patch('socket.gethostname')
+    @patch('datetime.datetime')
+    @patch('tpu_inference.worker.tpu_worker.vllm_envs')
+    @patch('google_cloud_mldiagnostics.machinelearning_run')
+    def test_init_with_mldiagnostics_and_profiler_config(self, mock_machinelearning_run, mock_envs,
+                                                         mock_datetime, mock_gethostname, monkeypatch, mock_vllm_config):
+        """Tests successful initialization of TPUWorker with enabled mldiagnostics and use profiler config if env variable is not provided."""
+
+        mock_gethostname.return_value = "host1"
+        mock_datetime.now.return_value = MOCKED_NOW
+
+        mock_mlrun = Mock()
+        mock_mlrun.name = "run-id"
+        mock_mlrun.gcs_path = "gs://gs-path"
+        mock_machinelearning_run.return_value = mock_mlrun
+        monkeypatch.setenv("ENABLE_GOOGLE_DIAGON_ML_DIAGNOSTICS", "true")
+
+        # set profiler config
+        mock_envs.VLLM_TORCH_PROFILER_DIR = None
+        mock_vllm_config.profiler_config.torch_profiler_dir = "gs://gs-path"
+
+        worker = TPUWorker(vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test_method",
+                           is_driver_worker=True,
+                           devices=['tpu:0'])
+        assert worker.vllm_config == mock_vllm_config
+        assert worker.mlrun == mock_mlrun
+        assert worker.profile_dir == "gs://gs-path/run-id"
+        mock_machinelearning_run.assert_called_once_with(
+            name="vllm-host1-2020-01-02 03:04:00",
+            environment="prod",
+            gcs_path="gs://gs-path",
+            region=None,
+        )
+
+    @patch('socket.gethostname')
+    @patch('datetime.datetime')
+    @patch('tpu_inference.worker.tpu_worker.vllm_envs')
+    @patch('google_cloud_mldiagnostics.machinelearning_run')
+    def test_init_with_specific_mldiagnostics_env_region(self, mock_machinelearning_run, mock_envs,
+                                                         mock_datetime, mock_gethostname, monkeypatch, mock_vllm_config):
+        """Tests successful initialization of TPUWorker with enabled mldiagnostics and specific env, region."""
+
+        mock_gethostname.return_value = "host1"
+        mock_datetime.now.return_value = MOCKED_NOW
+
+        mock_mlrun = Mock()
+        mock_mlrun.name = "run-id"
+        mock_mlrun.gcs_path = "gs://gs-path"
+        mock_machinelearning_run.return_value = mock_mlrun
+        monkeypatch.setenv("ML_DIAGNOSTICS_ENVIRONMENT", "staging")
+        monkeypatch.setenv("ML_DIAGNOSTICS_REGION", "us-central1")
+        monkeypatch.setenv("ENABLE_GOOGLE_DIAGON_ML_DIAGNOSTICS", "true")
+        mock_envs.VLLM_TORCH_PROFILER_DIR = "gs://gs-path"
+
+        TPUWorker(vllm_config=mock_vllm_config,
+                  local_rank=0,
+                  rank=0,
+                  distributed_init_method="test_method",
+                  is_driver_worker=True,
+                  devices=['tpu:0'])
+
+        mock_machinelearning_run.assert_called_once_with(
+            name="vllm-host1-2020-01-02 03:04:00",
+            environment="staging",
+            gcs_path="gs://gs-path",
+            region="us-central1",
+        )
+
+    @patch('socket.gethostname')
+    @patch('datetime.datetime')
+    @patch('tpu_inference.worker.tpu_worker.vllm_envs')
+    @patch('google_cloud_mldiagnostics.machinelearning_run')
+    def test_init_missed_profile_dir_disable_mldiagnostics(self, mock_machinelearning_run, mock_envs,
+                                                           mock_datetime, mock_gethostname, monkeypatch, mock_vllm_config):
+        """Tests successful initialization of TPUWorker with missed profile dir but enabled mldiagnostics."""
+
+        mock_gethostname.return_value = "host1"
+        mock_datetime.now.return_value = MOCKED_NOW
+
+        mock_mlrun = Mock()
+        mock_mlrun.name = "run-id"
+        mock_mlrun.gcs_path = "gs://gs-path"
+        mock_machinelearning_run.return_value = mock_mlrun
+        monkeypatch.setenv("ENABLE_GOOGLE_DIAGON_ML_DIAGNOSTICS", "true")
+
+        # skip to emulate missed profile dir
+        mock_envs.VLLM_TORCH_PROFILER_DIR = None
+        mock_vllm_config.profiler_config = None
+
+        worker = TPUWorker(vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test_method",
+                           is_driver_worker=True,
+                           devices=['tpu:0'])
+        assert worker.vllm_config == mock_vllm_config
+        assert worker.mlrun is None
+        assert worker.profile_dir is None
+        mock_machinelearning_run.assert_not_called()
+
+    @patch('socket.gethostname')
+    @patch('datetime.datetime')
+    @patch('tpu_inference.worker.tpu_worker.vllm_envs')
+    @patch('google_cloud_mldiagnostics.machinelearning_run')
+    def test_init_fail_import_enabled_mldiagnostics(self, mock_machinelearning_run, mock_envs,
+                                                    mock_datetime, mock_gethostname, monkeypatch, mock_vllm_config):
+        """Tests failed initialization of TPUWorker if enabled mldiagnostics but dependency missed."""
+
+        mock_gethostname.return_value = "host1"
+        mock_datetime.now.return_value = MOCKED_NOW
+
+        mock_machinelearning_run.side_effect = ImportError("Test")
+
+        monkeypatch.setenv("ENABLE_GOOGLE_DIAGON_ML_DIAGNOSTICS", "true")
+        mock_envs.VLLM_TORCH_PROFILER_DIR = "gs://gs-path"
+
+        try:
+            TPUWorker(vllm_config=mock_vllm_config,
+                      local_rank=0,
+                      rank=0,
+                      distributed_init_method="test_method",
+                      is_driver_worker=True,
+                      devices=['tpu:0'])
+            pytest.fail("Error expected!")
+        except ImportError:
+            pass
 
     @patch('tpu_inference.worker.tpu_worker.vllm_envs')
     def test_init_with_profiler_on_rank_zero(self, mock_envs,
@@ -149,7 +316,7 @@ class TestTPUWorker:
         mock_runner_cls.assert_called_once_with(mock_vllm_config, mock_devices,
                                                 expected_rank,
                                                 expected_is_first_rank,
-                                                expected_is_last_rank)
+                                                expected_is_last_rank, None)
         assert isinstance(worker.model_runner, MagicMock)
 
     @patch('tpu_inference.worker.tpu_worker.TPUModelRunner')
@@ -181,7 +348,7 @@ class TestTPUWorker:
                                                 expected_devices,
                                                 expected_rank,
                                                 expected_is_first_rank,
-                                                expected_is_last_rank)
+                                                expected_is_last_rank, None)
 
     @patch('tpu_inference.worker.tpu_worker.utils')
     def test_determine_available_memory(self, mock_utils, mock_vllm_config):
