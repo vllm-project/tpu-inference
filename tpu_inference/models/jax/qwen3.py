@@ -35,8 +35,8 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.qwen2 import Qwen2DecoderLayer
 from tpu_inference.models.jax.qwen2 import Qwen2MLP as Qwen3MLP
 from tpu_inference.models.jax.qwen2 import Qwen2Model
-from tpu_inference.models.jax.utils.weight_utils import (LoadableWithIterator,
-                                                         StandardWeightLoader)
+from tpu_inference.models.jax.utils.weight_utils import (StandardWeightLoader,
+                                                         get_default_maps)
 
 logger = init_logger(__name__)
 
@@ -249,18 +249,18 @@ class Qwen3Model(Qwen2Model):
         )
 
 
-class Qwen3ForCausalLM(JaxModule, LoadableWithIterator):
+class Qwen3ForCausalLM(JaxModule):
     WeightLoader = StandardWeightLoader
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
                  mesh: Mesh) -> None:
         self.vllm_config = vllm_config
-        rng = nnx.Rngs(rng_key)
+        self.rng = nnx.Rngs(rng_key)
         self.mesh = mesh
 
         self.model = Qwen3Model(
             vllm_config=vllm_config,
-            rng=rng,
+            rng=self.rng,
             mesh=mesh,
         )
         model_config = vllm_config.model_config
@@ -271,7 +271,7 @@ class Qwen3ForCausalLM(JaxModule, LoadableWithIterator):
                 einsum_str="TD,DV->TV",
                 kernel_shape=(hidden_size, vocab_size),
                 dtype=model_config.dtype,
-                rngs=rng,
+                rngs=self.rng,
                 quant_config=vllm_config.quant_config,
             )
 
