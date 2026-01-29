@@ -23,6 +23,7 @@ import torch
 from flax import nnx
 from jax.sharding import Mesh
 from vllm.config import ModelConfig
+import os
 
 # Assuming the model file is named deepseek_v3.py
 from tpu_inference.models.jax.deepseek_v3 import (DeepSeekV3,
@@ -229,6 +230,11 @@ class TestDeepSeekV3WeightLoader:
             assert k_weight.shape == (2, 4, 8)
             assert v_weight.shape == (2, 4, 8)
 
+    
+    @pytest.mark.skipif(
+        os.environ.get("IS_FOR_V7X") != "true", 
+        reason="MXFP4/FP4 weights are only supported on v7 TPU hardware"
+    )
     def test_load_individual_weight_with_mxfp4(self, loader, mesh):
         """Tests the logic for unpacking MXFP4 weights."""
         name = "layers.0.attn.kernel_q_down_proj_DA"
