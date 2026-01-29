@@ -20,7 +20,6 @@ from jax.experimental import xla_metadata
 from jax.experimental.pallas.ops.tpu.megablox.gmm import gmm as megablox_gmm
 from qwix._src.core.ragged_dot import ragged_dot as qwix_ragged_dot
 
-from tpu_inference import envs
 from tpu_inference.layers.common.fused_moe_gmm import \
     round_up_to_multiple_of_128_within_limit
 from tpu_inference.layers.jax.layers import FlaxUtils
@@ -31,40 +30,6 @@ from tpu_inference.models.jax.utils.qwix.qwix_utils import \
 logger = init_logger(__name__)
 modeling_flax_utils = FlaxUtils()
 set_xla_metadata = xla_metadata.set_xla_metadata
-
-
-class MoEBackend(enum.Enum):
-    FUSED_MOE = "fused_moe"
-    VLLM_MOE = "vllm_moe"
-    DENSE_MAT = "dense_mat"
-    MEGABLX_GMM = "megablox_gmm"
-    RAGGED_DOT = "ragged_dot_gmm"
-
-
-def select_moe_backend():
-    # Validation: Ensure mutually exclusive flags aren't set together
-    if envs.USE_MOE_EP_KERNEL and envs.USE_VLLM_MOE_KERNEL:
-        raise ValueError("Cannot enable multiple MoE kernels simultaneously.")
-
-    if envs.USE_MOE_EP_KERNEL:
-        logger.info("[MoE]: Fused MoE kernel is enabled")
-        return MoEBackend.FUSED_MOE
-
-    if envs.USE_VLLM_MOE_KERNEL:
-        logger.info("[MoE]: VLLM MoE kernel is enabled")
-        return MoEBackend.VLLM_MOE
-
-    if envs.USE_MEGABLOCKS:
-        logger.info("[MoE]: Mega Blocks is enabled for GMM in Sparse Matmul")
-        return MoEBackend.MEGABLX_GMM
-
-    if envs.USE_RAGGED_DOT:
-        logger.info("[MoE]: Ragged Dot is enabled for GMM in Sparse Matmul")
-        return MoEBackend.RAGGED_DOT
-
-    # Default case
-    logger.info("[MoE]: Dense Matmul is enabled")
-    return MoEBackend.DENSE_MAT
 
 
 # --- Helper Functions/Class for Sparse MoE ---

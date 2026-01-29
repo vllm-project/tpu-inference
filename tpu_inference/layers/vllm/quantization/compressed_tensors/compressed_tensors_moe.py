@@ -23,10 +23,10 @@ from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
     CompressedTensorsMoEMethod, CompressedTensorsW8A8Fp8MoEMethod)
 
+from tpu_inference.layers.common.fused_moe import (FusedMoEBackend,
+                                                   fused_moe_apply,
+                                                   select_moe_backend)
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.vllm.fused_moe import (FusedMoEBackend,
-                                                 fused_moe_apply,
-                                                 select_moe_backend)
 from tpu_inference.layers.vllm.process_weights.fused_moe_weights import (
     FusedMoEWeights, process_moe_weights, shard_moe_weights)
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig

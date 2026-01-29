@@ -23,9 +23,9 @@ from flax.typing import Sharding
 from jaxtyping import Float
 from qwix._src.providers import ptq
 
+from tpu_inference.layers.common.fused_moe import MoEBackend
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
-from tpu_inference.layers.jax.moe.utils import MoEBackend
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.models.jax.utils.qwix.qwix_utils import \
@@ -195,73 +195,21 @@ class JaxMoE(nnx.Module):
         D = self.hidden_size
         F = self.intermediate_size_moe
 
-        if self.moe_backend == MoEBackend.FUSED_MOE:
-            if self.edf_sharding:
-                self.e2df_sharding = (self.edf_sharding[0], None,
-                                      self.edf_sharding[1],
-                                      self.edf_sharding[2])
-            self.kernel_gating_upproj_E2DF = create_param(
-                rngs,
-                shape=(E, 2, D, F),
-                dtype=self.dtype,
-                sharding=self.e2df_sharding,
-                random_init=self.random_init)
-            self.kernel_down_proj_EFD = create_param(
-                rngs,
-                shape=(E, F, D),
-                dtype=self.dtype,
-                sharding=self.efd_sharding,
-                random_init=self.random_init)
-            self.block_size = {
-                "bt": 32,
-                "bf": 512,
-                "bd1": 512,
-                "bd2": 512,
-                "btc": 64,
-                "bfc": 256,
-                "bd1c": 256,
-                "bd2c": 256,
-            }
-        elif self.moe_backend == MoEBackend.VLLM_MOE:
-            # TODO (jacobplatin): the current GMM kernel expects that w1/w2 have the second and third
-            # dimensions transposed, but this is likely not optimal for DeepSeek, so we will
-            # need to fix this in the future
-            self.kernel_gating_upproj_EFD = create_param(
-                rngs,
-                shape=(E, D, 2 * F),
-                dtype=self.dtype,
-                sharding=self.efd_sharding,
-                random_init=self.random_init)
-            self.kernel_down_proj_EDF = create_param(
-                rngs,
-                shape=(E, F, D),
-                dtype=self.dtype,
-                sharding=self.edf_sharding,
-                random_init=self.random_init)
-        else:
-            self.kernel_gating_EDF = create_param(rngs,
-                                                  shape=(E, D, F),
-                                                  dtype=self.dtype,
-                                                  sharding=self.edf_sharding,
-                                                  random_init=self.random_init)
-            self.kernel_up_proj_EDF = create_param(
-                rngs,
-                shape=(E, D, F),
-                dtype=self.dtype,
-                sharding=self.edf_sharding,
-                random_init=self.random_init)
-            self.kernel_down_proj_EFD = create_param(
-                rngs,
-                shape=(E, F, D),
-                dtype=self.dtype,
-                sharding=self.efd_sharding,
-                random_init=self.random_init)
-
-        # Default MoE has no bias vectors
-        self.w1_bias, self.w2_bias = (None, None)
-
-        # TODO: Add quantization scale params for VLLM MoE kernel
-        self.w1_scale, self.w2_scale = (None, None)
+        self.kernel_gating_EDF = create_param(rngs,
+                                              shape=(E, D, F),
+                                              dtype=self.dtype,
+                                              sharding=self.edf_sharding,
+                                              random_init=self.random_init)
+        self.kernel_up_proj_EDF = create_param(rngs,
+                                               shape=(E, D, F),
+                                               dtype=self.dtype,
+                                               sharding=self.edf_sharding,
+                                               random_init=self.random_init)
+        self.kernel_down_proj_EFD = create_param(rngs,
+                                                 shape=(E, F, D),
+                                                 dtype=self.dtype,
+                                                 sharding=self.efd_sharding,
+                                                 random_init=self.random_init)
 
         self.expert_axis_name = self.edf_sharding[0]
         if self.expert_axis_name is None:
@@ -279,6 +227,10 @@ class JaxMoE(nnx.Module):
         self.is_batch_sharded_by_expert = (
             self.expert_axis_name is not None) and (self.expert_axis_name
                                                     == self.data_axis_name)
+
+        self.top_k = self.router.num_experts_per_tok
+        self.use_ep = self.num_expert_parallelism > 1
+        self.activation = self.hidden_act
 
     def _process_weight_for_qwix(self,
                                  weight_param,

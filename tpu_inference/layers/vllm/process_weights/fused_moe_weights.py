@@ -20,11 +20,11 @@ from jax.experimental.layout import Format, Layout, with_layout_constraint
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.tensor import Tensor
 
+from tpu_inference.layers.common.fused_moe import FusedMoEBackend
 from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import \
     reorder_concatenated_tensor_for_sharding
-from tpu_inference.layers.vllm.fused_moe import FusedMoEBackend
 from tpu_inference.utils import align_to
 
 P = PartitionSpec
@@ -42,6 +42,19 @@ class FusedMoEWeights:
     w2_bias: jax.Array | Tensor | None
 
 
+class UnfusedMoEWeights:
+    """Unfused moe weights. weights can be either jax or torchax array."""
+    w1_weight: jax.Array | Tensor
+    w1_weight_scale: jax.Array | Tensor | None
+    w1_bias: jax.Array | Tensor | None
+    w2_weight: jax.Array | Tensor
+    w2_weight_scale: jax.Array | Tensor | None
+    w2_bias: jax.Array | Tensor | None
+    w3_weight: jax.Array | Tensor
+    w3_weight_scale: jax.Array | Tensor | None
+    w3_bias: jax.Array | Tensor | None
+
+
 def quantize_moe_weights(
     weights: FusedMoEWeights,
     dtype: jnp.dtype,
@@ -53,7 +66,7 @@ def quantize_moe_weights(
         weights: fused moe weights.
         dtype: dtype to perform quantization.
         block_size: Specify block quantization size. If non, use per-channel
-            quantization. If contracting dim is not divisible by block size, 
+            quantization. If contracting dim is not divisible by block size,
             the dim will be automatically padded and corresponding dim on bias
             and the other weight (w13_weight <-> w2_weight) is also padded.
 
@@ -121,7 +134,7 @@ def process_moe_weights(
         weights: fused moe weights.
         moe_backend: backend type the weights should be processed for.
         w13_reorder_size: only used when backend type is GMM_TP. in order to
-            eliminate collective operations when using tensor parallelism, 
+            eliminate collective operations when using tensor parallelism,
             group w13_weight into w13_reorder_size number of chuncks where each
             chunk stores both w1 and w3 weights.
         w13_interleave: used when loaded w13_weight is stored in interleaved

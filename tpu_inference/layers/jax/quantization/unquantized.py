@@ -16,14 +16,19 @@ from typing import Optional
 
 import jax
 
-from tpu_inference.layers.common.fused_moe_gmm import fused_moe_func
+from tpu_inference.layers.common.fused_moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.quantization import unquantized as jax_common
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
-from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
+from tpu_inference.layers.jax.quantization.configs import (QuantFusedMoEConfig,
+                                                           QuantizationConfig)
+
+if TYPE_CHECKING:
+    from tpu_inference.layers.vllm.process_weights.fused_moe_weights import \
+        FusedMoEWeights
 
 
 class UnquantizedLinearMethod(QuantizeMethodBase,
@@ -49,116 +54,84 @@ class UnquantizedLinearMethod(QuantizeMethodBase,
 import jax.numpy as jnp
 from flax import nnx
 
-from tpu_inference.layers.jax.moe.dense_moe import (
-    dense_moe_fwd, dense_moe_fwd_preapply_router_weights)
-from tpu_inference.layers.jax.moe.utils import MoEBackend
-
 
 class UnquantizedFusedMoEMethod(QuantizeMethodBase,
                                 jax_common.UnquantizedFusedMoEMethod):
     """Unquantized method for JAX FusedMoELayer.
     """
 
+    def process_weights_after_loading(layer):
+        if layer.moe_backend == MoEBackend.FUSED_MOE:
+            raise ValueError
+            # if self.edf_sharding:
+            #     self.e2df_sharding = (self.edf_sharding[0], None,
+            #                           self.edf_sharding[1],
+            #                           self.edf_sharding[2])
+            # self.kernel_gating_upproj_E2DF = create_param(
+            #     rngs,
+            #     shape=(E, 2, D, F),
+            #     dtype=self.dtype,
+            #     sharding=self.e2df_sharding,
+            #     random_init=self.random_init)
+            # self.kernel_down_proj_EFD = create_param(
+            #     rngs,
+            #     shape=(E, F, D),
+            #     dtype=self.dtype,
+            #     sharding=self.efd_sharding,
+            #     random_init=self.random_init)
+            # self.block_size = {
+            #     "bt": 32,
+            #     "bf": 512,
+            #     "bd1": 512,
+            #     "bd2": 512,
+            #     "btc": 64,
+            #     "bfc": 256,
+            #     "bd1c": 256,
+            #     "bd2c": 256,
+            # }
+        elif layer.moe_backend == MoEBackend.VLLM_MOE:
+            # TODO (jacobplatin): the current GMM kernel expects that w1/w2 have the second and third
+            # dimensions transposed, but this is likely not optimal for DeepSeek, so we will
+            # need to fix this in the future
+            pass
+            # self.kernel_gating_upproj_EFD = create_param(
+            #     rngs,
+            #     shape=(E, D, 2 * F),
+            #     dtype=self.dtype,
+            #     sharding=self.efd_sharding,
+            #     random_init=self.random_init)
+            # self.kernel_down_proj_EDF = create_param(
+            #     rngs,
+            #     shape=(E, F, D),
+            #     dtype=self.dtype,
+            #     sharding=self.edf_sharding,
+            #     random_init=self.random_init)
+
     def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
         assert isinstance(layer, JaxMoE)
 
-        x_TD = jnp.asarray(x, layer.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD, layer.activation_ffw_td)
-        if layer.moe_backend == MoEBackend.FUSED_MOE:
-            raise ValueError
-            # router_logits_TE = layer.router(x_TD)
-            # ep_axis_name = layer.efd_sharding[0]
-            # output_TD = fused_ep_moe(
-            #     mesh=layer.mesh,
-            #     tokens=x_TD,
-            #     w1=layer.kernel_gating_upproj_E2DF.value,
-            #     w2=layer.kernel_down_proj_EFD.value,
-            #     gating_output=router_logits_TE,
-            #     top_k=layer.router.num_experts_per_tok,
-            #     ep_axis_name=ep_axis_name,
-            #     renormalize_topk_logits=layer.renormalize,
-            #     act_fn=layer.hidden_act,
-            #     **layer.block_size,
-            # )
-            # return output_TD
-        elif layer.moe_backend == MoEBackend.VLLM_MOE:
+        if layer.moe_backend == MoEBackend.VLLM_MOE:
+            x_TD = jnp.asarray(x, layer.dtype)
+            x_TD = nnx.with_sharding_constraint(x_TD, layer.activation_ffw_td)
+
+            # TODO
             router_logits_TE = layer.router(x_TD)
-            output_TD = fused_moe_func(
-                hidden_states=x_TD,
-                w1=layer.kernel_gating_upproj_EFD.value,
-                w2=layer.kernel_down_proj_EDF.value,
-                w1_bias=layer.w1_bias,
-                w2_bias=layer.w2_bias,
-                w1_scale=layer.w1_scale,
-                w2_scale=layer.w2_scale,
-                gating_output=router_logits_TE,
-                topk=layer.router.num_experts_per_tok,
-                renormalize=layer.renormalize,
-                mesh=layer.mesh,
-                use_ep=layer.num_expert_parallelism > 1,
-                activation=layer.hidden_act,
+
+            # TODO; unfused too
+            weights = FusedMoEWeights(
+                w13_weight=layer.kernel_gating_upproj_EFD.value,
+                w13_weight_scale=None,
+                w13_bias=None,  # TODO?
+                w2_weight=layer.kernel_down_proj_EDF.value,
+                w2_weight_scale=None,
+                w2_bias=None,  # TODO?
             )
-            return output_TD
         else:
-            weights_TX, indices_TX = layer.router(x_TD)
+            raise ValueError
 
-            # if layer.moe_backend == MoEBackend.MEGABLX_GMM or layer.moe_backend == MoEBackend.RAGGED_DOT:
-            #     in_specs = (
-            #         PartitionSpec(),  # replicated MoE instance
-            #         PartitionSpec(*layer.activation_ffw_td),  # Sharded x_TD
-            #         PartitionSpec(),  # Replicated router_weights_TX
-            #         PartitionSpec(),  # Replicated selected_experts_TX
-            #         PartitionSpec(*layer.edf_sharding),  # Sharded gating kernel
-            #         PartitionSpec(
-            #             *layer.edf_sharding),  # Sharded up-projection kernel
-            #         PartitionSpec(
-            #             *layer.efd_sharding),  # Sharded down-projection kernel
-            #     )
-            #     out_specs = PartitionSpec(*layer.activation_ffw_td)
-
-            #     mapped_moe_fwd = partial(
-            #         jax.experimental.shard_map.shard_map,
-            #         mesh=layer.mesh,
-            #         in_specs=in_specs,
-            #         out_specs=out_specs,
-            #         check_rep=False)(sparse_moe_distributed_fwd)
-
-            #     kernel_gating_EDF = layer._process_weight_for_qwix(
-            #         layer.kernel_gating_EDF,
-            #         channelwise_axes=[0, 2],
-            #         tiled_axes={})
-            #     kernel_up_proj_EDF = layer._process_weight_for_qwix(
-            #         layer.kernel_up_proj_EDF,
-            #         channelwise_axes=[0, 2],
-            #         tiled_axes={})
-            #     kernel_down_proj_EFD = layer._process_weight_for_qwix(
-            #         layer.kernel_down_proj_EFD,
-            #         channelwise_axes=[0, 2],
-            #         tiled_axes={})
-
-            #     return mapped_moe_fwd(layer, x_TD, weights_TX, indices_TX,
-            #                           kernel_gating_EDF, kernel_up_proj_EDF,
-            #                           kernel_down_proj_EFD)
-
-            # Dense Matmul, elif
-            if layer.moe_backend == MoEBackend.DENSE_MAT:
-                one_hot_indices_TXE = jax.nn.one_hot(
-                    indices_TX,
-                    num_classes=layer.num_local_experts,
-                    dtype=layer.dtype)
-                full_weights_TE = jnp.sum(one_hot_indices_TXE *
-                                          weights_TX[..., None],
-                                          axis=1)
-                # Some models use the routing scores to weight the data instead of
-                # weighting the expert outputs.
-                if layer.apply_expert_weight_before_computation:
-                    with jax.named_scope("pre_computing_weight"):
-                        return dense_moe_fwd_preapply_router_weights(
-                            layer, x_TD, full_weights_TE)
-                else:
-                    return dense_moe_fwd(layer, x_TD, full_weights_TE)
-            else:
-                raise ValueError
+        return moe_apply(layer, x_TD, router_logits_TE, weights,
+                         self.moe_backend, self.mesh,
+                         self.extra_backend_kwargs)
 
 
 class UnquantizedConfig(QuantizationConfig):
@@ -170,5 +143,6 @@ class UnquantizedConfig(QuantizationConfig):
             return UnquantizedLinearMethod(linear_config)
         if isinstance(layer, JaxMoE):
             # TODO: pass a config
+            moe_config = QuantFusedMoEConfig()
             return UnquantizedFusedMoEMethod()
         return None

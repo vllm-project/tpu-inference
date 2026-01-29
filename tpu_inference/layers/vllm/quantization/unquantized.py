@@ -22,13 +22,17 @@ from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
 from vllm.model_executor.layers import linear as vllm_linear
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
-                                                  UnquantizedFusedMoEMethod)
+from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEConfig
+from vllm.model_executor.layers.fused_moe import \
+    UnquantizedFusedMoEMethod as VllmUnquantizedFusedMoEMethod
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 
+from tpu_inference.layers.common.fused_moe import (FusedMoEBackend,
+                                                   fused_moe_apply,
+                                                   select_moe_backend)
 from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, process_linear_weights, shard_linear_weights,
     to_parameter_list)
@@ -37,9 +41,6 @@ from tpu_inference.layers.common.quant_methods import (UNQUANTIZED,
 from tpu_inference.layers.common.quantization import \
     unquantized as common_unquantized
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.vllm.fused_moe import (FusedMoEBackend,
-                                                 fused_moe_apply,
-                                                 select_moe_backend)
 from tpu_inference.layers.vllm.process_weights.fused_moe_weights import (
     FusedMoEWeights, process_moe_weights, shard_moe_weights)
 from tpu_inference.layers.vllm.quantization.configs import (
@@ -175,7 +176,9 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
         return out
 
 
-class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
+class VllmUnquantizedFusedMoEMethod(
+        VllmUnquantizedFusedMoEMethod,
+        common_unquantized.UnquantizedFusedMoEMethod):
 
     def __init__(
         self,

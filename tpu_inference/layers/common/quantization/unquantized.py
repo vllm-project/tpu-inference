@@ -16,7 +16,7 @@ from typing import Optional, Sequence
 
 import jax
 from jax import numpy as jnp
-from vllm.model_executor.layers.fused_moe import (UnquantizedFusedMoEMethod)
+from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
 
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.common.utils import \
@@ -68,27 +68,33 @@ class UnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     This class will be shared in both vLLM and jax path.
     """
 
-    def __init__(
-        self,
-        *args,
-        **kwargs,
-        # moe: FusedMoEConfig,
-        # mesh: Mesh,
-        # ep_axis_name: str = "model",
-    ):
-        pass
-        # super().__init__(moe)
-        # self.mesh = mesh
-        # self.moe_backend = select_moe_backend(self.moe)
-
-        # raise ValueError(moe, self.moe_backend)
-
-        # self.extra_backend_kwargs = {}
-        # if self.moe_backend == FusedMoEBackend.FUSED_MOE:
-        #     # When fused moe kernle is used, we pass extra arguments like
-        #     # tuned block sizes to the kernel.
-        #     self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name, )
-
     @property
     def is_monolithic(self) -> bool:
         return True
+
+    def apply_monolithic(
+        self,
+        layer: FusedMoE,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> torch.Tensor:
+
+        weights = FusedMoEWeights(
+            w13_weight=jax_view(layer.w13_weight),
+            w13_weight_scale=None,
+            w13_bias=jax_view(layer.w13_bias) if self.moe.has_bias else None,
+            w2_weight=jax_view(layer.w2_weight),
+            w2_weight_scale=None,
+            w2_bias=jax_view(layer.w2_bias) if self.moe.has_bias else None,
+        )
+
+        return torch_view(
+            fused_moe_apply(
+                layer,
+                jax_view(x),
+                jax_view(router_logits),
+                weights,
+                self.moe_backend,
+                self.mesh,
+                self.extra_backend_kwargs,
+            ))

@@ -36,14 +36,14 @@ from vllm.model_executor.layers.quantization.mxfp4 import (Mxfp4Backend,
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
+from tpu_inference.layers.common.fused_moe import (FusedMoEBackend,
+                                                   fused_moe_apply,
+                                                   select_moe_backend)
 from tpu_inference.layers.common.quant_methods import (MXFP4,
                                                        get_tpu_quant_method)
 from tpu_inference.layers.common.quantization import \
     dequantize_tensor_from_mxfp4_packed
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.vllm.fused_moe import (FusedMoEBackend,
-                                                 fused_moe_apply,
-                                                 select_moe_backend)
 from tpu_inference.layers.vllm.process_weights.fused_moe_weights import (
     FusedMoEWeights, process_moe_weights, quantize_moe_weights,
     shard_moe_weights)
