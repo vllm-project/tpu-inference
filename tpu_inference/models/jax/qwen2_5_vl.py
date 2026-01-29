@@ -1052,7 +1052,7 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             self, input_ids: jax.Array,
             multimodal_embeddings: Optional[jax.Array]) -> jax.Array:
 
-        inputs_embeds = self.model.embed(input_ids)
+        inputs_embeds = self.model.embed_tokens(input_ids)
 
 
         if multimodal_embeddings is not None \
@@ -1093,19 +1093,6 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         # Value: a tuple of (path to a nnx layer weight, nnx weight sharding)
 
         mappings = {
-            "model.layers.*.input_layernorm":
-            "model.layers.*.input_layernorm.scale",
-            "model.layers.*.post_attention_layernorm":
-            "model.layers.*.post_attention_layernorm.scale",
-            "model.layers.*.self_attn.k_proj":
-            "model.layers.*.self_attn.k_proj.kernel",
-            "model.layers.*.self_attn.o_proj":
-            "model.layers.*.self_attn.o_proj.kernel",
-            "model.layers.*.self_attn.q_proj":
-            "model.layers.*.self_attn.q_proj.kernel",
-            "model.layers.*.self_attn.v_proj":
-            "model.layers.*.self_attn.v_proj.kernel",
-            "model.norm": "model.norm.scale",
             "visual.blocks.*.attn.proj.bias": "visual.blocks.*.attn.proj.bias",
             "visual.blocks.*.attn.proj": "visual.blocks.*.attn.proj.kernel",
             "visual.blocks.*.attn.qkv.bias":
@@ -1134,13 +1121,9 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         }
 
         loader = self.WeightLoader(self.vllm_config, self.mesh)
-        loader.load_weights(
-            self,
-            mappings,
-            keep_hf_weight_suffix_when_match=[
-                'layers.' + str(i) + '.mlp' for i in range(
-                    self.vllm_config.model_config.hf_config.num_hidden_layers)
-            ] + ['emb'])
+        loader.load_weights(self,
+                            mappings,
+                            keep_hf_weight_suffix_when_match=['model'])
 
     def precompile_vision_encoder(
         self,
