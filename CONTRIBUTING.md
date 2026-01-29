@@ -28,6 +28,9 @@ We choose to follow a similar directory structure as vLLM:
   * `jax` contains model implementations/functionalities that are only used by JAX models
   * `vllm` contains model implementations/functionalities that are only used by vLLM models
 
+ ### Torchax v/s JAX-Native implementation
+ We prefer enabling Pytorch based vLLM models via Torchax first and then following up with integrating JAX-Native/FLAX implementation of the models.
+
 ## Testing
 When checking in a new feature, we expect that you you add relevant unit tests as well as CI tests.  You can read more about the latter [here](https://github.com/vllm-project/tpu-inference/tree/main/.buildkite#adding-a-new-feature-to-ci).
 
