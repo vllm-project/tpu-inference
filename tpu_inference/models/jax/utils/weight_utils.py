@@ -30,12 +30,14 @@ import torchax
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
+from jax.sharding import SingleDeviceSharding
 from safetensors import safe_open
 from torchax.ops.mappings import t2j
 from vllm.config import VllmConfig
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
 from tpu_inference import envs, utils
+from tpu_inference.layers.jax import JaxModule
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils import file_utils
 
@@ -715,13 +717,17 @@ class StandardWeightLoader(BaseWeightLoader):
 def load_nnx_param_from_torch(jax_param: nnx.Param,
                               torch_weight: torch.Tensor):
     """Load a nnx.Param from a torch.Tensor."""
-    spec = jax_param.sharding.spec if isinstance(
-        jax_param.sharding, NamedSharding) else jax_param.sharding
+    spec = jax_param.sharding
+    if isinstance(jax_param.sharding, NamedSharding):
+        spec = jax_param.sharding.spec
+    elif isinstance(jax_param.sharding, SingleDeviceSharding):
+        spec = ()
     mesh = jax_param.mesh if hasattr(jax_param, 'mesh') else None
 
-    jax_param.value = shard_put(
-        t2j(torch_weight, use_dlpack=False).astype(jax_param.value.dtype),
-        spec, mesh)
+    jax_param.value = shard_put(t2j(torch_weight, use_dlpack=False).astype(
+        jax_param.value.dtype),
+                                spec,
+                                mesh=mesh)
 
 
 def load_nnx_param_from_reshaped_torch(jax_param: nnx.Param,
@@ -729,7 +735,7 @@ def load_nnx_param_from_reshaped_torch(jax_param: nnx.Param,
     """Load a nnx.Param from a reshaped and transposed torch.Tensor.
     
     HuggingFace model almost always store linear layer weights with contracting dimension
-    last, and only support 2D weight tensors. This function reshapes and transposes
+    last, and only support 2D weight tensors. This function transposes then reshapes
     the torch weight to match the jax_param shape before loading.
     """
     torch_weight = torch_weight.t()
@@ -741,11 +747,20 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
     """A weights loader for JAX models."""
 
     def __init__(self, model, **kwargs):
+        assert isinstance(model, JaxModule)
+        for _, param in model.named_parameters():
+            if not hasattr(param, "weight_loader"):
+                setattr(param, "weight_loader",
+                        load_nnx_param_from_reshaped_torch)
+
         super().__init__(model, **kwargs)
 
 
 class LoadableWithIterator:
-    """Mixin for models that support loading weights with an iterator."""
+    """Mixin for models that support loading weights with an iterator.
+    
+    This is replicating what vLLM does for most models, e.g. https://github.com/vllm-project/vllm/blob/8e2a469b3b2f67bc900ed72724fe3f05e3564994/vllm/model_executor/models/gemma3_mm.py#L644-L646
+    """
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
