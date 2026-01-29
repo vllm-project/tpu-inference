@@ -354,12 +354,17 @@ def shard_moe_weights(
                 w2_weight_scale=Layout((0, 1, 2, 3)),
                 w2_bias=Layout((0, 1, 2)),
             )
+            
+    print(f'{moe_backend=}')
+    print(f'{weight_shardings=}')
+    print(f'{weight_layouts=}')
 
     for field in fields(FusedMoEWeights):
         key = field.name
         if (weight := getattr(weights, key, None)) is not None:
             layout = getattr(weight_layouts, key)
             sharding = getattr(weight_shardings, key)
+            print(f'Sharding weight: {key}, layout: {layout}, sharding: {sharding}')
             weight = jax.device_put(weight, Format(layout, sharding))
             setattr(weights, key, weight)
     return weights

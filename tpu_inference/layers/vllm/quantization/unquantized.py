@@ -41,13 +41,14 @@ from tpu_inference.layers.vllm.fused_moe import (FusedMoEBackend,
                                                  select_moe_backend)
 from tpu_inference.layers.vllm.process_weights.fused_moe_weights import (
     FusedMoEWeights, process_moe_weights, shard_moe_weights)
-from tpu_inference.layers.vllm.process_weights.linear_weights import (
-    LinearWeights, process_linear_weights, shard_linear_weights,
-    to_parameter_list)
 from tpu_inference.layers.vllm.quantization.configs import (
     VllmQuantConfig, VllmQuantLinearConfig)
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product
+
+from tpu_inference.layers.vllm.process_weights.linear_weights import (
+    LinearWeights, process_linear_weights, shard_linear_weights,
+    to_parameter_list)
 
 P = PartitionSpec
 
@@ -95,103 +96,52 @@ class VllmUnquantizedLinearMethod(UnquantizedLinearMethod):
     def __init__(self, linear_config: VllmQuantLinearConfig):
         self.linear_config = linear_config
 
-    def create_weights(
-        self,
-        layer: torch.nn.Module,
-        input_size_per_partition: int,
-        output_partition_sizes: list[int],
-        input_size: int,
-        output_size: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
-        weight = Parameter(torch.empty(sum(output_partition_sizes),
-                                       input_size_per_partition,
-                                       dtype=params_dtype,
-                                       device="meta"),
-                           requires_grad=False)
-        layer.register_parameter("weight", weight)
-        setattr(weight, "weight_loader", self._get_weight_loader(layer))
-
-        if self.linear_config.bias:
-            bias = Parameter(torch.empty(sum(output_partition_sizes),
-                                         dtype=params_dtype,
-                                         device="meta"),
-                             requires_grad=False)
-            layer.register_parameter("bias", bias)
-            setattr(bias, "weight_loader", self._get_weight_loader(layer))
-
-    def _get_weight_loader(self, layer: torch.nn.Module):
-
-        def weight_loader(param: torch.nn.Parameter,
-                          loaded_weight: torch.Tensor):
-            # If the weight is already on TPU, we don't need to do anything.
-            if isinstance(loaded_weight, torchax.tensor.Tensor):
-                param.data = loaded_weight
-                return
-
-            weight_name = None
-            for name, p in layer.named_parameters():
-                if p is param:
-                    weight_name = name
-                    break
-            assert weight_name is not None, "param not found in layer"
-
-            # Helper to check if we are loading bias
-            is_bias = weight_name == "bias"
-            if is_bias:
-                bias = t2j(loaded_weight, use_dlpack=False)
-                # When loading bias, we need to create a dummy weight for the process function
-                weight = jnp.zeros(layer.weight.shape, dtype=bias.dtype)
-            else:
-                weight = t2j(loaded_weight, use_dlpack=False)
-                # When loading weight, we might not have bias yet, or bias is already loaded
-                if layer.bias is not None and isinstance(
-                        layer.bias, torchax.tensor.Tensor):
-                    bias = jax_view(layer.bias)
-                else:
-                    bias = None
-
-            # Definition of the processing function
-            @jax.jit
-            def process_unquantized_linear_weights(
-                weight: jax.Array,
-                bias: jax.Array | None,
-            ) -> LinearWeights:
-                return process_linear_weights(
-                    LinearWeights(
-                        weight=weight,
-                        weight_scale=None,
-                        zero_point=None,
-                        bias=bias,
-                    ),
-                    fused=self.linear_config.fuse_matmuls,
-                    output_sizes=self.linear_config.output_sizes,
-                    reorder_size=self.linear_config.n_shards,
-                )
-
-            # Process and shard
-            # NOTE: We only update the tensor that is currently being loaded.
-            # If we are loading weight, we update weight.
-            # If we are loading bias, we update bias.
-            weights = process_unquantized_linear_weights(weight, bias)
-            weights = torch_view(
-                shard_linear_weights(
-                    weights,
-                    mesh=self.linear_config.mesh,
-                    weight_p_spec=self.linear_config.weight_sharding,
-                    bias_p_spec=self.linear_config.bias_sharding,
-                ))
-
-            if is_bias:
-                param.data = weights.bias
-            else:
-                param.data = weights.weight
-
-        return weight_loader
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        pass
+        return
+        weight = t2j(layer.weight, use_dlpack=False)
+        delattr(layer, "weight")
+        if layer.bias is not None and not layer.skip_bias_add:
+            if layer.return_bias:
+                logger.warning_once("Bias might return incorrect value.")
+            bias = t2j(layer.bias, use_dlpack=False)
+            delattr(layer, "bias")
+        else:
+            bias = None
+
+        @jax.jit
+        def process_unquantized_linear_weights(
+            weight: jax.Array,
+            bias: jax.Array | None,
+        ) -> LinearWeights:
+            return process_linear_weights(
+                LinearWeights(
+                    weight=weight,
+                    weight_scale=None,
+                    zero_point=None,
+                    bias=bias,
+                ),
+                fused=self.linear_config.fuse_matmuls,
+                output_sizes=self.linear_config.output_sizes,
+                reorder_size=self.linear_config.n_shards,
+            )
+
+        weights = process_unquantized_linear_weights(weight, bias)
+        weights = torch_view(
+            shard_linear_weights(
+                weights,
+                mesh=self.linear_config.mesh,
+                weight_p_spec=self.linear_config.weight_sharding,
+                bias_p_spec=self.linear_config.bias_sharding,
+            ))
+
+        if self.linear_config.fuse_matmuls:
+            layer.weight = Parameter(weights.weight, requires_grad=False)
+            if bias is not None:
+                layer.bias = Parameter(weights.bias, requires_grad=False)
+        else:
+            layer.weight = to_parameter_list(weights.weight)
+            if bias is not None:
+                layer.bias = to_parameter_list(weights.bias)
 
     def apply(self,
               layer: torch.nn.Module,
@@ -268,144 +218,10 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             # tuned block sizes to the kernel.
             self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name, )
 
-    def create_weights(
-        self,
-        layer: torch.nn.Module,
-        num_experts: int,
-        hidden_size: int,
-        intermediate_size: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
-        # Calculate shapes
-        # w13_weight: (num_experts, 2 * intermediate_size, hidden_size)
-        # w2_weight: (num_experts, hidden_size, intermediate_size)
-        w13_shape = (num_experts, 2 * intermediate_size, hidden_size)
-        w2_shape = (num_experts, hidden_size, intermediate_size)
-
-        # Create weights on meta
-        w13_weight = Parameter(torch.empty(w13_shape,
-                                           dtype=params_dtype,
-                                           device="meta"),
-                               requires_grad=False)
-        w2_weight = Parameter(torch.empty(w2_shape,
-                                          dtype=params_dtype,
-                                          device="meta"),
-                              requires_grad=False)
-
-        layer.register_parameter("w13_weight", w13_weight)
-        layer.register_parameter("w2_weight", w2_weight)
-
-        setattr(w13_weight, "weight_loader", self._get_weight_loader(layer))
-        setattr(w2_weight, "weight_loader", self._get_weight_loader(layer))
-
-        if self.moe.has_bias:
-            w13_bias_shape = (num_experts, 2 * intermediate_size)
-            w2_bias_shape = (num_experts, hidden_size)
-
-            w13_bias = Parameter(torch.empty(w13_bias_shape,
-                                             dtype=params_dtype,
-                                             device="meta"),
-                                 requires_grad=False)
-            w2_bias = Parameter(torch.empty(w2_bias_shape,
-                                            dtype=params_dtype,
-                                            device="meta"),
-                                requires_grad=False)
-
-            layer.register_parameter("w13_bias", w13_bias)
-            layer.register_parameter("w2_bias", w2_bias)
-
-            setattr(w13_bias, "weight_loader", self._get_weight_loader(layer))
-            setattr(w2_bias, "weight_loader", self._get_weight_loader(layer))
-
-    def _get_weight_loader(self, layer: torch.nn.Module):
-
-        def weight_loader(param: torch.nn.Parameter,
-                          loaded_weight: torch.Tensor):
-            if isinstance(loaded_weight, torchax.tensor.Tensor):
-                param.data = loaded_weight
-                return
-
-            weight_name = None
-            for name, p in layer.named_parameters():
-                if p is param:
-                    weight_name = name
-                    break
-            assert weight_name is not None, "param not found in layer"
-
-            # Helper to create dummy tensor for non-loaded weights
-            def get_tensor_or_dummy(p_name, p_attr, loaded_name, loaded_val):
-                if p_name == loaded_name:
-                    return t2j(loaded_val, use_dlpack=False)
-                val = getattr(layer, p_attr, None)
-                if val is not None and isinstance(val, torchax.tensor.Tensor):
-                    return jax_view(val)
-                # If not loaded yet, use dummy zero tensor
-                if val is not None:
-                    return jnp.zeros(val.shape, dtype=loaded_val.dtype)
-                return None
-
-            w13_weight = get_tensor_or_dummy("w13_weight", "w13_weight",
-                                             weight_name, loaded_weight)
-            w2_weight = get_tensor_or_dummy("w2_weight", "w2_weight",
-                                            weight_name, loaded_weight)
-            w13_bias = get_tensor_or_dummy("w13_bias", "w13_bias", weight_name,
-                                           loaded_weight)
-            w2_bias = get_tensor_or_dummy("w2_bias", "w2_bias", weight_name,
-                                          loaded_weight)
-
-            @jax.jit
-            def process_unquantized_moe_weights(
-                w13_weight: jax.Array,
-                w13_bias: jax.Array | None,
-                w2_weight: jax.Array,
-                w2_bias: jax.Array | None,
-            ) -> FusedMoEWeights:
-
-                w13_interleave = layer.activation == "swigluoai"
-                w13_reorder_size = get_mesh_shape_product(
-                    self.mesh, ShardingAxisName.MLP_TENSOR)
-
-                return process_moe_weights(
-                    FusedMoEWeights(
-                        w13_weight=w13_weight,
-                        w13_weight_scale=None,
-                        w13_bias=w13_bias,
-                        w2_weight=w2_weight,
-                        w2_weight_scale=None,
-                        w2_bias=w2_bias,
-                    ),
-                    moe_backend=self.moe_backend,
-                    w13_reorder_size=w13_reorder_size,
-                    w13_interleave=w13_interleave,
-                )
-
-            # We only care about the result for the current weight
-            weights = process_unquantized_moe_weights(
-                w13_weight,
-                w13_bias,
-                w2_weight,
-                w2_bias,
-            )
-            weights = torch_view(
-                shard_moe_weights(weights, self.moe_backend, self.mesh))
-
-            if weight_name == "w13_weight":
-                param.data = weights.w13_weight
-            elif weight_name == "w2_weight":
-                param.data = weights.w2_weight
-            elif weight_name == "w13_bias":
-                param.data = weights.w13_bias
-            elif weight_name == "w2_bias":
-                param.data = weights.w2_bias
-
-        return weight_loader
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        return
         assert isinstance(layer, FusedMoE)
-        # Check if weights are already sharded (if create_weights was fully implemented in future)
-        if isinstance(layer.w13_weight, torchax.tensor.Tensor):
-            return
 
         w13_weight = t2j(layer.w13_weight, use_dlpack=False)
         w2_weight = t2j(layer.w2_weight, use_dlpack=False)

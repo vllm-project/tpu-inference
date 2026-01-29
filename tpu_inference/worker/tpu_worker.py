@@ -212,6 +212,7 @@ class TPUWorker:
                 pipeline_model_parallel_size=1,
             )
 
+        print(f'{self.rank=}, {self.pp_config.pp_world_size=}')
         jax_parallel_state.init_pp_distributed_environment(
             self.pp_config.ip,
             self.rank,
