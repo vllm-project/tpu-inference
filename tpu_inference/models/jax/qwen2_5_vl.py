@@ -1085,11 +1085,6 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             "model.embed_tokens": "model.embed.embedding",
             "model.layers.*.input_layernorm":
             "model.layers.*.input_layernorm.scale",
-            "model.layers.*.mlp.down_proj":
-            "model.layers.*.mlp.down_proj.kernel",
-            "model.layers.*.mlp.gate_proj":
-            "model.layers.*.mlp.gate_proj.kernel",
-            "model.layers.*.mlp.up_proj": "model.layers.*.mlp.up_proj.kernel",
             "model.layers.*.post_attention_layernorm":
             "model.layers.*.post_attention_layernorm.scale",
             "model.layers.*.self_attn.k_proj":
@@ -1100,12 +1095,6 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             "model.layers.*.self_attn.q_proj.kernel",
             "model.layers.*.self_attn.v_proj":
             "model.layers.*.self_attn.v_proj.kernel",
-            "model.layers.*.self_attn.q_proj.bias":
-            "model.layers.*.self_attn.q_proj.bias",
-            "model.layers.*.self_attn.k_proj.bias":
-            "model.layers.*.self_attn.k_proj.bias",
-            "model.layers.*.self_attn.v_proj.bias":
-            "model.layers.*.self_attn.v_proj.bias",
             "model.norm": "model.norm.scale",
             "visual.blocks.*.attn.proj.bias": "visual.blocks.*.attn.proj.bias",
             "visual.blocks.*.attn.proj": "visual.blocks.*.attn.proj.kernel",
@@ -1142,7 +1131,12 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             })
 
         loader = self.WeightLoader(self.vllm_config, self.mesh)
-        loader.load_weights(self, mappings)
+        loader.load_weights(self,
+                            mappings,
+                            keep_hf_weight_suffix_when_match=[
+                                'layers.' + str(i) + '.mlp'
+                                for i in range(hf_config.num_hidden_layers)
+                            ])
 
     def precompile_vision_encoder(
         self,
