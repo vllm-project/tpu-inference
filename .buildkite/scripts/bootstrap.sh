@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Exit on error, exit on unset variable, fail on pipe errors.
+set -euo pipefail
 
 # --- Skip build if only docs/icons changed ---
 echo "--- :git: Checking changed files"
@@ -54,6 +56,14 @@ else
 fi
 
 
+# Validate modified YAML pipelines using bk pipeline validate
+if .buildkite/scripts/validate_all_pipelines.sh "$NON_SKIPPABLE_FILES"; then
+    echo "All pipelines syntax are valid. Proceeding with pipeline upload."
+else
+    echo "Some pipelines syntax are invalid. Failing build."
+    exit 1
+fi
+
 upload_pipeline() {
     VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
@@ -78,7 +88,7 @@ upload_pipeline() {
     buildkite-agent pipeline upload .buildkite/pipeline_pypi.yml
 }
 
-echo "--- Starting Buildkite Bootstrap ---"
+echo "--- Starting Buildkite Bootstrap"
 echo "Running in pipeline: $BUILDKITE_PIPELINE_SLUG"
 if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
     VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
@@ -141,4 +151,4 @@ else
 fi
 
 
-echo "--- Buildkite Bootstrap Finished ---"
+echo "--- Buildkite Bootstrap Finished"
