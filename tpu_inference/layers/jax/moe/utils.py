@@ -17,10 +17,11 @@ import enum
 import jax
 import jax.numpy as jnp
 from jax.experimental import xla_metadata
-from jax.experimental.pallas.ops.tpu.megablox.gmm import gmm as megablox_gmm
+from qwix._src.core.qarray import QArray
 from qwix._src.core.ragged_dot import ragged_dot as qwix_ragged_dot
 
 from tpu_inference import envs
+from tpu_inference.kernels.megablox.gmm import gmm as megablox_gmm
 from tpu_inference.layers.common.fused_moe_gmm import \
     round_up_to_multiple_of_128_within_limit
 from tpu_inference.layers.jax.layers import FlaxUtils
@@ -101,7 +102,6 @@ def global_permute_fn(inputs_TD: jax.Array, selected_experts_TX: jax.Array,
         expert_ids,
         repeats=group_sizes_E,
         total_repeat_length=total_assignments)
-
     return (
         sorted_inputs_tD,
         sort_indices_t,
@@ -122,12 +122,10 @@ def unpermute_fn(processed_tokens: jax.Array, sort_indices: jax.Array,
             -1, num_experts_per_tok, local_D)
 
     with jax.named_scope("combine_weights"):
-        output_TD = jnp.einsum(
-            "TXD,TX -> TD",
-            reshaped_tokens_TXD.astype(jnp.float32),
-            router_weights_TX.astype(jnp.float32),
-            precision='float32',
-        )
+        tokens_f32 = reshaped_tokens_TXD.astype(jnp.float32)
+        weights_f32 = router_weights_TX.astype(jnp.float32)
+        weights_expanded = jnp.expand_dims(weights_f32, axis=-1)
+        output_TD = jnp.sum(tokens_f32 * weights_expanded, axis=1)
 
     return output_TD.astype(output_dtype)
 
@@ -173,7 +171,6 @@ def local_permute_fn(inputs,
     sorted_inputs = sort_activations_fn(inputs, sorted_indices)
     # sorted local expert id from 0 to local expert size
     sorted_experts_ids = expert_indices[sorted_indices]
-
     return (
         sorted_inputs,
         sorted_indices,
@@ -249,23 +246,35 @@ def gmm_fn(inputs, kernel, group_sizes, tile_size, moe_backend, dtype,
         inputs = jnp.pad(inputs, ((0, pad_amount), (0, 0)))
 
     if moe_backend == MoEBackend.MEGABLX_GMM:
+        if quantized_dtype:
+            kernel_qvalue, kernel_scale = kernel
+            kernel_scale = jnp.expand_dims(kernel_scale, 2)
+        else:
+            kernel_qvalue = kernel
+            kernel_scale = None
         m = inputs.shape[0]
-        _, k, n = kernel.shape
+        _, k, n = kernel_qvalue.shape
         tm = round_up_to_multiple_of_128_within_limit(m, 512)
         tk = round_up_to_multiple_of_128_within_limit(k, 2048)
         tn = round_up_to_multiple_of_128_within_limit(n, 2048)
 
+        # TODO (jacobplatin/bzgoogle): replace this with the DS-specific megablox
         output = megablox_gmm(lhs=inputs,
-                              rhs=kernel,
+                              rhs=kernel_qvalue,
+                              rhs_scale=kernel_scale,
                               group_sizes=group_sizes,
                               preferred_element_type=dtype,
                               tiling=(tm, tk, tn))
 
     elif moe_backend == MoEBackend.RAGGED_DOT:
+        # TODO (jacobplatin): support more than just fp8_e4m3fn for activations!
         inputs = manually_quantize_qwix_activation(
             inputs, "ragged_dot", jnp.float8_e4m3fn, [0], {},
             "absmax") if quantized_dtype else inputs
         ragged_dot_func = qwix_ragged_dot if quantized_dtype else jax.lax.ragged_dot
+        if quantized_dtype:
+            q_value, q_scale = kernel
+            kernel = QArray(q_value, q_scale, qtype=quantized_dtype)
         with set_xla_metadata(ragged_dot_tiling=",".join(
             [str(t) for t in tile_size]),
                               mosaic_fusion_group="ragged-dot"):
