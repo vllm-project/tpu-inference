@@ -50,6 +50,10 @@ from tpu_inference.layers.vllm.quantization.configs import (
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product
 
+from tpu_inference.layers.vllm.process_weights.linear_weights import (
+    LinearWeights, process_linear_weights, shard_linear_weights,
+    to_parameter_list)
+
 P = PartitionSpec
 
 logger = init_logger(__name__)
@@ -131,46 +135,38 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
         else:
             bias = None
 
-            # Definition of the processing function
-            @jax.jit
-            def process_unquantized_linear_weights(
-                weight: jax.Array,
-                bias: jax.Array | None,
-            ) -> LinearWeights:
-                return process_linear_weights(
-                    LinearWeights(
-                        weight=weight,
-                        weight_scale=None,
-                        zero_point=None,
-                        bias=bias,
-                    ),
-                    fused=self.linear_config.fuse_matmuls,
-                    output_sizes=self.linear_config.output_sizes,
-                    reorder_size=self.linear_config.n_shards,
-                )
-
-            # Process and shard
-            # NOTE: We only update the tensor that is currently being loaded.
-            # If we are loading weight, we update weight.
-            # If we are loading bias, we update bias.
-            weights = process_unquantized_linear_weights(weight, bias)
-            weights = torch_view(
-                shard_linear_weights(
-                    weights,
-                    mesh=self.linear_config.mesh,
-                    weight_p_spec=self.linear_config.weight_sharding,
-                    bias_p_spec=self.linear_config.bias_sharding,
-                ))
-
-            if is_bias:
-                param.data = weights.bias
-            else:
-                param.data = weights.weight
-
-        return weight_loader
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        pass
+        @jax.jit
+        def process_unquantized_linear_weights(
+            weight: jax.Array,
+            bias: jax.Array | None,
+        ) -> LinearWeights:
+            return process_linear_weights(
+                LinearWeights(
+                    weight=weight,
+                    weight_scale=None,
+                    zero_point=None,
+                    bias=bias,
+                ),
+                fused=self.linear_config.fuse_matmuls,
+                output_sizes=self.linear_config.output_sizes,
+                reorder_size=self.linear_config.n_shards,
+            )
+        weights = process_unquantized_linear_weights(weight, bias)
+        weights = torch_view(
+            shard_linear_weights(
+                weights,
+                mesh=self.linear_config.mesh,
+                weight_p_spec=self.linear_config.weight_sharding,
+                bias_p_spec=self.linear_config.bias_sharding,
+            ))
+        if self.linear_config.fuse_matmuls:
+            layer.weight = Parameter(weights.weight, requires_grad=False)
+            if bias is not None:
+                layer.bias = Parameter(weights.bias, requires_grad=False)
+        else:
+            layer.weight = to_parameter_list(weights.weight)
+            if bias is not None:
+                layer.bias = to_parameter_list(weights.bias)
 
     def apply(self,
               layer: torch.nn.Module,
@@ -251,9 +247,6 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
             # Already processed and sharded.
             return
         assert isinstance(layer, FusedMoE)
-        # Check if weights are already sharded (if create_weights was fully implemented in future)
-        if isinstance(layer.w13_weight, torchax.tensor.Tensor):
-            return
 
         w13_weight = t2j(layer.w13_weight, use_dlpack=False)
         w2_weight = t2j(layer.w2_weight, use_dlpack=False)

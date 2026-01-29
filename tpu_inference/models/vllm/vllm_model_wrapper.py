@@ -28,26 +28,23 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
-from vllm.model_executor.model_loader import get_model, _LOAD_FORMAT_TO_MODEL_LOADER
+from vllm.model_executor.model_loader import _LOAD_FORMAT_TO_MODEL_LOADER
+from vllm.model_executor.model_loader.utils import (
+    initialize_model, process_weights_after_loading)
 from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 from tpu_inference.distributed.jax_parallel_state import \
     get_pp_group as jax_get_pp_group
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
-    shard_model_to_tpu, prepare_incremental_loading
-from vllm.model_executor.model_loader.utils import (
-    initialize_model,
-    process_weights_after_loading,
-)
-
-from vllm.utils.torch_utils import set_default_torch_dtype
+from tpu_inference.layers.vllm.process_weights.cleanup_sharding import (
+    prepare_incremental_loading, shard_model_to_tpu)
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
@@ -110,42 +107,43 @@ class _VllmRunner(torch.nn.Module):
 
 
 from vllm.config.load import LoadConfig
-from vllm.model_executor.model_loader import (
-    get_model_loader,
-    register_model_loader,
-)
+from vllm.model_executor.model_loader import (get_model_loader,
+                                              register_model_loader)
+from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 
 
 @register_model_loader("incremental")
 class IncrementalModelLoader(DefaultModelLoader):
+
     def __init__(self, load_config: LoadConfig, mesh: Mesh):
+        load_config.load_format = 'auto'
         super().__init__(load_config)
         self.mesh = mesh
 
-    def load_model(
-        self, vllm_config: VllmConfig, model_config: ModelConfig
-    ) -> nn.Module:
+    def load_model(self, vllm_config: VllmConfig,
+                   model_config: ModelConfig) -> torch.nn.Module:
         """Load a model with the given configurations."""
         device_config = vllm_config.device_config
         load_config = vllm_config.load_config
-        load_device = (
-            device_config.device if load_config.device is None else load_config.device
-        )
+        load_device = (device_config.device
+                       if load_config.device is None else load_config.device)
         target_device = torch.device(load_device)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
-                model = initialize_model(
-                    vllm_config=vllm_config, model_config=model_config
-                )
+                model = initialize_model(vllm_config=vllm_config,
+                                         model_config=model_config)
             # Prepare for incremental loading
             prepare_incremental_loading(model, self.mesh)
 
             # Quantization does not happen in `load_weights` but after it
             self.load_weights(model, model_config)
+            print('Finished loading weights.')
             process_weights_after_loading(model, model_config, target_device)
+            print('Finished processing weights after loading.')
 
         return model.eval()
+
 
 def get_model_loader(load_config: LoadConfig, mesh: Mesh) -> BaseModelLoader:
     """Get a model loader based on the load format."""
@@ -157,14 +155,15 @@ def get_model_loader(load_config: LoadConfig, mesh: Mesh) -> BaseModelLoader:
     return _LOAD_FORMAT_TO_MODEL_LOADER[load_format](load_config)
 
 
-def vllm_get_model(
-    *, vllm_config: VllmConfig, model_config: ModelConfig | None = None, mesh: Mesh
-) -> nn.Module:
-    loader = get_model_loader(vllm_config.load_config, mesh )
+def vllm_get_model(*,
+                   vllm_config: VllmConfig,
+                   model_config: ModelConfig | None = None,
+                   mesh: Mesh) -> torch.nn.Module:
+    loader = get_model_loader(vllm_config.load_config, mesh)
     if model_config is None:
         model_config = vllm_config.model_config
-    return loader.load_model(vllm_config=vllm_config, model_config=model_config)
-
+    return loader.load_model(vllm_config=vllm_config,
+                             model_config=model_config)
 
 
 class VllmModelWrapper:
@@ -245,7 +244,9 @@ class VllmModelWrapper:
         # Load the vLLM model and wrap it into a new model whose forward
         # function can calculate the hidden_state and logits.
         with load_context, jax_context:
-            vllm_model = vllm_get_model(vllm_config=vllm_config_for_load)
+            vllm_model = vllm_get_model(vllm_config=vllm_config_for_load,
+                                        mesh=self.mesh)
+            print('Finished loading vLLM model.')
         lora_manager = None
         if vllm_config_for_load.lora_config is not None:
             # Replace layers in the model with LoRA layers.
@@ -261,7 +262,7 @@ class VllmModelWrapper:
 
         self.model = _VllmRunner(vllm_model)
         params_and_buffers = shard_model_to_tpu(self.model, self.mesh)
-
+        print('Finished sharding model to TPU.')
         # Returning to the jax land, so we need to wrap it into a JaxValue.
         return jax_view(params_and_buffers), lora_manager
 
