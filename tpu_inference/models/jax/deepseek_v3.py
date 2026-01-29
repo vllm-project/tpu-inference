@@ -174,14 +174,14 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
             # are fused into a single weight tensor.
             self._loaded_to_standardized_keys.update({
                 "model.layers.*.mlp.experts.*.down_proj.weight":
-                "layers.*.custom_module.kernel_down_proj_EDF",
-                "model.layers.*.mlp.experts.*.gating_upproj_EFD.weight":
-                "layers.*.custom_module.kernel_gating_upproj_EFD",
+                "layers.*.custom_module.kernel_down_proj_EFD",
+                "model.layers.*.mlp.experts.*.gating_upproj_EDF.weight":
+                "layers.*.custom_module.kernel_gating_upproj_EDF",
             })
             # NOTE (jacobplatin): only used for the MOE_VLLM backend, which
             # expects 2/3 dimensions to be transposed.
             self._transpose_map.update({
-                r"mlp\.experts\.\d+\.gating_upproj_EFD": (0, 2, 1),
+                r"mlp\.experts\.\d+\.gating_upproj_EDF": (0, 2, 1),
             })
 
         if self.use_mla_kernel:
@@ -587,7 +587,7 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                                         [gate_s, up_s], dim=1
                                     ) if gate_s is not None and up_s is not None else None
                                     fused_name = loaded_name.replace(
-                                        proj_type, "gating_upproj_EFD")
+                                        proj_type, "gating_upproj_EDF")
 
                                 else:
                                     # (E, D, F) -> (E, 2, D, F)
