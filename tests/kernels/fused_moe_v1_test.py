@@ -19,7 +19,8 @@ from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
 from jax.sharding import Mesh
 
-from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe, ref_moe
+from tpu_inference.kernels.fused_moe.v1.kernel import (
+    fused_ep_moe, get_dtype_packing, ref_moe, sub_channel_quantize_minor_dim)
 
 jax.config.parse_flags_with_absl()
 
@@ -145,6 +146,9 @@ class MoEKernelTest(jtu.JaxTestCase):
         bd2c,
         act_fn="silu",
         w_dtype=None,
+        a_dtype=None,
+        t_subc_quant_wsz=None,
+        a_subc_quant_wsz=None,
         subc_quant_w1_sz=None,
         subc_quant_w2_sz=None,
         has_bias=False,
@@ -170,6 +174,12 @@ class MoEKernelTest(jtu.JaxTestCase):
                 subc_quant_w2_sz = 256
             w1, w1_scale = sub_channel_quantize(w1, w_dtype, subc_quant_w1_sz)
             w2, w2_scale = sub_channel_quantize(w2, w_dtype, subc_quant_w2_sz)
+        a_scale = None
+        if a_dtype is not None:
+            if t_subc_quant_wsz is None:
+                t_subc_quant_wsz = 256
+            a, a_scale = sub_channel_quantize_minor_dim(
+                a, a_dtype, t_subc_quant_wsz)
 
         actual = fused_ep_moe(
             mesh=self.mesh,
@@ -180,8 +190,11 @@ class MoEKernelTest(jtu.JaxTestCase):
             top_k=top_k,
             renormalize_topk_logits=renormalize_topk_logits,
             act_fn=act_fn,
+            t_subc_quant_wsz=t_subc_quant_wsz,
+            a_subc_quant_wsz=a_subc_quant_wsz,
             subc_quant_w1_sz=subc_quant_w1_sz,
             subc_quant_w2_sz=subc_quant_w2_sz,
+            tokens_scale=a_scale,
             w1_scale=w1_scale,
             w2_scale=w2_scale,
             b1=b1,
@@ -205,8 +218,11 @@ class MoEKernelTest(jtu.JaxTestCase):
             b2=b2,
             renormalize_topk_logits=renormalize_topk_logits,
             act_fn=act_fn,
+            t_subc_quant_wsz=t_subc_quant_wsz,
+            a_subc_quant_wsz=a_subc_quant_wsz,
             subc_quant_w1_sz=subc_quant_w1_sz,
             subc_quant_w2_sz=subc_quant_w2_sz,
+            tokens_scale=a_scale,
             w1_scale=w1_scale,
             w2_scale=w2_scale,
         )
@@ -420,6 +436,50 @@ class MoEKernelTest(jtu.JaxTestCase):
             bfc=256,
             bd1c=256,
             bd2c=256,
+        )
+
+    @parameterized.product(
+        a_dtype=[jnp.float8_e5m2, jnp.float8_e4m3fn, jnp.float4_e2m1fn], )
+    def test_quantized_tokens(self, a_dtype):
+        if a_dtype in (
+                jnp.float8_e5m2,
+                jnp.float8_e4m3fn,
+                jnp.float4_e2m1fn,
+        ) and not jtu.is_device_tpu_at_least(version=7):
+            self.skipTest("Expect TPUv7+")
+        top_k = 8
+        num_experts = 128
+        hidden_size = 2048
+        intermediate_size = 1024
+        num_tokens = 8 * 32
+        t_subc_quant_wsz = 256
+        a_subc_quant_wsz = 256
+        subc_quant_w1_sz = t_subc_quant_wsz
+        subc_quant_w2_sz = a_subc_quant_wsz
+        t_packing = get_dtype_packing(a_dtype)
+        self._test_moe(
+            dtype=jnp.bfloat16,
+            top_k=top_k,
+            num_experts=num_experts,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            num_tokens=num_tokens,
+            seed=1234,
+            renormalize_topk_logits=False,
+            w_dtype=jnp.float4_e2m1fn,
+            a_dtype=a_dtype,  # Comment to skip token quantization.
+            t_subc_quant_wsz=t_subc_quant_wsz,
+            a_subc_quant_wsz=a_subc_quant_wsz,  # Comment to skip quant in ffn2.
+            subc_quant_w1_sz=subc_quant_w1_sz,
+            subc_quant_w2_sz=subc_quant_w2_sz,
+            bt=32,
+            bf=1024,
+            bd1=2048,
+            bd2=1024,
+            btc=32,
+            bfc=256,
+            bd1c=subc_quant_w1_sz * t_packing,
+            bd2c=128 * t_packing,
         )
 
 

@@ -74,6 +74,27 @@ def activation_fn(acc1, acc3, act_fn):
         raise RuntimeError(f"Unsupported activation function: {act_fn}")
 
 
+def sub_channel_quantize_minor_dim(x, quant_dtype, wsz=256):
+    """Quantizes x with sub-channel quantization on the minor dim."""
+    assert len(x.shape) == 2
+    assert x.shape[-1] % wsz == 0, (x.shape[-1], wsz)
+    if jnp.issubdtype(quant_dtype, jnp.floating):
+        dtype_info = jnp.finfo(quant_dtype)
+    else:
+        dtype_info = jnp.iinfo(quant_dtype)
+    dtype_max = float(dtype_info.max)
+    quant_lst, scale_lst = [], []
+    for i in range(0, x.shape[-1], wsz):
+        y = x[:, i:i + wsz]
+        abs_max = jnp.abs(y).max(axis=-1, keepdims=True)
+        scale = (abs_max / dtype_max).astype(jnp.float32)
+        q = (y / scale).astype(quant_dtype)
+        quant_lst.append(q)
+        scale_lst.append(scale)
+    # TODO(yixiuliu): use select with mask
+    return jnp.concat(quant_lst, axis=-1), jnp.concat(scale_lst, axis=-1)
+
+
 def ref_moe(
         tokens: jax.Array,  # (num_tokens, hidden_size)
         w1: jax.Array,  # (num_experts, 2, hidden_size, intermediate_size)
@@ -83,15 +104,22 @@ def ref_moe(
         *,
         renormalize_topk_logits: bool = False,
         act_fn: str = "silu",
+        out_dtype: jnp.dtype = jnp.bfloat16,
+        t_subc_quant_wsz: int | None = None,
+        a_subc_quant_wsz: int | None = None,
         subc_quant_w1_sz: int | None = None,
         subc_quant_w2_sz: int | None = None,
+        tokens_scale: (
+            jax.Array
+            | None) = None,  # F32(num_tokens, hidden_size // t_subc_quant_wsz)
         w1_scale:
     (
         jax.Array | None
     ) = None,  # F32(num_experts, 2, hidden_size //subc_quant_w1_sz, 1, intermediate_size)
         w2_scale:
     (
-        jax.Array | None
+        jax.
+        Array | None
     ) = None,  # F32(num_experts, intermediate_size // subc_quant_w2_sz, 1, hidden_size)
         b1: jax.Array
     | None = None,  # F32(num_experts, 2, 1, intermediate_size)
@@ -116,7 +144,14 @@ def ref_moe(
 
     # Process each token individually
     for i in range(n_tokens):
-        curr_token = jnp.expand_dims(tokens[i], axis=0)  # [1, hidden_size]
+        curr_token = jnp.expand_dims(tokens[i].astype(jnp.bfloat16),
+                                     axis=0)  # [1, hidden_size]
+        if tokens_scale is not None:
+            assert t_subc_quant_wsz is not None
+            scale = jnp.expand_dims(tokens_scale[i], axis=0)
+            scale = jnp.repeat(scale, t_subc_quant_wsz, axis=1)
+            curr_token *= scale
+
         assigned_expert_ids = top_k_indices[
             i]  # [top_k] - indices of selected experts for token i
         tok_expert_act = []
@@ -160,7 +195,19 @@ def ref_moe(
             act = activation_fn(gmm1_w1_proj, gmm1_w3_proj, act_fn)
 
             # Second linear layer (down projection)
-            gmm_2_out = act @ expert_weight_2  # [1, hidden_size]
+            if a_subc_quant_wsz is None:
+                gmm_2_out = act @ expert_weight_2  # [1, hidden_size]
+            else:
+                act, act_scale = sub_channel_quantize_minor_dim(
+                    act, tokens.dtype, wsz=a_subc_quant_wsz)
+                act = act.astype(jnp.bfloat16)
+                act_scale = jnp.repeat(act_scale, a_subc_quant_wsz, axis=1)
+                gmm_2_out = jnp.sum(
+                    act.reshape(-1, 1) * expert_weight_2 *
+                    act_scale.reshape(-1, 1),
+                    axis=0,
+                    keepdims=True,
+                )
             if b2 is not None:
                 gmm_2_out += b2[expert_id:expert_id + 1, 0]
             tok_expert_act.append(gmm_2_out)
@@ -176,7 +223,7 @@ def ref_moe(
                                   axis=0,
                                   keepdims=True)  # [1, hidden_size]
 
-        t_outputs.append(weighted_output.astype(tokens.dtype))
+        t_outputs.append(weighted_output.astype(out_dtype))
 
     return jnp.concatenate(t_outputs,
                            axis=0)  # [actual_num_tokens, hidden_size]
@@ -190,7 +237,8 @@ def _fused_ep_moe_kernel(
         # TODO(jevinjiang): We choose F32 scale for easier slicing. The extra
         # latency should be hidden in the pipeline overlaping. But is there a better
         # way to do this?
-    w1_scale_hbm,  # None | F32(local_num_experts, 2, cdiv(hidden_size, subc_quant_w1_sz), 1, intermediate_size)
+    tokens_scale_hbm,  # None | F32(local_num_tokens, align_to(cdiv(hidden_size, t_subc_quant_wsz), 128))
+        w1_scale_hbm,  # None | F32(local_num_experts, 2, cdiv(hidden_size, subc_quant_w1_sz), 1, intermediate_size)
         w2_scale_hbm,  # None | F32(local_num_experts, cdiv(intermediate_size, subc_quant_w2_sz), 1, hidden_size)
         b1_hbm,  # None | F32(local_num_experts, 2, 1, intermediate_size)
         b2_hbm,  # None | F32(local_num_experts, 1, hidden_size)
@@ -206,18 +254,19 @@ def _fused_ep_moe_kernel(
         expert_sizes_x2_smem,  # <bt_sem_id> (2, 1, padded_num_experts)
         a2a_s_sends_x2_smem,  # <e_sem_id> (2,)
         a2a_s_x2_vmem,  # <e_sem_id> (2, bt * num_devices, t_packing, hidden_size // t_packing)
-        a2a_s_acc_x2_vmem,  # <e_sem_id> (2, bt * num_devices, t_packing, hidden_size // t_packing)
+        a2a_s_scale_x2_vmem,  # None | <e_sem_id> (2, bt * num_devices, padded_scale_size)
+        a2a_s_acc_x2_vmem,  # <e_sem_id> (2, bt * num_devices, o_packing, hidden_size // o_packing)
         ### Accumulation for gathered tokens:
-    a2a_g_acc_vmem,  # (top_k, bt, t_packing, hidden_size // t_packing)
+    a2a_g_acc_vmem,  # (top_k, bt, o_packing, hidden_size // o_packing)
         ### Expert weight double buffering:
     b_gating_x2_vmem,  # <bt_sem_id> (2, bt, padded_num_experts)
         b_output_x2_vmem,  # <bt_sem_id> (2, bt, hidden_size)
         b_w1_x2_vmem,  # <bw_sem_id> (2, t_packing, bd1 // t_packing, bf)
         b_w3_x2_vmem,  # <bw_sem_id> (2, t_packing, bd1 // t_packing, bf)
-        b_w2_x2_vmem,  # <bw_sem_id> (2, t_packing, bf, bd2 // t_packing)
+        b_w2_x2_vmem,  # <bw_sem_id> (2, o_packing, bf, bd2 // o_packing)
         b_w1_scale_x2_vmem,  # None | <bw_sem_id> (2, t_packing, bd1 // t_packing // subc_quant_w1_sz, 1, bf)
         b_w3_scale_x2_vmem,  # None | <bw_sem_id> (2, t_packing, bd1 // t_packing // subc_quant_w1_sz, 1, bf)
-        b_w2_scale_x2_vmem,  # None | <bw_sem_id> (2, t_packing, bf // subc_quant_w2_sz, 1, bd2 // t_packing)
+        b_w2_scale_x2_vmem,  # None | <bw_sem_id> (2, o_packing, bf // subc_quant_w2_sz, 1, bd2 // o_packing)
         b_b1_x2_vmem,  # None | <bw_sem_id> (2, 1, bf)
         b_b3_x2_vmem,  # None | <bw_sem_id> (2, 1, bf)
         b_b2_x2_vmem,  # None | <bw_sem_id> (2, t_packing, 1, bd2 // t_packing)
@@ -233,6 +282,9 @@ def _fused_ep_moe_kernel(
         renormalize_topk_logits: bool,
         ep_axis_name: str,
         act_fn: str,
+        out_dtype: jnp.dtype = jnp.bfloat16,
+        t_subc_quant_wsz: int | None = None,
+        a_subc_quant_wsz: int | None = None,
         subc_quant_w1_sz: int | None = None,
         subc_quant_w2_sz: int | None = None,
         # Kernel tuning params.
@@ -258,8 +310,8 @@ def _fused_ep_moe_kernel(
 
     t_dtype = tokens_hbm.dtype
     t_packing = get_dtype_packing(t_dtype)
+    o_packing = get_dtype_packing(out_dtype)
     t_bitwidth = 32 // t_packing
-    assert a2a_g_hbm.dtype == t_dtype
     assert w1_hbm.dtype == w2_hbm.dtype
 
     assert bd1 % bd1c == 0
@@ -267,16 +319,17 @@ def _fused_ep_moe_kernel(
     assert bf % bfc == 0
     assert hidden_size % t_packing == 0
     assert bd1 % t_packing == 0
-    assert bd2 % t_packing == 0
+    assert bd2 % o_packing == 0
     assert bd1c % t_packing == 0
-    assert bd2c % t_packing == 0
+    assert bd2c % o_packing == 0
 
     h_per_t_packing = hidden_size // t_packing
+    h_per_o_packing = hidden_size // o_packing
     assert tokens_hbm.shape[-1] == h_per_t_packing
     bd1_per_t_packing = bd1 // t_packing
-    bd2_per_t_packing = bd2 // t_packing
+    bd2_per_o_packing = bd2 // o_packing
     bd1c_per_t_packing = bd1c // t_packing
-    bd2c_per_t_packing = bd2c // t_packing
+    bd2c_per_o_packing = bd2c // o_packing
 
     if subc_quant_w1_sz is not None:
         if subc_quant_w1_sz < hidden_size:
@@ -499,6 +552,24 @@ def _fused_ep_moe_kernel(
                     device_id=get_mesh_device_id(recv_id),
                     device_id_type=pltpu.DeviceIdType.MESH,
                 ).start()
+                # Copy tokens_scale if exists.
+                if tokens_scale_hbm is not None:
+                    assert t_subc_quant_wsz is not None
+                    pltpu.make_async_copy(
+                        src_ref=tokens_scale_hbm.at[pl.ds(t_id, local_sz)],
+                        dst_ref=a2a_s_scale_x2_vmem.at[e_sem_id,
+                                                       pl.ds(start, local_sz)],
+                        sem=recv_sems.at[e_sem_id],
+                    ).start()
+                    pltpu.make_async_remote_copy(
+                        src_ref=tokens_scale_hbm.at[pl.ds(t_id, remote_sz)],
+                        dst_ref=a2a_s_scale_x2_vmem.at[
+                            e_sem_id, pl.ds(start, remote_sz)],
+                        send_sem=send_sems.at[e_sem_id],
+                        recv_sem=recv_sems.at[e_sem_id],
+                        device_id=get_mesh_device_id(recv_id),
+                        device_id_type=pltpu.DeviceIdType.MESH,
+                    ).start()
         a2a_s_sends_x2_smem[e_sem_id] = send_sz
 
     def wait_a2a_scatter_recv(bt_id, e_sem_id, local_e_id):
@@ -510,6 +581,14 @@ def _fused_ep_moe_kernel(
             dst_ref=a2a_s_x2_vmem.at[e_sem_id, pl.ds(0, sz)],
             sem=recv_sems.at[e_sem_id],
         ).wait()
+        if tokens_scale_hbm is not None:
+            pltpu.make_async_copy(
+                src_ref=a2a_s_scale_x2_vmem.at[e_sem_id,
+                                               pl.ds(0, sz)],
+                dst_ref=a2a_s_scale_x2_vmem.at[e_sem_id,
+                                               pl.ds(0, sz)],
+                sem=recv_sems.at[e_sem_id],
+            ).wait()
 
     def wait_a2a_scatter_send(bt_id, e_sem_id, local_e_id):
         del bt_id, local_e_id
@@ -519,6 +598,14 @@ def _fused_ep_moe_kernel(
             dst_ref=a2a_s_x2_vmem.at[e_sem_id, pl.ds(0, sz)],
             sem=send_sems.at[e_sem_id],
         ).wait()
+        if tokens_scale_hbm is not None:
+            pltpu.make_async_copy(
+                src_ref=a2a_s_scale_x2_vmem.at[e_sem_id,
+                                               pl.ds(0, sz)],
+                dst_ref=a2a_s_scale_x2_vmem.at[e_sem_id,
+                                               pl.ds(0, sz)],
+                sem=send_sems.at[e_sem_id],
+            ).wait()
 
     def start_a2a_gather(bt_id, e_sem_id, local_e_id):
         my_e_id = my_id * local_num_experts + local_e_id
@@ -555,8 +642,8 @@ def _fused_ep_moe_kernel(
         is_valid = jnp.logical_and(0 <= local_e_id, local_e_id
                                    < local_num_experts)
         remote_sz = lax.select(is_valid, remote_sz, 0)
-        ref = a2a_g_hbm.reshape(num_experts * bt, t_packing,
-                                hidden_size // t_packing)
+        ref = a2a_g_hbm.reshape(num_experts * bt, o_packing,
+                                hidden_size // o_packing)
         pltpu.make_async_copy(
             src_ref=ref.at[pl.ds(0, remote_sz)],
             dst_ref=ref.at[pl.ds(0, remote_sz)],
@@ -565,8 +652,8 @@ def _fused_ep_moe_kernel(
 
     def wait_a2a_gather_recv_all():
         sz = top_k * bt
-        ref = a2a_g_hbm.reshape(num_experts * bt, t_packing,
-                                hidden_size // t_packing)
+        ref = a2a_g_hbm.reshape(num_experts * bt, o_packing,
+                                hidden_size // o_packing)
         pltpu.make_async_copy(
             src_ref=ref.at[pl.ds(0, sz)],
             dst_ref=ref.at[pl.ds(0, sz)],
@@ -612,13 +699,13 @@ def _fused_ep_moe_kernel(
             ).start()
 
     def start_fetch_bw2(local_e_id, bw2_sem_id, bf_id, bd2_id):
-        for p in range(t_packing):
-            offset = p * h_per_t_packing + bd2_id * bd2_per_t_packing
+        for p in range(o_packing):
+            offset = p * h_per_o_packing + bd2_id * bd2_per_o_packing
             pltpu.make_async_copy(
                 src_ref=w2_hbm.at[
                     local_e_id,
                     pl.ds(bf_id * bf, bf),
-                    pl.ds(offset, bd2_per_t_packing),
+                    pl.ds(offset, bd2_per_o_packing),
                 ],
                 dst_ref=b_w2_x2_vmem.at[bw2_sem_id, p],
                 sem=local_sems.at[bw2_sem_id, 2],
@@ -635,7 +722,7 @@ def _fused_ep_moe_kernel(
                                  ),  # 1 for per-channel quantization
                         ),
                         pl.ds(0, 1),
-                        pl.ds(offset, bd2_per_t_packing),
+                        pl.ds(offset, bd2_per_o_packing),
                     ],
                     dst_ref=b_w2_scale_x2_vmem.at[bw2_sem_id, p],
                     sem=local_sems.at[bw2_sem_id, 2],
@@ -644,7 +731,7 @@ def _fused_ep_moe_kernel(
                 pltpu.make_async_copy(
                     src_ref=b2_hbm.at[local_e_id,
                                       pl.ds(0, 1),
-                                      pl.ds(offset, bd2_per_t_packing)],
+                                      pl.ds(offset, bd2_per_o_packing)],
                     dst_ref=b_b2_x2_vmem.at[bd2_id % 2, p],
                     sem=local_sems.at[bw2_sem_id, 2],
                 ).start()
@@ -768,8 +855,16 @@ def _fused_ep_moe_kernel(
         else:
             raise RuntimeError("Unreachable")
 
+    def broadcast_col(x, col_idx, broadcast_size):
+        """Broadcasts a column of x to the given broadcast_size."""
+        assert len(x.shape) == 2
+        msk = jax.lax.iota(jnp.int32, x.shape[1]) == col_idx
+        y = jnp.max(jnp.where(msk, x, -jnp.inf), axis=1, keepdims=True)
+        return jnp.broadcast_to(y, (x.shape[0], broadcast_size))
+
     def dynamic_ffn1(
         t_b32_vmem,
+        t_scale_vmem,
         w1_vmem,
         w1_scale_vmem,
         b1_vmem,
@@ -780,6 +875,7 @@ def _fused_ep_moe_kernel(
         acc3_vmem,
         dyn_sz,
         should_init,
+        bd1_id,
     ):
         assert t_b32_vmem.shape == (bt * num_devices, bd1 // t_packing)
         assert w1_vmem.shape == w3_vmem.shape == (t_packing, bd1_per_t_packing,
@@ -788,6 +884,9 @@ def _fused_ep_moe_kernel(
         assert bd1 % (t_packing * 128) == 0, (bd1, t_packing)
         assert bd1c % (t_packing * 128) == 0, (bd1c, t_packing)
         assert bd1_per_t_packing % bd1c_per_t_packing == 0
+        if t_scale_vmem is not None:
+            assert bd1c == t_packing * t_subc_quant_wsz
+            assert t_scale_vmem.shape[0] == bt * num_devices
         if w1_scale_vmem is not None:
             assert w1_scale_vmem.shape == (
                 t_packing,
@@ -816,8 +915,32 @@ def _fused_ep_moe_kernel(
                     pl.ds(btc_id * btc, btc),
                     pl.ds(bd1c_id * bd1c_per_t_packing, bd1c_per_t_packing),
                 ]
+                sliced_t_scales = None
+                if t_scale_vmem is not None:
+                    t_scale_slices = (
+                        pl.ds(btc_id * btc, btc),
+                        # t_scale is located at:
+                        #   p_id * (hidden_size // t_packing // t_subc_quant_wsz)
+                        #   + bd1_id * (bd1 // t_packing // t_subc_quant_wsz)
+                        #   + bd1c_id
+                        # Since bd1c == t_packing * t_subc_quant_wsz, it's equivalent to:
+                        #   p_id * (hidden_size // bd1c)
+                        #   + bd1_id * (bd1 // bd1c)
+                        #   + bd1c_id
+                        # Here we load scales for all p_ids.
+                        pl.ds(
+                            bd1_id * (bd1 // bd1c) + bd1c_id,
+                            1 + (t_packing - 1) * (hidden_size // bd1c),
+                        ),
+                    )
+                    sliced_t_scales = t_scale_vmem[*t_scale_slices]
                 for p_id in range(t_packing):
                     t = pltpu.bitcast(t_b32.astype(repack_ty), t_dtype)
+                    acc_scale = None
+                    if sliced_t_scales is not None:
+                        col_idx = p_id * (hidden_size // bd1c)
+                        acc_scale = broadcast_col(sliced_t_scales, col_idx,
+                                                  bfc)
                     t_b32 = t_b32 >> t_bitwidth
                     for bfc_id in range(cdiv(bf, bfc)):
                         w_slices = (
@@ -830,6 +953,8 @@ def _fused_ep_moe_kernel(
                         acc1 = jnp.dot(t,
                                        w1,
                                        preferred_element_type=jnp.float32)
+                        if acc_scale is not None:
+                            acc1 *= acc_scale
 
                         if w1_scale_vmem is not None:
                             w1_scale_slices = (
@@ -849,6 +974,8 @@ def _fused_ep_moe_kernel(
                         acc3 = jnp.dot(t,
                                        w3,
                                        preferred_element_type=jnp.float32)
+                        if acc_scale is not None:
+                            acc3 *= acc_scale
 
                         if w3_scale_vmem is not None:
                             w3_scale_slices = (
@@ -899,39 +1026,40 @@ def _fused_ep_moe_kernel(
         dyn_sz,
         should_init,
     ):
-        assert res_b32_vmem.shape == (bt * num_devices, bd2_per_t_packing)
-        assert w2_vmem.shape == (t_packing, bf, bd2_per_t_packing)
+        assert res_b32_vmem.shape == (bt * num_devices, bd2_per_o_packing)
+        assert w2_vmem.shape == (o_packing, bf, bd2_per_o_packing)
         assert acc1_vmem.shape == acc3_vmem.shape == (bt * num_devices, bf)
-        assert bd2 % (t_packing * 128) == 0, (bd2, t_packing)
-        assert bd2c % (t_packing * 128) == 0, (bd2c, t_packing)
-        assert t_dtype in (jnp.float32, jnp.bfloat16)
+        assert bd2 % (o_packing * 128) == 0, (bd2, o_packing)
+        assert bd2c % (o_packing * 128) == 0, (bd2c, o_packing)
+        assert t_dtype in (jnp.float32, jnp.bfloat16, jnp.float8_e5m2,
+                           jnp.float8_e4m3fn, jnp.float4_e2m1fn)
 
         if w2_scale_vmem is not None:
             assert w2_scale_vmem.shape == (
-                t_packing,
+                o_packing,
                 cdiv(bf, subc_quant_w2_sz),
                 1,
-                bd2_per_t_packing,
+                bd2_per_o_packing,
             )
             if subc_quant_w2_sz < intermediate_size:
                 assert bfc == subc_quant_w2_sz
 
         num_loops = cdiv(dyn_sz, btc)
-        assert bd2c % (t_packing * 128) == 0, (bd2c, t_packing)
+        assert bd2c % (o_packing * 128) == 0, (bd2c, o_packing)
 
         def body(btc_id, _):
             for bd2c_id in range(cdiv(bd2, bd2c)):
                 res_lst = []
-                for p_id in range(t_packing):
-                    res = jnp.zeros((btc, bd2c_per_t_packing),
+                for p_id in range(o_packing):
+                    res = jnp.zeros((btc, bd2c_per_o_packing),
                                     dtype=jnp.float32)
 
                     if b2_vmem is not None and should_init:
                         b2_scale_slices = (
                             p_id,
                             pl.ds(0, 1),
-                            pl.ds(bd2c_id * bd2c_per_t_packing,
-                                  bd2c_per_t_packing),
+                            pl.ds(bd2c_id * bd2c_per_o_packing,
+                                  bd2c_per_o_packing),
                         )
                         b2 = jnp.broadcast_to(b2_vmem[*b2_scale_slices],
                                               res.shape)
@@ -943,47 +1071,48 @@ def _fused_ep_moe_kernel(
                         acc1 = acc1_vmem[*acc_slices]
                         acc3 = acc3_vmem[*acc_slices]
                         act = activation_fn(acc1, acc3, act_fn)
+                        act_scale = None
+                        if a_subc_quant_wsz is not None:
+                            act, act_scale = sub_channel_quantize_minor_dim(
+                                act, t_dtype,
+                                a_subc_quant_wsz)  # act_scale [btc, 1]
                         w2 = w2_vmem[
                             p_id,
                             pl.ds(bfc_id * bfc, bfc),
                             pl.ds(bd2c_id *
-                                  bd2c_per_t_packing, bd2c_per_t_packing),
+                                  bd2c_per_o_packing, bd2c_per_o_packing),
                         ]
                         acc = jnp.dot(act,
                                       w2,
                                       preferred_element_type=jnp.float32)
+                        if a_subc_quant_wsz is not None:
+                            assert act_scale is not None
+                            acc *= jnp.broadcast_to(act_scale, acc.shape)
                         if w2_scale_vmem is not None:
                             w2_scale_slices = (
                                 p_id,
                                 (bfc_id * bfc) // subc_quant_w2_sz,
                                 pl.ds(0, 1),
-                                pl.ds(bd2c_id * bd2c_per_t_packing,
-                                      bd2c_per_t_packing),
+                                pl.ds(bd2c_id * bd2c_per_o_packing,
+                                      bd2c_per_o_packing),
                             )
                             w2_scale = jnp.broadcast_to(
                                 w2_scale_vmem[*w2_scale_slices], acc.shape)
                             acc *= w2_scale
                         res += acc
-                    res = pltpu.bitcast(res, jnp.uint32)
-                    if t_packing == 2:
-                        res = res >> 16 << (16 * p_id)
-                    else:
-                        assert t_packing == 1
                     res_lst.append(res)
-                res = res_lst[0]
-                # TODO(jevinjiang): use interleaved packing when it is exposed to Pallas
-                for i in range(1, t_packing):
-                    res |= res_lst[i]
+                res = pltpu.pack_elementwise(res_lst, packed_dtype=out_dtype)
+                res = res.astype(jnp.uint32)
                 sliced_res_vmem = res_b32_vmem.at[
                     pl.ds(btc_id * btc, btc),
-                    pl.ds(bd2c_id * bd2c_per_t_packing, bd2c_per_t_packing),
+                    pl.ds(bd2c_id * bd2c_per_o_packing, bd2c_per_o_packing),
                 ]
                 if should_init:
                     sliced_res_vmem[...] = res
                 else:
                     sliced_res_vmem[...] = pltpu.bitcast(
-                        sliced_res_vmem.bitcast(t_dtype)[...] +
-                        pltpu.bitcast(res, t_dtype),
+                        sliced_res_vmem.bitcast(out_dtype)[...] +
+                        pltpu.bitcast(res, out_dtype),
                         sliced_res_vmem.dtype,
                     )
 
@@ -997,16 +1126,16 @@ def _fused_ep_moe_kernel(
         a2a_s_b32_vmem = (a2a_s_x2_vmem.bitcast(jnp.uint32).reshape(
             2, bt * num_devices, hidden_size // t_packing).at[e_sem_id])
         a2a_s_acc_b32_vmem = (a2a_s_acc_x2_vmem.bitcast(jnp.uint32).reshape(
-            2, bt * num_devices, hidden_size // t_packing).at[e_sem_id])
+            2, bt * num_devices, hidden_size // o_packing).at[e_sem_id])
         b_acc_vmem_2d = b_acc_vmem.reshape(2, bt * num_devices, bf)
         b_acc1_vmem = b_acc_vmem_2d.at[0]
         b_acc3_vmem = b_acc_vmem_2d.at[1]
 
+        t_scale_vmem = (None if a2a_s_scale_x2_vmem is None else
+                        a2a_s_scale_x2_vmem.at[e_sem_id])
+
         e_id = my_id * local_num_experts + local_e_id
         dyn_sz = expert_sizes_x2_smem[bt_sem_id, 0, e_id]
-
-        bd1_per_t_packing = bd1 // t_packing
-        bd2_per_t_packing = bd2 // t_packing
 
         for bf_id in range(num_bf):
             for bd1_id in range(num_bd1):
@@ -1026,6 +1155,7 @@ def _fused_ep_moe_kernel(
                     t_b32_vmem=a2a_s_b32_vmem.at[
                         ...,
                         pl.ds(bd1_id * bd1_per_t_packing, bd1_per_t_packing)],
+                    t_scale_vmem=t_scale_vmem,
                     w1_vmem=b_w1_x2_vmem.at[bw_sem_id],
                     w1_scale_vmem=w1_scale_vmem,
                     b1_vmem=b1_vmem,
@@ -1036,6 +1166,7 @@ def _fused_ep_moe_kernel(
                     acc3_vmem=b_acc3_vmem,
                     dyn_sz=dyn_sz,
                     should_init=(bd1_id == 0),
+                    bd1_id=bd1_id,
                 )
                 bw_sem_id = (bw_sem_id + 1) % 2
 
@@ -1058,7 +1189,7 @@ def _fused_ep_moe_kernel(
                     b2_vmem=b2_vmem,
                     res_b32_vmem=a2a_s_acc_b32_vmem.at[
                         ...,
-                        pl.ds(bd2_id * bd2_per_t_packing, bd2_per_t_packing)],
+                        pl.ds(bd2_id * bd2_per_o_packing, bd2_per_o_packing)],
                     dyn_sz=dyn_sz,
                     should_init=(bf_id == 0),
                 )
@@ -1213,6 +1344,8 @@ def _fused_ep_moe_kernel(
         "top_k",
         "renormalize_topk_logits",
         "act_fn",
+        "t_subc_quant_wsz",
+        "a_subc_quant_wsz",
         "subc_quant_w1_sz",
         "subc_quant_w2_sz",
         "bt",
@@ -1234,10 +1367,16 @@ def fused_ep_moe(
     gating_output: jax.Array,  # (num_tokens, num_experts)
     top_k: int,
     *,
+    out_dtype: jnp.dtype = jnp.bfloat16,
     renormalize_topk_logits: bool = False,
     act_fn: str = "silu",
+    t_subc_quant_wsz: int | None = None,
+    a_subc_quant_wsz: int | None = None,
     subc_quant_w1_sz: int | None = None,
     subc_quant_w2_sz: int | None = None,
+    tokens_scale: (
+        jax.Array | None
+    ) = None,  # F32(num_tokens, align_to(cdiv(hidden_size, t_subc_quant_wsz), 128))
     w1_scale: (
         jax.Array | None
     ) = None,  # F32(num_experts, 2, hidden_size // subc_quant_w1_sz, 1, intermediate_size)
@@ -1309,6 +1448,7 @@ def fused_ep_moe(
     padded_top_k = align_to(top_k, 128)
     t_dtype = tokens.dtype
     t_packing = get_dtype_packing(t_dtype)
+    o_packing = get_dtype_packing(out_dtype)
     assert w1.dtype == w2.dtype
     w_packing = get_dtype_packing(w1.dtype)
 
@@ -1398,6 +1538,31 @@ def fused_ep_moe(
         raise ValueError(
             f"Expected {intermediate_size=} to be aligned to {bf=}.")
 
+    padded_scale_size = None
+    if tokens_scale is not None:
+        if t_subc_quant_wsz is None:
+            raise ValueError(
+                f"Expected {t_subc_quant_wsz=} to be not None when {tokens_scale=} is"
+                " not None.")
+        if a_subc_quant_wsz is not None and a_subc_quant_wsz != bfc:
+            raise ValueError(
+                f"Expected {a_subc_quant_wsz=} to be the same as {bfc=} for"
+                " activation quantization.")
+        scale_size = hidden_size // t_subc_quant_wsz
+        expected_tokens_scale_shape = (num_tokens, scale_size)
+        if tokens_scale.shape != expected_tokens_scale_shape:
+            raise ValueError(f"Expected {tokens_scale.shape=} to be"
+                             f" {expected_tokens_scale_shape}.")
+        padded_scale_size = align_to(scale_size, 128)
+        tokens_scale = jnp.pad(
+            tokens_scale,
+            ((0, 0), (0, padded_scale_size - scale_size)),
+            constant_values=0.0,
+        )
+
+        if tokens_scale.dtype != jnp.float32:
+            tokens_scale = tokens_scale.astype(jnp.float32)
+
     # Note: we should dump scale as the kernel expected shape in the
     # checkpoint offline or reshape right after weight loading.
     if w1_scale is not None:
@@ -1465,6 +1630,9 @@ def fused_ep_moe(
             renormalize_topk_logits=renormalize_topk_logits,
             ep_axis_name=ep_axis_name,
             act_fn=act_fn,
+            out_dtype=out_dtype,
+            t_subc_quant_wsz=t_subc_quant_wsz,
+            a_subc_quant_wsz=a_subc_quant_wsz,
             subc_quant_w1_sz=subc_quant_w1_sz,
             subc_quant_w2_sz=subc_quant_w2_sz,
             bt=bt,
@@ -1477,13 +1645,15 @@ def fused_ep_moe(
             bd2c=bd2c,
         ),
         out_shape=jax.ShapeDtypeStruct((local_num_tokens, hidden_size),
-                                       t_dtype),
+                                       out_dtype),
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=0,
             in_specs=[
                 hbm_block_spec,  # tokens_hbm
                 hbm_block_spec,  # w1_hbm
                 hbm_block_spec,  # w2_hbm
+                None if tokens_scale is None else
+                hbm_block_spec,  # tokens_scale_hbm
                 None if w1_scale is None else hbm_block_spec,  # w1_scale_hbm
                 None if w2_scale is None else hbm_block_spec,  # w2_scale_hbm
                 None if b1 is None else hbm_block_spec,  # b1_hbm
@@ -1515,29 +1685,38 @@ def fused_ep_moe(
                     ),
                     t_dtype,
                 ),
+                # a2a_s_scale_x2_vmem
+                (None if tokens_scale is None else pltpu.VMEM(
+                    (
+                        2,
+                        bt * num_devices,
+                        padded_scale_size,
+                    ),
+                    jnp.float32,
+                )),
                 # a2a_s_acc_x2_vmem
                 pltpu.VMEM(
                     (
                         2,
                         bt * num_devices,
-                        t_packing,
-                        hidden_size // t_packing,
+                        o_packing,
+                        hidden_size // o_packing,
                     ),
-                    t_dtype,
+                    out_dtype,
                 ),
                 # a2a_g_acc_vmem
-                pltpu.VMEM((top_k, bt, t_packing, hidden_size // t_packing),
-                           t_dtype),
+                pltpu.VMEM((top_k, bt, o_packing, hidden_size // o_packing),
+                           out_dtype),
                 # b_gating_x2_vmem
-                pltpu.VMEM((2, bt, padded_num_experts), t_dtype),
+                pltpu.VMEM((2, bt, padded_num_experts), gating_output.dtype),
                 # b_output_x2_vmem
-                pltpu.VMEM((2, bt, hidden_size), t_dtype),
+                pltpu.VMEM((2, bt, hidden_size), out_dtype),
                 # b_w1_x2_vmem
                 pltpu.VMEM((2, t_packing, bd1 // t_packing, bf), w1.dtype),
                 # b_w3_x2_vmem
                 pltpu.VMEM((2, t_packing, bd1 // t_packing, bf), w1.dtype),
                 # b_w2_x2_vmem
-                pltpu.VMEM((2, t_packing, bf, bd2 // t_packing), w2.dtype),
+                pltpu.VMEM((2, o_packing, bf, bd2 // o_packing), w2.dtype),
                 # b_w1_scale_x2_vmem
                 (None if w1_scale is None else pltpu.VMEM(
                     (
@@ -1564,10 +1743,10 @@ def fused_ep_moe(
                 (None if w2_scale is None else pltpu.VMEM(
                     (
                         2,
-                        t_packing,
+                        o_packing,
                         cdiv(bf, subc_quant_w2_sz),
                         1,
-                        bd2 // t_packing,
+                        bd2 // o_packing,
                     ),
                     jnp.float32,
                 )),
@@ -1627,6 +1806,8 @@ def fused_ep_moe(
             P(ep_axis_name),  # tokens_hbm
             P(ep_axis_name),  # w1_hbm
             P(ep_axis_name),  # w2_hbm
+            None
+            if tokens_scale is None else P(ep_axis_name),  # tokens_scale_hbm
             None if w1_scale is None else P(ep_axis_name),  # w1_scale_hbm
             None if w2_scale is None else P(ep_axis_name),  # w2_scale_hbm
             None if b1 is None else P(ep_axis_name),  # b1_hbm
@@ -1641,6 +1822,7 @@ def fused_ep_moe(
         tokens,
         w1,
         w2,
+        tokens_scale,
         w1_scale,
         w2_scale,
         b1,
@@ -1653,6 +1835,9 @@ def fused_ep_moe(
                                                pltpu.HBM),  # tokens_hbm
             pltpu.with_memory_space_constraint(w1, pltpu.HBM),  # w1_hbm
             pltpu.with_memory_space_constraint(w2, pltpu.HBM),  # w2_hbm
+            (None
+             if tokens_scale is None else pltpu.with_memory_space_constraint(
+                 tokens_scale, pltpu.HBM)),  # tokens_scale_hbm
             (None if w1_scale is None else pltpu.with_memory_space_constraint(
                 w1_scale, pltpu.HBM)),  # w1_scale_hbm
             (None if w2_scale is None else pltpu.with_memory_space_constraint(
@@ -1668,11 +1853,12 @@ def fused_ep_moe(
         )
 
     a2a_g_hbm_scratch = pl.empty(
-        (num_experts, bt, t_packing, hidden_size // t_packing), t_dtype)
+        (num_experts, bt, o_packing, hidden_size // o_packing), out_dtype)
     return kernel(
         tokens,
         w1,
         w2,
+        tokens_scale,
         w1_scale,
         w2_scale,
         b1,
