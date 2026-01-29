@@ -92,7 +92,7 @@ class MultiModalManager:
             return
 
         # Batch the multi-modal inputs.
-        mm_kwargs = list[tuple[str, MultiModalKwargsItem]]()
+        mm_kwargs = list[MultiModalKwargsItem]()
         # List of tuple (mm_hash, pos_info)
         mm_hashes_pos = list[tuple[str, PlaceholderRange]]()
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
@@ -100,7 +100,7 @@ class MultiModalManager:
             for mm_input_id in encoder_input_ids:
                 mm_feature = req_state.mm_features[mm_input_id]
                 mm_hash = mm_feature.identifier
-                mm_kwargs.append((mm_feature.modality, mm_feature.data))
+                mm_kwargs.append(mm_feature.data)
                 mm_hashes_pos.append((mm_hash, mm_feature.mm_position))
 
         # Batch mm inputs as much as we can: if a request in the batch has
@@ -164,6 +164,8 @@ class MultiModalManager:
                 mm_hashes_pos,
                 encoder_outputs,
         ):
+            if req_id not in self.runner.encoder_cache:
+                self.runner.encoder_cache[req_id] = {}
 
             self.runner.encoder_cache[mm_hash] = scatter_mm_placeholders(
                 output,
