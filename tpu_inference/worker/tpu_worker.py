@@ -85,7 +85,7 @@ class TPUWorker:
         # Explicitly trigger RunAI download on the worker if needed.
         # This handles downloading config.json and other non-weight files to the
         # worker's local cache before VllmModelWrapper initialization.
-        if hasattr(self.model_config, "maybe_pull_model_tokenizer_for_runai"):
+        if self.model_config.maybe_pull_model_tokenizer_for_runai:
             self.model_config.maybe_pull_model_tokenizer_for_runai(
                 self.model_config.model, self.model_config.tokenizer)
 
