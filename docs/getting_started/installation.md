@@ -57,6 +57,7 @@ For debugging or development purposes, you can install `tpu-inference` from sour
 1. Install system dependencies:
 
     ```shell
+    sudo apt install python3.12-venv
     sudo apt-get update && sudo apt-get install -y libopenblas-base libopenmpi-dev libomp-dev
     ```
 
