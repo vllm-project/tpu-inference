@@ -370,6 +370,8 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
                     assert len(self.pp_tp_workers[pp_rank]) == tp_rank
                     assert pp_rank < len(self.pp_tp_workers)
                     self.pp_tp_workers[pp_rank].append(self.workers[rank])
+                    
+        print(f'{self.pp_tp_workers=}')
 
     # Ray executor do not need handshake metadata
     # as we pass the kv_parameters through proxy server

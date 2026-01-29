@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gc
+
 import jax
 import torch
 import torchax
@@ -28,13 +30,22 @@ from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA)
 from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
+from vllm.model_executor.layers.fused_moe.layer import (
+    FusedMoE, UnquantizedFusedMoEMethod)
+from vllm.model_executor.layers.linear import (LinearBase, QKVParallelLinear,
+                                               UnquantizedLinearMethod)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 
 from tpu_inference import envs
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.vllm.process_weights.fused_moe_weights import (
+    FusedMoEWeights, process_moe_weights, shard_moe_weights)
+from tpu_inference.layers.vllm.process_weights.linear_weights import (
+    LinearWeights, process_linear_weights, shard_linear_weights,
+    to_parameter_list)
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import to_jax_dtype
+from tpu_inference.utils import get_mesh_shape_product, to_jax_dtype
 
 P = PartitionSpec
 
@@ -239,61 +250,255 @@ def _sharded_device_put(tensor: jax.Array, sharding) -> jax.Array:
                                                     dtype=tensor.dtype)
 
 
+# def has_all_weights_loaded(layer: torch.nn.Module) -> bool:
+#     for param_name, param in layer.named_parameters(recurse=False):
+#         print(f'{param_name} _is_loaded: {getattr(param, "_is_loaded", False)}')
+#         if not getattr(param, "_is_loaded", False):
+#             return False
+#     return True
+
+import os
+
+import psutil
+
+
+def print_ram_usage(prefix=""):
+    process = psutil.Process(os.getpid())
+    # RSS (Resident Set Size) is the non-swapped physical memory a process has used.
+    rss_gb = process.memory_info().rss / (1024**3)
+    print(f"{prefix}Current RAM Usage: {rss_gb:.2f} GB")
+
+
+def print_tensor_size(tensor, name="Tensor"):
+    if tensor is None:
+        print(f"{name} is None")
+        return
+    if hasattr(tensor, "nbytes"):
+        size_gb = tensor.nbytes / (1024**3)
+    elif hasattr(tensor, "element_size") and hasattr(tensor, "nelement"):
+        size_gb = tensor.element_size() * tensor.nelement() / (1024**3)
+    else:
+        size_gb = 0.0
+    print(f"{name} Size: {size_gb:.4f} GB")
+
+
+def maybe_process_unquantized_linear_weight(layer: torch.nn.Module,
+                                            layer_name: str):
+    print('Processing linear weight for layer:', layer_name)
+    weight = t2j(layer.weight, use_dlpack=False)
+    print_tensor_size(layer.weight, "weight")
+    delattr(layer, 'weight')
+    if layer.bias is not None and not layer.skip_bias_add:
+        if layer.return_bias:
+            logger.warning_once("Bias might return incorrect value.")
+        bias = t2j(layer.bias, use_dlpack=False)
+        delattr(layer, 'bias')
+    else:
+        bias = None
+
+    linear_config = layer.quant_method.linear_config
+
+    @jax.jit
+    def process_unquantized_linear_weights(
+        weight: jax.Array,
+        bias: jax.Array | None,
+    ) -> LinearWeights:
+        return process_linear_weights(
+            LinearWeights(
+                weight=weight,
+                weight_scale=None,
+                zero_point=None,
+                bias=bias,
+            ),
+            fused=linear_config.fuse_matmuls,
+            output_sizes=linear_config.output_sizes,
+            reorder_size=linear_config.n_shards,
+        )
+
+    print(f'{weight.device=}')
+    weights = process_unquantized_linear_weights(weight, bias)
+    print(f'{weights.weight.device=}')
+    weights_sharded = shard_linear_weights(
+        weights,
+        mesh=linear_config.mesh,
+        weight_p_spec=linear_config.weight_sharding,
+        bias_p_spec=linear_config.bias_sharding,
+    )
+    print(f'{weights_sharded.weight.device=}')
+    weights = torch_view(weights_sharded)
+    print(f'{weights.weight.device=}')
+
+    if linear_config.fuse_matmuls:
+        layer.weight = Parameter(weights.weight, requires_grad=False)
+        if bias is not None:
+            layer.bias = Parameter(weights.bias, requires_grad=False)
+    else:
+        layer.weight = to_parameter_list(weights.weight)
+        if bias is not None:
+            layer.bias = to_parameter_list(weights.bias)
+
+    del weights_sharded
+    del weights
+    gc.collect()
+
+
+def maybe_process_unquantized_moe_weight(layer: torch.nn.Module,
+                                         layer_name: str, param_name: str):
+    # pass
+    print('Processing moe weight for layer:', layer_name)
+    # time.sleep(5)
+    # print_ram_usage("sleep done: ")
+    # time.sleep(5)
+    # print_ram_usage("sleep done: ")
+    print_tensor_size(layer.w13_weight, "w13_weight")
+    print_tensor_size(layer.w2_weight, "w2_weight")
+    w13_weight = t2j(layer.w13_weight, use_dlpack=False)
+    w2_weight = t2j(layer.w2_weight, use_dlpack=False)
+    print_ram_usage("After moving weights to jax: ")
+    # time.sleep(5)
+    # print_ram_usage("sleep done: ")
+    # time.sleep(5)
+    # print_ram_usage("sleep done: ")
+    delattr(layer, 'w13_weight')
+    delattr(layer, 'w2_weight')
+    print_ram_usage("After deleting original weights: ")
+    # time.sleep(5)
+    # print_ram_usage("sleep done: ")
+    # time.sleep(5)
+    # print_ram_usage("sleep done: ")
+
+    quant_method = layer.quant_method
+
+    if quant_method.moe.has_bias:
+        w13_bias = t2j(layer.w13_bias, use_dlpack=False)
+        w2_bias = t2j(layer.w2_bias, use_dlpack=False)
+    else:
+        w13_bias = w2_bias = None
+
+    @jax.jit
+    def process_unquantized_moe_weights(
+        w13_weight: jax.Array,
+        w13_bias: jax.Array | None,
+        w2_weight: jax.Array,
+        w2_bias: jax.Array | None,
+    ) -> FusedMoEWeights:
+
+        w13_interleave = layer.activation == "swigluoai"
+        w13_reorder_size = get_mesh_shape_product(quant_method.mesh,
+                                                  ShardingAxisName.MLP_TENSOR)
+
+        return process_moe_weights(
+            FusedMoEWeights(
+                w13_weight=w13_weight,
+                w13_weight_scale=None,
+                w13_bias=w13_bias,
+                w2_weight=w2_weight,
+                w2_weight_scale=None,
+                w2_bias=w2_bias,
+            ),
+            moe_backend=quant_method.moe_backend,
+            w13_reorder_size=w13_reorder_size,
+            w13_interleave=w13_interleave,
+        )
+
+    print(f'{w13_weight.device=}')
+    weights = process_unquantized_moe_weights(
+        w13_weight,
+        w13_bias,
+        w2_weight,
+        w2_bias,
+    )
+    print_ram_usage("After processing moe weights: ")
+    # time.sleep(5)
+    # print_ram_usage("sleep done: ")
+    # time.sleep(5)
+    # print_ram_usage("sleep done: ")
+    print(f'{weights.w13_weight.device=}')
+    print(f'{quant_method.mesh=}')
+    weights_sharded = shard_moe_weights(weights, quant_method.moe_backend,
+                                        quant_method.mesh)
+    print(f'{weights_sharded.w13_weight.device.addressable_devices=}')
+    weights = torch_view(weights_sharded)
+    print_ram_usage("After sharding moe weights: ")
+    # time.sleep(5)
+    # print_ram_usage("sleep done: ")
+    print(f'{weights.w13_weight.device=}')
+    # del layer.w13_weight
+    # del layer.w2_weight
+    layer.w13_weight = Parameter(weights.w13_weight, requires_grad=False)
+    layer.w2_weight = Parameter(weights.w2_weight, requires_grad=False)
+    del w13_weight
+    del w2_weight
+    del w13_bias
+    del w2_bias
+    # del weights_sharded
+    del weights
+    gc.collect()
+
+    if quant_method.moe.has_bias:
+        layer.w13_bias = Parameter(weights.w13_bias, requires_grad=False)
+        layer.w2_bias = Parameter(weights.w2_bias, requires_grad=False)
+
+
 def prepare_incremental_loading(model: torch.nn.Module, mesh: Mesh) -> None:
     """
     Traverses the model and attaches a generic weight_loader to any parameter
     that doesn't already have one (i.e. wasn't handled by unquantized.py).
     """
 
-    # Helper to create a generic loader for a specific sharding spec
-    def create_generic_loader(layer, param_name, sharding_spec):
-        def generic_loader(param: torch.nn.Parameter, loaded_weight: torch.Tensor):
+    def create_weight_loader(layer, original_loader, layer_name, param_name):
 
-            # Check if we are loading the correct parameter
-            # We need to find if 'param' corresponds to 'param_name' in 'layer'
-            # (In this simple closure we assume 1:1 mapping created below)
-            
-            # Immediately shard
-            sharded_tensor = _convert_to_torchax_and_shard(
-                loaded_weight, 
-                NamedSharding(mesh, sharding_spec)
+        def weight_loader_wrapper(param: torch.nn.Parameter,
+                                  loaded_weight: torch.Tensor, *args,
+                                  **kwargs):
+            # Weight loading
+            original_loader(param, loaded_weight, *args, **kwargs)
+            print(
+                f'Loaded weight for param {layer_name} {param_name} with {args} {kwargs}'
             )
-            param.data = sharded_tensor
-            
-        return generic_loader
+            # Sharding
+            # For now, only handle unquantized linear and moe layers.
+            if isinstance(layer, LinearBase) and isinstance(
+                    layer.quant_method, UnquantizedLinearMethod):
+                if isinstance(layer, QKVParallelLinear):
+                    assert len(
+                        args) == 1, "Expecting shard_id as the only argument"
+                    shard_id = args[0]
+                    layer._loaded_shards.add(shard_id)
+                    if len(layer._loaded_shards) == 3:
+                        print_ram_usage("Before processing linear weight: ")
+                        maybe_process_unquantized_linear_weight(
+                            layer, layer_name)
+                        print_ram_usage("After processing linear weight: ")
+                else:
+                    maybe_process_unquantized_linear_weight(layer, layer_name)
+            if isinstance(layer, FusedMoE) and isinstance(
+                    layer.quant_method, UnquantizedFusedMoEMethod):
+                expert_id = kwargs.get('expert_id')
+                shard_id = kwargs.get('shard_id')
+                assert expert_id is not None, "Expecting expert_id argument"
+                assert shard_id is not None, "Expecting shard_id argument"
+                layer._loaded_expert_shards.add((expert_id, shard_id))
+
+                if len(layer._loaded_expert_shards
+                       ) == layer.global_num_experts * 3:
+                    print_ram_usage("Before processing moe weight: ")
+                    maybe_process_unquantized_moe_weight(
+                        layer, layer_name, param_name)
+                    print_ram_usage("After processing moe weight: ")
+
+        return weight_loader_wrapper
 
     for name, module in model.named_modules():
-        # Determine sharding strategy for this module
-        # This logic mirrors MODULE_TYPE_TO_SHARDING_FUNC but returns specs instead of applying them
-        
-        # We iterate parameters of the module
+        if isinstance(module, FusedMoE):
+            module._loaded_expert_shards = set()
+        if isinstance(module, QKVParallelLinear):
+            module._loaded_shards = set()
         for param_name, param in module.named_parameters(recurse=False):
-            print(f"Processing {name}.{param_name}")
-            if hasattr(param, "weight_loader"):
-                print(f"  Found weight_loader for {name}.{param_name}")
+            original_loader = getattr(param, "weight_loader", None)
+            if original_loader is None:
                 continue
-            print(f"  No weight_loader found for {name}.{param_name}")
-            # Default to Replicated
-            sharding_spec = P() 
-
-            if isinstance(module, VocabParallelEmbedding) and param_name == "weight":
-                 sharding_spec = P(ShardingAxisName.MLP_TENSOR, None)
-            elif isinstance(module, ParallelLMHead) and param_name == "weight":
-                 sharding_spec = P(ShardingAxisName.MLP_TENSOR, None)
-            elif isinstance(module, ParallelLMHead) and param_name == "bias":
-                 sharding_spec = P(ShardingAxisName.MLP_TENSOR)
-
-            # TODO: Add LoRA handling here if needed, or ensure they are handled elsewhere.
-            # For now, most other layers like Norms are small and safe to replicate.
-
-            # We need to register the parameter on meta device if it's not already
-            # (Though vLLM might have already initialized it on CPU/Meta)
-            # If it is on CPU with valid data, we should shard it NOW.
-            if param.device.type != "meta" and not isinstance(param, torchax.tensor.Tensor):
-                # If it has data, shard it immediately (this handles small params init by vLLM directly)
-                # But wait, vllm_get_model might force device="cpu". 
-                # If we init on meta, param.data is empty.
-                pass
-            
-            # Attach loader
-            setattr(param, "weight_loader", create_generic_loader(module, param_name, sharding_spec))
+            setattr(
+                param, "weight_loader",
+                create_weight_loader(module, original_loader, name,
+                                     param_name))
