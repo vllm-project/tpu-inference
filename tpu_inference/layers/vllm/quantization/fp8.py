@@ -106,6 +106,14 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
     ):
         super().__init__(quant_config)
         self.linear_config = linear_config
+        if self.linear_config.enable_quantized_matmul_kernel and not self.linear_config.requant_block_size:
+            raise ValueError(
+                "You should set REQUANTIZE_BLOCK_SIZE to enable quantized matmul kernel. Please set the value or disable the quantized matmul kernel."
+            )
+        if not self.linear_config.enable_quantized_matmul_kernel and self.linear_config.requant_block_size:
+            raise ValueError(
+                "Blockwise quantization is supported by quantized matmul kernel. Please enable quantized_matmul_kernel or unset the quantize block size to trigger XLA per-channel quantization."
+            )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         assert isinstance(layer, vllm_linear.LinearBase)
@@ -143,14 +151,14 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
                 weight_scale_slice = weight_scale[start //
                                                   original_block_size:end //
                                                   original_block_size]
-                dequantzed_weight = dequantize_tensor(
+                dequantized_weight = dequantize_tensor(
                     weight_slice,
                     weight_scale_slice,
                     (0, 1),
                 )
                 weight_slice, weight_scale_slice = quantize_tensor(
                     self.linear_config.requant_weight_dtype,
-                    dequantzed_weight,
+                    dequantized_weight,
                     block_size=requant_block_size)
 
                 weights.append(weight_slice)
@@ -174,29 +182,18 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
             )
 
         weights = process_fp8_linear_weights(weight, weight_scale, bias)
-        weight_sharding = self.linear_config.weight_sharding
-        bias_sharding = self.linear_config.bias_sharding
-        weight_scale_sharding = None
-        if self.linear_config.requant_block_size is not None and self.linear_config.enable_quantized_matmul_kernel:
+        if self.linear_config.enable_quantized_matmul_kernel:
             # The quantized_matmul_kernel expects weight scales shaped (n_out_features, 1, n_blocks) for blockwisze quantization.
-            weights.weight_scale = jnp.expand_dims(jnp.transpose(
-                weights.weight_scale),
-                                                   axis=1)
-            # Weight scale should be resharded accordingly as well.
-            if len(weight_sharding) == 2:
-                weight_scale_sharding = P(weight_sharding[1], None,
-                                          weight_sharding[0])
-            else:
-                raise ValueError(
-                    F"The weight sharding shape length should be 2, but given {len(weight_sharding)}."
-                )
+            weights.weight_scale = jnp.expand_dims(
+                jnp.transpose(weights.weight_scale),
+                axis=1,
+            )
         weights = torch_view(
             shard_linear_weights(
                 weights,
                 mesh=self.linear_config.mesh,
-                weight_p_spec=weight_sharding,
-                bias_p_spec=bias_sharding,
-                weight_scale_p_spec=weight_scale_sharding,
+                weight_p_spec=self.linear_config.weight_sharding,
+                bias_p_spec=self.linear_config.bias_sharding,
             ))
 
         if self.linear_config.fuse_matmuls:

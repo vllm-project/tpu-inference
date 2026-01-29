@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import jax.numpy as jnp
 import torchax
 from jax.sharding import Mesh, PartitionSpec
 from vllm.config import VllmConfig
@@ -31,7 +30,8 @@ from tpu_inference.layers.common.process_weights.linear_weights import \
     get_model_matmul_fusion_assignment
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.utils import TPU_SECOND_LAST_MINOR, get_mesh_shape_product
+from tpu_inference.utils import (TPU_SECOND_LAST_MINOR, get_mesh_shape_product,
+                                 to_jax_dtype)
 
 # yapf: enable
 
@@ -86,7 +86,7 @@ class VllmQuantLinearConfig(QuantLinearConfig):
                                                self.weight_sharding[0])
         self.enable_quantized_matmul_kernel = envs.ENABLE_QUANTIZED_MATMUL_KERNEL
         self.requant_block_size = envs.REQUANTIZE_BLOCK_SIZE
-        self.requant_weight_dtype = getattr(jnp, envs.REQUANTIZE_WEIGHT_DTYPE)
+        self.requant_weight_dtype = to_jax_dtype(envs.REQUANTIZE_WEIGHT_DTYPE)
 
     def get_input_sharding(self, x: torchax.tensor.Tensor):
         if not self.enable_sp:

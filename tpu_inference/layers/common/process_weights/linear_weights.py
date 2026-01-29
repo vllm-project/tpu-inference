@@ -145,7 +145,6 @@ def shard_linear_weights(
     mesh: Mesh,
     weight_p_spec: PartitionSpec,
     bias_p_spec: PartitionSpec,
-    weight_scale_p_spec: PartitionSpec | None = None,
     transposed: bool = True,
     per_tensor: bool = False,
 ) -> LinearWeights:
@@ -158,7 +157,16 @@ def shard_linear_weights(
 
     weight_sharding = NamedSharding(mesh, weight_p_spec)
     bias_sharding = NamedSharding(mesh, bias_p_spec)
-    if weight_scale_p_spec:
+    if len(weights.weight_scale.shape) == 3:
+        num_blocks = weights.weight_scale.shape[0]
+        if len(weight_p_spec) != 2:
+            raise ValueError(
+                F"The weight sharding shape length should be 2, but given {len(weight_p_spec)}."
+            )
+        # Cannot be sharded on the first dimension in case the number of blocks is 1.
+        in_axis = weight_p_spec[1] if num_blocks > 1 else None
+        out_axis = weight_p_spec[0]
+        weight_scale_p_spec = P(in_axis, None, out_axis)
         weight_scale_sharding = NamedSharding(mesh, weight_scale_p_spec)
     else:
         weight_scale_sharding = NamedSharding(
