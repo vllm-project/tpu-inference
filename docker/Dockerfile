@@ -31,8 +31,10 @@ RUN apt-get update && apt-get install -y \
     libomp-dev \
     procps \
     curl \
+    netcat-openbsd \
     rclone \
     wget \
+    bc \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
