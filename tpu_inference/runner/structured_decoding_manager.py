@@ -74,8 +74,6 @@ class StructuredDecodingManager:
         self.runner.grammar_bitmask_cpu.fill(0)
         self.runner.require_structured_out_cpu.fill(0)
 
-        # Preserve scheduler order because grammar_bitmask is aligned to
-        # structured_output_request_ids as emitted by the scheduler.
         cumulative_mask_idx = 0
         for req_id in grammar_output.structured_output_request_ids:
             if req_id in self.runner.input_batch.req_id_to_index:
