@@ -64,8 +64,6 @@ def fused_moe_apply(
     extra_backend_kwargs: dict,
 ) -> jax.Array:
     assert isinstance(layer, FusedMoE)
-    if layer.scoring_func != "softmax":
-        raise NotImplementedError("Only softmax is supported for scoring_func")
 
     with jax.named_scope(layer._get_name()):
         match moe_backend:
@@ -98,6 +96,7 @@ def fused_moe_apply(
                     top_k=layer.top_k,
                     renormalize_topk_logits=layer.renormalize,
                     act_fn=layer.activation,
+                    scoring_fn=layer.scoring_func,
                     subc_quant_w1_sz=subc_quant_w1_sz,
                     subc_quant_w2_sz=subc_quant_w2_sz,
                     w1_scale=weights.w13_weight_scale,
@@ -121,6 +120,7 @@ def fused_moe_apply(
                     mesh=mesh,
                     use_ep=layer.use_ep,
                     activation=layer.activation,
+                    scoring_fn=layer.scoring_func,
                 )
 
         return output
