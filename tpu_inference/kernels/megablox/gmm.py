@@ -15,6 +15,7 @@
 
 import functools
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import jax
@@ -100,7 +101,12 @@ def _calculate_irregular_num_tiles(x: int, tx: int) -> tuple[int, int]:
     return tiles, rem
 
 
-GroupMetadata = Any  # TODO(enriqueps): Clean this up and use a namedtuple
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class GroupMetadata:
+    group_offsets: jnp.ndarray
+    group_ids: jnp.ndarray
+    m_tile_ids: jnp.ndarray
 
 
 def make_group_metadata(
@@ -111,7 +117,7 @@ def make_group_metadata(
     start_group: jnp.ndarray,
     num_nonzero_groups: int,
     visit_empty_groups: bool = True,
-) -> GroupMetadata:
+) -> tuple[GroupMetadata, jnp.ndarray]:
     """Create the metadata needed for grouped matmul computation.
 
   Args:
@@ -275,7 +281,7 @@ def make_group_metadata(
     active_group_mask = jnp.logical_and(iota <= end_group, iota >= start_group)
     group_tiles = jnp.where(active_group_mask, group_tiles, 0)
     num_tiles = group_tiles.sum()
-    return (group_offsets, group_ids, m_tile_ids), num_tiles
+    return GroupMetadata(group_offsets, group_ids, m_tile_ids), num_tiles
 
 
 def _get_store_mask(
@@ -286,11 +292,10 @@ def _get_store_mask(
     tn: int,
 ) -> jnp.ndarray:
     """Mask for rows that belong to the current group in the current tile."""
-    group_offsets, group_ids, m_tile_ids = group_metadata[:3]
-    group_id = group_ids[grid_id]
-    group_start = group_offsets[group_id]
-    group_end = group_offsets[group_id + 1]
-    m_id = m_tile_ids[grid_id] * tm
+    group_id = group_metadata.group_ids[grid_id]
+    group_start = group_metadata.group_offsets[group_id]
+    group_end = group_metadata.group_offsets[group_id + 1]
+    m_id = group_metadata.m_tile_ids[grid_id] * tm
     iota = jax.lax.broadcasted_iota(jnp.int32, (tm, tn), 0) + m_id
     return jnp.logical_and(iota >= group_start, iota < group_end)
 
@@ -303,9 +308,8 @@ def _zero_uninitialized_memory(
     group_metadata: GroupMetadata,
 ) -> jnp.ndarray:
     """Zero out uninitialized memory from output."""
-    group_offsets = group_metadata[0]
-    group_start = group_offsets[start_group]
-    group_end = group_offsets[start_group + num_nonzero_groups]
+    group_start = group_metadata.group_offsets[start_group]
+    group_end = group_metadata.group_offsets[start_group + num_nonzero_groups]
     valid_mask = jax.lax.broadcasted_iota(jnp.int32, (out.shape[0], ), 0)
     valid_mask = (valid_mask >= group_start) & (valid_mask < group_end)
     return jnp.where(valid_mask[:, None], out, 0)
@@ -338,7 +342,7 @@ def gmm(
 
   Args:
     lhs: A 2d, jnp.ndarray with shape [m, k].
-    rhs: A 3d, jnp.ndarray with shape [num_groups, n, k].
+    rhs: A 3d, jnp.ndarray with shape [num_groups, k, n].
     group_sizes: A 1d, jnp.ndarray with shape [num_groups] and jnp.int32 dtype.
     preferred_element_type: jnp.dtype, the element type for the output matrix.
     rhs_scale: A 4d, jnp.ndarray with shape [num_groups, num_blocks, 1, n].
@@ -430,8 +434,8 @@ def gmm(
         out,
         acc_scratch,
     ):
-        group_offsets, group_ids, m_tile_ids = group_metadata
-        del group_offsets, group_ids, group_offset
+        m_tile_ids = group_metadata.m_tile_ids
+        del group_offset
 
         grid_id = pl.program_id(1)
         b_i = pl.program_id(2)
@@ -520,16 +524,15 @@ def gmm(
     def lhs_transform_indices(n_i, grid_id, b_i, k_i, group_metadata,
                               group_offset):
         # lhs is (m, k). Load the [tm, tk] matrix for this m-tile.
-        group_offsets, group_ids, m_tile_ids = group_metadata
-        del n_i, group_offsets, group_ids, group_offset
+        m_tile_ids = group_metadata.m_tile_ids
+        del n_i, group_offset
         return m_tile_ids[grid_id], b_i * tiles_k + k_i
 
     def rhs_transform_indices(n_i, grid_id, b_i, k_i, group_metadata,
                               group_offset):
         # rhs is (num_groups, k, n). Load the [tk, tn] matrix based on the group id
         # for this m-tile.
-        group_offsets, group_ids, m_tile_ids = group_metadata
-        del group_offsets, m_tile_ids
+        group_ids = group_metadata.group_ids
 
         # NOTE: If we're working on only a shard of the rhs we need to adjust the
         # group index we load from to account for this. The group_ids are in the
@@ -538,21 +541,21 @@ def gmm(
 
     def rhs_scale_transform_indices(n_i, grid_id, b_i, k_i, group_metadata,
                                     group_offset):
-        group_offsets, group_ids, m_tile_ids = group_metadata
-        del group_offsets, m_tile_ids, k_i
+        group_ids = group_metadata.group_ids
+        del k_i
         return group_ids[grid_id] - group_offset[0], b_i, 0, n_i
 
     def rhs_bias_transform_indices(n_i, grid_id, b_i, k_i, group_metadata,
                                    group_offset):
-        group_offsets, group_ids, m_tile_ids = group_metadata
-        del group_offsets, m_tile_ids, k_i, b_i
+        group_ids = group_metadata.group_ids
+        del k_i, b_i
         return group_ids[grid_id] - group_offset[0], 0, n_i
 
     def out_transform_indices(n_i, grid_id, b_i, k_i, group_metadata,
                               group_offset):
         # out is (m, n). Load the [tm, tn] matrix for this m-tile.
-        group_offsets, group_ids, m_tile_ids = group_metadata
-        del k_i, group_offsets, group_ids, group_offset, b_i
+        m_tile_ids = group_metadata.m_tile_ids
+        del k_i, group_offset, b_i
         return m_tile_ids[grid_id], n_i
 
     out_block_spec = pl.BlockSpec((tm, tn), out_transform_indices)
@@ -585,7 +588,7 @@ def gmm(
     if rhs_bias is not None:
         rhs_bytes += n * rhs_bias.itemsize
     out_bytes = (m * n) * jnp.dtype(preferred_element_type).itemsize
-    max_active_tiles = group_metadata[1].size
+    max_active_tiles = group_metadata.group_ids.size
     bytes_accessed = ((lhs_bytes * tiles_n) + (rhs_bytes * max_active_tiles) +
                       out_bytes)
     flops = 2 * m * k * n
