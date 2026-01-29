@@ -21,7 +21,7 @@ import re
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 import jax
 import jax.numpy as jnp
@@ -31,7 +31,9 @@ from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from safetensors import safe_open
+from torchax.ops.mappings import t2j
 from vllm.config import VllmConfig
+from vllm.model_executor.models.utils import AutoWeightsLoader
 
 from tpu_inference import envs, utils
 from tpu_inference.logger import init_logger
@@ -206,9 +208,14 @@ def get_param_and_sharding(params: nnx.State, shardings: Any,
     return plevel, slevel.value
 
 
-def shard_put(x: jax.Array, shardings, mesh: jax.sharding.Mesh) -> jax.Array:
+def shard_put(x: jax.Array, shardings,
+              mesh: jax.sharding.Mesh | None) -> jax.Array:
     # Single device sharding requires this special handling
     # to avoid the recursive jit error.
+    if mesh is None:
+        return jax.device_put(x, shardings) if isinstance(shardings, P) \
+            else jax.device_put(x, P(*shardings))
+
     if math.prod(mesh.axis_sizes) == 1:
         return jax.device_put(x, mesh.devices.flatten()[0])
 
@@ -703,3 +710,48 @@ class StandardWeightLoader(BaseWeightLoader):
             mesh=self.mesh,
             pp_missing_layers=getattr(model, 'pp_missing_layers', []),
             keep_hf_weight_suffix_when_match=keep_hf_weight_suffix_when_match)
+
+
+def load_nnx_param_from_torch(jax_param: nnx.Param,
+                              torch_weight: torch.Tensor):
+    """Load a nnx.Param from a torch.Tensor."""
+    spec = jax_param.sharding.spec if isinstance(
+        jax_param.sharding, NamedSharding) else jax_param.sharding
+    mesh = jax_param.mesh if hasattr(jax_param, 'mesh') else None
+
+    jax_param.value = shard_put(
+        t2j(torch_weight, use_dlpack=False).astype(jax_param.value.dtype),
+        spec, mesh)
+
+
+def load_nnx_param_from_reshaped_torch(jax_param: nnx.Param,
+                                       torch_weight: torch.Tensor):
+    """Load a nnx.Param from a reshaped and transposed torch.Tensor.
+    
+    HuggingFace model almost always store linear layer weights with contracting dimension
+    last, and only support 2D weight tensors. This function reshapes and transposes
+    the torch weight to match the jax_param shape before loading.
+    """
+    torch_weight = torch_weight.t()
+    torch_weight = torch_weight.reshape(jax_param.value.shape)
+    return load_nnx_param_from_torch(jax_param, torch_weight)
+
+
+class JaxAutoWeightsLoader(AutoWeightsLoader):
+    """A weights loader for JAX models."""
+
+    def __init__(self, model, **kwargs):
+        super().__init__(model, **kwargs)
+
+
+class LoadableWithIterator:
+    """Mixin for models that support loading weights with an iterator."""
+
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        if not isinstance(weights, Iterable):
+            # Use next parent class in MRO.
+            return super().load_weights(weights)
+
+        loader = JaxAutoWeightsLoader(self)
+        return loader.load_weights(weights)
