@@ -525,7 +525,7 @@ class TestQwen2_5_VLForConditionalGeneration:
                                        model.config.vocab_size)
         mock_text_embeds = jnp.ones((1, 10, model.config.hidden_size))
         model.model = MagicMock()
-        model.model.embed = MagicMock(return_value=mock_text_embeds)
+        model.model.embed_tokens = MagicMock(return_value=mock_text_embeds)
 
         embeds = model.embed_input_ids(input_ids, None)
         np.testing.assert_array_equal(embeds, mock_text_embeds)
