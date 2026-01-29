@@ -151,6 +151,10 @@ class VllmFp8LinearMethod(Fp8LinearMethod):
                     weight_scale_slice,
                     (0, 1),
                 )
+                if requant_block_size and not self.linear_config.enable_quantized_matmul_kernel:
+                    raise ValueError(
+                        "Blockwise quantization is supported by quantized matmul kernel. Please enable quantized_matmul_kernel or unset the quantize block size to trigger XLA per-channel quantization."
+                    )
                 weight_slice, weight_scale_slice = quantize_tensor(
                     self.linear_config.requant_weight_dtype,
                     dequantzed_weight,
@@ -180,15 +184,22 @@ class VllmFp8LinearMethod(Fp8LinearMethod):
         weight_sharding = self.linear_config.weight_sharding
         bias_sharding = self.linear_config.bias_sharding
         weight_scale_sharding = None
-        if self.linear_config.requant_block_size is not None and self.linear_config.enable_quantized_matmul_kernel:
+        if self.linear_config.enable_quantized_matmul_kernel:
+            if self.linear_config.requant_block_size is None:
+                raise ValueError(
+                    "You should set REQUANTIZE_BLOCK_SIZE to enable quantized matmul kernel. Please set the value or disable the quantized matmul kernel."
+                )
             # The quantized_matmul_kernel expects weight scales shaped (n_out_features, 1, n_blocks) for blockwisze quantization.
             weights.weight_scale = jnp.expand_dims(jnp.transpose(
                 weights.weight_scale),
                                                    axis=1)
+            num_blocks = weights.weight_scale.shape[0]
             # Weight scale should be resharded accordingly as well.
             if len(weight_sharding) == 2:
-                weight_scale_sharding = P(weight_sharding[1], None,
-                                          weight_sharding[0])
+                # Cannot be sharded on the first dimension in case the number of blocks is 1.
+                in_axis = weight_sharding[1] if num_blocks > 1 else None
+                out_axis = weight_sharding[0]
+                weight_scale_sharding = P(in_axis, None, out_axis)
             else:
                 raise ValueError(
                     F"The weight sharding shape length should be 2, but given {len(weight_sharding)}."
@@ -230,8 +241,7 @@ class VllmFp8LinearMethod(Fp8LinearMethod):
 
         outs = sharded_quantized_matmul(x_jax, weight_jax, weight_scale_jax,
                                         self.linear_config.mesh,
-                                        self.linear_config.weight_sharding,
-                                        self.linear_config.requant_block_size)
+                                        self.linear_config.weight_sharding)
 
         if bias is not None and not layer.skip_bias_add:
             outs += jax_view(bias)

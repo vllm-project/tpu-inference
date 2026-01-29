@@ -20,8 +20,6 @@ from jax.sharding import PartitionSpec as P
 from tpu_inference import envs
 from tpu_inference.kernels.quantized_matmul.blockwise_kernel import \
     quantized_matmul_kernel as blockwise_quantized_matmul_kernel
-from tpu_inference.kernels.quantized_matmul.kernel import \
-    quantized_matmul_kernel
 from tpu_inference.kernels.quantized_matmul.util import xla_quantized_matmul
 
 
@@ -44,7 +42,6 @@ def sharded_quantized_matmul(
     w_s: jax.Array,
     mesh: Mesh,
     weight_sharding: P,
-    block_size: int | None = None,
 ) -> jax.Array:
     """
     Wrapper around the quantized matmul kernel.
@@ -55,7 +52,6 @@ def sharded_quantized_matmul(
         w_s: Weight quantization scale. [n_output_features]
         mesh: Mesh to shard on.
         weight_sharding: PartitionSpec for the weight tensor.
-        block_size: Block size for blockwise quantized matmul kernel.
 
     Returns:
         Output of the quantized matmul.
@@ -65,9 +61,10 @@ def sharded_quantized_matmul(
     # with the kernel and thus we disable it for now.
     out_axis, in_axis = weight_sharding
     x_sharding = P(None, in_axis)
-    if block_size:
+    if envs.ENABLE_QUANTIZED_MATMUL_KERNEL:
+        num_blocks, _, __ = w_s.shape
         scale_sharding = P(
-            in_axis,
+            in_axis if num_blocks > 1 else None,
             None,
             out_axis,
         )
@@ -80,14 +77,14 @@ def sharded_quantized_matmul(
 
     def wrapper(x, w_q, w_s):
         if envs.ENABLE_QUANTIZED_MATMUL_KERNEL:
-            if block_size:
-                output = blockwise_quantized_matmul_kernel(
-                    x, w_q, w_s, x_q_dtype=x_q_dtype, block_size=block_size)
-            else:
-                output = quantized_matmul_kernel(x,
-                                                 w_q,
-                                                 w_s,
-                                                 x_q_dtype=w_q.dtype)
+            k_dim = x.shape[1]
+            sharded_num_blocks, _, __ = w_s.shape
+            block_size = k_dim // sharded_num_blocks
+            output = blockwise_quantized_matmul_kernel(x,
+                                                       w_q,
+                                                       w_s,
+                                                       x_q_dtype=x_q_dtype,
+                                                       block_size=block_size)
         else:
             output = xla_quantized_matmul(x, w_q, w_s)
         if in_axis:
