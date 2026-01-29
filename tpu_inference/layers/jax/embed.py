@@ -46,7 +46,7 @@ class JaxEmbed(nnx.Embed, JaxModule):
 
     def __getattr__(self, name: str):
         if name == "embedding":
-            # nnx.Embed needs to access self.weight
+            # nnx.Embed needs to access self.embedding
             return self.weight
 
     def __call__(self, x) -> jax.Array:
@@ -55,4 +55,4 @@ class JaxEmbed(nnx.Embed, JaxModule):
         return self.quant_method.apply_jax(self, x)
 
     def decode(self, x: jax.Array) -> jax.Array:
-        return jax.numpy.dot(x, self.weight.T)
+        return jax.numpy.dot(x, self.weight.value.T)
