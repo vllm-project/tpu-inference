@@ -63,6 +63,9 @@ class MockModelConfig:
     def get_head_size(self):
         return self.hf_config.hidden_size // self.hf_config.num_attention_heads
 
+    def get_vocab_size(self):
+        return self.hf_config.vocab_size
+
 
 class MockVllmConfig:
     """A mock VllmConfig sufficient for testing the Qwen2.5 VL model."""
@@ -105,6 +108,7 @@ class MockVllmConfig:
         self.load_config = MagicMock()
         self.extra_configs = {}
         self.additional_config = {}
+        self.quant_config = None
 
 
 @pytest.fixture(scope="module")
@@ -581,9 +585,6 @@ class TestQwen2_5_VLForConditionalGeneration:
         kwargs = mock_load_weights.call_args.kwargs
         assert kwargs['vllm_config'] == mock_vllm_config
         assert kwargs['model'] is model
-        assert "model.embed_tokens" in kwargs['metadata_map'].name_map
-        assert "lm_head" in kwargs[
-            'metadata_map'].name_map  # Should be present when not tied
         assert kwargs['mesh'] is mesh
         assert isinstance(model.rng, nnx.Rngs)
         assert model.rng is model.rng

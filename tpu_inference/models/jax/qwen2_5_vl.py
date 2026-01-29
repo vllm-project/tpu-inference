@@ -31,6 +31,7 @@ from tpu_inference import utils as utils
 from tpu_inference.layers.common.attention_interface import \
     sharded_flash_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.qwen2 import Qwen2Model
 # from vllm.model_executor.models.interfaces import MultiModalEmbeddings
@@ -769,6 +770,17 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
         )
         self.model = Qwen2Model(vllm_config, self.rng, mesh)
+        model_config = vllm_config.model_config
+        if not model_config.hf_config.tie_word_embeddings:
+            vocab_size = model_config.get_vocab_size()
+            hidden_size = model_config.hf_config.hidden_size
+            self.lm_head = JaxEinsum(
+                einsum_str="TD,DV->TV",
+                kernel_shape=(hidden_size, vocab_size),
+                dtype=model_config.dtype,
+                rngs=self.rng,
+                quant_config=vllm_config.quant_config,
+            )
 
     def get_mrope_input_positions(
         self,
@@ -1070,11 +1082,10 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         return kv_caches, x, []
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        if self.vllm_config.model_config.hf_config.tie_word_embeddings:
-            logits = jnp.dot(hidden_states, self.model.lm_head.value.T)
-        else:
-            logits = jnp.dot(hidden_states, self.model.lm_head.value)
-        return logits
+        if hasattr(self, 'lm_head'):
+            return self.lm_head(hidden_states)
+
+        return self.model.embed_tokens.decode(hidden_states)
 
     def load_weights(self, rng_key: jax.Array) -> None:
         self.rng = nnx.Rngs(rng_key)
@@ -1082,7 +1093,6 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         # Value: a tuple of (path to a nnx layer weight, nnx weight sharding)
 
         mappings = {
-            "model.embed_tokens": "model.embed.embedding",
             "model.layers.*.input_layernorm":
             "model.layers.*.input_layernorm.scale",
             "model.layers.*.post_attention_layernorm":
@@ -1123,20 +1133,14 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             "visual.patch_embed.proj": "visual.patch_embed.proj.kernel",
         }
 
-        # Add lm_head mapping only if it's not tied to embeddings
-        hf_config = self.vllm_config.model_config.hf_config
-        if not hf_config.tie_word_embeddings:
-            mappings.update({
-                "lm_head": "model.lm_head",
-            })
-
         loader = self.WeightLoader(self.vllm_config, self.mesh)
-        loader.load_weights(self,
-                            mappings,
-                            keep_hf_weight_suffix_when_match=[
-                                'layers.' + str(i) + '.mlp'
-                                for i in range(hf_config.num_hidden_layers)
-                            ])
+        loader.load_weights(
+            self,
+            mappings,
+            keep_hf_weight_suffix_when_match=[
+                'layers.' + str(i) + '.mlp' for i in range(
+                    self.vllm_config.model_config.hf_config.num_hidden_layers)
+            ] + ['emb'])
 
     def precompile_vision_encoder(
         self,
