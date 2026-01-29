@@ -81,6 +81,7 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
         self.kv_lora_rank = kv_lora_rank
         self.model_dtype = model_dtype
         self.use_mla_kernel = use_mla_kernel
+        self.moe_backend = select_moe_backend()
 
         self._transpose_map = {
             # dense mlp
@@ -165,6 +166,24 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
             "model.layers.*.mlp.shared_experts.up_proj.weight":
             "layers.*.shared_experts.kernel_up_proj_DF",
         }
+        if self.moe_backend == MoEBackend.VLLM_MOE:
+            # NOTE (jacobplatin): the first rule is needed because
+            # the current GMM kernel expects that the second/third
+            # dimensions are transposed.  The second rule is needed
+            # because the GMM kernel expects that the up/gate proj
+            # are fused into a single weight tensor.
+            self._loaded_to_standardized_keys.update({
+                "model.layers.*.mlp.experts.*.down_proj.weight":
+                "layers.*.custom_module.kernel_down_proj_EDF",
+                "model.layers.*.mlp.experts.*.gating_upproj_EFD.weight":
+                "layers.*.custom_module.kernel_gating_upproj_EFD",
+            })
+            # NOTE (jacobplatin): only used for the MOE_VLLM backend, which
+            # expects 2/3 dimensions to be transposed.
+            self._transpose_map.update({
+                r"mlp\.experts\.\d+\.gating_upproj_EFD": (0, 2, 1),
+            })
+
         if self.use_mla_kernel:
             self._loaded_to_standardized_keys.update({
                 "model.layers.*.self_attn.k_b_proj.weight":
@@ -366,7 +385,6 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                 raise ValueError(
                     f"Scale rank {scale_shape} does not match weight rank {weight_shape}"
                 )
-
         if model_weight.value.shape != weight_np.shape:
             raise ValueError(
                 f"Loaded shape for {name}: {weight_np.shape} "
@@ -561,14 +579,26 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                             down_name = loaded_name.replace(
                                 proj_type, "down_proj")
                             if is_moe_kernel:
-                                # (E, D, F) -> (E, 2, D, F)
-                                fused_w = torch.stack([gate_w, up_w], dim=1)
-                                fused_s = torch.stack(
-                                    [gate_s, up_s], dim=1
-                                ) if gate_s is not None and up_s is not None else None
+                                if model_for_loading.moe_backend == MoEBackend.VLLM_MOE:
+                                    # (E, D, F) -> (E, 2 * F, D)
 
-                                fused_name = loaded_name.replace(
-                                    proj_type, "gate_upproj_fused")
+                                    fused_w = torch.cat([gate_w, up_w], dim=1)
+                                    fused_s = torch.cat(
+                                        [gate_s, up_s], dim=1
+                                    ) if gate_s is not None and up_s is not None else None
+                                    fused_name = loaded_name.replace(
+                                        proj_type, "gating_upproj_EFD")
+
+                                else:
+                                    # (E, D, F) -> (E, 2, D, F)
+                                    fused_w = torch.stack([gate_w, up_w],
+                                                          dim=1)
+                                    fused_s = torch.stack(
+                                        [gate_s, up_s], dim=1
+                                    ) if gate_s is not None and up_s is not None else None
+
+                                    fused_name = loaded_name.replace(
+                                        proj_type, "gate_upproj_fused")
                                 weight_bytes, weight_shards = self._load_individual_weight(
                                     fused_name,
                                     fused_w,
@@ -577,7 +607,7 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                                     scale=fused_s)
 
                                 weight_bytes_down, weight_shards_down = self._load_individual_weight(
-                                    loaded_name,
+                                    down_name,
                                     down_w,
                                     model_params,
                                     model_for_loading.mesh,
