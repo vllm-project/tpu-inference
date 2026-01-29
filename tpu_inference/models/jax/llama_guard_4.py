@@ -36,8 +36,7 @@ from tpu_inference.layers.jax.pp_utils import (PPMissingLayer,
                                                get_start_end_layer)
 from tpu_inference.layers.jax.transformer_block import TransformerBlock
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.jax_intermediate_tensor import \
-    JaxIntermediateTensors
+from tpu_inference.models.jax.jax_intermediate_tensor import JaxIntermediateTensors
 from tpu_inference.models.jax.utils.weight_utils import (
     BaseWeightLoader, _is_pp_missing_layer, get_param, print_param_info,
     reshape_params, transpose_params)
