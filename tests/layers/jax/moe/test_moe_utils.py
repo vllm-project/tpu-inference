@@ -142,7 +142,6 @@ class TestMoEUtils(unittest.TestCase):
                               sort_indices,
                               weights,
                               num_experts_per_tok=k,
-                              hidden_size=dim,
                               output_dtype=jnp.float32)
 
         # Expected: sum(token_val * 0.5) over k=2 -> 1.0 * 0.5 + 1.0 * 0.5 = 1.0
