@@ -56,7 +56,8 @@ def apply_scoring_fn(scoring_fn: str, x):
         case "softmax":
             return jax.nn.softmax(x, axis=-1)
         case "sigmoid":
-            return jax.nn.sigmoid(x)
+            # TODO(catswe): use jax.nn.sigmoid once mosaic lowering bug with bf16 input is fixed
+            return 1 / (1 + jnp.exp(-x))
         case _:
             raise NotImplementedError(
                 f"Unsupported scoring function: {scoring_fn}")
