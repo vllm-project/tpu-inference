@@ -864,7 +864,11 @@ class DeepSeekV3(nnx.Module):
                     fd_sharding=(ShardingAxisName.MLP_TENSOR, None)))
 
             self.layers.append(block)
-
+        # TODO (jacobplatin): this is very hacky for now, and we need to clean-up when
+        # the refactor occurs.  Basically, we assume that the MLP/MoE layers are in FP4
+        # unless specified otherwise, but we shouldn't be doing this.
+        moe_dtype = jnp.float8_e4m3fn if self.weight_loader.is_native_fp8_model else vllm_config.model_config.hf_config.quantization_config.get(
+            "tpu_settings", {}).get("mlp_dtype", jnp.float4_e2m1fn)
         for i in range(first_k_dense_replace, num_layers):
             is_moe_layer = ((i + 1) % interleave_moe_layer_step == 0)
             router = DeepSeekV3Router(
@@ -879,8 +883,8 @@ class DeepSeekV3(nnx.Module):
                 dtype=dtype,
                 moe_backend=self.moe_backend,
                 activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
-                ed_sharding=(ShardingAxisName.MLP_TENSOR, None),
-                e_sharding=(ShardingAxisName.MLP_TENSOR, ))
+                ed_sharding=(None, None),
+                e_sharding=(None, ))
             custom_module = MoE(
                 dtype=dtype,
                 num_local_experts=num_local_experts,
@@ -891,12 +895,16 @@ class DeepSeekV3(nnx.Module):
                 mesh=self.mesh,
                 hidden_act=hidden_act,
                 rngs=self.rng,
-                activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
-                activation_ffw_ted=(ShardingAxisName.MLP_DATA, None, None),
-                edf_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
-                efd_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
+                activation_ffw_td=(ShardingAxisName.MLP_DATA,
+                                   ShardingAxisName.MODEL_1),
+                activation_ffw_ted=(ShardingAxisName.MLP_DATA, None,
+                                    ShardingAxisName.MODEL_1),
+                edf_sharding=(None, ShardingAxisName.MODEL_1,
+                              ShardingAxisName.MODEL_2),
+                efd_sharding=(None, ShardingAxisName.MODEL_2,
+                              ShardingAxisName.MODEL_1),
                 moe_backend=self.moe_backend,
-                quantized_dtype=self.weight_loader.quant_dtype
+                qwix_quantized_weight_dtype=moe_dtype
                 if self.weight_loader.is_model_quantized else None,
                 router=router) if is_moe_layer else DenseFFW(
                     dtype=dtype,
