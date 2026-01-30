@@ -44,6 +44,7 @@ def sampling_params():
 def _run_inference_with_config(model_name: str,
                                test_prompts: list,
                                sampling_params: SamplingParams,
+                               expert_parallel_size: int = 1,
                                tensor_parallel_size: int = 1,
                                enable_expert_parallel: bool = False,
                                max_num_batched_tokens: int = 128) -> list:
@@ -53,18 +54,30 @@ def _run_inference_with_config(model_name: str,
     os.environ['SKIP_JAX_PRECOMPILE'] = '1'
     os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '0'
 
+    if enable_expert_parallel:
+        additional_config = {
+            "sharding": {
+                "sharding_strategy": {
+                    "expert_parallelism": expert_parallel_size
+                }
+            }
+        }
+    else:
+        additional_config = {}
+
     # Create LLM args
     engine_args = EngineArgs(
         model=model_name,
-        max_model_len=128,
+        max_model_len=64,
         tensor_parallel_size=tensor_parallel_size,
         pipeline_parallel_size=1,
-        gpu_memory_utilization=0.95,
+        gpu_memory_utilization=0.40,
         max_num_batched_tokens=max_num_batched_tokens,
         max_num_seqs=16,
         enable_prefix_caching=False,
         kv_cache_dtype="auto",
         enable_expert_parallel=enable_expert_parallel,
+        additional_config=additional_config,
     )
 
     engine_args_dict = asdict(engine_args)
@@ -178,7 +191,7 @@ def test_expert_parallelism_correctness_via_gmm_kernel(
         model_name=model_name,
         test_prompts=test_prompts,
         sampling_params=sampling_params,
-        tensor_parallel_size=1,
+        expert_parallel_size=1,
         enable_expert_parallel=False,
     )
 
@@ -187,7 +200,7 @@ def test_expert_parallelism_correctness_via_gmm_kernel(
         model_name=model_name,
         test_prompts=test_prompts,
         sampling_params=sampling_params,
-        tensor_parallel_size=4,
+        expert_parallel_size=2,
         enable_expert_parallel=True,
     )
 
@@ -206,7 +219,7 @@ def test_expert_parallelism_correctness_via_fused_moe_kernel(
             model_name=model_name,
             test_prompts=test_prompts,
             sampling_params=sampling_params,
-            tensor_parallel_size=1,
+            expert_parallel_size=1,
             enable_expert_parallel=False,
         )
 
@@ -215,7 +228,7 @@ def test_expert_parallelism_correctness_via_fused_moe_kernel(
             model_name=model_name,
             test_prompts=test_prompts,
             sampling_params=sampling_params,
-            tensor_parallel_size=4,
+            expert_parallel_size=2,
             enable_expert_parallel=True,
         )
 
