@@ -131,7 +131,9 @@ class DeepseekV3MLP(nnx.Module):
 class DeepseekV3MoE(nnx.Module):
     """
     Corresponds to vLLM's DeepseekV2MoE.
-    It contains the routed experts and the shared experts, and handles summing them.
+    Handles the routed and shared experts + the relevant forward pass.
+
+    Reference here: https://github.com/vllm-project/vllm/blob/2b465570e6dd327e8422ef9c87e9b2b1454ceaed/vllm/model_executor/models/deepseek_v2.py#L223
     """
     experts: MoE
     shared_experts: Optional[DeepseekV3MLP] = None
@@ -139,15 +141,13 @@ class DeepseekV3MoE(nnx.Module):
     routed_scaling_factor: float = 1.0
 
     def __call__(self, x_TD: jax.Array) -> jax.Array:
-        # 1. Compute Routed Experts
+        # Compute Routed Experts
         final_hidden_states = self.experts(x_TD)
 
-        # 2. Compute Shared Experts (if they exist)
+        # (Maybe) Compute Shared Experts
         if self.shared_experts is not None:
             shared_output = self.shared_experts(x_TD)
-
-            if self.shared_experts is not None:
-                final_hidden_states += shared_output
+            final_hidden_states += shared_output
 
         return final_hidden_states
 
@@ -268,19 +268,18 @@ class DeepSeekV3Router(nnx.Module):
         if self.moe_backend == MoEBackend.FUSED_MOE or self.moe_backend == MoEBackend.VLLM_MOE:
             return scores_TE
 
-        else:
-            original_scores_TE = scores_TE
-            topk_indices_TX = self.get_topk_indices(scores_TE)
-            weights_TX = jnp.take_along_axis(original_scores_TE,
-                                             topk_indices_TX,
-                                             axis=-1)
+        original_scores_TE = scores_TE
+        topk_indices_TX = self.get_topk_indices(scores_TE)
+        weights_TX = jnp.take_along_axis(original_scores_TE,
+                                         topk_indices_TX,
+                                         axis=-1)
 
-            if self.norm_topk_prob:
-                weights_TX /= jnp.sum(weights_TX, axis=-1)[..., None] + 1e-20
+        if self.norm_topk_prob:
+            weights_TX /= jnp.sum(weights_TX, axis=-1)[..., None] + 1e-20
 
-            weights_TX *= self.routed_scaling_factor
+        weights_TX *= self.routed_scaling_factor
 
-            return weights_TX, topk_indices_TX
+        return weights_TX, topk_indices_TX
 
     def __post_init__(self, rngs: nnx.Rngs):
         """Generates the router kernel (weights and bias) for routing."""
@@ -1019,6 +1018,7 @@ class DeepSeekV3(nnx.Module):
         interleave_moe_layer_step: int = 1  # Deepseek V3 has moe_layer_freq=1 in hf config.
         hidden_act: str = "silu"
         rms_norm_eps: float = 1e-06
+        routed_scaling_factor: float = 2.5
         first_k_dense_replace: int = 3  # replace the first few MOE layers to dense layer.
         self.use_mla_kernel: bool = self.vllm_config.model_config.use_mla
 
@@ -1129,8 +1129,8 @@ class DeepSeekV3(nnx.Module):
             )
 
             # Logic to determine if this layer is Dense or MoE
-            # 1. The first k layers are always dense.
-            # 2. Subsequent layers are MoE if interleave_moe_layer_step conditions are met
+            # * The first k layers are always dense.
+            # * Subsequent layers are MoE if interleave_moe_layer_step conditions are met
             if i < first_k_dense_replace:
                 is_moe_layer = False
             else:
@@ -1160,7 +1160,7 @@ class DeepSeekV3(nnx.Module):
                     topk_groups=4,
                     norm_topk_prob=True,
                     rngs=self.rng,
-                    routed_scaling_factor=2.5,
+                    routed_scaling_factor=routed_scaling_factor,
                     dtype=dtype,
                     moe_backend=self.moe_backend,
                     activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
@@ -1206,10 +1206,9 @@ class DeepSeekV3(nnx.Module):
                 mlp_layer = DeepseekV3MoE(
                     experts=custom_module,
                     shared_experts=shared_experts,
-                    routed_scaling_factor=2.5  # or from config
+                    routed_scaling_factor=routed_scaling_factor,
                 )
 
-            # 3. Instantiate the Model-Specific Decoder Layer
             block = DeepseekV3DecoderLayer(
                 layer_idx=i,
                 input_layernorm=input_layernorm,
