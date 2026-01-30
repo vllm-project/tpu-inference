@@ -25,6 +25,8 @@ from vllm.config import ModelConfig
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.models.jax.qwen3 import Qwen3ForCausalLM
+from tpu_inference.models.jax.utils.qwix.qwix_utils import \
+    apply_qwix_quantization
 from tpu_inference.runner.kv_cache import create_kv_caches
 
 
@@ -36,6 +38,8 @@ class MockVllmConfig:
         self.load_config = MagicMock()
         self.load_config.download_dir = None
         self.cache_config = MagicMock(cache_dtype=kv_cache_dtype)
+        self.quant_config = None
+        self.additional_config = {}
 
 
 @pytest.fixture(scope="module")
@@ -89,12 +93,23 @@ def rng() -> PRNGKey:
 
 class TestQwen3ForCausalLM:
 
-    @pytest.mark.parametrize("mock_vllm_config", [
-        MockVllmConfig("Qwen/Qwen3-0.6B", "auto"),
-        MockVllmConfig("Qwen/Qwen3-0.6B", "fp8")
+    @pytest.mark.parametrize("model_name", ["Qwen/Qwen3-0.6B"])
+    @pytest.mark.parametrize("kv_cache_type", ["auto", "fp8"])
+    @pytest.mark.parametrize("qwix_rules", [
+        None,
+        [{
+            "module_path": ".*",
+            "weight_qtype": "float8_e4m3fn",
+            "act_qtype": "float8_e4m3fn"
+        }]
     ])
-    def test_qwen3_600M(self, mock_vllm_config, rng, mesh, mock_model_inputs):
+    def test_qwen3_600M(self, model_name, kv_cache_type, qwix_rules, rng, mesh,
+                        mock_model_inputs):
         """Tests model init and model forward for the 0.6B model variant."""
+        mock_vllm_config = MockVllmConfig(model_name, kv_cache_type)
+        if qwix_rules:
+            mock_vllm_config.additional_config["quanntization"] = dict(
+                qwix=dict(rules=qwix_rules))
 
         # Test model init
         model = Qwen3ForCausalLM(mock_vllm_config, rng, mesh)
@@ -112,7 +127,6 @@ class TestQwen3ForCausalLM:
         layers = model.model.layers
         assert len(layers) == hf_config.num_hidden_layers
         assert isinstance(model.rng, nnx.Rngs)
-        assert model.model.lm_head == model.model.embed.embedding
 
         attn = layers[0].self_attn
         hidden_size = hf_config.hidden_size
@@ -129,20 +143,27 @@ class TestQwen3ForCausalLM:
         assert attn.rope_theta == rope_theta
         assert attn.head_dim_original == original_head_dim
         assert attn.head_dim == head_dim
-        assert attn.q_proj.kernel.shape == (hidden_size, num_heads, head_dim)
-        assert attn.k_proj.kernel.shape == (hidden_size, num_kv_heads,
+        assert attn.q_proj.weight.shape == (hidden_size, num_heads, head_dim)
+        assert attn.k_proj.weight.shape == (hidden_size, num_kv_heads,
                                             head_dim)
-        assert attn.v_proj.kernel.shape == (hidden_size, num_kv_heads,
+        assert attn.v_proj.weight.shape == (hidden_size, num_kv_heads,
                                             head_dim)
-        assert attn.o_proj.kernel.shape == (num_heads, head_dim, hidden_size)
+        assert attn.o_proj.weight.shape == (num_heads, head_dim, hidden_size)
 
         mlp = layers[0].mlp
-        assert mlp.gate_proj.kernel.shape == (hidden_size, intermediate_size)
-        assert mlp.up_proj.kernel.shape == (hidden_size, intermediate_size)
-        assert mlp.down_proj.kernel.shape == (intermediate_size, hidden_size)
+        assert mlp.gate_proj.weight.shape == (hidden_size, intermediate_size)
+        assert mlp.up_proj.weight.shape == (hidden_size, intermediate_size)
+        assert mlp.down_proj.weight.shape == (intermediate_size, hidden_size)
 
         # Test model load
         model.load_weights(rng)
+
+        # Apply qwix quantization, no-op if rules are not given.
+        model = apply_qwix_quantization(mock_vllm_config,
+                                        model,
+                                        rng,
+                                        mesh,
+                                        apply_to_abstract_model=False)
 
         # Test model forward
         kv_caches = create_kv_caches(

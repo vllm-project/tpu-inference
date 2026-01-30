@@ -7,8 +7,7 @@ import pathlib
 from typing import NamedTuple
 
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import get_tpu_generation as get_tpu_version
-from tpu_inference.utils import get_tpu_name_slug
+from tpu_inference.utils import get_tpu_generation, get_tpu_name_slug
 
 logger = init_logger(__name__)
 
@@ -71,31 +70,13 @@ DEVICE_VMEM_LIMIT = {6: 96 * 1024 * 1024, 7: 48 * 1024 * 1024}
 
 
 def get_device_vmem_limit() -> int:
-    tpu_version = get_tpu_version()
+    tpu_version = get_tpu_generation()
     if tpu_version not in DEVICE_VMEM_LIMIT:
         logger.warning_once(
             'VMEM limit for TPU version %d not found. Using default VMEM limit '
             'of 96MiB', tpu_version)
         return 96 * 1024 * 1024
     return DEVICE_VMEM_LIMIT[tpu_version]
-
-
-def get_key(
-    n_batch: int,
-    n_out: int,
-    n_in: int,
-    x_q_dtype: str,
-    w_q_dtype: str,
-) -> TunedKey:
-    """Returns the key for the given parameters."""
-    return TunedKey(
-        get_tpu_version(),
-        n_batch,
-        n_out,
-        n_in,
-        x_q_dtype,
-        w_q_dtype,
-    )
 
 
 def get_tuned_block_sizes(
@@ -131,14 +112,14 @@ def get_tuned_block_sizes(
         val = data[json_key]
 
         if isinstance(val, dict) and "config" in val:
+            # TODO: Remove this check once we confirm all JSONs are flat lists
             cfg = val["config"]
             return TunedValue(cfg["batch_block_size"], cfg["out_block_size"],
                               cfg["in_block_size"])
-        else:
-            return TunedValue(*val)
+        return TunedValue(*val)
 
-    tpu_version = get_tpu_version()
-    keys = (tpu_version, n_batch, n_out, n_in, x_q_dtype, w_q_dtype)
+    tpu_generation = get_tpu_generation()
+    keys = (tpu_generation, n_batch, n_out, n_in, x_q_dtype, w_q_dtype)
     logger.warning_once(
         'Couldn`t find tuned sizes for the quantized matmul kernel with %s',
         keys)
