@@ -26,6 +26,7 @@ import jaxtyping
 import numpy as np
 import vllm.envs as vllm_envs
 from flax import nnx
+from jax import lax
 from jax.experimental import mesh_utils
 from jax.sharding import NamedSharding, PartitionSpec
 from vllm.config import VllmConfig
@@ -780,6 +781,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 assert isinstance(hidden_states, JaxIntermediateTensors)
                 hidden_states.kv_connector_output = kv_connector_output
                 return hidden_states
+            hidden_states = lax.with_sharding_constraint(
+                hidden_states,
+                NamedSharding(self.mesh,
+                              PartitionSpec(ShardingAxisName.ATTN_DATA, None)))
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
             logits = self.compute_logits_fn(

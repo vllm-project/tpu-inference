@@ -25,6 +25,7 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from tpu_inference import envs
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
 from tpu_inference.layers.common.fused_moe_gmm import fused_moe_func
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 
 if TYPE_CHECKING:
@@ -108,7 +109,9 @@ def fused_moe_apply(
                     **extra_backend_kwargs,
                 )[:, :actual_hidden_size]
                 output = lax.with_sharding_constraint(
-                    output, NamedSharding(mesh, PartitionSpec(None, None)))
+                    output,
+                    NamedSharding(
+                        mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None)))
             case FusedMoEBackend.GMM_EP | FusedMoEBackend.GMM_TP:
                 output = fused_moe_func(
                     hidden_states=x,
