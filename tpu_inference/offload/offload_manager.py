@@ -17,10 +17,16 @@ ChunkHash = BlockHash
 @dataclass
 class CPUChunk:
     """
-    ref_cnt:
-    -1: init, not saved
-    0: saved, ready_to_evict, ready_to_load
-    >=1: loadings, ready_to_load, in_use
+    Represents a physical storage unit in the CPU KV cache.
+
+    It tracks the lifecycle of a single block's data on the host, including
+    its reference count which determines if the chunk is being loaded into TPU,
+    is actively saved, or is ready for eviction.
+
+    ref_cnt states:
+    -1: Initial state, no data saved yet.
+    0: Data is saved and persistent; ready to be loaded or evicted (LRU).
+    >=1: Data is currently being loaded into TPU HBM or is pinned for active use.
     """
     chunk_id: CpuChunkId
     ref_cnt: int = -1
@@ -54,6 +60,12 @@ class CPUChunk:
 
 
 class CPUChunkPool:
+    """
+    A fixed-size pool of CPUChunk objects used to manage physical CPU memory slots.
+
+    It handles the low-level allocation and reclamation of CpuChunkIds, ensuring
+    that the system never exceeds the pre-defined maximum number of CPU blocks.
+    """
 
     def __init__(self, num_chunks: int):
         self.num_chunks: int = num_chunks
@@ -102,6 +114,14 @@ class CPUChunkPool:
 
 
 class LRUCacheManager:
+    """
+    Manages the logical mapping and eviction policy of the CPU KV cache.
+
+    It tracks which KV content (identified by BlockHash) is resident in CPU
+    memory by mapping hashes to physical `CPUChunk` objects. It implements
+    the Least Recently Used (LRU) eviction policy and manages the lifecycle
+    transitions of chunks (e.g., from 'saving' to 'ready_to_load').
+    """
 
     def __init__(self, num_cpu_chunks: int):
         self.num_chunks = num_cpu_chunks
@@ -234,9 +254,25 @@ class LRUCacheManager:
 
 
 class StagingBufferManager():
-    """ Bookkeeping the staging buffer inside the connector scheduler.
-    NOTE(jcgu): the operations (e.g., allocate, free, get) to staging buffer / blocks are NOT thread-safe.
-    But it's okay since there is only one connector scheduler instance.
+    """
+    Manages the accounting of a fixed-size staging buffer pool.
+
+    The staging buffer serves as a intermediate memory pool for data transfers
+    between different memory domains (e.g., TPU HBM and Host CPU RAM). This manager
+    enforces concurrency limits by tracking "slots" reserved for
+    different operation types (Load and Save), ensuring that total in-flight
+    data never exceeds the physical capacity of the pre-allocated staging area.
+
+    Key Functionalities:
+    - Resource Accounting: Tracks usage per request ID and operation type.
+    - Capacity Enforcement: Prevents over-subscription of the staging memory.
+    - Transactional Allocation: Supports reserving and releasing blocks for
+      long-running asynchronous operations.
+    - Multi-usage Support: Distinguishes between data moving to the device (Load)
+      and data moving from the device (Save).
+
+    NOTE(jcgu): the operations (e.g., allocate, free, get) to staging buffer / blocks
+    are NOT thread-safe. It is intended to be used by a single connector scheduler instance.
     """
 
     def __init__(self, num_blocks: int):
@@ -280,6 +316,7 @@ class StagingBufferManager():
 
     def get_num_free_save_staging_blocks(self) -> int:
         return self._num_free_save_blocks
+
     def get_num_free_load_staging_blocks(self) -> int:
         return self._num_free_load_blocks
 

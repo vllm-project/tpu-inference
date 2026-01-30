@@ -1,88 +1,93 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Scheduler side execution:
-TPUOffloadConnectorScheduler manages the state of KV cache loading and saving for
-each request. It acts as a state machine, tracking the progress of requests
-across multiple scheduling steps and generating work orders (TPUReqMeta) for
-the TPUOffloadConnectorWorker.
+TPUOffloadConnector manages KV cache data transfer between TPU (HBM) and CPU.
+
+The system utilizes a Scheduler-Worker architecture where the Scheduler performs
+logical bookkeeping of token sequences (hashes) while the Worker executes
+high-performance bi-directional data transfers.
 
 Core Components:
-- RequestTracker: The primary state object for a request. It tracks the
-    cumulative tokens and blocks processed, and how many of those tokens have
-    been saved to the CPU cache. A tracker is created when a request is first
-    scheduled and lives until the request is finished.
+- RequestTracker: Persists across a request's lifetime. Tracks block IDs,
+    token IDs, and the `save_watermark` (token-offset of tokens already offloaded).
+- LoadSpec: Created when a prefix match is found in CPU memory. It contains
+    source CPU chunk IDs and target HBM block IDs.
+- SaveSpec: Instructions for the worker to offload a slice of HBM to CPU.
+    In decode phase, it triggers only on block boundaries to minimize overhead.
+- StagingBufferManager: The resource gatekeeper for memory-intensive scatter/gather
+    operations. It manages a fixed pool of "staging slots" to prevent
+    TPU (HBM) memory exhaustion. The staging area is pre-allocated during
+    connector's scheduler component initialization.
+    - OOM Prevention: By enforcing a hard limit on in-flight blocks, it
+        ensures that concurrent Save/Load operations never exceed the
+        pre-allocated physical staging area.
+    - Transactional Allocation: The Scheduler 'check out' slots during
+        metadata construction. If slots are unavailable, the transfer is
+        downsized or deferred to a later step.
 
-- LoadSpec: A temporary state object created when a new request has a prefix
-    that matches data in the CPU cache (`get_num_new_matched_tokens`). It
-    holds the number of matched tokens and a `can_load` flag, which is set
-    to True only after the vLLM scheduler allocates the necessary blocks for
-    the load (`update_state_after_alloc`).
+Scheduler Lifecycle and State Coordination:
+1. Work Construction (`build_connector_meta()`):
+    - Phase 1 (Cleanup): Purges trackers for requests that finished in the
+      previous step. For requests previously in a 'delayed-free' state that
+      are now fully cleared, it sends a final no-op `SaveSpec` to the Worker
+      to finalize device-side state.
+    - Phase 2 (New): Initializes `RequestTracker` for newly scheduled
+      requests. It sets the `save_watermark` to the boundary of tokens already
+      persisted in CPU memory (or already resident in HBM cache) to ensure
+      subsequent save operations are strictly incremental and non-redundant.
+      For loads, it utilizes the `num_computed` tokens reported by vLLM to
+      accurately skip chunks that are already resident in the TPU's physical
+      KV cache, ensuring only the missing suffix is loaded from CPU memory.
+    - Phase 3 (Incremental): Handles ongoing saves/loads for running requests,
+      including chunked prefill and preemption recovery. Save specifications
+      are calculated based on the progress beyond the current `save_watermark`.
+2. Feedback Loop (`update_connector_output()`): Processes granular transfer
+    stats from the Worker. It releases staging slots in `StagingBufferManager`
+    and updates chunk states in `LRUCacheManager`. For requests parked in the
+    'delayed-free' state, it monitors the clearing of pending gather operations
+    (tracked in `_save_reqs_w_pending_gather` or `_reqs_being_loaded`); once
+    cleared, the request moves to the `_fully_finished_reqs` pool.
+3. Completion Gatekeeping (`request_finished()`): Triggered when a request
+    is logically done. If the Scheduler detects in-flight operations, it
+    returns `delay_free=True`. This prevents vLLM from reclaiming HBM blocks
+    while hardware is still accessing them.
 
-- SaveSpec: A part of the work order sent to the worker. It instructs the
-    worker to save a specific slice of the KV cache from TPU to CPU. It
-    contains `num_skip_leading_tokens` to indicate which part of the request's
-    KV cache is new and needs saving, and an `is_final_save` flag to signal
-    the last save operation for a request.
+Worker Execution:
+1. start_load_kv: A blocking operation. It fetches tensors from the CPU backend,
+    performs H2D transfer, and uses JIT-fused kernels to scatter slices into
+    the physical KV cache.
+2. start_save_kv: An asynchronous multi-stage pipeline:
+    - Step A (Gather): Blocking TPU operation to collect non-contiguous HBM
+        blocks into a contiguous staging buffer.
+    - Step B (Transfer): Non-blocking transfer (D2H) handled by a
+        background thread pool.
+    - Step C (Processing): Post-transfer registration of chunks into the
+        CPU Backend and metadata reconciliation.
 
-- TPUReqMeta: The unified work order for a single request in a single step,
-    sent from the scheduler to the worker. It can contain a `load_spec` (to
-    load from CPU to TPU), a `save_spec` (to save from TPU to CPU), or both.
+Asynchronous Coordination & Feedback Loop:
+The Scheduler and Worker maintain synchronization through a closed-loop
+feedback mechanism mediated by the vLLM engine's `KVConnectorOutput`.
 
-State Machine Flow (from the perspective of a request):
+1. Work Submission (Scheduler -> Worker):
+   - The Scheduler packs `SaveSpec` and `LoadSpec` into `TPUOffloadConnectorMetadata`.
+   - The Worker receives this during the model execution step.
 
-1.  RECEIVED -> AWAITING_ALLOCATION
-    - A new request arrives.
-    - `get_num_new_matched_tokens` checks the CPU backend for a matching
-        token prefix.
-    - If a match is found (N > 0 tokens), a `LoadSpec(num_matched_tokens=N, can_load=False)`
-        is created. The request now waits for the vLLM scheduler to allocate
-        physical blocks for these N tokens.
+2. Progress Tracking (Worker):
+   - As background threads in the `save_executor` complete swap out operation,
+     the Worker records granular progress (specific `CpuChunkId`s) into
+     `KVOffloadConnectorStats`.
 
-2.  AWAITING_ALLOCATION -> SCHEDULED
-    - The vLLM scheduler allocates blocks for the request.
-    - `update_state_after_alloc` is called. If a `LoadSpec` exists, its
-        `can_load` flag is set to True, greenlighting the load operation.
-        The request is now considered scheduled for processing in this step.
-
-3.  SCHEDULED -> IN_FLIGHT or COMPLETED
-    - This transition is handled by `build_connector_meta` which calls the
-        central decision-making function, `_prepare_req_meta`.
-    - LoadSpec Preparation: The `LoadSpec` (if it exists and `can_load`
-        is True) is passed directly into the `TPUReqMeta`. The worker will
-        use `num_matched_tokens` to slice the correct prefix from the request's
-        `token_ids` and fetch the corresponding data from the CPU cache.
-    - SaveSpec Preparation: `_prepare_req_meta` determines if a save is
-        needed by comparing the total tokens processed so far
-        (`len(tracker.token_ids)`) with the number of tokens already saved
-        (`tracker.num_saved_tokens`).
-        - If `len(token_ids) > num_saved_tokens`, a `SaveSpec` is created.
-        - `num_skip_leading_tokens` is set to `tracker.num_saved_tokens`. This
-            tells the worker to ignore the prefix that's already in the CPU
-            cache and only save the new data.
-        - The scheduler then *transactionally* updates `tracker.num_saved_tokens`
-            to the new total length, ensuring this slice of data is not saved
-            again.
-    - If the scheduler has not finished the request, it transitions to
-        IN_FLIGHT. Its tracker is updated for the next scheduling step.
-    - If the scheduler has finished the request, it transitions to
-        COMPLETED. The tracker is removed, and a final `SaveSpec` is
-        generated.
-        - is_final_save: This flag is set to `True` only when the
-            scheduler marks a request as finished. It is a  signal
-            for the worker, indicating that after this save is complete, the
-            request's lifecycle is over and its resources
-            can be safely freed.
-
-Worker Side Execution:
-- The TPUOffloadConnectorWorker receives the `TPUOffloadConnectorMetadata` containing the list of
-    `TPUReqMeta` objects.
-- `start_load_kv`: Iterates through the metadata. If a `meta.load_spec`
-    exists, it reads the corresponding data from the CPU backend and copies it
-    into the allocated blocks on the TPU. This is a blocking operation.
-- `wait_for_save`: Iterates through the metadata. If a `meta.save_spec`
-    exists, it submits an asynchronous task to copy the specified slice of
-    KV data from TPU to CPU and update the CPU backend. It then waits for all
-    submitted save tasks for the current step to complete.
+3. State Reconciliation (Worker -> Scheduler):
+   - The engine retrieves these stats via `get_kv_connector_stats()` and
+     `get_finished()`, then passes them to the Scheduler's
+     `update_connector_output()`.
+   - Incremental Updates: The Scheduler uses the chunk-level stats
+     (`finished_save_chunks`) to:
+     a) Release specific slots in the `StagingBufferManager`.
+     b) Transition chunks in `LRUCacheManager` to 'ready_to_load' status,
+        making them immediately available for prefix-matching in new requests.
+   - Request Finalization: The Scheduler uses `finished_sending` (Request IDs)
+     to perform final resource reclamation and remove the request from
+     internal tracking sets (`_reqs_being_saved`).
 """
 import copy
 import os
@@ -671,6 +676,26 @@ class TPUOffloadConnector(KVConnectorBase_V1):
 
 
 class TPUOffloadConnectorScheduler():
+    """
+    Coordinates the logical state of KV cache offloading and resource gatekeeping.
+
+    The Scheduler is responsible for prefix-matching against the CPU cache,
+    managing the lifecycle of requests being offloaded, and enforcing memory
+    concurrency limits via the `StagingBufferManager`.
+
+    Key Responsibilities:
+    1. Prefix Matching: During the scheduling phase, it identifies prompt prefixes
+       already resident in CPU memory and prepares 'Load' instructions.
+    2. Resource Gatekeeping: It consults the `StagingBufferManager` to ensure
+       data transfers stay within physical memory limits. It performs
+       transactional allocation (reserving slots during matching) and handles
+       cleanup if vLLM decides not to schedule a request.
+    3. State Tracking: It maintains `RequestTracker` objects to follow the
+       progress of each request (e.g., how many tokens have been saved).
+    4. Feedback Reconciliation: It processes performance stats from the Worker
+       (via `update_connector_output`) to incrementally release staging slots
+       and transition CPU chunks to 'ready_to_load' status.
+    """
 
     def __init__(self, vllm_config: "VllmConfig"):
         logger.info("TPUOffloadConnectorScheduler: Entering __init__")
@@ -1497,6 +1522,26 @@ class TPUOffloadConnectorScheduler():
 
 
 class TPUOffloadConnectorWorker:
+    """
+    Executes physical KV cache transfers and manages host-side storage.
+
+    The Worker is the performance engine of the offloading system. It performs
+    high-speed transfers and JIT-compiled tensor operations to move data
+    between TPU HBM and Host memory.
+
+    Key Responsibilities:
+    1. DMA Execution: Performs Host-to-Device (H2D) and Device-to-Host (D2H)
+       transfers using either JAX or specialized Pallas kernels.
+    2. Tensor Reshaping: Uses fused kernels (`_jitted_gather_kv_cache`,
+       `jitted_insert_kv_cache_slices`) to collect and scatter non-contiguous
+       KV blocks in the physical cache.
+    3. Asynchronous Saves: Manages a background `ThreadPoolExecutor` to handle
+       the CPU-side processing of offloaded data without blocking the main
+       model execution loop.
+    4. Progress Reporting: Records granular transfer stats (e.g., specific
+       chunks completed) into `KVOffloadConnectorStats` for the Scheduler
+       to reconcile.
+    """
 
     def __init__(self, vllm_config: VllmConfig,
                  connector: "TPUOffloadConnector"):
@@ -1519,7 +1564,6 @@ class TPUOffloadConnectorWorker:
         # cpu cache
         self.num_cpu_chunks = envs.TPU_OFFLOAD_NUM_CPU_CHUNKS
         self.cpu_backend = LocalCPUBackend(num_cpu_chunks=self.num_cpu_chunks)
-        # The worker needs its own token processor to generate keys.
         model_name = self.vllm_config.model_config.model
         logger.info(
             f"Model name is {model_name}, KV block_size={self.block_size}")
@@ -1859,9 +1903,12 @@ class TPUOffloadConnectorWorker:
                            full_token_ids: list[int],
                            save_spec: SaveSpec) -> tuple | None:
         """
-            Part 1: Validates request, calculates blocks to save, and gathers data from TPU.
-            Returns: None if early exit, or tuple(flat_kv_caches_tpu, num_blocks_to_save, dst_chunks, start_time)
-            """
+        Implements Stage 1 of the Save pipeline:
+        Validates request, calculates blocks to save, and gathers data from TPU
+        physical cache into the HBM staging buffer.
+
+        Returns: None if early exit, or tuple(flat_kv_caches_tpu, num_blocks_to_save, dst_chunks, start_time)
+        """
         GATHER_TPU_BLOCKS_CALLS.inc()
         if not self.runner or not self.runner.kv_caches:
             logger.error(f"Cannot save blocks for request {req_id}: runner or "
@@ -1952,8 +1999,9 @@ class TPUOffloadConnectorWorker:
                                           dst_chunks: list[int],
                                           blocks_to_save: list[int]):
         """
-        Part 2: Swaps data to CPU, splits into chunks, and registers with CPU backend.
-        Starts from 'chunks_on_cpu = None'.
+        Implements Stage 2 of the Save pipeline:
+        Swaps data from HBM staging buffer to Host RAM, splits into chunks,
+        and registers with CPU backend.
         """
         TRANSFER_AND_GEGISTER_CPU_CHUNKS_CALLS.inc()
         start_time = time.time()
@@ -2017,7 +2065,22 @@ class TPUOffloadConnectorWorker:
 
     def start_save_kv(self):
         """
-        Initiates asynchronous save operations for the current step.
+        This function is the worker-side entry point for transfering data from the
+        TPU's sharded KV cache to the Host CPU RAM. Initiates the two-stage asynchronous
+        save (offload) pipeline.
+
+        Stage 1: Gather (Synchronous/Blocking)
+        - Uses a JIT-compiled gather kernel to collect non-contiguous KV blocks
+          to a HBM staging buffer.
+        - This step is blocking to ensure data consistency before the next
+          model iteration. Once the data is copied to the staging buffer, vllm can
+          reclaim the KV blocks.
+
+        Stage 2: Swap-Out (Asynchronous/Non-Blocking)
+        - Submits a background task to the ThreadPoolExecutor to perform
+          the Device-to-Host (D2H) transfer.
+        - The background thread moves data from HBM to Host RAM and
+          registers the chunks in the LocalCPUBackend.
         """
         START_SAVE_KV_CALLS.inc()
         # assert self.cpu_backend, "please initialize cpu_backend first."
@@ -2147,9 +2210,20 @@ class TPUOffloadConnectorWorker:
     def start_load_kv(self, fwd_ctx: "ForwardContext") -> None:
         """
         This function is the worker-side entry point for loading data from the
-        local CPU backend into the TPU's sharded KV cache. It is a blocking
-        operation that ensures the cache is fully updated before the model's
-        forward pass begins.
+        local CPU backend into the TPU's sharded KV cache.
+        Executes a synchronous two-stage load (prefix-hit) pipeline.
+        This operation is fully blocking to ensure the KV cache is populated
+        before the model's forward pass begins.
+
+        Stage 1: Swap-In (Synchronous)
+        - Fetches requested chunks from the LocalCPUBackend (Host RAM).
+        - Performs a Host-to-Device (H2D) transfer to move the data into
+          a HBM staging buffer.
+
+        Stage 2: Scatter (Synchronous)
+        - Uses a JIT-compiled scatter kernel to disperse the contiguous
+          data from the staging buffer into the specific non-contiguous
+          physical blocks assigned to the request.
         """
         START_LOAD_KV_CALLS.inc()
         # Reset the save processing flag at the start of a new step.
