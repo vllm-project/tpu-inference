@@ -75,7 +75,7 @@ setup_environment() {
 
   # load VLLM_COMMIT_HASH from .env file
   if [ -f .env ]; then
-      export "$(grep -v '^#' tpu-inference/.env | xargs)"
+      export "$(grep -v '^#' .env | xargs)"
   fi
 
   if [ -z "${BUILDKITE:-}" ]; then

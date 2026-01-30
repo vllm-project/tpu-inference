@@ -22,7 +22,7 @@ echo "--- :git: Checking changed files"
 BASE_BRANCH=${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-"main"}
 # load VLLM_COMMIT_HASH from .env file, if not exists, get the latest commit hash from vllm repo
 if [ -f .env ]; then
-    export "$(grep -v '^#' tpu-inference/.env | xargs)"
+    export "$(grep -v '^#' .env | xargs)"
 fi
 if [ -z "${VLLM_COMMIT_HASH:-}" ]; then
     VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
