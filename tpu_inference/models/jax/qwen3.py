@@ -299,6 +299,6 @@ class Qwen3ForCausalLM(JaxModule, LoadableWithIterator):
     def load_weights(self, weights: Iterable) -> set[str]:
         loader = JaxAutoWeightsLoader(
             self,
-            skip_prefixes=(["lm_head."]
+            skip_prefixes=(["lm_head"]
                            if not hasattr(self, 'lm_head') else None))
         return loader.load_weights(weights)
