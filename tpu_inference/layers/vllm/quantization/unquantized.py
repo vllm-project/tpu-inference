@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import jax
 import torch
@@ -196,6 +196,9 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     @property
     def is_monolithic(self) -> bool:
         return True
+
+    def _select_monolithic(self) -> Callable:
+        return self.apply_monolithic
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         assert isinstance(layer, FusedMoE)
