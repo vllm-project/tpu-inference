@@ -73,6 +73,11 @@ setup_environment() {
 
   echo "Cleanup complete."
 
+  # load VLLM_COMMIT_HASH from .env file
+  if [ -f .env ]; then
+      export "$(grep -v '^#' tpu-inference/.env | xargs)"
+  fi
+
   if [ -z "${BUILDKITE:-}" ]; then
       VLLM_COMMIT_HASH=""
       TPU_INFERENCE_HASH=$(git log -n 1 --pretty="%H")
