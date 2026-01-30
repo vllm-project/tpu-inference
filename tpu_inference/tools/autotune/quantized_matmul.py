@@ -49,6 +49,7 @@ def factors_of_n(target: int, n: int) -> List[int]:
 
 
 def make_configs(batch_sizes, out_in_features, x_q_dtype, w_q_dtype):
+    tpu_version = tpu_utils.get_tpu_generation()
     configs = set()
     for batch_size in batch_sizes:
         if batch_size < 128:
@@ -57,9 +58,9 @@ def make_configs(batch_sizes, out_in_features, x_q_dtype, w_q_dtype):
             batch_block_sizes = factors_of_n(batch_size, 128)
 
         for out_feature, in_feature in out_in_features:
-            tuned_key = tuned_block_sizes.get_key(batch_size, out_feature,
-                                                  in_feature, x_q_dtype,
-                                                  w_q_dtype)
+            tuned_key = tuned_block_sizes.TunedKey(tpu_version, batch_size,
+                                                   out_feature, in_feature,
+                                                   x_q_dtype, w_q_dtype)
             out_block_sizes = factors_of_n(out_feature, 128)
             in_block_sizes = factors_of_n(in_feature, 128)
 

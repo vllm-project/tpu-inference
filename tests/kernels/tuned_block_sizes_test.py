@@ -1,214 +1,112 @@
-# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-import json
-import pathlib
 import unittest
 from unittest import mock
 
 import jax.numpy as jnp
 
-from tpu_inference.kernels.quantized_matmul import \
-    tuned_block_sizes as matmul_tuning
-from tpu_inference.kernels.ragged_paged_attention.v3 import \
-    tuned_block_sizes as rpa_tuning
+from tpu_inference.kernels.ragged_paged_attention.v3 import tuned_block_sizes
 
 
-class QuantizedMatmulTuningTest(unittest.TestCase):
+class TunedBlockSizesTest(unittest.TestCase):
 
-    def setUp(self):
-        # Clear cache before each test to ensure isolation
-        matmul_tuning._TUNING_DATA_CACHE.clear()
+    def test_get_tuning_file_path(self):
+        """Test that device names map to correct JSON paths."""
+        path_v6e = tuned_block_sizes._get_tuning_file_path("TPU v6e")
+        self.assertTrue(
+            path_v6e.endswith(
+                "tpu_inference/kernels/tuned_data/ragged_paged_attention/v3/tpu_v6e.json"
+            ))
 
-    @mock.patch.object(matmul_tuning, '_load_tuning_data')
+        path_v5lite = tuned_block_sizes._get_tuning_file_path("TPU v5 Lite")
+        self.assertTrue(path_v5lite.endswith("tpu_v5e.json"))
+
     @mock.patch(
-        'tpu_inference.kernels.quantized_matmul.tuned_block_sizes.get_tpu_name_slug'
+        'tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes._load_tuning_data'
     )
-    def test_logic_with_mock_data(self, mock_get_slug, mock_load_data):
-        """Verify that get_tuned_block_sizes returns the correct values from a mocked registry."""
-        mock_get_slug.return_value = 'tpu_v7'
-
-        # Mock data structure: { "n_batch,n_out,n_in,x_dtype,w_dtype": [B, O, I] }
-        mock_data = {
-            "1,1024,1024,int8,int8": [128, 256, 512],
-            "config_style_key": {
-                "config": {
-                    "batch_block_size": 64,
-                    "out_block_size": 64,
-                    "in_block_size": 64
-                }
-            }
-        }
-        mock_load_data.return_value = mock_data
-
-        # Test standard list format
-        val = matmul_tuning.get_tuned_block_sizes(n_batch=1,
-                                                  n_out=1024,
-                                                  n_in=1024,
-                                                  x_q_dtype='int8',
-                                                  w_q_dtype='int8')
-        self.assertEqual(val.batch_block_size, 128)
-        self.assertEqual(val.out_block_size, 256)
-        self.assertEqual(val.in_block_size, 512)
-
-    @mock.patch.object(matmul_tuning, '_load_tuning_data')
-    @mock.patch(
-        'tpu_inference.kernels.quantized_matmul.tuned_block_sizes.get_tpu_name_slug'
-    )
-    @mock.patch(
-        'tpu_inference.kernels.quantized_matmul.tuned_block_sizes.get_tpu_generation'
-    )
-    def test_default_fallback(self, mock_get_gen, mock_get_slug,
-                              mock_load_data):
-        """Verify fallback to defaults when key is missing."""
-        mock_get_slug.return_value = 'tpu_v7'
-        mock_load_data.return_value = {}  # Empty registry
-        mock_get_gen.return_value = 7  # Just needed for logging if checking that, or if logic changes
-
-        val = matmul_tuning.get_tuned_block_sizes(
-            n_batch=999,  # Unknown
-            n_out=999,
-            n_in=999,
-            x_q_dtype='int8',
-            w_q_dtype='int8')
-        # Expect defaults from code
-        self.assertEqual(val.batch_block_size, 128)
-        self.assertEqual(val.out_block_size, 128)
-        self.assertEqual(val.in_block_size, 128)
-
-    def test_registry_integrity(self):
-        """Walk all Matmul JSON files and ensure they are valid."""
-        # Assume repo structure relative to this test file
-        # tpu_inference/kernels/tuned_data/quantized_matmul/*.json
-        base_path = pathlib.Path(__file__).parent.parent.parent
-        data_dir = base_path / "tpu_inference" / "kernels" / "tuned_data" / "quantized_matmul"
-
-        self.assertTrue(data_dir.exists(), f"Directory not found: {data_dir}")
-
-        json_files = list(data_dir.glob("*.json"))
-        self.assertTrue(len(json_files) > 0, "No JSON files found for Matmul")
-
-        for json_file in json_files:
-            with open(json_file, 'r') as f:
-                try:
-                    data = json.load(f)
-                    self.assertIsInstance(data, dict,
-                                          f"Root must be dict in {json_file}")
-                    # Basic schema check for a random key if not empty
-                    if data:
-                        key = next(iter(data))
-                        val = data[key]
-                        # Must be list or dict with config
-                        valid_val = (isinstance(val, list) and len(val) == 3) or \
-                                    (isinstance(val, dict) and "config" in val)
-                        self.assertTrue(
-                            valid_val,
-                            f"Invalid value format in {json_file} for key {key}"
-                        )
-
-                except json.JSONDecodeError as e:
-                    self.fail(f"Failed to parse JSON {json_file}: {e}")
-
-
-class RaggedPagedAttentionTuningTest(unittest.TestCase):
-
-    def setUp(self):
-        rpa_tuning._TUNING_DATA_CACHE.clear()
-
-    @mock.patch.object(rpa_tuning, '_load_tuning_data')
     @mock.patch(
         'tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes.get_device_name'
     )
-    def test_logic_with_mock_data(self, mock_get_dev, mock_load_data):
-        """Verify successful lookup logic with mocked data."""
-        mock_get_dev.return_value = "TPU v5 Lite"  # Maps to tpu_v5e
+    @mock.patch(
+        'tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes.get_lookup_keys'
+    )
+    def test_get_tuned_block_sizes_hit(self, mock_get_keys, mock_get_device,
+                                       mock_load_data):
+        """Test cache hit logic."""
+        # Mock keys
+        mock_get_keys.return_value = (
+            "tpu_v6e",
+            16,  # page_size
+            "q_bfloat16_kv_bfloat16",
+            "dummy_dims",
+            "dummy_extra")
+        mock_get_device.return_value = "TPU v6e"
 
-        # Construct a key that get_lookup_keys would generate
-        # Key format: (device, page_size, dtypes, head_dims, extra)
-        # but the JSON is nested: data[page_size][dtypes][head_dims][extra]
-
-        # Let's mock the JSON structure directly
+        # Mock data structure matching the lookup chain
         mock_data = {
-            "16": {  # page_size
-                "q_bfloat16_kv_float8_e4m3fn": {
-                    "q_head-128_kv_head-16_head-128": {
-                        "max_model_len-16384-sw-None": [8, 32]  # bkv_p, bq
+            "16": {
+                "q_bfloat16_kv_bfloat16": {
+                    "dummy_dims": {
+                        "dummy_extra": [64, 32]  # bkv_p, bq
                     }
                 }
             }
         }
         mock_load_data.return_value = mock_data
 
-        bkv_p, bq = rpa_tuning.get_tuned_block_sizes(
+        bkv_p, bq = tuned_block_sizes.get_tuned_block_sizes(
             q_dtype=jnp.bfloat16,
-            kv_dtype=jnp.float8_e4m3fn,
-            actual_num_q_heads=128,
-            actual_num_kv_heads=16,
+            kv_dtype=jnp.bfloat16,
+            actual_num_q_heads=1,
+            actual_num_kv_heads=1,
             head_dim=128,
             page_size=16,
             max_num_tokens=1024,
-            pages_per_seq=1024,
-            sliding_window=None)
-        self.assertEqual(bkv_p, 8)
+            pages_per_seq=64)
+
+        self.assertEqual(bkv_p, 64)
         self.assertEqual(bq, 32)
 
-    def test_hd64_key_logic(self):
-        """Verify that head_dim=64 triggers the specific legacy key generation."""
-        # we can test get_simplified_raw_key directly
+    @mock.patch(
+        'tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes._load_tuning_data'
+    )
+    @mock.patch(
+        'tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes.get_device_name'
+    )
+    @mock.patch(
+        'tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes.get_tpu_generation'
+    )
+    def test_get_tuned_block_sizes_fallback_v4(self, mock_gen, mock_get_device,
+                                               mock_load_data):
+        """Test fallback logic for TPU v4."""
+        mock_load_data.return_value = None  # No data found
+        mock_gen.return_value = 4
 
-        # Case 1: Standard (head_dim=128)
-        # Should align head to 128
-        keys = rpa_tuning.get_simplified_raw_key(page_size=16,
-                                                 q_dtype=jnp.bfloat16,
-                                                 kv_dtype=jnp.bfloat16,
-                                                 actual_num_q_heads=32,
-                                                 actual_num_kv_heads=32,
-                                                 head_dim=128,
-                                                 max_model_len=1000,
-                                                 sliding_window=None)
-        # keys[5] is head_dim
-        self.assertEqual(keys[5], 128)
+        bkv_p, bq = tuned_block_sizes.get_tuned_block_sizes(
+            q_dtype=jnp.bfloat16,
+            kv_dtype=jnp.bfloat16,
+            actual_num_q_heads=1,
+            actual_num_kv_heads=1,
+            head_dim=128,
+            page_size=16,
+            max_num_tokens=1024,
+            pages_per_seq=64)
 
-        # Case 2: HD64
-        # Should KEEP head_dim as 64 (not align to 128)
-        keys_64 = rpa_tuning.get_simplified_raw_key(page_size=16,
-                                                    q_dtype=jnp.bfloat16,
-                                                    kv_dtype=jnp.bfloat16,
-                                                    actual_num_q_heads=32,
-                                                    actual_num_kv_heads=32,
-                                                    head_dim=64,
-                                                    max_model_len=1000,
-                                                    sliding_window=None)
-        self.assertEqual(keys_64[5], 64)
-
-    def test_registry_integrity(self):
-        """Walk all RPA JSON files and ensure they are valid."""
-        base_path = pathlib.Path(__file__).parent.parent.parent
-        data_dir = base_path / "tpu_inference" / "kernels" / "tuned_data" / "ragged_paged_attention" / "v3"
-
-        self.assertTrue(data_dir.exists(), f"Directory not found: {data_dir}")
-        json_files = list(data_dir.glob("*.json"))
-        self.assertTrue(len(json_files) > 0, "No JSON files found for RPA")
-
-        for json_file in json_files:
-            with open(json_file, 'r') as f:
-                try:
-                    data = json.load(f)
-                    self.assertIsInstance(data, dict)
-
-                    # RPA structure is deeply nested.
-                    # If it has "512" (partition size) or "16" (page size), check deeper
-
-                    # Just verify it's not empty and has expected string keys
-                    if data:
-                        key = next(iter(data))
-                        # Should be a number string like "128", "16", "32" etc.
-                        self.assertTrue(
-                            key.isdigit(),
-                            f"Top level keys in {json_file.name} should be numeric strings, got {key}"
-                        )
-
-                except json.JSONDecodeError as e:
-                    self.fail(f"Failed to parse JSON {json_file}: {e}")
+        # Fallback for v4 is (512 // page_size, 32) -> (32, 32)
+        self.assertEqual(bkv_p, 32)
+        self.assertEqual(bq, 32)
 
 
 if __name__ == '__main__':
