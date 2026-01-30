@@ -116,7 +116,7 @@ def get_tuned_block_sizes(
             cfg = val["config"]
             return TunedValue(cfg["batch_block_size"], cfg["out_block_size"],
                               cfg["in_block_size"])
-            return TunedValue(*val)
+        return TunedValue(*val)
 
     tpu_generation = get_tpu_generation()
     keys = (tpu_generation, n_batch, n_out, n_in, x_q_dtype, w_q_dtype)
