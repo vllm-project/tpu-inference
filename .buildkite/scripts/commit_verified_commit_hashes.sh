@@ -39,13 +39,7 @@ git fetch origin "${TARGET_BRANCH}"
 git checkout "${TARGET_BRANCH}"
 git reset --hard origin/"${TARGET_BRANCH}"
 
-# load VLLM_COMMIT_HASH from .env file, if not exists, get the latest commit hash from vllm repo
-if [ -f .env ]; then
-    export "$(grep -v '^#' .env | xargs)"
-fi
-if [ -z "${VLLM_COMMIT_HASH:-}" ]; then
-    VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
-fi
+VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH" --default "")
 
 if [ -z "${VLLM_COMMIT_HASH}" ]; then
     echo "VLLM_COMMIT_HASH not found in buildkite meta-data"

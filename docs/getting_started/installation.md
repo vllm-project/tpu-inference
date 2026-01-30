@@ -63,7 +63,7 @@ For debugging or development purposes, you can install `tpu-inference` from sour
 1. Clone the `vllm` and `tpu-inference` repositories:
 
     ```shell
-    git clone https://github.com/vllm-project/tpu-inference.git; export $(grep -v '^#' tpu-inference/.env | xargs)
+    git clone https://github.com/vllm-project/tpu-inference.git; export VLLM_COMMIT_HASH="$(cat tpu-inference/.buildkite/vllm_lkg.version)"
     git clone https://github.com/vllm-project/vllm.git; cd vllm && git checkout "${VLLM_COMMIT_HASH}"
     ```
 
@@ -76,7 +76,7 @@ For debugging or development purposes, you can install `tpu-inference` from sour
 
 1. Install `vllm` from source, targeting the TPU device:
 
-    NOTE: `tpu-inference` repo pins `vllm` revision in `.env` file,
+    NOTE: `tpu-inference` repo pins `vllm` revision in `vllm_lkg.version` file,
     make sure to checkout proper revision beforehand.
 
     ```shell

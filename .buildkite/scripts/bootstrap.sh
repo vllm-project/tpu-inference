@@ -20,9 +20,9 @@ set -euo pipefail
 echo "--- :git: Checking changed files"
 
 BASE_BRANCH=${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-"main"}
-# load VLLM_COMMIT_HASH from .env file, if not exists, get the latest commit hash from vllm repo
-if [ -f .env ]; then
-    export "$(grep -v '^#' .env | xargs)"
+# load VLLM_COMMIT_HASH from vllm_lkg.version file, if not exists, get the latest commit hash from vllm repo
+if [ -f .buildkite/vllm_lkg.version ]; then
+    VLLM_COMMIT_HASH="$(cat .buildkite/vllm_lkg.version)"
 fi
 if [ -z "${VLLM_COMMIT_HASH:-}" ]; then
     VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
