@@ -21,12 +21,10 @@ from jax.sharding import Mesh, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
-from vllm.attention.layer import Attention
+from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig, FusedMoEQuantConfig, mxfp4_w4a16_moe_quant_config)
-from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
-                                                        FusedMoEMethodBase,
-                                                        FusedMoERouter)
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
@@ -114,20 +112,7 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
         if self.moe_backend == FusedMoEBackend.FUSED_MOE:
             # When fused moe kernle is used, we pass extra arguments like
             # tuned block sizes to the kernel.
-            self.extra_backend_kwargs = dict(
-                subc_quant_w1_sz=REQUANTIZED_BLOCK_SIZE,
-                subc_quant_w2_sz=REQUANTIZED_BLOCK_SIZE,
-                ep_axis_name=ep_axis_name,
-                # TODO: Use autotune table once we have it.
-                bt=256,
-                bf=1024,
-                bd1=1024,
-                bd2=1024,
-                btc=256,
-                bfc=1024,
-                bd1c=1024,
-                bd2c=1024,
-            )
+            self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name, )
 
     def get_fused_moe_quant_config(
             self, layer: torch.nn.Module) -> FusedMoEQuantConfig | None:
@@ -137,6 +122,10 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
             w1_bias=layer.w13_bias,
             w2_bias=layer.w2_bias,
         )
+
+    @property
+    def is_monolithic(self) -> bool:
+        return True
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
         assert isinstance(layer, FusedMoE)
@@ -210,10 +199,9 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
         layer.w13_bias = Parameter(weights.w13_bias, requires_grad=False)
         layer.w2_bias = Parameter(weights.w2_bias, requires_grad=False)
 
-    def apply(
+    def apply_monolithic(
         self,
         layer: FusedMoE,
-        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:

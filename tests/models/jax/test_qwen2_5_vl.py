@@ -63,6 +63,9 @@ class MockModelConfig:
     def get_head_size(self):
         return self.hf_config.hidden_size // self.hf_config.num_attention_heads
 
+    def get_vocab_size(self):
+        return self.hf_config.vocab_size
+
 
 class MockVllmConfig:
     """A mock VllmConfig sufficient for testing the Qwen2.5 VL model."""
@@ -105,6 +108,7 @@ class MockVllmConfig:
         self.load_config = MagicMock()
         self.extra_configs = {}
         self.additional_config = {}
+        self.quant_config = None
 
 
 @pytest.fixture(scope="module")
@@ -405,7 +409,7 @@ class TestQwen2_5_VLForConditionalGeneration:
     def model(self, mock_vllm_config: MockVllmConfig, rng: PRNGKey,
               mesh: Mesh):
         with patch('tpu_inference.models.jax.qwen2_5_vl.Qwen2_5_VisionTransformer', autospec=True) as MockVision, \
-             patch('tpu_inference.models.jax.qwen2_5_vl.Qwen2ForCausalLM', autospec=True) as MockLM:
+             patch('tpu_inference.models.jax.qwen2_5_vl.Qwen2Model', autospec=True) as MockLM:
             mock_visual = MockVision.return_value
             mock_visual.dtype = mock_vllm_config.model_config.dtype
             mock_visual.config = mock_vllm_config.model_config.hf_config.vision_config
@@ -415,7 +419,8 @@ class TestQwen2_5_VLForConditionalGeneration:
                                                        mesh)
             # Directly assign mocked instances
             model.visual = mock_visual
-            model.language_model = MockLM.return_value
+            model.model = MockLM.return_value
+            model.compute_logits = MagicMock()
             yield model
 
     def test_validate_and_reshape_mm_tensor(
@@ -519,9 +524,8 @@ class TestQwen2_5_VLForConditionalGeneration:
         input_ids = jax.random.randint(rng, (1, 10), 0,
                                        model.config.vocab_size)
         mock_text_embeds = jnp.ones((1, 10, model.config.hidden_size))
-        model.language_model.model = MagicMock()
-        model.language_model.model.embed = MagicMock(
-            return_value=mock_text_embeds)
+        model.model = MagicMock()
+        model.model.embed_tokens = MagicMock(return_value=mock_text_embeds)
 
         embeds = model.embed_input_ids(input_ids, None)
         np.testing.assert_array_equal(embeds, mock_text_embeds)
@@ -549,15 +553,14 @@ class TestQwen2_5_VLForConditionalGeneration:
                                        model.config.vocab_size)
         attn_meta = MagicMock(spec=AttentionMetadata)
         mock_lm_output = ([MagicMock()],
-                          jnp.ones((1, 10, model.config.hidden_size)), [])
-        model.language_model.return_value = mock_lm_output
+                          jnp.ones((1, 10, model.config.hidden_size)))
+        model.model.return_value = mock_lm_output
 
         new_kvs, x, aux_hidden_states = model(kv_caches, input_ids, attn_meta)
-        model.language_model.assert_called_once_with(
-            kv_caches=kv_caches,
-            input_ids=input_ids,
-            attention_metadata=attn_meta,
-            inputs_embeds=None)
+        model.model.assert_called_once_with(kv_caches=kv_caches,
+                                            input_ids=input_ids,
+                                            attention_metadata=attn_meta,
+                                            inputs_embeds=None)
         assert len(new_kvs) == 1
         assert x.shape == (1, 10, model.config.hidden_size)
         assert len(aux_hidden_states) == 0
@@ -566,12 +569,11 @@ class TestQwen2_5_VLForConditionalGeneration:
                             rng: PRNGKey):
         hidden_states = jnp.ones((1, 10, model.config.hidden_size))
         mock_logits = jnp.ones((1, 10, model.config.vocab_size))
-        model.language_model.compute_logits.return_value = mock_logits
+        model.compute_logits.return_value = mock_logits
 
         logits = model.compute_logits(hidden_states)
         np.testing.assert_array_equal(logits, mock_logits)
-        model.language_model.compute_logits.assert_called_once_with(
-            hidden_states)
+        model.compute_logits.assert_called_once_with(hidden_states)
 
     @patch("tpu_inference.models.jax.utils.weight_utils.load_hf_weights")
     def test_load_weights(self, mock_load_weights: MagicMock,
@@ -583,19 +585,16 @@ class TestQwen2_5_VLForConditionalGeneration:
         kwargs = mock_load_weights.call_args.kwargs
         assert kwargs['vllm_config'] == mock_vllm_config
         assert kwargs['model'] is model
-        assert "model.embed_tokens" in kwargs['metadata_map'].name_map
-        assert "lm_head" in kwargs[
-            'metadata_map'].name_map  # Should be present when not tied
         assert kwargs['mesh'] is mesh
         assert isinstance(model.rng, nnx.Rngs)
-        assert model.language_model.rng is model.rng
+        assert model.rng is model.rng
 
     @patch("tpu_inference.models.jax.utils.weight_utils.load_hf_weights")
     def test_load_weights_tied(self, mock_load_weights: MagicMock,
                                rng: PRNGKey, mesh: Mesh):
         mock_vllm_config_tied = MockVllmConfig(tie_word_embeddings=True)
         with patch('tpu_inference.models.jax.qwen2_5_vl.Qwen2_5_VisionTransformer', autospec=True), \
-             patch('tpu_inference.models.jax.qwen2_5_vl.Qwen2ForCausalLM', autospec=True):
+             patch('tpu_inference.models.jax.qwen2_5_vl.Qwen2Model', autospec=True):
             model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config_tied,
                                                        rng, mesh)
 

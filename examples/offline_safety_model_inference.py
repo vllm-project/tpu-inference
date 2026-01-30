@@ -127,7 +127,7 @@ def main(args: dict):
     llm = LLM(**args)
 
     #TODO: Temporary patch as we haven't fully implemented the multimodal part of this model
-    llm.llm_engine.processor.model_config.processor_return_mm_hashes = False
+    llm.llm_engine.input_processor.model_config.processor_return_mm_hashes = False
 
     sampling_params = llm.get_default_sampling_params()
     if max_tokens is not None:

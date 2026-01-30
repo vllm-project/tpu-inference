@@ -34,9 +34,9 @@ from tpu_inference.layers.jax.attention.attention import AttentionMetadata
 from tpu_inference.layers.jax.attention.deepseek_v3_attention import MLA
 from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
-from tpu_inference.layers.jax.moe.deepseek_v3_moe import (DeepSeekV3Router,
-                                                          SparseMoE)
+from tpu_inference.layers.jax.moe.deepseek_v3_moe import DeepSeekV3Router
 from tpu_inference.layers.jax.moe.moe import MoE
+from tpu_inference.layers.jax.moe.utils import MoEBackend, select_moe_backend
 from tpu_inference.layers.jax.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
 from tpu_inference.logger import init_logger
@@ -155,6 +155,8 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
             "layers.*.custom_module.kernel_down_proj_EFD",
             "model.layers.*.mlp.experts.*.up_proj.weight":
             "layers.*.custom_module.kernel_up_proj_EDF",
+            "model.layers.*.mlp.experts.*.gate_upproj_fused.weight":
+            "layers.*.custom_module.kernel_gating_upproj_E2DF",
             # MOE(shared experts)
             "model.layers.*.mlp.shared_experts.down_proj.weight":
             "layers.*.shared_experts.kernel_down_proj_FD",
@@ -175,6 +177,9 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
 
         self.is_model_quantized = not vllm_config.additional_config.get(
             "skip_quantization", False)
+
+        # TODO (jacobplatin): remove this once the JAX path refactor is done
+        self.is_native_fp8_model = False
 
         if self.is_model_quantized:
             # NOTE: this is only needed for pre-quantized models when doing random weight loading
@@ -206,6 +211,17 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
 
             # TODO (jacobplatin): remove this check eventually!
             assert self.quant_dtype == jnp.float8_e4m3fn, f"Expected quant_dtype to be float8_e4m3fn for DeepSeek but got {self.quant_dtype}"
+
+            quantization_block_sizes = vllm_config.model_config.hf_config.quantization_config[
+                "weight_block_size"]
+            # TODO (jacobplatin): remove this once the JAX path refactor is done
+            if quantization_block_sizes == [128, 128]:
+                assert len(
+                    quantization_block_sizes
+                ) == 2, f"Expected only 2 quantization block sizes but got {quantization_block_sizes}"
+                self.quantization_block_size_n = quantization_block_sizes[0]
+                self.quantization_block_size_k = quantization_block_sizes[1]
+                self.is_native_fp8_model = True
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
@@ -320,16 +336,32 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
             scale_shape = scale.shape
             if len(weight_shape) == len(scale_shape):
                 new_scale = scale
-                for wdim, sdim in zip(weight_shape, scale_shape):
-                    if (wdim % sdim != 0):
-                        raise ValueError(
-                            f"Weight dim {wdim} is not divisible by scale dim {sdim} for weight {name} with shape {weight_shape} and scale {scale_shape}!"
+                # TODO (jacobplatin): remove once the refactor is complete
+                if self.is_native_fp8_model:
+                    for idx, (weight_dim, scale_dim) in enumerate(
+                            zip(weight_shape, scale_shape)):
+                        if weight_dim // self.quantization_block_size_n != scale_dim and weight_dim // scale_dim != 1:
+                            old_scale_shape = scale.shape
+                            scale = scale.repeat(
+                                self.quantization_block_size_n,
+                                axis=idx)[:, :weight_dim]
+                            logger.warning(
+                                f"Got a weight with shape {weight_shape} and scale with shape {old_scale_shape} "
+                                f"where the scale_dim {scale_dim} does not match the weight_dim {weight_dim} "
+                                f"multiplied by the quantization block size {self.quantization_block_size_n}. "
+                                f"Repeating the scale to new shape {scale.shape} along axis {idx} with repeat size {self.quantization_block_size_n}."
+                            )
+                else:
+                    for wdim, sdim in zip(weight_shape, scale_shape):
+                        if (wdim % sdim != 0):
+                            raise ValueError(
+                                f"Weight dim {wdim} is not divisible by scale dim {sdim} for weight {name} with shape {weight_shape} and scale {scale_shape}!"
+                            )
+                    if scale_shape != new_scale.shape:
+                        logger.warning(
+                            f"Adjusted scale shape {scale_shape} to {new_scale.shape} to match weight {weight_shape}"
                         )
-                if scale_shape != new_scale.shape:
-                    logger.warning(
-                        f"Adjusted scale shape {scale_shape} to {new_scale.shape} to match weight {weight_shape}"
-                    )
-                scale = new_scale
+                    scale = new_scale
             else:
                 raise ValueError(
                     f"Scale rank {scale_shape} does not match weight rank {weight_shape}"
@@ -408,6 +440,7 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
         mlp_experts_up_proj_scales = {}
         mlp_experts_down_proj_weights = {}
         mlp_experts_down_proj_scales = {}
+        stacked_tensors = {}
         quantized_weights = {}
         quantized_scales = {}
         with jax.default_device(jax.devices("cpu")[0]):
@@ -480,6 +513,7 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                 stacked_weights = None
                 if "mlp.experts" in loaded_name:
                     if "down_proj" in loaded_name:
+                        proj_type = "down_proj"
                         stacked_weights = self._process_moe_weights(
                             loaded_name, loaded_weight,
                             mlp_experts_down_proj_weights)
@@ -488,6 +522,7 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                                 loaded_name, scale,
                                 mlp_experts_down_proj_scales)
                     if "gate_proj" in loaded_name:
+                        proj_type = "gate_proj"
                         stacked_weights = self._process_moe_weights(
                             loaded_name, loaded_weight,
                             mlp_experts_gate_proj_weights)
@@ -496,6 +531,7 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                                 loaded_name, scale,
                                 mlp_experts_gate_proj_scales)
                     if "up_proj" in loaded_name:
+                        proj_type = "up_proj"
                         stacked_weights = self._process_moe_weights(
                             loaded_name, loaded_weight,
                             mlp_experts_up_proj_weights)
@@ -503,12 +539,82 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                             stacked_scales = self._process_moe_weights(
                                 loaded_name, scale, mlp_experts_up_proj_scales)
                     if stacked_weights is not None:
-                        weight_bytes, weight_shards = self._load_individual_weight(
-                            loaded_name,
-                            stacked_weights,
-                            model_params,
-                            model_for_loading.mesh,
-                            scale=stacked_scales)
+                        stacked_tensors[layer_num +
+                                        proj_type] = (stacked_weights,
+                                                      stacked_scales)
+                        if all(f"{layer_num}{p}" in stacked_tensors
+                               for p in ["gate_proj", "up_proj", "down_proj"]):
+
+                            gate_w, gate_s = stacked_tensors.pop(layer_num +
+                                                                 "gate_proj")
+                            up_w, up_s = stacked_tensors.pop(layer_num +
+                                                             "up_proj")
+                            down_w, down_s = stacked_tensors.pop(layer_num +
+                                                                 "down_proj")
+
+                            is_moe_kernel = model_for_loading.moe_backend in [
+                                MoEBackend.FUSED_MOE, MoEBackend.VLLM_MOE
+                            ]
+                            gate_name = loaded_name.replace(
+                                proj_type, "gate_proj")
+                            up_name = loaded_name.replace(proj_type, "up_proj")
+                            down_name = loaded_name.replace(
+                                proj_type, "down_proj")
+                            if is_moe_kernel:
+                                # (E, D, F) -> (E, 2, D, F)
+                                fused_w = torch.stack([gate_w, up_w], dim=1)
+                                fused_s = torch.stack(
+                                    [gate_s, up_s], dim=1
+                                ) if gate_s is not None and up_s is not None else None
+
+                                fused_name = loaded_name.replace(
+                                    proj_type, "gate_upproj_fused")
+                                weight_bytes, weight_shards = self._load_individual_weight(
+                                    fused_name,
+                                    fused_w,
+                                    model_params,
+                                    model_for_loading.mesh,
+                                    scale=fused_s)
+
+                                weight_bytes_down, weight_shards_down = self._load_individual_weight(
+                                    loaded_name,
+                                    down_w,
+                                    model_params,
+                                    model_for_loading.mesh,
+                                    scale=down_s)
+
+                                # Update cumulative memory
+                                weight_bytes += weight_bytes_down
+                                weight_shards += weight_shards_down
+
+                            else:
+
+                                weight_bytes, weight_shards = self._load_individual_weight(
+                                    gate_name,
+                                    gate_w,
+                                    model_params,
+                                    model_for_loading.mesh,
+                                    scale=gate_s)
+
+                                weight_bytes_up, weight_shards_up = self._load_individual_weight(
+                                    up_name,
+                                    up_w,
+                                    model_params,
+                                    model_for_loading.mesh,
+                                    scale=up_s)
+                                weight_bytes += weight_bytes_up
+                                weight_shards += weight_shards_up
+
+                                weight_bytes_down, weight_shards_down = self._load_individual_weight(
+                                    down_name,
+                                    down_w,
+                                    model_params,
+                                    model_for_loading.mesh,
+                                    scale=down_s)
+                                weight_bytes += weight_bytes_down
+                                weight_shards += weight_shards_down
+                        else:
+                            continue
                         if self.is_verbose:
                             cumulative_global_memory += weight_bytes
                             cumulative_local_memory += weight_shards
@@ -518,6 +624,8 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                             logger.info(
                                 f"Cumulative local memory: {cumulative_local_memory} GB"
                             )
+                    else:
+                        continue
                 else:
                     if self.use_mla_kernel and "kv_b_proj" in loaded_name:
                         # loaded_weight shape: (num_heads * (d_k + d_v), kv_lora_rank)
@@ -527,6 +635,7 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                             self.attn_heads,
                             self.qk_nope_head_dim + self.v_head_dim,
                             self.kv_lora_rank)
+
                         k_weight = weight_reshaped[:, :self.
                                                    qk_nope_head_dim, :]
                         v_weight = weight_reshaped[:,
@@ -540,19 +649,35 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
 
                         scales_list = [None, None]
                         if scale is not None:
-                            assert loaded_weight.shape[0] == scale.shape[0]
-                            block_size_k = loaded_weight.shape[
-                                1] // scale.shape[1]
-                            assert block_size_k > 0, f"Expected non-zero block size but got {block_size_k}!"
-                            scale_reshaped = scale.view(
-                                self.attn_heads,
-                                (self.qk_nope_head_dim + self.v_head_dim),
-                                self.kv_lora_rank // block_size_k)
+                            # TODO (jacobplatin): remove once refactor happens
+                            if self.is_native_fp8_model:
+                                bn = self.quantization_block_size_n
+                                bk = self.quantization_block_size_k
+                                scale_reshaped = scale.view(
+                                    self.attn_heads,
+                                    (self.qk_nope_head_dim + self.v_head_dim)
+                                    // bn, self.kv_lora_rank // bk)
 
-                            k_scale = scale_reshaped[:, :self.
-                                                     qk_nope_head_dim, :]
-                            v_scale = scale_reshaped[:,
-                                                     self.qk_nope_head_dim:, :]
+                                k_scale = scale_reshaped[:, :self.
+                                                         qk_nope_head_dim //
+                                                         bn, :]
+                                v_scale = scale_reshaped[:, self.
+                                                         qk_nope_head_dim //
+                                                         bn:, :]
+                            else:
+                                assert loaded_weight.shape[0] == scale.shape[0]
+                                block_size_k = loaded_weight.shape[
+                                    1] // scale.shape[1]
+                                assert block_size_k > 0, f"Expected non-zero block size but got {block_size_k}!"
+                                scale_reshaped = scale.view(
+                                    self.attn_heads,
+                                    (self.qk_nope_head_dim + self.v_head_dim),
+                                    self.kv_lora_rank // block_size_k)
+
+                                k_scale = scale_reshaped[:, :self.
+                                                         qk_nope_head_dim, :]
+                                v_scale = scale_reshaped[:, self.
+                                                         qk_nope_head_dim:, :]
                             scales_list = [k_scale, v_scale]
 
                     else:
@@ -641,21 +766,9 @@ class DeepSeekV3(nnx.Module):
         qk_rope_head_dim = 64
         v_head_dim = 128
 
-        self.random_init = force_random_weights or self.vllm_config.additional_config.get(
-            "random_weights", False)
-        self.sparse_matmul = self.vllm_config.additional_config.get(
-            "sparse_matmul", False)
-
-        if isinstance(self.sparse_matmul, str):
-            self.sparse_matmul = self.sparse_matmul.lower() == "true"
-        else:
-            self.sparse_matmul = bool(self.sparse_matmul)
-
-        if self.sparse_matmul:
-            logger.info("sparse matmul is enabled")
-        else:
-            logger.info("sparse matmul is disabled, using dense matmul")
         self.mesh = mesh
+
+        self.moe_backend = select_moe_backend()
 
         self.weight_loader = self.WeightLoader(
             vllm_config=vllm_config,
@@ -676,8 +789,7 @@ class DeepSeekV3(nnx.Module):
                                  dtype=dtype,
                                  rngs=self.rng,
                                  vd_sharding=(ShardingAxisName.MLP_TENSOR,
-                                              None),
-                                 random_init=self.random_init)
+                                              None))
 
         self.layers = []
 
@@ -703,7 +815,6 @@ class DeepSeekV3(nnx.Module):
                 v_head_dim=v_head_dim,
                 mesh=self.mesh,
                 use_mla_kernel=self.use_mla_kernel,
-                random_init=self.random_init,
                 hidden_size=hidden_size,
                 num_attention_heads=num_attention_heads,
                 num_key_value_heads=1
@@ -729,7 +840,6 @@ class DeepSeekV3(nnx.Module):
             block = TransformerBlock(
                 pre_attention_norm=RMSNorm(
                     dims=hidden_size,
-                    random_init=self.random_init,
                     epsilon=rms_norm_eps,
                     with_scale=True,
                     dtype=dtype,
@@ -737,7 +847,6 @@ class DeepSeekV3(nnx.Module):
                 ),
                 pre_mlp_norm=RMSNorm(
                     dims=hidden_size,
-                    random_init=self.random_init,
                     epsilon=rms_norm_eps,
                     with_scale=True,
                     dtype=dtype,
@@ -750,16 +859,19 @@ class DeepSeekV3(nnx.Module):
                     hidden_size=hidden_size,
                     intermediate_size=ffw_intermediate_size,
                     rngs=self.rng,
+                    activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
                     df_sharding=(None, ShardingAxisName.MLP_TENSOR),
-                    fd_sharding=(ShardingAxisName.MLP_TENSOR, None),
-                    random_init=self.random_init))
+                    fd_sharding=(ShardingAxisName.MLP_TENSOR, None)))
 
             self.layers.append(block)
-
+        # TODO (jacobplatin): this is very hacky for now, and we need to clean-up when
+        # the refactor occurs.  Basically, we assume that the MLP/MoE layers are in FP4
+        # unless specified otherwise, but we shouldn't be doing this.
+        moe_dtype = jnp.float8_e4m3fn if self.weight_loader.is_native_fp8_model else vllm_config.model_config.hf_config.quantization_config.get(
+            "tpu_settings", {}).get("mlp_dtype", jnp.float4_e2m1fn)
         for i in range(first_k_dense_replace, num_layers):
             is_moe_layer = ((i + 1) % interleave_moe_layer_step == 0)
             router = DeepSeekV3Router(
-                random_init=self.random_init,
                 hidden_size=hidden_size,
                 num_experts=num_local_experts,
                 num_experts_per_tok=num_experts_per_token,
@@ -769,60 +881,40 @@ class DeepSeekV3(nnx.Module):
                 rngs=self.rng,
                 routed_scaling_factor=2.5,
                 dtype=dtype,
+                moe_backend=self.moe_backend,
                 activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
-                ed_sharding=(ShardingAxisName.MLP_TENSOR, None),
-                e_sharding=(ShardingAxisName.MLP_TENSOR, ))
-            if self.sparse_matmul:
-                # TODO: orginize the SparseMoE and DenseMoE better given they share most interfaces
-                custom_module = SparseMoE(
+                ed_sharding=(None, None),
+                e_sharding=(None, ))
+            custom_module = MoE(
+                dtype=dtype,
+                num_local_experts=num_local_experts,
+                apply_expert_weight_before_computation=False,
+                hidden_size=hidden_size,
+                intermediate_size_moe=moe_intermediate_size,
+                num_experts_per_tok=num_experts_per_token,
+                mesh=self.mesh,
+                hidden_act=hidden_act,
+                rngs=self.rng,
+                activation_ffw_td=(ShardingAxisName.MLP_DATA,
+                                   ShardingAxisName.MODEL_1),
+                activation_ffw_ted=(ShardingAxisName.MLP_DATA, None,
+                                    ShardingAxisName.MODEL_1),
+                edf_sharding=(None, ShardingAxisName.MODEL_1,
+                              ShardingAxisName.MODEL_2),
+                efd_sharding=(None, ShardingAxisName.MODEL_2,
+                              ShardingAxisName.MODEL_1),
+                moe_backend=self.moe_backend,
+                qwix_quantized_weight_dtype=moe_dtype
+                if self.weight_loader.is_model_quantized else None,
+                router=router) if is_moe_layer else DenseFFW(
                     dtype=dtype,
-                    num_local_experts=num_local_experts,
-                    apply_expert_weight_before_computation=False,
-                    hidden_size=hidden_size,
-                    intermediate_size_moe=moe_intermediate_size,
-                    num_experts_per_tok=num_experts_per_token,
-                    mesh=self.mesh,
                     hidden_act=hidden_act,
-                    rngs=self.rng,
-                    random_init=self.random_init,
-                    activation_ffw_td=(ShardingAxisName.MLP_TENSOR, None),
-                    activation_ffw_ted=(ShardingAxisName.MLP_DATA, None, None),
-                    edf_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
-                    efd_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
-                    quantized_dtype=self.weight_loader.quant_dtype
-                    if self.weight_loader.is_model_quantized else None,
-                    router=router) if is_moe_layer else DenseFFW(
-                        dtype=dtype,
-                        hidden_act=hidden_act,
-                        hidden_size=hidden_size,
-                        intermediate_size=ffw_intermediate_size,
-                        rngs=self.rng,
-                        random_init=self.random_init,
-                        df_sharding=(None, ShardingAxisName.MLP_TENSOR),
-                        fd_sharding=(ShardingAxisName.MLP_TENSOR, None))
-            else:
-                custom_module = MoE(
-                    dtype=dtype,
-                    num_local_experts=num_local_experts,
-                    apply_expert_weight_before_computation=False,
                     hidden_size=hidden_size,
-                    intermediate_size_moe=moe_intermediate_size,
-                    hidden_act=hidden_act,
+                    intermediate_size=ffw_intermediate_size,
                     rngs=self.rng,
-                    random_init=self.random_init,
                     activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
-                    activation_ffw_ted=(ShardingAxisName.MLP_DATA, None, None),
-                    edf_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
-                    efd_sharding=(ShardingAxisName.MLP_TENSOR, None, None),
-                    router=router) if is_moe_layer else DenseFFW(
-                        dtype=dtype,
-                        hidden_act=hidden_act,
-                        hidden_size=hidden_size,
-                        intermediate_size=ffw_intermediate_size,
-                        rngs=self.rng,
-                        random_init=self.random_init,
-                        df_sharding=(None, ShardingAxisName.MLP_TENSOR),
-                        fd_sharding=(ShardingAxisName.MLP_TENSOR, None))
+                    df_sharding=(None, ShardingAxisName.MLP_TENSOR),
+                    fd_sharding=(ShardingAxisName.MLP_TENSOR, None))
 
             shared_experts = DenseFFW(
                 dtype=dtype,
@@ -830,14 +922,13 @@ class DeepSeekV3(nnx.Module):
                 hidden_size=hidden_size,
                 intermediate_size=num_shared_experts * moe_intermediate_size,
                 rngs=self.rng,
-                random_init=self.random_init,
+                activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
                 df_sharding=(None, ShardingAxisName.MLP_TENSOR),
                 fd_sharding=(ShardingAxisName.MLP_TENSOR, None))
 
             pre_attention_norm = RMSNorm(
                 dims=hidden_size,
                 rngs=self.rng,
-                random_init=self.random_init,
                 epsilon=rms_norm_eps,
                 with_scale=True,
                 dtype=dtype,
@@ -846,7 +937,6 @@ class DeepSeekV3(nnx.Module):
             pre_mlp_norm = RMSNorm(
                 dims=hidden_size,
                 rngs=self.rng,
-                random_init=self.random_init,
                 epsilon=rms_norm_eps,
                 with_scale=True,
                 dtype=dtype,
@@ -863,7 +953,6 @@ class DeepSeekV3(nnx.Module):
         self.final_norm = RMSNorm(
             dims=hidden_size,
             rngs=self.rng,
-            random_init=self.random_init,
             epsilon=rms_norm_eps,
             with_scale=True,
             dtype=dtype,
@@ -874,8 +963,7 @@ class DeepSeekV3(nnx.Module):
                               dtype=dtype,
                               rngs=self.rng,
                               vd_sharding=(ShardingAxisName.MLP_TENSOR, None),
-                              dv_sharding=(None, ShardingAxisName.MLP_TENSOR),
-                              random_init=self.random_init)
+                              dv_sharding=(None, ShardingAxisName.MLP_TENSOR))
 
         if os.environ.get("VLLM_LOGGING_LEVEL", "").upper() == "DEBUG":
             self._print_model_architecture()

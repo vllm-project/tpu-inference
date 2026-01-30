@@ -3,7 +3,7 @@ Feature,CorrectnessTest,PerformanceTest
 "DCN-based P/D disaggregation",unverified,✅
 "KV cache host offloading",unverified,unverified
 "LoRA_Torch",✅,✅
-"Multimodal Inputs",✅,✅
+"Multimodal Inputs",❌,N/A
 "Out-of-tree model support",✅,✅
 "Prefix Caching",✅,✅
 "Single Program Multi Data",✅,✅
@@ -11,7 +11,6 @@ Feature,CorrectnessTest,PerformanceTest
 "Speculative Decoding: Eagle3",✅,✅
 "Speculative Decoding: Ngram",✅,✅
 "async scheduler",✅,✅
-"data_parallelism",✅,unverified
 "runai_model_streamer_loader",✅,N/A
 "sampling_params",✅,N/A
 "structured_decoding",✅,N/A

@@ -30,10 +30,30 @@ from tpu_inference.utils import device_array
 logger = init_logger(__name__)
 
 QUANTIZATION_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "configs")
-DEFAULT_NUM_BLOCKS_FOR_JIT_KV_CACHE = 2000
+DEFAULT_NUM_BLOCKS_FOR_JIT_KV_CACHE = 2048
 DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS = 512
 DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS = 256
 DEFAULT_MAX_NUM_BLOCKS_PER_REQ = 16
+
+DEFAULT_DEEPSEEK_FP8_CONFIG = {
+    "qwix": {
+        "use_abstract_model":
+        True,
+        "scale_dtype":
+        "bfloat16",
+        "rules": [
+            {
+                "module_path": ".*.custom_module.router.*",
+                "weight_qtype": None,
+            },
+            {
+                "module_path": ".*",
+                "weight_qtype": "float8_e4m3fn",
+                "act_qtype": "float8_e4m3fn",
+            },
+        ],
+    }
+}
 
 DEFAULT_DEEPSEEK_FP4_MLP_MOE_FP8_ATTN_CONFIG = {
     "qwix": {
@@ -120,6 +140,12 @@ DEFAULT_GPT_OSS_FP4_CONFIG = {
         ],
     }
 }
+
+# TODO (jacobplatin): remove this once the JAX path refactor is complete
+NATIVE_FP8_CHECKPOINT_MODELS = [
+    "deepseek-ai/deepseek-v3", "deepseek-ai/deepseek-r1-0528",
+    "deepseek-ai/deepseek-r1"
+]
 
 
 def parse_qwix_config_to_rules(
@@ -452,14 +478,26 @@ def get_default_qwix_quantization_config(
     # NOTE (jacobplatin): we'll default to mixed FP8 (attention) + FP4 (MoE experts)
     # for DeepSeek
     if model_type == "deepseek_v3" and quant_method == "fp8":
-        config = copy.deepcopy(DEFAULT_DEEPSEEK_FP4_MLP_MOE_FP8_ATTN_CONFIG)
-
         # Dynamically fetch block size from HF config if available
         # Config fmt: 'weight_block_size': [1, 512] -> we want the 2nd dim for tile_size
         # NOTE: if the checkpoint is not 1D subchannel, we will throw an error
         hf_quant_config = hf_config.quantization_config
         assert "weight_block_size" in hf_quant_config, "Expected weight_block_size in quantization_config"
         block_size = hf_quant_config["weight_block_size"]
+
+        # TODO (jacobplatin): remove this (not so nice!) logic once the refactor on the JAX happens
+        # NOTE: this is needed / added to support backwards compatibility for the native FP8 DeepSeek checkpoints
+        # (e.g. deepseek-ai/DeepSeek-R1-0528)
+        if block_size == [128, 128]:
+            model_name = hf_config._name_or_path.lower()
+            if model_name not in NATIVE_FP8_CHECKPOINT_MODELS:
+                raise ValueError(
+                    f"Expected to find DeepSeek checkpoint with block_size of [128, 128], but got {model_name}.  Expexted one of {NATIVE_FP8_CHECKPOINT_MODELS}"
+                )
+            return DEFAULT_DEEPSEEK_FP8_CONFIG
+
+        config = copy.deepcopy(DEFAULT_DEEPSEEK_FP4_MLP_MOE_FP8_ATTN_CONFIG)
+
         if isinstance(block_size, (list, tuple)) and len(block_size) == 2:
             assert block_size[
                 0] == 1, f"Expected first dimension to be 1 (unchanneled), but got {block_size[0]}! If you are trying to run quantized DeepSeek, we currently only support 1D-subchannel quantization and those models can be found here: https://huggingface.co/collections/jrplatin/deepseek-r1-1d-subchannel"
@@ -473,11 +511,17 @@ def get_default_qwix_quantization_config(
             for rule in config["qwix"]["rules"]:
                 if "tile_size" in rule:
                     rule["tile_size"] = tile_size
+                # TODO (jacobplatin): need to make this MUCH more robust, but basically the TPU-friendly checkpoints
+                # always (for now) keep FP8 for the attention layers but can be FP4 or FP8 for the MLP layers
+                mlp_dtype = hf_quant_config.get("tpu_settings",
+                                                {}).get("mlp_dtype", None)
+                if mlp_dtype is not None and rule[
+                        "weight_qtype"] == "float4_e2m1fn":
+                    rule["weight_qtype"] = mlp_dtype
         else:
             raise ValueError(
                 f"Invalid weight_block_size config: {block_size}, expected a list/tuple of length 2"
             )
-
         return config
     elif model_type == "llama4" and quant_method == "compressed-tensors":
         return DEFAULT_LLAMA4_FP8_CONFIG
@@ -637,7 +681,8 @@ def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
     logger.info("Done initializing Qwix-quantized model with random weights")
 
 
-def manually_quantize_qwix_weight(weight: jax.Array, qtype: jnp.dtype,
+def manually_quantize_qwix_weight(name: str, weight: jax.Array,
+                                  qtype: jnp.dtype,
                                   channelwise_axes: List[int],
                                   tiled_axes: dict,
                                   calibration_method: str) -> QArray:
@@ -652,7 +697,7 @@ def manually_quantize_qwix_weight(weight: jax.Array, qtype: jnp.dtype,
         tiled_axes=tiled_axes,
         calibration_method=calibration_method)
 
-    return ptq.create_quantized_param(weight, how_to_quantize)
+    return ptq.create_quantized_param(name, weight, how_to_quantize)
 
 
 def manually_quantize_qwix_activation(inputs: jax.Array, rule_name: str,

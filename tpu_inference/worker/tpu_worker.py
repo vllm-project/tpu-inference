@@ -10,7 +10,6 @@ import jaxlib
 import jaxtyping
 import vllm.envs as vllm_envs
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.distributed import get_pp_group
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
                                           has_kv_transfer_group)
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
@@ -24,6 +23,7 @@ from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 
 from tpu_inference import envs, utils
 from tpu_inference.distributed import jax_parallel_state
+from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.distributed.utils import (get_device_topology_order_id,
                                              get_host_ip, get_kv_transfer_port)
 from tpu_inference.layers.common.sharding import ShardingConfigManager
@@ -82,11 +82,12 @@ class TPUWorker:
         self.pp_config = PPConfig(rank, ip, prev_worker_ip,
                                   self.parallel_config.pipeline_parallel_size)
 
-        if self.model_config.trust_remote_code:
-            # note: lazy import to avoid importing torch before initializing
-            from vllm.utils.import_utils import init_cached_hf_modules
-
-            init_cached_hf_modules()
+        # Explicitly trigger RunAI download on the worker if needed.
+        # This handles downloading config.json and other non-weight files to the
+        # worker's local cache before VllmModelWrapper initialization.
+        if hasattr(self.model_config, "maybe_pull_model_tokenizer_for_runai"):
+            self.model_config.maybe_pull_model_tokenizer_for_runai(
+                self.model_config.model, self.model_config.tokenizer)
 
         # Delay profiler initialization to the start of the profiling.
         # This is because in vLLM V1, MP runtime is initialized before the

@@ -21,6 +21,9 @@ if TYPE_CHECKING:
     PHASED_PROFILING_DIR: str = ""
     PYTHON_TRACER_LEVEL: int = 1
     USE_MOE_EP_KERNEL: bool = False
+    USE_VLLM_MOE_KERNEL: bool = False
+    USE_MEGABLOCKS: bool = False
+    USE_RAGGED_DOT: bool = False
     NUM_SLICES: int = 1
     RAY_USAGE_STATS_ENABLED: str = "0"
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: str = "shm"
@@ -130,6 +133,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "MODEL_IMPL_TYPE":
     env_with_choices("MODEL_IMPL_TYPE", "auto",
                      ["auto", "vllm", "flax_nnx", "jetpack"]),
+    # Enable 2D tensor parallelism, shard attention heads across multiple axes
+    "USE_2D_TP":
+    env_bool("USE_2D_TP", default=False),
     # Enable new experimental model design
     "NEW_MODEL_DESIGN":
     env_bool("NEW_MODEL_DESIGN", default=False),
@@ -142,6 +148,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use custom expert-parallel kernel for MoE (Mixture of Experts)
     "USE_MOE_EP_KERNEL":
     env_bool("USE_MOE_EP_KERNEL", default=False),
+    # Use vllm kernel for MoE (Mixture of Experts)
+    "USE_VLLM_MOE_KERNEL":
+    env_bool("USE_VLLM_MOE_KERNEL", default=False),
+    # Enable megablocks for JAX sparse matmul for MoE (Mixture of Experts)
+    "USE_MEGABLOCKS":
+    env_bool("USE_MEGABLOCKS", default=False),
+    # Enable ragged_odt for JAX sparse matmul for MoE (Mixture of Experts)
+    "USE_RAGGED_DOT":
+    env_bool("USE_RAGGED_DOT", default=False),
     # Number of TPU slices for multi-slice mesh
     "NUM_SLICES":
     lambda: int(os.getenv("NUM_SLICES") or "1"),
