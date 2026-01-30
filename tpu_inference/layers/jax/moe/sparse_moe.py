@@ -11,10 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# yapf: disable
 import jax
 import jax.numpy as jnp
 
+# yapf: disable
 from tpu_inference.layers.jax.moe.utils import (get_all_to_all_params_fn,
                                                 global_permute_fn, gmm_fn,
                                                 local_permute_fn,
@@ -49,10 +49,10 @@ def sparse_moe_distributed_fwd(
                           moe_instance.num_experts_per_tok,
                           moe_instance.num_local_experts)
 
-    expert_shard_id = jax.lax.axis_index(moe_instance.expert_axis_name)
-    local_expert_size = moe_instance.num_local_experts // moe_instance.num_expert_parallelism
-
     if moe_instance.num_expert_parallelism > 1:
+        expert_shard_id = jax.lax.axis_index(moe_instance.expert_axis_name)
+        local_expert_size = moe_instance.num_local_experts // moe_instance.num_expert_parallelism
+
         if moe_instance.is_batch_sharded_by_expert:
             # 2a. Send Tokens To Experts (All-to-All)
             all_shards_group_sizes = jax.lax.all_gather(
@@ -133,7 +133,8 @@ def sparse_moe_distributed_fwd(
     with jax.named_scope("gating"):
         gating_TEF = gmm_fn(compute_inputs, kernel_gating, compute_group_sizes,
                             moe_instance.tile_size, moe_instance.moe_backend,
-                            moe_instance.dtype, moe_instance.quantized_dtype)
+                            moe_instance.dtype,
+                            moe_instance.qwix_quantized_weight_dtype)
         activated_gating_TEF = modeling_flax_utils.ACT2FN[
             moe_instance.hidden_act](gating_TEF)
 
@@ -141,7 +142,7 @@ def sparse_moe_distributed_fwd(
         up_proj_TEF = gmm_fn(compute_inputs, kernel_up_proj,
                              compute_group_sizes, moe_instance.tile_size,
                              moe_instance.moe_backend, moe_instance.dtype,
-                             moe_instance.quantized_dtype)
+                             moe_instance.qwix_quantized_weight_dtype)
 
     fuse_TEF = activated_gating_TEF * up_proj_TEF
 
@@ -151,7 +152,7 @@ def sparse_moe_distributed_fwd(
                                      moe_instance.tile_size,
                                      moe_instance.moe_backend,
                                      moe_instance.dtype,
-                                     moe_instance.quantized_dtype)
+                                     moe_instance.qwix_quantized_weight_dtype)
 
     # 5. Return Results (All-to-All)
     if moe_instance.num_expert_parallelism > 1:
@@ -201,6 +202,6 @@ def sparse_moe_distributed_fwd(
         output_TD = unpermute_fn(final_intermediate_output,
                                  global_sort_indices, router_weights_TX,
                                  moe_instance.num_experts_per_tok,
-                                 moe_instance.hidden_size, moe_instance.dtype)
+                                 moe_instance.dtype)
 
     return output_TD

@@ -45,7 +45,7 @@ def sampling_config():
     return SamplingParams(temperature=0, max_tokens=10, ignore_eos=True)
 
 
-def test_correctness(
+def test_correctness_jax_uni_proc_executor(
     sampling_config: SamplingParams,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -90,8 +90,7 @@ def test_correctness(
         f"GCS output: {gcs_output_text}, HF output: {hf_output_text}")
 
 
-# TODO before submitting: Confirm the path this test follows to see if logic is tested as expected.
-def test_correctness_codegemma(
+def test_correctness_torchax_uni_proc_executor(
     sampling_config: SamplingParams,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -122,6 +121,55 @@ def test_correctness_codegemma(
 
     # Test with Hugging Face model
     hf_llm = LLM(model=hf_model_name,
+                 max_model_len=128,
+                 max_num_seqs=16,
+                 max_num_batched_tokens=256)
+    hf_outputs = hf_llm.generate([prompt], sampling_config)
+    hf_output_text = hf_outputs[0].outputs[0].text
+    del hf_llm
+    time.sleep(10)  # Wait for TPUs to be released
+
+    assert gcs_output_text == hf_output_text, (
+        f"Outputs do not match! "
+        f"GCS output: {gcs_output_text}, HF output: {hf_output_text}")
+
+
+def test_correctness_torchax_ray_distributed_executor(
+    sampling_config: SamplingParams,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    Compare the outputs of a codegemma model loaded from GCS via
+    runai_model_streamer, and a model loaded from
+    Hugging Face, both using RayDistributedExecutor. The outputs should be the same.
+    Note that these are run on the same node since a multi-node TPU setup would
+    require additional changes to the CI pipeline.
+    """
+    # TODO(amacaskill): Replace with GKE owned GCS bucket.
+    gcs_model_name = "gs://vertex-model-garden-public-us/llama3/llama3-8b-hf"
+    hf_model_name = "meta-llama/Meta-Llama-3-8B"
+    prompt = "def fibonacci("
+
+    # Set ENV variables so that runai_model_streamer uses anonymous GCS access.
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "fake-project")
+    monkeypatch.setenv("RUNAI_STREAMER_GCS_USE_ANONYMOUS_CREDENTIALS", "true")
+    monkeypatch.setenv("CLOUD_STORAGE_EMULATOR_ENDPOINT",
+                       "https://storage.googleapis.com")
+
+    gcs_llm = LLM(model=gcs_model_name,
+                  load_format="runai_streamer",
+                  tensor_parallel_size=2,
+                  max_model_len=128,
+                  max_num_seqs=16,
+                  max_num_batched_tokens=256)
+    gcs_outputs = gcs_llm.generate([prompt], sampling_config)
+    gcs_output_text = gcs_outputs[0].outputs[0].text
+    del gcs_llm
+    time.sleep(10)  # Wait for TPUs to be released
+
+    # Test with Hugging Face model
+    hf_llm = LLM(model=hf_model_name,
+                 tensor_parallel_size=2,
                  max_model_len=128,
                  max_num_seqs=16,
                  max_num_batched_tokens=256)

@@ -453,6 +453,12 @@
             "num_kv_pages_per_block": 8,
             "num_q_per_block": 64
           }
+        },
+        "512": {
+          "config": {
+            "num_kv_pages_per_block": 4,
+            "num_q_per_block": 64
+          }
         }
       },
       "q_head-16_kv_head-1_head-256": {
@@ -466,6 +472,12 @@
           "config": {
             "num_kv_pages_per_block": 1,
             "num_q_per_block": 32
+          }
+        },
+        "256": {
+          "config": {
+            "num_kv_pages_per_block": 2,
+            "num_q_per_block": 8
           }
         }
       },

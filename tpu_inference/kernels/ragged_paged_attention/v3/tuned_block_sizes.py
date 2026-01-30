@@ -22,8 +22,7 @@ import jax.numpy as jnp
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (
     align_to, get_dtype_packing, next_power_of_2)
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import get_device_name
-from tpu_inference.utils import get_tpu_generation as get_tpu_version
+from tpu_inference.utils import get_device_name, get_tpu_generation
 
 logger = init_logger(__name__)
 
@@ -103,6 +102,7 @@ def get_tuned_block_sizes(
             entry = data[str(page_size_key)][dtypes][head_dims][extra]
 
             if isinstance(entry, dict) and "config" in entry:
+                # TODO: Remove this check once we confirm all JSONs are flat lists
                 cfg = entry["config"]
                 bkv_p = cfg["num_kv_pages_per_block"]
                 bq = cfg["num_q_per_block"]
@@ -117,14 +117,15 @@ def get_tuned_block_sizes(
         logger.warning_once(
             'Couldn`t find tuned sizes for the RPA v3 kernel with %s', keys)
         # When not available use a sensible default based on TPU version
-        # Set default block sizes for each tpu_version.
-        tpu_version = get_tpu_version()
-        if tpu_version < 4:
+        # Set default block sizes for each tpu_generation.
+        tpu_generation = get_tpu_generation()
+        if tpu_generation < 4:
             # Fallback or error? Original raised NotImplementedError for v3?
-            if tpu_version != -1:  # -1 means not on TPU
-                raise NotImplementedError('TPU version must be 4 or higher.')
+            if tpu_generation != -1:  # -1 means not on TPU
+                raise NotImplementedError(
+                    'TPU generation must be 4 or higher.')
 
-        match tpu_version:
+        match tpu_generation:
             case 4:
                 # TPUv4 has much smaller VMEM size so we pick fixed block sizes.
                 bkv_p, bq = (512 // page_size, 32)
@@ -132,11 +133,6 @@ def get_tuned_block_sizes(
                 bkv_p, bq = (4096 // page_size, 32)
             case _:
                 bkv_p, bq = (2048 // page_size, 32)
-
-    # We should consider the actual page_per_seq and max_num_tokens.
-    # If page_per_seq < bkv_p or max_num_tokens < bq, using the bkv_p or bq may
-    # waste computation. So we need the min here.
-    bkv_p, bq = (min(pages_per_seq, bkv_p), min(max_num_tokens, bq))
 
     logger.info_once('RPA v3 kernel tuned block sizes for %s: bkv_p=%s, bq=%s',
                      keys, bkv_p, bq)
@@ -194,6 +190,30 @@ def get_simplified_raw_key(
     sliding_window,
 ):
     """Get the simplified key."""
+    if head_dim == 64:
+        # Legacy logic from tuned_block_sizes_hd64.py
+        # Maintains strict parity for head_dim=64 kernels
+        # assert head_dim == 64
+        assert actual_num_q_heads % actual_num_kv_heads == 0
+        actual_num_q_heads_per_kv_head = actual_num_q_heads // actual_num_kv_heads
+        q_packing = get_dtype_packing(q_dtype)
+        kv_packing = get_dtype_packing(kv_dtype)
+        num_kv_heads = align_to(actual_num_kv_heads, kv_packing)
+        num_q_heads_per_kv_head = align_to(actual_num_q_heads_per_kv_head,
+                                           q_packing)
+
+        return (
+            next_power_of_2(page_size),
+            jnp.dtype(q_dtype).name,
+            jnp.dtype(kv_dtype).name,
+            next_power_of_2(num_q_heads_per_kv_head * actual_num_kv_heads),
+            next_power_of_2(num_kv_heads),
+            head_dim,  # explicitly 64
+            next_power_of_2(max_model_len),
+            sliding_window,
+        )
+
+    # Standard logic for other head dimensions
     assert actual_num_q_heads % actual_num_kv_heads == 0
     actual_num_q_heads_per_kv_head = actual_num_q_heads // actual_num_kv_heads
     q_packing = get_dtype_packing(q_dtype)
@@ -209,7 +229,7 @@ def get_simplified_raw_key(
         jnp.dtype(kv_dtype).name,
         next_power_of_2(num_q_heads_per_kv_head * actual_num_kv_heads),
         next_power_of_2(num_kv_heads_x2) // 2,
-        head_dim if head_dim == 64 else align_to(head_dim, 128),
+        align_to(head_dim, 128),
         next_power_of_2(max_model_len),
         sliding_window,
     )

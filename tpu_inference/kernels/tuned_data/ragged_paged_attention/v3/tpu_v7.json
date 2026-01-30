@@ -3122,7 +3122,7 @@
       "q_head-2_kv_head-2_head-128": {
         "max_model_len-1024-sw-None": {
           "config": {
-            "num_kv_pages_per_block": 8,
+            "num_kv_pages_per_block": 4,
             "num_q_per_block": 128
           }
         },
@@ -3146,20 +3146,20 @@
         },
         "max_model_len-4096-sw-None": {
           "config": {
-            "num_kv_pages_per_block": 32,
-            "num_q_per_block": 128
+            "num_kv_pages_per_block": 16,
+            "num_q_per_block": 32
           }
         },
         "max_model_len-512-sw-None": {
           "config": {
             "num_kv_pages_per_block": 4,
-            "num_q_per_block": 128
+            "num_q_per_block": 32
           }
         },
         "max_model_len-8192-sw-None": {
           "config": {
-            "num_kv_pages_per_block": 32,
-            "num_q_per_block": 128
+            "num_kv_pages_per_block": 16,
+            "num_q_per_block": 64
           }
         }
       },
@@ -6924,7 +6924,7 @@
         },
         "max_model_len-2048-sw-None": {
           "config": {
-            "num_kv_pages_per_block": 8,
+            "num_kv_pages_per_block": 16,
             "num_q_per_block": 64
           }
         },
@@ -6942,8 +6942,8 @@
         },
         "max_model_len-512-sw-None": {
           "config": {
-            "num_kv_pages_per_block": 2,
-            "num_q_per_block": 128
+            "num_kv_pages_per_block": 4,
+            "num_q_per_block": 32
           }
         },
         "max_model_len-8192-sw-None": {
