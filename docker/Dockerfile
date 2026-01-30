@@ -56,7 +56,7 @@ RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install -e tests/v
 RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install \
     git+https://github.com/thuml/depyf.git \
     pytest-asyncio \
-    "lm-eval[api]>=0.4.9.2" \
+    "lm-eval[api]==0.4.9.2" \
     pytest-cov \
     tblib
 

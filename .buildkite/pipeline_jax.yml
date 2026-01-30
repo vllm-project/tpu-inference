@@ -234,7 +234,7 @@ steps:
        queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
      commands:
        - |
-         if [[ "$$IS_FOR_V7X" == "true" ]] && { [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels|tests/kernels|requirements.txt)'; }; then
+         if [[ "$$IS_FOR_V7X" == "true" ]] && { [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels|tests/kernels|requirements(_.*)?\.txt)'; }; then
            .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh  --model_name "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8" --use_moe_ep_kernel 1 --tensor_parallel_size 8 --max_model_len 2048 --max_num_batched_tokens 2048 --max_gen_toks 256 --enable_expert_parallel 1 --flex_threshold 0.85 --strict_threshold 0.70
          else
            echo "Skipping: Step requires TPU v7x and either a NIGHTLY build or kernel/requirements changes."
@@ -250,7 +250,7 @@ steps:
        queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
      commands:
        - |
-         if [[ "$$IS_FOR_V7X" == "true" ]] && { [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels|tests/kernels|requirements.txt)'; }; then
+         if [[ "$$IS_FOR_V7X" == "true" ]] && { [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels|tests/kernels|requirements(_.*)?\.txt)'; }; then
            .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh  --model_name "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8" --use_moe_ep_kernel 0 --tensor_parallel_size 8 --max_model_len 2048 --max_num_batched_tokens 2048 --max_gen_toks 256 --enable_expert_parallel 1 --flex_threshold 0.85 --strict_threshold 0.70
          else
            echo "Skipping: Step requires TPU v7x and either a NIGHTLY build or kernel/requirements changes."
@@ -266,7 +266,7 @@ steps:
        queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
      commands:
        - |
-         if [[ "$$IS_FOR_V7X" == "true" ]] && { [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels|tests/kernels|requirements.txt)'; }; then
+         if [[ "$$IS_FOR_V7X" == "true" ]] && { [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels|tests/kernels|requirements(_.*)?\.txt)'; }; then
            .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh  --model_name "openai/gpt-oss-120b" --use_moe_ep_kernel 1 --tensor_parallel_size 8 --max_model_len 2048 --max_num_batched_tokens 2048 --max_gen_toks 256 --enable_expert_parallel 1 --flex_threshold 0.50 --strict_threshold 0.25
          else
            echo "Skipping: Step requires TPU v7x and either a NIGHTLY build or kernel/requirements changes."
