@@ -452,7 +452,8 @@ class CompilationManager:
                 hidden_dim=vocab_size,
                 input_sharding=NamedSharding(
                     self.runner.mesh,
-                    PartitionSpec(None, ShardingAxisName.TENSOR)),
+                    PartitionSpec(ShardingAxisName.MLP_DATA,
+                                  ShardingAxisName.MLP_TENSOR)),
             )
             self._precompile_select_from_array_helper(
                 name=
@@ -462,7 +463,8 @@ class CompilationManager:
                 hidden_dim=vocab_size,
                 input_sharding=NamedSharding(
                     self.runner.mesh,
-                    PartitionSpec(None, ShardingAxisName.TENSOR)),
+                    PartitionSpec(ShardingAxisName.MLP_DATA,
+                                  ShardingAxisName.MLP_TENSOR)),
                 only_equal_paddings=True,
             )
 
@@ -600,7 +602,8 @@ class CompilationManager:
             for num_reqs in self.runner.num_reqs_paddings:
                 sharding = NamedSharding(
                     self.runner.mesh,
-                    PartitionSpec(None, ShardingAxisName.TENSOR))
+                    PartitionSpec(ShardingAxisName.MLP_DATA,
+                                  ShardingAxisName.MLP_TENSOR))
                 target_probs = self._create_dummy_tensor(
                     (num_logits, vocab_size), jnp.bfloat16, sharding)
                 draft_token_ids = self._create_dummy_tensor((num_logits, ),
@@ -805,8 +808,10 @@ class CompilationManager:
 
             draft_hidden_states = self._create_dummy_tensor(
                 (num_tokens, draft_hidden_size), dtype,
-                NamedSharding(self.runner.mesh,
-                              PartitionSpec(None, ShardingAxisName.TENSOR)))
+                NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(ShardingAxisName.MLP_DATA,
+                                  ShardingAxisName.MLP_TENSOR)))
             input_ids = self._create_dummy_tensor(
                 (num_tokens, ), jnp.int32,
                 NamedSharding(self.runner.mesh, PartitionSpec()))
