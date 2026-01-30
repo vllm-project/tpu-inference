@@ -18,6 +18,8 @@ specifically designed for TPU and compatible with a wide range of model
 specifications. It supports mixed prefill and decoding, enhancing throughput
 during inference.
 """
+from tpu_inference.logger import init_logger
+# logger = init_logger(__name__)
 import functools
 
 import jax
@@ -1252,6 +1254,7 @@ def static_validate_inputs(
         kv_packing,
         head_dim,
     ) = kv_cache.shape
+    # logger.warning(f"kv_cache shape = {kv_cache.shape}")
 
     if head_dim != align_to(actual_head_dim, 128):
         raise ValueError(

@@ -14,7 +14,8 @@
 """TPU-Friendly and Data-Movement-Friendly MLA Ragged Paged Attention kernel."""
 
 import functools
-
+from tpu_inference.logger import init_logger
+# logger = init_logger(__name__)
 import jax
 import jax.numpy as jnp
 from jax import lax
@@ -42,6 +43,7 @@ def get_kv_cache_shape(
         kv_packing,
         align_to(kv_dim, 128),
     )
+    # logger.warning(f"kv_cache_shape = {kv_cache_shape}")
 
 
 @functools.partial(

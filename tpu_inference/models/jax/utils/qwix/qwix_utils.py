@@ -215,7 +215,7 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
     kv_caches = create_kv_caches(
         num_blocks=DEFAULT_NUM_BLOCKS_FOR_JIT_KV_CACHE,
         block_size=kv_cache_block_size,
-        num_kv_heads=kv_cache_num_kv_heads,
+        num_kv_heads=16,
         head_size=kv_cache_head_size,
         mesh=mesh,
         layer_names=[f"layer.{i}" for i in range(num_hidden_layers)],

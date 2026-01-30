@@ -188,11 +188,11 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
             # TODO (jacobplatin): remove or clean this up
             self.scale_shape_map_for_random_weight_loading = {
                 # MoE experts (3D)
-                "custom_module.kernel_down_proj_EFD": (256, 8, 7168),
+                "custom_module.kernel_down_proj_EFD": (256, 1, 7168),
                 "custom_module.kernel_gating_EDF": (256, 28, 2048),
                 "custom_module.kernel_up_proj_EDF": (256, 28, 2048),
                 # Shared experts (2D)
-                "shared_experts.kernel_down_proj_FD": (8, 7168),
+                "shared_experts.kernel_down_proj_FD": (1, 7168),
                 "shared_experts.kernel_gating_DF": (28, 2048),
                 "shared_experts.kernel_up_proj_DF": (28, 2048),
                 # Dense FFW (2D)
@@ -201,12 +201,13 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                 "custom_module.kernel_down_proj_FD": (72, 7168),
                 # Attention (3D for MLA, 2D for the rest)
                 "attn.kernel_q_down_proj_DA": (28, 1536),
-                "attn.kernel_q_up_proj_AP": (6, 24576),
+                "attn.kernel_q_up_proj_AP": (6, self.attn_heads * (self.v_head_dim + qk_rope_head_dim)),
+                # "attn.kernel_q_up_proj_AP": (6, 24576),
                 "attn.kernel_kv_down_proj_DA": (28, 576),
-                "attn.kernel_kv_up_proj_AL": (2, 32768),
-                "attn.kernel_o_proj_RD": (64, 7168),
-                "attn.kernel_k_up_proj_ANH": (2, 128, 128),  # MLA
-                "attn.kernel_v_up_proj_ANH": (2, 128, 128),  # MLA
+                "attn.kernel_kv_up_proj_AL": (2, self.attn_heads * (self.v_head_dim + qk_nope_head_dim)),
+                "attn.kernel_o_proj_RD": (self.attn_heads * self.v_head_dim, 7168),
+                "attn.kernel_k_up_proj_ANH": (2, self.attn_heads, 128),  # MLA
+                "attn.kernel_v_up_proj_ANH": (2, self.attn_heads, 128),  # MLA
             }
 
             # TODO (jacobplatin): remove this check eventually!
@@ -735,8 +736,10 @@ class DeepSeekV3(nnx.Module):
         hidden_size: int = 7168
         # NOTE: this dtype may be implicitly overriden if using to Qwix to load in the quantized weights
         dtype: jnp.dtype = jnp.bfloat16
-        num_attention_heads: int = 128
-        num_key_value_heads: int = 128
+        # num_attention_heads: int = 128
+        num_attention_heads: int = 16
+        # num_key_value_heads: int = 128
+        num_key_value_heads: int = 16
         ffw_intermediate_size: int = 18432
         moe_intermediate_size: int = 2048
         num_experts_per_token: int = 8
@@ -816,9 +819,9 @@ class DeepSeekV3(nnx.Module):
                 mesh=self.mesh,
                 use_mla_kernel=self.use_mla_kernel,
                 hidden_size=hidden_size,
-                num_attention_heads=num_attention_heads,
+                num_attention_heads=16,
                 num_key_value_heads=1
-                if self.use_mla_kernel else num_key_value_heads,
+                if self.use_mla_kernel else 16,
                 head_dim=v_head_dim,  # MLA uses v_head_dim as head_dim
                 dtype=dtype,
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly

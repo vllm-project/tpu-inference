@@ -15,7 +15,8 @@
 import math
 from dataclasses import InitVar, dataclass
 from typing import Any, Tuple
-
+# from tpu_inference.logger import init_logger
+# logger = init_logger(__name__)
 import jax
 import jax.numpy as jnp
 from flax import nnx
@@ -128,6 +129,7 @@ class MLA(nnx.Module):
                                                   self.q_da_sharding,
                                                   self.dtype,
                                                   random_init=self.random_init)
+        # logger.warning(f"self.q_lora_rank: {self.q_lora_rank}, self.qk_head_dim: {self.qk_head_dim}, self.N: {self.N}")
         self.kernel_q_up_proj_AP = create_param(
             rngs,
             (self.q_lora_rank, self.N * self.qk_head_dim),
@@ -405,7 +407,7 @@ class MLA(nnx.Module):
         )
         out_specs = (self.attn_o_tnh, P(None, None,
                                         ShardingAxisName.ATTN_HEAD))
-
+        # logger.warning(f"kv_cache shape (before shard_map): {kv_cache.shape}")
         def _ragged_paged_attention(*args):
             outputs = ragged_paged_attention(
                 *args,
@@ -415,7 +417,6 @@ class MLA(nnx.Module):
                 v_scale=v_scale,
             )
             return outputs
-
         output_TNH, kv_cache = jax.jit(
             jax.shard_map(
                 _ragged_paged_attention,

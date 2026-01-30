@@ -76,18 +76,20 @@ class KVCacheManager:
                                     page_size_padded=page_size_bytes)
         else:
             page_size_bytes = get_attention_page_size_bytes(
-                self.runner.mesh, block_size, num_kv_heads, head_size,
+                self.runner.mesh, block_size, 16, head_size,
                 self.runner.kv_cache_dtype, False)
             if sliding_window is not None:
                 return SlidingWindowSpec(block_size=block_size,
                                          num_kv_heads=num_kv_heads,
+                                        #  num_kv_heads=16,
                                          head_size=head_size,
                                          dtype=self.runner.kv_cache_dtype,
                                          sliding_window=sliding_window,
                                          page_size_padded=page_size_bytes)
             else:
                 return FullAttentionSpec(block_size=block_size,
-                                         num_kv_heads=num_kv_heads,
+                                        #  num_kv_heads=num_kv_heads,
+                                         num_kv_heads=16,
                                          head_size=head_size,
                                          dtype=self.runner.kv_cache_dtype,
                                          page_size_padded=page_size_bytes)
@@ -130,6 +132,7 @@ class KVCacheManager:
                         block_size, 1, mla_head_size)
                 else:
                     kv_cache_spec[f"layer.{i}"] = self._create_attention_spec(
+                        # block_size, 16, head_size)
                         block_size, num_kv_heads, head_size)
 
             if self.runner.speculative_config and self.runner.speculative_config.method == "eagle3":
@@ -187,7 +190,8 @@ class KVCacheManager:
                     else:
                         kv_cache_spec[
                             layer_name] = self._create_attention_spec(
-                                block_size, num_kv_heads, head_size)
+                                # block_size, 16, head_size)
+                                block_size, num_attention_heads, head_size)
                 elif attn_module.attn_type in (AttentionType.ENCODER,
                                                AttentionType.ENCODER_ONLY):
                     # encoder-only attention does not need KV cache.
@@ -250,6 +254,7 @@ class KVCacheManager:
             kv_cache = create_kv_caches(
                 num_blocks=num_blocks,
                 block_size=representative_spec.block_size,
+                # num_kv_heads=16,
                 num_kv_heads=representative_spec.num_kv_heads,
                 head_size=head_size,
                 mesh=self.runner.mesh,

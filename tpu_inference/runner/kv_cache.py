@@ -141,4 +141,5 @@ def get_attention_page_size_bytes(mesh, block_size, num_kv_heads, head_size,
         kv_dtype=jax_dtype,
         use_mla=use_mla,
     )
+    logger.warning(f"kv_cache_shape = {kv_cache_shape}")
     return (bits * np.prod(kv_cache_shape)) // 8
