@@ -355,9 +355,9 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
             # worker-specific config copy and restore the original GCS URI from `model_weights`.
             # This allows each worker to independently invoke `maybe_pull_model_tokenizer_for_runai`
             # and stream the model from GCS.
-            if node_id != driver_node_id and hasattr(
-                    self.vllm_config, "model_config"
-            ) and self.vllm_config.model_config.model_weights:
+            if node_id != driver_node_id and getattr(
+                    self.vllm_config, "model_config", None) and getattr(
+                        self.vllm_config.model_config, "model_weights", None):
                 worker_vllm_config = copy.deepcopy(self.vllm_config)
                 worker_vllm_config.model_config.model = worker_vllm_config.model_config.model_weights
                 # Unset model_weights so maybe_pull_model_tokenizer_for_runai will pull the model.
