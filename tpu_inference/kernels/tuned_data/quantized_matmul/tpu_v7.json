@@ -1,0 +1,905 @@
+{
+  "1024,14336,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1792,
+      "in_block_size": 4096
+    }
+  },
+  "1024,25600,5120,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1280,
+      "in_block_size": 5120
+    }
+  },
+  "1024,28672,8192,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 1024,
+      "in_block_size": 8192
+    }
+  },
+  "1024,3072,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 3072,
+      "in_block_size": 1024
+    }
+  },
+  "1024,4096,2048,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1024,
+      "in_block_size": 2048
+    }
+  },
+  "1024,4096,7168,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 4096,
+      "in_block_size": 1024
+    }
+  },
+  "1024,5120,12800,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 2560,
+      "in_block_size": 2560
+    }
+  },
+  "1024,5120,25600,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 2560,
+      "in_block_size": 2560
+    }
+  },
+  "1024,5120,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1280,
+      "in_block_size": 4096
+    }
+  },
+  "1024,5120,5120,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1280,
+      "in_block_size": 5120
+    }
+  },
+  "1024,5120,8192,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 5120,
+      "in_block_size": 2048
+    }
+  },
+  "1024,8192,14336,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 2048,
+      "in_block_size": 2048
+    }
+  },
+  "1024,8192,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1024,
+      "in_block_size": 4096
+    }
+  },
+  "128,14336,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 3584,
+      "in_block_size": 4096
+    }
+  },
+  "128,25600,5120,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 3200,
+      "in_block_size": 5120
+    }
+  },
+  "128,28672,8192,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 1792,
+      "in_block_size": 8192
+    }
+  },
+  "128,3072,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 1536,
+      "in_block_size": 4096
+    }
+  },
+  "128,4096,2048,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 1024,
+      "in_block_size": 2048
+    }
+  },
+  "128,4096,7168,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 1024,
+      "in_block_size": 7168
+    }
+  },
+  "128,5120,12800,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 1024,
+      "in_block_size": 12800
+    }
+  },
+  "128,5120,25600,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 512,
+      "in_block_size": 25600
+    }
+  },
+  "128,5120,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 2560,
+      "in_block_size": 4096
+    }
+  },
+  "128,5120,5120,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 1280,
+      "in_block_size": 5120
+    }
+  },
+  "128,5120,8192,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 5120,
+      "in_block_size": 2048
+    }
+  },
+  "128,8192,14336,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 1024,
+      "in_block_size": 14336
+    }
+  },
+  "128,8192,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 4096,
+      "in_block_size": 4096
+    }
+  },
+  "16,14336,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 3584,
+      "in_block_size": 4096
+    }
+  },
+  "16,25600,5120,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 3200,
+      "in_block_size": 5120
+    }
+  },
+  "16,28672,8192,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 2048,
+      "in_block_size": 8192
+    }
+  },
+  "16,3072,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 1536,
+      "in_block_size": 4096
+    }
+  },
+  "16,4096,2048,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 4096,
+      "in_block_size": 1024
+    }
+  },
+  "16,4096,7168,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 4096,
+      "in_block_size": 1792
+    }
+  },
+  "16,5120,12800,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 1024,
+      "in_block_size": 12800
+    }
+  },
+  "16,5120,25600,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 640,
+      "in_block_size": 25600
+    }
+  },
+  "16,5120,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 1280,
+      "in_block_size": 4096
+    }
+  },
+  "16,5120,5120,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 1280,
+      "in_block_size": 5120
+    }
+  },
+  "16,5120,8192,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 1280,
+      "in_block_size": 8192
+    }
+  },
+  "16,8192,14336,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 8192,
+      "in_block_size": 1024
+    }
+  },
+  "16,8192,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 2048,
+      "in_block_size": 4096
+    }
+  },
+  "2048,14336,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 2048,
+      "in_block_size": 4096
+    }
+  },
+  "2048,25600,5120,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 2560,
+      "in_block_size": 5120
+    }
+  },
+  "2048,28672,8192,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 4096,
+      "in_block_size": 1024
+    }
+  },
+  "2048,3072,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1536,
+      "in_block_size": 4096
+    }
+  },
+  "2048,4096,2048,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 2048,
+      "in_block_size": 2048
+    }
+  },
+  "2048,4096,7168,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 4096,
+      "in_block_size": 1024
+    }
+  },
+  "2048,5120,12800,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 2560,
+      "in_block_size": 2560
+    }
+  },
+  "2048,5120,25600,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 2560,
+      "in_block_size": 2560
+    }
+  },
+  "2048,5120,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1280,
+      "in_block_size": 4096
+    }
+  },
+  "2048,5120,5120,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 2560,
+      "in_block_size": 2560
+    }
+  },
+  "2048,5120,8192,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 2560,
+      "in_block_size": 2048
+    }
+  },
+  "2048,8192,14336,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 4096,
+      "in_block_size": 1024
+    }
+  },
+  "2048,8192,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 2048,
+      "in_block_size": 4096
+    }
+  },
+  "256,14336,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 2048,
+      "in_block_size": 4096
+    }
+  },
+  "256,25600,5120,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 2560,
+      "in_block_size": 5120
+    }
+  },
+  "256,28672,8192,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 7168,
+      "in_block_size": 2048
+    }
+  },
+  "256,3072,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 3072,
+      "in_block_size": 2048
+    }
+  },
+  "256,4096,2048,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 2048,
+      "in_block_size": 2048
+    }
+  },
+  "256,4096,7168,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 1024,
+      "in_block_size": 7168
+    }
+  },
+  "256,5120,12800,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 5120,
+      "in_block_size": 2560
+    }
+  },
+  "256,5120,25600,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 5120,
+      "in_block_size": 2560
+    }
+  },
+  "256,5120,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 1280,
+      "in_block_size": 4096
+    }
+  },
+  "256,5120,5120,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 1280,
+      "in_block_size": 5120
+    }
+  },
+  "256,5120,8192,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 1280,
+      "in_block_size": 8192
+    }
+  },
+  "256,8192,14336,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 8192,
+      "in_block_size": 1792
+    }
+  },
+  "256,8192,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 2048,
+      "in_block_size": 4096
+    }
+  },
+  "32,14336,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 1792,
+      "in_block_size": 4096
+    }
+  },
+  "32,25600,5120,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 2560,
+      "in_block_size": 5120
+    }
+  },
+  "32,28672,8192,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 2048,
+      "in_block_size": 8192
+    }
+  },
+  "32,3072,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 3072,
+      "in_block_size": 2048
+    }
+  },
+  "32,4096,2048,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 1024,
+      "in_block_size": 2048
+    }
+  },
+  "32,4096,7168,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 2048,
+      "in_block_size": 7168
+    }
+  },
+  "32,5120,12800,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 1280,
+      "in_block_size": 12800
+    }
+  },
+  "32,5120,25600,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 640,
+      "in_block_size": 25600
+    }
+  },
+  "32,5120,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 1280,
+      "in_block_size": 4096
+    }
+  },
+  "32,5120,5120,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 1280,
+      "in_block_size": 5120
+    }
+  },
+  "32,5120,8192,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 2560,
+      "in_block_size": 4096
+    }
+  },
+  "32,8192,14336,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 2048,
+      "in_block_size": 7168
+    }
+  },
+  "32,8192,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 4096,
+      "in_block_size": 4096
+    }
+  },
+  "4096,14336,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 3584,
+      "in_block_size": 4096
+    }
+  },
+  "4096,25600,5120,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1280,
+      "in_block_size": 5120
+    }
+  },
+  "4096,28672,8192,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 1024,
+      "in_block_size": 8192
+    }
+  },
+  "4096,3072,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 3072,
+      "in_block_size": 4096
+    }
+  },
+  "4096,4096,2048,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 4096,
+      "in_block_size": 2048
+    }
+  },
+  "4096,4096,7168,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 4096,
+      "in_block_size": 1024
+    }
+  },
+  "4096,5120,12800,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 2560,
+      "in_block_size": 2560
+    }
+  },
+  "4096,5120,25600,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 2560,
+      "in_block_size": 2560
+    }
+  },
+  "4096,5120,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1280,
+      "in_block_size": 4096
+    }
+  },
+  "4096,5120,5120,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1280,
+      "in_block_size": 5120
+    }
+  },
+  "4096,5120,8192,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 2560,
+      "in_block_size": 2048
+    }
+  },
+  "4096,8192,14336,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 4096,
+      "in_block_size": 1024
+    }
+  },
+  "4096,8192,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1024,
+      "in_block_size": 4096
+    }
+  },
+  "512,14336,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 2048,
+      "in_block_size": 4096
+    }
+  },
+  "512,25600,5120,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 2560,
+      "in_block_size": 5120
+    }
+  },
+  "512,28672,8192,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 512,
+      "in_block_size": 8192
+    }
+  },
+  "512,3072,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 3072,
+      "in_block_size": 1024
+    }
+  },
+  "512,4096,2048,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 2048,
+      "in_block_size": 2048
+    }
+  },
+  "512,4096,7168,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 1024,
+      "in_block_size": 7168
+    }
+  },
+  "512,5120,12800,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 512,
+      "in_block_size": 12800
+    }
+  },
+  "512,5120,25600,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 2560,
+      "in_block_size": 2560
+    }
+  },
+  "512,5120,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 2560,
+      "in_block_size": 2048
+    }
+  },
+  "512,5120,5120,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 1280,
+      "in_block_size": 5120
+    }
+  },
+  "512,5120,8192,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 1024,
+      "in_block_size": 8192
+    }
+  },
+  "512,8192,14336,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 4096,
+      "in_block_size": 2048
+    }
+  },
+  "512,8192,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 1024,
+      "in_block_size": 4096
+    }
+  },
+  "64,14336,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 14336,
+      "in_block_size": 1024
+    }
+  },
+  "64,25600,5120,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 6400,
+      "in_block_size": 2560
+    }
+  },
+  "64,28672,8192,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 1792,
+      "in_block_size": 8192
+    }
+  },
+  "64,3072,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 1536,
+      "in_block_size": 4096
+    }
+  },
+  "64,4096,2048,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 2048,
+      "in_block_size": 2048
+    }
+  },
+  "64,4096,7168,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 1024,
+      "in_block_size": 7168
+    }
+  },
+  "64,5120,12800,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 1024,
+      "in_block_size": 12800
+    }
+  },
+  "64,5120,25600,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 640,
+      "in_block_size": 25600
+    }
+  },
+  "64,5120,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 2560,
+      "in_block_size": 4096
+    }
+  },
+  "64,5120,5120,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 1280,
+      "in_block_size": 5120
+    }
+  },
+  "64,5120,8192,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 1280,
+      "in_block_size": 8192
+    }
+  },
+  "64,8192,14336,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 1024,
+      "in_block_size": 14336
+    }
+  },
+  "64,8192,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 2048,
+      "in_block_size": 4096
+    }
+  },
+  "8192,14336,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1024,
+      "in_block_size": 4096
+    }
+  },
+  "8192,25600,5120,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 1280,
+      "in_block_size": 5120
+    }
+  },
+  "8192,28672,8192,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 2048,
+      "in_block_size": 2048
+    }
+  },
+  "8192,3072,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1536,
+      "in_block_size": 4096
+    }
+  },
+  "8192,4096,2048,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 4096,
+      "in_block_size": 2048
+    }
+  },
+  "8192,4096,7168,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 4096,
+      "in_block_size": 1024
+    }
+  },
+  "8192,5120,12800,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 2560,
+      "in_block_size": 3200
+    }
+  },
+  "8192,5120,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1280,
+      "in_block_size": 4096
+    }
+  },
+  "8192,5120,5120,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1280,
+      "in_block_size": 5120
+    }
+  },
+  "8192,5120,8192,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 5120,
+      "in_block_size": 2048
+    }
+  },
+  "8192,8192,14336,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 4096,
+      "in_block_size": 1024
+    }
+  },
+  "8192,8192,4096,float8_e4m3fn,float8_e4m3fn": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 2048,
+      "in_block_size": 4096
+    }
+  }
+}
