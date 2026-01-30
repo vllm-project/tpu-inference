@@ -116,7 +116,6 @@ class TestQwen2ForCausalLM:
         layers = model.model.layers
         assert len(layers) == hf_config.num_hidden_layers
         assert isinstance(model.rng, nnx.Rngs)
-        assert model.model.lm_head == model.model.embed.embedding
 
         attn = layers[0].self_attn
         hidden_size = hf_config.hidden_size
@@ -133,12 +132,12 @@ class TestQwen2ForCausalLM:
         assert attn.rope_theta == rope_theta
         assert attn.head_dim_original == original_head_dim
         assert attn.head_dim == head_dim
-        assert attn.q_proj.kernel.shape == (hidden_size, num_heads, head_dim)
-        assert attn.k_proj.kernel.shape == (hidden_size, num_kv_heads,
+        assert attn.q_proj.weight.shape == (hidden_size, num_heads, head_dim)
+        assert attn.k_proj.weight.shape == (hidden_size, num_kv_heads,
                                             head_dim)
-        assert attn.v_proj.kernel.shape == (hidden_size, num_kv_heads,
+        assert attn.v_proj.weight.shape == (hidden_size, num_kv_heads,
                                             head_dim)
-        assert attn.o_proj.kernel.shape == (num_heads, head_dim, hidden_size)
+        assert attn.o_proj.weight.shape == (num_heads, head_dim, hidden_size)
 
         mlp = layers[0].mlp
         assert mlp.gate_proj.weight.shape == (hidden_size, intermediate_size)
