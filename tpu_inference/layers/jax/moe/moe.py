@@ -214,12 +214,9 @@ class MoE(nnx.Module):
                 # For the scale, we don't shard on the "D" dimmension because this is the subchannel dimmension
                 if self.qwix_quantized_weight_dtype:
                     gating_up_proj_spec = (PartitionSpec(*self.edf_sharding),
-                                           PartitionSpec(
-                                               self.edf_sharding[0], None,
-                                               self.edf_sharding[2]))
+                                           PartitionSpec(*self.edf_sharding))
                     down_proj_spec = (PartitionSpec(*self.efd_sharding),
-                                      PartitionSpec(self.efd_sharding[0], None,
-                                                    self.efd_sharding[2]))
+                                      PartitionSpec(*self.efd_sharding))
                 else:
                     gating_up_proj_spec = PartitionSpec(*self.edf_sharding)
                     down_proj_spec = PartitionSpec(*self.efd_sharding)
@@ -250,17 +247,17 @@ class MoE(nnx.Module):
                     "kernel_gating_EDF",
                     self.kernel_gating_EDF,
                     channelwise_axes=[0, 2],
-                    tiled_axes={})
+                    tiled_axes={1:128})
                 kernel_up_proj_EDF = self._process_weight_for_qwix(
                     "kernel_up_proj_EDF",
                     self.kernel_up_proj_EDF,
                     channelwise_axes=[0, 2],
-                    tiled_axes={})
+                    tiled_axes={1:128})
                 kernel_down_proj_EFD = self._process_weight_for_qwix(
                     "kernel_down_proj_EFD",
                     self.kernel_down_proj_EFD,
                     channelwise_axes=[0, 2],
-                    tiled_axes={})
+                    tiled_axes={1:128})
 
                 return mapped_moe_fwd(self, x_TD, weights_TX, indices_TX,
                                       kernel_gating_EDF, kernel_up_proj_EDF,

@@ -40,10 +40,13 @@ class ShardingAxisNameBase:
     ATTN_TENSOR = None
     MLP_TENSOR = ('attn_dp', 'model', 'expert')
     MOE_TENSOR = ('attn_dp', 'model')
-    EXPERT = ('attn_dp', 'expert', 'model')
+    #EXPERT = ('attn_dp', 'expert', 'model') #EP
+    EXPERT = None
     VOCAB = ('model', 'attn_dp', 'expert')
     MODEL_1 = 'model'
     MODEL_2 = 'expert'
+    #MODEL_1 = None #EP
+    #MODEL_2 = None #EP
 
 
 class ShardingAxisName2D:
