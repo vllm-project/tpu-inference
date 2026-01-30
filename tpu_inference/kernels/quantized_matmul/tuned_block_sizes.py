@@ -79,6 +79,17 @@ def get_device_vmem_limit() -> int:
     return DEVICE_VMEM_LIMIT[tpu_version]
 
 
+def get_key(
+    n_batch: int,
+    n_out: int,
+    n_in: int,
+    x_q_dtype: str,
+    w_q_dtype: str,
+) -> str:
+    """Returns the comma-separated key string for JSON lookup."""
+    return f"{n_batch},{n_out},{n_in},{x_q_dtype},{w_q_dtype}"
+
+
 def get_tuned_block_sizes(
     n_batch: int,
     n_out: int,
@@ -104,7 +115,7 @@ def get_tuned_block_sizes(
 
     # Construct comma-separated key string for JSON lookup
     # Exclude tpu_version from the string key as it distinguishes the file
-    json_key = f"{n_batch},{n_out},{n_in},{x_q_dtype},{w_q_dtype}"
+    json_key = get_key(n_batch, n_out, n_in, x_q_dtype, w_q_dtype)
 
     data = _load_tuning_data(tpu_slug)
     if data and json_key in data:
