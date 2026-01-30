@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Union
 
 import jax
 import jax.numpy as jnp
@@ -27,8 +27,13 @@ from tpu_inference.layers.common.fused_moe_gmm import fused_moe_func
 from tpu_inference.logger import init_logger
 
 if TYPE_CHECKING:
+    from tpu_inference.layers.jax.moe.moe import JaxMoE
     from tpu_inference.layers.vllm.process_weights.fused_moe_weights import (
         FusedMoEWeights, UnfusedMoEWeights)
+else:
+    FusedMoEWeights = None
+    UnfusedMoEWeights = None
+    JaxMoE = None
 
 logger = init_logger(__name__)
 
@@ -51,8 +56,9 @@ def select_moe_backend(moe: FusedMoEConfig):
             "USE_MOE_EP_KERNEL=1 but expert parallelism is not "
             "enabled. Falling back to gmm implementation.")
 
-    if moe.use_ep:
-        return MoEBackend.GMM_EP
+    # TODO: add
+    # if moe.use_ep:
+    #     return MoEBackend.GMM_EP
 
     if envs.USE_MOE_EP_KERNEL:
         logger.info("[MoE]: Fused MoE kernel is enabled")
@@ -75,15 +81,16 @@ def select_moe_backend(moe: FusedMoEConfig):
 
 
 def moe_apply(
-    layer: FusedMoE,  # TODO: add JAX layer?
+    layer: FusedMoE | JaxMoE,  # TODO: add JAX layer?
     x: jax.Array,
     gating_output: jax.Array,
-    weights: "FusedMoEWeights" | UnfusedMoEWeights,
+    weights: Union[FusedMoEWeights, UnfusedMoEWeights],
     moe_backend: MoEBackend,
     mesh: Mesh,
     extra_backend_kwargs: dict,
 ) -> jax.Array:
-    assert isinstance(layer, FusedMoE)
+    # TODO: JaxMoE
+    # assert isinstance(layer, (FusedMoE, JaxMoE))
     if layer.scoring_func != "softmax":
         raise NotImplementedError("Only softmax is supported for scoring_func")
 

@@ -82,7 +82,8 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
         self.kv_lora_rank = kv_lora_rank
         self.model_dtype = model_dtype
         self.use_mla_kernel = use_mla_kernel
-        self.moe_backend = select_moe_backend()
+        # TODO
+        self.moe_backend = select_moe_backend(None)
 
         self._transpose_map = {
             # dense mlp
@@ -173,17 +174,18 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
             # dimensions are transposed.  The second rule is needed
             # because the GMM kernel expects that the up/gate proj
             # are fused into a single weight tensor.
-            self._loaded_to_standardized_keys.update({
-                "model.layers.*.mlp.experts.*.down_proj.weight":
-                "layers.*.custom_module.kernel_down_proj_EDF",
-                "model.layers.*.mlp.experts.*.gating_upproj_EFD.weight":
-                "layers.*.custom_module.kernel_gating_upproj_EFD",
-            })
+            # self._loaded_to_standardized_keys.update({
+            #     "model.layers.*.mlp.experts.*.down_proj.weight":
+            #     "layers.*.custom_module.kernel_down_proj_EDF",
+            #     "model.layers.*.mlp.experts.*.gating_upproj_EFD.weight":
+            #     "layers.*.custom_module.kernel_gating_upproj_EFD",
+            # })
             # NOTE (jacobplatin): only used for the MOE_VLLM backend, which
             # expects 2/3 dimensions to be transposed.
-            self._transpose_map.update({
-                r"mlp\.experts\.\d+\.gating_upproj_EFD": (0, 2, 1),
-            })
+            # self._transpose_map.update({
+            #     r"mlp\.experts\.\d+\.gating_upproj_EFD": (0, 2, 1),
+            # })
+            pass
 
         if self.use_mla_kernel:
             self._loaded_to_standardized_keys.update({
@@ -571,9 +573,10 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                             down_w, down_s = stacked_tensors.pop(layer_num +
                                                                  "down_proj")
 
-                            is_moe_kernel = model_for_loading.moe_backend in [
-                                MoEBackend.FUSED_MOE, MoEBackend.VLLM_MOE
-                            ]
+                            is_moe_kernel = False
+                            # model_for_loading.moe_backend in [
+                            #     MoEBackend.FUSED_MOE, MoEBackend.VLLM_MOE
+                            # ]
                             gate_name = loaded_name.replace(
                                 proj_type, "gate_proj")
                             up_name = loaded_name.replace(proj_type, "up_proj")
@@ -799,7 +802,8 @@ class DeepSeekV3(nnx.Module):
 
         self.mesh = mesh
 
-        self.moe_backend = select_moe_backend()
+        # TODO: None
+        self.moe_backend = select_moe_backend(None)
 
         self.weight_loader = self.WeightLoader(
             vllm_config=vllm_config,

@@ -16,7 +16,6 @@ from typing import Optional, Sequence
 
 import jax
 from jax import numpy as jnp
-from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
 
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.common.utils import \
@@ -60,41 +59,3 @@ class UnquantizedLinearMethod:
             outs.append(out)
         out = jnp.concatenate(outs, axis=-1)
         return out
-
-
-class UnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
-    """Implements the forward method for unquantized MoE layers.
-
-    This class will be shared in both vLLM and jax path.
-    """
-
-    @property
-    def is_monolithic(self) -> bool:
-        return True
-
-    def apply_monolithic(
-        self,
-        layer: FusedMoE,
-        x: torch.Tensor,
-        router_logits: torch.Tensor,
-    ) -> torch.Tensor:
-
-        weights = FusedMoEWeights(
-            w13_weight=jax_view(layer.w13_weight),
-            w13_weight_scale=None,
-            w13_bias=jax_view(layer.w13_bias) if self.moe.has_bias else None,
-            w2_weight=jax_view(layer.w2_weight),
-            w2_weight_scale=None,
-            w2_bias=jax_view(layer.w2_bias) if self.moe.has_bias else None,
-        )
-
-        return torch_view(
-            fused_moe_apply(
-                layer,
-                jax_view(x),
-                jax_view(router_logits),
-                weights,
-                self.moe_backend,
-                self.mesh,
-                self.extra_backend_kwargs,
-            ))

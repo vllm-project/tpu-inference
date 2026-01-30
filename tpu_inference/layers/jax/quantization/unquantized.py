@@ -15,6 +15,8 @@
 from typing import Optional
 
 import jax
+import jax.numpy as jnp
+from flax import nnx
 
 from tpu_inference.layers.common.fused_moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.quantization import unquantized as jax_common
@@ -23,12 +25,9 @@ from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
-from tpu_inference.layers.jax.quantization.configs import (QuantFusedMoEConfig,
-                                                           QuantizationConfig)
-
-if TYPE_CHECKING:
-    from tpu_inference.layers.vllm.process_weights.fused_moe_weights import \
-        FusedMoEWeights
+from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
+from tpu_inference.layers.vllm.process_weights.fused_moe_weights import \
+    FusedMoEWeights
 
 
 class UnquantizedLinearMethod(QuantizeMethodBase,
@@ -51,16 +50,18 @@ class UnquantizedLinearMethod(QuantizeMethodBase,
         return out
 
 
-import jax.numpy as jnp
-from flax import nnx
-
-
-class UnquantizedFusedMoEMethod(QuantizeMethodBase,
-                                jax_common.UnquantizedFusedMoEMethod):
+class UnquantizedFusedMoEMethod(QuantizeMethodBase):
     """Unquantized method for JAX FusedMoELayer.
     """
 
-    def process_weights_after_loading(layer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # TODO
+        self.extra_backend_kwargs = {}
+        # if self.moe_backend == MoEBackend.FUSED_MOE:
+        #     self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name, )
+
+    def process_weights_after_loading(self, layer):
         if layer.moe_backend == MoEBackend.FUSED_MOE:
             raise ValueError
             # if self.edf_sharding:
@@ -90,22 +91,27 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase,
             #     "bd2c": 256,
             # }
         elif layer.moe_backend == MoEBackend.VLLM_MOE:
-            # TODO (jacobplatin): the current GMM kernel expects that w1/w2 have the second and third
-            # dimensions transposed, but this is likely not optimal for DeepSeek, so we will
-            # need to fix this in the future
-            pass
-            # self.kernel_gating_upproj_EFD = create_param(
-            #     rngs,
-            #     shape=(E, D, 2 * F),
-            #     dtype=self.dtype,
-            #     sharding=self.efd_sharding,
-            #     random_init=self.random_init)
-            # self.kernel_down_proj_EDF = create_param(
-            #     rngs,
-            #     shape=(E, F, D),
-            #     dtype=self.dtype,
-            #     sharding=self.edf_sharding,
-            #     random_init=self.random_init)
+            w_gate = layer.kernel_gating_EDF.value
+            w_up = layer.kernel_up_proj_EDF.value
+
+            # Fuse the weights into w13: [Gate, Up]
+            # Concatenate along the last dimension (F) to create (E, D, 2*F)
+            # This matches the standard layout for fused SwiGLU kernels
+            w13_val = jnp.concatenate([w_gate, w_up], axis=-1)
+
+            # Assign the fused weight to the new parameter
+            # We use nnx.Param to wrap the value appropriately
+            layer.kernel_gating_upproj_EFD = nnx.Param(w13_val)
+
+            # Delete the old parameters to free memory
+            del layer.kernel_gating_EDF
+            del layer.kernel_up_proj_EDF
+
+            # transpose E, F, D to E, D, F
+            w_down = layer.kernel_down_proj_EFD.value
+            # w_down = jnp.transpose(w_down, (0, 2, 1))
+            layer.kernel_down_proj_EDF = nnx.Param(w_down)
+            del layer.kernel_down_proj_EFD
 
     def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
         assert isinstance(layer, JaxMoE)
@@ -128,9 +134,8 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase,
             )
         else:
             raise ValueError
-
         return moe_apply(layer, x_TD, router_logits_TE, weights,
-                         self.moe_backend, self.mesh,
+                         layer.moe_backend, layer.mesh,
                          self.extra_backend_kwargs)
 
 
@@ -143,6 +148,6 @@ class UnquantizedConfig(QuantizationConfig):
             return UnquantizedLinearMethod(linear_config)
         if isinstance(layer, JaxMoE):
             # TODO: pass a config
-            moe_config = QuantFusedMoEConfig()
+            # moe_config = QuantFusedMoEConfig()
             return UnquantizedFusedMoEMethod()
         return None

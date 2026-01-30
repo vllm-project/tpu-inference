@@ -21,9 +21,9 @@ from flax import nnx
 from flax.typing import Sharding
 from jaxtyping import Float
 
+from tpu_inference.layers.common.fused_moe import MoEBackend
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
-from tpu_inference.layers.jax.moe.utils import MoEBackend
 
 modeling_flax_utils = FlaxUtils()
 

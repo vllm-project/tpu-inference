@@ -20,7 +20,7 @@ from jax.experimental.layout import Format, Layout, with_layout_constraint
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.tensor import Tensor
 
-from tpu_inference.layers.common.fused_moe import FusedMoEBackend
+from tpu_inference.layers.common.fused_moe import MoEBackend
 from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import \
@@ -124,7 +124,7 @@ def quantize_moe_weights(
 
 def process_moe_weights(
     weights: FusedMoEWeights,
-    moe_backend: FusedMoEBackend,
+    moe_backend: MoEBackend,
     w13_reorder_size: int | None = None,
     w13_interleave: bool = False,
 ) -> FusedMoEWeights:
@@ -194,7 +194,7 @@ def process_moe_weights(
         w2_bias = jnp.expand_dims(w2_bias, 1)
 
     match moe_backend:
-        case FusedMoEBackend.FUSED_MOE:
+        case MoEBackend.FUSED_MOE:
             # Kernel expects:
             # w13: (num_experts, 2, hidden_size, intermediate_size)
             # w2: (num_experts, intermediate_size, hidden_size)
@@ -258,7 +258,7 @@ def process_moe_weights(
                     ((0, 0), (0, 0), (0, pad_width_hidden_size)),
                 )
 
-        case FusedMoEBackend.GMM_TP:
+        case MoEBackend.GMM_TP:
             assert w13_reorder_size is not None
             assert intermediate_size % w13_reorder_size == 0
             output_sizes = [intermediate_size, intermediate_size]
@@ -282,7 +282,7 @@ def process_moe_weights(
                     w13_reorder_size,
                     dim=2,
                 )
-        case FusedMoEBackend.GMM_EP:
+        case MoEBackend.GMM_EP:
             # No additional processing is needed for GMM_EP.
             pass
 
@@ -298,12 +298,12 @@ def process_moe_weights(
 
 def shard_moe_weights(
     weights: FusedMoEWeights,
-    moe_backend: FusedMoEBackend,
+    moe_backend: MoEBackend,
     mesh: Mesh,
 ) -> FusedMoEWeights:
 
     match moe_backend:
-        case FusedMoEBackend.FUSED_MOE | FusedMoEBackend.GMM_EP:
+        case MoEBackend.FUSED_MOE | MoEBackend.GMM_EP:
             ep_sharding = NamedSharding(mesh, P(ShardingAxisName.EXPERT))
             weight_shardings = FusedMoEWeights(
                 w13_weight=ep_sharding,
@@ -313,7 +313,7 @@ def shard_moe_weights(
                 w2_weight_scale=ep_sharding,
                 w2_bias=ep_sharding,
             )
-        case FusedMoEBackend.GMM_TP:
+        case MoEBackend.GMM_TP:
             # When using per-channel, in_dim // block_size == 1. This means we
             # are unable to shard w2_weight_scale along 1st dim. Therefore, we
             # fully replicate it instead.
@@ -349,7 +349,7 @@ def shard_moe_weights(
             )
 
     match moe_backend:
-        case FusedMoEBackend.FUSED_MOE:
+        case MoEBackend.FUSED_MOE:
             weight_layouts = FusedMoEWeights(
                 w13_weight=Layout((0, 1, 2, 3)),
                 w13_weight_scale=Layout((0, 1, 2, 3, 4)),
@@ -358,7 +358,7 @@ def shard_moe_weights(
                 w2_weight_scale=Layout((0, 1, 2, 3)),
                 w2_bias=Layout((0, 1, 2)),
             )
-        case FusedMoEBackend.GMM_TP | FusedMoEBackend.GMM_EP:
+        case MoEBackend.GMM_TP | MoEBackend.GMM_EP:
             weight_layouts = FusedMoEWeights(
                 w13_weight=Layout((0, 1, 2)),
                 w13_weight_scale=Layout((0, 1, 2, 3)),

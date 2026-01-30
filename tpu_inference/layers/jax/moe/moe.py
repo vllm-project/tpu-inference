@@ -228,9 +228,15 @@ class JaxMoE(nnx.Module):
             self.expert_axis_name is not None) and (self.expert_axis_name
                                                     == self.data_axis_name)
 
+        # TODO
         self.top_k = self.router.num_experts_per_tok
         self.use_ep = self.num_expert_parallelism > 1
         self.activation = self.hidden_act
+        self.scoring_func = "softmax"
+
+    # TODO
+    def _get_name(self):
+        return "MOE"
 
     def _process_weight_for_qwix(self,
                                  weight_param,
