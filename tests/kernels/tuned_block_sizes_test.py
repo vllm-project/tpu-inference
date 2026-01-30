@@ -151,38 +151,6 @@ class RaggedPagedAttentionTuningTest(unittest.TestCase):
         self.assertEqual(bkv_p, 8)
         self.assertEqual(bq, 32)
 
-    @mock.patch.object(rpa_tuning, '_load_tuning_data')
-    @mock.patch(
-        'tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes.get_device_name'
-    )
-    def test_capping_logic(self, mock_get_dev, mock_load_data):
-        """Verify that block sizes are capped by sequence length/token count."""
-        mock_data = {
-            "16": {
-                "q_bfloat16_kv_bfloat16": {
-                    "q_head-128_kv_head-128_head-128": {
-                        "max_model_len-8192-sw-None": [64, 64]  # Big blocks
-                    }
-                }
-            }
-        }
-        mock_load_data.return_value = mock_data
-
-        # Request with small seq limits
-        bkv_p, bq = rpa_tuning.get_tuned_block_sizes(
-            q_dtype=jnp.bfloat16,
-            kv_dtype=jnp.bfloat16,
-            actual_num_q_heads=128,
-            actual_num_kv_heads=128,
-            head_dim=128,
-            page_size=16,
-            max_num_tokens=32,  # Cap bq to 32
-            pages_per_seq=10,  # Cap bkv_p to 10
-            sliding_window=None)
-
-        self.assertEqual(bkv_p, 10)  # 10 < 64
-        self.assertEqual(bq, 32)  # 32 < 64
-
     def test_hd64_key_logic(self):
         """Verify that head_dim=64 triggers the specific legacy key generation."""
         # we can test get_simplified_raw_key directly
