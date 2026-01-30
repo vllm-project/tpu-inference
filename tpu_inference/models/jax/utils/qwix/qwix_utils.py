@@ -681,7 +681,8 @@ def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
     logger.info("Done initializing Qwix-quantized model with random weights")
 
 
-def manually_quantize_qwix_weight(weight: jax.Array, qtype: jnp.dtype,
+def manually_quantize_qwix_weight(name: str, weight: jax.Array,
+                                  qtype: jnp.dtype,
                                   channelwise_axes: List[int],
                                   tiled_axes: dict,
                                   calibration_method: str) -> QArray:
@@ -696,7 +697,7 @@ def manually_quantize_qwix_weight(weight: jax.Array, qtype: jnp.dtype,
         tiled_axes=tiled_axes,
         calibration_method=calibration_method)
 
-    return ptq.create_quantized_param(weight, how_to_quantize)
+    return ptq.create_quantized_param(name, weight, how_to_quantize)
 
 
 def manually_quantize_qwix_activation(inputs: jax.Array, rule_name: str,
