@@ -73,11 +73,20 @@ setup_environment() {
 
   echo "Cleanup complete."
 
+  # load VLLM_COMMIT_HASH from .env file
+  if [ -f .env ]; then
+      export "$(grep -v '^#' tpu-inference/.env | xargs)"
+  fi
+
   if [ -z "${BUILDKITE:-}" ]; then
-      VLLM_COMMIT_HASH=""
+      if [ -z "${VLLM_COMMIT_HASH:-}" ]; then
+          VLLM_COMMIT_HASH=""
+      fi
       TPU_INFERENCE_HASH=$(git log -n 1 --pretty="%H")
-  else    
-      VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH" --default "")
+  else
+      if [ -z "${VLLM_COMMIT_HASH:-}" ]; then
+          VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH" --default "")
+      fi
       TPU_INFERENCE_HASH="$BUILDKITE_COMMIT"
   fi
 

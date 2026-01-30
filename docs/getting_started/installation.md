@@ -63,8 +63,8 @@ For debugging or development purposes, you can install `tpu-inference` from sour
 1. Clone the `vllm` and `tpu-inference` repositories:
 
     ```shell
-    git clone https://github.com/vllm-project/vllm.git
-    git clone https://github.com/vllm-project/tpu-inference.git
+    git clone https://github.com/vllm-project/tpu-inference.git; export $(grep -v '^#' tpu-inference/.env | xargs)
+    git clone https://github.com/vllm-project/vllm.git; cd vllm && git checkout "${VLLM_COMMIT_HASH}"
     ```
 
 1. Set up a Python virtual environment:
@@ -75,6 +75,9 @@ For debugging or development purposes, you can install `tpu-inference` from sour
     ```
 
 1. Install `vllm` from source, targeting the TPU device:
+
+    NOTE: `tpu-inference` repo pins `vllm` revision in `.env` file,
+    make sure to checkout proper revision beforehand.
 
     ```shell
     cd vllm
