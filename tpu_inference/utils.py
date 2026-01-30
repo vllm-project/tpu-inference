@@ -138,8 +138,8 @@ def get_device_name(num_devices: int | None = None):
     return kind
 
 
-def get_tpu_generation() -> int:
-    """Returns the numeric generation of the TPU (e.g. 5, 6, 7)."""
+def get_tpu_version() -> int:
+    """Returns the numeric version of the TPU (e.g. 5, 6, 7)."""
     try:
         name = get_device_name()
     except RuntimeError:

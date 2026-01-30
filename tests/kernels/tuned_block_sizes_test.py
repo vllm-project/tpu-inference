@@ -99,7 +99,7 @@ class TunedBlockSizesTest(unittest.TestCase):
         'tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes.get_device_name'
     )
     @mock.patch(
-        'tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes.get_tpu_generation'
+        'tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes.get_tpu_version'
     )
     def test_get_tuned_block_sizes_fallback(self, mock_gen, mock_get_device,
                                             mock_load_data):

@@ -7,7 +7,7 @@ import pathlib
 from typing import NamedTuple
 
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import get_tpu_generation, get_tpu_name_slug
+from tpu_inference.utils import get_tpu_name_slug, get_tpu_version
 
 logger = init_logger(__name__)
 
@@ -70,7 +70,7 @@ DEVICE_VMEM_LIMIT = {6: 96 * 1024 * 1024, 7: 48 * 1024 * 1024}
 
 
 def get_device_vmem_limit() -> int:
-    tpu_version = get_tpu_generation()
+    tpu_version = get_tpu_version()
     if tpu_version not in DEVICE_VMEM_LIMIT:
         logger.warning_once(
             'VMEM limit for TPU version %d not found. Using default VMEM limit '
@@ -129,9 +129,6 @@ def get_tuned_block_sizes(
                               cfg["in_block_size"])
         return TunedValue(*val)
 
-    tpu_generation = get_tpu_generation()
-    keys = (tpu_generation, n_batch, n_out, n_in, x_q_dtype, w_q_dtype)
-    logger.warning_once(
-        'Couldn`t find tuned sizes for the quantized matmul kernel with %s',
-        keys)
-    return TunedValue(128, 128, 128)
+    # If not found, fall back to default based on TPU generation
+    # Default for all generations (v4, v5, v6, v7)
+    return TunedValue(128, 128, 128, 1)

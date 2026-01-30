@@ -22,7 +22,7 @@ import jax.numpy as jnp
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (
     align_to, get_dtype_packing, next_power_of_2)
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import get_device_name, get_tpu_generation
+from tpu_inference.utils import get_device_name, get_tpu_version
 
 logger = init_logger(__name__)
 
@@ -118,14 +118,14 @@ def get_tuned_block_sizes(
             'Couldn`t find tuned sizes for the RPA v3 kernel with %s', keys)
         # When not available use a sensible default based on TPU version
         # Set default block sizes for each tpu_generation.
-        tpu_generation = get_tpu_generation()
-        if tpu_generation < 4:
+        tpu_version = get_tpu_version()
+        if tpu_version < 4:
             # Fallback or error? Original raised NotImplementedError for v3?
-            if tpu_generation != -1:  # -1 means not on TPU
+            if tpu_version != -1:  # -1 means not on TPU
                 raise NotImplementedError(
                     'TPU generation must be 4 or higher.')
 
-        match tpu_generation:
+        match tpu_version:
             case 4:
                 # TPUv4 has much smaller VMEM size so we pick fixed block sizes.
                 bkv_p, bq = (512 // page_size, 32)

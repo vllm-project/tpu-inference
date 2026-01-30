@@ -8,8 +8,8 @@ import pytest
 # Import the functions to be tested
 from tpu_inference.utils import (GBYTES, enable_megacore,
                                  get_jax_dtype_from_str_dtype, get_megacore,
-                                 get_padded_head_dim, get_tpu_generation,
-                                 get_tpu_name_slug, hbm_usage_bytes,
+                                 get_padded_head_dim, get_tpu_name_slug,
+                                 get_tpu_version, hbm_usage_bytes,
                                  hbm_usage_gb)
 
 
@@ -195,9 +195,9 @@ def test_get_jax_dtype_from_str_dtype():
 
 
 @patch("tpu_inference.utils.get_device_name")
-def test_get_tpu_generation(mock_get_device_name):
-    """Tests proper extraction of TPU generation from device name."""
-    # Test cases: (device_name, expected_generation)
+def test_get_tpu_version(mock_get_device_name):
+    """Tests proper extraction of TPU version from device name."""
+    # Test cases: (device_name, expected_version)
     test_cases = [
         ("TPU v5e", 5),
         ("TPU v5lite", 5),
@@ -214,11 +214,11 @@ def test_get_tpu_generation(mock_get_device_name):
     for name, expected in test_cases:
         mock_get_device_name.return_value = name
         mock_get_device_name.side_effect = None
-        assert get_tpu_generation() == expected, f"Failed for {name}"
+        assert get_tpu_version() == expected, f"Failed for {name}"
 
     # Test Exception Handling
     mock_get_device_name.side_effect = RuntimeError("Not a TPU")
-    assert get_tpu_generation() == -1
+    assert get_tpu_version() == -1
 
 
 @patch("tpu_inference.utils.get_device_name")
