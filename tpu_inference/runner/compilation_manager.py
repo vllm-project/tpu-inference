@@ -31,7 +31,7 @@ from tpu_inference.layers.jax.sample.sampling_metadata import \
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
-from tpu_inference.utils import device_array, to_jax_dtype
+from tpu_inference.utils import device_array
 
 if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
@@ -401,7 +401,6 @@ class CompilationManager:
             check_should_skip_padding: If True, check whether to skip certain padding combinations to reduce compilation time
         """
         logger.info(f"Compiling select_from_array for {name}.")
-        dtype = to_jax_dtype(self.runner.model_config.dtype)
         for array_size in source_paddings:
             for indices_count in indices_paddings:
                 if check_should_skip_padding and self._should_skip_padding_combination(
@@ -409,7 +408,7 @@ class CompilationManager:
                     continue
 
                 input_tensor = self._create_dummy_tensor(
-                    (array_size, hidden_dim), dtype, input_sharding)
+                    (array_size, hidden_dim), jnp.bfloat16, input_sharding)
                 indices_to_select = self._create_dummy_tensor(
                     (indices_count, ), jnp.int32, indices_sharding)
 
@@ -429,26 +428,18 @@ class CompilationManager:
             index_paddings = self.runner.num_logits_paddings
         else:
             index_paddings = self.runner.num_reqs_paddings
+        dp_sharding = NamedSharding(self.runner.mesh,
+                                    PartitionSpec(ShardingAxisName.ATTN_DATA))
+        hidden_states_sharding = NamedSharding(
+            self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None))
         dp_size = self.runner.vllm_config.sharding_config.total_dp_size
-        if dp_size > 1:
-            hidden_states_sharding = NamedSharding(
-                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
-            indices_sharding = NamedSharding(
-                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
-        elif self.runner.vllm_config.parallel_config.enable_expert_parallel and dp_size == 1:
-            hidden_states_sharding = NamedSharding(
-                self.runner.mesh, PartitionSpec(ShardingAxisName.MLP_TENSOR))
-            indices_sharding = None
-        else:
-            hidden_states_sharding = None
-            indices_sharding = None
         self._precompile_select_from_array_helper(
             name=f"worker{self.runner.rank} select all logits",
             source_paddings=self.runner.num_tokens_paddings,
             indices_paddings=index_paddings,
             hidden_dim=hsize,
             input_sharding=hidden_states_sharding,
-            indices_sharding=indices_sharding,
+            indices_sharding=dp_sharding if dp_size > 1 else None,
         )
 
         if self.runner.speculative_config:
