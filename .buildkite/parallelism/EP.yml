@@ -22,7 +22,8 @@ steps:
       queue: tpu_v6e_queue
     commands:
       - |
-        buildkite-agent meta-data set "EP_CorrectnessTest" "unverified"
+        .buildkite/scripts/run_in_docker.sh \
+          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_expert_parallel.py'
   - label: "Record correctness test result for EP"
     key: "record_EP_CorrectnessTest"
     depends_on: "EP_CorrectnessTest"
