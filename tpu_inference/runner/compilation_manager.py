@@ -435,9 +435,11 @@ class CompilationManager:
                 self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
             indices_sharding = NamedSharding(
                 self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
+        elif self.runner.vllm_config.parallel_config.enable_expert_parallel and dp_size == 1:
+            hidden_states_sharding = NamedSharding(
+                self.runner.mesh, PartitionSpec(ShardingAxisName.MLP_TENSOR))
+            indices_sharding = None
         else:
-            # For dp_size=1, use None to match runtime behavior where
-            # device_array() uses PartitionSpec(None) by default
             hidden_states_sharding = None
             indices_sharding = None
         self._precompile_select_from_array_helper(
