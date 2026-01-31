@@ -20,6 +20,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 from tpu_inference.kernels.megablox.gmm import gmm
+from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
@@ -118,6 +119,7 @@ def _get_tiling_size_for_gmm_kernel(m: int, k: int, n: int,
 
 def tensor_sharded_gmm_merged_column_parallel(
     lhs: jax.Array,
+    lhs_scale: jax.Array | None,
     rhs: jax.Array,
     rhs_scale: jax.Array | None,
     rhs_bias: jax.Array | None,
@@ -125,16 +127,17 @@ def tensor_sharded_gmm_merged_column_parallel(
     mesh: Mesh,
 ) -> list[jax.Array]:
 
-    def _gmm(lhs, rhs, rhs_scale, rhs_bias, group_sizes):
+    def _gmm(lhs, lhs_scale, rhs, rhs_scale, rhs_bias, group_sizes):
         m, g, k, n = lhs.shape[0], *rhs.shape
         tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
         return gmm(
             lhs,
             rhs,
             group_sizes,
+            lhs_scale=lhs_scale,
             rhs_scale=rhs_scale,
             rhs_bias=rhs_bias,
-            preferred_element_type=lhs.dtype,
+            preferred_element_type=jnp.bfloat16,
             tiling=(tm, tk, tn),
             group_offset=jnp.array(0),
         )
@@ -144,15 +147,18 @@ def tensor_sharded_gmm_merged_column_parallel(
     rhs_bias_spec = None if rhs_bias is None else P(
         None, None, ShardingAxisName.MLP_TENSOR)
 
+    lhs_scale_spec = P(None, ShardingAxisName.MLP_DATA,
+                       None) if lhs_scale is not None else None
+
     gmm_result = jax.shard_map(
         _gmm,
         mesh=mesh,
-        in_specs=(P(ShardingAxisName.MLP_DATA,
-                    None), P(None, None, ShardingAxisName.MLP_TENSOR),
-                  rhs_scale_spec, rhs_bias_spec, P(ShardingAxisName.MLP_DATA)),
+        in_specs=(P(ShardingAxisName.MLP_DATA, None), lhs_scale_spec,
+                  P(None, None, ShardingAxisName.MLP_TENSOR), rhs_scale_spec,
+                  rhs_bias_spec, P(ShardingAxisName.MLP_DATA)),
         out_specs=(P(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR)),
         check_vma=False,
-    )(lhs, rhs, rhs_scale, rhs_bias, group_sizes)
+    )(lhs, lhs_scale, rhs, rhs_scale, rhs_bias, group_sizes)
 
     tp_size = get_mesh_shape_product(mesh, ShardingAxisName.MLP_TENSOR)
     intermediate_size = gmm_result.shape[-1] // 2
@@ -163,6 +169,7 @@ def tensor_sharded_gmm_merged_column_parallel(
 
 def tensor_sharded_gmm_row_parallel(
     lhs: jax.Array,
+    lhs_scale: jax.Array | None,
     rhs: jax.Array,
     topk_argsort_revert_indices: jax.Array,
     topk_weights: jax.Array,
@@ -175,6 +182,7 @@ def tensor_sharded_gmm_row_parallel(
 
     def _gmm_all_reduce(
         lhs,
+        lhs_scale,
         rhs,
         topk_argsort_revert_indices_local,
         topk_weights_local,
@@ -192,9 +200,10 @@ def tensor_sharded_gmm_row_parallel(
             lhs,
             rhs,
             group_sizes,
+            lhs_scale=lhs_scale,
             rhs_scale=rhs_scale,
             rhs_bias=rhs_bias,
-            preferred_element_type=lhs.dtype,
+            preferred_element_type=jnp.bfloat16,
             tiling=(tm, tk, tn),
             group_offset=jnp.array(0),
         )
@@ -212,10 +221,17 @@ def tensor_sharded_gmm_row_parallel(
     rhs_scale_spec = None if num_blocks == 1 else P(
         None, ShardingAxisName.MLP_TENSOR, None, None)
     rhs_bias_spec = None if rhs_bias is None else P(None, None, None)
+
+    lhs_scale_spec = P(
+        ShardingAxisName.MLP_TENSOR, ShardingAxisName.MLP_DATA,
+        None) if lhs_scale is not None and num_blocks != 1 else P(
+            None, ShardingAxisName.MLP_DATA,
+            None) if lhs_scale is not None and num_blocks == 1 else None
     gmm_result = jax.shard_map(
         _gmm_all_reduce,
         mesh=mesh,
-        in_specs=(P(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR),
+        in_specs=(P(ShardingAxisName.MLP_DATA,
+                    ShardingAxisName.MLP_TENSOR), lhs_scale_spec,
                   P(None, ShardingAxisName.MLP_TENSOR,
                     None), P(ShardingAxisName.MLP_DATA),
                   P(ShardingAxisName.MLP_DATA,
@@ -223,14 +239,15 @@ def tensor_sharded_gmm_row_parallel(
                   P(ShardingAxisName.MLP_DATA)),
         out_specs=(P(ShardingAxisName.MLP_DATA)),
         check_vma=False,
-    )(lhs, rhs, topk_argsort_revert_indices, topk_weights, rhs_scale, rhs_bias,
-      group_sizes)
+    )(lhs, lhs_scale, rhs, topk_argsort_revert_indices, topk_weights,
+      rhs_scale, rhs_bias, group_sizes)
 
     return gmm_result.astype(lhs.dtype)
 
 
 def expert_sharded_gmm(
     lhs: jax.Array,
+    lhs_scale: jax.Array | None,
     rhs: jax.Array,
     rhs_scale: jax.Array | None,
     rhs_bias: jax.Array | None,
@@ -246,17 +263,19 @@ def expert_sharded_gmm(
     num_experts_per_shard = num_experts // ep_size
     group_offset = jnp.arange(0, num_experts, num_experts_per_shard)
 
-    def _gmm(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset):
+    def _gmm(lhs, lhs_scale, rhs, rhs_scale, rhs_bias, group_sizes,
+             group_offset):
         m, g, k, n = lhs.shape[0], *rhs.shape
         tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
 
         gmm_res = gmm(
             lhs=lhs,
             rhs=rhs,
+            lhs_scale=lhs_scale,
             rhs_scale=rhs_scale,
             rhs_bias=rhs_bias,
             group_sizes=group_sizes,
-            preferred_element_type=lhs.dtype,
+            preferred_element_type=jnp.bfloat16,
             tiling=(tm, tk, tn),
             group_offset=group_offset[0],
         )
@@ -280,7 +299,14 @@ def expert_sharded_gmm(
     #       0, 0, 0, 0     0, 0, 0, 0     0, 0, 0, 0     D, D, D, D
     #        shard-0        shard-1        shard-2        shard-3
     # Each shards has 3 (row A), 2 (row B), 5 (row C) and 4 (row D).
-    lhs_spec = ep_data_p_spec if is_last_gmm else data_p_spec
+    if is_last_gmm:
+        lhs_spec = ep_p_spec
+        lhs_scale_spec = P(None, ShardingAxisName.EXPERT,
+                           None) if lhs_scale is not None else None
+    else:
+        lhs_spec = data_p_spec
+        lhs_scale_spec = P(None, ShardingAxisName.MLP_DATA,
+                           None) if lhs_scale is not None else None
     rhs_spec = ep_p_spec
     rhs_scale_spec = None if rhs_scale is None else ep_p_spec
     rhs_bias_spec = None if rhs_bias is None else ep_p_spec
@@ -289,6 +315,7 @@ def expert_sharded_gmm(
         mesh=mesh,
         in_specs=(
             lhs_spec,
+            lhs_scale_spec,
             rhs_spec,
             rhs_scale_spec,
             rhs_bias_spec,
@@ -297,7 +324,7 @@ def expert_sharded_gmm(
         ),
         out_specs=ep_data_p_spec,
         check_vma=False,
-    )(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset)
+    )(lhs, lhs_scale, rhs, rhs_scale, rhs_bias, group_sizes, group_offset)
 
     if not is_last_gmm:
         return gmm_res
@@ -451,6 +478,11 @@ def fused_moe_func(
 
     assert gating_output.shape == (num_tokens, global_num_experts)
 
+    if w1_scale is not None:
+        block_size = w1.shape[1] // w1_scale.shape[1]
+    else:
+        block_size = w1.shape[1]
+
     topk_weights = jax.nn.softmax(gating_output.astype(jnp.float32), axis=-1)
     # All-gather topk weights for attention dp
     topk_weights = jax.lax.with_sharding_constraint(
@@ -461,6 +493,37 @@ def fused_moe_func(
     topk_weights = topk_weights.astype(dtype)
 
     def _process_tokens_locally(hidden_states_local, topk_indices_local):
+        orig_hidden_size = hidden_states_local.shape[-1]
+        if w1_scale is not None:
+            # To quantize hidden states along reduce dimension (hidden_size for first gmm),
+            # we need to pad the hidden to be multiple of block_size
+            # padded_hidden_size of w13 aka w1 is already multiple of block_size
+            padded_hidden_size = w1.shape[1]
+            hidden_states_local = jnp.pad(
+                hidden_states_local,
+                ((0, 0), (0, padded_hidden_size - orig_hidden_size)))
+            assert hidden_states_local.shape[
+                -1] % block_size == 0 or block_size == hidden_states_local.shape[
+                    -1], (
+                        f"Original hidden size {orig_hidden_size} is not "
+                        f"multiple of block size {block_size} for quantization. "
+                        f"w1 shape: {w1.shape} w1_scale shape: {w1_scale.shape}"
+                    )
+
+            hidden_states_local, lhs_scales = quantize_tensor(
+                jnp.float8_e4m3fn,
+                hidden_states_local,
+                axis=-1,  # Quantize along Hidden dimension
+                block_size=block_size,
+            )
+
+            assert hidden_states_local.shape[-1] == padded_hidden_size, (
+                f"After quantization, original hidden_size {orig_hidden_size} was padded to "
+                f"\n hidden size {hidden_states_local.shape[-1]} to divide quantization block size {block_size} "
+                f"\n padded hidden size is not equal to padded hidden size {padded_hidden_size} of w1 gmm1 up projection is not possible"
+                f"hidden_states shape: {hidden_states_local.shape}, w1 shape {w1.shape}"
+            )
+
         num_tokens_local = hidden_states_local.shape[0]
         topk_indices_flat = topk_indices_local.flatten()
         topk_argsort_indices = jnp.argsort(topk_indices_flat)
@@ -472,22 +535,33 @@ def fused_moe_func(
                                          length=global_num_experts)
 
         x = hidden_states_local[token_indices_sorted]
-        return x, group_sizes_local, topk_argsort_revert_indices
+        x_scale = None
+        if w1_scale is not None:
+            x_scale = lhs_scales[token_indices_sorted]
+            x_scale = jnp.swapaxes(x_scale, 0, 1)
+            x_scale = jnp.broadcast_to(x_scale[..., None],
+                                       (*x_scale.shape, 128))
 
-    x, group_sizes, topk_argsort_revert_indices = jax.shard_map(
+        return x, x_scale, group_sizes_local, topk_argsort_revert_indices
+
+    x_scale_spec = P(None, ShardingAxisName.MLP_DATA,
+                     None) if w1_scale is not None else None
+    x, x_scale, group_sizes, topk_argsort_revert_indices = jax.shard_map(
         _process_tokens_locally,
         mesh=mesh,
         in_specs=(P(ShardingAxisName.MLP_DATA,
                     None), P(ShardingAxisName.MLP_DATA, None)),
-        out_specs=(P(ShardingAxisName.MLP_DATA, None),
+        out_specs=(P(ShardingAxisName.MLP_DATA, None), x_scale_spec,
                    P(ShardingAxisName.MLP_DATA), P(ShardingAxisName.MLP_DATA)),
     )(hidden_states, topk_indices)
 
-    x = jnp.pad(x, ((0, 0), (0, padded_hidden_size - hidden_size)))
+    if x.shape[-1] < padded_hidden_size:
+        x = jnp.pad(x, ((0, 0), (0, padded_hidden_size - hidden_size)))
 
     if use_ep:
         x = expert_sharded_gmm(
             x,
+            x_scale,
             w1,
             w1_scale,
             w1_bias,
@@ -498,9 +572,29 @@ def fused_moe_func(
         x1, x2 = jnp.split(x, 2, -1)
 
         x = activation_fn(activation, x1, x2)
+        x_scale = None
+        if w2_scale is not None:
+            # Block Size (Using Intermediate Dim 1)
+            block_size = w2.shape[1] // w2_scale.shape[1]
+            assert x.shape[-1] % block_size == 0 or block_size == x.shape[
+                -1], (f"Original intermediate size {x.shape[-1]} is not "
+                      f"multiple of block size {block_size} for quantization.")
+            x, x_scale = quantize_tensor(
+                jnp.float8_e4m3fn,
+                x,
+                axis=-1,
+                block_size=block_size,
+            )
+
+            # Transpose Scale for Kernel (Blocks, 1, Tokens)
+            x_scale = jnp.swapaxes(x_scale, 0, 1)
+            # x_scale = jnp.expand_dims(x_scale, 1)
+            x_scale = jnp.broadcast_to(x_scale[..., None],
+                                       (*x_scale.shape, 128))
 
         x = expert_sharded_gmm(
             x,
+            x_scale,
             w2,
             w2_scale,
             w2_bias,
@@ -531,6 +625,7 @@ def fused_moe_func(
     else:
         x1, x2 = tensor_sharded_gmm_merged_column_parallel(
             x,
+            x_scale,
             w1,
             w1_scale,
             w1_bias,
@@ -539,9 +634,31 @@ def fused_moe_func(
         )
 
         x = activation_fn(activation, x1, x2)
+        x_scale = None
+        if w2_scale is not None:
+            block_size = w2.shape[1] // w2_scale.shape[1]
+            original_intermediate_size = x.shape[-1]
+            assert x.shape[-1] % block_size == 0 or block_size == x.shape[-1], (
+                f"Original intermediate size {original_intermediate_size} is not "
+                f"multiple of block size {block_size} for quantization.")
+            x, x_scale = quantize_tensor(
+                jnp.float8_e4m3fn,
+                x,
+                axis=-1,  # Quantize along Intermediate dimension
+                block_size=block_size,
+            )
+            assert x.shape[-1] == w2.shape[1], (
+                f"After quantization, original intermediate size {original_intermediate_size} was padded to {x.shape[-1]}"
+                f" to divide quantization block size {block_size}, which is not equal to w2 gmm2 input size {w2.shape[1]}"
+                f" x shape: {x.shape}, w2 shape {w2.shape}")
+            x_scale = jnp.swapaxes(x_scale, 0, 1)
+            x_scale = jnp.broadcast_to(x_scale[..., None],
+                                       (*x_scale.shape, 128))
+            # x_scale = jnp.expand_dims(x_scale, 1)
 
         x = tensor_sharded_gmm_row_parallel(
             x,
+            x_scale,
             w2,
             topk_argsort_revert_indices,
             topk_weights,

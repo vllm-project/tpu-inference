@@ -108,6 +108,9 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
         self.mesh = mesh
         self.moe_backend = select_moe_backend(self.moe)
 
+        logger.info("Using VLLM MXFP4 MoE backend: %s mxfp4.py",
+                    self.moe_backend.value)
+
         self.extra_backend_kwargs = {}
         if self.moe_backend == FusedMoEBackend.FUSED_MOE:
             # When fused moe kernle is used, we pass extra arguments like

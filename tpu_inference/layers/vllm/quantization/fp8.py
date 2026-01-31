@@ -236,7 +236,8 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
 
         self.mesh = mesh
         self.moe_backend = select_moe_backend(self.moe)
-
+        logger.info("Using VLLM FP8 MoE backend: %s fp8.py",
+                    self.moe_backend.value)
         self.extra_backend_kwargs = {}
         if self.moe_backend == FusedMoEBackend.FUSED_MOE:
             self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name, )
