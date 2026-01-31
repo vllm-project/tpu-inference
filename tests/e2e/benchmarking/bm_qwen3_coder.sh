@@ -120,8 +120,16 @@ VLLM_XLA_CHECK_RECOMPILATION=0 vllm serve --seed=42 --model="$model" --max-model
 
 # Need to put the nc command in a condition.
 # If we assign it to a variable, the nc command is supposed to fail at first because it takes some time for the server to be ready. But the "set -e" will cause the script to exit immediately so the while loop will not run.
+TIMEOUT_SECONDS=$((40 * 60))  # 40 minutes
+wait_start_time=$(date +%s)
 while ! nc -zv $DEFAULT_HOST $DEFAULT_PORT; do
-  echo "Waiting for the server to start..."
+  current_time=$(date +%s)
+  elapsed=$((current_time - wait_start_time))
+  if [ "$elapsed" -ge "$TIMEOUT_SECONDS" ]; then
+    echo "Timeout: Server did not start within 40 minutes."
+    exit 1
+  fi
+  echo "Waiting for the server to start... (${elapsed}s elapsed)"
   sleep 15
 done
 
