@@ -384,7 +384,7 @@ def gmm(
 
     # Gather shape information.
     m, k, n = (lhs.shape[0], lhs.shape[1], rhs.shape[-1])
-    print(f"GMM called with (m, k, n) = ({m}, {k}, {n})")
+
     # If tiling is callable, look up the problem dimensions in the LUT. If no
     # tuned tile dimensions are available throw an error.
     if callable(tiling):
@@ -395,8 +395,7 @@ def gmm(
             f"No tuned tiling found for (m, k, n) = ({m}, {k}, {n})")
 
     tm, tk, tn = tiling
-    print(f"Using tiling (tm, tk, tn) = ({tm}, {tk}, {tn})")
-    
+
     if rhs_scale is not None:
         assert isinstance(rhs_scale, jax.Array)
         assert rhs_scale.shape[0] == num_current_groups
@@ -405,21 +404,13 @@ def gmm(
         num_quant_blocks = 1
     quant_block_size = k // num_quant_blocks
 
-    print(f"Using num_quant_blocks = {num_quant_blocks} with quant_block_size={quant_block_size}")
-    
+    if tk % quant_block_size != 0 and quant_block_size % tk != 0:
+        tk = quant_block_size
+
     tiles_k, k_rem = _calculate_irregular_num_tiles(k, tk)
     tiles_n, n_rem = _calculate_irregular_num_tiles(n, tn)
-    print(f"tiles_k={tiles_k}, k_rem={k_rem}, tiles_n={tiles_n}, n_rem={n_rem}")
     del n_rem
-    if tk > quant_block_size:
-        assert tk % quant_block_size == 0, (
-            f"tk ({tk}) must be a multiple of quant_block_size ({quant_block_size})"
-        )
-    else: 
-        # TODO: Support this case by adjusting the kernel.
-        pass
-    num_quant_blocks_per_tk =  num_quant_blocks // tiles_k
-    print(f"num_quant_blocks_per_tk={num_quant_blocks_per_tk}")
+    num_quant_blocks_per_tk = max(1, tk // quant_block_size)
 
     # Create the metadata we need for computation.
     group_metadata, num_active_tiles = make_group_metadata(  # pylint: disable=unbalanced-tuple-unpacking
@@ -430,8 +421,7 @@ def gmm(
         num_nonzero_groups=rhs.shape[0],
         visit_empty_groups=False,
     )
-    print(f"num_active_tiles={num_active_tiles}")
-    print("group_metadata=", group_metadata)
+
     def kernel(
         group_metadata,
         group_offset,
@@ -474,7 +464,7 @@ def gmm(
             x = x.astype(jnp.float32)
             return jnp.where(iota < k_rem, x, 0).astype(orig_dtype)
 
-        def _accum(is_last_k_tile, is_first_k_tile):
+        def _accum(is_last_k_tile):
             if is_last_k_tile:
                 mask_k_rem_lhs = partial(mask_k_rem, dim=1)
                 mask_k_rem_rhs = partial(mask_k_rem, dim=0)
@@ -489,29 +479,23 @@ def gmm(
             loaded_lhs = mask_k_rem_lhs(lhs[...])
             loaded_rhs = mask_k_rem_rhs(rhs[...])
 
-            if rhs_scale is not None:
-                acc = acc_scratch[...]
-                for b_i in range(num_quant_blocks_per_tk):
-                    partial_result = jnp.dot(
-                        loaded_lhs[..., b_i*quant_block_size:(b_i+1)*quant_block_size],
-                        loaded_rhs[b_i*quant_block_size:(b_i+1)*quant_block_size, ...],
-                        preferred_element_type=jnp.float32,
-                    )
-                    partial_result *= jnp.broadcast_to(rhs_scale[b_i], partial_result.shape)
-                    acc = acc + partial_result
-                
-            else:
-                acc = acc_scratch[...] + jnp.dot(
-                    loaded_lhs,
-                    loaded_rhs,
+            acc = acc_scratch[...]
+            for b_i in range(num_quant_blocks_per_tk):
+                partial_result = jnp.dot(
+                    loaded_lhs[..., b_i * quant_block_size:(b_i + 1) *
+                               quant_block_size],
+                    loaded_rhs[b_i * quant_block_size:(b_i + 1) *
+                               quant_block_size, ...],
                     preferred_element_type=jnp.float32,
                 )
+                if rhs_scale is not None:
+                    partial_result *= jnp.broadcast_to(rhs_scale[b_i],
+                                                       partial_result.shape)
+                acc = acc + partial_result
 
             if is_last_k_tile:
                 loaded_out = out[...].astype(jnp.float32)
-                if not is_first_k_tile:
-                    acc += loaded_out
-                elif rhs_bias is not None:
+                if rhs_bias is not None:
                     acc += rhs_bias[...].astype(jnp.float32)
 
                 mask = _get_store_mask(
@@ -526,16 +510,11 @@ def gmm(
                 acc_scratch[...] = acc
 
         is_last_k_tile = k_i == (tiles_k - 1)
-        is_first_k_tile = k_i == 0
 
         lax.cond(
             is_last_k_tile,
-            lambda: lax.cond(
-                is_first_k_tile,
-                partial(_accum, True, True),
-                partial(_accum, True, False),
-            ),
-            partial(_accum, False, False),
+            partial(_accum, True),
+            partial(_accum, False),
         )
 
     def lhs_transform_indices(n_i, grid_id, k_i, group_metadata, group_offset):
@@ -557,7 +536,8 @@ def gmm(
     def rhs_scale_transform_indices(n_i, grid_id, k_i, group_metadata,
                                     group_offset):
         group_ids = group_metadata.group_ids
-        b_i = k_i * num_quant_blocks_per_tk 
+        b_i = (k_i * tk) // quant_block_size
+
         return group_ids[grid_id] - group_offset[0], b_i, 0, n_i
 
     def rhs_bias_transform_indices(n_i, grid_id, k_i, group_metadata,
@@ -586,8 +566,9 @@ def gmm(
     if rhs_scale is None:
         rhs_scale_block_spec = None
     else:
-        rhs_scale_block_spec = pl.BlockSpec((None, num_quant_blocks_per_tk, 1, tn),
-                                            rhs_scale_transform_indices)
+        rhs_scale_block_spec = pl.BlockSpec(
+            (None, num_quant_blocks_per_tk, 1, tn),
+            rhs_scale_transform_indices)
 
     if rhs_bias is None:
         rhs_bias_block_spec = None
