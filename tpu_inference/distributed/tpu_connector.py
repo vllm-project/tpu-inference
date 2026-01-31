@@ -519,7 +519,7 @@ class TPUConnectorWorker:
             use_raw_buffers=False,
         )
         logger.info(
-            f"TPUConnector Worker {self.node_id} --> kv transfer | addr={self.kv_transfer_server.address()}"
+            f"TPUConnector Worker {self.node_id} --> KV start_transfer_server | addr={self.kv_transfer_server.address()}"
         )
 
     def _pull_notify_listener(self, ready_event: threading.Event):
@@ -543,8 +543,8 @@ class TPUConnectorWorker:
                 # Set the expiration time of this request to -1, mark to be done
                 self.reqs_wait_pull[req_id][1] = -1
             else:
-                raise ValueError(
-                    f"Disagg producer recives a non-exist pulling finished notification request {req_id}"
+                logger.warning(
+                    f"TPUConnector Worker {self.node_id} --> Disagg producer recives a non-exist pulling finished notification request {req_id}"
                 )
             time.sleep(0)
             # The response is not really needed.
@@ -574,7 +574,7 @@ class TPUConnectorWorker:
                 # the data asyncly.
                 conn = self._maybe_build_kv_connection(req_meta)
                 self.reqs_pulling[req_id] = self.pull_executor.submit(
-                    self._pull_kv, conn, req_meta)
+                    self._pull_kv, req_id, conn, req_meta)
             else:
                 # The request has finished pulling the KV from remote, or it has full local
                 # prefix cache, need to notify P to let it free blocks.
@@ -611,7 +611,7 @@ class TPUConnectorWorker:
             )
         return conn
 
-    def _pull_kv(self, conn: Any, req_meta: LoadMeta):
+    def _pull_kv(self, req_id: str, conn: Any, req_meta: LoadMeta):
         # The local allocated blocks which don't hit prefix caching.
         local_block_ids = req_meta.local_block_ids
         # The remote computed blocks which need to pull from P.
@@ -623,9 +623,12 @@ class TPUConnectorWorker:
         kv_spec = self._get_kv_spec(len(remote_block_ids))
         # TODO(xiang): pad block_ids to avoid recompilation
         indices = device_array(self.mesh, np.array(local_block_ids))
+        logger.info(
+            f"Worker {self.node_id} --> kv transfer | start pull req_id={req_id} | uuid={req_meta.uuid}"
+        )
         kv = conn.pull(req_meta.uuid, kv_spec)
         logger.info(
-            f"Worker {self.node_id} --> kv transfer | pull uuid={req_meta.uuid}"
+            f"Worker {self.node_id} --> kv transfer | done pull req_id={req_id} | uuid={req_meta.uuid}"
         )
         return kv, indices
 
@@ -651,7 +654,7 @@ class TPUConnectorWorker:
                                    socket_type=zmq.DEALER,
                                    bind=False)
             logger.info(
-                f"Worker {self.node_id} --> zmq notify | sock_path={sock_path}"
+                f"Worker {self.node_id} --> notify make_zmq_socket | sock_path={sock_path}"
             )
         return sock
 
