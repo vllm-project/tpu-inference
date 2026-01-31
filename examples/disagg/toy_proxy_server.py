@@ -15,8 +15,7 @@ from fastapi.responses import StreamingResponse
 # Configure logging to show info-level messages
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +63,9 @@ async def lifespan(app: FastAPI):
     app.state.decode_iterator = itertools.cycle(
         range(len(app.state.decode_clients)))
 
-    logger.info(f"Initialized {len(app.state.prefill_clients)} prefill clients "
-          f"and {len(app.state.decode_clients)} decode clients.")
+    logger.info(
+        f"Initialized {len(app.state.prefill_clients)} prefill clients "
+        f"and {len(app.state.decode_clients)} decode clients.")
 
     yield
 
@@ -206,10 +206,8 @@ async def _handle_completions(api: str, request: Request):
 
         # Get the next prefill client in round-robin fashion
         prefill_client_info = get_next_client(request.app, 'prefill')
-        logger.info(
-            f"[{request_id}] Sending prefill request to "
-            f"client {prefill_client_info['id']}"
-        )
+        logger.info(f"[{request_id}] Sending prefill request to "
+                    f"client {prefill_client_info['id']}")
         logger.debug(f"[{request_id}] Prefill request body: {req_data}")
 
         # Send request to prefill service
@@ -220,8 +218,10 @@ async def _handle_completions(api: str, request: Request):
         # Extract the needed fields
         response_json = response.json()
         # print(response_json)
-        logger.info(f"[{request_id}] Prefill response parsed. Starting decode.")
-        logger.debug(f"[{request_id}] Prefill response content: {response_json}")
+        logger.info(
+            f"[{request_id}] Prefill response parsed. Starting decode.")
+        logger.debug(
+            f"[{request_id}] Prefill response content: {response_json}")
 
         kv_transfer_params = response_json.get('kv_transfer_params', {})
         if kv_transfer_params:
@@ -232,13 +232,11 @@ async def _handle_completions(api: str, request: Request):
 
         logger.debug(
             f"[{request_id}] Using prefill client {prefill_client_info['id']} "
-            f"and decode client {decode_client_info['id']}"
-        )
-        logger.info(
-            f"[{request_id}] Sending decode request to "
-            f"client {decode_client_info['id']}"
-        )
+            f"and decode client {decode_client_info['id']}")
+        logger.info(f"[{request_id}] Sending decode request to "
+                    f"client {decode_client_info['id']}")
         logger.debug(f"[{request_id}] Decode request body: {req_data}")
+
         # print(req_data)
         # Stream response from decode service
         async def generate_stream():
@@ -259,7 +257,7 @@ async def _handle_completions(api: str, request: Request):
         import traceback
         exc_info = sys.exc_info()
         logger.error("Error occurred in disagg prefill proxy server"
-              f" - {api} endpoint")
+                     f" - {api} endpoint")
         logger.error(e)
         logger.error("".join(traceback.format_exception(*exc_info)))
         raise
