@@ -17,7 +17,6 @@ import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from tpu_inference import envs
 from tpu_inference.kernels.quantized_matmul.blockwise_kernel import \
     quantized_matmul_kernel as blockwise_quantized_matmul_kernel
 from tpu_inference.kernels.quantized_matmul.util import xla_quantized_matmul
@@ -48,7 +47,7 @@ def sharded_quantized_matmul(x: jax.Array,
     Args:
         x:  Activation.
         w_q: Weight quantized array. [n_output_features, n_input_features]
-        w_s: Weight quantization scale. [n_output_features]
+        w_s: Weight quantization scale. [n_output_features] for xla quantized matmul, [n_blocks, 1, n_output_features] for quantized matmul kernel
         weight_sharding: PartitionSpec for the weight tensor.
         mesh: (Optional) Mesh to shard on. If None, mesh from current context is used, similar to jax.shard_map().
 
@@ -60,7 +59,8 @@ def sharded_quantized_matmul(x: jax.Array,
     # with the kernel and thus we disable it for now.
     out_axis, in_axis = weight_sharding
     x_sharding = P(None, in_axis)
-    if envs.ENABLE_QUANTIZED_MATMUL_KERNEL:
+    enable_quantized_matmul_kernel = len(w_s.shape) == 3
+    if enable_quantized_matmul_kernel:
         num_blocks, _, __ = w_s.shape
         scale_sharding = P(
             in_axis if num_blocks > 1 else None,
@@ -77,7 +77,7 @@ def sharded_quantized_matmul(x: jax.Array,
         NamedSharding(mesh, x_sharding) if mesh else x_sharding)
 
     def wrapper(x, w_q, w_s):
-        if envs.ENABLE_QUANTIZED_MATMUL_KERNEL:
+        if enable_quantized_matmul_kernel:
             k_dim = x.shape[1]
             sharded_num_blocks, _, __ = w_s.shape
             block_size = k_dim // sharded_num_blocks

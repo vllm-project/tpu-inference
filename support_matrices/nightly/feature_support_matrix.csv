@@ -13,4 +13,4 @@ Feature,CorrectnessTest,PerformanceTest
 "async scheduler",✅,✅
 "runai_model_streamer_loader",✅,N/A
 "sampling_params",✅,N/A
-"structured_decoding",✅,N/A
+"structured_decoding",❌,N/A

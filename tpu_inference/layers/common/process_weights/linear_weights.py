@@ -157,7 +157,8 @@ def shard_linear_weights(
 
     weight_sharding = NamedSharding(mesh, weight_p_spec)
     bias_sharding = NamedSharding(mesh, bias_p_spec)
-    if len(weights.weight_scale.shape) == 3:
+    if isinstance(weights.weight_scale, (jax.Array, Tensor)) and len(
+            weights.weight_scale.shape) == 3:
         num_blocks = weights.weight_scale.shape[0]
         if len(weight_p_spec) != 2:
             raise ValueError(
