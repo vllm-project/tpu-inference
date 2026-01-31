@@ -235,6 +235,9 @@ def expert_sharded_gmm(
     rhs_scale: jax.Array | None,
     rhs_bias: jax.Array | None,
     group_sizes: jax.Array,
+    topk_argsort_revert_indices: jax.Array,
+    topk_weights: jax.Array,
+    topk: int,
     is_last_gmm: bool,
     mesh: Mesh,
 ) -> jax.Array:
@@ -260,6 +263,7 @@ def expert_sharded_gmm(
             tiling=(tm, tk, tn),
             group_offset=group_offset[0],
         )
+
         return gmm_res
 
     # The result from gmm on each shard has the same shape, but only the rows
@@ -302,98 +306,27 @@ def expert_sharded_gmm(
     if not is_last_gmm:
         return gmm_res
 
-    # For i-th shard, it is responsible groups (AKA experts) from
-    # i*num_experts_per_shard to (i+1)*num_experts_per_shard We sum them up to
-    # get total rows in that shard, and that is the size for shard to send to
-    # its peers. This is also the number of non-zero rows from the gmm results.
-    # In the working example, send_sizes would be [3, 2, 5, 4].
+    def _top_k_expert_reduction(gmm_res_local,
+                                topk_argsort_revert_indices_local,
+                                topk_weights_local):
+        # First run local reduction on topk experts owned by the rank for all tokens
+        token_topk_hidden = gmm_res_local[
+            topk_argsort_revert_indices_local].reshape(
+                (-1, topk, gmm_res_local.shape[-1]))
+        token_topk_hidden = token_topk_hidden * jnp.expand_dims(
+            topk_weights_local, axis=-1)
+        token_hidden = token_topk_hidden.sum(axis=-2)
 
-    # group_sizes has shape of [num_tokens_per_shard * num_experts_per_shard].
-    # So reshaping to [num_tokens_per_shard, num_experts_per_shard] and applying
-    # sum(axis=1) will get desired send_sizes shaped [num_tokens_per_shard].
-    send_sizes = group_sizes.reshape(-1, num_experts_per_shard).sum(axis=1)
+        # Then global reduction on all ranks for all tokens and all experts
+        return jax.lax.psum(token_hidden, axis_name=ShardingAxisName.EXPERT)
 
-    # In the working example, input_offsets would be [0, 3, 5, 10]
-
-    def _compute_input_offsets(send_sizes_local):
-        input_offset_shard = jnp.concatenate(
-            (jnp.array([0]), send_sizes_local.cumsum()[:-1]))
-        return input_offset_shard
-
-    input_offsets = jax.shard_map(
-        _compute_input_offsets,
-        mesh=mesh,
-        in_specs=data_p_spec,
-        out_specs=data_p_spec,
-    )(send_sizes)
-    output_offsets = input_offsets
-    recv_sizes = send_sizes
-    data_sharding = NamedSharding(mesh, data_p_spec)
-
-    send_sizes = jax.lax.with_sharding_constraint(send_sizes, data_sharding)
-    input_offsets = jax.lax.with_sharding_constraint(input_offsets,
-                                                     data_sharding)
-    output_offsets = jax.lax.with_sharding_constraint(output_offsets,
-                                                      data_sharding)
-    recv_sizes = jax.lax.with_sharding_constraint(recv_sizes, data_sharding)
-
-    def _ragged_all_to_all(operand, input_offsets, send_sizes, output_offsets,
-                           recv_sizes):
-        output = jnp.zeros_like(operand)
-
-        # input_offsets, send_sizes and output_offsets are sharded and there is
-        # only 1 elemnt in each shard, we are taking the 0-th element from them
-        # just so that jnp.repeat generates the arrays with correct shape.
-        input_offsets_of_shard = jnp.repeat(input_offsets[0], ep_size)
-        send_sizes_of_shard = jnp.repeat(send_sizes[0], ep_size)
-        output_offsets_of_shard = jnp.repeat(output_offsets[0], ep_size)
-
-        # recv_sizes is replicated across shards, because all the shards receive
-        # the same data and write to the output in the same way (same
-        # output_offsets and same recv_sizes) and thus generates replicated
-        # output.
-        recv_sizes_of_shard = recv_sizes
-
-        # In the working example, for each shard, the values of the offsets and
-        # sizes would be:
-        #                                shard-0         shard-1         shard-2         shard-3
-        # input_offsets_of_shard       [0, 0, 0, 0]    [3, 3, 3, 3]    [5, 5, 5, 5]    [10,10,10,10]
-        # send_sizes_of_shard          [3, 3, 3, 3]    [2, 2, 2, 2]    [5, 5, 5, 5]    [4, 4, 4, 4 ]
-        # output_offsets_of_shard      [0, 0, 0, 0]    [0, 0, 0, 0]    [0, 0, 0, 0]    [10,10,10,10]
-        # recv_sizes_of_shard          [3, 2, 5, 4]    [3, 2, 5, 4]    [3, 2, 5, 4]    [3, 2, 5, 4]
-        return jax.lax.ragged_all_to_all(operand,
-                                         output,
-                                         input_offsets_of_shard,
-                                         send_sizes_of_shard,
-                                         output_offsets_of_shard,
-                                         recv_sizes_of_shard,
-                                         axis_name=ShardingAxisName.EXPERT)
-
-    # Use ragged_all_to_all to send the result from gmm for each expert to all
-    # the shards.  In the working example, the result would be:
-    #       A, A, A, A     A, A, A, A     A, A, A, A     A, A, A, A
-    #       A, A, A, A     A, A, A, A     A, A, A, A     A, A, A, A
-    #       A, A, A, A     A, A, A, A     A, A, A, A     A, A, A, A
-    #       B, B, B, B     B, B, B, B     B, B, B, B     B, B, B, B
-    #       B, B, B, B     B, B, B, B     B, B, B, B     B, B, B, B
-    #       C, C, C, C     C, C, C, C     C, C, C, C     C, C, C, C
-    #       C, C, C, C     C, C, C, C     C, C, C, C     C, C, C, C
-    #       C, C, C, C     C, C, C, C     C, C, C, C     C, C, C, C
-    #       C, C, C, C     C, C, C, C     C, C, C, C     C, C, C, C
-    #       C, C, C, C     C, C, C, C     C, C, C, C     C, C, C, C
-    #       D, D, D, D     D, D, D, D     D, D, D, D     D, D, D, D
-    #       D, D, D, D     D, D, D, D     D, D, D, D     D, D, D, D
-    #       D, D, D, D     D, D, D, D     D, D, D, D     D, D, D, D
-    #       D, D, D, D     D, D, D, D     D, D, D, D     D, D, D, D
-    #        shard-0        shard-1        shard-2        shard-3
     return jax.shard_map(
-        _ragged_all_to_all,
+        _top_k_expert_reduction,
         mesh=mesh,
-        in_specs=(ep_data_p_spec, ep_data_p_spec, ep_data_p_spec,
-                  ep_data_p_spec, data_p_spec),
+        in_specs=(ep_data_p_spec, data_p_spec, data_p_spec),
         out_specs=(data_p_spec),
         check_vma=False,
-    )(gmm_res, input_offsets, send_sizes, output_offsets, recv_sizes)
+    )(gmm_res, topk_argsort_revert_indices, topk_weights)
 
 
 @functools.partial(
@@ -472,6 +405,7 @@ def fused_moe_func(
                                          length=global_num_experts)
 
         x = hidden_states_local[token_indices_sorted]
+
         return x, group_sizes_local, topk_argsort_revert_indices
 
     x, group_sizes, topk_argsort_revert_indices = jax.shard_map(
@@ -479,9 +413,9 @@ def fused_moe_func(
         mesh=mesh,
         in_specs=(P(ShardingAxisName.MLP_DATA,
                     None), P(ShardingAxisName.MLP_DATA, None)),
-        out_specs=(P(ShardingAxisName.MLP_DATA, None),
-                   P(ShardingAxisName.MLP_DATA), P(ShardingAxisName.MLP_DATA)),
-    )(hidden_states, topk_indices)
+        out_specs=(P(ShardingAxisName.MLP_DATA,
+                     None), P(ShardingAxisName.MLP_DATA),
+                   P(ShardingAxisName.MLP_DATA)))(hidden_states, topk_indices)
 
     x = jnp.pad(x, ((0, 0), (0, padded_hidden_size - hidden_size)))
 
@@ -492,6 +426,9 @@ def fused_moe_func(
             w1_scale,
             w1_bias,
             group_sizes,
+            topk_argsort_revert_indices,
+            topk_weights,
+            topk,
             is_last_gmm=False,
             mesh=mesh,
         )
@@ -505,29 +442,12 @@ def fused_moe_func(
             w2_scale,
             w2_bias,
             group_sizes,
+            topk_argsort_revert_indices,
+            topk_weights,
+            topk,
             is_last_gmm=True,
             mesh=mesh,
         )
-
-        # On TP, the unsort / summing topk are handled before all-reduce
-        # So it is not needed here.
-        def _finalize_output(x_local, topk_argsort_revert_indices_local,
-                             topk_weights_local):
-            x_local = x_local[topk_argsort_revert_indices_local].reshape(
-                -1, topk, padded_hidden_size)
-            x_local = x_local * jnp.expand_dims(topk_weights_local, axis=-1)
-            x_local = x_local.sum(axis=-2)
-            return x_local
-
-        x = jax.shard_map(
-            _finalize_output,
-            mesh=mesh,
-            in_specs=(P(ShardingAxisName.MLP_DATA,
-                        None), P(ShardingAxisName.MLP_DATA),
-                      P(ShardingAxisName.MLP_DATA, None)),
-            out_specs=(P(ShardingAxisName.ATTN_DATA, None)),
-            check_vma=False,
-        )(x, topk_argsort_revert_indices, topk_weights)
     else:
         x1, x2 = tensor_sharded_gmm_merged_column_parallel(
             x,
