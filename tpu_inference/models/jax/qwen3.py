@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -230,13 +230,13 @@ class Qwen3Model(Qwen2Model):
         if self.is_first_rank or (hf_config.tie_word_embeddings
                                   and self.is_last_rank):
             self.embed_tokens = JaxEmbed(
-            num_embeddings=vocab_size,
-            features=hidden_size,
-            param_dtype=dtype,
-            embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
-            rngs=rng,
-            quant_config=vllm_config.quant_config,
-        )
+                num_embeddings=vocab_size,
+                features=hidden_size,
+                param_dtype=dtype,
+                embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
+                rngs=rng,
+                quant_config=vllm_config.quant_config,
+            )
         else:
             self.embed_tokens = PPMissingLayer()
 
@@ -263,7 +263,6 @@ class Qwen3Model(Qwen2Model):
             )
         else:
             self.norm = PPMissingLayer()
-
 
 
 class Qwen3ForCausalLM(JaxModule):
@@ -308,10 +307,10 @@ class Qwen3ForCausalLM(JaxModule):
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
         inputs_embeds: Optional[jax.Array] = None,
-        _input_positions=None,
-        _layer_name_to_kv_cache=None,
-        _lora_metadata=None,
-        intermediate_tensors: JaxIntermediateTensors | None = None,
+        _input_positions: Optional[jax.Array] = None,
+        _layer_name_to_kv_cache: Optional[Tuple[Tuple[str, int]]] = None,
+        _lora_metadata: Any = None,
+        intermediate_tensors: Optional[JaxIntermediateTensors] = None,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
         kv_caches, x = self.model(

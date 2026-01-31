@@ -14,7 +14,7 @@
 
 import re
 from itertools import islice
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -340,10 +340,6 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                 dtype=self.dtype,
                 random_init=force_random_weights,
             )
-        else:
-            self.final_norm = PPMissingLayer()
-
-        if self.is_last_rank:
             self.lm_head = LMhead(vocab_size=vocab_size,
                                   hidden_size=self.hidden_size,
                                   dtype=self.dtype,
@@ -352,6 +348,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                                   dv_sharding=(None, ('data', 'model')),
                                   random_init=force_random_weights)
         else:
+            self.final_norm = PPMissingLayer()
             self.lm_head = PPMissingLayer()
 
         if self.is_verbose:
@@ -387,10 +384,10 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
         inputs_embeds: Optional[jax.Array] = None,
-        _input_positions=None,
-        _layer_name_to_kv_cache=None,
-        _lora_metadata=None,
-        intermediate_tensors: JaxIntermediateTensors | None = None,
+        _input_positions: Optional[jax.Array] = None,
+        _layer_name_to_kv_cache: Optional[Tuple[Tuple[str, int]]] = None,
+        _lora_metadata: Any = None,
+        intermediate_tensors: Optional[JaxIntermediateTensors] = None,
         *args,
     ) -> Tuple[List[KVCacheType], jax.Array]:
         is_prefill = False
