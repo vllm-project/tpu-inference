@@ -557,7 +557,6 @@ def gmm(
     def rhs_scale_transform_indices(n_i, grid_id, k_i, group_metadata,
                                     group_offset):
         group_ids = group_metadata.group_ids
-        del k_i
         b_i = k_i * num_quant_blocks_per_tk 
         return group_ids[grid_id] - group_offset[0], b_i, 0, n_i
 

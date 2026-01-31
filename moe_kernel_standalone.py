@@ -167,6 +167,7 @@ class MoEKernelTest(jtu.JaxTestCase):
     single_chip_mesh = Mesh(
         np.array(jax.devices()[:1]).reshape(1, 1), axis_names=("data", "model")
     )
+    print("Running expected...")
     expected = jax.block_until_ready(
         fused_moe_func(
             a,
@@ -237,7 +238,7 @@ class MoEKernelTest(jtu.JaxTestCase):
       # xprof_sess.start_session(trace_mode="TRACE_COMPUTE_AND_DMA")
       xprof_sess.start_session(trace_mode="TRACE_COMPUTE_AND_SYNC")
       # xprof_sess.start_session(trace_mode="TRACE_ALL")
-
+    print("Running actual...")
     actual = jax.block_until_ready(
         fused_moe_func(
             a,
@@ -258,7 +259,11 @@ class MoEKernelTest(jtu.JaxTestCase):
     if capture_xprof:
       url = xprof_sess.end_session_and_get_url()
       print(f"XProf URL: {url}")
-
+    jax.debug.print("actual: {} {}", actual, actual.shape)
+    jax.debug.print("expected: {} {}", expected, expected.shape)
+    
+    self.assertEqual(actual.dtype, a.dtype)
+    self.assertEqual(expected.dtype, a.dtype)
     self.assertAllClose(actual, expected, atol=atol, rtol=rtol)
 
   @parameterized.product(
