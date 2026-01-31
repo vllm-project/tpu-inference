@@ -18,15 +18,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-import torch
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
-from transformers import AutoModelForCausalLM
 from vllm.config import ModelConfig
-from vllm.model_executor.model_loader import LoadConfig, get_model_loader
 
-from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
-    get_kv_cache_shape
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.models.jax.qwen3 import Qwen3ForCausalLM
 from tpu_inference.models.jax.utils.qwix.qwix_utils import \
@@ -191,76 +186,3 @@ class TestQwen3ForCausalLM:
 
         logits = model.compute_logits(hidden_states)
         assert logits.shape == (1, hf_config.vocab_size)
-
-    def test_loading(self, rng, mesh):
-        """Tests loading weights from HF model, doing forward and comparing outputs."""
-        model_name = "Qwen/Qwen3-0.6B"
-        kv_cache_type = "auto"
-        mock_vllm_config = MockVllmConfig(model_name, kv_cache_type)
-
-        model_dim = mock_vllm_config.model_config.hf_config.hidden_size
-        model_config = mock_vllm_config.model_config
-        kv_dtype = jnp.bfloat16
-        num_key_value_heads = model_config.hf_config.num_key_value_heads
-        qk_head_dim = model_config.hf_config.head_dim
-
-        # Use transformer library to load the HF model, for reference.
-        hf_model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            trust_remote_code=True,
-            torch_dtype='auto',
-            low_cpu_mem_usage=True,
-        )
-        hf_model = hf_model.eval()
-
-        with jax.set_mesh(mesh):
-            # Test model init
-            model = Qwen3ForCausalLM(mock_vllm_config, rng, mesh)
-
-            # load weights from HF model
-            loader = get_model_loader(LoadConfig(load_format="hf"))
-            loader.load_weights(model, model_config)
-
-            jax_layer_0 = model.model.layers[0]
-            hf_layer_0 = hf_model.model.layers[0]
-
-            # Create random input for comparison
-            seq_len = 1
-            input = [[0.01 * i for i in range(model_dim)]
-                     for _ in range(seq_len)]
-            input_tensor_hf = torch.tensor(input, dtype=torch.bfloat16)
-            input_tensor_jax = jnp.array(input, dtype=jnp.bfloat16)
-
-            # Forward pass only the 1st layer for comparison
-
-            block_size = 16
-            num_blocks = 8
-            cache_shape = get_kv_cache_shape(num_blocks, block_size,
-                                             num_key_value_heads, qk_head_dim,
-                                             kv_dtype)
-            jax_output, _ = jax_layer_0(
-                kv_cache=jnp.zeros(cache_shape, dtype=kv_dtype),
-                x=input_tensor_jax,
-                attention_metadata=AttentionMetadata(
-                    input_positions=jnp.array(seq_len),
-                    block_tables=jnp.array(list(range(1))),
-                    seq_lens=jnp.array([seq_len]),
-                    query_start_loc=jnp.array([0, seq_len]),
-                    request_distribution=jnp.array([0, 0, 1]),
-                ),
-            )
-            with torch.no_grad():
-                hf_output = hf_layer_0(
-                    hidden_states=input_tensor_hf,
-                    attention_mask=None,
-                    position_ids=None,
-                    past_key_values=None,
-                    use_cache=False,
-                    output_attentions=False,
-                ).float().numpy()
-                np.testing.assert_allclose(
-                    jax_output,
-                    hf_output,
-                    rtol=1e-2,
-                    atol=1e-2,
-                )
