@@ -1121,9 +1121,10 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         }
 
         loader = self.WeightLoader(self.vllm_config, self.mesh)
-        loader.load_weights(self,
-                            mappings,
-                            keep_hf_weight_suffix_when_match=['model'])
+        loader.load_weights(
+            self,
+            mappings,
+            keep_hf_weight_suffix_when_match=['model', 'lm_head'])
 
     def precompile_vision_encoder(
         self,
