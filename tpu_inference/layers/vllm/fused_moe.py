@@ -17,8 +17,6 @@ from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
-# from jax import lax
-# from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from jax.sharding import Mesh
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
@@ -108,10 +106,6 @@ def fused_moe_apply(
                     b2=weights.w2_bias,
                     **extra_backend_kwargs,
                 )[:, :actual_hidden_size]
-                # output = lax.with_sharding_constraint(
-                #     output,
-                #     NamedSharding(
-                #         mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None)))
             case FusedMoEBackend.GMM_EP | FusedMoEBackend.GMM_TP:
                 output = fused_moe_func(
                     hidden_states=x,
