@@ -714,15 +714,41 @@ class StandardWeightLoader(BaseWeightLoader):
             keep_hf_weight_suffix_when_match=keep_hf_weight_suffix_when_match)
 
 
-def load_nnx_param_from_torch(jax_param: nnx.Param,
-                              torch_weight: torch.Tensor):
-    """Load a nnx.Param from a torch.Tensor."""
+def load_nnx_param_from_reshaped_torch(
+        jax_param: nnx.Param,
+        torch_weight: torch.Tensor,
+        *,
+        reshape_dims: Optional[tuple[int, ...]] = None,
+        permute_dims: Optional[tuple[int, ...]] = None,
+        param_name: str = "Unknown"):
+    """Load a nnx.Param from a torch.Tensor with reshaping and transposing.
+    
+    HuggingFace model almost always store linear layer weights with contracting dimension
+    last, and only support 1D/2D weight tensors. This function reshapes then transposes
+    the torch weight to match the jax_param shape before loading.
+
+    Args:
+        jax_param: The target nnx.Param to load the weight into.
+        torch_weight: The source torch.Tensor weight.
+        reshape_dims: Optional tuple specifying the shape to reshape the torch weight to before permutation. If None, no reshaping is applied.
+        permute_dims: Optional tuple specifying the permutation of dimensions. If None, no-op for 1D tensors and transpose for 2D tensors is applied.
+    """
+    if reshape_dims is not None:
+        torch_weight = torch_weight.reshape(reshape_dims)
+    if permute_dims is None and torch_weight.ndim == 2:
+        permute_dims = (1, 0)
+    if permute_dims is not None:
+        torch_weight = torch_weight.permute(*permute_dims)
+
+    assert tuple(torch_weight.shape) == jax_param.value.shape, \
+        f"Shape mismatch when loading weight '{param_name}': torch {torch_weight.shape} vs jax {jax_param.value.shape}"
+
     spec = jax_param.sharding
     if isinstance(jax_param.sharding, NamedSharding):
         spec = jax_param.sharding.spec
     elif isinstance(jax_param.sharding, SingleDeviceSharding):
         spec = ()
-    mesh = jax_param.mesh if hasattr(jax_param, 'mesh') else None
+    mesh = getattr(jax_param, 'mesh', None)
 
     jax_param.value = shard_put(t2j(torch_weight, use_dlpack=False).astype(
         jax_param.value.dtype),
@@ -730,28 +756,41 @@ def load_nnx_param_from_torch(jax_param: nnx.Param,
                                 mesh=mesh)
 
 
-def load_nnx_param_from_reshaped_torch(jax_param: nnx.Param,
-                                       torch_weight: torch.Tensor):
-    """Load a nnx.Param from a reshaped and transposed torch.Tensor.
-    
-    HuggingFace model almost always store linear layer weights with contracting dimension
-    last, and only support 2D weight tensors. This function transposes then reshapes
-    the torch weight to match the jax_param shape before loading.
-    """
-    torch_weight = torch_weight.t()
-    torch_weight = torch_weight.reshape(jax_param.value.shape)
-    return load_nnx_param_from_torch(jax_param, torch_weight)
-
-
 class JaxAutoWeightsLoader(AutoWeightsLoader):
     """A weights loader for JAX models."""
 
     def __init__(self, model, **kwargs):
         assert isinstance(model, JaxModule)
-        for _, param in model.named_parameters():
+
+        for name, param in model.named_parameters():
             if not hasattr(param, "weight_loader"):
-                setattr(param, "weight_loader",
-                        load_nnx_param_from_reshaped_torch)
+                # Following are common patterns in standard transformers. To add pattern for modules
+                # beyond standard transformers, please consider setting weight_loader.
+                reshape_dims = None
+                permute_dims = None
+                if any(substr in name for substr in
+                       ["q_proj.weight", "k_proj.weight", "v_proj.weight"]):
+                    D, N, H = param.value.shape
+                    reshape_dims = (N, H, D)
+                    permute_dims = (2, 0, 1)
+                elif any(substr in name for substr in
+                         ["q_proj.bias", "k_proj.bias", "v_proj.bias"]):
+                    permute_dims = (0, 1)
+                elif "o_proj.weight" in name:
+                    N, H, D = param.value.shape
+                    reshape_dims = (D, N, H)
+                    permute_dims = (1, 2, 0)
+                elif "embed_tokens.weight" in name:
+                    permute_dims = (0, 1)
+                elif "lm_head" in name:
+                    permute_dims = (1, 0)
+
+                setattr(
+                    param, "weight_loader",
+                    functools.partial(load_nnx_param_from_reshaped_torch,
+                                      reshape_dims=reshape_dims,
+                                      permute_dims=permute_dims,
+                                      param_name=name))
 
         super().__init__(model, **kwargs)
 

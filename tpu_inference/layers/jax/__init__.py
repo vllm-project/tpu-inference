@@ -21,6 +21,9 @@ class JaxModule(nnx.Module):
     """Base module for JAX layers, extending flax.nnx.Module.
     """
 
+    def _get_name(self) -> str:
+        return self.__class__.__name__
+
     def named_parameters(self,
                          prefix: str = "",
                          recurse=True) -> Iterator[tuple[str, nnx.Param]]:
@@ -76,6 +79,9 @@ class JaxModuleList(list):
         super().__init__()
         for module in modules:
             self.append(module)
+
+    def _get_name(self) -> str:
+        return self.__class__.__name__
 
     def named_parameters(self,
                          prefix: str = "",
