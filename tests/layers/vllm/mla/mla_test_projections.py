@@ -11,7 +11,6 @@ Run with: python tests/mla_test_projections.py
 import numpy as np
 import torch
 import jax
-import jax.numpy as jnp
 
 # Force CPU execution
 jax.config.update('jax_platform_name', 'cpu')
