@@ -1279,7 +1279,6 @@ def _jax_mla_attn_func(
     def _mla_kernel_fn(ql_nope, q_pe, kv_c, k_pe, kv_cache, seq_lens, block_tables,
                        query_start_loc, request_distribution):
         # Compute block sizes inside shard_map
-        max_num_tokens = ql_nope.shape[0]
         max_num_seqs = seq_lens.shape[0]
         num_page_indices = block_tables.shape[0]
         pages_per_seq = num_page_indices // max_num_seqs
