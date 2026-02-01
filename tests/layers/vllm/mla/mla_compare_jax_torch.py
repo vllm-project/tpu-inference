@@ -87,7 +87,6 @@ def mla_attention_torch(
     """
     num_heads = config['num_heads']
     qk_nope = config['qk_nope_head_dim']
-    qk_rope = config['qk_rope_head_dim']
     v_head = config['v_head_dim']
     kv_lora = config['kv_lora_rank']
 
