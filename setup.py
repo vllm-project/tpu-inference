@@ -106,4 +106,12 @@ setup(
         "Programming Language :: Python :: 3.12",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
+    extras_require={
+        "tuning": ["click", "rich"],
+    },
+    entry_points={
+        "console_scripts": [
+            "tpu-tune=tpu_inference.tools.autotune.cli:main",
+        ],
+    },
 )

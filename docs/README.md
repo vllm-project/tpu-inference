@@ -46,6 +46,7 @@ If you are interested in contributing to the project or want to learn more about
 
 - **[JAX Model Development](developer_guides/jax_model_development.md)**
 - **[Torch Model Development](developer_guides/torchax_model_development.md)**
+- **[Kernel Tuning Guide](developer_guides/tuning.md)**
 
 ## Contribute
 
