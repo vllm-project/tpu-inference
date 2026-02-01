@@ -8,7 +8,8 @@ import pytest
 # Import the functions to be tested
 from tpu_inference.utils import (GBYTES, enable_megacore,
                                  get_jax_dtype_from_str_dtype, get_megacore,
-                                 get_padded_head_dim, hbm_usage_bytes,
+                                 get_padded_head_dim, get_tpu_name_slug,
+                                 get_tpu_version, hbm_usage_bytes,
                                  hbm_usage_gb)
 
 
@@ -191,3 +192,51 @@ def test_get_jax_dtype_from_str_dtype():
     assert get_jax_dtype_from_str_dtype("fp8") == jnp.float8_e4m3fn
     assert get_jax_dtype_from_str_dtype("fp8_e4m3") == jnp.float8_e4m3fn
     assert get_jax_dtype_from_str_dtype("fp8_e5m2") == jnp.float8_e5m2
+
+
+@patch("tpu_inference.utils.get_device_name")
+def test_get_tpu_version(mock_get_device_name):
+    """Tests proper extraction of TPU version from device name."""
+    # Test cases: (device_name, expected_version)
+    test_cases = [
+        ("TPU v5e", 5),
+        ("TPU v5lite", 5),
+        ("TPU v6", 6),
+        ("TPU v7", 7),
+        ("TPU v10", 10),  # New multi-digit support
+        ("TPU v12lite", 12),
+        ("TPU v4 pod", 4),
+        ("TPU v", -1),  # Missing number
+        ("CPU", -1),  # Not TPU
+        ("TPU_v5", -1),  # Wrong format space
+    ]
+
+    for name, expected in test_cases:
+        mock_get_device_name.return_value = name
+        mock_get_device_name.side_effect = None
+        assert get_tpu_version() == expected, f"Failed for {name}"
+
+    # Test Exception Handling
+    mock_get_device_name.side_effect = RuntimeError("Not a TPU")
+    assert get_tpu_version() == -1
+
+
+@patch("tpu_inference.utils.get_device_name")
+def test_get_tpu_name_slug(mock_get_device_name):
+    """Tests proper slugification of TPU names."""
+    test_cases = [
+        ("TPU v5e", "tpu_v5e"),
+        ("TPU v7", "tpu_v7"),
+        ("TPU v5 Lite", "tpu_v5_lite"),
+        ("TPU v10", "tpu_v10"),
+    ]
+
+    for name, expected in test_cases:
+        mock_get_device_name.return_value = name
+        mock_get_device_name.side_effect = None
+        assert get_tpu_name_slug() == expected, f"Failed for {name}"
+
+    # Test strict failure (no fallback)
+    mock_get_device_name.side_effect = RuntimeError("Fatal error")
+    with pytest.raises(RuntimeError):
+        get_tpu_name_slug()

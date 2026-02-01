@@ -1,0 +1,2311 @@
+{
+  "1024,1024,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 256,
+      "in_block_size": 4096
+    }
+  },
+  "1024,1024,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 512,
+      "in_block_size": 8192
+    }
+  },
+  "1024,128,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 128,
+      "in_block_size": 8192
+    }
+  },
+  "1024,1280,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1280,
+      "in_block_size": 2048
+    }
+  },
+  "1024,13824,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 768,
+      "in_block_size": 5120
+    }
+  },
+  "1024,14336,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1024,
+      "in_block_size": 4096
+    }
+  },
+  "1024,1536,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 1536,
+      "in_block_size": 1536
+    }
+  },
+  "1024,1536,8960,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 256,
+      "in_block_size": 8960
+    }
+  },
+  "1024,1792,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 256,
+      "in_block_size": 5120
+    }
+  },
+  "1024,17920,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1792,
+      "in_block_size": 1536
+    }
+  },
+  "1024,2048,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 2048,
+      "in_block_size": 1536
+    }
+  },
+  "1024,28672,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 2048,
+      "in_block_size": 4096
+    }
+  },
+  "1024,3584,18944,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 512,
+      "in_block_size": 18944
+    }
+  },
+  "1024,3584,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 896,
+      "in_block_size": 3584
+    }
+  },
+  "1024,3584,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 512,
+      "in_block_size": 8192
+    }
+  },
+  "1024,37888,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1024,
+      "in_block_size": 3584
+    }
+  },
+  "1024,4096,14336,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 256,
+      "in_block_size": 14336
+    }
+  },
+  "1024,4096,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 256,
+      "in_block_size": 4096
+    }
+  },
+  "1024,4608,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 768,
+      "in_block_size": 3584
+    }
+  },
+  "1024,5120,1280,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1280,
+      "in_block_size": 1280
+    }
+  },
+  "1024,5120,3456,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 512,
+      "in_block_size": 3456
+    }
+  },
+  "1024,5120,640,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 5120,
+      "in_block_size": 640
+    }
+  },
+  "1024,5120,6912,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 512,
+      "in_block_size": 6912
+    }
+  },
+  "1024,6144,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 768,
+      "in_block_size": 4096
+    }
+  },
+  "1024,6912,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 768,
+      "in_block_size": 5120
+    }
+  },
+  "1024,7168,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 256,
+      "in_block_size": 8192
+    }
+  },
+  "1024,8192,1024,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 2048,
+      "in_block_size": 1024
+    }
+  },
+  "1024,8192,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1024,
+      "in_block_size": 3584
+    }
+  },
+  "1024,896,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 896,
+      "in_block_size": 2560
+    }
+  },
+  "128,1024,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 512,
+      "in_block_size": 4096
+    }
+  },
+  "128,1024,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 1024,
+      "in_block_size": 2048
+    }
+  },
+  "128,128,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 128,
+      "in_block_size": 4096
+    }
+  },
+  "128,1280,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 1280,
+      "in_block_size": 2048
+    }
+  },
+  "128,13824,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 13824,
+      "in_block_size": 256
+    }
+  },
+  "128,14336,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 896,
+      "in_block_size": 4096
+    }
+  },
+  "128,1536,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 768,
+      "in_block_size": 1536
+    }
+  },
+  "128,1536,8960,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 384,
+      "in_block_size": 8960
+    }
+  },
+  "128,1792,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 1792,
+      "in_block_size": 1280
+    }
+  },
+  "128,17920,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 8960,
+      "in_block_size": 384
+    }
+  },
+  "128,2048,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 1024,
+      "in_block_size": 1536
+    }
+  },
+  "128,2560,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 1280,
+      "out_block_size": 2560
+    },
+    "stats": {
+      "compile_time_s": 0.7280679021496326,
+      "latency_avg_ns": 160560.0,
+      "latency_std_ns": 0.0,
+      "lower_time_s": 0.020848209969699383
+    }
+  },
+  "128,28672,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 28672,
+      "in_block_size": 256
+    }
+  },
+  "128,3584,18944,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 512,
+      "in_block_size": 9472
+    }
+  },
+  "128,3584,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 3584,
+      "in_block_size": 896
+    }
+  },
+  "128,3584,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 3584,
+      "in_block_size": 1024
+    }
+  },
+  "128,37888,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 1024,
+      "in_block_size": 3584
+    }
+  },
+  "128,4096,14336,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 256,
+      "in_block_size": 14336
+    }
+  },
+  "128,4096,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 512,
+      "in_block_size": 4096
+    }
+  },
+  "128,4608,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 768,
+      "in_block_size": 3584
+    }
+  },
+  "128,5120,1280,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 2560,
+      "in_block_size": 1280
+    }
+  },
+  "128,5120,3456,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 640,
+      "in_block_size": 3456
+    }
+  },
+  "128,5120,640,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 5120,
+      "in_block_size": 128
+    }
+  },
+  "128,5120,6912,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 512,
+      "in_block_size": 6912
+    }
+  },
+  "128,6144,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 1024,
+      "in_block_size": 4096
+    }
+  },
+  "128,6912,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 768,
+      "in_block_size": 5120
+    }
+  },
+  "128,7168,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 3584,
+      "in_block_size": 1024
+    }
+  },
+  "128,8192,1024,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 4096,
+      "in_block_size": 1024
+    }
+  },
+  "128,8192,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 8192,
+      "in_block_size": 512
+    }
+  },
+  "128,896,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "out_block_size": 896,
+      "in_block_size": 2560
+    }
+  },
+  "16,1024,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 1024,
+      "in_block_size": 2048
+    }
+  },
+  "16,1024,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 256,
+      "in_block_size": 8192
+    }
+  },
+  "16,128,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 128,
+      "in_block_size": 8192
+    }
+  },
+  "16,1280,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 256,
+      "in_block_size": 8192
+    }
+  },
+  "16,13824,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 512,
+      "in_block_size": 5120
+    }
+  },
+  "16,14336,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 896,
+      "in_block_size": 4096
+    }
+  },
+  "16,1536,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 768,
+      "in_block_size": 1536
+    }
+  },
+  "16,1536,8960,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 1536,
+      "in_block_size": 1792
+    }
+  },
+  "16,1792,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 1792,
+      "in_block_size": 2560
+    }
+  },
+  "16,17920,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 1792,
+      "in_block_size": 1536
+    }
+  },
+  "16,2048,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 1024,
+      "in_block_size": 1536
+    }
+  },
+  "16,2560,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "in_block_size": 1024,
+      "out_block_size": 1280
+    },
+    "stats": {
+      "compile_time_s": 0.1371432989835739,
+      "latency_avg_ns": 157870.0,
+      "latency_std_ns": 0.0,
+      "lower_time_s": 0.020720200147479773
+    }
+  },
+  "16,28672,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 1024,
+      "in_block_size": 4096
+    }
+  },
+  "16,3584,18944,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 256,
+      "in_block_size": 18944
+    }
+  },
+  "16,3584,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 896,
+      "in_block_size": 3584
+    }
+  },
+  "16,3584,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 3584,
+      "in_block_size": 1024
+    }
+  },
+  "16,37888,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 1024,
+      "in_block_size": 3584
+    }
+  },
+  "16,4096,14336,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 2048,
+      "in_block_size": 1792
+    }
+  },
+  "16,4096,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 1024,
+      "in_block_size": 4096
+    }
+  },
+  "16,4608,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 1152,
+      "in_block_size": 3584
+    }
+  },
+  "16,5120,1280,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 2560,
+      "in_block_size": 1280
+    }
+  },
+  "16,5120,3456,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 1024,
+      "in_block_size": 3456
+    }
+  },
+  "16,5120,640,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 2560,
+      "in_block_size": 640
+    }
+  },
+  "16,5120,6912,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 640,
+      "in_block_size": 6912
+    }
+  },
+  "16,6144,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 768,
+      "in_block_size": 4096
+    }
+  },
+  "16,6912,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 768,
+      "in_block_size": 5120
+    }
+  },
+  "16,7168,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 512,
+      "in_block_size": 8192
+    }
+  },
+  "16,8192,1024,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 2048,
+      "in_block_size": 1024
+    }
+  },
+  "16,8192,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 1024,
+      "in_block_size": 3584
+    }
+  },
+  "16,896,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 16,
+      "out_block_size": 896,
+      "in_block_size": 2560
+    }
+  },
+  "16384,1024,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 1024,
+      "in_block_size": 4096
+    }
+  },
+  "16384,1024,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 512,
+      "in_block_size": 8192
+    }
+  },
+  "16384,128,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 128,
+      "in_block_size": 8192
+    }
+  },
+  "16384,1280,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 1280,
+      "in_block_size": 8192
+    }
+  },
+  "16384,13824,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 2304,
+      "in_block_size": 5120
+    }
+  },
+  "16384,14336,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 2048,
+      "in_block_size": 4096
+    }
+  },
+  "16384,1536,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1536,
+      "in_block_size": 1536
+    }
+  },
+  "16384,1536,8960,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1536,
+      "in_block_size": 8960
+    }
+  },
+  "16384,1792,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 1792,
+      "in_block_size": 5120
+    }
+  },
+  "16384,17920,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 17920,
+      "in_block_size": 1536
+    }
+  },
+  "16384,2048,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 4096,
+      "out_block_size": 2048,
+      "in_block_size": 1536
+    }
+  },
+  "16384,28672,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 1792,
+      "in_block_size": 4096
+    }
+  },
+  "16384,3584,18944,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 3584,
+      "in_block_size": 512
+    }
+  },
+  "16384,3584,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 3584,
+      "in_block_size": 3584
+    }
+  },
+  "16384,3584,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1792,
+      "in_block_size": 8192
+    }
+  },
+  "16384,37888,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 1024,
+      "in_block_size": 3584
+    }
+  },
+  "16384,4096,14336,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 4096,
+      "in_block_size": 512
+    }
+  },
+  "16384,4096,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 4096,
+      "in_block_size": 4096
+    }
+  },
+  "16384,4608,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 2304,
+      "in_block_size": 3584
+    }
+  },
+  "16384,5120,1280,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 5120,
+      "in_block_size": 1280
+    }
+  },
+  "16384,5120,3456,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 5120,
+      "in_block_size": 3456
+    }
+  },
+  "16384,5120,640,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 5120,
+      "in_block_size": 640
+    }
+  },
+  "16384,5120,6912,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 5120,
+      "in_block_size": 6912
+    }
+  },
+  "16384,6144,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 6144,
+      "in_block_size": 4096
+    }
+  },
+  "16384,6912,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 6912,
+      "in_block_size": 5120
+    }
+  },
+  "16384,7168,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1792,
+      "in_block_size": 4096
+    }
+  },
+  "16384,8192,1024,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 8192,
+      "in_block_size": 1024
+    }
+  },
+  "16384,8192,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 8192,
+      "in_block_size": 3584
+    }
+  },
+  "16384,896,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 896,
+      "in_block_size": 2560
+    }
+  },
+  "2048,1024,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 256,
+      "in_block_size": 4096
+    }
+  },
+  "2048,1024,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 256,
+      "in_block_size": 8192
+    }
+  },
+  "2048,128,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 128,
+      "in_block_size": 8192
+    }
+  },
+  "2048,1280,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 256,
+      "in_block_size": 8192
+    }
+  },
+  "2048,13824,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 768,
+      "in_block_size": 5120
+    }
+  },
+  "2048,14336,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 1024,
+      "in_block_size": 4096
+    }
+  },
+  "2048,1536,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 512,
+      "in_block_size": 1536
+    }
+  },
+  "2048,1536,8960,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 768,
+      "in_block_size": 8960
+    }
+  },
+  "2048,1792,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 256,
+      "in_block_size": 5120
+    }
+  },
+  "2048,17920,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 2560,
+      "in_block_size": 1536
+    }
+  },
+  "2048,2048,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 2048,
+      "in_block_size": 1536
+    }
+  },
+  "2048,28672,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 1024,
+      "in_block_size": 4096
+    }
+  },
+  "2048,3584,18944,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 3584,
+      "in_block_size": 512
+    }
+  },
+  "2048,3584,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 512,
+      "in_block_size": 3584
+    }
+  },
+  "2048,3584,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 512,
+      "in_block_size": 8192
+    }
+  },
+  "2048,37888,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 1024,
+      "in_block_size": 3584
+    }
+  },
+  "2048,4096,14336,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 4096,
+      "in_block_size": 512
+    }
+  },
+  "2048,4096,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 512,
+      "in_block_size": 4096
+    }
+  },
+  "2048,4608,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 512,
+      "in_block_size": 3584
+    }
+  },
+  "2048,5120,1280,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 1280,
+      "in_block_size": 1280
+    }
+  },
+  "2048,5120,3456,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 512,
+      "in_block_size": 3456
+    }
+  },
+  "2048,5120,640,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 5120,
+      "in_block_size": 640
+    }
+  },
+  "2048,5120,6912,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 512,
+      "in_block_size": 6912
+    }
+  },
+  "2048,6144,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 512,
+      "in_block_size": 4096
+    }
+  },
+  "2048,6912,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 768,
+      "in_block_size": 5120
+    }
+  },
+  "2048,7168,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 512,
+      "in_block_size": 8192
+    }
+  },
+  "2048,8192,1024,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 8192,
+      "in_block_size": 1024
+    }
+  },
+  "2048,8192,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 512,
+      "in_block_size": 3584
+    }
+  },
+  "2048,896,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 896,
+      "in_block_size": 5120
+    }
+  },
+  "256,1024,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 512,
+      "in_block_size": 4096
+    }
+  },
+  "256,1024,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 512,
+      "in_block_size": 8192
+    }
+  },
+  "256,128,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 128,
+      "in_block_size": 8192
+    }
+  },
+  "256,1280,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 1280,
+      "in_block_size": 2048
+    }
+  },
+  "256,13824,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 6912,
+      "in_block_size": 512
+    }
+  },
+  "256,14336,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 1024,
+      "in_block_size": 4096
+    }
+  },
+  "256,1536,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 768,
+      "in_block_size": 1536
+    }
+  },
+  "256,1536,8960,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 256,
+      "in_block_size": 8960
+    }
+  },
+  "256,1792,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 896,
+      "in_block_size": 5120
+    }
+  },
+  "256,17920,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 3584,
+      "in_block_size": 1536
+    }
+  },
+  "256,2048,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 2048,
+      "in_block_size": 1536
+    }
+  },
+  "256,28672,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 1024,
+      "in_block_size": 4096
+    }
+  },
+  "256,3584,18944,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 256,
+      "in_block_size": 18944
+    }
+  },
+  "256,3584,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 512,
+      "in_block_size": 3584
+    }
+  },
+  "256,3584,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 3584,
+      "in_block_size": 1024
+    }
+  },
+  "256,37888,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 9472,
+      "in_block_size": 512
+    }
+  },
+  "256,4096,14336,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 2048,
+      "in_block_size": 2048
+    }
+  },
+  "256,4096,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 512,
+      "in_block_size": 4096
+    }
+  },
+  "256,4608,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 512,
+      "in_block_size": 3584
+    }
+  },
+  "256,5120,1280,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 2560,
+      "in_block_size": 1280
+    }
+  },
+  "256,5120,3456,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 640,
+      "in_block_size": 3456
+    }
+  },
+  "256,5120,640,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 2560,
+      "in_block_size": 640
+    }
+  },
+  "256,5120,6912,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 640,
+      "in_block_size": 6912
+    }
+  },
+  "256,6144,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 2048,
+      "in_block_size": 2048
+    }
+  },
+  "256,6912,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 768,
+      "in_block_size": 5120
+    }
+  },
+  "256,7168,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 512,
+      "in_block_size": 8192
+    }
+  },
+  "256,8192,1024,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 2048,
+      "in_block_size": 1024
+    }
+  },
+  "256,8192,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 8192,
+      "in_block_size": 512
+    }
+  },
+  "256,896,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 896,
+      "in_block_size": 2560
+    }
+  },
+  "32,1024,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 512,
+      "in_block_size": 4096
+    }
+  },
+  "32,1024,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 256,
+      "in_block_size": 8192
+    }
+  },
+  "32,128,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 128,
+      "in_block_size": 4096
+    }
+  },
+  "32,1280,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 1280,
+      "in_block_size": 2048
+    }
+  },
+  "32,13824,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 512,
+      "in_block_size": 5120
+    }
+  },
+  "32,14336,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 896,
+      "in_block_size": 4096
+    }
+  },
+  "32,1536,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 768,
+      "in_block_size": 1536
+    }
+  },
+  "32,1536,8960,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 1536,
+      "in_block_size": 1792
+    }
+  },
+  "32,1792,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 1792,
+      "in_block_size": 2560
+    }
+  },
+  "32,17920,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 1792,
+      "in_block_size": 1536
+    }
+  },
+  "32,2048,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 1024,
+      "in_block_size": 1536
+    }
+  },
+  "32,2560,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "in_block_size": 1280,
+      "out_block_size": 2560
+    },
+    "stats": {
+      "compile_time_s": 0.3204505071043968,
+      "latency_avg_ns": 159430.0,
+      "latency_std_ns": 0.0,
+      "lower_time_s": 0.01979359914548695
+    }
+  },
+  "32,28672,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 896,
+      "in_block_size": 4096
+    }
+  },
+  "32,3584,18944,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 256,
+      "in_block_size": 18944
+    }
+  },
+  "32,3584,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 896,
+      "in_block_size": 3584
+    }
+  },
+  "32,3584,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 512,
+      "in_block_size": 8192
+    }
+  },
+  "32,37888,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 37888,
+      "in_block_size": 128
+    }
+  },
+  "32,4096,14336,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 256,
+      "in_block_size": 14336
+    }
+  },
+  "32,4096,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 1024,
+      "in_block_size": 4096
+    }
+  },
+  "32,4608,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 1536,
+      "in_block_size": 1792
+    }
+  },
+  "32,5120,1280,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 2560,
+      "in_block_size": 1280
+    }
+  },
+  "32,5120,3456,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 1024,
+      "in_block_size": 3456
+    }
+  },
+  "32,5120,640,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 2560,
+      "in_block_size": 640
+    }
+  },
+  "32,5120,6912,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 512,
+      "in_block_size": 6912
+    }
+  },
+  "32,6144,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 768,
+      "in_block_size": 4096
+    }
+  },
+  "32,6912,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 768,
+      "in_block_size": 5120
+    }
+  },
+  "32,7168,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 512,
+      "in_block_size": 8192
+    }
+  },
+  "32,8192,1024,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 8192,
+      "in_block_size": 256
+    }
+  },
+  "32,8192,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 4096,
+      "in_block_size": 896
+    }
+  },
+  "32,896,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 32,
+      "out_block_size": 896,
+      "in_block_size": 2560
+    }
+  },
+  "4096,1024,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 512,
+      "in_block_size": 4096
+    }
+  },
+  "4096,1024,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 4096,
+      "out_block_size": 1024,
+      "in_block_size": 1024
+    }
+  },
+  "4096,128,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 128,
+      "in_block_size": 8192
+    }
+  },
+  "4096,1280,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1280,
+      "in_block_size": 8192
+    }
+  },
+  "4096,13824,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 768,
+      "in_block_size": 5120
+    }
+  },
+  "4096,14336,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 2048,
+      "in_block_size": 4096
+    }
+  },
+  "4096,1536,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 1536,
+      "in_block_size": 1536
+    }
+  },
+  "4096,1536,8960,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1536,
+      "in_block_size": 4480
+    }
+  },
+  "4096,1792,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 1792,
+      "in_block_size": 5120
+    }
+  },
+  "4096,17920,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 17920,
+      "in_block_size": 1536
+    }
+  },
+  "4096,2048,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 2048,
+      "in_block_size": 1536
+    }
+  },
+  "4096,28672,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 1792,
+      "in_block_size": 4096
+    }
+  },
+  "4096,3584,18944,int8,int8": {
+    "config": {
+      "batch_block_size": 4096,
+      "out_block_size": 1792,
+      "in_block_size": 512
+    }
+  },
+  "4096,3584,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 4096,
+      "out_block_size": 512,
+      "in_block_size": 3584
+    }
+  },
+  "4096,3584,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 3584,
+      "in_block_size": 8192
+    }
+  },
+  "4096,37888,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 1024,
+      "in_block_size": 3584
+    }
+  },
+  "4096,4096,14336,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 4096,
+      "in_block_size": 1792
+    }
+  },
+  "4096,4096,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 4096,
+      "out_block_size": 512,
+      "in_block_size": 4096
+    }
+  },
+  "4096,4608,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 4096,
+      "out_block_size": 512,
+      "in_block_size": 3584
+    }
+  },
+  "4096,5120,1280,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 5120,
+      "in_block_size": 1280
+    }
+  },
+  "4096,5120,3456,int8,int8": {
+    "config": {
+      "batch_block_size": 4096,
+      "out_block_size": 512,
+      "in_block_size": 3456
+    }
+  },
+  "4096,5120,640,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 5120,
+      "in_block_size": 640
+    }
+  },
+  "4096,5120,6912,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 5120,
+      "in_block_size": 6912
+    }
+  },
+  "4096,6144,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 4096,
+      "out_block_size": 512,
+      "in_block_size": 4096
+    }
+  },
+  "4096,6912,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 6912,
+      "in_block_size": 5120
+    }
+  },
+  "4096,7168,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1792,
+      "in_block_size": 8192
+    }
+  },
+  "4096,8192,1024,int8,int8": {
+    "config": {
+      "batch_block_size": 4096,
+      "out_block_size": 512,
+      "in_block_size": 1024
+    }
+  },
+  "4096,8192,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 4096,
+      "out_block_size": 512,
+      "in_block_size": 3584
+    }
+  },
+  "4096,896,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 896,
+      "in_block_size": 5120
+    }
+  },
+  "512,1024,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 512,
+      "in_block_size": 2048
+    }
+  },
+  "512,1024,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 512,
+      "in_block_size": 8192
+    }
+  },
+  "512,128,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 128,
+      "in_block_size": 8192
+    }
+  },
+  "512,1280,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 256,
+      "in_block_size": 8192
+    }
+  },
+  "512,13824,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 768,
+      "in_block_size": 5120
+    }
+  },
+  "512,14336,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 896,
+      "in_block_size": 4096
+    }
+  },
+  "512,1536,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 768,
+      "in_block_size": 1536
+    }
+  },
+  "512,1536,8960,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 256,
+      "in_block_size": 8960
+    }
+  },
+  "512,1792,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 1792,
+      "in_block_size": 1280
+    }
+  },
+  "512,17920,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 1280,
+      "in_block_size": 1536
+    }
+  },
+  "512,2048,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 2048,
+      "in_block_size": 1536
+    }
+  },
+  "512,28672,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 1024,
+      "in_block_size": 4096
+    }
+  },
+  "512,3584,18944,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 256,
+      "in_block_size": 18944
+    }
+  },
+  "512,3584,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 1792,
+      "in_block_size": 3584
+    }
+  },
+  "512,3584,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 3584,
+      "in_block_size": 2048
+    }
+  },
+  "512,37888,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 1024,
+      "in_block_size": 3584
+    }
+  },
+  "512,4096,14336,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 512,
+      "in_block_size": 14336
+    }
+  },
+  "512,4096,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 1024,
+      "in_block_size": 4096
+    }
+  },
+  "512,4608,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 768,
+      "in_block_size": 3584
+    }
+  },
+  "512,5120,1280,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 5120,
+      "in_block_size": 1280
+    }
+  },
+  "512,5120,3456,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 1280,
+      "in_block_size": 3456
+    }
+  },
+  "512,5120,640,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 2560,
+      "in_block_size": 640
+    }
+  },
+  "512,5120,6912,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 512,
+      "in_block_size": 6912
+    }
+  },
+  "512,6144,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 768,
+      "in_block_size": 4096
+    }
+  },
+  "512,6912,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 768,
+      "in_block_size": 5120
+    }
+  },
+  "512,7168,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 1792,
+      "in_block_size": 4096
+    }
+  },
+  "512,8192,1024,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 2048,
+      "in_block_size": 1024
+    }
+  },
+  "512,8192,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 1024,
+      "in_block_size": 3584
+    }
+  },
+  "512,896,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 896,
+      "in_block_size": 2560
+    }
+  },
+  "64,1024,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 1024,
+      "in_block_size": 1024
+    }
+  },
+  "64,1024,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 1024,
+      "in_block_size": 2048
+    }
+  },
+  "64,128,128,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 128,
+      "out_block_size": 128
+    },
+    "metadata": {
+      "benchmarking_method": "xprof",
+      "num_repeats": 5,
+      "samples_ns": [
+        2674.0,
+        2554.0,
+        2572.0,
+        2555.0,
+        2690.0
+      ]
+    },
+    "stats": {
+      "compile_time_s": 0.031881800008704886,
+      "latency_avg_ns": 2609.0,
+      "latency_std_ns": 67.26068688320095,
+      "lower_time_s": 0.01382968999678269
+    }
+  },
+  "64,128,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 128,
+      "in_block_size": 4096
+    }
+  },
+  "64,1280,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 1280,
+      "in_block_size": 2048
+    }
+  },
+  "64,13824,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 13824,
+      "in_block_size": 256
+    }
+  },
+  "64,14336,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 7168,
+      "in_block_size": 512
+    }
+  },
+  "64,1536,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 256,
+      "in_block_size": 1536
+    }
+  },
+  "64,1536,8960,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 256,
+      "in_block_size": 8960
+    }
+  },
+  "64,1792,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 896,
+      "in_block_size": 5120
+    }
+  },
+  "64,17920,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 1792,
+      "in_block_size": 1536
+    }
+  },
+  "64,2048,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 2048,
+      "in_block_size": 768
+    }
+  },
+  "64,2560,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "in_block_size": 1280,
+      "out_block_size": 1280
+    },
+    "stats": {
+      "compile_time_s": 0.25217080814763904,
+      "latency_avg_ns": 157950.0,
+      "latency_std_ns": 0.0,
+      "lower_time_s": 0.02153536886908114
+    }
+  },
+  "64,28672,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 1024,
+      "in_block_size": 4096
+    }
+  },
+  "64,3584,18944,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 256,
+      "in_block_size": 18944
+    }
+  },
+  "64,3584,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 896,
+      "in_block_size": 3584
+    }
+  },
+  "64,3584,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 512,
+      "in_block_size": 8192
+    }
+  },
+  "64,37888,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 18944,
+      "in_block_size": 256
+    }
+  },
+  "64,4096,14336,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 256,
+      "in_block_size": 14336
+    }
+  },
+  "64,4096,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 4096,
+      "in_block_size": 1024
+    }
+  },
+  "64,4608,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 768,
+      "in_block_size": 3584
+    }
+  },
+  "64,5120,1280,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 2560,
+      "in_block_size": 1280
+    }
+  },
+  "64,5120,3456,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 1024,
+      "in_block_size": 3456
+    }
+  },
+  "64,5120,640,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 2560,
+      "in_block_size": 640
+    }
+  },
+  "64,5120,6912,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 512,
+      "in_block_size": 6912
+    }
+  },
+  "64,6144,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 1536,
+      "in_block_size": 4096
+    }
+  },
+  "64,6912,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 768,
+      "in_block_size": 5120
+    }
+  },
+  "64,7168,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 1024,
+      "in_block_size": 8192
+    }
+  },
+  "64,8192,1024,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 2048,
+      "in_block_size": 1024
+    }
+  },
+  "64,8192,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 1024,
+      "in_block_size": 3584
+    }
+  },
+  "64,896,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 64,
+      "out_block_size": 896,
+      "in_block_size": 2560
+    }
+  },
+  "8192,1024,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 1024,
+      "in_block_size": 4096
+    }
+  },
+  "8192,1024,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 1024,
+      "in_block_size": 8192
+    }
+  },
+  "8192,128,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 128,
+      "in_block_size": 8192
+    }
+  },
+  "8192,1280,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 1280,
+      "in_block_size": 8192
+    }
+  },
+  "8192,13824,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 1536,
+      "in_block_size": 5120
+    }
+  },
+  "8192,14336,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 1792,
+      "in_block_size": 4096
+    }
+  },
+  "8192,1536,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1536,
+      "in_block_size": 1536
+    }
+  },
+  "8192,1536,8960,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 1536,
+      "in_block_size": 8960
+    }
+  },
+  "8192,1792,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 1792,
+      "in_block_size": 2560
+    }
+  },
+  "8192,17920,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 17920,
+      "in_block_size": 1536
+    }
+  },
+  "8192,2048,1536,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 2048,
+      "in_block_size": 1536
+    }
+  },
+  "8192,28672,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 1792,
+      "in_block_size": 4096
+    }
+  },
+  "8192,3584,18944,int8,int8": {
+    "config": {
+      "batch_block_size": 4096,
+      "out_block_size": 1792,
+      "in_block_size": 512
+    }
+  },
+  "8192,3584,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 1792,
+      "in_block_size": 3584
+    }
+  },
+  "8192,3584,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 3584,
+      "in_block_size": 8192
+    }
+  },
+  "8192,37888,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 4096,
+      "out_block_size": 512,
+      "in_block_size": 3584
+    }
+  },
+  "8192,4096,14336,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 2048,
+      "in_block_size": 3584
+    }
+  },
+  "8192,4096,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 2048,
+      "in_block_size": 4096
+    }
+  },
+  "8192,4608,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 1536,
+      "in_block_size": 3584
+    }
+  },
+  "8192,5120,1280,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 1280,
+      "in_block_size": 1280
+    }
+  },
+  "8192,5120,3456,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 5120,
+      "in_block_size": 3456
+    }
+  },
+  "8192,5120,640,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 5120,
+      "in_block_size": 640
+    }
+  },
+  "8192,5120,6912,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 5120,
+      "in_block_size": 6912
+    }
+  },
+  "8192,6144,4096,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 6144,
+      "in_block_size": 4096
+    }
+  },
+  "8192,6912,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 6912,
+      "in_block_size": 5120
+    }
+  },
+  "8192,7168,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 256,
+      "out_block_size": 1792,
+      "in_block_size": 8192
+    }
+  },
+  "8192,8192,1024,int8,int8": {
+    "config": {
+      "batch_block_size": 512,
+      "out_block_size": 8192,
+      "in_block_size": 1024
+    }
+  },
+  "8192,8192,3584,int8,int8": {
+    "config": {
+      "batch_block_size": 1024,
+      "out_block_size": 4096,
+      "in_block_size": 3584
+    }
+  },
+  "8192,896,5120,int8,int8": {
+    "config": {
+      "batch_block_size": 2048,
+      "out_block_size": 896,
+      "in_block_size": 5120
+    }
+  }
+}
