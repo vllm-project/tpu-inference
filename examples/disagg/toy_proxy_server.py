@@ -217,7 +217,6 @@ async def _handle_completions(api: str, request: Request):
 
         # Extract the needed fields
         response_json = response.json()
-        # print(response_json)
         logger.info(
             f"[{request_id}] Prefill response parsed. Starting decode.")
         logger.debug(
@@ -237,7 +236,6 @@ async def _handle_completions(api: str, request: Request):
                     f"client {decode_client_info['id']}")
         logger.debug(f"[{request_id}] Decode request body: {req_data}")
 
-        # print(req_data)
         # Stream response from decode service
         async def generate_stream():
             try:
