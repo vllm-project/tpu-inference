@@ -6,7 +6,6 @@ import jax.numpy as jnp
 import torch
 import vllm.envs as vllm_envs
 from tpu_info import device
-from vllm.inputs import ProcessorInputs, PromptType
 from vllm.platforms.interface import Platform, PlatformEnum
 
 from tpu_inference import envs
@@ -16,6 +15,7 @@ from tpu_inference.logger import init_logger
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.config.cache import BlockSize
+    from vllm.inputs import ProcessorInputs, PromptType
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams, SamplingType
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -28,6 +28,8 @@ else:
     AttentionBackendEnum = None
     SamplingParams = None
     SamplingType = None
+    PromptType = None
+    ProcessorInputs = None
 
 logger = init_logger(__name__)
 

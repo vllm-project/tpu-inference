@@ -29,6 +29,8 @@ if TYPE_CHECKING:
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: str = "shm"
     ENABLE_QUANTIZED_MATMUL_KERNEL: bool = False
     FORCE_MLA_BACKEND: bool = False
+    REQUANTIZE_BLOCK_SIZE: int | None = None
+    REQUANTIZE_WEIGHT_DTYPE: str = "float8_e4m3fn"
 
 
 def env_with_choices(
@@ -134,6 +136,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "MODEL_IMPL_TYPE":
     env_with_choices("MODEL_IMPL_TYPE", "auto",
                      ["auto", "vllm", "flax_nnx", "jetpack"]),
+    # Enable 2D tensor parallelism, shard attention heads across multiple axes
+    "USE_2D_TP":
+    env_bool("USE_2D_TP", default=False),
     # Enable new experimental model design
     "NEW_MODEL_DESIGN":
     env_bool("NEW_MODEL_DESIGN", default=False),
@@ -169,6 +174,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Force MLA backend selection for models with MLA attention
     "FORCE_MLA_BACKEND":
     env_bool("FORCE_MLA_BACKEND", default=False),
+    # Specify block quantization size
+    "REQUANTIZE_BLOCK_SIZE":
+    lambda: int(block_size) if
+    (block_size := os.getenv("REQUANTIZE_BLOCK_SIZE")) is not None else None,
+    # Specify dtype for quantized weights
+    "REQUANTIZE_WEIGHT_DTYPE":
+    lambda: os.getenv("REQUANTIZE_WEIGHT_DTYPE", "float8_e4m3fn"),
 }
 
 
