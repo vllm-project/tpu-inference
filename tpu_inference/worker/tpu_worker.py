@@ -405,9 +405,6 @@ class TPUWorker:
             self.model_runner.compilation_manager._precompile_sampling()
             self.model_runner.compilation_manager._precompile_gather_logprobs()
 
-    
-        logger.info(f"VLLM Config2: {self.vllm_config}")
-        logger.info(f"Generated KV Cache Config2: {kv_cache_config}")
         self.model_runner.initialize_kv_cache(kv_cache_config,
                                               self.topology_order_id)
 
