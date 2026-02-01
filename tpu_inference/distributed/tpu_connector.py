@@ -626,9 +626,12 @@ class TPUConnectorWorker:
         logger.info(
             f"Worker {self.node_id} --> kv transfer | start pull req_id={req_id} | uuid={req_meta.uuid}"
         )
+        start_time = time.perf_counter()
         kv = conn.pull(req_meta.uuid, kv_spec)
+        end_time = time.perf_counter()
+        kv_size_mb = sum(k.nbytes for k in kv) / (1024 * 1024)
         logger.info(
-            f"Worker {self.node_id} --> kv transfer | done pull req_id={req_id} | uuid={req_meta.uuid}"
+            f"Worker {self.node_id} --> kv transfer | done pull req_id={req_id} | uuid={req_meta.uuid} | duration={(end_time - start_time) * 1000:.2f}ms | size={kv_size_mb:.2f}MB"
         )
         return kv, indices
 
