@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import os as _bt_os
-_BT_DEBUG = _bt_os.environ.get("VLLM_USE_MLA", "0") == "1"
-
 import jax
 import jax.numpy as jnp
 import numpy as np
