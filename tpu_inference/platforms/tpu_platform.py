@@ -59,10 +59,88 @@ class TpuPlatform(Platform):
 
         # Invoke @register_backend in the module.
         import tpu_inference.layers.vllm.attention  # noqa: F401
-        if selected_backend != AttentionBackendEnum.FLASH_ATTN:
+
+        # Allow both FLASH_ATTN and FLASH_ATTN_MLA for TPU
+        allowed_backends = {AttentionBackendEnum.FLASH_ATTN}
+        has_mla = hasattr(AttentionBackendEnum, 'FLASH_ATTN_MLA')
+        if has_mla:
+            allowed_backends.add(AttentionBackendEnum.FLASH_ATTN_MLA)
+
+        # If selected_backend is None, try to detect MLA model and select appropriate backend
+        if selected_backend is None:
+            # Check if model has MLA (kv_lora_rank attribute indicates MLA)
+            is_mla_model = False
+
+            # Debug: log what we received
+            logger.info("[MLA_DETECT] attn_selector_config=%s, type=%s",
+                       attn_selector_config, type(attn_selector_config).__name__)
+            logger.info("[MLA_DETECT] kwargs keys=%s", list(kwargs.keys()) if kwargs else None)
+
+            # Try to get model_config from attn_selector_config
+            if attn_selector_config is not None:
+                logger.info("[MLA_DETECT] attn_selector_config attrs: %s",
+                           [a for a in dir(attn_selector_config) if not a.startswith('_')])
+
+                model_config = getattr(attn_selector_config, 'model_config', None)
+                logger.info("[MLA_DETECT] model_config=%s", model_config)
+
+                if model_config is not None:
+                    logger.info("[MLA_DETECT] model_config attrs: %s",
+                               [a for a in dir(model_config) if not a.startswith('_')])
+
+                    hf_config = getattr(model_config, 'hf_config', None)
+                    logger.info("[MLA_DETECT] hf_config=%s, type=%s",
+                               hf_config, type(hf_config).__name__ if hf_config else None)
+
+                    if hf_config is not None:
+                        kv_lora_rank = getattr(hf_config, 'kv_lora_rank', None)
+                        logger.info("[MLA_DETECT] kv_lora_rank=%s", kv_lora_rank)
+                        is_mla_model = kv_lora_rank is not None
+
+            # Also check kwargs for model config (alternative path)
+            if not is_mla_model and kwargs:
+                for key in ['model_config', 'vllm_config']:
+                    if key in kwargs:
+                        cfg = kwargs[key]
+                        logger.info("[MLA_DETECT] Found %s in kwargs: %s", key, cfg)
+                        if hasattr(cfg, 'hf_config'):
+                            hf_config = cfg.hf_config
+                            kv_lora_rank = getattr(hf_config, 'kv_lora_rank', None)
+                            logger.info("[MLA_DETECT] kwargs path: kv_lora_rank=%s", kv_lora_rank)
+                            if kv_lora_rank is not None:
+                                is_mla_model = True
+                                break
+                        elif hasattr(cfg, 'model_config'):
+                            model_config = cfg.model_config
+                            if hasattr(model_config, 'hf_config'):
+                                hf_config = model_config.hf_config
+                                kv_lora_rank = getattr(hf_config, 'kv_lora_rank', None)
+                                logger.info("[MLA_DETECT] kwargs nested path: kv_lora_rank=%s", kv_lora_rank)
+                                if kv_lora_rank is not None:
+                                    is_mla_model = True
+                                    break
+
+            # Fallback: check environment variable FORCE_MLA_BACKEND
+            if not is_mla_model:
+                force_mla = envs.FORCE_MLA_BACKEND
+                logger.info("[MLA_DETECT] FORCE_MLA_BACKEND env var=%s", force_mla)
+                if force_mla:
+                    is_mla_model = True
+                    logger.info("[MLA_DETECT] Forcing MLA backend via FORCE_MLA_BACKEND=1")
+
+            logger.info("[MLA_DETECT] Final: is_mla_model=%s, has_mla=%s", is_mla_model, has_mla)
+
+            if is_mla_model and has_mla:
+                logger.info("Detected MLA model, selecting FLASH_ATTN_MLA backend.")
+                selected_backend = AttentionBackendEnum.FLASH_ATTN_MLA
+            else:
+                logger.info("Backend is None, defaulting to FLASH_ATTN.")
+                selected_backend = AttentionBackendEnum.FLASH_ATTN
+        elif selected_backend not in allowed_backends:
             logger.info("Cannot use %s backend on TPU. Setting to FLASH_ATTN.",
                         selected_backend)
             selected_backend = AttentionBackendEnum.FLASH_ATTN
+
         logger.info("Using %s backend.", selected_backend.name)
         return selected_backend.get_path()
 

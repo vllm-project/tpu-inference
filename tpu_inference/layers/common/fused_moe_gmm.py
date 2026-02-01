@@ -404,6 +404,7 @@ def expert_sharded_gmm(
         "mesh",
         "use_ep",
         "activation",
+        "scoring_func",
     ),
 )
 def fused_moe_func(
@@ -420,6 +421,7 @@ def fused_moe_func(
     mesh: Mesh,
     use_ep: bool,
     activation: str,
+    scoring_func: str = "softmax",
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -451,7 +453,14 @@ def fused_moe_func(
 
     assert gating_output.shape == (num_tokens, global_num_experts)
 
-    topk_weights = jax.nn.softmax(gating_output.astype(jnp.float32), axis=-1)
+    # Apply scoring function to convert logits to scores
+    if scoring_func == "softmax":
+        topk_weights = jax.nn.softmax(gating_output.astype(jnp.float32), axis=-1)
+    elif scoring_func == "sigmoid":
+        # GLM-4 and similar models use sigmoid scoring (independent expert probabilities)
+        topk_weights = jax.nn.sigmoid(gating_output.astype(jnp.float32))
+    else:
+        raise ValueError(f"Unsupported scoring_func: {scoring_func}")
     # All-gather topk weights for attention dp
     topk_weights = jax.lax.with_sharding_constraint(
         topk_weights, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))

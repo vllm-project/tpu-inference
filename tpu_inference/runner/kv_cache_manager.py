@@ -23,6 +23,7 @@ from jax.sharding import NamedSharding, PartitionSpec
 from torchax.ops.mappings import t2j_dtype
 from vllm.config import get_layers_from_vllm_config
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
@@ -149,9 +150,15 @@ class KVCacheManager:
                                 block_size, num_kv_heads, head_size)
         else:
             # Else propagate attention modules from compilation config.
+            # Get both Attention and MLAAttention layers
             layers = get_layers_from_vllm_config(self.runner.vllm_config,
                                                  Attention)
-            logger.warning(f"Compilation num_layers = {len(layers.items())}")
+            mla_layers = get_layers_from_vllm_config(self.runner.vllm_config,
+                                                     MLAAttention)
+            logger.info(f"Compilation num_layers: Attention={len(layers)}, "
+                        f"MLAAttention={len(mla_layers)}")
+
+            # Handle standard Attention layers
             for layer_name, attn_module in layers.items():
                 if (kv_tgt_layer :=
                         attn_module.kv_sharing_target_layer_name) is not None:
@@ -196,6 +203,12 @@ class KVCacheManager:
                     raise ValueError(
                         f"Unknown attention type: {attn_module.attn_type}")
 
+            # Handle MLAAttention layers
+            # MLA is always DECODER attention type with no sliding window
+            for layer_name, mla_module in mla_layers.items():
+                kv_cache_spec[layer_name] = self._create_attention_spec(
+                    block_size, 1, mla_head_size)
+
         return kv_cache_spec
 
     def maybe_reinitialize_input_batch(self,
@@ -237,8 +250,11 @@ class KVCacheManager:
             assert kv_cache_tensor.size % page_size_bytes == 0
             num_blocks = kv_cache_tensor.size // page_size_bytes
             dp_size = self.runner.vllm_config.sharding_config.total_dp_size
-            # num_blocks must be a multiple of dp_size
-            num_blocks = (num_blocks // dp_size) * dp_size
+            model_size = self.runner.mesh.shape["model"]
+            # num_blocks must be a multiple of both dp_size and model_size
+            # since KV cache is sharded along these mesh axes
+            divisor = dp_size * model_size
+            num_blocks = (num_blocks // divisor) * divisor
             # NOTE: we'll multiply the num_kv_heads by 2 in the function
             if self.use_mla:
                 head_size = self.runner.model_config.hf_config.kv_lora_rank + \

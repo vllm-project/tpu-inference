@@ -14,6 +14,7 @@
 """TPU-Friendly and Data-Movement-Friendly MLA Ragged Paged Attention kernel."""
 
 import functools
+import os
 
 import jax
 import jax.numpy as jnp
@@ -78,10 +79,77 @@ def update_kv_cache(
     num_page_indices = page_indices.shape[0]
     pages_per_seq = num_page_indices // max_num_seqs
 
+    # Zero template for clearing pages (same shape as one page)
+    # zero_page = jnp.zeros((page_size_per_kv_packing, kv_packing, cache_kv_dim),
+    #                       dtype=cache_kv.dtype)
+
     def seq_loop_body(i, cache_kv):
         q_start, q_end = cu_q_lens[i], cu_q_lens[i + 1]
         q_len = q_end - q_start
         kv_len = kv_lens[i]
+
+
+        # # Detect prefill: kv_len == q_len means this is a fresh sequence
+        # # (all tokens are new, no previously computed tokens)
+        # is_prefill = kv_len == q_len
+
+        # # For prefill, zero out all pages that will be used by this sequence
+        # # This prevents stale data from corrupting attention when blocks are reused
+        # def clear_pages_for_prefill(cache_kv_):
+        #     num_pages_needed = cdiv(kv_len, page_size)
+        #     page_indices_start = i * pages_per_seq
+
+        #     def clear_page(p, cache_kv_inner):
+        #         page_idx = page_indices[page_indices_start + p]
+        #         return cache_kv_inner.at[page_idx].set(zero_page)
+
+        #     return lax.fori_loop(0, num_pages_needed, clear_page, cache_kv_)
+
+        # # Only clear pages during prefill (when kv_len == q_len)
+        # cache_kv = lax.cond(is_prefill, clear_pages_for_prefill, lambda x: x, cache_kv)
+
+        # # For non-prefill cases (decode, chunked prefill, prefix caching),
+        # # clear any NEW pages we're about to use to prevent stale data corruption.
+        # # This handles multiple scenarios:
+        # # - Decode (q_len=1): single new token, may cross page boundary
+        # # - Chunked prefill (q_len>1): multiple new tokens spanning multiple pages
+        # # - Prefix caching (q_len>1, prev_kv_len>0): new tokens after cached prefix
+        # def clear_new_pages_for_non_prefill(cache_kv_):
+        #     prev_kv_len = kv_len - q_len  # tokens already in cache
+        #     last_new_token_pos = kv_len - 1  # last position we'll write to
+
+        #     # Pages that need new data written
+        #     first_new_page = prev_kv_len // page_size
+        #     last_new_page = last_new_token_pos // page_size
+
+        #     # Previously fully or partially filled pages
+        #     # ceil(prev_kv_len / page_size) gives pages with at least one token
+        #     prev_filled_pages = (prev_kv_len + page_size - 1) // page_size
+
+        #     page_indices_start = i * pages_per_seq
+
+        #     # Clear all pages in the range [first_new_page, last_new_page] that are NEW
+        #     # (i.e., page_num >= prev_filled_pages)
+        #     def clear_page_if_new(p, cache_kv_inner):
+        #         page_idx = page_indices[page_indices_start + p]
+        #         # Only clear if this is a genuinely new page (not partially filled)
+        #         should_clear = p >= prev_filled_pages
+        #         return jnp.where(
+        #             should_clear,
+        #             cache_kv_inner.at[page_idx].set(zero_page),
+        #             cache_kv_inner
+        #         )
+
+        #     # Loop over all pages that will hold new tokens
+        #     # Add 1 because fori_loop upper bound is exclusive
+        #     num_pages_to_check = last_new_page + 1
+        #     return lax.fori_loop(first_new_page, num_pages_to_check,
+        #                          clear_page_if_new, cache_kv_)
+
+        # # Only clear new pages during non-prefill (prefill already clears all pages)
+        # is_non_prefill = kv_len != q_len
+        # cache_kv = lax.cond(is_non_prefill, clear_new_pages_for_non_prefill,
+        #                     lambda x: x, cache_kv)
 
         def token_loop_body(j, cache_kv_):
             token_idx_in_seq = kv_len - q_len + j
@@ -128,6 +196,43 @@ def ref_mla_ragged_paged_attention(
     if mask_value is None:
         mask_value = DEFAULT_MASK_VALUE
 
+    # # Debug: comprehensive summary for troubleshooting gibberish output
+    # # Only print when there's actual work to do (not during empty warmup calls)
+    # num_seqs = distribution[-1]
+    # if _MLA_KERNEL_DEBUG:
+    #     q_len = cu_q_lens[1] - cu_q_lens[0]
+    #     kv_len = kv_lens[0]
+    #     is_prefill = (kv_len == q_len)
+    #     # Only print detailed debug when num_seqs > 0 (actual work)
+    #     jax.debug.print(
+    #         "[MLA KERNEL] q_len={ql}, kv_len={kl}, prefill={pf}, num_seqs={ns}, dist={d}, page0={p}",
+    #         ql=q_len, kl=kv_len, pf=is_prefill, ns=num_seqs, d=distribution, p=page_indices[0])
+
+    #     # CRITICAL: Warn if num_seqs=0 - this means the loop won't run!
+    #     def warn_zero_seqs():
+    #         jax.debug.print("[MLA KERNEL] WARNING: num_seqs=0, attention loop will NOT execute!")
+    #     def no_warn():
+    #         pass
+    #     jax.lax.cond(num_seqs == 0, warn_zero_seqs, no_warn)
+
+    #     # Only print tensor stats when num_seqs > 0
+    #     def print_tensor_stats():
+    #         jax.debug.print(
+    #             "[MLA KERNEL] ql_nope: min={qmin}, max={qmax}, mean={qmean}",
+    #             qmin=jnp.min(ql_nope), qmax=jnp.max(ql_nope), qmean=jnp.mean(ql_nope.astype(jnp.float32)))
+    #         jax.debug.print(
+    #             "[MLA KERNEL] q_pe: min={qmin}, max={qmax}, mean={qmean}",
+    #             qmin=jnp.min(q_pe), qmax=jnp.max(q_pe), qmean=jnp.mean(q_pe.astype(jnp.float32)))
+    #         jax.debug.print(
+    #             "[MLA KERNEL] new_kv_c: min={kmin}, max={kmax}, mean={kmean}",
+    #             kmin=jnp.min(new_kv_c), kmax=jnp.max(new_kv_c), kmean=jnp.mean(new_kv_c.astype(jnp.float32)))
+    #         jax.debug.print(
+    #             "[MLA KERNEL] cache BEFORE: page[{p}] min={cmin}, max={cmax}",
+    #             p=page_indices[0], cmin=jnp.min(cache_kv[page_indices[0]]), cmax=jnp.max(cache_kv[page_indices[0]]))
+    #     def skip_stats():
+    #         pass
+    #     jax.lax.cond(num_seqs > 0, print_tensor_stats, skip_stats)
+
     dynamic_validate_inputs(
         ql_nope,
         q_pe,
@@ -156,6 +261,7 @@ def ref_mla_ragged_paged_attention(
         cu_q_lens,
         distribution,
     )
+
     # Pad ql_nope and q_pe to make the last dimension 128-byte aligned.
     actual_lkv_dim = ql_nope.shape[-1]
     lkv_dim = align_to(actual_lkv_dim, 128)
@@ -288,6 +394,7 @@ def dynamic_validate_inputs(
     debug_mode: bool = False,
 ):
     """Validate inputs to the MLA RPA kernel dynamically."""
+    # Static validation (shape checks) works during JAX tracing
     static_validate_inputs(
         ql_nope,
         q_pe,
@@ -311,6 +418,12 @@ def dynamic_validate_inputs(
         vmem_limit_bytes=vmem_limit_bytes,
         debug_mode=debug_mode,
     )
+
+    # Skip dynamic validation during JAX tracing - these checks require
+    # concrete Python values which aren't available when tracing
+    if isinstance(distribution, jax.core.Tracer):
+        return
+
     max_num_tokens = ql_nope.shape[0]
     total_num_pages = cache_kv.shape[0]
     _, page_size_per_kv_packing, kv_packing, _ = cache_kv.shape

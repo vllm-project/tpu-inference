@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     RAY_USAGE_STATS_ENABLED: str = "0"
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: str = "shm"
     ENABLE_QUANTIZED_MATMUL_KERNEL: bool = False
+    FORCE_MLA_BACKEND: bool = False
 
 
 def env_with_choices(
@@ -165,6 +166,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_with_choices("VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE", "shm", ["shm"]),
     "ENABLE_QUANTIZED_MATMUL_KERNEL":
     lambda: bool(int(os.getenv("ENABLE_QUANTIZED_MATMUL_KERNEL") or "0")),
+    # Force MLA backend selection for models with MLA attention
+    "FORCE_MLA_BACKEND":
+    env_bool("FORCE_MLA_BACKEND", default=False),
 }
 
 

@@ -243,7 +243,7 @@ class VllmModelWrapper:
             # Wrap the output(hidden states or intermediate tensor)
             # from torch land into a JaxValue for the jax code to consume.
             if not is_last_rank:
-                output = JaxIntermediateTensors.from_torch(output_from_torch)
+                output = JaxIntermediateTensors.from_torch(IntermediateTensors({'hidden_states': output_from_torch}, new_kv_caches))
             else:
                 output = jax_view(output_from_torch)
             return new_kv_caches, output, []

@@ -20,6 +20,16 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
+# MLA_DEBUG_PATCHED - Request tracking debug (only when VLLM_LOGGING_LEVEL=DEBUG)
+import os as _mla_debug_os
+_MLA_DEBUG = _mla_debug_os.environ.get("VLLM_LOGGING_LEVEL", "").upper() == "DEBUG"
+
+def _mla_debug_print(*args, **kwargs):
+    """Print only when VLLM_LOGGING_LEVEL=DEBUG"""
+    if _MLA_DEBUG:
+        print(*args, **kwargs)
+
+
 import jax
 import jax.numpy as jnp
 import jaxtyping
@@ -261,6 +271,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.structured_decoding_manager = StructuredDecodingManager(self)
         self.kv_cache_manager = KVCacheManager(self)
         self.mm_manager = MultiModalManager(self)
+        # MLA block allocation: pass use_mla and block_size to PersistentBatchManager
         self.persistent_batch_manager = PersistentBatchManager(
             self.requests, self.input_batch, self.encoder_cache,
             self.uses_mrope, self.model_config, self.is_last_rank)
@@ -753,6 +764,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # TODO: make _get_input_ids_embeds within this context
         # NOTE: right now, mm model will use embeddings as the input,
         # but text-only model will use input_ids
+        if _MLA_DEBUG:
+            _mla_debug_print(f"[MLA DEBUG] About to call model_fn")
+            print(f"    input_ids shape={input_ids.shape if input_ids is not None else None}")
+            print(f"    kv_caches type={type(self.kv_caches)}, len={len(self.kv_caches) if self.kv_caches else 0}")
+            print(f"    layer_name_to_kvcache_index={list(self.layer_name_to_kvcache_index.keys())[:3]}...")
         with self.maybe_forbid_compile:
 
             with set_forward_context(
@@ -1008,6 +1024,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     input_ids,
                 )
 
+        # MLA_DEBUG: Log when creating final ModelRunnerOutput
+        if _MLA_DEBUG:
+            _mla_debug_print(f"[MLA DEBUG] Creating ModelRunnerOutput:")
+            print(f"    req_ids={req_ids[:5]}")
+            print(f"    input_batch.req_id_to_index keys={list(self.input_batch.req_id_to_index.keys())[:5]}")
+            print(f"    num_reqs={self.input_batch.num_reqs}")
+        
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
@@ -1622,6 +1645,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         attention_metadata_per_layer: Dict[str, AttentionMetadata] = {}
         uniform_attention_metadata: AttentionMetadata = None
+
+        if _MLA_DEBUG:
+            num_kv_groups = len(self.kv_cache_config.kv_cache_groups) if self.kv_cache_config else 0
+            num_block_tables = len(self.input_batch.block_table.block_tables)
+            _mla_debug_print(f"[MLA DEBUG] _prepare_inputs_non_dp: kv_cache_groups={num_kv_groups}, block_tables={num_block_tables}")
+            # Debug: dump actual block_table_cpu values for first request
+            for gid in range(num_block_tables):
+                bt_cpu = self.input_batch.block_table[gid].get_cpu_tensor()
+                num_blocks = self.input_batch.block_table[gid].num_blocks_per_row
+                print(f"    [MLA DEBUG] block_table[{gid}] first row: {bt_cpu[0, :10]}, num_blocks_per_row[0]={num_blocks[0]}")
+
         for kv_cache_gid, kv_cache_group in enumerate(
                 self.kv_cache_config.kv_cache_groups):
             block_tables = self.block_tables_cpu[kv_cache_gid][:self.
@@ -1629,6 +1663,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             block_tables[:num_reqs] = (
                 self.input_batch.block_table[kv_cache_gid].get_cpu_tensor()
                 [:num_reqs])
+            if _MLA_DEBUG:
+                # Debug: show actual block_tables values going to kernel
+                _mla_debug_print(f"[MLA DEBUG] kv_cache_gid={kv_cache_gid} block_tables before reshape:")
+                print(f"    first row: {block_tables[0, :10]}")
+                print(f"    unique values in first row: {np.unique(block_tables[0, :])}")
             # Convert block_tables to 1D on cpu.
             block_tables = block_tables.reshape(-1)
             block_tables = device_array(self.mesh, (block_tables))
