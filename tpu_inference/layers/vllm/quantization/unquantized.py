@@ -20,8 +20,8 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
+from vllm.attention.layer import Attention
 from vllm.model_executor.layers import linear as vllm_linear
-from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
                                                   UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.quantization import \

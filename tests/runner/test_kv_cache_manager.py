@@ -21,7 +21,7 @@ import pytest
 import torch
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, VllmConfig)
-from vllm.model_executor.layers.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.sampling_params import SamplingType
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
