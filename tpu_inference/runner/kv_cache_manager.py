@@ -132,8 +132,8 @@ class KVCacheManager:
                         block_size, 1, mla_head_size)
                 else:
                     kv_cache_spec[f"layer.{i}"] = self._create_attention_spec(
-                        # block_size, 16, head_size)
-                        block_size, num_kv_heads, head_size)
+                        block_size, 16, head_size)
+                        # block_size, num_kv_heads, head_size)
 
             if self.runner.speculative_config and self.runner.speculative_config.method == "eagle3":
                 draft_model_config = self.runner.speculative_config.draft_model_config
@@ -190,8 +190,8 @@ class KVCacheManager:
                     else:
                         kv_cache_spec[
                             layer_name] = self._create_attention_spec(
-                                # block_size, 16, head_size)
-                                block_size, num_attention_heads, head_size)
+                                block_size, 16, head_size)
+                                # block_size, num_attention_heads, head_size)
                 elif attn_module.attn_type in (AttentionType.ENCODER,
                                                AttentionType.ENCODER_ONLY):
                     # encoder-only attention does not need KV cache.

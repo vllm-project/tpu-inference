@@ -15,7 +15,6 @@ import math
 from dataclasses import InitVar, dataclass
 from functools import partial
 from typing import Optional
-
 import jax
 import jax.numpy as jnp
 from flax import nnx

@@ -396,6 +396,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
+        # logger.warning(f"self.block_size = {self.block_size}")
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
         # InputBatch needs to work with sampling tensors greater than padding

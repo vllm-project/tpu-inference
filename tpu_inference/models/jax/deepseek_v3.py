@@ -27,9 +27,10 @@ from jax.sharding import PartitionSpec as P
 from torchax.ops.mappings import j2t_dtype
 from vllm.config import VllmConfig
 
-from tpu_inference import utils
+from tpu_inference import (envs,
+                           utils)
 from tpu_inference.layers.common.quantization import u8_unpack_e2m1
-from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.sharding import ShardingAxisName, _use_2d_tp_sharding
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
 from tpu_inference.layers.jax.attention.deepseek_v3_attention import MLA
 from tpu_inference.layers.jax.constants import KVCacheType
@@ -872,6 +873,16 @@ class DeepSeekV3(nnx.Module):
         # unless specified otherwise, but we shouldn't be doing this.
         moe_dtype = jnp.float8_e4m3fn if self.weight_loader.is_native_fp8_model else vllm_config.model_config.hf_config.quantization_config.get(
             "tpu_settings", {}).get("mlp_dtype", jnp.float4_e2m1fn)
+        if envs.USE_2D_TP:
+            edf_sharding = (None, ShardingAxisName.MODEL_1,
+                              ShardingAxisName.MODEL_2)
+            efd_sharding = (None, ShardingAxisName.MODEL_2,
+                              ShardingAxisName.MODEL_1)
+        else:
+            edf_sharding = (ShardingAxisName.MODEL_2, None,
+                              None)
+            efd_sharding = (ShardingAxisName.MODEL_2, None,
+                              None)
         for i in range(first_k_dense_replace, num_layers):
             is_moe_layer = ((i + 1) % interleave_moe_layer_step == 0)
             router = DeepSeekV3Router(
@@ -902,10 +913,8 @@ class DeepSeekV3(nnx.Module):
                                    ShardingAxisName.MODEL_1),
                 activation_ffw_ted=(ShardingAxisName.MLP_DATA, None,
                                     ShardingAxisName.MODEL_1),
-                edf_sharding=(None, ShardingAxisName.MODEL_1,
-                              ShardingAxisName.MODEL_2),
-                efd_sharding=(None, ShardingAxisName.MODEL_2,
-                              ShardingAxisName.MODEL_1),
+                edf_sharding=edf_sharding,
+                efd_sharding=efd_sharding,
                 moe_backend=self.moe_backend,
                 qwix_quantized_weight_dtype=moe_dtype
                 if self.weight_loader.is_model_quantized else None,
