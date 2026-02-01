@@ -799,10 +799,10 @@ def _jax_attn_func(
 try:
     from vllm.model_executor.layers.attention.mla_attention import MLAAttentionImpl
     _MLA_BASE_AVAILABLE = True
-    print("[MLA] MLAAttentionImpl base class available")
+    _mla_debug_print("[MLA] MLAAttentionImpl base class available")
 except ImportError:
     _MLA_BASE_AVAILABLE = False
-    print("[MLA] MLAAttentionImpl not available, using stub")
+    _mla_debug_print("[MLA] MLAAttentionImpl not available, using stub")
     # Fallback: Define a stub
     class MLAAttentionImpl:
         pass
