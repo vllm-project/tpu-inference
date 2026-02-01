@@ -150,8 +150,9 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
 
                 weight_slice = weight[start:end]
                 weight_scale_slice = weight_scale[start //
-                                                  original_block_size:math.ceil(end /
-                                                  original_block_size)]
+                                                  original_block_size:math.
+                                                  ceil(end /
+                                                       original_block_size)]
                 dequantized_weight = pad_and_dequantize_tensor(
                     weight_slice,
                     weight_scale_slice,
