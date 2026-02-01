@@ -28,7 +28,7 @@ if _VLLM_USE_MLA:
     try:
         from tpu_inference.kernels.mla.v1.kernel import mla_ragged_paged_attention
         _MLA_KERNEL_LOADED = True
-        print("[MLA] TPU MLA kernel loaded successfully")
+        _mla_debug_print("[MLA] TPU MLA kernel loaded successfully")
     except ImportError as e:
         _mla_debug_print(f"[MLA] MLA kernel not available, using fallback: {e}")
 
