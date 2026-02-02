@@ -23,7 +23,7 @@ fi
 
 # Configuration
 REPO_URL="https://github.com/vllm-project/tpu-inference.git"
-TARGET_BRANCH="feat/buildkite-vllm-pipeline"
+TARGET_BRANCH="main"
 
 NEW_LKG_HASH=$1
 VERSION_FILE=".buildkite/vllm_lkg.version"
