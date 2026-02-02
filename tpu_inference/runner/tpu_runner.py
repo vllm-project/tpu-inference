@@ -365,7 +365,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             return make_optimized_mesh(
                 mesh_shape,
                 MESH_AXIS_NAMES_2D,
-                axis_types=(jax.sharding.AxisType.Auto,) * len(mesh_shape),
+                axis_types=(jax.sharding.AxisType.Auto, ) * len(mesh_shape),
                 devices=self.devices)
 
     def _init_phased_profiling(self) -> None:
