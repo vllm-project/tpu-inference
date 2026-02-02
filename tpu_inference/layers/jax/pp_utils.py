@@ -42,13 +42,13 @@ class LayerFn(Protocol):
 def make_layers(
     num_hidden_layers: int,
     layer_fn: LayerFn,
-) -> tuple[int, int, List[nnx.Module]]:
+) -> tuple[int, int, nnx.List[nnx.Module]]:
     start_layer, end_layer = get_pp_indices(num_hidden_layers,
                                             get_pp_group().rank_in_group,
                                             get_pp_group().world_size)
 
-    layers = [PPMissingLayer() for _ in range(start_layer)] \
+    layers = nnx.List([PPMissingLayer() for _ in range(start_layer)] \
         + [layer_fn() for _ in range(start_layer, end_layer)] \
-        + [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)]
+        + [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)])
 
     return start_layer, end_layer, layers

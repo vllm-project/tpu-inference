@@ -48,6 +48,7 @@ class LlamaForCausalLM(nnx.Module):
         self.rng = nnx.Rngs(rng)
         self.mesh = mesh
 
+        jax.set_mesh(self.mesh)
         model_name = self.vllm_config.model_config.model.lower()
         if "70b" in model_name:
             logger.info("Initializing Llama3 70B model variant.")
@@ -131,6 +132,7 @@ class LlamaForCausalLM(nnx.Module):
                                            fd_sharding=("model", None),
                                            random_init=force_random_weights),
                 ))
+        self.layers = nnx.List(self.layers)
 
         self.final_norm = RMSNorm(
             dims=self.hidden_size,
