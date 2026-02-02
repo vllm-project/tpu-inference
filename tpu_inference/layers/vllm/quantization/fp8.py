@@ -29,6 +29,7 @@ from vllm.model_executor.layers.quantization import \
     register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizeMethodBase
+from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
@@ -91,8 +92,7 @@ class VllmFp8Config(vllm_fp8.Fp8Config, VllmQuantConfig):
                 raise NotImplementedError(
                     "FP8OnelineMoEMethod is not supported.")
         elif isinstance(layer, Attention):
-            logger.warning_once("FP8KVCacheMethod is not implemented. "
-                                "Skipping quantization for this layer.")
+            return VllmFp8KVCacheMethod(self)
         return None
 
 
@@ -357,3 +357,10 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
                 self.mesh,
                 self.extra_backend_kwargs,
             ))
+
+
+class VllmFp8KVCacheMethod(BaseKVCacheMethod):
+
+    def __init__(self, quant_config: "VllmFp8Config"):
+        super().__init__(quant_config)
+        self.quant_config = quant_config
