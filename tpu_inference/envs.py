@@ -28,6 +28,8 @@ if TYPE_CHECKING:
     RAY_USAGE_STATS_ENABLED: str = "0"
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: str = "shm"
     ENABLE_QUANTIZED_MATMUL_KERNEL: bool = False
+    REQUANTIZE_BLOCK_SIZE: int | None = None
+    REQUANTIZE_WEIGHT_DTYPE: str = "float8_e4m3fn"
 
 
 def env_with_choices(
@@ -168,6 +170,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_with_choices("VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE", "shm", ["shm"]),
     "ENABLE_QUANTIZED_MATMUL_KERNEL":
     lambda: bool(int(os.getenv("ENABLE_QUANTIZED_MATMUL_KERNEL") or "0")),
+    # Specify block quantization size
+    "REQUANTIZE_BLOCK_SIZE":
+    lambda: int(block_size) if
+    (block_size := os.getenv("REQUANTIZE_BLOCK_SIZE")) is not None else None,
+    # Specify dtype for quantized weights
+    "REQUANTIZE_WEIGHT_DTYPE":
+    lambda: os.getenv("REQUANTIZE_WEIGHT_DTYPE", "float8_e4m3fn"),
 }
 
 

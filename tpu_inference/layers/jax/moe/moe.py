@@ -189,10 +189,13 @@ class MoE(nnx.Module):
             return output_TD
         elif self.moe_backend == MoEBackend.VLLM_MOE:
             router_logits_TE = self.router(x_TD)
+            # TODO (jacobplatin): the current GMM kernel expects that w1/w2 have the second and third dimensions
+            # transposed, but this is likely not optimal for DeepSeek, so we will need to fix this
+            # in the future
             output_TD = fused_moe_func(
                 hidden_states=x_TD,
-                w1=self.kernel_gating_upproj_EFD.value,
-                w2=self.kernel_down_proj_EDF.value,
+                w1=self.kernel_gating_upproj_EDF.value,
+                w2=self.kernel_down_proj_EFD.value,
                 w1_bias=self.w1_bias,
                 w2_bias=self.w2_bias,
                 w1_scale=self.w1_scale,
@@ -318,15 +321,18 @@ class MoE(nnx.Module):
                 "bd2c": 256,
             }
         elif self.moe_backend == MoEBackend.VLLM_MOE:
-            self.kernel_gating_upproj_EFD = create_param(
+            # TODO (jacobplatin): the current GMM kernel expects that w1/w2 have the second and third
+            # dimensions transposed, but this is likely not optimal for DeepSeek, so we will
+            # need to fix this in the future
+            self.kernel_gating_upproj_EDF = create_param(
                 rngs,
-                shape=(E, 2 * F, D),
+                shape=(E, D, 2 * F),
                 dtype=self.dtype,
                 sharding=self.efd_sharding,
                 random_init=self.random_init)
-            self.kernel_down_proj_EDF = create_param(
+            self.kernel_down_proj_EFD = create_param(
                 rngs,
-                shape=(E, D, F),
+                shape=(E, F, D),
                 dtype=self.dtype,
                 sharding=self.edf_sharding,
                 random_init=self.random_init)

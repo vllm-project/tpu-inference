@@ -620,6 +620,7 @@ def gmm(
         )),
         interpret=interpret,
         cost_estimate=cost_estimate,
+        name=f"gmm-m_{m}-k_{k}-n_{n}-tm_{tm}-tk_{tk}-tn_{tn}",
     )
 
     out = call_gmm(

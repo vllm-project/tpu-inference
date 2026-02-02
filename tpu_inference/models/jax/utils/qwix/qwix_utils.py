@@ -43,7 +43,7 @@ DEFAULT_DEEPSEEK_FP8_CONFIG = {
         "bfloat16",
         "rules": [
             {
-                "module_path": ".*.custom_module.router.*",
+                "module_path": ".*.custom_module.experts.router.*",
                 "weight_qtype": None,
             },
             {
@@ -64,7 +64,7 @@ DEFAULT_DEEPSEEK_FP4_MLP_MOE_FP8_ATTN_CONFIG = {
         "rules": [
             # Exclude router from quantization
             {
-                "module_path": ".*.custom_module.router.*",
+                "module_path": ".*.custom_module.experts.router.*",
                 "weight_qtype": None,
             },
             # Avoid the combine expert ops

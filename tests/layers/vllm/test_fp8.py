@@ -18,8 +18,9 @@ import jax
 import pytest
 import torch
 import torchax
+from jax._src import test_util as jtu
 from jax.sharding import PartitionSpec
-from torchax.interop import torch_view
+from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import j2t, t2j
 from vllm.config import ParallelConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
@@ -85,6 +86,8 @@ def return_ref_and_layer_output(layer: torch.nn.Module, batch_size: int = 16):
     assert isinstance(layer, LinearBase)
     quant_method = layer.quant_method
     assert isinstance(quant_method, VllmFp8LinearMethod)
+    quant_method.requant_block_size = None
+    quant_method.requant_weight_dtype = jax.numpy.float8_e4m3fn
 
     input_tensor = torch.rand(
         batch_size, layer.input_size, dtype=torch.bfloat16) / 10
@@ -162,6 +165,8 @@ def quantize_to_fp8_block_3d(weight: torch.Tensor, block_m: int, block_n: int,
 def initialize_layer_weights(layer: torch.nn.Module):
     assert isinstance(layer, LinearBase)
     assert isinstance(layer.quant_method, VllmFp8LinearMethod)
+    layer.quant_method.linear_config.requant_block_size = None
+    layer.quant_method.linear_config.requant_weight_dtype = jax.numpy.float8_e4m3fn
 
     assert hasattr(layer.quant_method, "weight_block_size")
     block_m, block_n = layer.quant_method.weight_block_size
@@ -480,3 +485,53 @@ def test_fused_moe(use_ep, num_devices, num_tokens, intermediate_size,
                                    check_device=False,
                                    atol=2e-2,
                                    rtol=1e-1)
+
+
+@pytest.mark.parametrize("requant_block_size", (128, 512))
+@pytest.mark.parametrize("requant_weight_dtype",
+                         (jax.numpy.float8_e4m3fn, jax.numpy.float4_e2m1fn))
+def test_blockwise_quant(requant_block_size, requant_weight_dtype):
+    if not jtu.is_device_tpu_at_least(version=7):
+        pytest.skip("Expect TPUv7+")
+    mesh = test_utils.get_spmd_mesh()
+    dtype = torch.bfloat16
+
+    engine_args = EngineArgs(model=MODELS[0],
+                             max_model_len=64,
+                             max_num_batched_tokens=64,
+                             max_num_seqs=4,
+                             trust_remote_code=True)
+    vllm_config = engine_args.create_engine_config()
+
+    vllm_config.model_config.dtype = dtype
+    quant_config = get_tpu_quantization_config(vllm_config, mesh)
+    with set_current_vllm_config(vllm_config):
+        linear_layer = RowParallelLinear(
+            input_size=4096,
+            output_size=5120,
+            bias=False,
+            params_dtype=dtype,
+            return_bias=False,
+            quant_config=quant_config,
+        )
+
+    initialize_layer_weights(linear_layer)
+    quant_method = linear_layer.quant_method
+    quant_method.linear_config.requant_block_size = requant_block_size
+    quant_method.linear_config.requant_weight_dtype = requant_weight_dtype
+    quant_method.linear_config.enable_quantized_matmul_kernel = True
+
+    quant_method.process_weights_after_loading(linear_layer)
+    weight_jax = jax_view(linear_layer.weight)
+    weight_scale_jax = jax_view(linear_layer.weight_scale)
+    assert weight_jax.shape == (5120, 4096)
+    assert weight_scale_jax.shape == (4096 // requant_block_size, 1, 5120)
+    assert weight_jax.dtype == requant_weight_dtype
+
+    # TODO: Check output similarity between quantized and unquantized ones.
+    input_tensor = torch.rand(
+        16, linear_layer.input_size, dtype=torch.bfloat16) / 10
+    input_tensor = input_tensor.to('cpu')
+    jax_input_tensor = torch_view(t2j(input_tensor, use_dlpack=False))
+    quantized_output = linear_layer(jax_input_tensor)
+    assert quantized_output.shape == (16, 5120)

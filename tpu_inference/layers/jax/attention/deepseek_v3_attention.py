@@ -34,6 +34,7 @@ from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import RMSNorm
+# TODO: move this into here as well?
 from tpu_inference.layers.jax.rope import DeepseekScalingRotaryEmbedding
 
 KVCache = Tuple[jax.Array, jax.Array]

@@ -417,7 +417,7 @@ class TestTPUConnectorWorker(unittest.TestCase):
         worker._maybe_build_kv_connection.assert_called_once_with(load_meta)
         self.all_mocks[
             "ThreadPoolExecutor"].return_value.submit.assert_called_once_with(
-                worker._pull_kv, "conn", load_meta)
+                worker._pull_kv, "req1", "conn", load_meta)
 
     def test_process_send_load_for_consumer_notifying(self):
         """Tests process_send_load for a consumer that needs to notify."""
