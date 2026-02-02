@@ -12,12 +12,12 @@ logger = init_logger(__name__)
 
 class LocalCPUBackend:
     """
-    A singleton in-memory CPU backend for storing KV cache keys and values.
+    An in-memory CPU backend for storing KV cache keys and values.
 
-    This class uses the singleton pattern to ensure that the scheduler and the
-    worker, running in the same process, can share the same cache.
-    The scheduler reads from this to find cache hits, and the worker writes
-    to it after saving KV blocks from the TPU.
+    This class provides a local cache for storing KV data. In decoupled or
+    multihost serving setups, the scheduler and worker may run in separate
+    processes and maintain their own backend instances, with state
+    synchronization handled through metadata exchange.
 
     It implements an LRU (Least Recently Used) eviction policy with a maximum
     size limit and support for pinning cache entries to prevent eviction.
