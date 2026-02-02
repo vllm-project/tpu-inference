@@ -118,23 +118,26 @@ class TestLlamaForCausalLM:
 
     def test_init_8b_variant(self, mock_vllm_config_8b, rng, mesh):
         """Tests correct parameter detection for the 8B model variant."""
-        model = LlamaForCausalLM(mock_vllm_config_8b, rng, mesh)
-        assert model.hidden_size == 4096
-        assert "8b" in model.vllm_config.model_config.model.lower()
+        with jax.set_mesh(mesh):
+            model = LlamaForCausalLM(mock_vllm_config_8b, rng, mesh)
+            assert model.hidden_size == 4096
+            assert "8b" in model.vllm_config.model_config.model.lower()
 
     def test_init_70b_variant(self, mock_vllm_config_70b, rng, mesh):
         """Tests correct parameter detection for the 70B model variant."""
-        model = nnx.eval_shape(
-            lambda: LlamaForCausalLM(mock_vllm_config_70b, rng, mesh))
-        assert model.hidden_size == 8192
-        assert "70b" in model.vllm_config.model_config.model.lower()
+        with jax.set_mesh(mesh):
+            model = nnx.eval_shape(
+                lambda: LlamaForCausalLM(mock_vllm_config_70b, rng, mesh))
+            assert model.hidden_size == 8192
+            assert "70b" in model.vllm_config.model_config.model.lower()
 
     def test_init_unknown_variant_raises_error(self, mock_vllm_config_unknown,
                                                rng, mesh):
         """Tests that an unknown model variant raises a ValueError."""
-        with pytest.raises(ValueError,
-                           match="Could not determine Llama3 variant"):
-            LlamaForCausalLM(mock_vllm_config_unknown, rng, mesh)
+        with jax.set_mesh(mesh):
+            with pytest.raises(ValueError,
+                               match="Could not determine Llama3 variant"):
+                LlamaForCausalLM(mock_vllm_config_unknown, rng, mesh)
 
     def test_create_model_with_random_weights(self, mock_vllm_config_8b, rng,
                                               mesh):
@@ -163,19 +166,20 @@ class TestLlamaForCausalLM:
     @patch("tpu_inference.experimental.llama3_jax_stashed.Llama3WeightLoader")
     def test_load_weights_called_correctly(self, mock_loader_cls, rng, mesh):
         """Tests that the weight loader is called correctly for checkpoint loading."""
-        vllm_config = MockVllmConfig(model_name="llama3-8b",
-                                     random_weights=False)
-        model = LlamaForCausalLM(vllm_config, rng, mesh)
+        with jax.set_mesh(mesh):
+            vllm_config = MockVllmConfig(model_name="llama3-8b",
+                                         random_weights=False)
+            model = LlamaForCausalLM(vllm_config, rng, mesh)
 
-        mock_loader_instance = MagicMock()
-        mock_loader_cls.return_value = mock_loader_instance
-        model.load_weights(rng, cache_dir="/tmp/cache")
-        mock_loader_cls.assert_called_once_with(vllm_config=vllm_config,
-                                                hidden_size=4096,
-                                                attn_heads=32,
-                                                num_key_value_heads=8,
-                                                attn_head_dim=128)
-        mock_loader_instance.load_weights.assert_called_once_with(model)
+            mock_loader_instance = MagicMock()
+            mock_loader_cls.return_value = mock_loader_instance
+            model.load_weights(rng, cache_dir="/tmp/cache")
+            mock_loader_cls.assert_called_once_with(vllm_config=vllm_config,
+                                                    hidden_size=4096,
+                                                    attn_heads=32,
+                                                    num_key_value_heads=8,
+                                                    attn_head_dim=128)
+            mock_loader_instance.load_weights.assert_called_once_with(model)
 
 
 class TestLlama3WeightLoader:
@@ -192,17 +196,18 @@ class TestLlama3WeightLoader:
 
     def test_load_weights_transformation(self, weight_loader, rng, mesh):
         """Tests that weights are correctly reshaped, transposed, and loaded."""
-        vllm_config = MockVllmConfig("llama3-8b-small-test",
-                                     random_weights=False)
+        with jax.set_mesh(mesh):
+            vllm_config = MockVllmConfig("llama3-8b-small-test",
+                                         random_weights=False)
 
-        # Create a model instance but override its config for the test.
-        model = LlamaForCausalLM(vllm_config, rng, mesh)
+            # Create a model instance but override its config for the test.
+            model = LlamaForCausalLM(vllm_config, rng, mesh)
 
-        with patch(
-                "tpu_inference.experimental.llama3_jax_stashed.load_hf_weights"
-        ) as mock_load:
-            # This will now pass after the code fix
-            weight_loader.load_weights(model)
+            with patch(
+                    "tpu_inference.experimental.llama3_jax_stashed.load_hf_weights"
+            ) as mock_load:
+                # This will now pass after the code fix
+                weight_loader.load_weights(model)
 
-            # Assert that shard_put was called with the correctly transposed weight
-            mock_load.assert_called_once()
+                # Assert that shard_put was called with the correctly transposed weight
+                mock_load.assert_called_once()

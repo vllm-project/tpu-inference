@@ -215,7 +215,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             random_init=force_random_weights,
         )
 
-        self.layers = []
+        layers = []
 
         for i in range(self.num_layers):
             use_attention_rope = True
@@ -294,7 +294,8 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                                      pre_attention_norm=pre_attention_norm,
                                      pre_mlp_norm=pre_mlp_norm,
                                      use_attention_rope=use_attention_rope)
-            self.layers.append(block)
+            layers.append(block)
+        self.layers = nnx.List(layers)
 
         self.final_norm = RMSNorm(
             dims=self.hidden_size,

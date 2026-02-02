@@ -523,7 +523,8 @@ def _create_mesh():
     axis_names = ("data", "model")
     devices = _get_devices()
     mesh_shape = (1, len(devices))
-    mesh = jax.make_mesh(mesh_shape, axis_names, devices=devices)
+    axis_types = (jax.sharding.AxisType.Auto, jax.sharding.AxisType.Auto)
+    mesh = jax.make_mesh(mesh_shape, axis_names, axis_types, devices=devices)
     return mesh
 
 
