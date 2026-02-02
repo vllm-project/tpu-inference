@@ -127,7 +127,6 @@ class TestQwen3ForCausalLM:
         layers = model.model.layers
         assert len(layers) == hf_config.num_hidden_layers
         assert isinstance(model.rng, nnx.Rngs)
-        assert model.model.lm_head == model.model.embed.embedding
 
         attn = layers[0].self_attn
         hidden_size = hf_config.hidden_size

@@ -9,12 +9,12 @@ import torch
 from jax.sharding import Mesh
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionLayer, AttentionType)
-from vllm.attention.backends.registry import (AttentionBackendEnum,
-                                              register_backend)
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv, next_power_of_2
+from vllm.v1.attention.backend import (AttentionBackend, AttentionImpl,
+                                       AttentionLayer, AttentionType)
+from vllm.v1.attention.backends.registry import (AttentionBackendEnum,
+                                                 register_backend)
 
 from tpu_inference import utils
 from tpu_inference.layers.common.attention_interface import attention
