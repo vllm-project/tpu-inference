@@ -19,7 +19,6 @@ import torch
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn import Parameter
 from torchax.interop import jax_view, torch_view
-from torchax.ops.mappings import t2j
 from vllm.model_executor.layers import linear as vllm_linear
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
@@ -48,11 +47,6 @@ from tpu_inference.layers.vllm.quantization.base import VllmQuantizationMethod
 from tpu_inference.layers.vllm.quantization.configs import (
     VllmQuantConfig, VllmQuantLinearConfig)
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import get_mesh_shape_product
-
-from tpu_inference.layers.vllm.process_weights.linear_weights import (
-    LinearWeights, process_linear_weights, shard_linear_weights,
-    to_parameter_list)
 
 P = PartitionSpec
 
