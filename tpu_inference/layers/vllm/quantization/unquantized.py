@@ -17,9 +17,7 @@ from typing import Any, Callable, Optional
 import jax
 import torch
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
-from torchax.ops.mappings import t2j
 from vllm.model_executor.layers import linear as vllm_linear
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
@@ -42,14 +40,17 @@ from tpu_inference.layers.common.quantization import \
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
+from tpu_inference.layers.vllm.fused_moe import (FusedMoEBackend,
+                                                 fused_moe_apply,
+                                                 select_moe_backend)
+from tpu_inference.layers.vllm.process_weights.cleanup_sharding import (
+    _tensor_is_in_cpu, process_unquantized_linear_weight,
+    process_unquantized_moe_weight)
+from tpu_inference.layers.vllm.process_weights.fused_moe_weights import \
+    FusedMoEWeights
 from tpu_inference.layers.vllm.quantization.configs import (
     VllmQuantConfig, VllmQuantLinearConfig)
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import get_mesh_shape_product
-
-from tpu_inference.layers.vllm.process_weights.linear_weights import (
-    LinearWeights, process_linear_weights, shard_linear_weights,
-    to_parameter_list)
 
 P = PartitionSpec
 
@@ -99,49 +100,10 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
         super().__init__(linear_config)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        return
-        weight = t2j(layer.weight, use_dlpack=False)
-        delattr(layer, "weight")
-        if layer.bias is not None and not layer.skip_bias_add:
-            if layer.return_bias:
-                logger.warning_once("Bias might return incorrect value.")
-            bias = t2j(layer.bias, use_dlpack=False)
-            delattr(layer, "bias")
-        else:
-            bias = None
-
-        @jax.jit
-        def process_unquantized_linear_weights(
-            weight: jax.Array,
-            bias: jax.Array | None,
-        ) -> LinearWeights:
-            return process_linear_weights(
-                LinearWeights(
-                    weight=weight,
-                    weight_scale=None,
-                    zero_point=None,
-                    bias=bias,
-                ),
-                fused=self.linear_config.fuse_matmuls,
-                output_sizes=self.linear_config.output_sizes,
-                reorder_size=self.linear_config.n_shards,
-            )
-        weights = process_unquantized_linear_weights(weight, bias)
-        weights = torch_view(
-            shard_linear_weights(
-                weights,
-                mesh=self.linear_config.mesh,
-                weight_p_spec=self.linear_config.weight_sharding,
-                bias_p_spec=self.linear_config.bias_sharding,
-            ))
-        if self.linear_config.fuse_matmuls:
-            layer.weight = Parameter(weights.weight, requires_grad=False)
-            if bias is not None:
-                layer.bias = Parameter(weights.bias, requires_grad=False)
-        else:
-            layer.weight = to_parameter_list(weights.weight)
-            if bias is not None:
-                layer.bias = to_parameter_list(weights.bias)
+        if not _tensor_is_in_cpu(layer.weight):
+            # Already processed and sharded.
+            return
+        process_unquantized_linear_weight(layer)
 
     def apply(self,
               layer: torch.nn.Module,
@@ -204,59 +166,11 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         return self.apply_monolithic
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        return
+        if not _tensor_is_in_cpu(layer.w13_weight):
+            # Already processed and sharded.
+            return
         assert isinstance(layer, FusedMoE)
-
-        w13_weight = t2j(layer.w13_weight, use_dlpack=False)
-        w2_weight = t2j(layer.w2_weight, use_dlpack=False)
-
-        if self.moe.has_bias:
-            w13_bias = t2j(layer.w13_bias, use_dlpack=False)
-            w2_bias = t2j(layer.w2_bias, use_dlpack=False)
-        else:
-            w13_bias = w2_bias = None
-
-        @jax.jit
-        def process_unquantized_moe_weights(
-            w13_weight: jax.Array,
-            w13_bias: jax.Array | None,
-            w2_weight: jax.Array,
-            w2_bias: jax.Array | None,
-        ) -> FusedMoEWeights:
-
-            w13_interleave = layer.activation == "swigluoai"
-            w13_reorder_size = get_mesh_shape_product(
-                self.mesh, ShardingAxisName.MLP_TENSOR)
-
-            return process_moe_weights(
-                FusedMoEWeights(
-                    w13_weight=w13_weight,
-                    w13_weight_scale=None,
-                    w13_bias=w13_bias,
-                    w2_weight=w2_weight,
-                    w2_weight_scale=None,
-                    w2_bias=w2_bias,
-                ),
-                moe_backend=self.moe_backend,
-                w13_reorder_size=w13_reorder_size,
-                w13_interleave=w13_interleave,
-            )
-
-        weights = process_unquantized_moe_weights(
-            w13_weight,
-            w13_bias,
-            w2_weight,
-            w2_bias,
-        )
-        weights = torch_view(
-            shard_moe_weights(weights, self.moe_backend, self.mesh))
-
-        layer.w13_weight = Parameter(weights.w13_weight, requires_grad=False)
-        layer.w2_weight = Parameter(weights.w2_weight, requires_grad=False)
-
-        if self.moe.has_bias:
-            layer.w13_bias = Parameter(weights.w13_bias, requires_grad=False)
-            layer.w2_bias = Parameter(weights.w2_bias, requires_grad=False)
+        process_unquantized_moe_weight(layer)
 
     def apply_monolithic(
         self,
