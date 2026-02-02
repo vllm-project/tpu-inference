@@ -23,8 +23,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
     CompressedTensorsMoEMethod, CompressedTensorsW8A8Fp8MoEMethod)
 
-from tpu_inference.layers.common.fused_moe import (FusedMoEBackend,
-                                                   fused_moe_apply,
+from tpu_inference.layers.common.fused_moe import (MoEBackend, moe_apply,
                                                    select_moe_backend)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.process_weights.fused_moe_weights import (
@@ -96,7 +95,7 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         self.moe_backend = select_moe_backend(self.moe)
 
         self.extra_backend_kwargs = {}
-        if self.moe_backend == FusedMoEBackend.FUSED_MOE:
+        if self.moe_backend == MoEBackend.FUSED_MOE:
             self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name, )
 
     @property
@@ -206,7 +205,7 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         )
 
         return torch_view(
-            fused_moe_apply(
+            moe_apply(
                 layer,
                 jax_view(x),
                 jax_view(router_logits),

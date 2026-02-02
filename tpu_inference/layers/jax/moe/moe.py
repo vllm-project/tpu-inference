@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import math
 from dataclasses import InitVar, dataclass
 from typing import Optional
@@ -136,7 +135,6 @@ class JaxMoE(nnx.Module):
     rngs: InitVar[nnx.Rngs]
     router: nnx.Module
     mesh: jax.sharding.Mesh
-
     # --- Sharding Config ---
     activation_ffw_td: Sharding
     activation_ffw_ted: Sharding
@@ -148,11 +146,11 @@ class JaxMoE(nnx.Module):
     apply_expert_weight_before_computation: bool
     random_init: bool = False
     moe_backend: MoEBackend = MoEBackend.DENSE_MAT
-
     # --- Sparse MoE Specific Attributes ---
     num_experts_per_tok: int = 1  # Required for Sparse, optional/derived for Dense
     tile_size: tuple[int, int, int] = (128, 128, 128)
-    quantized_dtype: Optional[jnp.dtype] = None
+    # NOTE: this is only needed for SparseMoE
+    qwix_quantized_weight_dtype: Optional[jnp.dtype] = None
 
     # --- MoE Kernel Specific Attributes ---
     renormalize: bool = True
@@ -239,6 +237,7 @@ class JaxMoE(nnx.Module):
         return "MOE"
 
     def _process_weight_for_qwix(self,
+                                 name,
                                  weight_param,
                                  channelwise_axes=[],
                                  tiled_axes={}):
@@ -248,12 +247,11 @@ class JaxMoE(nnx.Module):
         """
         weight = weight_param.value
 
-        if self.quantized_dtype:
+        if self.qwix_quantized_weight_dtype:
             if not isinstance(weight, ptq.WithAux):
-                weight = manually_quantize_qwix_weight(weight,
-                                                       self.quantized_dtype,
-                                                       channelwise_axes,
-                                                       tiled_axes, "absmax")
-            return weight.array
+                weight = manually_quantize_qwix_weight(
+                    name, weight, self.qwix_quantized_weight_dtype,
+                    channelwise_axes, tiled_axes, "absmax")
+            return (weight.array.qvalue, weight.array.scale)
 
         return weight

@@ -63,72 +63,70 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
 
     def process_weights_after_loading(self, layer):
         if layer.moe_backend == MoEBackend.FUSED_MOE:
-            raise ValueError
-            # if self.edf_sharding:
-            #     self.e2df_sharding = (self.edf_sharding[0], None,
-            #                           self.edf_sharding[1],
-            #                           self.edf_sharding[2])
-            # self.kernel_gating_upproj_E2DF = create_param(
-            #     rngs,
-            #     shape=(E, 2, D, F),
-            #     dtype=self.dtype,
-            #     sharding=self.e2df_sharding,
-            #     random_init=self.random_init)
-            # self.kernel_down_proj_EFD = create_param(
-            #     rngs,
-            #     shape=(E, F, D),
-            #     dtype=self.dtype,
-            #     sharding=self.efd_sharding,
-            #     random_init=self.random_init)
-            # self.block_size = {
-            #     "bt": 32,
-            #     "bf": 512,
-            #     "bd1": 512,
-            #     "bd2": 512,
-            #     "btc": 64,
-            #     "bfc": 256,
-            #     "bd1c": 256,
-            #     "bd2c": 256,
-            # }
+            if layer.edf_sharding:
+                e2df_sharding = (layer.edf_sharding[0], None,
+                                 layer.edf_sharding[1], layer.edf_sharding[2])
+            # fuse the weights into w13: [Gate, Up]
+            w_gate = layer.kernel_gating_EDF.value
+            w_up = layer.kernel_up_proj_EDF.value
+
+            # stack to create a 4d matrix
+            w13_val = jnp.stack([w_gate, w_up], axis=1)
+
+            layer.kernel_gating_upproj_E2DF = nnx.Param(w13_val,
+                                                        sharding=e2df_sharding)
+
+            del layer.kernel_gating_EDF
+            del layer.kernel_up_proj_EDF
+
+            ep_axis_name = layer.efd_sharding[0]
+
+            self.extra_backend_kwargs = {
+                "ep_axis_name": ep_axis_name,
+                "bt": 32,
+                "bf": 512,
+                "bd1": 512,
+                "bd2": 512,
+                "btc": 64,
+                "bfc": 256,
+                "bd1c": 256,
+                "bd2c": 256,
+            }
+
         elif layer.moe_backend == MoEBackend.VLLM_MOE:
             w_gate = layer.kernel_gating_EDF.value
             w_up = layer.kernel_up_proj_EDF.value
 
             # Fuse the weights into w13: [Gate, Up]
-            # Concatenate along the last dimension (F) to create (E, D, 2*F)
-            # This matches the standard layout for fused SwiGLU kernels
             w13_val = jnp.concatenate([w_gate, w_up], axis=-1)
 
-            # Assign the fused weight to the new parameter
-            # We use nnx.Param to wrap the value appropriately
             layer.kernel_gating_upproj_EFD = nnx.Param(w13_val)
 
-            # Delete the old parameters to free memory
             del layer.kernel_gating_EDF
             del layer.kernel_up_proj_EDF
 
-            # transpose E, F, D to E, D, F
+            # Rename for consistency
             w_down = layer.kernel_down_proj_EFD.value
-            # w_down = jnp.transpose(w_down, (0, 2, 1))
             layer.kernel_down_proj_EDF = nnx.Param(w_down)
             del layer.kernel_down_proj_EFD
 
     def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
         assert isinstance(layer, JaxMoE)
 
-        if layer.moe_backend == MoEBackend.VLLM_MOE:
+        # Fused weight backends
+        if layer.moe_backend in [MoEBackend.FUSED_MOE, MoEBackend.VLLM_MOE]:
             x_TD = jnp.asarray(x, layer.dtype)
             x_TD = nnx.with_sharding_constraint(x_TD, layer.activation_ffw_td)
-
-            # TODO
             router_logits_TE = layer.router(x_TD)
 
             # TODO; unfused too
+            w13_weight = layer.kernel_gating_upproj_E2DF.value if layer.moe_backend == MoEBackend.FUSED_MOE else layer.kernel_gating_upproj_EFD.value
+            w2_weight = layer.kernel_down_proj_EFD.value if layer.moe_backend == MoEBackend.FUSED_MOE else layer.kernel_down_proj_EDF.value
             weights = FusedMoEWeights(
-                w13_weight=layer.kernel_gating_upproj_EFD.value,
+                w13_weight=w13_weight,
                 w13_weight_scale=None,
                 w13_bias=None,  # TODO?
-                w2_weight=layer.kernel_down_proj_EDF.value,
+                w2_weight=w2_weight,
                 w2_weight_scale=None,
                 w2_bias=None,  # TODO?
             )

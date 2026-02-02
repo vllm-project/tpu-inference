@@ -351,7 +351,6 @@ def _ragged_paged_attention_kernel(
     def flash_attention_step1_qk_softmax(
         q,  # [actual_bq_sz * num_q_heads_per_kv_head, head_dim]
         k,  # [bkv_sz, head_dim]
-        v,  # [bkv_sz, head_dim]
         *,
         bq_idx,
         bkv_idx,
@@ -360,8 +359,7 @@ def _ragged_paged_attention_kernel(
         assert len(q.shape) == 2
         assert q.shape[0] % num_q_heads_per_kv_head == 0
         assert q.shape[1] == head_dim
-        assert k.shape == v.shape == (bkv_sz, head_dim)
-        assert k.dtype == v.dtype
+        assert k.shape == (bkv_sz, head_dim)
         head_l_ref = l_ref.at[kv_head_idx, :q.shape[0]]
         head_m_ref = m_ref.at[kv_head_idx, :q.shape[0]]
 
@@ -379,7 +377,7 @@ def _ragged_paged_attention_kernel(
                 q = jnp.clip(q, min=minval, max=maxval)
             q = q.astype(k.dtype)
 
-        s = jnp.einsum("nd,md->nm", q, k, preferred_element_type=jnp.float32)
+        s = jnp.matmul(q, k.T, preferred_element_type=jnp.float32)
         s *= sm_scale
         if k_scale is not None:
             s *= k_scale
@@ -414,21 +412,25 @@ def _ragged_paged_attention_kernel(
         return p, exp_m_diff
 
     def flash_attention_step2_pv(
-        q_shape_0,
         v,  # [bkv_sz, head_dim]
-        p,  # from step1
-        exp_m_diff,  # from step1
+        p,  # [actual_bq_sz * num_q_heads_per_kv_head, bkv_sz] from step1
+        exp_m_diff,  # [actual_bq_sz * num_q_heads_per_kv_head] from step1
         *,
         bkv_idx,
         kv_head_idx,
     ):
-        head_acc_ref = acc_ref.at[kv_head_idx, :q_shape_0]
+        assert len(p.shape) == 2
+        assert p.shape[0] % num_q_heads_per_kv_head == 0
+        assert p.shape[1] == bkv_sz
+        assert v.shape == (bkv_sz, head_dim)
+
+        head_acc_ref = acc_ref.at[kv_head_idx, :p.shape[0]]
 
         def load_with_init(ref, init_val):
             return jnp.where(bkv_idx == 0, jnp.full_like(ref, init_val),
                              ref[...])
 
-        pv = jnp.einsum("nm,md->nd", p, v, preferred_element_type=jnp.float32)
+        pv = jnp.matmul(p, v, preferred_element_type=jnp.float32)
         if v_scale is not None:
             pv *= v_scale
         o_prev = load_with_init(head_acc_ref, 0.0)
@@ -877,7 +879,6 @@ def _ragged_paged_attention_kernel(
 
                 # Flash attention with cur bkv and bq
                 # NOTE: kv_packing is divided by 2 because k and v are packed together.
-                prev_bq_shape_0 = None
                 prev_kv_head_bv = None
                 prev_kv_head_idx = None
                 prev_kv_head_p = None
@@ -899,7 +900,9 @@ def _ragged_paged_attention_kernel(
                         cur_kv_head_bq = load_bq(bq_sem_idx,
                                                  cur_kv_head_idx,
                                                  actual_bq_sz=actual_bq_sz)
-                        bk, bv = bkv_lst[i]
+                        cur_kv_head_bk, cur_kv_head_bv = bkv_lst[i]
+                        assert cur_kv_head_bk.shape == cur_kv_head_bv.shape
+                        assert cur_kv_head_bk.dtype == cur_kv_head_bv.dtype
                         # FlashAttention is divided into `flash_attention_step1_qk_softmax`
                         # and `flash_attention_step2_pv` to pipeline the computation.
                         # `step2_pv` for the previous KV head, which depends on the softmax
@@ -908,31 +911,27 @@ def _ragged_paged_attention_kernel(
                         cur_kv_head_p, cur_kv_head_exp_m_diff = (
                             flash_attention_step1_qk_softmax(
                                 cur_kv_head_bq,
-                                bk,
-                                bv,
+                                cur_kv_head_bk,
                                 bq_idx=bq_idx,
                                 bkv_idx=bkv_idx,
                                 kv_head_idx=cur_kv_head_idx,
                             ))
-                        if prev_bq_shape_0 is not None:
+                        if prev_kv_head_p is not None:
                             flash_attention_step2_pv(
-                                prev_bq_shape_0,
                                 prev_kv_head_bv,
                                 prev_kv_head_p,
                                 prev_kv_head_exp_m_diff,
                                 bkv_idx=bkv_idx,
                                 kv_head_idx=prev_kv_head_idx,
                             )
-                        prev_bq_shape_0 = cur_kv_head_bq.shape[0]
-                        prev_kv_head_bv = bv
+                        prev_kv_head_bv = cur_kv_head_bv
                         prev_kv_head_p = cur_kv_head_p
                         prev_kv_head_exp_m_diff = cur_kv_head_exp_m_diff
                         prev_kv_head_idx = cur_kv_head_idx
 
                 # Execute pv of last attention head.
-                assert prev_bq_shape_0 is not None
+                assert prev_kv_head_p is not None
                 flash_attention_step2_pv(
-                    prev_bq_shape_0,
                     prev_kv_head_bv,
                     prev_kv_head_p,
                     prev_kv_head_exp_m_diff,
@@ -1329,8 +1328,11 @@ def static_validate_inputs(
     del debug_mode
 
 
-def get_kernel_scope_name(bq_size, bkv_p, page_size):
-    return f"RPA-bq_{bq_size}-bkvp_{bkv_p}-p_{page_size}-"
+def get_kernel_scope_name(bq_size, bkv_p, page_size, sliding_window):
+    name = f"RPA-bq_{bq_size}-bkvp_{bkv_p}-p_{page_size}"
+    if sliding_window is not None:
+        name += f"-sw_{sliding_window}"
+    return name
 
 
 @functools.partial(
@@ -1537,7 +1539,7 @@ def ragged_paged_attention(
         jnp.full((6, ), -1, jnp.int32),
     )
 
-    scope_name = get_kernel_scope_name(bq_sz, bkv_p, page_size)
+    scope_name = get_kernel_scope_name(bq_sz, bkv_p, page_size, sliding_window)
     kernel = pl.pallas_call(
         functools.partial(
             _ragged_paged_attention_kernel,

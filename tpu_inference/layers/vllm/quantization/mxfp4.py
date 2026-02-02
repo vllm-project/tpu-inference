@@ -36,8 +36,7 @@ from vllm.model_executor.layers.quantization.mxfp4 import (Mxfp4Backend,
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
-from tpu_inference.layers.common.fused_moe import (FusedMoEBackend,
-                                                   fused_moe_apply,
+from tpu_inference.layers.common.fused_moe import (MoEBackend, moe_apply,
                                                    select_moe_backend)
 from tpu_inference.layers.common.quant_methods import (MXFP4,
                                                        get_tpu_quant_method)
@@ -109,7 +108,7 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
         self.moe_backend = select_moe_backend(self.moe)
 
         self.extra_backend_kwargs = {}
-        if self.moe_backend == FusedMoEBackend.FUSED_MOE:
+        if self.moe_backend == MoEBackend.FUSED_MOE:
             # When fused moe kernle is used, we pass extra arguments like
             # tuned block sizes to the kernel.
             self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name, )
@@ -216,7 +215,7 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
         )
 
         return torch_view(
-            fused_moe_apply(
+            moe_apply(
                 layer,
                 jax_view(x),
                 jax_view(router_logits),

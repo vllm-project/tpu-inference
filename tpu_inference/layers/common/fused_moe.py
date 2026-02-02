@@ -50,8 +50,9 @@ class MoEBackend(Enum):
 
 def select_moe_backend(moe: FusedMoEConfig):
     if envs.USE_MOE_EP_KERNEL:
-        if moe.use_ep:
-            return MoEBackend.FUSED_MOE
+        # TODO
+        # if moe.use_ep:
+        return MoEBackend.FUSED_MOE
         logger.warning_once(
             "USE_MOE_EP_KERNEL=1 but expert parallelism is not "
             "enabled. Falling back to gmm implementation.")
@@ -97,7 +98,6 @@ def moe_apply(
     with jax.named_scope(layer._get_name()):
         match moe_backend:
             case MoEBackend.FUSED_MOE:
-                raise ValueError
                 subc_quant_w1_sz = None
                 subc_quant_w2_sz = None
                 if weights.w13_weight_scale is not None and weights.w2_weight_scale is not None:
