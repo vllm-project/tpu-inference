@@ -23,7 +23,7 @@ notify:
 
 steps:
    - label: "Upload Tests for Models & Features"
-     <<: *run-on-nightly-or-tag
+    #  <<: *run-on-nightly-or-tag
      agents:
        queue: cpu
      commands:
@@ -33,7 +33,7 @@ steps:
      continue_on_failure: true  # ensure we still generate support matrices even if some tests fail
 
    - label: "Generate support matrices"
-     <<: *run-on-nightly-or-tag
+    #  <<: *run-on-nightly-or-tag
      key: generate_support_matrices
      agents:
        queue: cpu
@@ -42,18 +42,19 @@ steps:
        - bash .buildkite/scripts/generate_support_matrices.sh
 
    - label: "Commit support matrices if is nightly build or release tag specified"
-     <<: *run-on-nightly-or-tag
+    #  <<: *run-on-nightly-or-tag
      key: commit_support_matrices
      depends_on: generate_support_matrices
      agents:
        queue: cpu
-     secrets:
-      - GITHUB_PAT
+    #  secrets:
+    #   - GITHUB_PAT
      command:
-       - bash .buildkite/scripts/commit_support_matrices.sh
+       - echo .buildkite/scripts/commit_support_matrices.sh
+      #  - bash .buildkite/scripts/commit_support_matrices.sh
 
    - label: "Notify test results"
-     <<: *run-on-nightly-or-tag
+    #  <<: *run-on-nightly-or-tag
      key: notify_test_results
      depends_on: commit_support_matrices
      agents:
@@ -62,14 +63,15 @@ steps:
        - bash .buildkite/scripts/notify_test_results.sh
 
    - label: "Record verified commit hashes"
-     if: build.env("NIGHTLY") == "1"
+    #  if: build.env("NIGHTLY") == "1"
      key: record_verified_commit_hashes
      depends_on:
        - notify_test_results
        - tpu_test_notification
      agents:
        queue: cpu
-     secrets:
-      - GITHUB_PAT
+    #  secrets:
+    #   - GITHUB_PAT
      command:
-       - bash .buildkite/scripts/commit_verified_commit_hashes.sh
+       - echo .buildkite/scripts/commit_verified_commit_hashes.sh
+      #  - bash .buildkite/scripts/commit_verified_commit_hashes.sh

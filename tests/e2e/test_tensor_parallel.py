@@ -7,6 +7,7 @@ import time
 from dataclasses import asdict
 
 import pytest
+
 from vllm import LLM, EngineArgs, SamplingParams
 
 
@@ -118,10 +119,10 @@ def test_tensor_parallelism_vllm_model(
     Test tensor parallelism works on vLLM models.
 
     Equivalent to:
-    MODEL_IMPL_TYPE=vllm python examples/offline_inference.py --tensor_parallel_size=2 --pipeline_parallel_size=1
+    python examples/offline_inference.py --tensor_parallel_size=2 --pipeline_parallel_size=1
     """
 
-    os.environ['MODEL_IMPL_TYPE'] = 'vllm'
+    # os.environ['MODEL_IMPL_TYPE'] = 'vllm'
     # Test with tensor parallelism enabled
     outputs = _run_inference_with_config(
         model_name=model_name,

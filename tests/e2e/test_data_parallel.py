@@ -5,6 +5,7 @@ import os
 import time
 
 import pytest
+
 from vllm import LLM, SamplingParams
 
 
@@ -187,7 +188,7 @@ def test_attention_data_parallelism(
     Correctness and performance test for attention DP     
     """
 
-    os.environ['MODEL_IMPL_TYPE'] = "vllm"
+    # os.environ['MODEL_IMPL_TYPE'] = "vllm"
     model_name = "Qwen/Qwen2.5-1.5B-Instruct"
 
     # Configuration for long sequences
@@ -244,7 +245,7 @@ def test_data_parallelism(
     """
     Correctness and performance test for model DP 
     """
-    os.environ['MODEL_IMPL_TYPE'] = "flax_nnx"
+    # os.environ['MODEL_IMPL_TYPE'] = "flax_nnx"
 
     model_name = "Qwen/Qwen2.5-1.5B-Instruct"
 

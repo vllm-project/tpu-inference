@@ -5,6 +5,7 @@ import time
 from dataclasses import asdict
 
 import pytest
+
 from vllm import LLM, EngineArgs, SamplingParams
 
 
@@ -87,7 +88,7 @@ def test_hybrid_kv_cache(
     Test hybrid kv cache works on gemma vLLM models.
     """
 
-    os.environ['MODEL_IMPL_TYPE'] = 'vllm'
+    # os.environ['MODEL_IMPL_TYPE'] = 'vllm'
     # Test with hybrid kv cache alloctaion enabled.
     outputs = _run_inference_with_config(
         model_name=model_name,
