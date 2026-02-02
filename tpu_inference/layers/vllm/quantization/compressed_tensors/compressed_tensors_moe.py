@@ -23,11 +23,11 @@ from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
     CompressedTensorsMoEMethod, CompressedTensorsW8A8Fp8MoEMethod)
 
-from tpu_inference.layers.common.fused_moe import (MoEBackend, moe_apply,
-                                                   select_moe_backend)
-from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.vllm.process_weights.fused_moe_weights import (
+from tpu_inference.layers.common.moe import (MoEBackend, moe_apply,
+                                             select_moe_backend)
+from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_moe_weights, shard_moe_weights)
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedFusedMoEMethod
@@ -92,7 +92,7 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         super().__init__(weight_quant, input_quant, moe)
 
         self.mesh = mesh
-        self.moe_backend = select_moe_backend(self.moe)
+        self.moe_backend = select_moe_backend(self.moe.use_ep)
 
         self.extra_backend_kwargs = {}
         if self.moe_backend == MoEBackend.FUSED_MOE:

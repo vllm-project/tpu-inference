@@ -25,10 +25,3 @@ class QuantizationConfig(ABC):
     def get_quant_method(self, layer: JaxModule,
                          prefix: str) -> Optional[QuantizeMethodBase]:
         raise NotImplementedError
-
-
-class QuantFusedMoEConfig:
-
-    def __init__(self):
-        self.use_ep = None
-        self.has_bias = None

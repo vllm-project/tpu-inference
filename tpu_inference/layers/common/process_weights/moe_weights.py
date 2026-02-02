@@ -20,7 +20,7 @@ from jax.experimental.layout import Format, Layout, with_layout_constraint
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.tensor import Tensor
 
-from tpu_inference.layers.common.fused_moe import MoEBackend
+from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import \
@@ -42,6 +42,8 @@ class FusedMoEWeights:
     w2_bias: jax.Array | Tensor | None
 
 
+@jax.tree_util.register_dataclass
+@dataclass
 class UnfusedMoEWeights:
     """Unfused moe weights. weights can be either jax or torchax array."""
     w1_weight: jax.Array | Tensor

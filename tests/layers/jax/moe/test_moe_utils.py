@@ -20,12 +20,10 @@ import jax.numpy as jnp
 
 # Adjust the import path to match your project structure
 # yapf: disable
-from tpu_inference import envs
 from tpu_inference.layers.jax.moe.utils import (MoEBackend,
                                                 get_all_to_all_params_fn,
                                                 global_permute_fn, gmm_fn,
                                                 local_permute_fn,
-                                                select_moe_backend,
                                                 sort_activations_fn,
                                                 unpermute_fn)
 
@@ -36,49 +34,6 @@ class TestMoEUtils(unittest.TestCase):
 
     def setUp(self):
         self.key = jax.random.PRNGKey(0)
-
-    def test_select_moe_backend_defaults(self):
-        """Test default backend selection (Dense)."""
-        # Ensure all flags are False
-        with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', False), \
-             mock.patch.object(envs, 'USE_VLLM_MOE_KERNEL', False), \
-             mock.patch.object(envs, 'USE_MEGABLOCKS', False), \
-             mock.patch.object(envs, 'USE_RAGGED_DOT', False):
-
-            backend = select_moe_backend()
-            self.assertEqual(backend, MoEBackend.DENSE_MAT)
-
-    def test_select_moe_backend_priority(self):
-        """Test priority logic for backend selection."""
-        # Case 1: Fused MoE has highest priority
-        with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', True), \
-             mock.patch.object(envs, 'USE_VLLM_MOE_KERNEL', False):
-            self.assertEqual(select_moe_backend(), MoEBackend.FUSED_MOE)
-
-        # Case 2: VLLM MoE
-        with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', False), \
-             mock.patch.object(envs, 'USE_VLLM_MOE_KERNEL', True):
-            self.assertEqual(select_moe_backend(), MoEBackend.VLLM_MOE)
-
-        # Case 3: MegaBlocks
-        with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', False), \
-             mock.patch.object(envs, 'USE_VLLM_MOE_KERNEL', False), \
-             mock.patch.object(envs, 'USE_MEGABLOCKS', True):
-            self.assertEqual(select_moe_backend(), MoEBackend.MEGABLX_GMM)
-
-        # Case 4: Ragged Dot
-        with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', False), \
-             mock.patch.object(envs, 'USE_VLLM_MOE_KERNEL', False), \
-             mock.patch.object(envs, 'USE_MEGABLOCKS', False), \
-             mock.patch.object(envs, 'USE_RAGGED_DOT', True):
-            self.assertEqual(select_moe_backend(), MoEBackend.RAGGED_DOT)
-
-    def test_select_moe_backend_conflict(self):
-        """Test conflict detection."""
-        with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', True), \
-             mock.patch.object(envs, 'USE_VLLM_MOE_KERNEL', True):
-            with self.assertRaises(ValueError):
-                select_moe_backend()
 
     def test_sort_activations_fn(self):
         """Test stateless sorting of activations."""

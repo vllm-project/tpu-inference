@@ -61,6 +61,7 @@ class NewModel(nnx.Module):
                mesh: jax.sharding.Mesh)
 ```
 
+# TODO (jacobplatin): we need to update this once the JAX-path refactor is fully done
 The constructor should set the architecture configuration (e.g. num_layers, hidden_size) and initialize the model layers. Layers can be defined from scratch using flax NNX (e.g. [Llama3](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/jax/llama3.py)) or can leverage tpu-inference to import or extend commonly used layer types (e.g. [Embedder](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/layers/jax/layers.py#L168), [RMSNorm](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/layers/jax/layers.py#L49), [MoE](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/layers/jax/moe/moe.py#L69), [Attention](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/layers/jax/attention/attention.py#L23), [DenseFFW](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/layers/jax/layers.py#L98C7-L98C15), [TransformerBlock](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/layers/jax/transformer_block.py#L15
 )).
 

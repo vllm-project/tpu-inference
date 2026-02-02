@@ -21,7 +21,7 @@ from flax import nnx
 from jax.sharding import Mesh, PartitionSpec
 
 from tpu_inference.layers.jax.moe.deepseek_v3_moe import DeepSeekV3Router
-from tpu_inference.layers.jax.moe.moe import MoE, Router
+from tpu_inference.layers.jax.moe.moe import JaxMoE, Router
 from tpu_inference.layers.jax.moe.utils import MoEBackend
 
 
@@ -138,7 +138,7 @@ class TestMoE(unittest.TestCase):
                 ed_sharding=PartitionSpec(None, 'model'),
                 moe_backend=backend)
 
-            moe = MoE(
+            moe = JaxMoE(
                 dtype=self.dtype,
                 num_local_experts=self.E,
                 hidden_size=self.D,

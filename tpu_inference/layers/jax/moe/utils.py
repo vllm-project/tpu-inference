@@ -13,17 +13,19 @@
 # limitations under the License.
 
 import enum
+import math
 
 import jax
 import jax.numpy as jnp
 from jax.experimental import xla_metadata
+from jax.sharding import Mesh
 from qwix._src.core.qarray import QArray
 from qwix._src.core.ragged_dot import ragged_dot as qwix_ragged_dot
 
 from tpu_inference.kernels.megablox.gmm import gmm as megablox_gmm
-from tpu_inference.layers.common.fused_moe import MoEBackend
 from tpu_inference.layers.common.fused_moe_gmm import \
     round_up_to_multiple_of_128_within_limit
+from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.qwix.qwix_utils import \
@@ -252,3 +254,20 @@ def gmm_fn(inputs, kernel, group_sizes, tile_size, moe_backend, dtype,
     if pad_amount > 0:
         output = output[:num_rows, :]
     return output
+
+
+def get_expert_parallelism(expert_axis_name: str, mesh: Mesh) -> int:
+    """
+    Returns the expert parallelism number from the mesh.
+    This will likely be deprecated/refactored in another PR
+    (jacobplatin).
+
+    Args:
+    """
+    if expert_axis_name is None:
+        return 1
+    else:
+        if isinstance(expert_axis_name, str):
+            return mesh.shape[expert_axis_name]
+        else:
+            return math.prod(mesh.shape[axis] for axis in expert_axis_name)

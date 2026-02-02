@@ -21,7 +21,6 @@ if TYPE_CHECKING:
     PHASED_PROFILING_DIR: str = ""
     PYTHON_TRACER_LEVEL: int = 1
     USE_MOE_EP_KERNEL: bool = False
-    USE_VLLM_MOE_KERNEL: bool = False
     USE_MEGABLOCKS: bool = False
     USE_RAGGED_DOT: bool = False
     NUM_SLICES: int = 1
@@ -150,9 +149,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use custom expert-parallel kernel for MoE (Mixture of Experts)
     "USE_MOE_EP_KERNEL":
     env_bool("USE_MOE_EP_KERNEL", default=False),
-    # Use vllm kernel for MoE (Mixture of Experts)
-    "USE_VLLM_MOE_KERNEL":
-    env_bool("USE_VLLM_MOE_KERNEL", default=False),
     # Enable megablocks for JAX sparse matmul for MoE (Mixture of Experts)
     "USE_MEGABLOCKS":
     env_bool("USE_MEGABLOCKS", default=False),

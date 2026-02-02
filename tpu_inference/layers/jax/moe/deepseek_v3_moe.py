@@ -21,7 +21,7 @@ from flax import nnx
 from flax.typing import Sharding
 from jaxtyping import Float
 
-from tpu_inference.layers.common.fused_moe import MoEBackend
+from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
 
@@ -104,7 +104,9 @@ class DeepSeekV3Router(nnx.Module):
         scores_TE = jnp.einsum("TD,DE -> TE", x_TD, self.kernel_DE.value)
         scores_TE = nnx.sigmoid(scores_TE)
 
-        if self.moe_backend == MoEBackend.FUSED_MOE or self.moe_backend == MoEBackend.VLLM_MOE:
+        if self.moe_backend in [
+                MoEBackend.FUSED_MOE, MoEBackend.GMM_EP, MoEBackend.GMM_TP
+        ]:
             return scores_TE
 
         else:

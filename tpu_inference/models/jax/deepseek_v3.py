@@ -28,8 +28,7 @@ from torchax.ops.mappings import j2t_dtype
 from vllm.config import VllmConfig
 
 from tpu_inference import utils
-from tpu_inference.layers.common.fused_moe import (MoEBackend,
-                                                   select_moe_backend)
+from tpu_inference.layers.common.moe import MoEBackend, select_moe_backend
 from tpu_inference.layers.common.quantization import u8_unpack_e2m1
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
@@ -38,6 +37,7 @@ from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
 from tpu_inference.layers.jax.moe.deepseek_v3_moe import DeepSeekV3Router
 from tpu_inference.layers.jax.moe.moe import JaxMoE
+from tpu_inference.layers.jax.moe.utils import get_expert_parallelism
 from tpu_inference.layers.jax.transformer_block import (
     SharedExpertsTransformerBlock, TransformerBlock)
 from tpu_inference.logger import init_logger
@@ -70,6 +70,7 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                  v_head_dim,
                  num_local_experts,
                  model_dtype,
+                 moe_backend,
                  use_mla_kernel=False):
         super().__init__(vllm_config, framework="pt")
         self.num_layers = num_layers
@@ -82,8 +83,7 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
         self.kv_lora_rank = kv_lora_rank
         self.model_dtype = model_dtype
         self.use_mla_kernel = use_mla_kernel
-        # TODO
-        self.moe_backend = select_moe_backend(None)
+        self.moe_backend = moe_backend
 
         self._transpose_map = {
             # dense mlp
@@ -168,24 +168,23 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
             "model.layers.*.mlp.shared_experts.up_proj.weight":
             "layers.*.shared_experts.kernel_up_proj_DF",
         }
-        if self.moe_backend == MoEBackend.VLLM_MOE:
+        if self.moe_backend in [MoEBackend.GMM_EP, MoEBackend.GMM_TP]:
             # NOTE (jacobplatin): the first rule is needed because
             # the current GMM kernel expects that the second/third
             # dimensions are transposed.  The second rule is needed
             # because the GMM kernel expects that the up/gate proj
             # are fused into a single weight tensor.
-            # self._loaded_to_standardized_keys.update({
-            #     "model.layers.*.mlp.experts.*.down_proj.weight":
-            #     "layers.*.custom_module.kernel_down_proj_EDF",
-            #     "model.layers.*.mlp.experts.*.gating_upproj_EFD.weight":
-            #     "layers.*.custom_module.kernel_gating_upproj_EFD",
-            # })
+            self._loaded_to_standardized_keys.update({
+                "model.layers.*.mlp.experts.*.down_proj.weight":
+                "layers.*.custom_module.kernel_down_proj_EDF",
+                "model.layers.*.mlp.experts.*.gating_upproj_EFD.weight":
+                "layers.*.custom_module.kernel_gating_upproj_EFD",
+            })
             # NOTE (jacobplatin): only used for the MOE_VLLM backend, which
             # expects 2/3 dimensions to be transposed.
-            # self._transpose_map.update({
-            #     r"mlp\.experts\.\d+\.gating_upproj_EFD": (0, 2, 1),
-            # })
-            pass
+            self._transpose_map.update({
+                r"mlp\.experts\.\d+\.gating_upproj_EFD": (0, 2, 1),
+            })
 
         if self.use_mla_kernel:
             self._loaded_to_standardized_keys.update({
@@ -573,17 +572,19 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                             down_w, down_s = stacked_tensors.pop(layer_num +
                                                                  "down_proj")
 
-                            is_moe_kernel = False
-                            # model_for_loading.moe_backend in [
-                            #     MoEBackend.FUSED_MOE, MoEBackend.VLLM_MOE
-                            # ]
+                            is_moe_kernel = model_for_loading.moe_backend in [
+                                MoEBackend.FUSED_MOE, MoEBackend.GMM_TP,
+                                MoEBackend.GMM_EP
+                            ]
                             gate_name = loaded_name.replace(
                                 proj_type, "gate_proj")
                             up_name = loaded_name.replace(proj_type, "up_proj")
                             down_name = loaded_name.replace(
                                 proj_type, "down_proj")
                             if is_moe_kernel:
-                                if model_for_loading.moe_backend == MoEBackend.VLLM_MOE:
+                                if model_for_loading.moe_backend in [
+                                        MoEBackend.GMM_EP, MoEBackend.GMM_TP
+                                ]:
                                     # (E, D, F) -> (E, 2 * F, D)
 
                                     fused_w = torch.cat([gate_w, up_w], dim=1)
@@ -591,7 +592,7 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                                         [gate_s, up_s], dim=1
                                     ) if gate_s is not None and up_s is not None else None
                                     fused_name = loaded_name.replace(
-                                        proj_type, "gating_upproj_EFD")
+                                        proj_type, "gating_upproj_EDF")
 
                                 else:
                                     # (E, D, F) -> (E, 2, D, F)
@@ -802,8 +803,18 @@ class DeepSeekV3(nnx.Module):
 
         self.mesh = mesh
 
-        # TODO: None
-        self.moe_backend = select_moe_backend(None)
+        # TODO (jacobplatin): this shouldn't be related to
+        # the (DeepSeek) modelling code since it's really
+        # MoE-specific, but because we do weight loading
+        # here, we need to keep it for now.
+        # TODO (jacobplatin): remove this in another PR
+        edf_sharding = (None, ShardingAxisName.MODEL_1,
+                        ShardingAxisName.MODEL_2)
+        self.expert_axis_name = edf_sharding[0]
+        self.num_expert_parallelism = get_expert_parallelism(
+            self.expert_axis_name, self.mesh)
+        self.use_ep = self.num_expert_parallelism > 1
+        self.moe_backend = select_moe_backend(self.use_ep)
 
         self.weight_loader = self.WeightLoader(
             vllm_config=vllm_config,
@@ -817,6 +828,7 @@ class DeepSeekV3(nnx.Module):
             v_head_dim=v_head_dim,
             num_local_experts=num_local_experts,
             model_dtype=dtype,
+            moe_backend=self.moe_backend,
             use_mla_kernel=self.use_mla_kernel)
 
         self.embedder = Embedder(vocab_size=vocab_size,
@@ -924,6 +936,8 @@ class DeepSeekV3(nnx.Module):
                 dtype=dtype,
                 num_local_experts=num_local_experts,
                 apply_expert_weight_before_computation=False,
+                expert_axis_name=self.expert_axis_name,
+                use_ep=self.use_ep,
                 hidden_size=hidden_size,
                 intermediate_size_moe=moe_intermediate_size,
                 num_experts_per_tok=num_experts_per_token,
@@ -935,8 +949,7 @@ class DeepSeekV3(nnx.Module):
                                    ShardingAxisName.MODEL_1),
                 activation_ffw_ted=(ShardingAxisName.MLP_DATA, None,
                                     ShardingAxisName.MODEL_1),
-                edf_sharding=(None, ShardingAxisName.MODEL_1,
-                              ShardingAxisName.MODEL_2),
+                edf_sharding=edf_sharding,
                 efd_sharding=(None, ShardingAxisName.MODEL_2,
                               ShardingAxisName.MODEL_1),
                 moe_backend=self.moe_backend,
