@@ -379,4 +379,4 @@ class Qwen2ForCausalLM(JaxModule):
             self,
             mappings,
             # Keep .weight suffix for all parameters.
-            keep_hf_weight_suffix_when_match=['model'])
+            keep_hf_weight_suffix_when_match=['model', 'lm_head'])
