@@ -14,6 +14,11 @@
 
 from typing import List
 
+# MLA_PATCHED - MLA kv cache handling
+import os as _mla_os
+_VLLM_USE_MLA = _mla_os.environ.get("VLLM_USE_MLA", "0") == "1"
+
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -42,10 +47,18 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
                                  use_mla: bool = False):
     """Gets the KV cache shape based on the mesh configuration."""
 
+    model_cnt = mesh.shape["model"]
+    # MLA uses a single KV head for the compressed latent representation,
+    # which doesn't need to be divisible by model_cnt (TP size)
+    if _VLLM_USE_MLA:
+        print(f"[MLA] Skipping KV head sharding check: actual_num_kv_heads={actual_num_kv_heads}, model_cnt={model_cnt}")
+    else:
+        assert actual_num_kv_heads % model_cnt == 0
     axis_name = ShardingAxisName.ATTN_HEAD
     model_cnt = utils.get_mesh_shape_product(mesh, axis_name)
 
-    assert actual_num_kv_heads % model_cnt == 0
+    if not _VLLM_USE_MLA:
+        assert actual_num_kv_heads % model_cnt == 0
     # NOTE(chengjiyao): Currently, the attention kernel is tailored to the
     # specific model, rather than being determined by the head_dim. If new
     # models are introduced with a head_dim of 64, this will require additional

@@ -65,12 +65,19 @@ class BlockTable:
         self.block_table_cpu[[src, tgt]] = self.block_table_cpu[[tgt, src]]
 
     def commit(self, num_reqs: int) -> None:
-        self.block_table[:num_reqs].copy_(self.block_table_cpu[:num_reqs],
-                                          non_blocking=True)
+        # JAX arrays are immutable - we need to create a new array
+        # Copy from numpy CPU array to JAX device array
+        self.block_table = jnp.array(self.block_table_cpu)
 
     def clear(self) -> None:
-        self.block_table.fill_(0)
-        self.block_table_cpu.fill_(0)
+        # JAX arrays are immutable - create new zeroed arrays
+        self.block_table = jnp.zeros(
+            (self.max_num_reqs, self.max_num_blocks_per_req),
+            dtype=jnp.int32,
+        )
+        # NumPy uses fill() not fill_()
+        self.block_table_cpu.fill(0)
+        self.num_blocks_per_row.fill(0)
 
     def get_device_tensor(self) -> jax.Array:
         """Ruturns the device tensor of the block table."""
@@ -94,12 +101,25 @@ class MultiGroupBlockTable:
         ]
 
     def append_row(self, block_ids: list[list[int]], row_idx: int) -> None:
+        # Handle empty block_ids (e.g., MLA models with latent KV cache)
+        if not block_ids:
+            return
         for i, block_table in enumerate(self.block_tables):
-            block_table.append_row(block_ids[i], row_idx)
+            # Use empty list if block_ids doesn't have enough elements
+            ids = block_ids[i] if i < len(block_ids) else []
+            block_table.append_row(ids, row_idx)
 
     def add_row(self, block_ids: list[list[int]], row_idx: int) -> None:
+        # Handle empty block_ids (e.g., MLA models with latent KV cache)
+        if not block_ids:
+            # Initialize all block tables with empty rows
+            for block_table in self.block_tables:
+                block_table.add_row([], row_idx)
+            return
         for i, block_table in enumerate(self.block_tables):
-            block_table.add_row(block_ids[i], row_idx)
+            # Use empty list if block_ids doesn't have enough elements
+            ids = block_ids[i] if i < len(block_ids) else []
+            block_table.add_row(ids, row_idx)
 
     def move_row(self, src: int, tgt: int) -> None:
         for block_table in self.block_tables:

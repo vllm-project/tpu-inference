@@ -404,6 +404,7 @@ class TPUWorker:
                  and self.model_runner.model_config.enforce_eager)):
             self.model_runner.compilation_manager._precompile_sampling()
             self.model_runner.compilation_manager._precompile_gather_logprobs()
+
         self.model_runner.initialize_kv_cache(kv_cache_config,
                                               self.topology_order_id)
 

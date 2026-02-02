@@ -28,10 +28,14 @@ from jax.sharding import PartitionSpec as P
 
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
+import tpu_inference.kernels.mla.v1.kernel as mla_kernel
 from tpu_inference.kernels.flash_attention.kernel import flash_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_megacore
+
+import os as _mla_os
+_USE_MLA_DEBUG = _mla_os.environ.get("VLLM_USE_MLA", "0") == "1"
 
 MAX_ALLOWED_PAGE_INDICES_N = (
     128 * 1024
@@ -318,8 +322,16 @@ def sharded_ragged_paged_attention(
             v = jnp.repeat(v, factor, axis=1)
 
     qkv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
-    kv_cache_spec = P(ShardingAxisName.ATTN_DATA, None,
-                      ShardingAxisName.ATTN_HEAD, None, None)
+
+    # MLA uses 4D KV cache: (num_pages, page_size_packed, kv_packing, kv_dim)
+    # Standard attention uses 5D: (num_pages, page_size, num_kv_heads, kv_packing, head_dim)
+    is_mla = len(kv_cache.shape) == 4
+    if is_mla:
+        kv_cache_spec = P(ShardingAxisName.ATTN_DATA, None, None, None)
+    else:
+        kv_cache_spec = P(ShardingAxisName.ATTN_DATA, None,
+                          ShardingAxisName.ATTN_HEAD, None, None)
+
     in_specs = (
         qkv_spec,  # q
         qkv_spec,  # k

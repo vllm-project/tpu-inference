@@ -14,6 +14,7 @@
 """TPU-Friendly and Data-Movement-Friendly MLA Ragged Paged Attention kernel."""
 
 import functools
+import os
 
 import jax
 import jax.numpy as jnp
@@ -156,6 +157,7 @@ def ref_mla_ragged_paged_attention(
         cu_q_lens,
         distribution,
     )
+
     # Pad ql_nope and q_pe to make the last dimension 128-byte aligned.
     actual_lkv_dim = ql_nope.shape[-1]
     lkv_dim = align_to(actual_lkv_dim, 128)
@@ -288,6 +290,7 @@ def dynamic_validate_inputs(
     debug_mode: bool = False,
 ):
     """Validate inputs to the MLA RPA kernel dynamically."""
+    # Static validation (shape checks) works during JAX tracing
     static_validate_inputs(
         ql_nope,
         q_pe,
@@ -311,6 +314,12 @@ def dynamic_validate_inputs(
         vmem_limit_bytes=vmem_limit_bytes,
         debug_mode=debug_mode,
     )
+
+    # Skip dynamic validation during JAX tracing - these checks require
+    # concrete Python values which aren't available when tracing
+    if isinstance(distribution, jax.core.Tracer):
+        return
+
     max_num_tokens = ql_nope.shape[0]
     total_num_pages = cache_kv.shape[0]
     _, page_size_per_kv_packing, kv_packing, _ = cache_kv.shape

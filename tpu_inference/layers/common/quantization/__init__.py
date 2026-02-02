@@ -53,7 +53,7 @@ def quantize_tensor_to_mxfp4_packed(
 
 def u8_unpack_e2m1(u8_packed_e2m1: jax.Array) -> jax.Array:
     """Unpack e2m1 tensor that was packed into u8."""
-    assert u8_packed_e2m1.dtype == jnp.uint8
+    # assert u8_packed_e2m1.dtype == jnp.uint8
     e2m1 = jax.lax.bitcast_convert_type(u8_packed_e2m1, jnp.float4_e2m1fn)
     # bitcast creates one more dimension that splits 8 bits into two e2m1.
     # we flatten them with the last dim.

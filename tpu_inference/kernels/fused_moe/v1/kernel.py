@@ -83,6 +83,7 @@ def ref_moe(
         *,
         renormalize_topk_logits: bool = False,
         act_fn: str = "silu",
+        scoring_func: str = "softmax",
         subc_quant_w1_sz: int | None = None,
         subc_quant_w2_sz: int | None = None,
         w1_scale:
@@ -100,8 +101,12 @@ def ref_moe(
     n_tokens = tokens.shape[0]  # num_tokens
 
     # Compute gating scores for all experts
-    gating_logits = jax.nn.softmax(gating_output,
-                                   axis=-1)  # [num_tokens, n_experts]
+    if scoring_func == "softmax":
+        gating_logits = jax.nn.softmax(gating_output, axis=-1)  # [num_tokens, n_experts]
+    elif scoring_func == "sigmoid":
+        gating_logits = jax.nn.sigmoid(gating_output)  # [num_tokens, n_experts]
+    else:
+        gating_logits = jax.nn.softmax(gating_output, axis=-1)  # default to softmax
 
     # Select top-k experts per token
     top_k_logits, top_k_indices = lax.top_k(
@@ -233,6 +238,7 @@ def _fused_ep_moe_kernel(
         renormalize_topk_logits: bool,
         ep_axis_name: str,
         act_fn: str,
+        scoring_func: str,
         subc_quant_w1_sz: int | None = None,
         subc_quant_w2_sz: int | None = None,
         # Kernel tuning params.
@@ -1124,7 +1130,14 @@ def _fused_ep_moe_kernel(
         wait_fetch_b_gating(bt_id)
 
         b_gating = b_gating_x2_vmem[bt_sem_id]
-        b_gating_score = jax.nn.softmax(b_gating, axis=-1)
+        # Apply scoring function (softmax or sigmoid)
+        if scoring_func == "softmax":
+            b_gating_score = jax.nn.softmax(b_gating, axis=-1)
+        elif scoring_func == "sigmoid":
+            b_gating_score = jax.nn.sigmoid(b_gating)
+        else:
+            # Default to softmax for safety
+            b_gating_score = jax.nn.softmax(b_gating, axis=-1)
         top_k_logits_lst, t2e_routing, expert_sizes, expert_starts = get_top_k(
             b_gating_score, top_k, renormalize_topk_logits)
 
@@ -1224,6 +1237,7 @@ def _fused_ep_moe_kernel(
         "bd1c",
         "bd2c",
         "ep_axis_name",
+        "scoring_func",
     ],
 )
 def fused_ep_moe(
@@ -1236,6 +1250,7 @@ def fused_ep_moe(
     *,
     renormalize_topk_logits: bool = False,
     act_fn: str = "silu",
+    scoring_func: str = "softmax",
     subc_quant_w1_sz: int | None = None,
     subc_quant_w2_sz: int | None = None,
     w1_scale: (
@@ -1465,6 +1480,7 @@ def fused_ep_moe(
             renormalize_topk_logits=renormalize_topk_logits,
             ep_axis_name=ep_axis_name,
             act_fn=act_fn,
+            scoring_func=scoring_func,
             subc_quant_w1_sz=subc_quant_w1_sz,
             subc_quant_w2_sz=subc_quant_w2_sz,
             bt=bt,
