@@ -112,10 +112,13 @@ def quantize_array(
     is_float = jnp.issubdtype(quant_dtype, jnp.floating)
     dtype_info = jnp.finfo(quant_dtype) if is_float else jnp.iinfo(quant_dtype)
     dtype_max = float(dtype_info.max)
+    dtype_min = float(dtype_info.min)
 
     # TODO(kyuyeunk): Investigate performance gain from non xlu transpose.
     scale = jnp.transpose(x_abs_max / dtype_max)
-    return (x / scale).astype(quant_dtype), scale.astype(jnp.float32)
+    scale_inv = jnp.nan_to_num(1 / scale, jnp.inf)
+    x_q = jnp.clip(x * scale_inv, dtype_min, dtype_max)
+    return x_q.astype(quant_dtype), scale.astype(jnp.float32)
 
 
 def get_vmem_limit(

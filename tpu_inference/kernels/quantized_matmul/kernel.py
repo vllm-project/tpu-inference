@@ -157,9 +157,7 @@ def quantized_matmul_kernel(
     # Pallas kernel only has access to a single block of the input. Therefere,
     # for per-token quantization, abs max has to be computed outside of the
     # kernel.
-    eps = 1e-5 #jnp.finfo(x.dtype).tiny
-    x_abs_max = jnp.maximum(jnp.max(jnp.abs(x), axis=-1, keepdims=False), eps)  # [bs]
-    #x_abs_max = jnp.max(jnp.abs(x), axis=-1, keepdims=False)  # [bs]
+    x_abs_max = jnp.max(jnp.abs(x), axis=-1, keepdims=False)  # [bs]
     # Pallas requires minormost dim to be a multiple of sublane size 128.
     # Therefore, instead of using [bs, 1], we reshape this into [1, bs]
     x_abs_max = jnp.expand_dims(x_abs_max, axis=0)  # [1, bs]
