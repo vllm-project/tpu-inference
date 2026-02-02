@@ -22,12 +22,12 @@ from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
-
 from tpu_inference.models.jax.utils.multi_modal_utils import (
     flatten_embeddings, sanity_check_mm_encoder_outputs)
 
 if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
+
 
 # TODO(patrickji): Investigate whether we can deprecate scatter_mm_placeholders and gather_mm_placeholders
 def scatter_mm_placeholders(
@@ -57,6 +57,7 @@ def scatter_mm_placeholders(
     placeholders[is_embed] = embeds
     return placeholders
 
+
 def gather_mm_placeholders(
     placeholders: torch.Tensor,
     is_embed: torch.Tensor | None,
@@ -71,6 +72,7 @@ def gather_mm_placeholders(
         return placeholders
 
     return placeholders[is_embed]
+
 
 class MultiModalManager:
 
