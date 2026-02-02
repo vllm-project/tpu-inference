@@ -311,8 +311,11 @@ class Qwen3ForCausalLM(JaxModule):
             k + ".weight": v
             for k, v in metadata_map.reshape_map.items()
         }
+        keep_hf_weight_suffix_when_match = ['model']
+        if not self.vllm_config.model_config.hf_config.tie_word_embeddings:
+            keep_hf_weight_suffix_when_match.append('lm_head')
         loader.load_weights(
             self,
             metadata_map,
             # Keep .weight suffix for all parameters.
-            keep_hf_weight_suffix_when_match=['model', 'lm_head'])
+            keep_hf_weight_suffix_when_match=keep_hf_weight_suffix_when_match)

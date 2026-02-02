@@ -375,8 +375,11 @@ class Qwen2ForCausalLM(JaxModule):
         mappings = {}
 
         loader = self.WeightLoader(self.vllm_config, self.mesh)
+        keep_hf_weight_suffix_when_match = ['model']
+        if not self.vllm_config.model_config.hf_config.tie_word_embeddings:
+            keep_hf_weight_suffix_when_match.append('lm_head')
         loader.load_weights(
             self,
             mappings,
             # Keep .weight suffix for all parameters.
-            keep_hf_weight_suffix_when_match=['model', 'lm_head'])
+            keep_hf_weight_suffix_when_match=keep_hf_weight_suffix_when_match)
