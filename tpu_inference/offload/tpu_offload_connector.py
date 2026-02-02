@@ -141,6 +141,12 @@ KV_SAVE_TRANSFER_LATENCY = Histogram(
     "Time spent transferring KV blocks from TPU to CPU memory (Hardware Phase).",
     buckets=[0.01, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0])
 
+KV_SAVE_TRANSFER_BW_GBPS = Histogram(
+    "vllm_kv_cache_save_transfer_gbps",
+    "Bandwidth of TPU-to-CPU KV cache transfer in GB/s.",
+    labelnames=["num_blocks"],
+    buckets=[0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 40, 60, 80, 100])
+
 KV_SAVE_POST_TRANSFER_LATENCY = Histogram(
     'vllm_kv_cache_save_post_transfer_seconds',
     'Time spent registering chunks and updating CPU backend (Software Phase)',
@@ -185,7 +191,7 @@ GATHER_TPU_BLOCKS_CALLS = Counter(
     "vllm_gather_tpu_blocks_calls_total",
     "Total number of times gather_tpu_blocks has been called.")
 
-TRANSFER_AND_GEGISTER_CPU_CHUNKS_CALLS = Counter(
+TRANSFER_AND_REGISTER_CPU_CHUNKS_CALLS = Counter(
     "vllm_transfer_and_register_cpu_chunks_calls_total",
     "Total number of times _transfer_and_register_cpu_chunks has been called.")
 
@@ -1955,7 +1961,7 @@ class TPUOffloadConnectorWorker:
         Part 2: Swaps data to CPU, splits into chunks, and registers with CPU backend.
         Starts from 'chunks_on_cpu = None'.
         """
-        TRANSFER_AND_GEGISTER_CPU_CHUNKS_CALLS.inc()
+        TRANSFER_AND_REGISTER_CPU_CHUNKS_CALLS.inc()
         start_time = time.time()
         chunks_on_cpu = None
         if not self.no_op_swap_out:
@@ -1992,6 +1998,11 @@ class TPUOffloadConnectorWorker:
                 f"Total size of chunks_on_cpu: {total_size_bytes / 1024**2:.2f} MB"
             )
             KV_SAVED_BYTES.inc(total_size_bytes)
+
+            if duration > 0:
+                bw_gbps = (total_size_bytes / (1024**3)) / duration
+                KV_SAVE_TRANSFER_BW_GBPS.labels(
+                    num_blocks=str(num_blocks_to_save)).observe(bw_gbps)
 
         post_transfer_start_time = time.time()
 
