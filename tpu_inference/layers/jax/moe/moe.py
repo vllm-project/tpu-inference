@@ -153,6 +153,7 @@ class JaxMoE(JaxModule):
     # --- Flags & Configs ---
     apply_expert_weight_before_computation: bool
     expert_axis_name: str
+    num_expert_parallelism: int
     use_ep: bool
     random_init: bool = False
     moe_backend: MoEBackend = MoEBackend.DENSE_MAT
@@ -201,7 +202,7 @@ class JaxMoE(JaxModule):
                 **self.block_size,
             )
             return output_TD
-        elif self.moe_backend == MoEBackend.GMM_EP | self.moe_backend == MoEBackend.GMM_TP:
+        elif self.moe_backend in [MoEBackend.GMM_EP, MoEBackend.GMM_TP]:
             router_logits_TE = self.router(x_TD)
             # TODO (jacobplatin): the current GMM kernel expects that w1/w2 have the second and third dimensions
             # transposed, but this is likely not optimal for DeepSeek, so we will need to fix this
@@ -308,12 +309,8 @@ class JaxMoE(JaxModule):
             self.quant_method = None
         elif (quant_method :=
               self.quant_config.get_quant_method(self, prefix=self.prefix)):
-            # Ensure QuantizeMethodBase is imported or available in scope
             assert isinstance(quant_method, QuantizeMethodBase)
             self.quant_method = quant_method
-
-            # This triggers the quantization library to inspect 'self' and
-            # replace/wrap parameters.
             self.quant_method.create_weights_jax(self)
         else:
             self.quant_method = None

@@ -263,6 +263,11 @@ def get_expert_parallelism(expert_axis_name: str, mesh: Mesh) -> int:
     (jacobplatin).
 
     Args:
+        expert_axis_name: The expert axis name.
+        mesh: The mesh.
+
+    Returns:
+        The expert parallelism number.
     """
     if expert_axis_name is None:
         return 1

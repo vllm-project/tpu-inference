@@ -48,8 +48,8 @@ class MoEBackend(Enum):
 
 def select_moe_backend(use_ep: bool):
     if envs.USE_MOE_EP_KERNEL:
-        logger.info("[MoE]: Using fused MoE EP kernel")
         if use_ep:
+            logger.info("[MoE]: Using fused MoE EP kernel")
             return MoEBackend.FUSED_MOE
 
     if envs.USE_MEGABLOCKS:
@@ -64,9 +64,10 @@ def select_moe_backend(use_ep: bool):
         logger.warning_once(
             "USE_MOE_EP_KERNEL=1 but expert parallelism is not "
             "enabled. Falling back to gmm implementation.")
+        logger.info("[MoE]: Using GMM EP kernel")
         return MoEBackend.GMM_EP
 
-    # Use default implementation.
+    logger.info("[MoE]: Using GMM TP kernel")
     return MoEBackend.GMM_TP
 
 

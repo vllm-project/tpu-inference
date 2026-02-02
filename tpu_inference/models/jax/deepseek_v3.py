@@ -14,16 +14,17 @@
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from typing import List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
 import torch
 from flax import nnx
-from flax.typing import PRNGKey
+from flax.typing import PRNGKey, Sharding
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
+from jaxtyping import Float
 from torchax.ops.mappings import j2t_dtype
 from vllm.config import VllmConfig
 
@@ -33,13 +34,12 @@ from tpu_inference.layers.common.quantization import u8_unpack_e2m1
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
 from tpu_inference.layers.jax.attention.deepseek_v3_attention import MLA
+from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.constants import KVCacheType
-from tpu_inference.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
-from tpu_inference.layers.jax.moe.deepseek_v3_moe import DeepSeekV3Router
+from tpu_inference.layers.jax.layers import (Embedder, FlaxUtils, LMhead,
+                                             RMSNorm)
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.moe.utils import get_expert_parallelism
-from tpu_inference.layers.jax.transformer_block import (
-    SharedExpertsTransformerBlock, TransformerBlock)
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (BaseWeightLoader,
                                                          get_param,
@@ -53,6 +53,252 @@ DTYPE_VIEW_MAP = {
     jnp.dtype(jnp.bfloat16): torch.uint16,
     jnp.dtype(jnp.float32): torch.uint32,
 }
+
+modeling_flax_utils = FlaxUtils()
+
+
+@dataclass(kw_only=True)
+class DeepseekV3MLP(nnx.Module):
+    """A Gated Feed-Forward Network (FFN) layer.
+
+    This module consists of two linear projections (gating and up-projection),
+    an element-wise multiplication of the activated gating projection and the
+    up-projection, followed by a final downward projection.
+
+    Attributes:
+        sharding_cfg: The configuration for tensor sharding.
+    """
+    dtype: jnp.dtype
+    hidden_act: str
+    hidden_size: int
+    intermediate_size: int
+    df_sharding: Sharding = ()
+    fd_sharding: Sharding = ()
+    activation_ffw_td: Sharding = ()
+    random_init: bool = False
+
+    rngs: InitVar[nnx.Rngs]
+
+    def __call__(self, x_TD):
+        """Performs the forward pass of the FFW layer.
+
+        Args:
+            x_TD: The input tensor of shape either `(sequence, d_model)`
+
+        Returns:
+            The output tensor of shape `(batch, sequence, d_model)`.
+        """
+        # TODO: refactor to use JaxEinsum
+        x_TD = jnp.asarray(x_TD, self.dtype)
+        x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
+        with jax.named_scope("wi_0"):
+            gating_TF = jnp.einsum('TD,DF -> TF', x_TD,
+                                   self.kernel_gating_DF.value)
+            activated_gating_TF = modeling_flax_utils.ACT2FN[self.hidden_act](
+                gating_TF)
+        with jax.named_scope("wi_1"):
+            up_proj_TF = jnp.einsum('TD,DF -> TF', x_TD,
+                                    self.kernel_up_proj_DF.value)
+        fuse_TF = activated_gating_TF * up_proj_TF
+        with jax.named_scope("wo"):
+            output_TD = jnp.einsum('TF,FD -> TD', fuse_TF,
+                                   self.kernel_down_proj_FD.value)
+
+        return output_TD
+
+    def __post_init__(self, rngs: nnx.Rngs):
+        D = self.hidden_size
+        F = self.intermediate_size
+
+        # TODO: replace this with JaxEinsums
+        self.kernel_gating_DF = create_param(rngs,
+                                             shape=(D, F),
+                                             dtype=self.dtype,
+                                             sharding=self.df_sharding,
+                                             random_init=self.random_init)
+        self.kernel_up_proj_DF = create_param(rngs,
+                                              shape=(D, F),
+                                              dtype=self.dtype,
+                                              sharding=self.df_sharding,
+                                              random_init=self.random_init)
+        self.kernel_down_proj_FD = create_param(rngs,
+                                                shape=(F, D),
+                                                dtype=self.dtype,
+                                                sharding=self.fd_sharding,
+                                                random_init=self.random_init)
+
+
+@dataclass(kw_only=True)
+class DeepseekV3MoE(nnx.Module):
+    """
+    Corresponds to vLLM's DeepseekV2MoE.
+    Handles the routed and shared experts + the relevant forward pass.
+
+    Reference here: https://github.com/vllm-project/vllm/blob/2b465570e6dd327e8422ef9c87e9b2b1454ceaed/vllm/model_executor/models/deepseek_v2.py#L223
+    """
+    experts: JaxMoE
+    shared_experts: Optional[DeepseekV3MLP] = None
+
+    routed_scaling_factor: float = 1.0
+
+    def __call__(self, x_TD: jax.Array) -> jax.Array:
+        # Compute Routed Experts
+        final_hidden_states = self.experts(x_TD)
+
+        # (Maybe) Compute Shared Experts
+        if self.shared_experts is not None:
+            shared_output = self.shared_experts(x_TD)
+            final_hidden_states += shared_output
+
+        return final_hidden_states
+
+
+@dataclass(kw_only=True)
+class DeepseekV3DecoderLayer(nnx.Module):
+    """
+    Implementats the DecoderLayer for DeepseekV3.
+    """
+    layer_idx: int
+    input_layernorm: RMSNorm
+    post_attention_layernorm: RMSNorm
+
+    self_attn: nnx.Module
+
+    # MLP can be either the Dense MLP (for first k layers) or DeepseekV2MoE
+    # TODO: rename to mlp? custom_module seems needlessly confusing
+    custom_module: nnx.Module | DeepseekV3MoE | DeepseekV3MLP
+
+    def __call__(
+        self, x_TD: jax.Array, is_prefill: bool, kv_cache: List[jax.Array],
+        attention_metadata: AttentionMetadata
+    ) -> Tuple[List[jax.Array], jax.Array]:
+
+        # Run Self-Attention
+        residual = x_TD
+        hidden_states = self.input_layernorm(x_TD)
+        new_cache, attn_output = self.self_attn(hidden_states, is_prefill,
+                                                kv_cache, attention_metadata)
+        hidden_states = residual + attn_output
+
+        # Run MLP/MoE
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        custom_module_output = self.custom_module(hidden_states)
+
+        # Residual
+        hidden_states = residual + custom_module_output
+
+        return new_cache, hidden_states
+
+
+@dataclass
+class DeepSeekV3Router(nnx.Module):
+    """Router module for Mixture-of-Experts (MoE) layers.
+
+    This module determines which experts each token should be routed to based on the input.
+    """
+
+    hidden_size: int
+    num_experts: int
+    num_experts_per_tok: int
+    n_groups: int
+    topk_groups: int
+    norm_topk_prob: bool
+    routed_scaling_factor: float
+    dtype: jnp.dtype
+    rngs: InitVar[nnx.Rngs]
+
+    # Sharding Attributes
+    activation_ffw_td: Sharding = ()
+    ed_sharding: Sharding = ()
+    e_sharding: Sharding = ()
+
+    random_init: bool = False
+
+    router_bias_dtype: jnp.dtype = jnp.float32
+
+    moe_backend: MoEBackend = MoEBackend.DENSE_MAT
+
+    def get_topk_indices(self, scores_TE: Float) -> Float:
+        """Get the topk indices of the scores.
+
+        Args:
+            scores_TE: The scores to get the topk indices of. Shape (sequence, num_experts).
+
+        Returns:
+            The topk indices of the scores. Shape (sequence, num_experts_per_tok).
+        """
+
+        scores_TE = scores_TE + self.bias_E
+        if self.n_groups > 1:
+            experts_per_group = self.num_experts // self.n_groups
+            group_scores_TGM = jnp.reshape(
+                scores_TE, (-1, self.n_groups, experts_per_group))
+            group_scores_TG2 = jax.lax.top_k(group_scores_TGM, k=2)[0]
+            group_scores_TG = jnp.sum(group_scores_TG2, axis=-1)
+            indices = jax.lax.top_k(group_scores_TG, k=self.topk_groups)[1]
+
+            mask_TG = jnp.any(jnp.arange(
+                self.n_groups)[:, None] == indices[..., None, :],
+                              axis=-1)
+            mask_TE = jnp.repeat(mask_TG,
+                                 scores_TE.shape[-1] // mask_TG.shape[-1], -1)
+            scores_TE = jnp.where(mask_TE, scores_TE, 0.0)
+
+        indices_TX = jax.lax.top_k(scores_TE, k=self.num_experts_per_tok)[1]
+
+        return indices_TX
+
+    def __call__(self, x_TD: Float) -> Tuple[Float, Float]:
+        """Routes tokens to top k experts.
+
+        Args:
+            x_TD: Input array of shape (sequence, d_model).
+
+        Returns:
+            A tuple containing:
+                - weights: Normalized weights for selected experts, shape (sequence, num_experts_per_tok).
+                - indices: Indices of selected experts, shape (sequence, num_experts_per_tok).
+        """
+        x_TD = jnp.asarray(x_TD, self.dtype)
+        x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
+
+        scores_TE = jnp.einsum("TD,DE -> TE", x_TD, self.kernel_DE.value)
+        scores_TE = nnx.sigmoid(scores_TE)
+
+        if self.moe_backend in [
+                MoEBackend.FUSED_MOE, MoEBackend.GMM_EP, MoEBackend.GMM_TP
+        ]:
+            return scores_TE
+
+        original_scores_TE = scores_TE
+        topk_indices_TX = self.get_topk_indices(scores_TE)
+        weights_TX = jnp.take_along_axis(original_scores_TE,
+                                         topk_indices_TX,
+                                         axis=-1)
+
+        if self.norm_topk_prob:
+            weights_TX /= jnp.sum(weights_TX, axis=-1)[..., None] + 1e-20
+
+        weights_TX *= self.routed_scaling_factor
+
+        return weights_TX, topk_indices_TX
+
+    def __post_init__(self, rngs: nnx.Rngs):
+        """Generates the router kernel (weights and bias) for routing."""
+        D = self.hidden_size
+        E = self.num_experts
+        # TODO: replace this with a JaxEinsum
+        self.kernel_DE = create_param(rngs,
+                                      shape=(D, E),
+                                      dtype=self.dtype,
+                                      sharding=self.ed_sharding,
+                                      random_init=self.random_init)
+        self.bias_E = create_param(rngs,
+                                   shape=(E, ),
+                                   dtype=self.router_bias_dtype,
+                                   sharding=self.e_sharding,
+                                   random_init=self.random_init)
 
 
 @dataclass
@@ -122,24 +368,24 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
             "final_norm.scale",
             # norm in transformer blocks
             "model.layers.*.input_layernorm.weight":
-            "layers.*.pre_attention_norm.scale",
+            "layers.*.input_layernorm.scale",
             "model.layers.*.post_attention_layernorm.weight":
-            "layers.*.pre_mlp_norm.scale",
+            "layers.*.post_attention_layernorm.scale",
             # attention (MLA)
             "model.layers.*.self_attn.q_a_layernorm.weight":
-            "layers.*.attn.q_rms_norm.scale",
+            "layers.*.self_attn.q_rms_norm.scale",
             "model.layers.*.self_attn.kv_a_layernorm.weight":
-            "layers.*.attn.kv_rms_norm.scale",
+            "layers.*.self_attn.kv_rms_norm.scale",
             "model.layers.*.self_attn.q_a_proj.weight":
-            "layers.*.attn.kernel_q_down_proj_DA",
+            "layers.*.self_attn.kernel_q_down_proj_DA",
             "model.layers.*.self_attn.q_b_proj.weight":
-            "layers.*.attn.kernel_q_up_proj_AP",
+            "layers.*.self_attn.kernel_q_up_proj_AP",
             "model.layers.*.self_attn.kv_a_proj_with_mqa.weight":
-            "layers.*.attn.kernel_kv_down_proj_DA",
+            "layers.*.self_attn.kernel_kv_down_proj_DA",
             "model.layers.*.self_attn.kv_b_proj.weight":
-            "layers.*.attn.kernel_kv_up_proj_AL",
+            "layers.*.self_attn.kernel_kv_up_proj_AL",
             "model.layers.*.self_attn.o_proj.weight":
-            "layers.*.attn.kernel_o_proj_RD",
+            "layers.*.self_attn.kernel_o_proj_RD",
             # Dense ffw
             "model.layers.*.mlp.gate_proj.weight":
             "layers.*.custom_module.kernel_gating_DF",
@@ -147,26 +393,26 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
             "layers.*.custom_module.kernel_up_proj_DF",
             "model.layers.*.mlp.down_proj.weight":
             "layers.*.custom_module.kernel_down_proj_FD",
-            # MOE(routed experts)
+            # MOE(routed experts) - Nested under .experts now
             "model.layers.*.mlp.gate.weight":
-            "layers.*.custom_module.router.kernel_DE",
+            "layers.*.custom_module.experts.router.kernel_DE",
             "model.layers.*.mlp.gate.e_score_correction_bias":
-            "layers.*.custom_module.router.bias_E",
+            "layers.*.custom_module.experts.router.bias_E",
             "model.layers.*.mlp.experts.*.gate_proj.weight":
-            "layers.*.custom_module.kernel_gating_EDF",
+            "layers.*.custom_module.experts.kernel_gating_EDF",
             "model.layers.*.mlp.experts.*.down_proj.weight":
-            "layers.*.custom_module.kernel_down_proj_EFD",
+            "layers.*.custom_module.experts.kernel_down_proj_EFD",
             "model.layers.*.mlp.experts.*.up_proj.weight":
-            "layers.*.custom_module.kernel_up_proj_EDF",
+            "layers.*.custom_module.experts.kernel_up_proj_EDF",
             "model.layers.*.mlp.experts.*.gate_upproj_fused.weight":
-            "layers.*.custom_module.kernel_gating_upproj_E2DF",
-            # MOE(shared experts)
+            "layers.*.custom_module.experts.kernel_gating_upproj_E2DF",
+            # MOE(shared experts) - Nested under .shared_experts inside custom_module
             "model.layers.*.mlp.shared_experts.down_proj.weight":
-            "layers.*.shared_experts.kernel_down_proj_FD",
+            "layers.*.custom_module.shared_experts.kernel_down_proj_FD",
             "model.layers.*.mlp.shared_experts.gate_proj.weight":
-            "layers.*.shared_experts.kernel_gating_DF",
+            "layers.*.custom_module.shared_experts.kernel_gating_DF",
             "model.layers.*.mlp.shared_experts.up_proj.weight":
-            "layers.*.shared_experts.kernel_up_proj_DF",
+            "layers.*.custom_module.shared_experts.kernel_up_proj_DF",
         }
         if self.moe_backend in [MoEBackend.GMM_EP, MoEBackend.GMM_TP]:
             # NOTE (jacobplatin): the first rule is needed because
@@ -176,22 +422,22 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
             # are fused into a single weight tensor.
             self._loaded_to_standardized_keys.update({
                 "model.layers.*.mlp.experts.*.down_proj.weight":
-                "layers.*.custom_module.kernel_down_proj_EDF",
-                "model.layers.*.mlp.experts.*.gating_upproj_EFD.weight":
-                "layers.*.custom_module.kernel_gating_upproj_EFD",
+                "layers.*.custom_module.experts.kernel_down_proj_EFD",
+                "model.layers.*.mlp.experts.*.gating_upproj_EDF.weight":
+                "layers.*.custom_module.experts.kernel_gating_upproj_EDF",
             })
             # NOTE (jacobplatin): only used for the MOE_VLLM backend, which
             # expects 2/3 dimensions to be transposed.
             self._transpose_map.update({
-                r"mlp\.experts\.\d+\.gating_upproj_EFD": (0, 2, 1),
+                r"mlp\.experts\.\d+\.gating_upproj_EDF": (0, 2, 1),
             })
 
         if self.use_mla_kernel:
             self._loaded_to_standardized_keys.update({
                 "model.layers.*.self_attn.k_b_proj.weight":
-                "layers.*.attn.kernel_k_up_proj_ANH",
+                "layers.*.self_attn.kernel_k_up_proj_ANH",
                 "model.layers.*.self_attn.v_b_proj.weight":
-                "layers.*.attn.kernel_v_up_proj_ANH",
+                "layers.*.self_attn.kernel_v_up_proj_ANH",
             })
         # TODO (jacobplatin): we should not be hard-coding these
         self.scale_dtype, self.quant_dtype = jnp.bfloat16, jnp.float8_e4m3fn
@@ -221,13 +467,13 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                 "custom_module.kernel_up_proj_DF": (28, 18432),
                 "custom_module.kernel_down_proj_FD": (72, 7168),
                 # Attention (3D for MLA, 2D for the rest)
-                "attn.kernel_q_down_proj_DA": (28, 1536),
-                "attn.kernel_q_up_proj_AP": (6, 24576),
-                "attn.kernel_kv_down_proj_DA": (28, 576),
-                "attn.kernel_kv_up_proj_AL": (2, 32768),
-                "attn.kernel_o_proj_RD": (64, 7168),
-                "attn.kernel_k_up_proj_ANH": (2, 128, 128),  # MLA
-                "attn.kernel_v_up_proj_ANH": (2, 128, 128),  # MLA
+                "self_attn.kernel_q_down_proj_DA": (28, 1536),
+                "self_attn.kernel_q_up_proj_AP": (6, 24576),
+                "self_attn.kernel_kv_down_proj_DA": (28, 576),
+                "self_attn.kernel_kv_up_proj_AL": (2, 32768),
+                "self_attn.kernel_o_proj_RD": (64, 7168),
+                "self_attn.kernel_k_up_proj_ANH": (2, 128, 128),  # MLA
+                "self_attn.kernel_v_up_proj_ANH": (2, 128, 128),  # MLA
             }
 
             # TODO (jacobplatin): remove this check eventually!
@@ -586,7 +832,6 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                                         MoEBackend.GMM_EP, MoEBackend.GMM_TP
                                 ]:
                                     # (E, D, F) -> (E, 2 * F, D)
-
                                     fused_w = torch.cat([gate_w, up_w], dim=1)
                                     fused_s = torch.cat(
                                         [gate_s, up_s], dim=1
@@ -779,6 +1024,7 @@ class DeepSeekV3(nnx.Module):
         interleave_moe_layer_step: int = 1  # Deepseek V3 has moe_layer_freq=1 in hf config.
         hidden_act: str = "silu"
         rms_norm_eps: float = 1e-06
+        routed_scaling_factor: float = 2.5
         first_k_dense_replace: int = 3  # replace the first few MOE layers to dense layer.
         self.use_mla_kernel: bool = self.vllm_config.model_config.use_mla
 
@@ -883,79 +1129,34 @@ class DeepSeekV3(nnx.Module):
                 kv_da_sharding=(None, ShardingAxisName.VOCAB),
                 rd_sharding=(ShardingAxisName.MLP_TENSOR, None))
 
-        for i in range(first_k_dense_replace):
-            block = TransformerBlock(
-                pre_attention_norm=RMSNorm(
-                    dims=hidden_size,
-                    epsilon=rms_norm_eps,
-                    with_scale=True,
-                    dtype=dtype,
-                    rngs=self.rng,
-                ),
-                pre_mlp_norm=RMSNorm(
-                    dims=hidden_size,
-                    epsilon=rms_norm_eps,
-                    with_scale=True,
-                    dtype=dtype,
-                    rngs=self.rng,
-                ),
-                attn=_create_mla(),
-                custom_module=DenseFFW(
-                    dtype=dtype,
-                    hidden_act=hidden_act,
-                    hidden_size=hidden_size,
-                    intermediate_size=ffw_intermediate_size,
-                    rngs=self.rng,
-                    activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
-                    df_sharding=(None, ShardingAxisName.MLP_TENSOR),
-                    fd_sharding=(ShardingAxisName.MLP_TENSOR, None)))
+        for i in range(num_layers):
+            input_layernorm = RMSNorm(
+                dims=hidden_size,
+                epsilon=rms_norm_eps,
+                with_scale=True,
+                dtype=dtype,
+                rngs=self.rng,
+            )
 
-            self.layers.append(block)
-        # TODO (jacobplatin): this is very hacky for now, and we need to clean-up when
-        # the refactor occurs.  Basically, we assume that the MLP/MoE layers are in FP4
-        # unless specified otherwise, but we shouldn't be doing this.
-        moe_dtype = jnp.float8_e4m3fn if self.weight_loader.is_native_fp8_model else vllm_config.model_config.hf_config.quantization_config.get(
-            "tpu_settings", {}).get("mlp_dtype", jnp.float4_e2m1fn)
-        for i in range(first_k_dense_replace, num_layers):
-            is_moe_layer = ((i + 1) % interleave_moe_layer_step == 0)
-            router = DeepSeekV3Router(
-                hidden_size=hidden_size,
-                num_experts=num_local_experts,
-                num_experts_per_tok=num_experts_per_token,
-                n_groups=n_group,
-                topk_groups=4,
-                norm_topk_prob=True,
-                rngs=self.rng,
-                routed_scaling_factor=2.5,
+            post_attention_layernorm = RMSNorm(
+                dims=hidden_size,
+                epsilon=rms_norm_eps,
+                with_scale=True,
                 dtype=dtype,
-                moe_backend=self.moe_backend,
-                activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
-                ed_sharding=(None, None),
-                e_sharding=(None, ))
-            custom_module = JaxMoE(
-                dtype=dtype,
-                num_local_experts=num_local_experts,
-                apply_expert_weight_before_computation=False,
-                expert_axis_name=self.expert_axis_name,
-                use_ep=self.use_ep,
-                hidden_size=hidden_size,
-                intermediate_size_moe=moe_intermediate_size,
-                num_experts_per_tok=num_experts_per_token,
-                mesh=self.mesh,
-                hidden_act=hidden_act,
                 rngs=self.rng,
-                quant_config=vllm_config.quant_config,
-                activation_ffw_td=(ShardingAxisName.MLP_DATA,
-                                   ShardingAxisName.MODEL_1),
-                activation_ffw_ted=(ShardingAxisName.MLP_DATA, None,
-                                    ShardingAxisName.MODEL_1),
-                edf_sharding=edf_sharding,
-                efd_sharding=(None, ShardingAxisName.MODEL_2,
-                              ShardingAxisName.MODEL_1),
-                moe_backend=self.moe_backend,
-                qwix_quantized_weight_dtype=moe_dtype
-                if self.weight_loader.is_model_quantized else None,
-                router=router) if is_moe_layer else DenseFFW(
+            )
+
+            # Logic to determine if this layer is Dense or MoE
+            # * The first k layers are always dense.
+            # * Subsequent layers are MoE if interleave_moe_layer_step conditions are met
+            if i < first_k_dense_replace:
+                is_moe_layer = False
+            else:
+                is_moe_layer = ((i + 1) % interleave_moe_layer_step == 0)
+
+            if not is_moe_layer:
+                # Dense Layer (used for first k layers or interleaved dense layers)
+                mlp_layer = DeepseekV3MLP(
                     dtype=dtype,
                     hidden_act=hidden_act,
                     hidden_size=hidden_size,
@@ -964,39 +1165,79 @@ class DeepSeekV3(nnx.Module):
                     activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
                     df_sharding=(None, ShardingAxisName.MLP_TENSOR),
                     fd_sharding=(ShardingAxisName.MLP_TENSOR, None))
+            else:
+                # MoE Layer
+                moe_dtype = jnp.float8_e4m3fn if self.weight_loader.is_native_fp8_model else vllm_config.model_config.hf_config.quantization_config.get(
+                    "tpu_settings", {}).get("mlp_dtype", jnp.float4_e2m1fn)
 
-            shared_experts = DenseFFW(
-                dtype=dtype,
-                hidden_act=hidden_act,
-                hidden_size=hidden_size,
-                intermediate_size=num_shared_experts * moe_intermediate_size,
-                rngs=self.rng,
-                activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
-                df_sharding=(None, ShardingAxisName.MLP_TENSOR),
-                fd_sharding=(ShardingAxisName.MLP_TENSOR, None))
+                router = DeepSeekV3Router(
+                    hidden_size=hidden_size,
+                    num_experts=num_local_experts,
+                    num_experts_per_tok=num_experts_per_token,
+                    n_groups=n_group,
+                    topk_groups=4,
+                    norm_topk_prob=True,
+                    rngs=self.rng,
+                    routed_scaling_factor=routed_scaling_factor,
+                    dtype=dtype,
+                    moe_backend=self.moe_backend,
+                    activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
+                    ed_sharding=(None, None),
+                    e_sharding=(None, ))
 
-            pre_attention_norm = RMSNorm(
-                dims=hidden_size,
-                rngs=self.rng,
-                epsilon=rms_norm_eps,
-                with_scale=True,
-                dtype=dtype,
-            )
+                # routed experts
+                custom_module = JaxMoE(
+                    dtype=dtype,
+                    num_local_experts=num_local_experts,
+                    apply_expert_weight_before_computation=False,
+                    expert_axis_name=self.expert_axis_name,
+                    num_expert_parallelism=self.num_expert_parallelism,
+                    use_ep=self.use_ep,
+                    hidden_size=hidden_size,
+                    intermediate_size_moe=moe_intermediate_size,
+                    num_experts_per_tok=num_experts_per_token,
+                    mesh=self.mesh,
+                    hidden_act=hidden_act,
+                    rngs=self.rng,
+                    quant_config=vllm_config.quant_config,
+                    activation_ffw_td=(ShardingAxisName.MLP_DATA,
+                                       ShardingAxisName.MODEL_1),
+                    activation_ffw_ted=(ShardingAxisName.MLP_DATA, None,
+                                        ShardingAxisName.MODEL_1),
+                    edf_sharding=(None, ShardingAxisName.MODEL_1,
+                                  ShardingAxisName.MODEL_2),
+                    efd_sharding=(None, ShardingAxisName.MODEL_2,
+                                  ShardingAxisName.MODEL_1),
+                    moe_backend=self.moe_backend,
+                    qwix_quantized_weight_dtype=moe_dtype
+                    if self.weight_loader.is_model_quantized else None,
+                    router=router)
 
-            pre_mlp_norm = RMSNorm(
-                dims=hidden_size,
-                rngs=self.rng,
-                epsilon=rms_norm_eps,
-                with_scale=True,
-                dtype=dtype,
-            )
+                # shared experts
+                shared_experts = DeepseekV3MLP(
+                    dtype=dtype,
+                    hidden_act=hidden_act,
+                    hidden_size=hidden_size,
+                    intermediate_size=num_shared_experts *
+                    moe_intermediate_size,
+                    rngs=self.rng,
+                    activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
+                    df_sharding=(None, ShardingAxisName.MLP_TENSOR),
+                    fd_sharding=(ShardingAxisName.MLP_TENSOR, None))
 
-            block = SharedExpertsTransformerBlock(
-                custom_module=custom_module,
-                attn=_create_mla(),
-                pre_attention_norm=pre_attention_norm,
-                pre_mlp_norm=pre_mlp_norm,
-                shared_experts=shared_experts)
+                mlp_layer = DeepseekV3MoE(
+                    experts=custom_module,
+                    shared_experts=shared_experts,
+                    routed_scaling_factor=routed_scaling_factor,
+                )
+
+            block = DeepseekV3DecoderLayer(
+                layer_idx=i,
+                input_layernorm=input_layernorm,
+                post_attention_layernorm=post_attention_layernorm,
+                self_attn=_create_mla(),  # Your existing MLA factory
+                custom_module=mlp_layer)
+
             self.layers.append(block)
 
         self.final_norm = RMSNorm(
@@ -1046,9 +1287,10 @@ class DeepSeekV3(nnx.Module):
     def initialize_cache(self):
         # Initialize RoPE caches after weights are loaded and before JIT compilation.
         for layer in self.layers:
-            if hasattr(layer, 'attn') and hasattr(layer.attn, 'rope'):
-                if hasattr(layer.attn.rope, 'initialize_cache'):
-                    layer.attn.rope.initialize_cache(self.mesh)
+            if hasattr(layer, 'self_attn') and hasattr(layer.self_attn,
+                                                       'rope'):
+                if hasattr(layer.self_attn.rope, 'initialize_cache'):
+                    layer.self_attn.rope.initialize_cache(self.mesh)
 
     def __call__(
         self,

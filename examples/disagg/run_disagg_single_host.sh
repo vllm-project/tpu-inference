@@ -17,7 +17,7 @@
 # shellcheck disable=all
 set -e
 
-MODEL="Qwen/Qwen2.5-0.5B-Instruct"
+MODEL="Qwen/Qwen3-0.6B"
 
 NUM_PREFILL_INSTANCES=1
 NUM_DECODE_INSTANCES=1
@@ -45,7 +45,7 @@ cleanup_instances() {
 }
 
 mkdir -p $HOME/logs
-
+cleanup_instances
 
 # Start prefill instances
 for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
@@ -63,7 +63,7 @@ for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     \
     vllm serve $MODEL \
     --port $PORT \
-    --gpu-memory-utilization 0.2 \
+    --gpu-memory-utilization 0.4 \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
     --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_producer\"}" \
     > $HOME/logs/prefill_$i.txt 2>&1 &
@@ -90,7 +90,7 @@ for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     \
     vllm serve $MODEL \
     --port $PORT \
-    --gpu-memory-utilization 0.2 \
+    --gpu-memory-utilization 0.4 \
     --tensor-parallel-size $DECODER_TP_SIZE \
     --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\"}" \
     > $HOME/logs/decode_$i.txt 2>&1 &
@@ -110,27 +110,60 @@ for PORT in "${DECODE_PORTS[@]}"; do
     wait_for_server $PORT
 done
 
-
+echo "starting proxy server"
 # Start proxy server
 python $HOME/tpu-inference/examples/disagg/toy_proxy_server.py \
 --host localhost \
---port 7080 \
+--port 8000 \
 --prefiller-hosts ${PREFILL_HOSTS[@]} \
 --prefiller-ports ${PREFILL_PORTS[@]} \
 --decoder-hosts ${DECODE_HOSTS[@]} \
 --decoder-ports ${DECODE_PORTS[@]} \
-> $HOME/logs/proxy.txt 2>&1 &
+> $HOME/logs/proxy_s.txt 2>&1 &
 
+# run benchmark for both disagg and non-disagg
+LOG_FILE="$HOME/logs/benchmark_single_host.txt"
+echo "--- Running Disagg Benchmark ---" > $LOG_FILE
+
+# run ben for disagg
+set -x
+vllm bench serve \
+--model=$MODEL \
+--dataset-name=random \
+--random-input-len=4096 \
+--random-output-len=1024 \
+--num-prompts=20 \
+--ignore-eos \
+--host=localhost \
+--port 8000 \
+--request-rate 4 \
+>> $LOG_FILE 2>&1
+
+echo -e "\n\n--- Running Non-Disagg Benchmark ---" >> $LOG_FILE
+# run ben for non-disagg
+vllm bench serve \
+--model=$MODEL \
+--dataset-name=random \
+--random-input-len=4096 \
+--random-output-len=1024 \
+--num-prompts=20 \
+--ignore-eos \
+--host=localhost \
+--port 9400 \
+--request-rate 4 \
+>> $LOG_FILE 2>&1
+set +x
 
 cat <<'EOF'
-The proxy server has been launched on: 127.0.0.1:7080
+The proxy server has been launched on: 127.0.0.1:8000
 
 >> Send example request:
 
-curl -X POST \
-http://127.0.0.1:7080/v1/completions \
--H "Content-Type: application/json" \
--d '{"prompt": "We hold these truths to be self-evident, that all men are created equal, that they are endowed by their Creator with certain unalienable Rights, that among these are Life, Liberty and the pursuit of Happiness.--That to secure these rights, Governments are instituted among Men, deriving their just powers from the consent of the governed,  ", "max_tokens": 10}'
+curl http://localhost:8000/v1/completions -X POST -H "Content-Type: application/json" -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "prompt": "what is your pet name",
+    "max_tokens": 10
+}'
 
 >> Stop the proxy server and all prefill/decode instances:
 

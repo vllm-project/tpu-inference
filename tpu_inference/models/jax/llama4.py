@@ -475,6 +475,10 @@ class Llama4ForCausalLM(nnx.Module):
                 apply_expert_weight_before_computation=True,
                 hidden_size=self.hidden_size,
                 intermediate_size_moe=self.intermediate_size_moe,
+                expert_axis_name=None,
+                num_expert_parallelism=None,
+                # TODO (jacobplatin): maybe try both once/if FusedMoEKernel is ever supported
+                use_ep=False,
                 hidden_act=self.hidden_act,
                 router=router,
                 rngs=self.rng,
