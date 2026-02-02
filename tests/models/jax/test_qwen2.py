@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import jax
 import jax.numpy as jnp
@@ -87,19 +87,6 @@ def mock_model_inputs():
 def rng() -> PRNGKey:
     """Provides a reusable JAX PRNGKey."""
     return jax.random.PRNGKey(42)
-
-
-@pytest.fixture(autouse=True)
-def mock_get_pp_group():
-    mock_pp_group = MagicMock(is_first_rank=True,
-                              is_last_rank=True,
-                              rank_in_group=0,
-                              world_size=1)
-    with patch("tpu_inference.models.jax.qwen2.get_pp_group",
-               return_value=mock_pp_group), \
-        patch("tpu_inference.layers.jax.pp_utils.get_pp_group",
-              return_value=mock_pp_group):
-        yield
 
 
 class TestQwen2ForCausalLM:

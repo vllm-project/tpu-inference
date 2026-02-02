@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -22,7 +22,6 @@ from transformers import Qwen3Config
 from vllm.config import VllmConfig
 
 from tpu_inference import utils
-from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
@@ -30,12 +29,9 @@ from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.norm import JaxRmsNorm
-from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.jax_intermediate_tensor import \
-    JaxIntermediateTensors
 from tpu_inference.models.jax.qwen2 import Qwen2DecoderLayer
 from tpu_inference.models.jax.qwen2 import Qwen2MLP as Qwen3MLP
 from tpu_inference.models.jax.qwen2 import Qwen2Model
@@ -224,25 +220,16 @@ class Qwen3Model(Qwen2Model):
         rms_norm_eps = hf_config.rms_norm_eps
         hidden_size = hf_config.hidden_size
 
-        self.is_first_rank = get_pp_group().is_first_rank
-        self.is_last_rank = get_pp_group().is_last_rank
-
-        if self.is_first_rank or (hf_config.tie_word_embeddings
-                                  and self.is_last_rank):
-            self.embed_tokens = JaxEmbed(
-                num_embeddings=vocab_size,
-                features=hidden_size,
-                param_dtype=dtype,
-                embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
-                rngs=rng,
-                quant_config=vllm_config.quant_config,
-            )
-        else:
-            self.embed_tokens = PPMissingLayer()
-
-        self.start_layer, self.end_layer, self.layers = make_layers(
-            hf_config.num_hidden_layers,
-            lambda: Qwen3DecoderLayer(
+        self.embed_tokens = JaxEmbed(
+            num_embeddings=vocab_size,
+            features=hidden_size,
+            param_dtype=dtype,
+            embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
+            rngs=rng,
+            quant_config=vllm_config.quant_config,
+        )
+        self.layers = [
+            Qwen3DecoderLayer(
                 config=hf_config,
                 dtype=dtype,
                 rng=rng,
@@ -250,19 +237,16 @@ class Qwen3Model(Qwen2Model):
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
                 quant_config=vllm_config.quant_config,
-            ))
-
-        if self.is_last_rank:
-            self.norm = JaxRmsNorm(
-                hidden_size,
-                epsilon=rms_norm_eps,
-                param_dtype=dtype,
-                scale_init=nnx.with_partitioning(init_fn, (None, )),
-                rngs=rng,
-                quant_config=vllm_config.quant_config,
-            )
-        else:
-            self.norm = PPMissingLayer()
+            ) for _ in range(hf_config.num_hidden_layers)
+        ]
+        self.norm = JaxRmsNorm(
+            hidden_size,
+            epsilon=rms_norm_eps,
+            param_dtype=dtype,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
+            rngs=rng,
+            quant_config=vllm_config.quant_config,
+        )
 
 
 class Qwen3ForCausalLM(JaxModule):
@@ -280,45 +264,28 @@ class Qwen3ForCausalLM(JaxModule):
             mesh=mesh,
         )
         model_config = vllm_config.model_config
-
-        if self.model.is_last_rank:
-            if not model_config.hf_config.tie_word_embeddings:
-                vocab_size = model_config.get_vocab_size()
-                hidden_size = model_config.hf_config.hidden_size
-                self.lm_head = JaxEinsum(
-                    einsum_str="TD,DV->TV",
-                    kernel_shape=(hidden_size, vocab_size),
-                    dtype=model_config.dtype,
-                    rngs=self.rng,
-                    quant_config=vllm_config.quant_config,
-                )
-        else:
-            self.lm_head = PPMissingLayer()
-
-        self.pp_missing_layers = []
-        for path, module in nnx.iter_graph(self):
-            if isinstance(module, PPMissingLayer):
-                # the path should be sth like ('layers', '0')
-                self.pp_missing_layers.append('.'.join([str(s) for s in path]))
+        if not model_config.hf_config.tie_word_embeddings:
+            vocab_size = model_config.get_vocab_size()
+            hidden_size = model_config.hf_config.hidden_size
+            self.lm_head = JaxEinsum(
+                einsum_str="TD,DV->TV",
+                kernel_shape=(hidden_size, vocab_size),
+                dtype=model_config.dtype,
+                rngs=self.rng,
+                quant_config=vllm_config.quant_config,
+            )
 
     def __call__(
         self,
         kv_caches: List[jax.Array],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
-        inputs_embeds: Optional[jax.Array] = None,
-        _input_positions: Optional[jax.Array] = None,
-        _layer_name_to_kv_cache: Optional[Tuple[Tuple[str, int]]] = None,
-        _lora_metadata: Any = None,
-        intermediate_tensors: Optional[JaxIntermediateTensors] = None,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
         kv_caches, x = self.model(
             kv_caches,
             input_ids,
             attention_metadata,
-            inputs_embeds,
-            intermediate_tensors,
         )
         return kv_caches, x, []
 
