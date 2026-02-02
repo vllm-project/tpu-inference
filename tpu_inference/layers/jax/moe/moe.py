@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import math
 from dataclasses import InitVar, dataclass
 from functools import partial
@@ -141,7 +140,6 @@ class MoE(nnx.Module):
     rngs: InitVar[nnx.Rngs]
     router: nnx.Module
     mesh: jax.sharding.Mesh
-
     # --- Sharding Config ---
     activation_ffw_td: Sharding
     activation_ffw_ted: Sharding
@@ -153,11 +151,11 @@ class MoE(nnx.Module):
     apply_expert_weight_before_computation: bool
     random_init: bool = False
     moe_backend: MoEBackend = MoEBackend.DENSE_MAT
-
     # --- Sparse MoE Specific Attributes ---
     num_experts_per_tok: int = 1  # Required for Sparse, optional/derived for Dense
     tile_size: tuple[int, int, int] = (128, 128, 128)
-    quantized_dtype: Optional[jnp.dtype] = None
+    # NOTE: this is only needed for SparseMoE
+    qwix_quantized_weight_dtype: Optional[jnp.dtype] = None
 
     # --- MoE Kernel Specific Attributes ---
     renormalize: bool = True
@@ -191,10 +189,13 @@ class MoE(nnx.Module):
             return output_TD
         elif self.moe_backend == MoEBackend.VLLM_MOE:
             router_logits_TE = self.router(x_TD)
+            # TODO (jacobplatin): the current GMM kernel expects that w1/w2 have the second and third dimensions
+            # transposed, but this is likely not optimal for DeepSeek, so we will need to fix this
+            # in the future
             output_TD = fused_moe_func(
                 hidden_states=x_TD,
-                w1=self.kernel_gating_upproj_EFD.value,
-                w2=self.kernel_down_proj_EDF.value,
+                w1=self.kernel_gating_upproj_EDF.value,
+                w2=self.kernel_down_proj_EFD.value,
                 w1_bias=self.w1_bias,
                 w2_bias=self.w2_bias,
                 w1_scale=self.w1_scale,
@@ -211,16 +212,29 @@ class MoE(nnx.Module):
             weights_TX, indices_TX = self.router(x_TD)
 
             if self.moe_backend == MoEBackend.MEGABLX_GMM or self.moe_backend == MoEBackend.RAGGED_DOT:
+                # NOTE: for the qwix_quantized_weight_dtype case, we make the spec a tuple of 2 PartitionSpecs
+                # since the first entry corresponds to the weight and the second entry corresponds to the scale.
+                # For the scale, we don't shard on the "D" dimmension because this is the subchannel dimmension
+                if self.qwix_quantized_weight_dtype:
+                    gating_up_proj_spec = (PartitionSpec(*self.edf_sharding),
+                                           PartitionSpec(
+                                               self.edf_sharding[0], None,
+                                               self.edf_sharding[2]))
+                    down_proj_spec = (PartitionSpec(*self.efd_sharding),
+                                      PartitionSpec(self.efd_sharding[0], None,
+                                                    self.efd_sharding[2]))
+                else:
+                    gating_up_proj_spec = PartitionSpec(*self.edf_sharding)
+                    down_proj_spec = PartitionSpec(*self.efd_sharding)
+
                 in_specs = (
                     PartitionSpec(),  # replicated MoE instance
                     PartitionSpec(*self.activation_ffw_td),  # Sharded x_TD
                     PartitionSpec(),  # Replicated router_weights_TX
                     PartitionSpec(),  # Replicated selected_experts_TX
-                    PartitionSpec(*self.edf_sharding),  # Sharded gating kernel
-                    PartitionSpec(
-                        *self.edf_sharding),  # Sharded up-projection kernel
-                    PartitionSpec(
-                        *self.efd_sharding),  # Sharded down-projection kernel
+                    gating_up_proj_spec,  # Sharded gating kernel
+                    gating_up_proj_spec,  # Sharded up-projection kernel
+                    down_proj_spec,  # Sharded down-projection kernel
                 )
                 out_specs = PartitionSpec(*self.activation_ffw_td)
 
@@ -231,15 +245,22 @@ class MoE(nnx.Module):
                     out_specs=out_specs,
                     check_rep=False)(sparse_moe_distributed_fwd)
 
+                # TODO (jacobplatin): this is needed because of issues with Qwix quantizing the `shard_map` in SpraseMatmul
+                # Basically, during the abstract pass, we need to manually quantize the weights here for Qwix, but we'll
+                # override the actual weight/scale during loading (we just need to make sure Qwix quantizes the weight
+                # in the first place).
                 kernel_gating_EDF = self._process_weight_for_qwix(
+                    "kernel_gating_EDF",
                     self.kernel_gating_EDF,
                     channelwise_axes=[0, 2],
                     tiled_axes={})
                 kernel_up_proj_EDF = self._process_weight_for_qwix(
+                    "kernel_up_proj_EDF",
                     self.kernel_up_proj_EDF,
                     channelwise_axes=[0, 2],
                     tiled_axes={})
                 kernel_down_proj_EFD = self._process_weight_for_qwix(
+                    "kernel_down_proj_EFD",
                     self.kernel_down_proj_EFD,
                     channelwise_axes=[0, 2],
                     tiled_axes={})
@@ -300,15 +321,18 @@ class MoE(nnx.Module):
                 "bd2c": 256,
             }
         elif self.moe_backend == MoEBackend.VLLM_MOE:
-            self.kernel_gating_upproj_EFD = create_param(
+            # TODO (jacobplatin): the current GMM kernel expects that w1/w2 have the second and third
+            # dimensions transposed, but this is likely not optimal for DeepSeek, so we will
+            # need to fix this in the future
+            self.kernel_gating_upproj_EDF = create_param(
                 rngs,
-                shape=(E, 2 * F, D),
+                shape=(E, D, 2 * F),
                 dtype=self.dtype,
                 sharding=self.efd_sharding,
                 random_init=self.random_init)
-            self.kernel_down_proj_EDF = create_param(
+            self.kernel_down_proj_EFD = create_param(
                 rngs,
-                shape=(E, D, F),
+                shape=(E, F, D),
                 dtype=self.dtype,
                 sharding=self.edf_sharding,
                 random_init=self.random_init)
@@ -355,6 +379,7 @@ class MoE(nnx.Module):
                                                     == self.data_axis_name)
 
     def _process_weight_for_qwix(self,
+                                 name,
                                  weight_param,
                                  channelwise_axes=[],
                                  tiled_axes={}):
@@ -364,12 +389,11 @@ class MoE(nnx.Module):
         """
         weight = weight_param.value
 
-        if self.quantized_dtype:
+        if self.qwix_quantized_weight_dtype:
             if not isinstance(weight, ptq.WithAux):
-                weight = manually_quantize_qwix_weight(weight,
-                                                       self.quantized_dtype,
-                                                       channelwise_axes,
-                                                       tiled_axes, "absmax")
-            return weight.array
+                weight = manually_quantize_qwix_weight(
+                    name, weight, self.qwix_quantized_weight_dtype,
+                    channelwise_axes, tiled_axes, "absmax")
+            return (weight.array.qvalue, weight.array.scale)
 
         return weight

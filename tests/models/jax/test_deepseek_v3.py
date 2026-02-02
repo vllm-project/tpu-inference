@@ -25,7 +25,7 @@ from jax.sharding import Mesh
 from vllm.config import ModelConfig
 
 # Assuming the model file is named deepseek_v3.py
-from tpu_inference.models.jax.deepseek_v3 import (DeepSeekV3,
+from tpu_inference.models.jax.deepseek_v3 import (DeepSeekV3, DeepSeekV3Router,
                                                   DeepSeekV3WeightLoader)
 
 
@@ -76,7 +76,7 @@ class MockVllmConfig:
         }
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture()
 def mesh():
     if not jax.devices():
         pytest.skip("No JAX devices available.")
@@ -104,7 +104,7 @@ class TestDeepSeekV3:
     def test_init(self, mock_config, rng, mesh):
         """Tests if the model initializes with the correct hierarchy."""
         model = DeepSeekV3(mock_config, rng, mesh)
-        assert len(model.layers) == 3  # num_layers from mock
+        assert len(model.layers) == 1
         assert isinstance(model.embedder, nnx.Module)
         assert model.vllm_config.model_config.hf_config.num_hidden_layers == 1
 
@@ -158,11 +158,11 @@ class TestDeepSeekV3WeightLoader:
     @pytest.mark.parametrize("loaded_key, expected_mapped", [
         ("model.embed_tokens.weight", "embedder.input_embedding_table_VD"),
         ("model.layers.0.self_attn.q_a_proj.weight",
-         "layers.0.attn.kernel_q_down_proj_DA"),
+         "layers.0.self_attn.kernel_q_down_proj_DA"),
         ("model.layers.5.mlp.experts.10.gate_proj.weight",
-         "layers.5.custom_module.kernel_gating_EDF"),
+         "layers.5.custom_module.experts.kernel_gating_EDF"),
         ("model.layers.1.mlp.shared_experts.down_proj.weight",
-         "layers.1.shared_experts.kernel_down_proj_FD"),
+         "layers.1.custom_module.shared_experts.kernel_down_proj_FD"),
         ("model.norm.weight", "final_norm.scale"),
     ])
     def test_key_mapping(self, loader, loaded_key, expected_mapped):
@@ -231,7 +231,7 @@ class TestDeepSeekV3WeightLoader:
 
     def test_load_individual_weight_with_mxfp4(self, loader, mesh):
         """Tests the logic for unpacking MXFP4 weights."""
-        name = "layers.0.attn.kernel_q_down_proj_DA"
+        name = "layers.0.self_attn.kernel_q_down_proj_DA"
         # Mocking torch tensor as uint8 (packed fp4)
         expected_weight_shape = (128, 128)  # Unpacked
         expected_scale_shape = (128, 1)
@@ -248,7 +248,7 @@ class TestDeepSeekV3WeightLoader:
         mock_params = {
             "layers": {
                 "0": {
-                    "attn": {
+                    "sefl_attn": {
                         "kernel_q_down_proj_DA": mock_var
                     }
                 }
@@ -309,7 +309,7 @@ class TestDeepSeekV3WeightLoader:
         Tests the logic for loading 'unpacked' weights (e.g., standard FP8).
         This verifies the branch that uses DTYPE_VIEW_MAP for raw memory conversion.
         """
-        name = "layers.0.attn.kernel_q_down_proj_DA"
+        name = "layers.0.self_attn.kernel_q_down_proj_DA"
 
         # 1. Setup a standard 'unpacked' FP8 torch tensor
         # DeepSeek V3 weights are often float8_e4m3fn
@@ -322,7 +322,7 @@ class TestDeepSeekV3WeightLoader:
         mock_params = {
             "layers": {
                 "0": {
-                    "attn": {
+                    "self_attn": {
                         "kernel_q_down_proj_DA": mock_var
                     }
                 }
@@ -505,3 +505,76 @@ class TestDeepSeekV3NativeFP8:
                     scale_call_found = True
 
             assert scale_call_found, f"Expected scale with shape {expected_scale_shape} to be created."
+
+
+class TestDeepSeekV3Router:
+    """Refactored to use native pytest fixtures instead of unittest.TestCase."""
+
+    @pytest.fixture
+    def cpu_mesh(self):
+        """Creates a CPU mesh specifically for router tests."""
+        return Mesh(jax.devices('cpu'), axis_names=('data', ))
+
+    def test_get_topk_indices_single_group(self, cpu_mesh):
+        """Test get_topk_indices with single expert group."""
+        with jax.set_mesh(cpu_mesh):
+            router = DeepSeekV3Router(random_init=True,
+                                      hidden_size=512,
+                                      num_experts=4,
+                                      num_experts_per_tok=2,
+                                      n_groups=1,
+                                      topk_groups=1,
+                                      norm_topk_prob=True,
+                                      routed_scaling_factor=1.0,
+                                      dtype=jnp.bfloat16,
+                                      rngs=nnx.Rngs(42))
+            router.bias_E = jnp.zeros((4, ))
+
+            scores = jnp.array([[0.1, 0.3, 0.2, 0.4]])  # shape: (1, 4)
+            indices = router.get_topk_indices(scores)
+
+            # Should return indices of top 2 experts
+            expected_indices = jnp.array([[3,
+                                           1]])  # experts with scores 0.4, 0.3
+            assert jnp.array_equal(indices, expected_indices)
+
+    def test_get_topk_indices_2_groups(self, cpu_mesh):
+        """Test get_topk_indices with 2 expert groups."""
+        with jax.set_mesh(cpu_mesh):
+            router = DeepSeekV3Router(random_init=True,
+                                      hidden_size=512,
+                                      num_experts=4,
+                                      num_experts_per_tok=2,
+                                      n_groups=2,
+                                      topk_groups=1,
+                                      norm_topk_prob=True,
+                                      routed_scaling_factor=1.0,
+                                      dtype=jnp.bfloat16,
+                                      rngs=nnx.Rngs(42))
+            router.bias_E = jnp.zeros((4, ))
+
+            # 4 experts, 2 groups, 2 experts per group
+            scores = jnp.array([[[0.1, 0.3, 0.2, 0.4]]])  # shape: (1, 1, 4)
+            indices = router.get_topk_indices(scores)
+
+            # Should return indices of top 2 experts
+            expected_indices = jnp.array([[[3, 2]]])
+            assert jnp.array_equal(indices, expected_indices)
+
+    def test_router_e2e(self, cpu_mesh):
+        with jax.set_mesh(cpu_mesh):
+            router = DeepSeekV3Router(random_init=True,
+                                      hidden_size=512,
+                                      num_experts=8,
+                                      num_experts_per_tok=2,
+                                      n_groups=2,
+                                      topk_groups=1,
+                                      norm_topk_prob=True,
+                                      routed_scaling_factor=1.0,
+                                      dtype=jnp.bfloat16,
+                                      rngs=nnx.Rngs(42))
+            x = jnp.ones((2, 512))
+            weights, indices = router(x)
+
+            assert weights.shape == (2, 2)
+            assert indices.shape == (2, 2)
