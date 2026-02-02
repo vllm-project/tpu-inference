@@ -206,6 +206,7 @@ def get_dtype_packing(dtype):
 
 def make_optimized_mesh(axis_shapes: Sequence[int],
                         axis_names: Sequence[str],
+                        axis_types: Sequence[jax.sharding.AxisType],
                         *,
                         devices: Sequence[xc.Device] | None = None):
     if devices is None:
@@ -258,11 +259,11 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
             if ordered_devices is not None:
                 ordered_devices = np.array(ordered_devices)
                 ordered_devices = ordered_devices.reshape(axis_shapes)
-                mesh = mesh_lib.Mesh(ordered_devices, axis_names)
+                mesh = mesh_lib.Mesh(ordered_devices, axis_names, axis_types)
                 logger.info("Use customized mesh: %s", mesh)
                 return mesh
 
-    return jax.make_mesh(axis_shapes, axis_names, devices=devices)
+    return jax.make_mesh(axis_shapes, axis_names, axis_types,devices=devices)
 
 
 def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:

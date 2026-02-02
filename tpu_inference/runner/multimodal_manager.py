@@ -16,12 +16,12 @@ from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
+import torch
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
-from vllm.v1.worker.utils import (gather_mm_placeholders,
-                                  scatter_mm_placeholders)
+
 
 from tpu_inference.models.jax.utils.multi_modal_utils import (
     flatten_embeddings, sanity_check_mm_encoder_outputs)
@@ -29,6 +29,48 @@ from tpu_inference.models.jax.utils.multi_modal_utils import (
 if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
 
+# TODO(patrickji): Investigate whether we can deprecate scatter_mm_placeholders and gather_mm_placeholders
+def scatter_mm_placeholders(
+    embeds: torch.Tensor,
+    is_embed: torch.Tensor | None,
+) -> torch.Tensor:
+    """
+    Scatter the multimodal embeddings into a contiguous tensor that represents
+    the placeholder tokens.
+
+    [`vllm.multimodal.processing.PromptUpdateDetails.is_embed`][].
+
+    Args:
+        embeds: The multimodal embeddings.
+            Shape: `(num_embeds, embed_dim)`
+        is_embed: A boolean mask indicating which positions in the placeholder
+            tokens need to be filled with multimodal embeddings.
+            Shape: `(num_placeholders, num_embeds)`
+    """
+    if is_embed is None:
+        return embeds
+
+    placeholders = embeds.new_full(
+        (is_embed.shape[0], embeds.shape[-1]),
+        fill_value=torch.nan,
+    )
+    placeholders[is_embed] = embeds
+    return placeholders
+
+def gather_mm_placeholders(
+    placeholders: torch.Tensor,
+    is_embed: torch.Tensor | None,
+) -> torch.Tensor:
+    """
+    Reconstructs the embeddings from the placeholder tokens.
+
+    This is the operation of [`scatter_mm_placeholders`]
+    [vllm.v1.worker.utils.scatter_mm_placeholders].
+    """
+    if is_embed is None:
+        return placeholders
+
+    return placeholders[is_embed]
 
 class MultiModalManager:
 
