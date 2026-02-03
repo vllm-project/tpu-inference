@@ -408,11 +408,24 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
                 cpu_kv_chunk = cpu_backend.get(cpu_chunk_id)
                 for layer_idx in range(self.num_layers):
                     tpu_kv_block = kv_caches[layer_idx][tpu_block_id]
-                    assert cpu_kv_chunk[
-                        layer_idx].sharding.memory_kind == 'pinned_host'
-                    self.assertArraysEqual(np.array(tpu_kv_block),
-                                           np.array(cpu_kv_chunk[layer_idx]))
-
+                    if swap_op_type != "jax_copy":
+                        assert cpu_kv_chunk[
+                            layer_idx].sharding.memory_kind == 'pinned_host'
+                        self.assertArraysEqual(
+                            np.array(tpu_kv_block),
+                            np.array(cpu_kv_chunk[layer_idx]))
+                    else:
+                        cpu_shards_for_layer = cpu_kv_chunk[layer_idx]
+                        tpu_shards_for_layer = tpu_kv_block.addressable_shards
+                        self.assertEqual(
+                            len(cpu_shards_for_layer),
+                            len(tpu_shards_for_layer),
+                        )
+                        for cpu_shard, tpu_shard in zip(
+                                cpu_shards_for_layer, tpu_shards_for_layer):
+                            # cpu_shard is using SingleDeviceSharding
+                            self.assertArraysEqual(np.array(cpu_shard),
+                                                   np.array(tpu_shard.data))
         logger.info("Saved data verification completed.")
 
     @parameterized.named_parameters(
