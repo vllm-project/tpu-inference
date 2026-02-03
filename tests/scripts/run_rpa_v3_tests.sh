@@ -22,7 +22,6 @@ TPU_INFERENCE_DIR="/workspace/tpu_inference/"
 # RPA v3 test files - add new tests here
 RPA_V3_TESTS=(
     "tests/kernels/ragged_paged_attention_kernel_v3_test.py"
-    "tests/layers/attention/test_deepseek_v3_attention.py"
 )
 
 # Convert array to space-separated string for pytest
@@ -31,5 +30,6 @@ for test in "${RPA_V3_TESTS[@]}"; do
     FULL_PATHS+=("$TPU_INFERENCE_DIR/$test")
 done
 
-# Run all tests in a single pytest command
 pytest "${FULL_PATHS[@]}"
+# NOTE: `test_deepseek_v3.py` includes all model-related tests, so we only want to run the attention tests
+pytest "$TPU_INFERENCE_DIR/tpu-inference/tests/models/jax/test_deepseek_v3.py" -k "TestDeepseekV3Attention"
