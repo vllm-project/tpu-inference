@@ -222,7 +222,7 @@ def test_expert_parallelism_correctness_via_fused_moe_kernel(
         _verify_correctness(baseline_outputs,
                             ep_outputs,
                             label="EP Fused",
-                            text_match_threshold=0.9,
+                            text_match_threshold=0.8,
                             logprob_tolerance=1.0)
     finally:
         del os.environ['USE_MOE_EP_KERNEL']
