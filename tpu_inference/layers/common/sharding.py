@@ -26,18 +26,19 @@ from tpu_inference import envs, utils
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-MESH_AXIS_NAMES = ("data", "attn_dp", "expert", "model")
+MESH_AXIS_NAMES = ("data", "attn_dp", "attn_dp_expert", "expert", "model")
 MESH_AXIS_NAMES_2D = ('data', 'model')
 
 
 class ShardingAxisNameBase:
     """Base class for sharding axis names."""
     SEQUENCE = ('data', 'attn_dp')
-    ATTN_DATA = ('data', 'attn_dp')
+    ATTN_DATA = ('data', 'attn_dp', 'attn_dp_expert')
+    ATTN_DATA_EXPERT = ('attn_dp_expert', 'expert')
     MLP_DATA = 'data'
     ATTN_HEAD = ('model', 'expert')
     ATTN_TENSOR = None
-    MLP_TENSOR = ('attn_dp', 'model', 'expert')
+    MLP_TENSOR = ('attn_dp', 'attn_dp_expert', 'model', 'expert')
     MOE_TENSOR = ('attn_dp', 'model')
     EXPERT = ('attn_dp', 'expert', 'model')
     EXPERT_DATA = ('data', 'attn_dp', 'expert', 'model')
@@ -96,6 +97,7 @@ class ShardingStrategy:
     sequence_parallelism: int = 1
     data_parallelism: int = 1
     attention_data_parallelism: int = 1
+    attention_data_expert_parallelism: int = 1
 
 
 class ShardingConfigManager:
@@ -137,7 +139,7 @@ class ShardingConfigManager:
         enable_dp_attention = sharding_strategy.get("enable_dp_attention",
                                                     False)
         if enable_dp_attention:
-            # Replicate attention layer when num_kv_heads < TP
+        # Replicate attention layer when num_kv_heads < TP
             num_kv_heads = 1 if vllm_config.model_config.use_mla else vllm_config.model_config.get_total_num_kv_heads(
             )
             cache_dtype = vllm_config.cache_config.cache_dtype
@@ -160,15 +162,21 @@ class ShardingConfigManager:
                 int(tensor_parallelism // num_kv_heads_per_device_in_kv_cache),
                 1)
             tensor_parallelism = tensor_parallelism // attn_dp
+            attn_dp_expert = expert_parallelism
+            expert_parallelism = 1
+            if vllm_config.model_config.use_mla:
+                attn_dp *= expert_parallelism
         else:
             attn_dp = 1
+            attn_dp_expert = 1
 
         sharding_strategy = ShardingStrategy(
             tensor_parallelism=tensor_parallelism,
             data_parallelism=data_parallelism,
             expert_parallelism=expert_parallelism,
             sequence_parallelism=sequence_parallelism,
-            attention_data_parallelism=attn_dp)
+            attention_data_parallelism=attn_dp,
+            attention_data_expert_parallelism=attn_dp_expert)
 
         # Must override here to avoid vLLM spinning up multiple DP engines.
         if vllm_config.parallel_config.data_parallel_size > 1:
@@ -181,7 +189,7 @@ class ShardingConfigManager:
 
     @classmethod
     def validate(cls, vllm_config, sharding_strategy):
-        total_dp_size = sharding_strategy.data_parallelism * sharding_strategy.attention_data_parallelism
+        total_dp_size = sharding_strategy.data_parallelism * sharding_strategy.attention_data_parallelism * sharding_strategy.attention_data_expert_parallelism
         if total_dp_size > 1:
             if vllm_config.speculative_config is not None:
                 raise ValueError(
@@ -201,7 +209,7 @@ class ShardingConfigManager:
 
     @property
     def total_dp_size(self) -> int:
-        return self.sharding_strategy.data_parallelism * self.sharding_strategy.attention_data_parallelism
+        return self.sharding_strategy.data_parallelism * self.sharding_strategy.attention_data_parallelism * self.sharding_strategy.attention_data_expert_parallelism
 
     @property
     def model_dp_size(self) -> int:
@@ -210,6 +218,10 @@ class ShardingConfigManager:
     @property
     def attn_dp_size(self) -> int:
         return self.sharding_strategy.attention_data_parallelism
+
+    @property
+    def attn_dp_expert_size(self) -> int:
+        return self.sharding_strategy.attention_data_expert_parallelism
 
     @property
     def tp_size(self) -> int:

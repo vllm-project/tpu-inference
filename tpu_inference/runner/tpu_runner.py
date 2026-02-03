@@ -314,6 +314,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         mesh_shape = (
             sharding_strategy.model_dp_size,
             sharding_strategy.attn_dp_size,
+            sharding_strategy.attn_dp_expert_size,
             sharding_strategy.expert_size,
             sharding_strategy.tp_size,
         )
@@ -403,12 +404,20 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # The total number of requests is dp_size * max_num_seqs
         self.max_num_reqs = max(self.dp_size * scheduler_config.max_num_seqs,
                                 MIN_NUM_SEQS)
+        
+        additional_sizes = self.vllm_config.additional_config.get("compilation_sizes", [])
         # [16, 32, 64, 128, 256, 512, 1024, 2048]
+        cache_dtype = self.cache_config.cache_dtype
+        if cache_dtype == "auto":
+            cache_dtype = self.dtype
+        kv_cache_dtype = to_jax_dtype(cache_dtype)
+        kv_packing = common_utils.get_dtype_packing(kv_cache_dtype)
         self.num_tokens_paddings = runner_utils.get_token_paddings(
-            min_token_size=max(16, self.dp_size),
+            min_token_size=max(16, self.dp_size * kv_packing),
             max_token_size=scheduler_config.max_num_batched_tokens *
             self.dp_size,
             padding_gap=vllm_envs.VLLM_TPU_BUCKET_PADDING_GAP)
+        self.num_tokens_paddings = sorted(self.num_tokens_paddings + additional_sizes)
         self.num_tokens_paddings_per_dp = [
             padding // self.dp_size for padding in self.num_tokens_paddings
         ]
@@ -434,7 +443,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.positions_cpu = np.zeros(self.max_num_tokens, dtype=np.int32)
         # Note: self.input_batch and self.block_tables_cpu are both initialized
         # with only 1 block_size. For hybrid kv cache, it will be re-init
-        # in kv_cache_manager's maybe_reinitialize_input_batch.
+        # in ∏cache_manager's maybe_reinitialize_input_batch.
         self.block_tables_cpu = [
             np.zeros((self.max_num_reqs, self.max_num_blocks_per_req),
                      dtype=np.int32)

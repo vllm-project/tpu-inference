@@ -245,12 +245,12 @@ class DeepseekV3BaseAttention(nnx.Module):
                 outputs_TNH = outputs_TNH[..., :self.v_head_dim]
 
             with jax.named_scope("o_proj"):
-                outputs_TNH = nnx.with_sharding_constraint(
-                    outputs_TNH, self.activation_attention_out_td)
                 outputs_TR = outputs_TNH.reshape(outputs_TNH.shape[0],
                                                  self.N * self.v_head_dim)
                 o_TD = jnp.einsum("TR,RD -> TD", outputs_TR,
                                   self.kernel_o_proj_RD.value)
+                outputs_TNH = nnx.with_sharding_constraint(
+                    outputs_TNH, self.activation_attention_out_td)
 
             return new_kv_cache, o_TD
 
@@ -965,11 +965,11 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
             # TODO (jacobplatin): remove or clean this up
             self.scale_shape_map_for_random_weight_loading = {
                 # MoE experts (3D)
-                "custom_module.experts.kernel_down_proj_EFD": (256, 8, 7168),
+                "custom_module.experts.kernel_down_proj_EFD": (256, 1, 7168),
                 "custom_module.experts.kernel_gating_EDF": (256, 28, 2048),
                 "custom_module.experts.kernel_up_proj_EDF": (256, 28, 2048),
                 # Shared experts (2D)
-                "custom_module.shared_experts.kernel_down_proj_FD": (8, 7168),
+                "custom_module.shared_experts.kernel_down_proj_FD": (1, 7168),
                 "custom_module.shared_experts.kernel_gating_DF": (28, 2048),
                 "custom_module.shared_experts.kernel_up_proj_DF": (28, 2048),
                 # Dense FFW (2D)
@@ -1568,11 +1568,25 @@ class DeepSeekV3(nnx.Module):
                 query_tnh_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
                 keyvalue_skh_spec = P(ShardingAxisName.MLP_TENSOR, None)
                 attn_o_tnh_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
-
+                anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None)
             else:
-                query_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
-                keyvalue_skh_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
-                attn_o_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
+                query_tnh_spec=P(None, ShardingAxisName.MLP_TENSOR, None)
+                keyvalue_skh_spec=P(None, ShardingAxisName.MLP_TENSOR, None)
+                attn_o_tnh_spec=P(None, ShardingAxisName.MLP_TENSOR, None)
+            rd_sharding=(ShardingAxisName.MLP_TENSOR, None)
+            ap_sharding=(None, ShardingAxisName.MLP_TENSOR)
+            q_da_sharding=(None, ShardingAxisName.VOCAB)
+            kv_da_sharding=(None, ShardingAxisName.VOCAB)
+            
+            if self.vllm_config.additional_config.get(
+                "replicate_attn_weights", False):
+                rd_sharding=()
+                ap_sharding=()
+                q_da_sharding=()
+                kv_da_sharding=()
+                if self.use_mla_kernel:
+                    anh_sharding=()
+
 
             attn_cls = None
             if self.use_mla_kernel:
@@ -1606,13 +1620,12 @@ class DeepSeekV3(nnx.Module):
                 keyvalue_skh=keyvalue_skh_spec,
                 activation_attention_out_td=(None, None),
                 attn_o_tnh=attn_o_tnh_spec,
-                q_da_sharding=(None, ShardingAxisName.VOCAB),
-                ap_sharding=(None, ShardingAxisName.MLP_TENSOR),
-                kv_da_sharding=(None, ShardingAxisName.VOCAB),
-                rd_sharding=(ShardingAxisName.MLP_TENSOR, None))
+                q_da_sharding=q_da_sharding,
+                ap_sharding=ap_sharding,
+                kv_da_sharding=kv_da_sharding,
+                rd_sharding=rd_sharding)
             if self.use_mla_kernel:
-                kwargs.update(anh_sharding=(None, ShardingAxisName.MLP_TENSOR,
-                                            None))
+                kwargs.update(anh_sharding=anh_sharding)
 
             return attn_cls(**kwargs)
 
@@ -1687,13 +1700,13 @@ class DeepSeekV3(nnx.Module):
                     rngs=self.rng,
                     quant_config=self.vllm_config.quant_config,
                     activation_ffw_td=(ShardingAxisName.MLP_DATA,
-                                       ShardingAxisName.MODEL_1),
+                                       ShardingAxisName.MOE_TENSOR),
                     activation_ffw_ted=(ShardingAxisName.MLP_DATA, None,
-                                        ShardingAxisName.MODEL_1),
-                    edf_sharding=(None, ShardingAxisName.MODEL_1,
-                                  ShardingAxisName.MODEL_2),
-                    efd_sharding=(None, ShardingAxisName.MODEL_2,
-                                  ShardingAxisName.MODEL_1),
+                                        ShardingAxisName.MOE_TENSOR),
+                    edf_sharding=(None, ShardingAxisName.MOE_TENSOR,
+                                  ShardingAxisName.ATTN_DATA_EXPERT),
+                    efd_sharding=(None, ShardingAxisName.ATTN_DATA_EXPERT,
+                                  ShardingAxisName.MOE_TENSOR),
                     moe_backend=self.moe_backend,
                     qwix_quantized_weight_dtype=moe_dtype
                     if self.weight_loader.is_model_quantized else None,
