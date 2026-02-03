@@ -111,6 +111,22 @@ class QuantizationTest(jtu.JaxTestCase):
 
         self.assertAllClose(dequantized, original, rtol=0.1, atol=0.1)
 
+    def test_unaligned_dequantization_missing_block_size_raises(self):
+        key = jax.random.key(0)
+        shape = (128, 128)
+
+        original = jax.random.normal(key, shape, jnp.bfloat16)
+        block_size = 32
+        axis = 0
+
+        tensor_q, scale = quantize_tensor(jnp.int8, original, axis, block_size)
+        unaligned_tensor_q = jax.lax.slice(tensor_q, (0, 0), (99, 128))
+
+        self.assertRaises(
+            ValueError,
+            functools.partial(dequantize_tensor, unaligned_tensor_q, scale,
+                              axis))
+
     def test_unaligned_block_quantization_raises_error(self):
         key = jax.random.key(0)
 
