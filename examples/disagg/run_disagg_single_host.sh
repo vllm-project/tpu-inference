@@ -63,7 +63,8 @@ for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     \
     vllm serve $MODEL \
     --port $PORT \
-    --gpu-memory-utilization 0.4 \
+    --gpu-memory-utilization 0.2 \
+    --no-enable-prefix-caching \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
     --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_producer\"}" \
     > $HOME/logs/prefill_$i.txt 2>&1 &
@@ -90,7 +91,8 @@ for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     \
     vllm serve $MODEL \
     --port $PORT \
-    --gpu-memory-utilization 0.4 \
+    --gpu-memory-utilization 0.2 \
+    --no-enable-prefix-caching \
     --tensor-parallel-size $DECODER_TP_SIZE \
     --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\"}" \
     > $HOME/logs/decode_$i.txt 2>&1 &
@@ -129,8 +131,9 @@ echo "--- Running Disagg Benchmark ---" > $LOG_FILE
 set -x
 vllm bench serve \
 --model=$MODEL \
+--num-warmups=3 \
 --dataset-name=random \
---random-input-len=4096 \
+--random-input-len=1024 \
 --random-output-len=1024 \
 --num-prompts=20 \
 --ignore-eos \
@@ -143,8 +146,9 @@ echo -e "\n\n--- Running Non-Disagg Benchmark ---" >> $LOG_FILE
 # run ben for non-disagg
 vllm bench serve \
 --model=$MODEL \
+--num-warmups=3 \
 --dataset-name=random \
---random-input-len=4096 \
+--random-input-len=1024 \
 --random-output-len=1024 \
 --num-prompts=20 \
 --ignore-eos \

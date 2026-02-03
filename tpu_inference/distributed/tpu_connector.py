@@ -451,6 +451,13 @@ class TPUConnectorWorker:
         self.reqs_wait_pull: dict[ReqId, list[list[jax.Array], float]] = {}
         # req_id: thread_future
         self.reqs_pulling: dict[ReqId, Future] = {}
+        # the KV cache strafer uuid to request mapping
+        # the reason is vllm add prefix + external uuid suffix for each request id
+        # for example: prefill req_id:cmpl-cd70b21e-0f2b-46ed-910c-9525f706389a-0-99ae74c8
+        # decode req_id:cmpl-cd70b21e-0f2b-46ed-910c-9525f706389a-0-23cb9419
+        # this map will use the uuid to query the original request id
+        self.kv_pull_uuid_to_req_id_map: dict[int, ReqId] = {}
+
 
         self.host_ip = get_host_ip()
         self.kv_transfer_port = get_kv_transfer_port()
@@ -534,18 +541,25 @@ class TPUConnectorWorker:
         )
 
         while True:
-            client_id, req_id_bytes = sock.recv_multipart()
-            req_id = req_id_bytes.decode('utf-8')
-            logger.info(
-                f"TPUConnector Worker {self.node_id} --> zmq recieve | req_id={req_id}"
-            )
-            if req_id in self.reqs_wait_pull:
-                # Set the expiration time of this request to -1, mark to be done
-                self.reqs_wait_pull[req_id][1] = -1
+            client_id, uuid_bytes = sock.recv_multipart()
+            uuid = int(uuid_bytes.decode('utf-8'))
+            if uuid in self.kv_pull_uuid_to_req_id_map:
+                req_id = self.kv_pull_uuid_to_req_id_map[uuid]
+                logger.info(
+                    f"TPUConnector Worker {self.node_id} --> zmq recieve | req_id={req_id} | uuid={uuid}"
+                )
+                if req_id in self.reqs_wait_pull:
+                    # Set the expiration time of this request to -1, mark to be done
+                    self.reqs_wait_pull[req_id][1] = -1
+                    self.kv_pull_uuid_to_req_id_map.pop(uuid)
+                else:
+                    logger.warning(
+                        f"TPUConnector Worker {self.node_id} --> Disagg producer recives a non-exist pulling finished notification request {req_id} | uuid {uuid}"
+                    )
             else:
                 logger.warning(
-                    f"TPUConnector Worker {self.node_id} --> Disagg producer recives a non-exist pulling finished notification request {req_id}"
-                )
+                        f"TPUConnector Worker {self.node_id} --> Disagg producer recives a non-exist pulling finished notification uuid {uuid}"
+                    )
             time.sleep(0)
             # The response is not really needed.
             # sock.send_multipart([client_id, b"", b"ACK"])
@@ -579,7 +593,7 @@ class TPUConnectorWorker:
                 # The request has finished pulling the KV from remote, or it has full local
                 # prefix cache, need to notify P to let it free blocks.
                 socket = self._maybe_build_notif_socket(req_meta)
-                self._notify_pull_done(socket, req_id)
+                self._notify_pull_done(socket, req_id, req_meta.uuid)
 
     def _prepare_kv_and_wait(self, req_id: str, req_meta: SendMeta):
         local_block_ids = req_meta.local_block_ids
@@ -592,6 +606,7 @@ class TPUConnectorWorker:
         # So we have to set use_raw_buffers=False and stores the kv, then the kv buffer
         # will be safely destroyed by either D notifying or expiration.
         self.reqs_wait_pull[req_id] = [kv, req_meta.expiration_time]
+        self.kv_pull_uuid_to_req_id_map[req_meta.uuid] = req_id
         self.kv_transfer_server.await_pull(req_meta.uuid, kv)
 
     def _maybe_build_kv_connection(self, req_meta: LoadMeta) -> Any:
@@ -661,9 +676,9 @@ class TPUConnectorWorker:
             )
         return sock
 
-    def _notify_pull_done(self, sock: zmq.Socket, req_id: str):
-        logger.info(f"Worker {self.node_id} --> zmq notify | req_id={req_id}")
-        sock.send_string(req_id)
+    def _notify_pull_done(self, sock: zmq.Socket, req_id: str, uuid: int):
+        logger.info(f"Worker {self.node_id} --> zmq notify | req_id={req_id} | uuid={uuid}")
+        sock.send_string(str(uuid))
         # The response is not really needed.
         # ack = sock.recv_string()
 
