@@ -26,7 +26,7 @@ steps:
      key: "build-vllm-tpu-image"
      agents:
        queue: cpu
-     envs:
+     env:
        GCP_REGION: "southamerica-west1"
        GCP_PROJECT_ID: "cloud-tpu-inference-test"
        ARTIFACT_REPO: "vllm-tpu-bm-bk"
@@ -39,7 +39,7 @@ steps:
   #    depends_on: "build-vllm-tpu-image"
   #    agents:
   #      queue: cpu
-  #    envs:
+  #    env:
   #      GCP_REGION: "southamerica-west1"
   #      GCP_PROJECT_ID: "cloud-tpu-inference-test"
   #    commands:
