@@ -149,6 +149,7 @@ class TPUConnector(KVConnectorBase_V1):
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
         assert vllm_config.kv_transfer_config is not None
+        self._connector_metadata = None
 
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = \
