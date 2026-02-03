@@ -100,7 +100,7 @@ NOTIFY_FILE="generated_notification.yml"
 #      it won't alert the oncall team.
 
 if [[ "$BUILDKITE_PIPELINE_SLUG" == "tpu-vllm-integration" && "$BUILDKITE_SOURCE" == "schedule" ]] || \
-   [[ "$NIGHTLY" == "1" && "$BUILDKITE_SOURCE" == "schedule" ]]; then
+   [[ "${NIGHTLY:-0}" == "1" && "$BUILDKITE_SOURCE" == "schedule" ]]; then
     echo "Context: Scheduled Integration/Nightly. Notifying Oncall."
     cat <<EOF > "$NOTIFY_FILE"
 notify:
