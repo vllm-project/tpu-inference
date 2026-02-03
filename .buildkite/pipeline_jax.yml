@@ -92,25 +92,66 @@ steps:
            .buildkite/scripts/run_in_docker.sh \
              bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py'
 
-   - label: "${LABEL_PREFIX}JAX unit tests"
-     key: ${KEY_PREFIX}test_7
+   - label: "${LABEL_PREFIX}JAX unit tests part1"
+     key: ${KEY_PREFIX}test_7_1
      soft_fail: true
      env:
        IS_FOR_V7X: "${IS_FOR_V7X}"
+     artifact_paths: "/mnt/disks/persist/models/.coverage.part1"
      agents:
        queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
      commands:
        - |
-         .buildkite/scripts/run_in_docker.sh \
-           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/ \
+         .buildkite/scripts/run_in_docker.sh bash -c "
+           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/models /workspace/tpu_inference/tests/layers \
            --ignore=/workspace/tpu_inference/tests/kernels \
            --ignore=/workspace/tpu_inference/tests/lora \
            --ignore=/workspace/tpu_inference/tests/e2e \
            --ignore=/workspace/tpu_inference/tpu_inference/mock \
            --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py \
            --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py \
-           --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference --cov-report term-missing --cov-fail-under=${COV_FAIL_UNDER:-69}
+           --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference --cov-report term-missing; \
+           cp .coverage /tmp/hf_home/.coverage.part1"           
 
+   - label: "${LABEL_PREFIX}JAX unit tests part2"
+     key: ${KEY_PREFIX}test_7_2
+     soft_fail: true
+     env:
+       IS_FOR_V7X: "${IS_FOR_V7X}"
+     artifact_paths: "/mnt/disks/persist/models/.coverage.part2"
+     agents:
+       queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
+     commands:
+       - |
+         .buildkite/scripts/run_in_docker.sh bash -c "
+           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/ \
+           --ignore=/workspace/tpu_inference/tests/models \
+           --ignore=/workspace/tpu_inference/tests/layers \
+           --ignore=/workspace/tpu_inference/tests/kernels \
+           --ignore=/workspace/tpu_inference/tests/lora \
+           --ignore=/workspace/tpu_inference/tests/e2e \
+           --ignore=/workspace/tpu_inference/tpu_inference/mock \
+           --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference --cov-report term-missing; \
+           cp .coverage /tmp/hf_home/.coverage.part2"
+
+   - label: "${LABEL_PREFIX}JAX unit tests combine and report"
+     depends_on: [${KEY_PREFIX}test_7_1, ${KEY_PREFIX}test_7_2]
+     key: ${KEY_PREFIX}test_7_3
+     soft_fail: true
+     env:
+       IS_FOR_V7X: "${IS_FOR_V7X}"
+     agents:
+       queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
+     commands:
+       - "buildkite-agent artifact download \".coverage.part*\" /mnt/disks/persist/models/"
+       - |
+        .buildkite/scripts/run_in_docker.sh bash -c "
+          cd /tmp/hf_home
+          ls -la .coverage.part*
+          coverage combine .coverage.part1 .coverage.part2
+          coverage report --fail-under=69
+        "
+           
    - label: "${LABEL_PREFIX}JAX unit tests - kernels"
      key: ${KEY_PREFIX}test_8
      soft_fail: true
