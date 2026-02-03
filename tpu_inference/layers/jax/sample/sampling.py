@@ -48,6 +48,11 @@ def sample(
         return greedy_sampled
 
     logits = logits.astype(jnp.float32)
+    # Temperature scaling
+    temperatures = tpu_sampling_metadata.temperature.astype(logits.dtype)
+    temperatures = jnp.expand_dims(temperatures, axis=-1)
+    logits /= temperatures
+    
     # Only apply top-k masking if k > 0 for each token
     top_k = tpu_sampling_metadata.top_k
     should_apply_topk = jnp.expand_dims(top_k > 0, axis=-1)
@@ -60,9 +65,8 @@ def sample(
     topp_masked = topp_mask(logits, top_p, replace_val=-1e12)
     logits = jnp.where(should_apply_topp, topp_masked, logits)
 
-    temperatures = tpu_sampling_metadata.temperature.astype(logits.dtype)
-    temperatures = jnp.expand_dims(temperatures, axis=-1)
-    logits /= temperatures
+    logits = topk_mask(logits, tpu_sampling_metadata.top_k, replace_val=-1e12)
+    logits = topp_mask(logits, tpu_sampling_metadata.top_p, replace_val=-1e12)
 
     # (batch_size,)
     next_tokens = jax.random.categorical(rng, logits)
