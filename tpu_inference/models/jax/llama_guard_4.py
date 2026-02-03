@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# yapf: disable
+# isort: skip_file
+
 import re
 from itertools import islice
 from typing import Any, List, Optional, Tuple
