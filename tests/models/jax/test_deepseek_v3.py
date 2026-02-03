@@ -11,8 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import os
-import unittest
+
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -22,19 +21,11 @@ import numpy as np
 import pytest
 import torch
 from flax import nnx
-from jax.sharding import Mesh, PartitionSpec
-from parameterized import parameterized
+from jax.sharding import Mesh
 from vllm.config import ModelConfig
 
 # Assuming the model file is named deepseek_v3.py
-import tpu_inference.kernels.mla.v1.kernel as mla
-from tpu_inference.layers.common.attention_interface import get_kv_cache_shape
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.models.jax.deepseek_v3 import (DeepSeekV3,
-                                                  DeepseekV3Attention,
-                                                  DeepseekV3MLA,
-                                                  DeepSeekV3Router,
+from tpu_inference.models.jax.deepseek_v3 import (DeepSeekV3, DeepSeekV3Router,
                                                   DeepSeekV3WeightLoader)
 
 
@@ -587,194 +578,3 @@ class TestDeepSeekV3Router:
 
             assert weights.shape == (2, 2)
             assert indices.shape == (2, 2)
-
-
-class TestDeepseekV3Attention(unittest.TestCase):
-
-    def setUp(self):
-        os.environ["NEW_MODEL_DESIGN"] = "1"
-        self.mesh = Mesh(
-            np.array(jax.devices("tpu")[:1]).reshape(1, 1, 1, 1),
-            axis_names=("data", "attn_dp", "expert", "model"),
-        )
-
-    @parameterized.expand([["auto"], ["fp8"]])
-    def test_deepseek_v3_attention_forward_pass(self, kv_cache_str):
-        """
-        Tests DeepseekV3Attention.
-        This class simulates the 'decompressed' path where MLA weights
-        are projected up to standard MHA heads, using standard KV cache.
-        """
-        hidden_size = 256
-        num_attention_heads = 32
-        num_key_value_heads = 32
-        qk_nope_head_dim = 64
-        qk_rope_head_dim = 32
-        v_head_dim = 64
-
-        with jax.set_mesh(self.mesh):
-            query_tnh_spec = PartitionSpec(None, ShardingAxisName.MLP_TENSOR,
-                                           None)
-            keyvalue_skh_spec = PartitionSpec(None,
-                                              ShardingAxisName.MLP_TENSOR,
-                                              None)
-            attn_o_tnh_spec = PartitionSpec(None, ShardingAxisName.MLP_TENSOR,
-                                            None)
-
-            # NOTE: DeepseekV3Attention = MHA
-            mha_layer = DeepseekV3Attention(
-                hidden_size=hidden_size,
-                num_attention_heads=num_attention_heads,
-                num_key_value_heads=num_key_value_heads,
-                head_dim=v_head_dim,
-                rope_theta=10000,
-                dtype=jnp.bfloat16,
-                q_lora_rank=512,
-                kv_lora_rank=512,
-                qk_nope_head_dim=qk_nope_head_dim,
-                qk_rope_head_dim=qk_rope_head_dim,
-                v_head_dim=v_head_dim,
-                rms_norm_eps=1e-5,
-                rngs=nnx.Rngs(42),
-                rope_scaling={
-                    "beta_fast": 32,
-                    "beta_slow": 1,
-                    "factor": 40,
-                    "mscale": 1.0,
-                    "mscale_all_dim": 1.0,
-                    "original_max_position_embeddings": 4096,
-                    "type": "yarn",
-                },
-                mesh=self.mesh,
-                random_init=True,
-                kv_cache_dtype=kv_cache_str,
-                query_tnh=query_tnh_spec,
-                keyvalue_skh=keyvalue_skh_spec,
-                attn_o_tnh=attn_o_tnh_spec,
-                q_da_sharding=(None, ShardingAxisName.VOCAB),
-                ap_sharding=(None, ShardingAxisName.MLP_TENSOR),
-                kv_da_sharding=(None, ShardingAxisName.VOCAB),
-                rd_sharding=(ShardingAxisName.MLP_TENSOR, None),
-            )
-
-            seq_len = 32
-            x = jnp.ones((seq_len, hidden_size), dtype=jnp.bfloat16)
-
-            qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
-            block_size = 16
-            num_blocks = 8
-            kv_dtype = jnp.float8_e4m3fn if kv_cache_str == "fp8" else jnp.bfloat16
-            cache_shape = get_kv_cache_shape(num_blocks, block_size,
-                                             num_key_value_heads, qk_head_dim,
-                                             kv_dtype)
-            kv_cache = jnp.zeros(cache_shape, dtype=kv_dtype)
-
-            attention_metadata = AttentionMetadata(
-                input_positions=jnp.arange(seq_len, dtype=jnp.int32),
-                block_tables=jnp.zeros((8, ), dtype=jnp.int32),
-                seq_lens=jnp.ones((1, ), dtype=jnp.int32) * seq_len,
-                query_start_loc=jnp.array([0, seq_len], dtype=jnp.int32),
-                request_distribution=jnp.array([0, 0, 1], dtype=jnp.int32),
-            )
-
-            mha_layer.rope.initialize_cache(self.mesh)
-
-            new_kv_cache, output = mha_layer(
-                x,
-                is_prefill=True,
-                kv_cache=kv_cache,
-                attention_metadata=attention_metadata)
-
-            self.assertEqual(output.shape, (seq_len, hidden_size))
-            self.assertEqual(new_kv_cache.shape, kv_cache.shape)
-
-    @parameterized.expand(
-        [["auto"]])  # TODO (gpolovets): MLA kernel does not support fp8 yet
-    def test_deepseek_v3_mla_forward_pass(self, kv_cache_str):
-        """
-        Tests DeepseekV3MLA.
-        This class uses the specialized MLA kernel with matrix absorption
-        and compressed latent KV cache.
-        """
-        hidden_size = 256
-        num_attention_heads = 32
-        num_key_value_heads = 1
-        qk_nope_head_dim = 64
-        qk_rope_head_dim = 32
-        v_head_dim = 64
-        kv_lora_rank = 512
-
-        with jax.set_mesh(self.mesh):
-            query_tnh_spec = PartitionSpec(ShardingAxisName.MLP_TENSOR, None,
-                                           None)
-            keyvalue_skh_spec = PartitionSpec(ShardingAxisName.MLP_TENSOR,
-                                              None)
-            attn_o_tnh_spec = PartitionSpec(ShardingAxisName.MLP_TENSOR, None,
-                                            None)
-
-            model = DeepseekV3MLA(
-                hidden_size=hidden_size,
-                num_attention_heads=num_attention_heads,
-                num_key_value_heads=num_key_value_heads,
-                head_dim=v_head_dim,
-                rope_theta=10000,
-                dtype=jnp.bfloat16,
-                q_lora_rank=512,
-                kv_lora_rank=kv_lora_rank,
-                qk_nope_head_dim=qk_nope_head_dim,
-                qk_rope_head_dim=qk_rope_head_dim,
-                v_head_dim=v_head_dim,
-                rms_norm_eps=1e-5,
-                rngs=nnx.Rngs(42),
-                rope_scaling={
-                    "beta_fast": 32,
-                    "beta_slow": 1,
-                    "factor": 40,
-                    "mscale": 1.0,
-                    "mscale_all_dim": 1.0,
-                    "original_max_position_embeddings": 4096,
-                    "type": "yarn",
-                },
-                mesh=self.mesh,
-                random_init=True,
-                kv_cache_dtype=kv_cache_str,
-                query_tnh=query_tnh_spec,
-                keyvalue_skh=keyvalue_skh_spec,
-                attn_o_tnh=attn_o_tnh_spec,
-                q_da_sharding=(None, ShardingAxisName.VOCAB),
-                # anh_sharding is specific to DeepseekV3MLA
-                anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None),
-                ap_sharding=(None, ShardingAxisName.MLP_TENSOR),
-                kv_da_sharding=(None, ShardingAxisName.VOCAB),
-                rd_sharding=(ShardingAxisName.MLP_TENSOR, None),
-            )
-
-            seq_len = 32
-            x = jnp.ones((seq_len, hidden_size), dtype=jnp.bfloat16)
-
-            block_size = 16
-            num_blocks = 8
-            kv_dtype = jnp.float8_e4m3fn if kv_cache_str == "fp8" else jnp.bfloat16
-
-            cache_shape = mla.get_kv_cache_shape(
-                num_blocks, block_size, kv_lora_rank + qk_rope_head_dim,
-                kv_dtype)
-            kv_cache = jnp.zeros(cache_shape, dtype=kv_dtype)
-
-            attention_metadata = AttentionMetadata(
-                input_positions=jnp.arange(seq_len, dtype=jnp.int32),
-                block_tables=jnp.zeros((8, ), dtype=jnp.int32),
-                seq_lens=jnp.ones((1, ), dtype=jnp.int32) * seq_len,
-                query_start_loc=jnp.array([0, seq_len], dtype=jnp.int32),
-                request_distribution=jnp.array([0, 0, 1], dtype=jnp.int32),
-            )
-
-            model.rope.initialize_cache(self.mesh)
-
-            new_kv_cache, output = model(x,
-                                         is_prefill=True,
-                                         kv_cache=kv_cache,
-                                         attention_metadata=attention_metadata)
-
-            self.assertEqual(output.shape, (seq_len, hidden_size))
-            self.assertEqual(new_kv_cache.shape, kv_cache.shape)

@@ -24,6 +24,7 @@ tpu_inference
 │   │    ├── glossary.md
 │   │    ├── attention
 │   │    │    ├── attention.py # Pre-implemented attention layer.
+│   │    │    └── deepseek_v3_attention.py
 │   │    └── moe
 │   │         ├── moe.py
 │   └── common # Functionalities shared between torchax and jax implementations.
