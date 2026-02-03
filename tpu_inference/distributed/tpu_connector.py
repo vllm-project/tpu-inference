@@ -458,7 +458,6 @@ class TPUConnectorWorker:
         # this map will use the uuid to query the original request id
         self.kv_pull_uuid_to_req_id_map: dict[int, ReqId] = {}
 
-
         self.host_ip = get_host_ip()
         self.kv_transfer_port = get_kv_transfer_port()
         self.side_channel_port = get_side_channel_port()
@@ -558,8 +557,8 @@ class TPUConnectorWorker:
                     )
             else:
                 logger.warning(
-                        f"TPUConnector Worker {self.node_id} --> Disagg producer recives a non-exist pulling finished notification uuid {uuid}"
-                    )
+                    f"TPUConnector Worker {self.node_id} --> Disagg producer recives a non-exist pulling finished notification uuid {uuid}"
+                )
             time.sleep(0)
             # The response is not really needed.
             # sock.send_multipart([client_id, b"", b"ACK"])
@@ -677,7 +676,9 @@ class TPUConnectorWorker:
         return sock
 
     def _notify_pull_done(self, sock: zmq.Socket, req_id: str, uuid: int):
-        logger.info(f"Worker {self.node_id} --> zmq notify | req_id={req_id} | uuid={uuid}")
+        logger.info(
+            f"Worker {self.node_id} --> zmq notify | req_id={req_id} | uuid={uuid}"
+        )
         sock.send_string(str(uuid))
         # The response is not really needed.
         # ack = sock.recv_string()
