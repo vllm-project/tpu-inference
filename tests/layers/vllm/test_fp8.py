@@ -189,7 +189,7 @@ def initialize_layer_weights(layer: torch.nn.Module):
         10)
 
     for i in range(0, layer.output_size, block_m):
-        w_f32[i:i + block_m] *= 1 + i / 10  # simulate varying scales
+        w_f32[i:i + block_m] *= 1 + i / 20  # simulate varying scales
 
     w_q, w_scale_blocks = ref_quantize_fp8_block_2d(w_f32, block_m, block_n,
                                                     torch.float8_e4m3fn)
