@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -35,8 +35,8 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.qwen2 import Qwen2DecoderLayer
 from tpu_inference.models.jax.qwen2 import Qwen2MLP as Qwen3MLP
 from tpu_inference.models.jax.qwen2 import Qwen2Model
-from tpu_inference.models.jax.utils.weight_utils import (StandardWeightLoader,
-                                                         get_default_maps)
+from tpu_inference.models.jax.utils.weight_utils import (JaxAutoWeightsLoader,
+                                                         LoadableWithIterator)
 
 logger = init_logger(__name__)
 
@@ -249,18 +249,17 @@ class Qwen3Model(Qwen2Model):
         )
 
 
-class Qwen3ForCausalLM(JaxModule):
-    WeightLoader = StandardWeightLoader
+class Qwen3ForCausalLM(JaxModule, LoadableWithIterator):
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
                  mesh: Mesh) -> None:
         self.vllm_config = vllm_config
-        self.rng = nnx.Rngs(rng_key)
+        rng = nnx.Rngs(rng_key)
         self.mesh = mesh
 
         self.model = Qwen3Model(
             vllm_config=vllm_config,
-            rng=self.rng,
+            rng=rng,
             mesh=mesh,
         )
         model_config = vllm_config.model_config
@@ -271,7 +270,7 @@ class Qwen3ForCausalLM(JaxModule):
                 einsum_str="TD,DV->TV",
                 kernel_shape=(hidden_size, vocab_size),
                 dtype=model_config.dtype,
-                rngs=self.rng,
+                rngs=rng,
                 quant_config=vllm_config.quant_config,
             )
 
@@ -295,27 +294,9 @@ class Qwen3ForCausalLM(JaxModule):
 
         return self.model.embed_tokens.decode(hidden_states)
 
-    def load_weights(self, rng_key: jax.Array):
-        # NOTE: Since we are using nnx.eval_shape to init the model,
-        # we have to pass dynamic arrays here for __call__'s usage.
-        self.rng = nnx.Rngs(rng_key)
-
-        # Key: path to a HF layer weight
-        # Value: path to a nnx layer weight
-        mappings = {}
-
-        loader = self.WeightLoader(self.vllm_config, self.mesh)
-        metadata_map = get_default_maps(self.vllm_config.model_config,
-                                        self.mesh, mappings)
-        metadata_map.reshape_map = {
-            k + ".weight": v
-            for k, v in metadata_map.reshape_map.items()
-        }
-        keep_hf_weight_suffix_when_match = ['model']
-        if not self.vllm_config.model_config.hf_config.tie_word_embeddings:
-            keep_hf_weight_suffix_when_match.append('lm_head')
-        loader.load_weights(
+    def load_weights(self, weights: Iterable) -> set[str]:
+        loader = JaxAutoWeightsLoader(
             self,
-            metadata_map,
-            # Keep .weight suffix for all parameters.
-            keep_hf_weight_suffix_when_match=keep_hf_weight_suffix_when_match)
+            skip_prefixes=(["lm_head"]
+                           if not hasattr(self, 'lm_head') else None))
+        return loader.load_weights(weights)
