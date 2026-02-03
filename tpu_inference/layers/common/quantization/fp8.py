@@ -40,12 +40,14 @@ class Fp8LinearMethod:
                                         weight_jax,
                                         weight_scale_jax,
                                         self.linear_config.weight_sharding,
-                                        mesh=self.linear_config.mesh)
+                                        mesh=getattr(self.linear_config,
+                                                     'mesh', None))
 
         if bias is not None:
             outs += bias
         outs = slice_sharded_tensor_for_concatenation(
-            outs, self.linear_config.output_sizes, self.linear_config.n_shards)
+            outs, self.linear_config.output_sizes,
+            getattr(self.linear_config, 'n_shards', 1))
         return jnp.concatenate(outs, axis=-1)
 
     def _apply_split(self,

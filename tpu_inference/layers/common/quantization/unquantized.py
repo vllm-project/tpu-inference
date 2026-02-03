@@ -41,7 +41,8 @@ class UnquantizedLinearMethod:
             outs += bias_jax
 
         outs = slice_sharded_tensor_for_concatenation(
-            outs, self.linear_config.output_sizes, self.linear_config.n_shards)
+            outs, self.linear_config.output_sizes,
+            getattr(self.linear_config, 'n_shards', 1))
         out = jnp.concatenate(outs, axis=-1)
         return out
 
