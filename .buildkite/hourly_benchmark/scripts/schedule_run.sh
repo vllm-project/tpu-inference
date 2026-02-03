@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # === Usage ===
-if [ "$#" -ne 5 ]; then
+if [ "$#" -ne 3 ]; then
   echo "Usage: $0 <input.csv|gs://path/to/input.csv> VLLM_COMMIT_HASH TPU_INFERENCE_HASH"
   exit 1
 fi
