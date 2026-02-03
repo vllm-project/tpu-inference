@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Iterable, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -35,8 +35,7 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.qwen2 import Qwen2DecoderLayer
 from tpu_inference.models.jax.qwen2 import Qwen2MLP as Qwen3MLP
 from tpu_inference.models.jax.qwen2 import Qwen2Model
-from tpu_inference.models.jax.utils.weight_utils import (JaxAutoWeightsLoader,
-                                                         LoadableWithIterator)
+from tpu_inference.models.jax.utils.weight_utils import LoadableWithIterator
 
 logger = init_logger(__name__)
 
@@ -293,10 +292,3 @@ class Qwen3ForCausalLM(JaxModule, LoadableWithIterator):
             return self.lm_head(hidden_states)
 
         return self.model.embed_tokens.decode(hidden_states)
-
-    def load_weights(self, weights: Iterable) -> set[str]:
-        loader = JaxAutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head"]
-                           if not hasattr(self, 'lm_head') else None))
-        return loader.load_weights(weights)
