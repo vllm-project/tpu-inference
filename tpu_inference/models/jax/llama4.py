@@ -13,7 +13,8 @@
 # limitations under the License.
 
 import re
-from typing import List, Optional, Tuple
+from itertools import islice
+from typing import Any, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -23,18 +24,23 @@ from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
 
+from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
 from tpu_inference.layers.jax.attention.llama4_attention import Llama4Attention
 from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
 from tpu_inference.layers.jax.misc import shard_put
 from tpu_inference.layers.jax.moe.moe import JaxMoE, Router
+from tpu_inference.layers.jax.pp_utils import (PPMissingLayer,
+                                               get_start_end_layer)
 from tpu_inference.layers.jax.transformer_block import \
     SharedExpertsTransformerBlock
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.jax_intermediate_tensor import \
+    JaxIntermediateTensors
 from tpu_inference.models.jax.utils.weight_utils import (
-    BaseWeightLoader, convert_torch_to_jax_with_view, get_param,
-    print_param_info, reshape_params, transpose_params)
+    BaseWeightLoader, _is_pp_missing_layer, convert_torch_to_jax_with_view,
+    get_param, print_param_info, reshape_params, transpose_params)
 
 logger = init_logger(__name__)
 
@@ -159,6 +165,7 @@ class Llama4WeightLoader(BaseWeightLoader):
             self._loaded_to_standardized_keys.update(EXPERT_MAPPINGS_FUSED)
         else:
             self._loaded_to_standardized_keys.update(EXPERT_MAPPINGS_UNFUSED)
+        self.pp_missing_layers = []
 
     def map_loaded_to_standardized_name(self, loaded_key: str) -> str:
         # Find the corresponding model key using the HF key
@@ -206,7 +213,11 @@ class Llama4WeightLoader(BaseWeightLoader):
 
             mapped_name = re.sub(r"layers\.\*", f"layers.{layer_num}",
                                  mapped_name)
-
+            if _is_pp_missing_layer(mapped_name, self.pp_missing_layers):
+                logger.debug(
+                    f"Skip loading {mapped_name=} as it doesn't belong to this PP stage."
+                )
+                continue
             mapped_model_weight = get_param(model_params, mapped_name)
 
             if mapped_model_weight.value.shape != loaded_weight.shape:
@@ -246,6 +257,13 @@ class Llama4WeightLoader(BaseWeightLoader):
 
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)
+
+        for path, module in nnx.iter_graph(model_for_loading):
+            if isinstance(module, PPMissingLayer):
+                # this layer name is layers.{i} or final_norm, embedder, lm_head, etc
+                layer_name = ".".join([str(s) for s in path])
+                self.pp_missing_layers.append(layer_name)
+
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in self.get_weights_iterator():
                 is_moe_layer = False
@@ -254,10 +272,17 @@ class Llama4WeightLoader(BaseWeightLoader):
                 # Quantized (FP8) checkpoints unstack the expert weights, while unquantized (BF16) checkpoints keep them stacked.
                 is_unfused_expert = self.quantization_config is not None and expert_num is not None
                 is_scale = loaded_name.endswith(".weight_scale")
-
+                skip_layer = False
                 if is_unfused_expert:
                     mapped_name = self.map_loaded_to_standardized_name(
                         loaded_name)
+                    if _is_pp_missing_layer(mapped_name,
+                                            self.pp_missing_layers):
+                        skip_layer = True
+                        logger.debug(
+                            f"Skip loading {mapped_name} as it doesn't belong to this PP stage."
+                        )
+                        continue
                     model_weight = get_param(model_params, mapped_name)
 
                     if is_scale:
@@ -277,6 +302,8 @@ class Llama4WeightLoader(BaseWeightLoader):
                     self.expert_weights_buffer[buffer_key][
                         expert_num] = loaded_weight
                     continue
+                if skip_layer:
+                    continue
 
                 if layer_num is not None:
                     is_moe_layer = (layer_num + 1) % \
@@ -290,6 +317,11 @@ class Llama4WeightLoader(BaseWeightLoader):
                     continue
 
                 mapped_name = self.map_loaded_to_standardized_name(loaded_name)
+                if _is_pp_missing_layer(mapped_name, self.pp_missing_layers):
+                    logger.debug(
+                        f"Skip loading {mapped_name} as it doesn't belong to this PP stage."
+                    )
+                    continue
                 model_weight = get_param(model_params, mapped_name)
 
                 cast_type = model_weight.value.dtype
@@ -314,13 +346,11 @@ class Llama4WeightLoader(BaseWeightLoader):
                 logger.debug(
                     f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
                 )
-
                 model_weight.value = shard_put(loaded_weight,
                                                model_weight.sharding,
                                                mesh=model_for_loading.mesh)
                 if self.is_verbose:
                     print_param_info(model_weight, loaded_name)
-
             with jax.default_device(jax.devices("cpu")[0]):
                 for buffer_key, expert_map in self.expert_weights_buffer.items(
                 ):
@@ -331,7 +361,12 @@ class Llama4WeightLoader(BaseWeightLoader):
                     base_mapped_name = buffer_key.replace("_scale",
                                                           "").replace(
                                                               "_qvalue", "")
-
+                    if _is_pp_missing_layer(base_mapped_name,
+                                            self.pp_missing_layers):
+                        logger.debug(
+                            f"Skip loading {base_mapped_name} as it doesn't belong to this PP stage."
+                        )
+                        continue
                     model_weight = get_param(model_params, base_mapped_name)
 
                     assert hasattr(
@@ -439,17 +474,30 @@ class Llama4ForCausalLM(nnx.Module):
 
         self.use_qk_norm = getattr(text_config, "use_qk_norm", True)
 
-        self.embedder = Embedder(vocab_size=self.vocab_size,
-                                 hidden_size=self.hidden_size,
-                                 dtype=dtype,
-                                 vd_sharding=(('data', 'expert', 'model'),
-                                              None),
-                                 rngs=self.rng,
-                                 random_init=force_random_weights)
+        self.is_first_rank = get_pp_group().is_first_rank
+        self.is_last_rank = get_pp_group().is_last_rank
+
+        if self.is_first_rank or (model_config.hf_config.tie_word_embeddings
+                                  and self.is_last_rank):
+            self.embedder = Embedder(vocab_size=self.vocab_size,
+                                     hidden_size=self.hidden_size,
+                                     dtype=dtype,
+                                     vd_sharding=(('data', 'expert', 'model'),
+                                                  None),
+                                     rngs=self.rng,
+                                     random_init=force_random_weights)
+        else:
+            self.embedder = PPMissingLayer()
 
         self.layers = []
+        self.start_layer, self.end_layer = get_start_end_layer(
+            self.num_layers,
+            get_pp_group().rank_in_group,
+            get_pp_group().world_size)
+        for i in range(self.start_layer):
+            self.layers.append(PPMissingLayer())
 
-        for i in range(self.num_layers):
+        for i in range(self.start_layer, self.end_layer):
             # For Llama4-Scout, all layers are MoE layers.
             # This can be adjusted for other variants.
             is_moe_layer = (i + 1) % \
@@ -571,22 +619,31 @@ class Llama4ForCausalLM(nnx.Module):
                 use_attention_rope=use_attention_rope)
             self.layers.append(block)
 
-        self.final_norm = RMSNorm(
-            dims=self.hidden_size,
-            epsilon=self.rms_norm_eps,
-            rngs=self.rng,
-            with_scale=True,
-            dtype=dtype,
-            random_init=force_random_weights,
-        )
+        for i in range(self.end_layer, self.num_layers):
+            self.layers.append(PPMissingLayer())
 
-        self.lm_head = LMhead(vocab_size=self.vocab_size,
-                              hidden_size=self.hidden_size,
-                              dtype=dtype,
-                              rngs=self.rng,
-                              vd_sharding=(('data', 'expert', 'model'), None),
-                              dv_sharding=(None, ('data', 'expert', 'model')),
-                              random_init=force_random_weights)
+        if self.is_last_rank:
+            self.final_norm = RMSNorm(
+                dims=self.hidden_size,
+                epsilon=self.rms_norm_eps,
+                rngs=self.rng,
+                with_scale=True,
+                dtype=dtype,
+                random_init=force_random_weights,
+            )
+            self.lm_head = LMhead(vocab_size=self.vocab_size,
+                                  hidden_size=self.hidden_size,
+                                  dtype=dtype,
+                                  rngs=self.rng,
+                                  vd_sharding=(('data', 'expert', 'model'),
+                                               None),
+                                  dv_sharding=(None, ('data', 'expert',
+                                                      'model')),
+                                  random_init=force_random_weights)
+        else:
+            self.final_norm = PPMissingLayer()
+            self.lm_head = PPMissingLayer()
+
         if self.is_verbose:
             self._print_model_architecture()
 
@@ -624,20 +681,33 @@ class Llama4ForCausalLM(nnx.Module):
         kv_caches: List[jax.Array],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
+        inputs_embeds: Optional[jax.Array] = None,
+        _input_positions: Optional[jax.Array] = None,
+        _layer_name_to_kv_cache: Optional[Tuple[Tuple[str, int]]] = None,
+        _lora_metadata: Any = None,
+        intermediate_tensors: Optional[JaxIntermediateTensors] = None,
         *args,
     ) -> Tuple[List[KVCacheType], jax.Array, List[jax.Array]]:
         is_prefill = False
-        x_TD = self.embedder.encode(input_ids)
+        if self.is_first_rank:
+            x_TD = self.embedder.encode(input_ids)
+        else:
+            assert intermediate_tensors is not None
+            x_TD = intermediate_tensors["hidden_states"]
 
-        for (i, block) in enumerate(self.layers):
+        for (i, block) in enumerate(
+                islice(self.layers, self.start_layer, self.end_layer)):
             kv_cache = kv_caches[i]
             new_kv_cache, x_TD = block(x_TD, is_prefill, kv_cache,
                                        attention_metadata)
             jax.block_until_ready(x_TD)
             kv_caches[i] = new_kv_cache
 
-        final_activation_TD = self.final_norm(x_TD)
+        if not self.is_last_rank:
+            return kv_caches, JaxIntermediateTensors({"hidden_states":
+                                                      x_TD}), []
 
+        final_activation_TD = self.final_norm(x_TD)
         return kv_caches, final_activation_TD, []
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
