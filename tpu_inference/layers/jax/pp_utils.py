@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Protocol
+from typing import Iterable, List, Protocol
 
 from flax import nnx
 from vllm.distributed.utils import get_pp_indices
@@ -32,6 +32,11 @@ class PPMissingLayer(JaxModule):
     def __call__(self, *args, **kwargs):
         """Return the first arg from args or the first value from kwargs."""
         return args[0] if args else next(iter(kwargs.values()))
+
+    def load_weights(self, weights: Iterable, *args, **kwargs):
+        """No-op for loading weights."""
+        for _ in weights:
+            pass
 
 
 class LayerFn(Protocol):

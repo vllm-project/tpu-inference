@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from itertools import islice
 from typing import List, Optional, Tuple
 
 import jax
@@ -22,6 +23,7 @@ from transformers import Qwen2Config, modeling_flax_utils
 from vllm.config import VllmConfig
 
 from tpu_inference import utils
+from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
@@ -29,9 +31,12 @@ from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
 from tpu_inference.layers.jax.norm import JaxRmsNorm
+from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.jax_intermediate_tensor import \
+    JaxIntermediateTensors
 from tpu_inference.models.jax.utils.weight_utils import (LoadableWithIterator,
                                                          StandardWeightLoader)
 
@@ -268,33 +273,42 @@ class Qwen2Model(JaxModule):
         rms_norm_eps = hf_config.rms_norm_eps
         hidden_size = hf_config.hidden_size
 
-        self.embed_tokens = JaxEmbed(
-            num_embeddings=vocab_size,
-            features=hidden_size,
-            param_dtype=dtype,
-            embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
-            rngs=rng,
-            quant_config=vllm_config.quant_config,
-        )
-        self.layers = [
-            Qwen2DecoderLayer(
+        self.is_first_rank = get_pp_group().is_first_rank
+        self.is_last_rank = get_pp_group().is_last_rank
+
+        if self.is_first_rank:
+            self.embed_tokens = JaxEmbed(
+                num_embeddings=vocab_size,
+                features=hidden_size,
+                param_dtype=dtype,
+                embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
+                rngs=rng,
+                quant_config=vllm_config.quant_config,
+            )
+        else:
+            self.embed_tokens = PPMissingLayer()
+
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            hf_config.num_hidden_layers,
+            lambda: Qwen2DecoderLayer(
                 config=hf_config,
                 dtype=dtype,
                 rng=rng,
                 mesh=mesh,
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
-                quant_config=vllm_config.quant_config)
-            for _ in range(hf_config.num_hidden_layers)
-        ]
-        self.norm = JaxRmsNorm(
-            hidden_size,
-            epsilon=rms_norm_eps,
-            param_dtype=dtype,
-            scale_init=nnx.with_partitioning(init_fn, (None, )),
-            rngs=rng,
-            quant_config=vllm_config.quant_config,
-        )
+                quant_config=vllm_config.quant_config))
+        if self.is_last_rank:
+            self.norm = JaxRmsNorm(
+                hidden_size,
+                epsilon=rms_norm_eps,
+                param_dtype=dtype,
+                scale_init=nnx.with_partitioning(init_fn, (None, )),
+                rngs=rng,
+                quant_config=vllm_config.quant_config,
+            )
+        else:
+            self.norm = PPMissingLayer()
 
     def __call__(
         self,
@@ -307,7 +321,8 @@ class Qwen2Model(JaxModule):
             x = inputs_embeds
         else:
             x = self.embed_tokens(input_ids)
-        for i, layer in enumerate(self.layers):
+        for i, layer in enumerate(
+                islice(self.layers, self.start_layer, self.end_layer)):
             kv_cache = kv_caches[i]
             kv_cache, x = layer(
                 kv_cache,
@@ -351,14 +366,27 @@ class Qwen2ForCausalLM(JaxModule, LoadableWithIterator):
         input_ids: Optional[jax.Array],
         attention_metadata: AttentionMetadata,
         inputs_embeds: Optional[jax.Array] = None,
+        _input_embeds=None,
+        _input_positions=None,
+        _layer_name_to_kv_cache=None,
+        _lora_metadata=None,
+        intermediate_tensors: Optional[JaxIntermediateTensors] = None,
+        is_first_rank: bool = True,
+        is_last_rank: bool = True,
         *args,
-    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
+    ) -> Tuple[List[jax.Array], jax.Array | JaxIntermediateTensors,
+               List[jax.Array]]:
+        if not is_first_rank:
+            assert intermediate_tensors is not None
+            inputs_embeds = intermediate_tensors["hidden_states"]
         kv_caches, x = self.model(
             kv_caches,
             input_ids,
             attention_metadata,
             inputs_embeds,
         )
+        if not is_last_rank:
+            x = JaxIntermediateTensors(tensors={"hidden_states": x}, )
         return kv_caches, x, []
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
