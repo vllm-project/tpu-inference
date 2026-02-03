@@ -19,8 +19,8 @@ import jax.numpy as jnp
 from flax import nnx
 
 from tpu_inference.layers.common.moe import MoEBackend, moe_apply
-from tpu_inference.layers.common.process_weights.moe_weights import \
-    FusedMoEWeights
+from tpu_inference.layers.common.process_weights.moe_weights import (
+    FusedMoEWeights, UnfusedMoEWeights)
 from tpu_inference.layers.common.quantization import unquantized as jax_common
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.jax import JaxModule
@@ -111,15 +111,17 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
     def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
         assert isinstance(layer, JaxMoE)
 
+        x_TD = jnp.asarray(x, layer.dtype)
+        x_TD = nnx.with_sharding_constraint(x_TD, layer.activation_ffw_td)
+
+        router_logits = None
         # Fused weight backends
         if layer.moe_backend in [
                 MoEBackend.FUSED_MOE, MoEBackend.GMM_EP, MoEBackend.GMM_TP
         ]:
-            x_TD = jnp.asarray(x, layer.dtype)
-            x_TD = nnx.with_sharding_constraint(x_TD, layer.activation_ffw_td)
-            router_logits_TE = layer.router(x_TD)
+            # of shape TE, only 1D in this case
+            router_logits = layer.router(x_TD)
 
-            # TODO; unfused too
             w13_weight = layer.kernel_gating_upproj_E2DF.value if layer.moe_backend == MoEBackend.FUSED_MOE else layer.kernel_gating_upproj_EFD.value
             w2_weight = layer.kernel_down_proj_EFD.value if layer.moe_backend == MoEBackend.FUSED_MOE else layer.kernel_down_proj_EDF.value
             weights = FusedMoEWeights(
@@ -130,9 +132,30 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
                 w2_weight_scale=None,
                 w2_bias=None,  # TODO?
             )
+        elif layer.moe_backend in [
+                MoEBackend.DENSE_MAT, MoEBackend.MEGABLX_GMM,
+                MoEBackend.RAGGED_DOT
+        ]:
+            # Composed of weights_TX and indices_TX, so 2D in this case
+            router_logits = layer.router(x_TD)
+            weights = UnfusedMoEWeights(
+                w1_weight=layer.kernel_gating_EDF.value,
+                w1_weight_scale=None,
+                w1_bias=None,  # TODO?
+                w2_weight=layer.kernel_up_proj_EDF.value,
+                w2_weight_scale=None,
+                w2_bias=None,  # TODO?
+                w3_weight=layer.kernel_down_proj_EFD.value,
+                w3_weight_scale=None,
+                w3_bias=None,
+            )
+
+            if layer in [MoEBackend.MEGABLX_GMM, MoEBackend.RAGGED_DOT]:
+                # TODO
+                raise NotImplementedError
         else:
-            raise ValueError
-        return moe_apply(layer, x_TD, router_logits_TE, weights,
+            raise ValueError(f"Unsupported moe backend {layer.moe_backend}")
+        return moe_apply(layer, x_TD, router_logits, weights,
                          layer.moe_backend, layer.mesh,
                          self.extra_backend_kwargs)
 

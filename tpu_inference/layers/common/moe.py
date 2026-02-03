@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from enum import Enum
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -59,6 +59,10 @@ def select_moe_backend(use_ep: bool):
         logger.info("[MoE]: Ragged Dot is enabled for GMM in Sparse Matmul")
         return MoEBackend.RAGGED_DOT
 
+    if envs.USE_DENSE_MOE:
+        logger.info("[MoE]: Using dense MoE kernel")
+        return MoEBackend.DENSE_MAT
+
     if use_ep:
         logger.warning_once(
             "USE_MOE_EP_KERNEL=1 but expert parallelism is not "
@@ -74,7 +78,7 @@ def select_moe_backend(use_ep: bool):
 def moe_apply(
     layer: FusedMoE,
     x: jax.Array,
-    gating_output: jax.Array,
+    gating_output: Union[jax.Array, Tuple[jax.Array, jax.Array]],
     weights: Union[FusedMoEWeights, UnfusedMoEWeights],
     moe_backend: MoEBackend,
     mesh: Mesh,
@@ -140,24 +144,23 @@ def moe_apply(
                     scoring_fn=layer.scoring_func,
                 )
             case MoEBackend.DENSE_MAT:
-                raise ValueError
-                # TODO move
-                # weights_TX, indices_TX = self.router(x_TD)
-                # one_hot_indices_TXE = jax.nn.one_hot(
-                #     indices_TX,
-                #     num_classes=self.num_local_experts,
-                #     dtype=self.dtype)
-                # full_weights_TE = jnp.sum(one_hot_indices_TXE *
-                #                           weights_TX[..., None],
-                #                           axis=1)
-                # # Some models use the routing scores to weight the data instead of
-                # # weighting the expert outputs.
-                # if self.apply_expert_weight_before_computation:
-                #     with jax.named_scope("pre_computing_weight"):
-                #         return dense_moe_fwd_preapply_router_weights(
-                #             self, x_TD, full_weights_TE)
-                # else:
-                #     return dense_moe_fwd(self, x_TD, full_weights_TE)
+                # TODO: move jax -> common?
+                # NOTE: circular import avoidance
+                from tpu_inference.layers.jax.moe.dense_moe import \
+                    dense_moe_func
+                assert len(
+                    gating_output
+                ) == 2, "Expected the gating output to be have 2 entries: weights and indices"
+                return dense_moe_func(
+                    weights=weights,
+                    x_TD=x,
+                    gating_output=gating_output,
+                    cast_dtype=layer.dtype,
+                    num_local_experts=layer.num_local_experts,
+                    apply_expert_weight_before_computation=layer.
+                    apply_expert_weight_before_computation,
+                    activation_ffw_td=layer.activation_ffw_td,
+                    hidden_act=layer.hidden_act)
 
             case MoEBackend.RAGGED_DOT | MoEBackend.MEGABLX_GMM:
                 raise ValueError
