@@ -29,6 +29,7 @@ from vllm.utils.func_utils import supports_kw
 from tpu_inference import envs
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     apply_qwix_on_abstract_model, apply_qwix_quantization,
@@ -89,12 +90,25 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     )
 
 
+def _process_weights_after_loading(model: nnx.Module):
+    """
+    Iterates through the model's graph and triggers any post-loading
+    weight processing defined in the layers' quantization methods.
+    This is required for operations like fusing MoE weights.
+    """
+    for _, node in nnx.iter_graph(model):
+        if hasattr(node, 'quant_method') and hasattr(
+                node.quant_method, 'process_weights_after_loading'):
+            node.quant_method.process_weights_after_loading(node)
+
+
 def _get_nnx_model(
     model_class: Any,
     vllm_config: VllmConfig,
     rng: jax.Array,
     mesh: Mesh,
 ) -> nnx.Module:
+    vllm_config.quant_config = get_tpu_quantization_config(vllm_config)
 
     def create_abstract_model() -> nnx.Module:
         """
@@ -225,6 +239,7 @@ def _get_nnx_model(
                 del vllm_config.model_config.runai_model_weights_iterator
             else:
                 model.load_weights(rng)
+            _process_weights_after_loading(model)
             jit_model = create_jit_model(
                 model,
                 use_qwix_on_abstract_model=should_apply_qwix_on_abstract_model)

@@ -23,16 +23,15 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from tpu_inference import envs
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
 from tpu_inference.layers.common.fused_moe_gmm import fused_moe_func
+# from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.logger import init_logger
 
 if TYPE_CHECKING:
     from tpu_inference.layers.common.process_weights.moe_weights import (
         FusedMoEWeights, UnfusedMoEWeights)
-    from tpu_inference.layers.jax.moe.moe import JaxMoE
 else:
     FusedMoEWeights = None
     UnfusedMoEWeights = None
-    JaxMoE = None
 
 logger = init_logger(__name__)
 
@@ -71,8 +70,9 @@ def select_moe_backend(use_ep: bool):
     return MoEBackend.GMM_TP
 
 
+# TODO: JaxMoE
 def moe_apply(
-    layer: FusedMoE | JaxMoE,
+    layer: FusedMoE,
     x: jax.Array,
     gating_output: jax.Array,
     weights: Union[FusedMoEWeights, UnfusedMoEWeights],
@@ -80,7 +80,7 @@ def moe_apply(
     mesh: Mesh,
     extra_backend_kwargs: dict,
 ) -> jax.Array:
-    assert isinstance(layer, (FusedMoE, JaxMoE))
+    # assert isinstance(layer, (FusedMoE))
 
     with jax.named_scope(layer._get_name()):
         match moe_backend:
@@ -140,11 +140,81 @@ def moe_apply(
                     scoring_fn=layer.scoring_func,
                 )
             case MoEBackend.DENSE_MAT:
-                # TODO(jacobplatin): will implement in forthcoming PR
                 raise ValueError
+                # TODO move
+                # weights_TX, indices_TX = self.router(x_TD)
+                # one_hot_indices_TXE = jax.nn.one_hot(
+                #     indices_TX,
+                #     num_classes=self.num_local_experts,
+                #     dtype=self.dtype)
+                # full_weights_TE = jnp.sum(one_hot_indices_TXE *
+                #                           weights_TX[..., None],
+                #                           axis=1)
+                # # Some models use the routing scores to weight the data instead of
+                # # weighting the expert outputs.
+                # if self.apply_expert_weight_before_computation:
+                #     with jax.named_scope("pre_computing_weight"):
+                #         return dense_moe_fwd_preapply_router_weights(
+                #             self, x_TD, full_weights_TE)
+                # else:
+                #     return dense_moe_fwd(self, x_TD, full_weights_TE)
 
             case MoEBackend.RAGGED_DOT | MoEBackend.MEGABLX_GMM:
+                raise ValueError
                 # TODO(jacobplatin): will implement in forthcoming PR
-                raise NotImplementedError
+                # weights_TX, indices_TX = self.router(x_TD)
+                # if self.qwix_quantized_weight_dtype:
+                #     gating_up_proj_spec = (PartitionSpec(*self.edf_sharding),
+                #                            PartitionSpec(
+                #                                self.edf_sharding[0], None,
+                #                                self.edf_sharding[2]))
+                #     down_proj_spec = (PartitionSpec(*self.efd_sharding),
+                #                       PartitionSpec(self.efd_sharding[0], None,
+                #                                     self.efd_sharding[2]))
+                # else:
+                #     gating_up_proj_spec = PartitionSpec(*self.edf_sharding)
+                #     down_proj_spec = PartitionSpec(*self.efd_sharding)
+
+                # in_specs = (
+                #     PartitionSpec(),  # replicated MoE instance
+                #     PartitionSpec(*self.activation_ffw_td),  # Sharded x_TD
+                #     PartitionSpec(),  # Replicated router_weights_TX
+                #     PartitionSpec(),  # Replicated selected_experts_TX
+                #     gating_up_proj_spec,  # Sharded gating kernel
+                #     gating_up_proj_spec,  # Sharded up-projection kernel
+                #     down_proj_spec,  # Sharded down-projection kernel
+                # )
+                # out_specs = PartitionSpec(*self.activation_ffw_td)
+
+                # mapped_moe_fwd = partial(
+                #     jax.experimental.shard_map.shard_map,
+                #     mesh=self.mesh,
+                #     in_specs=in_specs,
+                #     out_specs=out_specs,
+                #     check_rep=False)(sparse_moe_distributed_fwd)
+
+                # # TODO (jacobplatin): this is needed because of issues with Qwix quantizing the `shard_map` in SpraseMatmul
+                # # Basically, during the abstract pass, we need to manually quantize the weights here for Qwix, but we'll
+                # # override the actual weight/scale during loading (we just need to make sure Qwix quantizes the weight
+                # # in the first place).
+                # kernel_gating_EDF = self._process_weight_for_qwix(
+                #     "kernel_gating_EDF",
+                #     self.kernel_gating_EDF,
+                #     channelwise_axes=[0, 2],
+                #     tiled_axes={})
+                # kernel_up_proj_EDF = self._process_weight_for_qwix(
+                #     "kernel_up_proj_EDF",
+                #     self.kernel_up_proj_EDF,
+                #     channelwise_axes=[0, 2],
+                #     tiled_axes={})
+                # kernel_down_proj_EFD = self._process_weight_for_qwix(
+                #     "kernel_down_proj_EFD",
+                #     self.kernel_down_proj_EFD,
+                #     channelwise_axes=[0, 2],
+                #     tiled_axes={})
+
+                # return mapped_moe_fwd(self, x_TD, weights_TX, indices_TX,
+                #                       kernel_gating_EDF, kernel_up_proj_EDF,
+                #                       kernel_down_proj_EFD)
 
         return output

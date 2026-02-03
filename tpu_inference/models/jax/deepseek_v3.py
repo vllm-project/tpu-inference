@@ -941,23 +941,23 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
             "model.layers.*.mlp.shared_experts.up_proj.weight":
             "layers.*.custom_module.shared_experts.kernel_up_proj_DF",
         }
-        if self.moe_backend in [MoEBackend.GMM_EP, MoEBackend.GMM_TP]:
-            # NOTE (jacobplatin): the first rule is needed because
-            # the current GMM kernel expects that the second/third
-            # dimensions are transposed.  The second rule is needed
-            # because the GMM kernel expects that the up/gate proj
-            # are fused into a single weight tensor.
-            self._loaded_to_standardized_keys.update({
-                "model.layers.*.mlp.experts.*.down_proj.weight":
-                "layers.*.custom_module.experts.kernel_down_proj_EFD",
-                "model.layers.*.mlp.experts.*.gating_upproj_EDF.weight":
-                "layers.*.custom_module.experts.kernel_gating_upproj_EDF",
-            })
-            # NOTE (jacobplatin): only used for the MOE_VLLM backend, which
-            # expects 2/3 dimensions to be transposed.
-            self._transpose_map.update({
-                r"mlp\.experts\.\d+\.gating_upproj_EDF": (0, 2, 1),
-            })
+        # if self.moe_backend in [MoEBackend.GMM_EP, MoEBackend.GMM_TP]:
+        #     # NOTE (jacobplatin): the first rule is needed because
+        #     # the current GMM kernel expects that the second/third
+        #     # dimensions are transposed.  The second rule is needed
+        #     # because the GMM kernel expects that the up/gate proj
+        #     # are fused into a single weight tensor.
+        #     self._loaded_to_standardized_keys.update({
+        #         "model.layers.*.mlp.experts.*.down_proj.weight":
+        #         "layers.*.custom_module.experts.kernel_down_proj_EFD",
+        #         "model.layers.*.mlp.experts.*.gating_upproj_EDF.weight":
+        #         "layers.*.custom_module.experts.kernel_gating_upproj_EDF",
+        #     })
+        #     # NOTE (jacobplatin): only used for the MOE_VLLM backend, which
+        #     # expects 2/3 dimensions to be transposed.
+        #     self._transpose_map.update({
+        #         r"mlp\.experts\.\d+\.gating_upproj_EDF": (0, 2, 1),
+        #     })
 
         if self.use_mla_kernel:
             self._loaded_to_standardized_keys.update({
@@ -1345,81 +1345,36 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                             down_w, down_s = stacked_tensors.pop(layer_num +
                                                                  "down_proj")
 
-                            is_moe_kernel = model_for_loading.moe_backend in [
-                                MoEBackend.FUSED_MOE, MoEBackend.GMM_TP,
-                                MoEBackend.GMM_EP
-                            ]
                             gate_name = loaded_name.replace(
                                 proj_type, "gate_proj")
                             up_name = loaded_name.replace(proj_type, "up_proj")
                             down_name = loaded_name.replace(
                                 proj_type, "down_proj")
-                            if is_moe_kernel:
-                                if model_for_loading.moe_backend in [
-                                        MoEBackend.GMM_EP, MoEBackend.GMM_TP
-                                ]:
-                                    # (E, D, F) -> (E, 2 * F, D)
-                                    fused_w = torch.cat([gate_w, up_w], dim=1)
-                                    fused_s = torch.cat(
-                                        [gate_s, up_s], dim=1
-                                    ) if gate_s is not None and up_s is not None else None
-                                    fused_name = loaded_name.replace(
-                                        proj_type, "gating_upproj_EDF")
 
-                                else:
-                                    # (E, D, F) -> (E, 2, D, F)
-                                    fused_w = torch.stack([gate_w, up_w],
-                                                          dim=1)
-                                    fused_s = torch.stack(
-                                        [gate_s, up_s], dim=1
-                                    ) if gate_s is not None and up_s is not None else None
+                            weight_bytes, weight_shards = self._load_individual_weight(
+                                gate_name,
+                                gate_w,
+                                model_params,
+                                model_for_loading.mesh,
+                                scale=gate_s)
 
-                                    fused_name = loaded_name.replace(
-                                        proj_type, "gate_upproj_fused")
-                                weight_bytes, weight_shards = self._load_individual_weight(
-                                    fused_name,
-                                    fused_w,
-                                    model_params,
-                                    model_for_loading.mesh,
-                                    scale=fused_s)
+                            weight_bytes_up, weight_shards_up = self._load_individual_weight(
+                                up_name,
+                                up_w,
+                                model_params,
+                                model_for_loading.mesh,
+                                scale=up_s)
+                            weight_bytes += weight_bytes_up
+                            weight_shards += weight_shards_up
 
-                                weight_bytes_down, weight_shards_down = self._load_individual_weight(
-                                    down_name,
-                                    down_w,
-                                    model_params,
-                                    model_for_loading.mesh,
-                                    scale=down_s)
-
-                                # Update cumulative memory
-                                weight_bytes += weight_bytes_down
-                                weight_shards += weight_shards_down
-
-                            else:
-
-                                weight_bytes, weight_shards = self._load_individual_weight(
-                                    gate_name,
-                                    gate_w,
-                                    model_params,
-                                    model_for_loading.mesh,
-                                    scale=gate_s)
-
-                                weight_bytes_up, weight_shards_up = self._load_individual_weight(
-                                    up_name,
-                                    up_w,
-                                    model_params,
-                                    model_for_loading.mesh,
-                                    scale=up_s)
-                                weight_bytes += weight_bytes_up
-                                weight_shards += weight_shards_up
-
-                                weight_bytes_down, weight_shards_down = self._load_individual_weight(
-                                    down_name,
-                                    down_w,
-                                    model_params,
-                                    model_for_loading.mesh,
-                                    scale=down_s)
-                                weight_bytes += weight_bytes_down
-                                weight_shards += weight_shards_down
+                            weight_bytes_down, weight_shards_down = self._load_individual_weight(
+                                down_name,
+                                down_w,
+                                model_params,
+                                model_for_loading.mesh,
+                                scale=down_s)
+                            weight_bytes += weight_bytes_down
+                            weight_shards += weight_shards_down
                         else:
                             continue
                         if self.is_verbose:
