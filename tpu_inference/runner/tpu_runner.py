@@ -295,6 +295,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.mesh = self._create_2d_mesh()
 
         logger.info(f"Init mesh | mesh={self.mesh}")
+        jax.set_mesh(self.mesh)
 
     def _create_new_model_mesh(self) -> jax.sharding.Mesh:
         num_slices = envs.NUM_SLICES
@@ -361,9 +362,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                  MESH_AXIS_NAMES_2D,
                                  devices=self.devices)
         else:
-            return make_optimized_mesh(mesh_shape,
-                                       MESH_AXIS_NAMES_2D,
-                                       devices=self.devices)
+            return make_optimized_mesh(
+                mesh_shape,
+                MESH_AXIS_NAMES_2D,
+                axis_types=(jax.sharding.AxisType.Auto, ) * len(mesh_shape),
+                devices=self.devices)
 
     def _init_phased_profiling(self) -> None:
         self.phased_profiling_dir = envs.PHASED_PROFILING_DIR

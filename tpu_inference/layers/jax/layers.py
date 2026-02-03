@@ -88,7 +88,7 @@ class RMSNorm(nnx.Module):
             The normalized tensor with the same shape as the input.
         """
         x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
+        x_TD = jax.lax.with_sharding_constraint(x_TD, self.activation_ffw_td)
 
         with jax.named_scope("rms_norm_variance"):
             var_T1 = jnp.mean(jnp.square(x_TD), axis=-1, keepdims=True)
@@ -97,7 +97,7 @@ class RMSNorm(nnx.Module):
 
         with jax.named_scope("rms_norm_scale_apply"):
             normed_x_TD *= self.scale.value
-        normed_x_TD = nnx.with_sharding_constraint(normed_x_TD,
+        normed_x_TD = jax.lax.with_sharding_constraint(normed_x_TD,
                                                    self.activation_ffw_td)
         return normed_x_TD.astype(self.dtype)
 
@@ -142,7 +142,7 @@ class DenseFFW(nnx.Module):
         """
         # TODO consider to create factories for einsum(?)
         x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
+        x_TD = jax.lax.with_sharding_constraint(x_TD, self.activation_ffw_td)
         with jax.named_scope("wi_0"):
             gating_TF = jnp.einsum('TD,DF -> TF', x_TD,
                                    self.kernel_gating_DF.value)
@@ -236,7 +236,7 @@ class Embedder(nnx.Module):
             `(sequence, vocab_size)`.
         """
         x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD, self.prelogit_td)
+        x_TD = jax.lax.with_sharding_constraint(x_TD, self.prelogit_td)
 
         with jax.named_scope("embedder_decode_projection"):
             logits_TV = jnp.einsum('VD,TD -> TV',
@@ -309,7 +309,7 @@ class LMhead(Embedder):
             `(sequence, vocab_size)`.
         """
         x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD, self.prelogit_td)
+        x_TD = jax.lax.with_sharding_constraint(x_TD, self.prelogit_td)
 
         with jax.named_scope("lmhead_decode_projection"):
             logits_TV = jnp.einsum('DV,TD -> TV',

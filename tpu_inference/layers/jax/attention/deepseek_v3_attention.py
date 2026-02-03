@@ -222,8 +222,8 @@ class MLA(nnx.Module):
         """
         md = attention_metadata
         x = jnp.asarray(x, self.dtype)
-        x_SD = nnx.with_sharding_constraint(x, self.activation_attention_td)
-        x_q_TD = nnx.with_sharding_constraint(x, self.activation_q_td)
+        x_SD = jax.lax.with_sharding_constraint(x, self.activation_attention_td)
+        x_q_TD = jax.lax.with_sharding_constraint(x, self.activation_q_td)
 
         with jax.named_scope("q_proj"):
             # Query down projection.
@@ -242,12 +242,12 @@ class MLA(nnx.Module):
                 # Absorb the k up-projection matrix into q
                 q_TNA = jnp.einsum("TNH,ANH -> TNA", q_nope_TNH,
                                    self.kernel_k_up_proj_ANH.value)
-                q_TNA = nnx.with_sharding_constraint(q_TNA, self.query_tnh)
+                q_TNA = jax.lax.with_sharding_constraint(q_TNA, self.query_tnh)
             else:
                 # Concatenate the nope and rope queries.
                 q_TNH = jnp.concatenate([q_nope_TNH, q_rope_TNH], axis=-1)
                 # Multiply the query by scaling factor
-                q_TNH = nnx.with_sharding_constraint(q_TNH, self.query_tnh)
+                q_TNH = jax.lax.with_sharding_constraint(q_TNH, self.query_tnh)
 
         with jax.named_scope("kv_proj"):
             # KV down projection.
@@ -263,7 +263,7 @@ class MLA(nnx.Module):
 
             kv_SA = kv_SA[..., :self.kv_lora_rank]
             kv_SA = self.kv_rms_norm(kv_SA)
-            kv_SA = nnx.with_sharding_constraint(kv_SA, self.keyvalue_skh)
+            kv_SA = jax.lax.with_sharding_constraint(kv_SA, self.keyvalue_skh)
 
             if not self.use_mla_kernel:
                 k_rope_SNH = jnp.broadcast_to(
@@ -280,8 +280,8 @@ class MLA(nnx.Module):
                 v_SNH = kv_nope_SNH[..., self.qk_nope_head_dim:]
                 # Concatenate the key vector.
                 k_SNH = jnp.concatenate([k_nope_SNH, k_rope_SNH], axis=-1)
-                k_SNH = nnx.with_sharding_constraint(k_SNH, self.keyvalue_skh)
-                v_SNH = nnx.with_sharding_constraint(v_SNH, self.keyvalue_skh)
+                k_SNH = jax.lax.with_sharding_constraint(k_SNH, self.keyvalue_skh)
+                v_SNH = jax.lax.with_sharding_constraint(v_SNH, self.keyvalue_skh)
 
         with jax.named_scope("attn_op"):
             # TODO(wenxindongwork): K and V have different head dimension,
@@ -345,7 +345,7 @@ class MLA(nnx.Module):
                                          self.kernel_v_up_proj_ANH.value)
 
             with jax.named_scope("o_proj"):
-                outputs_TNH = nnx.with_sharding_constraint(
+                outputs_TNH = jax.lax.with_sharding_constraint(
                     outputs_TNH, self.activation_attention_out_td)
                 outputs_TR = outputs_TNH.reshape(outputs_TNH.shape[0],
                                                  self.N * self.v_head_dim)

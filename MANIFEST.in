@@ -1,4 +1,3 @@
 include requirements.txt
-include requirements_v7x.txt
 include README.md
 include tpu_inference/models/jax/utils/quantization/configs/*.yaml

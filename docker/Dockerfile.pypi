@@ -46,11 +46,6 @@ COPY requirements_test.txt .
 RUN  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then \
         pip install -r requirements_test.txt --retries 3; \
     fi
-# TODO (jacobplatin): remove when v7x is supported in JAX/Libtpu officially
-COPY requirements_v7x.txt .
-RUN --mount=type=cache,target=/root/.cache/pip if [ "$IS_FOR_V7X" = "true" ]; then \
-        pip install -r requirements_v7x.txt; \
-    fi
 COPY . .
 # Build tpu_inference
 RUN python3 -m pip install build

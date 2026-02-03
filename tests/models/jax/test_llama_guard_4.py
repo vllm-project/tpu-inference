@@ -126,13 +126,14 @@ class TestLlamaGuard4ForCausalLM:
     def test_init_llama_guard_4(self, mock_vllm_config_llama_guard_4, rng,
                                 mesh):
         """Tests correct initialization and parameter detection."""
-        model = LlamaGuard4ForCausalLM(mock_vllm_config_llama_guard_4, rng,
-                                       mesh)
+        with jax.set_mesh(mesh):
+            model = LlamaGuard4ForCausalLM(mock_vllm_config_llama_guard_4, rng,
+                                           mesh)
 
-        # Check model name is correctly set in the config
-        assert "llama-guard-4" in model.vllm_config.model_config.model.lower()
+            # Check model name is correctly set in the config
+            assert "llama-guard-4" in model.vllm_config.model_config.model.lower()
 
-        assert model.hidden_size == 128
+            assert model.hidden_size == 128
 
     def test_create_model_with_random_weights(self,
                                               mock_vllm_config_llama_guard_4,
@@ -162,22 +163,23 @@ class TestLlamaGuard4ForCausalLM:
 
     def test_load_weights_called_correctly(self, rng, mesh):
         """Tests that the weight loader is called correctly for checkpoint loading."""
-        vllm_config = MockVllmConfig(model_name="llama-guard-4-test",
-                                     random_weights=False)
-        model = LlamaGuard4ForCausalLM(vllm_config, rng, mesh)
+        with jax.set_mesh(mesh):
+            vllm_config = MockVllmConfig(model_name="llama-guard-4-test",
+                                        random_weights=False)
+            model = LlamaGuard4ForCausalLM(vllm_config, rng, mesh)
 
-        with patch.object(LlamaGuard4ForCausalLM,
-                          'WeightLoader') as mock_loader_cls:
-            mock_loader_instance = MagicMock()
-            mock_loader_cls.return_value = mock_loader_instance
-            model.load_weights(rng)
+            with patch.object(LlamaGuard4ForCausalLM,
+                            'WeightLoader') as mock_loader_cls:
+                mock_loader_instance = MagicMock()
+                mock_loader_cls.return_value = mock_loader_instance
+                model.load_weights(rng)
 
-            mock_loader_cls.assert_called_once_with(vllm_config=vllm_config,
-                                                    hidden_size=128,
-                                                    attn_heads=4,
-                                                    num_key_value_heads=2,
-                                                    attn_head_dim=32)
-            mock_loader_instance.load_weights.assert_called_once_with(model)
+                mock_loader_cls.assert_called_once_with(vllm_config=vllm_config,
+                                                        hidden_size=128,
+                                                        attn_heads=4,
+                                                        num_key_value_heads=2,
+                                                        attn_head_dim=32)
+                mock_loader_instance.load_weights.assert_called_once_with(model)
 
 
 class TestLlamaGuard4WeightLoader:
@@ -211,33 +213,34 @@ class TestLlamaGuard4WeightLoader:
 
     def test_load_weights_transformation(self, weight_loader, rng, mesh):
         """Tests that weights are correctly reshaped, transposed, and loaded."""
-        vllm_config = MockVllmConfig(model_name="llama-guard-4-small-test",
-                                     random_weights=False)
+        with jax.set_mesh(mesh):
+            vllm_config = MockVllmConfig(model_name="llama-guard-4-small-test",
+                                        random_weights=False)
 
-        model = LlamaGuard4ForCausalLM(vllm_config, rng, mesh)
+            model = LlamaGuard4ForCausalLM(vllm_config, rng, mesh)
 
-        hidden_size = 5120
-        vocab_size = 202048
+            hidden_size = 5120
+            vocab_size = 202048
 
-        original_weight = jnp.ones((vocab_size, hidden_size))
-        dummy_weights = [
-            ("language_model.model.embed_tokens.weight", original_weight),
-        ]
-        weight_loader.names_and_weights_generator = dummy_weights
+            original_weight = jnp.ones((vocab_size, hidden_size))
+            dummy_weights = [
+                ("language_model.model.embed_tokens.weight", original_weight),
+            ]
+            weight_loader.names_and_weights_generator = dummy_weights
 
-        # Mock get_param to return a mock param with the target shape
-        mock_param = MockParamLlamaGuard4(shape=(vocab_size, hidden_size))
+            # Mock get_param to return a mock param with the target shape
+            mock_param = MockParamLlamaGuard4(shape=(vocab_size, hidden_size))
 
-        with patch("tpu_inference.models.jax.llama_guard_4.get_param", return_value=mock_param), \
-            patch("tpu_inference.models.jax.llama_guard_4.shard_put", return_value=jnp.ones(mock_param.value.shape)) as mock_shard_put:
+            with patch("tpu_inference.models.jax.llama_guard_4.get_param", return_value=mock_param), \
+                patch("tpu_inference.models.jax.llama_guard_4.shard_put", return_value=jnp.ones(mock_param.value.shape)) as mock_shard_put:
 
-            weight_loader.load_weights(model)
+                weight_loader.load_weights(model)
 
-            # Assert that shard_put was called with the correctly transposed weight
-            mock_shard_put.assert_called_once()
+                # Assert that shard_put was called with the correctly transposed weight
+                mock_shard_put.assert_called_once()
 
-            # Get the actual array passed to shard_put
-            called_with_weight = mock_shard_put.call_args[0][0]
+                # Get the actual array passed to shard_put
+                called_with_weight = mock_shard_put.call_args[0][0]
 
-            # Check if the shape of the array passed to shard_put matches the model's expected shape.
-            assert called_with_weight.shape == mock_param.value.shape
+                # Check if the shape of the array passed to shard_put matches the model's expected shape.
+                assert called_with_weight.shape == mock_param.value.shape
