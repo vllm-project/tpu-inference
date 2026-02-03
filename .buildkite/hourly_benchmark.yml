@@ -22,28 +22,34 @@
 # 3. publish job and generate pipeline step (include execute bm and report result)
 
 steps:
-   - label: "Build vllm-tpu image"
-     key: "build-vllm-tpu-image"
-     agents:
-       queue: cpu
-     env:
-       GCP_REGION: "southamerica-west1"
-       GCP_PROJECT_ID: "cloud-tpu-inference-test"
-       ARTIFACT_REPO: "vllm-tpu-bm-bk"
-     commands:
-       - VLLM_COMMIT_HASH=$$(buildkite-agent meta-data get 'VLLM_COMMIT_HASH')
-       - bash .buildkite/hourly_benchmark/scripts/build_tpu_inference_image.sh $$VLLM_COMMIT_HASH $$BUILDKITE_COMMIT
-
-  #  - label: "Read CSV file and publish benchmark job"
-  #    key: "read-csv-publish-job"
-  #    depends_on: "build-vllm-tpu-image"
+  #  - label: "Build vllm-tpu image"
+  #    key: "build-vllm-tpu-image"
   #    agents:
   #      queue: cpu
   #    env:
-  #      GCP_REGION: "southamerica-west1"
   #      GCP_PROJECT_ID: "cloud-tpu-inference-test"
+  #      GCP_REGION: "southamerica-west1"
+  #      ARTIFACT_REPO: "vllm-tpu-bm-bk"
   #    commands:
-  #      - 
+  #      - VLLM_COMMIT_HASH=$$(buildkite-agent meta-data get 'VLLM_COMMIT_HASH')
+  #      - bash .buildkite/hourly_benchmark/scripts/build_tpu_inference_image.sh $$VLLM_COMMIT_HASH $$BUILDKITE_COMMIT
+
+   - label: "Read CSV file and publish benchmark job"
+     key: "read-csv-publish-job"
+    #  depends_on: "build-vllm-tpu-image"
+     agents:
+       queue: cpu
+     env:
+       # Temp hack when dev
+       TPU_IMAGE: "vllm-tpu:64a40a7ab4d0053830fae04c83763fa67f2183e6-32d1ad9716eb2d70354de84b46be7ea85fa61c85-"
+       GCP_PROJECT_ID: "cloud-tpu-inference-test"
+       GCP_REGION: "southamerica-west1"
+       ARTIFACT_REPO: "vllm-tpu-bm-bk"
+       GCP_INSTANCE_ID: "vllm-bm-inst"
+       GCP_DATABASE_ID: "vllm-bm-bk-runs"
+     commands:
+       - VLLM_COMMIT_HASH=$$(buildkite-agent meta-data get 'VLLM_COMMIT_HASH')
+       - bash .buildkte/hourly_benchmark/scripts/schedule_run.sh .buildkite/hourly_benchmark/ases/hourly_jax_dev.csv $$VLLM_COMMIT_HASH $$BUILDKITE_COMMIT
 
   #  - wait: ~
   #    continue_on_failure: true  # ensure we still generate support matrices even if some tests fail
