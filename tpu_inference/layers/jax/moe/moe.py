@@ -20,7 +20,6 @@ import jax.numpy as jnp
 from flax import nnx
 from flax.typing import Sharding
 from jaxtyping import Float
-from qwix._src.providers import ptq
 
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.jax import JaxModule
@@ -28,8 +27,6 @@ from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
-from tpu_inference.models.jax.utils.qwix.qwix_utils import \
-    manually_quantize_qwix_weight
 
 modeling_flax_utils = FlaxUtils()
 
@@ -235,23 +232,3 @@ class JaxMoE(JaxModule):
         self.use_ep = self.num_expert_parallelism > 1
         self.activation = self.hidden_act
         self.scoring_func = "softmax"
-
-    def _process_weight_for_qwix(self,
-                                 name,
-                                 weight_param,
-                                 channelwise_axes=[],
-                                 tiled_axes={}):
-        """
-        Extracts weight value, applies quantization if needed,
-        and returns the underlying array.
-        """
-        weight = weight_param.value
-
-        if self.qwix_quantized_weight_dtype:
-            if not isinstance(weight, ptq.WithAux):
-                weight = manually_quantize_qwix_weight(
-                    name, weight, self.qwix_quantized_weight_dtype,
-                    channelwise_axes, tiled_axes, "absmax")
-            return (weight.array.qvalue, weight.array.scale)
-
-        return weight

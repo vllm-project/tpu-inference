@@ -151,6 +151,9 @@ def moe_apply(
                 assert len(
                     gating_output
                 ) == 2, "Expected the gating output to be have 2 entries: weights and indices"
+                assert isinstance(
+                    weights, UnfusedMoEWeights
+                ), "Expected unfused weights for DENSE_MAT backend"
                 return dense_moe_func(
                     weights=weights,
                     x_TD=x,
@@ -163,61 +166,15 @@ def moe_apply(
                     hidden_act=layer.hidden_act)
 
             case MoEBackend.RAGGED_DOT | MoEBackend.MEGABLX_GMM:
-                raise ValueError
-                # TODO(jacobplatin): will implement in forthcoming PR
-                # weights_TX, indices_TX = self.router(x_TD)
-                # if self.qwix_quantized_weight_dtype:
-                #     gating_up_proj_spec = (PartitionSpec(*self.edf_sharding),
-                #                            PartitionSpec(
-                #                                self.edf_sharding[0], None,
-                #                                self.edf_sharding[2]))
-                #     down_proj_spec = (PartitionSpec(*self.efd_sharding),
-                #                       PartitionSpec(self.efd_sharding[0], None,
-                #                                     self.efd_sharding[2]))
-                # else:
-                #     gating_up_proj_spec = PartitionSpec(*self.edf_sharding)
-                #     down_proj_spec = PartitionSpec(*self.efd_sharding)
+                from tpu_inference.layers.jax.moe.sparse_moe import \
+                    sparse_moe_func
 
-                # in_specs = (
-                #     PartitionSpec(),  # replicated MoE instance
-                #     PartitionSpec(*self.activation_ffw_td),  # Sharded x_TD
-                #     PartitionSpec(),  # Replicated router_weights_TX
-                #     PartitionSpec(),  # Replicated selected_experts_TX
-                #     gating_up_proj_spec,  # Sharded gating kernel
-                #     gating_up_proj_spec,  # Sharded up-projection kernel
-                #     down_proj_spec,  # Sharded down-projection kernel
-                # )
-                # out_specs = PartitionSpec(*self.activation_ffw_td)
-
-                # mapped_moe_fwd = partial(
-                #     jax.experimental.shard_map.shard_map,
-                #     mesh=self.mesh,
-                #     in_specs=in_specs,
-                #     out_specs=out_specs,
-                #     check_rep=False)(sparse_moe_distributed_fwd)
-
-                # # TODO (jacobplatin): this is needed because of issues with Qwix quantizing the `shard_map` in SpraseMatmul
-                # # Basically, during the abstract pass, we need to manually quantize the weights here for Qwix, but we'll
-                # # override the actual weight/scale during loading (we just need to make sure Qwix quantizes the weight
-                # # in the first place).
-                # kernel_gating_EDF = self._process_weight_for_qwix(
-                #     "kernel_gating_EDF",
-                #     self.kernel_gating_EDF,
-                #     channelwise_axes=[0, 2],
-                #     tiled_axes={})
-                # kernel_up_proj_EDF = self._process_weight_for_qwix(
-                #     "kernel_up_proj_EDF",
-                #     self.kernel_up_proj_EDF,
-                #     channelwise_axes=[0, 2],
-                #     tiled_axes={})
-                # kernel_down_proj_EFD = self._process_weight_for_qwix(
-                #     "kernel_down_proj_EFD",
-                #     self.kernel_down_proj_EFD,
-                #     channelwise_axes=[0, 2],
-                #     tiled_axes={})
-
-                # return mapped_moe_fwd(self, x_TD, weights_TX, indices_TX,
-                #                       kernel_gating_EDF, kernel_up_proj_EDF,
-                #                       kernel_down_proj_EFD)
+                # TODO: enable
+                # assert isinstance(weights, UnfusedMoEWeights), "Expected unfused weights for DENSE_MAT backend"
+                return sparse_moe_func(weights=weights,
+                                       x_TD=x,
+                                       gating_output=gating_output,
+                                       layer=layer,
+                                       mesh=mesh)
 
         return output

@@ -11,9 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from functools import partial
+from typing import Tuple
+
 import jax
 import jax.numpy as jnp
+from jax.sharding import PartitionSpec
 
+from tpu_inference.layers.common.process_weights.moe_weights import \
+    UnfusedMoEWeights
 # yapf: disable
 from tpu_inference.layers.jax.moe.utils import (get_all_to_all_params_fn,
                                                 global_permute_fn, gmm_fn,
@@ -205,3 +211,83 @@ def sparse_moe_distributed_fwd(
                                  moe_instance.dtype)
 
     return output_TD
+
+
+def sparse_moe_func(weights: UnfusedMoEWeights, x_TD: jax.Array,
+                    gating_output: Tuple[jax.Array, jax.Array], layer, mesh):
+    weights_TX, indices_TX = gating_output
+    if layer.qwix_quantized_weight_dtype:
+        gating_up_proj_spec = (PartitionSpec(*layer.edf_sharding),
+                               PartitionSpec(layer.edf_sharding[0], None,
+                                             layer.edf_sharding[2]))
+        down_proj_spec = (PartitionSpec(layer.efd_sharding),
+                          PartitionSpec(layer.efd_sharding[0], None,
+                                        layer.efd_sharding[2]))
+    else:
+        gating_up_proj_spec = PartitionSpec(layer.edf_sharding)
+        down_proj_spec = PartitionSpec(layer.efd_sharding)
+
+    in_specs = (
+        PartitionSpec(),  # replicated MoE instance
+        PartitionSpec(layer.activation_ffw_td),  # Sharded x_TD
+        PartitionSpec(),  # Replicated router_weights_TX
+        PartitionSpec(),  # Replicated selected_experts_TX
+        gating_up_proj_spec,  # Sharded gating kernel
+        gating_up_proj_spec,  # Sharded up-projection kernel
+        down_proj_spec,  # Sharded down-projection kernel
+    )
+    out_specs = PartitionSpec(layer.activation_ffw_td)
+
+    mapped_moe_fwd = partial(jax.experimental.shard_map.shard_map,
+                             mesh=mesh,
+                             in_specs=in_specs,
+                             out_specs=out_specs,
+                             check_rep=False)(sparse_moe_distributed_fwd)
+
+    # TODO (jacobplatin): this is needed because of issues with Qwix quantizing the `shard_map` in SpraseMatmul
+    # Basically, during the abstract pass, we need to manually quantize the weights here for Qwix, but we'll
+    # override the actual weight/scale during loading (we just need to make sure Qwix quantizes the weight
+    # in the first place).
+    # kernel_gating_EDF = _process_weight_for_qwix(
+    #     "kernel_gating_EDF",
+    #     self.kernel_gating_EDF,
+    #     channelwise_axes=[0, 2],
+    #     tiled_axes={})
+    # kernel_up_proj_EDF = _process_weight_for_qwix(
+    #     "kernel_up_proj_EDF",
+    #     self.kernel_up_proj_EDF,
+    #     channelwise_axes=[0, 2],
+    #     tiled_axes={})
+    # kernel_down_proj_EFD = _process_weight_for_qwix(
+    #     "kernel_down_proj_EFD",
+    #     self.kernel_down_proj_EFD,
+    #     channelwise_axes=[0, 2],
+    #     tiled_axes={})
+
+    # TODO (jacobplatin): support quantization
+    print(layer, x_TD, weights_TX, indices_TX, weights.w1_weight,
+          weights.w2_weight, weights.w3_weight, mesh)
+    return mapped_moe_fwd(layer, x_TD, weights_TX, indices_TX,
+                          weights.w1_weight, weights.w2_weight,
+                          weights.w3_weight)
+
+
+# def _process_weight_for_qwix(self,
+#                                  name,
+#                                  weight_param,
+#                                  channelwise_axes=[],
+#                                  tiled_axes={}):
+#         """
+#         Extracts weight value, applies quantization if needed,
+#         and returns the underlying array.
+#         """
+#         weight = weight_param.value
+
+#         if self.qwix_quantized_weight_dtype:
+#             if not isinstance(weight, ptq.WithAux):
+#                 weight = manually_quantize_qwix_weight(
+#                     name, weight, self.qwix_quantized_weight_dtype,
+#                     channelwise_axes, tiled_axes, "absmax")
+#             return (weight.array.qvalue, weight.array.scale)
+
+#         return weight
