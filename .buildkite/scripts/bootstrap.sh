@@ -24,9 +24,44 @@ if [ -z "${VLLM_COMMIT_HASH:-}" ]; then
     VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
 fi
 
+get_vllm_short_hash() {
+    local repo_url="https://github.com/vllm-project/vllm.git"
+    local target_dir="${1:-vllm}"
+    local commit_hash=""
+
+    echo "Cleaning up target directory: $target_dir"
+    rm -rf "$target_dir"
+
+    echo "Cloning vLLM from $repo_url ..."
+    if ! git clone "$repo_url" "$target_dir"; then
+        echo "Error: Failed to clone repository." >&2
+        return 1
+    fi
+
+    pushd "$target_dir" || return 1
+    commit_hash=$(git rev-parse --short HEAD)
+    
+    if [[ -z "$commit_hash" ]]; then
+        echo "Error: Failed to retrieve commit hash." >&2
+        popd
+        return 1
+    fi
+
+    echo "Successfully cloned. Head is at: $commit_hash"
+    popd
+
+    echo "$commit_hash"
+}
+
 upload_pipeline() {
+    VLLM_SHORT_HASH=$(get_vllm_short_hash "vllm_src")
+    TPU_SHORT_HASH=$(git rev-parse --short HEAD)
+    buildkite-agent meta-data set "VLLM_SHORT_HASH" "${VLLM_SHORT_HASH}"
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
+    buildkite-agent meta-data set "TPU_SHORT_HASH" "${TPU_SHORT_HASH}"
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
+    echo "Using vllm short commit hash: $(buildkite-agent meta-data get "VLLM_SHORT_HASH")"
+    echo "Using tpu-inference short commit hash: $(buildkite-agent meta-data get "TPU_SHORT_HASH")"
 
     # BUILDKITE_COMMIT is tpu-inference latest commit
     

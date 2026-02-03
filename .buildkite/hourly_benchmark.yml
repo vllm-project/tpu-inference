@@ -22,21 +22,25 @@
 # 3. publish job and generate pipeline step (include execute bm and report result)
 
 steps:
-  #  - label: "Build vllm-tpu image"
-  #    key: "build-vllm-tpu-image"
-  #    agents:
-  #      queue: cpu
-  #    env:
-  #      GCP_PROJECT_ID: "cloud-tpu-inference-test"
-  #      GCP_REGION: "southamerica-west1"
-  #      ARTIFACT_REPO: "vllm-tpu-bm-bk"
-  #    commands:
-  #      - VLLM_COMMIT_HASH=$$(buildkite-agent meta-data get 'VLLM_COMMIT_HASH')
-  #      - bash .buildkite/hourly_benchmark/scripts/build_tpu_inference_image.sh $$VLLM_COMMIT_HASH $$BUILDKITE_COMMIT
+   - label: "Build vllm-tpu image"
+     key: "build-vllm-tpu-image"
+     agents:
+       queue: cpu
+     env:
+       GCP_PROJECT_ID: "cloud-tpu-inference-test"
+       GCP_REGION: "southamerica-west1"
+       ARTIFACT_REPO: "vllm-tpu-bm-bk"
+     commands:
+       - VLLM_COMMIT_HASH=$$(buildkite-agent meta-data get 'VLLM_COMMIT_HASH')
+       - VLLM_SHORT_HASH=$$(buildkite-agent meta-data get 'VLLM_SHORT_HASH')
+       - TPU_SHORT_HASH=$$(buildkite-agent meta-data get 'TPU_SHORT_HASH')
+       - CODE_HASH="$${VLLM_SHORT_HASH}-$${VLLM_SHORT_HASH}-"
+       - echo "CodeHash - $${CODE_HASH}"
+      #  - bash .buildkite/hourly_benchmark/scripts/build_tpu_inference_image.sh $$VLLM_COMMIT_HASH $$BUILDKITE_COMMIT
 
    - label: "Read CSV file and publish benchmark job"
      key: "read-csv-publish-job"
-    #  depends_on: "build-vllm-tpu-image"
+     depends_on: "build-vllm-tpu-image"
      agents:
        queue: cpu
      env:
@@ -49,7 +53,11 @@ steps:
        GCP_DATABASE_ID: "vllm-bm-bk-runs"
      commands:
        - VLLM_COMMIT_HASH=$$(buildkite-agent meta-data get 'VLLM_COMMIT_HASH')
-       - bash .buildkite/hourly_benchmark/scripts/schedule_run.sh .buildkite/hourly_benchmark/cases/hourly_jax_dev.csv $$VLLM_COMMIT_HASH $$BUILDKITE_COMMIT
+       - VLLM_SHORT_HASH=$$(buildkite-agent meta-data get 'VLLM_SHORT_HASH')
+       - TPU_SHORT_HASH=$$(buildkite-agent meta-data get 'TPU_SHORT_HASH')
+       - CODE_HASH="$${VLLM_SHORT_HASH}-$${VLLM_SHORT_HASH}-"
+       - echo "CodeHash - $${CODE_HASH}"
+      #  - bash .buildkite/hourly_benchmark/scripts/schedule_run.sh .buildkite/hourly_benchmark/cases/hourly_jax_dev.csv $$VLLM_COMMIT_HASH $$BUILDKITE_COMMIT
 
   #  - wait: ~
   #    continue_on_failure: true  # ensure we still generate support matrices even if some tests fail
