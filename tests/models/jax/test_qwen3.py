@@ -239,7 +239,7 @@ class TestQwen3ForCausalLM:
         )
         assert jax_output is not None
 
-        # TODO(lk-chen): Enable HF comparison when issue resolved.
+        # TODO(#1604): Enable HF comparison when issue resolved.
         # Currently there's a shape mismatch during rope.
         if True:
             return
