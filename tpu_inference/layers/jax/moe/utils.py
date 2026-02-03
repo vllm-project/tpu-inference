@@ -259,8 +259,6 @@ def gmm_fn(inputs, kernel, group_sizes, tile_size, moe_backend, dtype,
 def get_expert_parallelism(expert_axis_name: str, mesh: Mesh) -> int:
     """
     Returns the expert parallelism number from the mesh.
-    This will likely be deprecated/refactored in another PR
-    (jacobplatin).
 
     Args:
         expert_axis_name: The expert axis name.

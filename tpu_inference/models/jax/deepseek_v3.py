@@ -793,9 +793,7 @@ class DeepSeekV3Router(nnx.Module):
         scores_TE = jnp.einsum("TD,DE -> TE", x_TD, self.kernel_DE.value)
         scores_TE = nnx.sigmoid(scores_TE)
 
-        if self.moe_backend in [
-                MoEBackend.FUSED_MOE, MoEBackend.GMM_EP, MoEBackend.GMM_TP
-        ]:
+        if self.moe_backend in MoEBackend.fused_moe_backends():
             return scores_TE
 
         original_scores_TE = scores_TE
@@ -1730,7 +1728,6 @@ class DeepSeekV3(nnx.Module):
                     apply_expert_weight_before_computation=False,
                     expert_axis_name=self.expert_axis_name,
                     num_expert_parallelism=self.num_expert_parallelism,
-                    use_ep=self.use_ep,
                     hidden_size=hidden_size,
                     intermediate_size_moe=moe_intermediate_size,
                     num_experts_per_tok=num_experts_per_token,

@@ -96,8 +96,7 @@ class TestMoE(unittest.TestCase):
                 moe_backend=backend,
                 num_experts_per_tok=self.K,
                 expert_axis_name='model',
-                num_expert_parallelism=num_expert_parallelism,
-                use_ep=use_ep)
+                num_expert_parallelism=num_expert_parallelism)
         return moe
 
     def _compute_ground_truth(self, moe_instance, x_input):

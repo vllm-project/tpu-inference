@@ -45,6 +45,11 @@ class MoEBackend(Enum):
     MEGABLX_GMM = "megablox_gmm"  # only used in the JAX path for now
     RAGGED_DOT = "ragged_dot_gmm"  # only used in the JAX path for now
 
+    @classmethod
+    def fused_moe_backends(cls):
+        """Returns those backends that use fused weights"""
+        return {cls.FUSED_MOE, cls.GMM_EP, cls.GMM_TP}
+
 
 def select_moe_backend(use_ep: bool):
     if envs.USE_MOE_EP_KERNEL:
@@ -141,7 +146,7 @@ def moe_apply(
                 )
             case MoEBackend.DENSE_MAT:
                 # TODO(jacobplatin): will implement in forthcoming PR
-                raise ValueError
+                raise NotImplementedError
 
             case MoEBackend.RAGGED_DOT | MoEBackend.MEGABLX_GMM:
                 # TODO(jacobplatin): will implement in forthcoming PR
