@@ -94,13 +94,14 @@ ONCALL_EMAIL="ullm-oncall@rotations.google.com"
 NOTIFY_FILE="generated_notification.yml"
 
 # Logic
-# 1. Official integration: If it's the Integration pipeline AND triggered by Schedule -> Notify Oncall & Slack.
+# 1. Official Integration/Nightly: If it's triggered by schedule -> Notify Oncall & Slack.
 # 2. Everything else (PRs, Manual Triggers): Notify the creator of this build.
 #    - This ensures that if you manually trigger the integration pipeline for debugging, 
 #      it won't alert the oncall team.
 
-if [[ "$BUILDKITE_PIPELINE_SLUG" == "tpu-vllm-integration" ]] && [[ "$BUILDKITE_SOURCE" == "schedule" ]]; then
-    echo "Context: Scheduled vllm Integration. Notifying Oncall."
+if [[ "$BUILDKITE_PIPELINE_SLUG" == "tpu-vllm-integration" && "$BUILDKITE_SOURCE" == "schedule" ]] || \
+   [[ "$NIGHTLY" == "1" && "$BUILDKITE_SOURCE" == "schedule" ]]; then
+    echo "Context: Scheduled Integration/Nightly. Notifying Oncall."
     cat <<EOF > "$NOTIFY_FILE"
 notify:
   - email: "$ONCALL_EMAIL"
