@@ -34,7 +34,7 @@ steps:
        - VLLM_COMMIT_HASH=$$(buildkite-agent meta-data get 'VLLM_COMMIT_HASH')
        - VLLM_SHORT_HASH=$$(buildkite-agent meta-data get 'VLLM_SHORT_HASH')
        - TPU_SHORT_HASH=$$(buildkite-agent meta-data get 'TPU_SHORT_HASH')
-       - CODE_HASH="$${VLLM_SHORT_HASH}-$${VLLM_SHORT_HASH}-"
+       - CODE_HASH="$${VLLM_SHORT_HASH}-$${TPU_SHORT_HASH}-"
        - echo "CodeHash - $${CODE_HASH}"
       #  - bash .buildkite/hourly_benchmark/scripts/build_tpu_inference_image.sh $$VLLM_COMMIT_HASH $$BUILDKITE_COMMIT
 
@@ -55,7 +55,7 @@ steps:
        - VLLM_COMMIT_HASH=$$(buildkite-agent meta-data get 'VLLM_COMMIT_HASH')
        - VLLM_SHORT_HASH=$$(buildkite-agent meta-data get 'VLLM_SHORT_HASH')
        - TPU_SHORT_HASH=$$(buildkite-agent meta-data get 'TPU_SHORT_HASH')
-       - CODE_HASH="$${VLLM_SHORT_HASH}-$${VLLM_SHORT_HASH}-"
+       - CODE_HASH="$${VLLM_SHORT_HASH}-$${TPU_SHORT_HASH}-"
        - echo "CodeHash - $${CODE_HASH}"
       #  - bash .buildkite/hourly_benchmark/scripts/schedule_run.sh .buildkite/hourly_benchmark/cases/hourly_jax_dev.csv $$VLLM_COMMIT_HASH $$BUILDKITE_COMMIT
 
