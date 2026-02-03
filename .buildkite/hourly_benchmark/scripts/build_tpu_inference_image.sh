@@ -32,12 +32,10 @@ if gcloud artifacts docker images describe "$IMAGE_TAG" --format='value(image_su
     exit 0
 fi
 
-local DOCKERFILE="Dockerfile"
-
 VLLM_TARGET_DEVICE=tpu DOCKER_BUILDKIT=1 docker build \
 --build-arg BASE_IMAGE="python:3.12-slim-bookworm" \
 --build-arg VLLM_COMMIT_HASH="$VLLM_COMMIT_HASH" \
 --tag $IMAGE_TAG \
---no-cache -f "docker/${DOCKERFILE}" .
+--no-cache -f "docker/Dockerfile" .
 
 docker push "$IMAGE_TAG"
