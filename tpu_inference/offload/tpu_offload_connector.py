@@ -1682,12 +1682,6 @@ class TPUOffloadConnectorWorker:
         Pre-compiles the JIT-compiled functions used for KV cache swapping
         with a variety of common block sizes to avoid runtime recompilation.
         """
-        if os.getenv("TPU_OFFLOAD_SKIP_JAX_PRECOMPILE", "0") == "1":
-            logger.info(
-                "Skipping KV swap pre-compilation due to environment variable."
-            )
-            return
-
         logger.info("Starting pre-compilation of KV cache swap operations")
         start_time = time.time()
         paged_kv_for_compilation = self.runner.kv_caches
