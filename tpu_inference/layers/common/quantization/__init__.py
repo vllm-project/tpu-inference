@@ -124,7 +124,9 @@ def dequantize_tensor(
             if tensor_q.shape[i] % num_blocks:
                 raise ValueError(
                     f"Unable to perform block dequantization. axis={i} of "
-                    f"{tensor_q.shape=} is not divisible by {num_blocks=}", )
+                    f"{tensor_q.shape=} is not divisible by {num_blocks=}."
+                    "To perform unaligned dequantization, pass block_size as"
+                    "an argument.")
             calc_block_size = tensor_q.shape[i] // num_blocks
 
             blocked_shape[i] = (num_blocks, calc_block_size)
