@@ -80,7 +80,8 @@ upload_pipeline() {
     # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
     buildkite-agent pipeline upload .buildkite/main.yml
     buildkite-agent pipeline upload .buildkite/nightly_releases.yml
-    buildkite-agent pipeline upload .buildkite/pipeline_pypi.yml
+    TPU_SMALL_CORE_QUEUE=tpu_v6e_queue buildkite-agent pipeline upload .buildkite/pipeline_pypi.yml
+    TPU_SMALL_CORE_QUEUE=tpu_v7x_2_queue IS_FOR_V7X=true TEST_KEY_PREFIX=tpu7x_ TEST_LABEL_PREFIX=TPU7x buildkite-agent pipeline upload .buildkite/pipeline_pypi.yml
 }
 
 echo "--- Starting Buildkite Bootstrap"
