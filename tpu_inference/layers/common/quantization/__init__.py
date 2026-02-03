@@ -87,6 +87,7 @@ def dequantize_tensor(
     scale: jax.Array,
     axis: int | None | tuple = -1,
     out_dtype: jnp.dtype = jnp.bfloat16,
+    block_size: tuple[int, ...] | None = None,
 ) -> jax.Array:
     """Dequantize a quantized tensor
 
@@ -95,6 +96,7 @@ def dequantize_tensor(
         scale: Quantization scale.
         axis: The axis tensor was quantized. None denotes per-tensor.
         out_dtype: Dtype of the output.
+        block_size: Block sizes corresponding to `axis`, used to pad partial blocks.
 
     Returns:
         Dequantized tensor_q.
@@ -106,18 +108,26 @@ def dequantize_tensor(
         axis = [axis]
 
     orig_shape = tensor_q.shape
+    if block_size is not None:
+        pad_width = [[0, 0] for _ in range(tensor_q.ndim)]
+        for ax, bs in zip(axis, block_size):
+            pad_width[ax][1] = scale.shape[ax] * bs - tensor_q.shape[ax]
+
+        tensor_q = jnp.pad(tensor_q, pad_width)
+
+    aligned_shape = tensor_q.shape
     if tensor_q.ndim == scale.ndim:
         # Indicates the tensor was block quantized.
-        blocked_shape = [[i] for i in orig_shape]
+        blocked_shape = [[i] for i in aligned_shape]
         for i in axis:
             num_blocks = scale.shape[i]
             if tensor_q.shape[i] % num_blocks:
                 raise ValueError(
                     f"Unable to perform block dequantization. axis={i} of "
                     f"{tensor_q.shape=} is not divisible by {num_blocks=}", )
-            block_size = tensor_q.shape[i] // num_blocks
+            calc_block_size = tensor_q.shape[i] // num_blocks
 
-            blocked_shape[i] = (num_blocks, block_size)
+            blocked_shape[i] = (num_blocks, calc_block_size)
 
         # Convert all axis into positive values.
         axis = sorted([(i + tensor_q.ndim) % tensor_q.ndim for i in axis])
@@ -133,8 +143,8 @@ def dequantize_tensor(
     scale = jnp.expand_dims(scale, axis)
 
     tensor = (tensor_q.astype(jnp.float32) * scale).astype(out_dtype)
-
-    return tensor.reshape(orig_shape)
+    tensor = tensor.reshape(aligned_shape)
+    return jax.lax.slice(tensor, [0] * tensor.ndim, orig_shape)
 
 
 def dequantize_tensor_from_mxfp4_packed(
@@ -163,39 +173,6 @@ def dequantize_tensor_from_mxfp4_packed(
         axis,
         out_dtype,
     )
-
-
-def pad_and_dequantize_tensor(
-    tensor_q: jax.Array,
-    scale: jax.Array,
-    axis: tuple[int, ...],
-    block_size: tuple[int, ...],
-    out_dtype: jnp.dtype = jnp.bfloat16,
-) -> jax.Array:
-    """Pad tensor to align with scale dimensions, dequantize, then slice back.
-    
-    Some models (e.g., DeepSeek V3) store weights that were padded during
-    quantization, then trimmed.
-    
-    Args:        
-        tensor_q: Quantized tensor (may be smaller than scale implies).
-        scale: Quantization scale.
-        axis: Axes that were quantized.
-        block_size: Block size used during quantization (e.g., (128, 128)).
-        out_dtype: Dtype of the output.
-
-    Returns:
-        Dequantized tensor with original (unpadded) shape.
-    """
-    orig_shape = tensor_q.shape
-
-    pad_width = [[0, 0] for _ in range(tensor_q.ndim)]
-    for ax, bs in zip(axis, block_size):
-        pad_width[ax][1] = scale.shape[ax] * bs - tensor_q.shape[ax]
-
-    tensor = dequantize_tensor(jnp.pad(tensor_q, pad_width), scale, axis,
-                               out_dtype)
-    return tensor[tuple(slice(0, dim_size) for dim_size in orig_shape)]
 
 
 def quantize_tensor(

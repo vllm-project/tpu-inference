@@ -37,9 +37,9 @@ from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, process_linear_weights, shard_linear_weights,
     to_parameter_list)
 from tpu_inference.layers.common.quant_methods import FP8, get_tpu_quant_method
+from tpu_inference.layers.common.quantization import dequantize_tensor
 from tpu_inference.layers.common.quantization import fp8 as common_fp8
-from tpu_inference.layers.common.quantization import (
-    pad_and_dequantize_tensor, quantize_tensor)
+from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.fused_moe import (FusedMoEBackend,
                                                  fused_moe_apply,
@@ -153,11 +153,11 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
                                                   original_block_size:math.
                                                   ceil(end /
                                                        original_block_size)]
-                dequantized_weight = pad_and_dequantize_tensor(
+                dequantized_weight = dequantize_tensor(
                     weight_slice,
                     weight_scale_slice,
                     (0, 1),
-                    self.weight_block_size,
+                    block_size=self.weight_block_size,
                 )
                 weight_slice, weight_scale_slice = quantize_tensor(
                     self.linear_config.requant_weight_dtype,
@@ -289,12 +289,12 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
             w2_weight_scale: jax.Array,
         ) -> FusedMoEWeights:
             # Dequantize fp8 2d block quantized weights into fp32.
-            w13_weight = pad_and_dequantize_tensor(w13_weight,
-                                                   w13_weight_scale, (1, 2),
-                                                   self.weight_block_size)
-            w2_weight = pad_and_dequantize_tensor(w2_weight, w2_weight_scale,
-                                                  (1, 2),
-                                                  self.weight_block_size)
+            w13_weight = dequantize_tensor(w13_weight,
+                                           w13_weight_scale, (1, 2),
+                                           block_size=self.weight_block_size)
+            w2_weight = dequantize_tensor(w2_weight,
+                                          w2_weight_scale, (1, 2),
+                                          block_size=self.weight_block_size)
 
             w13_interleave = layer.activation == "swigluoai"
             w13_reorder_size = get_mesh_shape_product(

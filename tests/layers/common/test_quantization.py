@@ -71,6 +71,33 @@ class QuantizationTest(jtu.JaxTestCase):
         self.assertAllClose(dequantized, original, rtol=0.1, atol=0.1)
 
     @parameterized.product(dtype=[jnp.float8_e4m3fn, jnp.int8],
+                           axis=[-1, 0, (0, 1)],
+                           block_size=[32])
+    def test_unaligned_dequantization(self, dtype, axis, block_size):
+        key = jax.random.key(0)
+
+        shape = (128, 128)
+        original = jax.random.normal(key, shape, jnp.bfloat16)
+
+        tensor_q, scale = quantize_tensor(dtype, original, axis, block_size)
+
+        axes_tuple = (axis, ) if isinstance(axis, int) else axis
+        axes = {ax + len(shape) if ax < 0 else ax for ax in axes_tuple}
+
+        start_indices = (0, ) * len(shape)
+        limit_indices = [100 if i in axes else s for i, s in enumerate(shape)]
+
+        tensor_q_in = jax.lax.slice(tensor_q, start_indices, limit_indices)
+        expected = jax.lax.slice(original, start_indices, limit_indices)
+
+        dequantized = dequantize_tensor(tensor_q_in,
+                                        scale,
+                                        axis,
+                                        block_size=(block_size, ) * len(axes))
+
+        self.assertAllClose(dequantized, expected, rtol=0.1, atol=0.1)
+
+    @parameterized.product(dtype=[jnp.float8_e4m3fn, jnp.int8],
                            axis=[(0, 1), (-1, 0)],
                            block_size=[32, (64, 32)])
     def test_multi_block_quantization(self, dtype, axis, block_size):
