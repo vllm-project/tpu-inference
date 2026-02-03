@@ -157,6 +157,7 @@ class JaxMoE(JaxModule):
     use_ep: bool
     random_init: bool = False
     moe_backend: MoEBackend = MoEBackend.DENSE_MAT
+    scoring_func = "softmax"
 
     # --- Sparse MoE Specific Attributes ---
     num_experts_per_tok: int = 1  # Required for Sparse, optional/derived for Dense
@@ -221,6 +222,7 @@ class JaxMoE(JaxModule):
                 mesh=self.mesh,
                 use_ep=self.use_ep,
                 activation=self.hidden_act,
+                scoring_fn=self.scoring_func,
             )
             return output_TD
         else:

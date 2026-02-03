@@ -51,10 +51,25 @@ def find_all_layer_type(module: torch.nn.Module, layer_type: torch.nn.Module):
 
 # TODO(kyuyeunk): Consolidate all reference implementation used for unit tests
 # into a single file.
-def ref_moe(x, router_logits, w1, w2, w1_bias, w2_bias, top_k, renormalize,
-            activation):
+def ref_moe(x,
+            router_logits,
+            w1,
+            w2,
+            w1_bias,
+            w2_bias,
+            top_k,
+            renormalize,
+            activation,
+            scoring_func="softmax"):
+    match scoring_func:
+        case "softmax":
+            expert_weights = F.softmax(router_logits, dim=-1)
+        case "sigmoid":
+            expert_weights = F.sigmoid(router_logits)
+        case _:
+            raise NotImplementedError(
+                f"No reference implementation for {scoring_func} scoring")
 
-    expert_weights = F.softmax(router_logits, dim=-1)
     expert_weights, expert_indices = torch.topk(expert_weights, top_k, dim=-1)
     if renormalize:
         expert_weights /= expert_weights.sum(dim=-1, keepdim=True)
