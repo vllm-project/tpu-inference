@@ -18,9 +18,10 @@ from flax import nnx
 from vllm.distributed.utils import get_pp_indices
 
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
+from tpu_inference.layers.jax import JaxModule
 
 
-class PPMissingLayer(nnx.Module):
+class PPMissingLayer(JaxModule):
     """
     A placeholder layer for missing layers in a pipeline parallel model.
     """

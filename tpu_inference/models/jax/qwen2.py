@@ -32,7 +32,8 @@ from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.utils.weight_utils import StandardWeightLoader
+from tpu_inference.models.jax.utils.weight_utils import (LoadableWithIterator,
+                                                         StandardWeightLoader)
 
 logger = init_logger(__name__)
 
@@ -318,18 +319,18 @@ class Qwen2Model(JaxModule):
         return kv_caches, x
 
 
-class Qwen2ForCausalLM(JaxModule):
+class Qwen2ForCausalLM(JaxModule, LoadableWithIterator):
     WeightLoader = StandardWeightLoader
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
                  mesh: Mesh) -> None:
         self.vllm_config = vllm_config
-        self.rng = nnx.Rngs(rng_key)
+        rng = nnx.Rngs(rng_key)
         self.mesh = mesh
 
         self.model = Qwen2Model(
             vllm_config=vllm_config,
-            rng=self.rng,
+            rng=rng,
             mesh=mesh,
         )
         model_config = vllm_config.model_config
@@ -340,7 +341,7 @@ class Qwen2ForCausalLM(JaxModule):
                 einsum_str="TD,DV->TV",
                 kernel_shape=(hidden_size, vocab_size),
                 dtype=model_config.dtype,
-                rngs=self.rng,
+                rngs=rng,
                 quant_config=vllm_config.quant_config,
             )
 
@@ -364,22 +365,3 @@ class Qwen2ForCausalLM(JaxModule):
         if hasattr(self, 'lm_head'):
             return self.lm_head(hidden_states)
         return self.model.embed_tokens.decode(hidden_states)
-
-    def load_weights(self, rng_key: jax.Array):
-        # NOTE: Since we are using nnx.eval_shape to init the model,
-        # we have to pass dynamic arrays here for __call__'s usage.
-        self.rng = nnx.Rngs(rng_key)
-
-        # Key: path to a HF layer weight
-        # Value: path to a nnx layer weight
-        mappings = {}
-
-        loader = self.WeightLoader(self.vllm_config, self.mesh)
-        keep_hf_weight_suffix_when_match = ['model']
-        if not self.vllm_config.model_config.hf_config.tie_word_embeddings:
-            keep_hf_weight_suffix_when_match.append('lm_head')
-        loader.load_weights(
-            self,
-            mappings,
-            # Keep .weight suffix for all parameters.
-            keep_hf_weight_suffix_when_match=keep_hf_weight_suffix_when_match)
