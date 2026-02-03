@@ -49,7 +49,7 @@ steps:
        GCP_DATABASE_ID: "vllm-bm-bk-runs"
      commands:
        - VLLM_COMMIT_HASH=$$(buildkite-agent meta-data get 'VLLM_COMMIT_HASH')
-       - bash .buildkite/hourly_benchmark/scripts/schedule_run.sh .buildkite/hourly_benchmark/ases/hourly_jax_dev.csv $$VLLM_COMMIT_HASH $$BUILDKITE_COMMIT
+       - bash .buildkite/hourly_benchmark/scripts/schedule_run.sh .buildkite/hourly_benchmark/cases/hourly_jax_dev.csv $$VLLM_COMMIT_HASH $$BUILDKITE_COMMIT
 
   #  - wait: ~
   #    continue_on_failure: true  # ensure we still generate support matrices even if some tests fail
