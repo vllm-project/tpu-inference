@@ -20,6 +20,8 @@ from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
+# from vllm.v1.worker.utils import (gather_mm_placeholders,
+#                                   scatter_mm_placeholders)
 
 from tpu_inference.models.jax.utils.multi_modal_utils import (
     flatten_embeddings, sanity_check_mm_encoder_outputs)
