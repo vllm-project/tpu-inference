@@ -20,13 +20,6 @@ set -euo pipefail
 echo "--- :git: Checking changed files"
 
 BASE_BRANCH=${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-"main"}
-# load VLLM_COMMIT_HASH from vllm_lkg.version file, if not exists, get the latest commit hash from vllm repo
-if [ -f .buildkite/vllm_lkg.version ]; then
-    VLLM_COMMIT_HASH="$(cat .buildkite/vllm_lkg.version)"
-fi
-if [ -z "${VLLM_COMMIT_HASH:-}" ]; then
-    VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
-fi
 
 if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     echo "PR detected. Target branch: $BASE_BRANCH"
@@ -71,9 +64,6 @@ else
 fi
 
 upload_pipeline() {
-    buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
-    echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
-    
     # Upload JAX pipeline for v6 (default)
     buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
 
@@ -96,6 +86,8 @@ upload_pipeline() {
 echo "--- Starting Buildkite Bootstrap"
 echo "Running in pipeline: $BUILDKITE_PIPELINE_SLUG"
 if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
+    # Note: Integration pipeline always fetch latest vllm version
+    VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     # Note: upload are inserted in reverse order, so promote LKG should upload before tests
@@ -115,6 +107,16 @@ if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
     buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
 
 else
+  # Note: PR and Nightly pipelines will load VLLM_COMMIT_HASH from vllm_lkg.version file, if not exists, get the latest commit hash from vllm repo
+  if [ -f .buildkite/vllm_lkg.version ]; then
+      VLLM_COMMIT_HASH="$(cat .buildkite/vllm_lkg.version)"
+  fi
+  if [ -z "${VLLM_COMMIT_HASH:-}" ]; then
+      VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
+  fi
+  buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
+  echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
+    
   # Check if the current build is a pull request
   if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     echo "This is a Pull Request build."

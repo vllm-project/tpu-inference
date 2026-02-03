@@ -188,6 +188,12 @@ class VllmModelWrapper:
         @functools.partial(
             jax.jit,
             donate_argnames=("kv_caches", ),
+            out_shardings=(
+                None,  # kv_caches - keep original sharding
+                NamedSharding(self.mesh,
+                              PartitionSpec(ShardingAxisName.MLP_DATA, None)),
+                None,  # empty list
+            ),
             compiler_options={
                 "xla_tpu_all_gather_collective_matmul_mode":
                 "post_spmd_conservative",
