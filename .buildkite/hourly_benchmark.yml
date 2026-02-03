@@ -1,0 +1,49 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# x-run-condition: &run-on-nightly-or-tag
+#   if: build.env("NIGHTLY") == "1" || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/
+
+
+
+# 1. Build image (combire create_job.sh and build_image.sh)
+# 2. Scan csv file
+# 3. publish job and generate pipeline step (include execute bm and report result)
+
+steps:
+   - label: "Build vllm-tpu image"
+     key: "build-vllm-tpu-image"
+     agents:
+       queue: cpu
+     envs:
+       GCP_REGION: "southamerica-west1"
+       GCP_PROJECT_ID: "cloud-tpu-inference-test"
+       ARTIFACT_REPO: "vllm-tpu-bm-bk"
+     commands:
+       - VLLM_COMMIT_HASH=$$(buildkite-agent meta-data get 'VLLM_COMMIT_HASH')
+       - bash .buildkite/hourly_benchmark/scripts/build_tpu_inference_image.sh $$VLLM_COMMIT_HASH $$BUILDKITE_COMMIT
+
+  #  - label: "Read CSV file and publish benchmark job"
+  #    key: "read-csv-publish-job"
+  #    depends_on: "build-vllm-tpu-image"
+  #    agents:
+  #      queue: cpu
+  #    envs:
+  #      GCP_REGION: "southamerica-west1"
+  #      GCP_PROJECT_ID: "cloud-tpu-inference-test"
+  #    commands:
+  #      - 
+
+  #  - wait: ~
+  #    continue_on_failure: true  # ensure we still generate support matrices even if some tests fail
