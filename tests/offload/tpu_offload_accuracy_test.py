@@ -105,7 +105,7 @@ def test_kv_cache_cpu_offloading_accuracy_smaller_then_cpu_ram(
     sampling_config: SamplingParams,
     kv_transfer_config: KVTransferConfig,
 ):
-    swap_op_types = ["pallas", "jax"]
+    swap_op_types = ["pallas", "jax", "jax_copy"]
     decode_saves = ["0", "1"]
     skip_precompile = ["0", "1"]
     for swap_op_type, decode_save, _skip_precompile in itertools.product(
@@ -137,7 +137,7 @@ def test_kv_cache_cpu_offloading_accuracy_larger_than_cpu_ram(
     sampling_config: SamplingParams,
     kv_transfer_config: KVTransferConfig,
 ):
-    swap_op_types = ["pallas", "jax"]
+    swap_op_types = ["pallas", "jax", "jax_copy"]
     decode_saves = ["0", "1"]
     skip_precompile = ["0", "1"]
     for swap_op_type, decode_save, _skip_precompile in itertools.product(
