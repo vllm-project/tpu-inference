@@ -27,16 +27,9 @@ fi
 VLLM_SHORT_HASH=""
 
 get_vllm_short_hash() {
+    local target_dir="vllm_src"
     local repo_url="https://github.com/vllm-project/vllm.git"
-    local target_dir="${1:-vllm}"
     local commit_hash=""
-
-    cleanup() {
-        if [[ -d "$target_dir" ]]; then
-            echo "Cleanup: Removing $target_dir..."
-            rm -rf "$target_dir"
-        fi
-    }
 
     # Cleaning up target directory: $target_dir
     rm -rf "$target_dir"
@@ -47,8 +40,17 @@ get_vllm_short_hash() {
         return 1
     fi
 
-    trap cleanup EXIT INT TERM
     pushd "$target_dir" || return 1
+
+    CURRENT_DIR=$(pwd)
+    cleanup() {
+        if [[ -d "$CURRENT_DIR" ]]; then
+            echo "Cleanup: Removing $CURRENT_DIR..."
+            rm -rf "$CURRENT_DIR"
+        fi
+    }
+    trap cleanup EXIT INT TERM
+
     commit_hash=$(git rev-parse --short HEAD)
     popd
     
@@ -62,7 +64,7 @@ get_vllm_short_hash() {
 }
 
 upload_pipeline() {
-    get_vllm_short_hash "vllm_src"
+    get_vllm_short_hash
     TPU_SHORT_HASH=$(git rev-parse --short HEAD)
     buildkite-agent meta-data set "VLLM_SHORT_HASH" "${VLLM_SHORT_HASH}"
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
