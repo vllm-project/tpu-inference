@@ -276,7 +276,8 @@ class Qwen2Model(JaxModule):
         self.is_first_rank = get_pp_group().is_first_rank
         self.is_last_rank = get_pp_group().is_last_rank
 
-        if self.is_first_rank:
+        if self.is_first_rank or (hf_config.tie_word_embeddings
+                                  and self.is_last_rank):
             self.embed_tokens = JaxEmbed(
                 num_embeddings=vocab_size,
                 features=hidden_size,
@@ -366,7 +367,6 @@ class Qwen2ForCausalLM(JaxModule, LoadableWithIterator):
         input_ids: Optional[jax.Array],
         attention_metadata: AttentionMetadata,
         inputs_embeds: Optional[jax.Array] = None,
-        _input_embeds=None,
         _input_positions=None,
         _layer_name_to_kv_cache=None,
         _lora_metadata=None,

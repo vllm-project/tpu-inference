@@ -226,7 +226,8 @@ class Qwen3Model(Qwen2Model):
         self.is_first_rank = get_pp_group().is_first_rank
         self.is_last_rank = get_pp_group().is_last_rank
 
-        if self.is_first_rank:
+        if self.is_first_rank or (hf_config.tie_word_embeddings
+                                  and self.is_last_rank):
             self.embed_tokens = JaxEmbed(
                 num_embeddings=vocab_size,
                 features=hidden_size,
@@ -296,7 +297,6 @@ class Qwen3ForCausalLM(JaxModule, LoadableWithIterator):
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
         inputs_embeds: Optional[jax.Array] = None,
-        _input_embeds=None,
         _input_positions=None,
         _layer_name_to_kv_cache=None,
         _lora_metadata=None,
@@ -315,6 +315,8 @@ class Qwen3ForCausalLM(JaxModule, LoadableWithIterator):
             attention_metadata,
             inputs_embeds,
         )
+        if not is_last_rank:
+            x = JaxIntermediateTensors(tensors={"hidden_states": x}, )
         return kv_caches, x, []
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
