@@ -17,11 +17,11 @@ from typing import Optional
 import jax
 
 from tpu_inference.layers.common.quantization import unquantized as jax_common
-from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
-from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
+from tpu_inference.layers.jax.quantization.configs import (
+    JaxQuantLinearConfig, QuantizationConfig)
 
 
 class UnquantizedLinearMethod(QuantizeMethodBase,
@@ -49,7 +49,6 @@ class UnquantizedConfig(QuantizationConfig):
     def get_quant_method(self, layer: JaxModule,
                          prefix: str) -> Optional[QuantizeMethodBase]:
         if isinstance(layer, JaxEinsum):
-            linear_config = QuantLinearConfig(
-                output_sizes=[layer.weight.shape[1]], enable_sp=False)
+            linear_config = JaxQuantLinearConfig(layer)
             return UnquantizedLinearMethod(linear_config)
         return None
