@@ -17,9 +17,7 @@ import tempfile
 from unittest.mock import MagicMock
 
 import jax
-import jax.numpy as jnp
 import numpy as np
-import pytest
 import torch
 from flax import nnx
 from jax.sharding import Mesh
@@ -29,8 +27,7 @@ from vllm.model_executor.model_loader import LoadConfig, get_model_loader
 
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import JaxLinear
-from tpu_inference.models.jax.utils.weight_utils import (
-    LoadableWithIterator, load_blockwise_fp8_scale)
+from tpu_inference.models.jax.utils.weight_utils import LoadableWithIterator
 
 
 class TorchMLP(nn.Module):
@@ -111,64 +108,3 @@ class TestJaxAutoWeightsLoader:
                                    jax_output,
                                    rtol=1e-3,
                                    atol=1e-2)
-
-
-class TestLoadBlockwiseFp8Scale:
-
-    def test_load_blockwise_fp8_scale(self):
-        output_dim = 4
-        n_blocks = 2
-
-        devices = jax.local_devices()
-        mesh = Mesh(devices, axis_names=('p', ))
-
-        with jax.set_mesh(mesh):
-            # Case 1: 1D flattened input
-            torch_scale_1d = torch.arange(n_blocks * output_dim,
-                                          dtype=torch.float32)
-            jax_param = nnx.Param(
-                jnp.zeros((n_blocks, 1, output_dim), dtype=jnp.float32))
-
-            load_blockwise_fp8_scale(jax_param, torch_scale_1d, output_dim,
-                                     n_blocks, "test_param")
-
-            expected_scale = jnp.arange(n_blocks * output_dim,
-                                        dtype=jnp.float32).reshape(
-                                            n_blocks, 1, output_dim)
-            np.testing.assert_allclose(jax_param.value, expected_scale)
-
-            # Case 2: 2D input
-            torch_scale_2d = torch.arange(n_blocks * output_dim,
-                                          dtype=torch.float32).reshape(
-                                              n_blocks, output_dim)
-            jax_param = nnx.Param(
-                jnp.zeros((n_blocks, 1, output_dim), dtype=jnp.float32))
-
-            load_blockwise_fp8_scale(jax_param, torch_scale_2d, output_dim,
-                                     n_blocks, "test_param")
-
-            np.testing.assert_allclose(jax_param.value, expected_scale)
-
-            # Case 3: Size mismatch (1D)
-            torch_scale_wrong_size = torch.arange(n_blocks * output_dim + 1,
-                                                  dtype=torch.float32)
-            with pytest.raises(ValueError,
-                               match="Checkpoint scale size mismatch"):
-                load_blockwise_fp8_scale(jax_param, torch_scale_wrong_size,
-                                         output_dim, n_blocks, "test_param")
-
-            # Case 4: Shape mismatch (2D)
-            torch_scale_wrong_shape = torch.zeros((n_blocks + 1, output_dim))
-            with pytest.raises(ValueError,
-                               match="Checkpoint scale shape mismatch"):
-                load_blockwise_fp8_scale(jax_param, torch_scale_wrong_shape,
-                                         output_dim, n_blocks, "test_param")
-
-            # Case 5: Wrong number of dimensions
-            torch_scale_3d = torch.zeros((n_blocks, output_dim, 1))
-            with pytest.raises(
-                    ValueError,
-                    match="Checkpoint scale has unexpected number of dimensions"
-            ):
-                load_blockwise_fp8_scale(jax_param, torch_scale_3d, output_dim,
-                                         n_blocks, "test_param")

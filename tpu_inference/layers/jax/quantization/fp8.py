@@ -18,8 +18,10 @@ from typing import Optional
 import jax
 import jax.numpy as jnp
 import numpy as np
+import torch
 from flax import nnx
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding, SingleDeviceSharding
+from torchax.ops.mappings import t2j
 
 from tpu_inference import envs
 from tpu_inference.layers.common.quantization import dequantize_tensor
@@ -31,7 +33,72 @@ from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import (
     JaxQuantLinearConfig, QuantizationConfig)
 from tpu_inference.models.jax.utils.weight_utils import (
-    load_blockwise_fp8_scale, load_nnx_param_from_reshaped_torch, shard_put)
+    load_nnx_param_from_reshaped_torch, shard_put)
+
+
+def load_blockwise_fp8_scale(
+    jax_param: nnx.Param,
+    torch_weight: torch.Tensor,
+    output_dim: int,
+    n_blocks: int,
+    param_name: str,
+) -> None:
+    """Load blockwise FP8 weight scales from checkpoint.
+
+    Transforms scale shape from checkpoint format to kernel format:
+    - Checkpoint: (n_blocks, n_out) or (n_blocks * n_out,) flattened
+    - Kernel: (n_blocks, 1, n_out)
+
+    Args:
+        jax_param: Target nnx.Param to load into
+        torch_weight: Weight tensor from checkpoint
+        output_dim: Output dimension of the layer
+        n_blocks: Number of quantization blocks
+        param_name: Name of the parameter
+
+    Raises:
+        ValueError: If checkpoint scale shape doesn't match expected block size.
+    """
+    # Convert torch tensor to JAX array
+    scale_jax = t2j(torch_weight, use_dlpack=False)
+
+    # Reshape if flattened: (n_blocks * n_out,) → (n_blocks, n_out)
+    if scale_jax.ndim == 1:
+        expected_size = n_blocks * output_dim
+        if scale_jax.size != expected_size:
+            raise ValueError(
+                f"Checkpoint scale size mismatch for '{param_name}': "
+                f"expected {expected_size} ({n_blocks} blocks × {output_dim} outputs), "
+                f"got {scale_jax.size}.")
+        scale_jax = scale_jax.reshape(n_blocks, output_dim)
+    elif scale_jax.ndim == 2:
+        if scale_jax.shape != (n_blocks, output_dim):
+            raise ValueError(
+                f"Checkpoint scale shape mismatch for '{param_name}': "
+                f"expected ({n_blocks}, {output_dim}), got {scale_jax.shape}. "
+                f"This suggests the checkpoint uses a different block size. ")
+    else:
+        raise ValueError(
+            f"Checkpoint scale has unexpected number of dimensions for '{param_name}': "
+            f"expected 1D or 2D, got {scale_jax.ndim}D with shape {scale_jax.shape}. "
+            f"Expected shapes: ({n_blocks * output_dim},) or ({n_blocks}, {output_dim})."
+        )
+
+    # Expand dims: (n_blocks, n_out) → (n_blocks, 1, n_out)
+    scale_jax = jnp.expand_dims(scale_jax, axis=1)
+
+    # Get sharding info
+    spec = jax_param.sharding
+    if isinstance(jax_param.sharding, NamedSharding):
+        spec = jax_param.sharding.spec
+    elif isinstance(jax_param.sharding, SingleDeviceSharding):
+        spec = ()
+    mesh = getattr(jax_param, 'mesh', None)
+
+    # Load into parameter
+    jax_param.value = shard_put(scale_jax.astype(jax_param.value.dtype),
+                                spec,
+                                mesh=mesh)
 
 
 class Fp8LinearMethod(QuantizeMethodBase, jax_common.Fp8LinearMethod):
