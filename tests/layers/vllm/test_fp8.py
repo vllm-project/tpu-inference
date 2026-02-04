@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 import tempfile
 
 import jax
 import pytest
 import torch
+import torch.nn.functional as F
 import torchax
 from jax._src import test_util as jtu
 from jax.sharding import PartitionSpec
@@ -75,11 +77,17 @@ def ref_fp8_activation(
 def ref_dequantize_fp8_block_2d(w_q: torch.Tensor, scale_blocks: torch.Tensor,
                                 block_m: int, block_n: int) -> torch.Tensor:
     out, inn = w_q.shape
-    assert scale_blocks.shape == (out // block_m, inn // block_n)
-    scale_e = scale_blocks[:, None, :, None].repeat(1, block_m, 1, block_n)
-    w_deq = (w_q.to(torch.float32).view(out // block_m, block_m,
-                                        inn // block_n, block_n) * scale_e)
-    return w_deq.reshape(out, inn)
+    scale_out, scale_inn = scale_blocks.shape
+    padded_out, padded_inn = scale_out * block_m, scale_inn * block_n
+
+    w_q = F.pad(w_q, (0, padded_inn - inn, 0, padded_out - out))
+
+    w_q = w_q.to(torch.float32).view(scale_out, block_m, scale_inn, block_n)
+    scale_e = scale_blocks[:, None, :, None]
+    w_deq = w_q * scale_e
+
+    w_deq = w_deq.reshape(padded_out, padded_inn)
+    return w_deq[:out, :inn]
 
 
 def return_ref_and_layer_output(layer: torch.nn.Module, batch_size: int = 16):
@@ -128,14 +136,19 @@ def ref_quantize_fp8_block_2d(w: torch.Tensor, block_m: int, block_n: int,
     dtype_min = float(dtype_info.min)
 
     out, inn = w.shape
-    assert out % block_m == 0 and inn % block_n == 0
-    w_view = w.view(out // block_m, block_m, inn // block_n, block_n)
+    scale_out, scale_inn = math.ceil(out / block_m), math.ceil(inn / block_n)
+    padded_out, padded_inn = scale_out * block_m, scale_inn * block_n
+
+    w = F.pad(w, (0, padded_inn - inn, 0, padded_out - out))
+    w_view = w.view(scale_out, block_m, scale_inn, block_n)
 
     abs_max = torch.amax(torch.abs(w_view), dim=(1, 3), keepdim=True)
     scale = abs_max / dtype_max
     w_q = torch.clamp(w_view / scale, dtype_min, dtype_max).to(dtype)
 
-    w_q = w_q.reshape(out, inn)
+    w_q = w_q.reshape(padded_out, padded_inn)
+    w_q = w_q[:out, :inn]
+
     scale_blocks = scale.squeeze(1).squeeze(-1).to(torch.float32)
     return w_q, scale_blocks
 
@@ -174,6 +187,7 @@ def initialize_layer_weights(layer: torch.nn.Module):
     w_f32 = (
         torch.rand(layer.output_size, layer.input_size, dtype=torch.float32) /
         10)
+
     w_q, w_scale_blocks = ref_quantize_fp8_block_2d(w_f32, block_m, block_n,
                                                     torch.float8_e4m3fn)
 
@@ -535,3 +549,37 @@ def test_blockwise_quant(requant_block_size, requant_weight_dtype):
     jax_input_tensor = torch_view(t2j(input_tensor, use_dlpack=False))
     quantized_output = linear_layer(jax_input_tensor)
     assert quantized_output.shape == (16, 5120)
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("input_size,output_size", [
+    (7168, 576),
+])
+def test_unaligned_block_quantization(model, input_size, output_size):
+    mesh = test_utils.get_spmd_mesh(1)
+
+    torch.manual_seed(42)
+    dtype = torch.bfloat16
+
+    engine_args = EngineArgs(model=model,
+                             max_model_len=64,
+                             max_num_batched_tokens=64,
+                             max_num_seqs=4,
+                             trust_remote_code=True)
+    vllm_config = engine_args.create_engine_config()
+
+    vllm_config.model_config.dtype = dtype
+    quant_config = get_tpu_quantization_config(vllm_config, mesh)
+    with set_current_vllm_config(vllm_config):
+        linear_layer = RowParallelLinear(
+            input_size=input_size,
+            output_size=output_size,
+            bias=False,
+            params_dtype=dtype,
+            return_bias=False,
+            quant_config=quant_config,
+        )
+
+    initialize_layer_weights(linear_layer)
+    ref_output, layer_output = return_ref_and_layer_output(linear_layer)
+    torch.testing.assert_close(ref_output, layer_output)
