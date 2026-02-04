@@ -81,6 +81,11 @@ class VllmQuantLinearConfig(QuantLinearConfig):
                 "Unsupported linear layer type of %s. Can potentially yield "
                 " bad performance.", type(layer))
 
+        if isinstance(layer, QKVParallelLinear):
+            self.num_proj = 3
+        else:
+            self.num_proj = 1
+
         self.bias_sharding = P(self.weight_sharding[0])
         self.n_shards = get_mesh_shape_product(self.mesh,
                                                self.weight_sharding[0])
