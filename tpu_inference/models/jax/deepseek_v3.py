@@ -1741,7 +1741,8 @@ class DeepSeekV3(nnx.Module):
                     intermediate_size=num_shared_experts *
                     moe_intermediate_size,
                     rngs=self.rng,
-                    activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
+                    activation_ffw_td=(ShardingAxisName.MLP_DATA,
+                                       ShardingAxisName.MOE_TENSOR),
                     df_sharding=(None, ShardingAxisName.MLP_TENSOR),
                     fd_sharding=(ShardingAxisName.MLP_TENSOR, None))
 

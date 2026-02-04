@@ -157,7 +157,7 @@ class ShardingConfigManager:
             # duplicate KV heads across devices, wasting kv cache memory.
             # Use attention DP instead to reduce per-device num_kv_heads and
             # eliminate this waste.
-            num_kv_heads_per_device_in_kv_cache = (num_kv_heads * 2) / packing
+            num_kv_heads_per_device_in_kv_cache = max(1, (num_kv_heads * 2) / packing)
             attn_dp = max(
                 int(tensor_parallelism // num_kv_heads_per_device_in_kv_cache),
                 1)
