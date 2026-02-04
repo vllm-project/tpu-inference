@@ -10,6 +10,7 @@ import time
 import traceback
 from typing import Any, Callable, Optional, Tuple, TypeVar, Union
 
+import copy
 import jax
 # ======================================================================================
 # Imports for DisaggEngineCoreProc (the vLLM adapter)
@@ -398,28 +399,63 @@ class _DisaggOrchestrator:
 
 def _create_engine_cores(
     slice_sizes: tuple[int, ...],
+    dps: tuple[int, ...],
+    start_index: int,
+    all_slice_sizes: tuple[int, ...],
+    devices: list,
     vllm_config: VllmConfig,
     log_stats: bool,
     executor_fail_callback: Optional[Callable] = None,
 ) -> list[vLLMEngineCore]:
     engine_cores = []
-    for _ in slice_sizes:
+    for i, (size, dp) in enumerate(zip(slice_sizes, dps)):
+        idx = start_index + i
+        engine_config = copy.deepcopy(vllm_config)
+        engine_config.parallel_config.data_parallel_size = dp
+        # Check if we need to enable dp attention
+        sharding_config = engine_config.additional_config.get("sharding", {})
+        sharding_strategy = sharding_config.get("sharding_strategy", {})
+        sharding_strategy["enable_dp_attention"] = True
+        if "sharding" not in engine_config.additional_config:
+            engine_config.additional_config["sharding"] = {}
+        engine_config.additional_config["sharding"][
+            "sharding_strategy"] = sharding_strategy
+
+        setattr(engine_config.device_config, "slice",
+                (idx, all_slice_sizes, devices))
+
         engine_core = vLLMEngineCore(
-            vllm_config,
+            engine_config,
             disagg_executor.DisaggExecutor,
             log_stats,
             executor_fail_callback,
         )
 
         engine_cores.append(engine_core)
-        logger.warning("Disaggregated engine core created.")
+        logger.warning(
+            f"Disaggregated engine core created with index {idx} and dp {dp}.")
 
     return engine_cores
 
 
-def _get_slice_sizes(devices):
-    prefill_slice_sizes = disagg_utils.get_prefill_slices()
-    decode_slice_sizes = disagg_utils.get_decode_slices()
+def _get_slice_config(devices, tp_size):
+    prefill_dps = disagg_utils.get_prefill_slices()
+    decode_dps = disagg_utils.get_decode_slices()
+
+    prefill_slice_sizes = []
+    for dp in prefill_dps:
+        if isinstance(dp, int):
+            prefill_slice_sizes.append(dp * tp_size)
+        else:
+            prefill_slice_sizes.append(math.prod(dp))
+
+    decode_slice_sizes = []
+    for dp in decode_dps:
+        if isinstance(dp, int):
+            decode_slice_sizes.append(dp * tp_size)
+        else:
+            decode_slice_sizes.append(math.prod(dp))
+
     if isinstance(prefill_slice_sizes[0], int):
         prefill_chip_cnt = sum(prefill_slice_sizes)
     else:
@@ -431,9 +467,9 @@ def _get_slice_sizes(devices):
     assert decode_chip_cnt + prefill_chip_cnt <= len(devices)
     assert prefill_chip_cnt > 0 and decode_chip_cnt > 0
 
-    slice_sizes = list(prefill_slice_sizes)
-    slice_sizes.extend(decode_slice_sizes)
-    return prefill_slice_sizes, decode_slice_sizes, slice_sizes
+    all_slice_sizes = list(prefill_slice_sizes)
+    all_slice_sizes.extend(decode_slice_sizes)
+    return prefill_slice_sizes, decode_slice_sizes, all_slice_sizes, prefill_dps, decode_dps
 
 
 class DisaggEngineCore(vLLMEngineCore):
@@ -463,20 +499,26 @@ class DisaggEngineCore(vLLMEngineCore):
         if device_kind != 'TPU7x':
             self.vllm_config.cache_config.gpu_memory_utilization = (
                 self.vllm_config.cache_config.gpu_memory_utilization - 0.1)
-        prefill_slice_sizes, decode_slice_sizes, slice_sizes = _get_slice_sizes(
-            self.devices)
+        (prefill_slice_sizes, decode_slice_sizes, all_slice_sizes, prefill_dps,
+         decode_dps) = _get_slice_config(
+             self.devices,
+             self.vllm_config.parallel_config.tensor_parallel_size)
 
-        if isinstance(slice_sizes[0], int):
+        if isinstance(all_slice_sizes[0], int):
             setattr(vllm_config.device_config, "slice",
-                    (0, slice_sizes, self.devices))
+                    (0, all_slice_sizes, self.devices))
         else:
             setattr(vllm_config.device_config, "slice",
-                    ((0, 0), 0, slice_sizes, self.devices))
+                    ((0, 0), 0, all_slice_sizes, self.devices))
         logger.info(
-            f"Creating DisaggEngineCore with slice_sizes {slice_sizes}...")
+            f"Creating DisaggEngineCore with slice_sizes {all_slice_sizes}...")
 
         self._prefill_engines = _create_engine_cores(
             prefill_slice_sizes,
+            prefill_dps,
+            0,
+            all_slice_sizes,
+            self.devices,
             vllm_config,
             log_stats,
             executor_fail_callback,
@@ -487,6 +529,10 @@ class DisaggEngineCore(vLLMEngineCore):
 
         self._decode_engines = _create_engine_cores(
             decode_slice_sizes,
+            decode_dps,
+            len(prefill_slice_sizes),
+            all_slice_sizes,
+            self.devices,
             vllm_config,
             log_stats,
             executor_fail_callback,
@@ -623,17 +669,19 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
         if device_kind != 'TPU7x':
             self.vllm_config.cache_config.gpu_memory_utilization = (
                 self.vllm_config.cache_config.gpu_memory_utilization - 0.1)
-        prefill_slice_sizes, decode_slice_sizes, slice_sizes = _get_slice_sizes(
-            self.devices)
+        (prefill_slice_sizes, decode_slice_sizes, all_slice_sizes, prefill_dps,
+         decode_dps) = _get_slice_config(
+             self.devices,
+             self.vllm_config.parallel_config.tensor_parallel_size)
 
-        if isinstance(slice_sizes[0], int):
+        if isinstance(all_slice_sizes[0], int):
             setattr(vllm_config.device_config, "slice",
-                    (0, slice_sizes, self.devices))
+                    (0, all_slice_sizes, self.devices))
         else:
             setattr(vllm_config.device_config, "slice",
-                    ((0, 0), 0, slice_sizes, self.devices))
+                    ((0, 0), 0, all_slice_sizes, self.devices))
         logger.info(
-            f"Creating DisaggEngineCoreProc with slice_sizes {slice_sizes}...")
+            f"Creating DisaggEngineCoreProc with slice_sizes {all_slice_sizes}...")
 
         def executor_fail_callback():
             self.input_queue.put_nowait(
@@ -661,6 +709,10 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
 
             self._prefill_engines = _create_engine_cores(
                 prefill_slice_sizes,
+                prefill_dps,
+                0,
+                all_slice_sizes,
+                self.devices,
                 vllm_config,
                 log_stats,
                 executor_fail_callback,
@@ -671,6 +723,10 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
 
             self._decode_engines = _create_engine_cores(
                 decode_slice_sizes,
+                decode_dps,
+                len(prefill_slice_sizes),
+                all_slice_sizes,
+                self.devices,
                 vllm_config,
                 log_stats,
                 executor_fail_callback,
