@@ -43,7 +43,7 @@ DEFAULT_DEEPSEEK_FP8_CONFIG = {
         "bfloat16",
         "rules": [
             {
-                "module_path": ".*.custom_module.router.*",
+                "module_path": ".*.custom_module.experts.router.*",
                 "weight_qtype": None,
             },
             {
@@ -64,7 +64,7 @@ DEFAULT_DEEPSEEK_FP4_MLP_MOE_FP8_ATTN_CONFIG = {
         "rules": [
             # Exclude router from quantization
             {
-                "module_path": ".*.custom_module.router.*",
+                "module_path": ".*.custom_module.experts.router.*",
                 "weight_qtype": None,
             },
             # Avoid the combine expert ops
@@ -663,8 +663,8 @@ def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
         param_dtype = scale_dtype if is_qwix_scale else param.value.dtype
         param_shape = param.value.shape
         if is_qwix_scale:
-            key = f"{path[2]}.{path[3]}"
-
+            # structure of path is ('layers', NUM_NUM, RELEVANT_MODULE_NAME, .... , RELEVANT_MODULE_NAME, 'scale', 'array')
+            key = ".".join(path[2:-2])
             if key in scale_shape_map:
                 param_shape = scale_shape_map[key]
             else:
