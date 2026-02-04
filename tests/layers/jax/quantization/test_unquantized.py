@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 from flax import nnx
 
-from tpu_inference.layers.jax.linear import JaxLinear
+from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.unquantized import UnquantizedConfig
 
@@ -46,6 +46,31 @@ class TestUnquantizedJaxLinear:
         method = UnquantizedConfig().get_quant_method(jax_linear, prefix='')
         assert isinstance(method, QuantizeMethodBase)
         y_from_method = method.apply_jax(jax_linear, x)
+
+        # compare outputs
+        np.testing.assert_allclose(y_from_layer,
+                                   y_from_method,
+                                   rtol=1e-5,
+                                   atol=1e-5)
+
+    @pytest.mark.parametrize("kernel_shape", [(128, 8, 32), (512, 4, 16)])
+    @pytest.mark.parametrize("use_bias", [True, False])
+    @pytest.mark.parametrize("batch_size", [1, 4])
+    def test_einsum_forward_correctness(self, kernel_shape, use_bias,
+                                        batch_size, rngs):
+        # Create input data with rngs
+        x = jax.random.uniform(rngs.params(), (batch_size, kernel_shape[0]))
+
+        jax_einsum = JaxEinsum(
+            'TD,DNH->TNH',
+            kernel_shape,
+            rngs,
+            bias_shape=kernel_shape[1:] if use_bias else None)
+        y_from_layer = jax_einsum(x)
+
+        method = UnquantizedConfig().get_quant_method(jax_einsum, prefix='')
+        assert isinstance(method, QuantizeMethodBase)
+        y_from_method = method.apply_jax(jax_einsum, x)
 
         # compare outputs
         np.testing.assert_allclose(y_from_layer,

@@ -52,6 +52,6 @@ class UnquantizedConfig(QuantizationConfig):
                          prefix: str) -> Optional[QuantizeMethodBase]:
         if isinstance(layer, JaxEinsum):
             linear_config = QuantLinearConfig(
-                enable_sp=False, output_sizes=[layer.kernel_shape[1]])
+                enable_sp=False, output_sizes=[layer.kernel_shape[-1]])
             return UnquantizedLinearMethod(linear_config)
         return None

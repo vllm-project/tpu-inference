@@ -26,3 +26,4 @@ class QuantLinearConfig:
         self.output_sharding = None
 
         self.bias_sharding = P(self.weight_sharding[0])
+        self.n_shards = len(output_sizes)
