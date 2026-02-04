@@ -75,5 +75,5 @@ steps:
        queue: tpu_v6e_queue
      command:
       #  - CODE_HASH=$$(buildkite-agent meta-data get 'CODE_HASH')
-       - CODE_HASH="4c4b6f7a9-4e6e6fb4-"
+       - CODE_HASH="64a40a7ab4d0053830fae04c83763fa67f2183e6-32d1ad9716eb2d70354de84b46be7ea85fa61c85-"
        - ".buildkite/benchmark/scripts/agent/run_job.sh 68db88d5-80e6-4973-9d24-0dbcea35cc59"
