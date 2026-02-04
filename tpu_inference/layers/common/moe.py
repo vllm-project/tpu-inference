@@ -20,7 +20,6 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from vllm.model_executor.layers.fused_moe import FusedMoE
 
-from tpu_inference import envs
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
 from tpu_inference.layers.common.fused_moe_gmm import fused_moe_func
 from tpu_inference.logger import init_logger
@@ -38,42 +37,23 @@ logger = init_logger(__name__)
 
 
 class MoEBackend(Enum):
+    # This is using the Fused MoE kernel found in tpu-inference/tpu_inference/kernels/fused_moe/v1/kernel.py
+    # and is production ready.
     FUSED_MOE = "fused_moe"
+    # This is using the GMM kernel found in tpu-inference/tpu_inference/layers/common/fused_moe_gmm.py
+    # and is `expert_sharded_gmm` the GMM calls.  Production ready.
     GMM_EP = "gmm_ep"
+    # Same as GMM_EP but uses `tensor_sharded_gmm_*` for the GMM calls and is production ready
     GMM_TP = "gmm_tp"
-    DENSE_MAT = "dense_mat"  # only used in the JAX path for now
+    # Uses a simple dense matmul for the MoE backend and is intended for testing
+    # Only used in the JAX path for now
+    DENSE_MAT = "dense_mat"
     MEGABLX_GMM = "megablox_gmm"  # only used in the JAX path for now
-    RAGGED_DOT = "ragged_dot_gmm"  # only used in the JAX path for now
 
     @classmethod
     def fused_moe_backends(cls):
         """Returns those backends that use fused weights"""
         return {cls.FUSED_MOE, cls.GMM_EP, cls.GMM_TP}
-
-
-def select_moe_backend(use_ep: bool):
-    if envs.USE_MOE_EP_KERNEL:
-        if use_ep:
-            logger.info("[MoE]: Using fused MoE EP kernel")
-            return MoEBackend.FUSED_MOE
-
-    if envs.USE_MEGABLOCKS:
-        logger.info("[MoE]: Mega Blocks is enabled for GMM in Sparse Matmul")
-        return MoEBackend.MEGABLX_GMM
-
-    if envs.USE_RAGGED_DOT:
-        logger.info("[MoE]: Ragged Dot is enabled for GMM in Sparse Matmul")
-        return MoEBackend.RAGGED_DOT
-
-    if use_ep:
-        logger.warning_once(
-            "USE_MOE_EP_KERNEL=1 but expert parallelism is not "
-            "enabled. Falling back to gmm implementation.")
-        logger.info("[MoE]: Using GMM EP kernel")
-        return MoEBackend.GMM_EP
-
-    logger.info("[MoE]: Using GMM TP kernel")
-    return MoEBackend.GMM_TP
 
 
 def moe_apply(
@@ -85,7 +65,6 @@ def moe_apply(
     mesh: Mesh,
     extra_backend_kwargs: dict,
 ) -> jax.Array:
-    assert isinstance(layer, (FusedMoE, JaxMoE))
 
     with jax.named_scope(layer._get_name()):
         match moe_backend:
@@ -148,7 +127,7 @@ def moe_apply(
                 # TODO(jacobplatin): will implement in forthcoming PR
                 raise NotImplementedError
 
-            case MoEBackend.RAGGED_DOT | MoEBackend.MEGABLX_GMM:
+            case MoEBackend.MEGABLX_GMM:
                 # TODO(jacobplatin): will implement in forthcoming PR
                 raise NotImplementedError
 

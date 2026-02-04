@@ -226,7 +226,7 @@ class JaxMoE(JaxModule):
         else:
             weights_TX, indices_TX = self.router(x_TD)
 
-            if self.moe_backend == MoEBackend.MEGABLX_GMM or self.moe_backend == MoEBackend.RAGGED_DOT:
+            if self.moe_backend == MoEBackend.MEGABLX_GMM:
                 # NOTE: for the qwix_quantized_weight_dtype case, we make the spec a tuple of 2 PartitionSpecs
                 # since the first entry corresponds to the weight and the second entry corresponds to the scale.
                 # For the scale, we don't shard on the "D" dimmension because this is the subchannel dimmension

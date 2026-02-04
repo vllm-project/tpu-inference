@@ -32,8 +32,7 @@ from vllm.model_executor.layers.quantization.base_config import \
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
-from tpu_inference.layers.common.moe import (MoEBackend, moe_apply,
-                                             select_moe_backend)
+from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, process_linear_weights, shard_linear_weights,
     to_parameter_list)
@@ -45,6 +44,8 @@ from tpu_inference.layers.common.quantization import dequantize_tensor
 from tpu_inference.layers.common.quantization import fp8 as common_fp8
 from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.vllm.moe import (
+    select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.quantization.configs import (
     VllmQuantConfig, VllmQuantLinearConfig)
 from tpu_inference.layers.vllm.quantization.unquantized import (
@@ -255,7 +256,7 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
         self.fp8_backend = None
 
         self.mesh = mesh
-        self.moe_backend = select_moe_backend(self.moe.use_ep)
+        self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
 
         self.extra_backend_kwargs = {}
         if self.moe_backend == MoEBackend.FUSED_MOE:
@@ -345,14 +346,8 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
             w2_weight_scale=jax_view(layer.w2_weight_scale_inv),
             w2_bias=jax_view(layer.w2_bias) if self.moe.has_bias else None,
         )
-
-        return torch_view(
-            moe_apply(
-                layer,
-                jax_view(x),
-                jax_view(router_logits),
-                weights,
-                self.moe_backend,
-                self.mesh,
-                self.extra_backend_kwargs,
-            ))
+        return vllm_moe_apply(layer=layer,
+                              weights=weights,
+                              quant_method_instance=self,
+                              x=x,
+                              router_logits=router_logits)

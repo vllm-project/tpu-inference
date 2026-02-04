@@ -288,6 +288,17 @@ def process_moe_weights(
             # No additional processing is needed for GMM_EP.
             pass
 
+        case MoEBackend.DENSE_MAT:
+            # TODO (jacobplatin)
+            raise NotImplementedError(
+                "process_moe_weights is not yet implemented for dense matmul backend."
+            )
+        case MoEBackend.MEGABLX_GMM:
+            # TODO (jacobplatin)
+            raise NotImplementedError(
+                "process_moe_weights is not yet implemented for megablox gmm backend"
+            )
+
     return FusedMoEWeights(
         w13_weight=w13_weight,
         w13_weight_scale=w13_weight_scale,
