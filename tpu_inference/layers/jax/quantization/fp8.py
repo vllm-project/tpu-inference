@@ -129,6 +129,7 @@ class Fp8LinearMethod(QuantizeMethodBase, jax_common.Fp8LinearMethod):
                 param_name="weight_scale")
         else:
             # Per-channel quantization: 1D scales (n_out,)
+            # TODO(patemotter): Support per-channel quantization and quantized matmul kernel
             layer.weight_scale = nnx.Param(
                 jnp.ones((output_dim, ), dtype=jnp.float32))
             layer.weight_scale.weight_loader = partial(
@@ -157,6 +158,7 @@ class Fp8LinearMethod(QuantizeMethodBase, jax_common.Fp8LinearMethod):
 
         if not is_fp8 and not needs_blockwise:
             # Float32/BF16 weights but no block size -> error (per-channel requant not supported)
+            # TODO(patemotter): Allow per-channel requantization
             raise ValueError(
                 "FP8 requantization from float32/bfloat16 requires REQUANTIZE_BLOCK_SIZE "
                 "to be set. Per-channel FP8 is only supported when loading from a "
