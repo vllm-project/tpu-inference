@@ -130,11 +130,9 @@ steps:
        queue: cpu
      commands:
        - "buildkite-agent artifact download \".coverage.part*\" ."
-       - python3 -m venv venv_coverage
-       - source venv_coverage/bin/activate
-       - |
-         python3 -m pip install --upgrade pip
-         python3 -m pip install coverage[toml] pytest-cov
+       - curl -sS https://bootstrap.pypa.io/get-pip.py | python3 --user
+       - export PATH="$HOME/.local/bin:$PATH"
+       - python3 -m pip install coverage[toml] pytest-cov
        - |
          echo "[paths]" > .coveragerc
          echo "source =" >> .coveragerc
