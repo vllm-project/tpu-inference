@@ -410,7 +410,7 @@ def gmm(
     tiles_k, k_rem = _calculate_irregular_num_tiles(k, tk)
     tiles_n, n_rem = _calculate_irregular_num_tiles(n, tn)
     del n_rem
-    num_quant_blocks_per_tk = max(1, tk // quant_block_size)
+    num_quant_blocks_per_tk = pl.cdiv(tk, quant_block_size)
 
     # Create the metadata we need for computation.
     group_metadata, num_active_tiles = make_group_metadata(  # pylint: disable=unbalanced-tuple-unpacking
