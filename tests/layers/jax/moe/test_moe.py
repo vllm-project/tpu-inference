@@ -20,8 +20,11 @@ import numpy as np
 from flax import nnx
 from jax.sharding import Mesh, PartitionSpec
 
-from tpu_inference.layers.jax.moe.moe import MoE, Router
-from tpu_inference.layers.jax.moe.utils import MoEBackend
+from tpu_inference.layers.jax.moe.moe import JaxMoE, Router
+from tpu_inference.layers.jax.moe.utils import (MoEBackend,
+                                                get_expert_parallelism)
+
+EXPERT_AXIS_NAME = "model"
 
 
 class TestMoE(unittest.TestCase):
@@ -30,7 +33,7 @@ class TestMoE(unittest.TestCase):
         """Set up a multi-device mesh for testing."""
         devices = jax.devices()
         self.device_count = len(devices)
-        if self.device_count < 8:
+        if self.device_count < 2:
             self.skipTest("This test requires at least 8 simulated devices.")
 
         # This mesh will have a 'model' axis for expert parallelism
@@ -45,7 +48,7 @@ class TestMoE(unittest.TestCase):
 
         # --- Model Configuration ---
         self.B, self.S, self.D = 2, 8, 32  # Batch, Sequence, Hidden Dim
-        self.E, self.K = 8, 2  # Num Experts (Total), Experts per Token
+        self.E, self.K = self.device_count, 2  # Num Experts (Total), Experts per Token
         self.moe_intermediate_size = 64
         self.dtype = jnp.bfloat16
         self.key = jax.random.PRNGKey(42)
@@ -67,8 +70,13 @@ class TestMoE(unittest.TestCase):
                 activation_ffw_td=PartitionSpec('data', 'model'),
                 ed_sharding=PartitionSpec(None, 'model'),
                 moe_backend=backend)
+            num_expert_parallelism = get_expert_parallelism(
+                EXPERT_AXIS_NAME, self.mesh)
+            assert num_expert_parallelism == self.device_count
+            use_ep = num_expert_parallelism > 1
+            assert use_ep
 
-            moe = MoE(
+            moe = JaxMoE(
                 dtype=self.dtype,
                 num_local_experts=self.E,
                 hidden_size=self.D,
@@ -87,7 +95,8 @@ class TestMoE(unittest.TestCase):
                 apply_expert_weight_before_computation=False,
                 moe_backend=backend,
                 num_experts_per_tok=self.K,
-            )
+                expert_axis_name='model',
+                num_expert_parallelism=num_expert_parallelism)
         return moe
 
     def _compute_ground_truth(self, moe_instance, x_input):
@@ -163,37 +172,28 @@ class TestMoE(unittest.TestCase):
             jnp.allclose(actual_output, expected_output, atol=1e-2, rtol=1e-2),
             "Dense backend output does not match ground truth.")
 
-    def test_sparse_distributed_backend_correctness_ragged_dot(self):
+    def test_sparse_distributed_backend_correctness(self):
         """
-        Verifies the RAGGED_DOT (Sparse) backend with expert parallelism
+        Verifies the Sparse backends with expert parallelism
         against the sequential ground truth.
         """
-        # 1. Instantiate MoE with RAGGED_DOT backend
-        # TODO: add MoEBackend.FUSED_MOE, MoEBackend.VLLM_MOE
-        for backend in [MoEBackend.RAGGED_DOT, MoEBackend.MEGABLX_GMM]:
-            moe = self._create_moe(backend)
+        # TODO: add MoEBackend.FUSED_MOE, MoEBackend.GMM_TP/GMM_EP
+        backend = MoEBackend.MEGABLX_GMM
+        moe = self._create_moe(backend)
 
-            # 2. Run Forward Pass (Distributed)
-            # The __call__ invokes shard_map internally for RAGGED_DOT
-            with self.mesh:
-                actual_output = moe(self.x)
+        # Run Forward Pass (Distributed)
+        with self.mesh:
+            actual_output = moe(self.x)
 
-            # 3. Compute Ground Truth using the exact same weights
-            # (Weights are pulled from the initialized model)
-            expected_output = self._compute_ground_truth(moe, self.x)
+        # Compute Ground Truth using the exact same weights
+        expected_output = self._compute_ground_truth(moe, self.x)
 
-            # 4. Compare
-            # Due to permutation re-ordering and potential float precision diffs
-            # in different kernels, we allow a small tolerance.
-            diff = jnp.mean(jnp.abs(actual_output - expected_output))
+        diff = jnp.mean(jnp.abs(actual_output - expected_output))
 
-            self.assertTrue(
-                jnp.allclose(actual_output,
-                             expected_output,
-                             atol=5e-2,
-                             rtol=5e-2),
-                f"Sparse distributed output mismatch for backebd tyoe {backend}. Mean diff: {diff}"
-            )
+        self.assertTrue(
+            jnp.allclose(actual_output, expected_output, atol=5e-2, rtol=5e-2),
+            f"Sparse distributed output mismatch for backebd tyoe {backend}. Mean diff: {diff}"
+        )
 
     def test_backend_consistency(self):
         """
