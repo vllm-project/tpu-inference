@@ -167,7 +167,7 @@ class Fp8LinearMethod(QuantizeMethodBase, jax_common.Fp8LinearMethod):
         # Flatten x to (Batch, In) for the kernel
         x_reshaped = x.reshape(-1, input_size)
 
-        with jax.named_scope(layer.__class__.__name__):
+        with jax.named_scope(layer._get_name()):
             if self.linear_config.fuse_matmuls:
                 # _apply_fused expects transposed data -> (Out, In).
                 out = self._apply_fused(x_reshaped, w_val.T,
