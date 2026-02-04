@@ -25,6 +25,8 @@ from transformers import AutoModelForCausalLM
 from vllm.config import ModelConfig
 from vllm.model_executor.model_loader import LoadConfig, get_model_loader
 
+from tpu_inference.distributed.jax_parallel_state import \
+    init_pp_distributed_environment
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     get_kv_cache_shape
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
@@ -194,11 +196,21 @@ class TestQwen3ForCausalLM:
         logits = model.compute_logits(hidden_states)
         assert logits.shape == (1, hf_config.vocab_size)
 
-    def test_model_loading(self, rng, mesh):
+    @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
+                                                       (3, 4)])
+    def test_model_loading(self, pp_rank, pp_world_size, rng, mesh):
         """Tests loading weights from HF model"""
         model_name = "Qwen/Qwen3-0.6B"
         kv_cache_type = "auto"
         mock_vllm_config = MockVllmConfig(model_name, kv_cache_type)
+
+        init_pp_distributed_environment(
+            ip="",
+            rank=pp_rank,
+            world_size=pp_world_size,
+            device=jax.devices()[0],
+            need_pp=False,
+        )
 
         model_dim = mock_vllm_config.model_config.hf_config.hidden_size
         model_config = mock_vllm_config.model_config
@@ -215,7 +227,8 @@ class TestQwen3ForCausalLM:
             loader = get_model_loader(LoadConfig(load_format="hf"))
             loader.load_weights(model, model_config)
 
-        jax_layer_0 = model.model.layers[0]
+        layer_idx = model.model.start_layer
+        jax_layer_0 = model.model.layers[layer_idx]
 
         input_tensor_jax = jnp.array(input, dtype=jnp.bfloat16)
 

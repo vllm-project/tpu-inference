@@ -328,6 +328,47 @@ steps:
            .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/bm_qwen3_coder.sh --model Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 --tp 8 --req_tput_limit 0.4  --output_token_tput_limit 381 --total_token_tput_limit 3421 --input_len 8192 --output_len 1024 --use_moe_ep_kernel 1
          fi
   
+   - label: "${LABEL_PREFIX}Perf regression test for qwen3 coder 1k 8k."
+     key: ${KEY_PREFIX}test_22
+     soft_fail: true
+     env:
+       IS_FOR_V7X: "${IS_FOR_V7X}"
+     agents:
+       queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
+     if: build.env("NIGHTLY") == "1"
+     commands:
+       - |
+         if [[ "$$IS_FOR_V7X" == "true" ]]; then
+           .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/bm_qwen3_coder.sh --model Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 --tp 8 --req_tput_limit 0.16  --output_token_tput_limit 1226 --total_token_tput_limit 1378 --input_len 1024 --output_len 8192 --use_moe_ep_kernel 0
+         fi
+  
+   - label: "${LABEL_PREFIX}Perf regression test for qwen3 coder 8k 1k."
+     key: ${KEY_PREFIX}test_23
+     soft_fail: true
+     env:
+       IS_FOR_V7X: "${IS_FOR_V7X}"
+     agents:
+       queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
+     if: build.env("NIGHTLY") == "1"
+     commands:
+       - |
+         if [[ "$$IS_FOR_V7X" == "true" ]]; then
+           .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/bm_qwen3_coder.sh --model Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 --tp 8 --req_tput_limit 0.63  --output_token_tput_limit 579 --total_token_tput_limit 5193 --input_len 8192 --output_len 1024 --use_moe_ep_kernel 0
+         fi
+
+   - label: "${LABEL_PREFIX}Test EP recompilation."
+     key: ${KEY_PREFIX}test_24
+     soft_fail: true
+     env:
+       IS_FOR_V7X: "${IS_FOR_V7X}"
+     agents:
+       queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
+     commands:
+       - |
+         if [[ "$$IS_FOR_V7X" == "true" ]]; then
+           .buildkite/scripts/run_in_docker.sh bash -c 'SKIP_JAX_PRECOMPILE=0 USE_MOE_EP_KERNEL=1 VLLM_XLA_CHECK_RECOMPILATION=1  MODEL_IMPL_TYPE=vllm python examples/offline_inference.py --model Qwen/Qwen1.5-MoE-A2.7B  --tensor-parallel-size 4 --enable-expert-parallel --no-async-scheduling --max-model-len 32 --max-num-batched-tokens 32 --max-num-seqs 8'
+         fi
+  
   # -----------------------------------------------------------------
   # NOTIFICATION STEP
   # -----------------------------------------------------------------
@@ -356,9 +397,11 @@ steps:
        - ${KEY_PREFIX}test_19
        - ${KEY_PREFIX}test_20
        - ${KEY_PREFIX}test_21
+       - ${KEY_PREFIX}test_24
      agents:
        queue: cpu
      commands:
        - |
          .buildkite/scripts/check_results.sh \
-           "TPU JAX Tests Failed" ${KEY_PREFIX}test_0 ${KEY_PREFIX}test_1 ${KEY_PREFIX}test_2 ${KEY_PREFIX}test_3 ${KEY_PREFIX}test_4 ${KEY_PREFIX}test_6 ${KEY_PREFIX}test_7_1 ${KEY_PREFIX}test_7_2 ${KEY_PREFIX}test_7_3 ${KEY_PREFIX}test_8 ${KEY_PREFIX}test_9 ${KEY_PREFIX}test_10 ${KEY_PREFIX}test_11 ${KEY_PREFIX}test_12 ${KEY_PREFIX}test_13 ${KEY_PREFIX}test_15 ${KEY_PREFIX}test_16 ${KEY_PREFIX}test_17 ${KEY_PREFIX}test_18 ${KEY_PREFIX}test_19 ${KEY_PREFIX}test_20 ${KEY_PREFIX}test_21
+           "TPU JAX Tests Failed" ${KEY_PREFIX}test_0 ${KEY_PREFIX}test_1 ${KEY_PREFIX}test_2 ${KEY_PREFIX}test_3 ${KEY_PREFIX}test_4 ${KEY_PREFIX}test_6 ${KEY_PREFIX}test_7_1 ${KEY_PREFIX}test_7_2 ${KEY_PREFIX}test_7_3 ${KEY_PREFIX}test_8 ${KEY_PREFIX}test_9 ${KEY_PREFIX}test_10 ${KEY_PREFIX}test_11 ${KEY_PREFIX}test_12 ${KEY_PREFIX}test_13 ${KEY_PREFIX}test_15 ${KEY_PREFIX}test_16 ${KEY_PREFIX}test_17 ${KEY_PREFIX}test_18 ${KEY_PREFIX}test_19 ${KEY_PREFIX}test_20 ${KEY_PREFIX}test_21 ${KEY_PREFIX}test_22 ${KEY_PREFIX}test_23 ${KEY_PREFIX}test_24
+
