@@ -130,16 +130,17 @@ steps:
        queue: cpu
      commands:
        - "buildkite-agent artifact download \".coverage.part*\" ."
-       - curl -sS https://bootstrap.pypa.io/get-pip.py | python3 --user
-       - export PATH="$HOME/.local/bin:$PATH"
+       - curl -L https://github.com/pantsbuild/pex/releases/download/v2.1.151/pex -o pex
+       - chmod +x pex
+       - ./pex coverage -c coverage -- --version
        - python3 -m pip install coverage[toml] pytest-cov
        - |
          echo "[paths]" > .coveragerc
          echo "source =" >> .coveragerc
          echo "    ." >> .coveragerc
          echo "    /workspace/tpu_inference/" >> .coveragerc
-       - "coverage combine .coverage.part1.${KEY_PREFIX} .coverage.part2.${KEY_PREFIX}"
-       - "coverage report --fail-under=69"
+       - "./pex coverage combine .coverage.part1.${KEY_PREFIX} .coverage.part2.${KEY_PREFIX}"
+       - "./pex coverage report --fail-under=69"
            
    - label: "${LABEL_PREFIX}JAX unit tests - kernels"
      key: ${KEY_PREFIX}test_8
