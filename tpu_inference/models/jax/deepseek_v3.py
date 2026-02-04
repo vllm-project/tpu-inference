@@ -246,8 +246,8 @@ class DeepseekV3BaseAttention(nnx.Module):
                                                  self.N * self.v_head_dim)
                 o_TD = jnp.einsum("TR,RD -> TD", outputs_TR,
                                   self.kernel_o_proj_RD.value)
-                outputs_TNH = nnx.with_sharding_constraint(
-                    outputs_TNH, self.activation_attention_out_td)
+                o_TD = nnx.with_sharding_constraint(
+                    o_TD, self.activation_attention_out_td)
 
             return new_kv_cache, o_TD
 
@@ -1750,7 +1750,8 @@ class DeepSeekV3(nnx.Module):
                     intermediate_size=num_shared_experts *
                     moe_intermediate_size,
                     rngs=self.rng,
-                    activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
+                    activation_ffw_td=(ShardingAxisName.MLP_DATA,
+                                       ShardingAxisName.MOE_TENSOR),
                     df_sharding=(None, ShardingAxisName.MLP_TENSOR),
                     fd_sharding=(ShardingAxisName.MLP_TENSOR, None))
 
