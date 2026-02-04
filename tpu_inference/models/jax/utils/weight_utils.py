@@ -776,6 +776,8 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                     permute_dims = (2, 0, 1)
                 elif any(substr in name for substr in
                          ["q_proj.bias", "k_proj.bias", "v_proj.bias"]):
+                    N, H = param.value.shape
+                    reshape_dims = (N, H)
                     permute_dims = (0, 1)
                 elif "o_proj.weight" in name:
                     N, H, D = param.value.shape
@@ -812,5 +814,8 @@ class LoadableWithIterator:
             # Use next parent class in MRO.
             return super().load_weights(weights)
 
-        loader = JaxAutoWeightsLoader(self)
+        loader = JaxAutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head"]
+                           if not hasattr(self, 'lm_head') else None))
         return loader.load_weights(weights)
