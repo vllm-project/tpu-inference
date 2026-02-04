@@ -136,8 +136,9 @@ class TestLlamaGuard4ForCausalLM:
     def test_init_llama_guard_4(self, mock_vllm_config_llama_guard_4, rng,
                                 mesh):
         """Tests correct initialization and parameter detection."""
-        model = LlamaGuard4ForCausalLM(mock_vllm_config_llama_guard_4, rng,
-                                       mesh)
+        with jax.set_mesh(mesh):
+            model = LlamaGuard4ForCausalLM(mock_vllm_config_llama_guard_4, rng,
+                                        mesh)
 
         # Check model name is correctly set in the config
         assert "llama-guard-4" in model.vllm_config.model_config.model.lower()
@@ -174,7 +175,8 @@ class TestLlamaGuard4ForCausalLM:
         """Tests that the weight loader is called correctly for checkpoint loading."""
         vllm_config = MockVllmConfig(model_name="llama-guard-4-test",
                                      random_weights=False)
-        model = LlamaGuard4ForCausalLM(vllm_config, rng, mesh)
+        with jax.set_mesh(mesh):
+            model = LlamaGuard4ForCausalLM(vllm_config, rng, mesh)
 
         with patch.object(LlamaGuard4ForCausalLM,
                           'WeightLoader') as mock_loader_cls:
@@ -224,7 +226,8 @@ class TestLlamaGuard4WeightLoader:
         vllm_config = MockVllmConfig(model_name="llama-guard-4-small-test",
                                      random_weights=False)
 
-        model = LlamaGuard4ForCausalLM(vllm_config, rng, mesh)
+        with jax.set_mesh(mesh):
+            model = LlamaGuard4ForCausalLM(vllm_config, rng, mesh)
 
         hidden_size = 5120
         vocab_size = 202048

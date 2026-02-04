@@ -275,7 +275,7 @@ class Qwen2Model(JaxModule):
             rngs=rng,
             quant_config=vllm_config.quant_config,
         )
-        self.layers = [
+        self.layers = nnx.List([
             Qwen2DecoderLayer(
                 config=hf_config,
                 dtype=dtype,
@@ -285,7 +285,7 @@ class Qwen2Model(JaxModule):
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
                 quant_config=vllm_config.quant_config)
             for _ in range(hf_config.num_hidden_layers)
-        ]
+        ])
         self.norm = JaxRmsNorm(
             hidden_size,
             epsilon=rms_norm_eps,

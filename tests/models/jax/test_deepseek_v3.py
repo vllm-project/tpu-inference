@@ -112,7 +112,8 @@ class TestDeepSeekV3:
 
     def test_init(self, mock_config, rng, mesh):
         """Tests if the model initializes with the correct hierarchy."""
-        model = DeepSeekV3(mock_config, rng, mesh)
+        with jax.set_mesh(mesh):
+            model = DeepSeekV3(mock_config, rng, mesh)
         assert len(model.layers) == 1
         assert isinstance(model.embedder, nnx.Module)
         assert model.vllm_config.model_config.hf_config.num_hidden_layers == 1
@@ -137,7 +138,8 @@ class TestDeepSeekV3:
     )
     def test_load_weights_called(self, mock_weights_generator, mock_loader_cls,
                                  mock_config, rng, mesh):
-        model = DeepSeekV3(mock_config, rng, mesh)
+        with jax.set_mesh(mesh):
+            model = DeepSeekV3(mock_config, rng, mesh)
 
         model.load_weights(rng)
 
@@ -617,7 +619,7 @@ class TestDeepseekV3Attention(unittest.TestCase):
                                            None)
             keyvalue_skh_spec = PartitionSpec(None,
                                               ShardingAxisName.MLP_TENSOR,
-                                              None)
+                                              )
             attn_o_tnh_spec = PartitionSpec(None, ShardingAxisName.MLP_TENSOR,
                                             None)
 
@@ -651,10 +653,10 @@ class TestDeepseekV3Attention(unittest.TestCase):
                 query_tnh=query_tnh_spec,
                 keyvalue_skh=keyvalue_skh_spec,
                 attn_o_tnh=attn_o_tnh_spec,
-                q_da_sharding=(None, ShardingAxisName.VOCAB),
-                ap_sharding=(None, ShardingAxisName.MLP_TENSOR),
-                kv_da_sharding=(None, ShardingAxisName.VOCAB),
-                rd_sharding=(ShardingAxisName.MLP_TENSOR, None),
+                q_da_sharding=PartitionSpec(None, ShardingAxisName.VOCAB),
+                ap_sharding=PartitionSpec(None, ShardingAxisName.MLP_TENSOR),
+                kv_da_sharding=PartitionSpec(None, ShardingAxisName.VOCAB),
+                rd_sharding=PartitionSpec(ShardingAxisName.MLP_TENSOR, None),
             )
 
             seq_len = 32

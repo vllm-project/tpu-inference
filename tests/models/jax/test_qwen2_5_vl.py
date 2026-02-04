@@ -164,10 +164,11 @@ class TestUtils:
 
 class TestQwen2_5_VisionMLP:
 
-    def test_forward(self, mock_vllm_config: MockVllmConfig, rngs: nnx.Rngs):
+    def test_forward(self, mock_vllm_config: MockVllmConfig, rngs: nnx.Rngs, mesh: Mesh,):
         config = mock_vllm_config.model_config.hf_config.vision_config
         dtype = mock_vllm_config.model_config.dtype
-        mlp = Qwen2_5_VisionMLP(config, dtype, rngs)
+        with jax.set_mesh(mesh):
+            mlp = Qwen2_5_VisionMLP(config, dtype, rngs)
         x = jnp.ones((5, config.hidden_size), dtype=dtype)
         y = mlp(x)
         assert y.shape == (5, config.hidden_size)
@@ -180,9 +181,10 @@ class TestQwen2_5_VisionAttention:
     def test_forward_fullattn(self, mock_flash_attention: MagicMock,
                               mock_vllm_config: MockVllmConfig, rngs: nnx.Rngs,
                               mesh: Mesh, rng: PRNGKey):
-        attn_module = Qwen2_5_VisionAttention(
-            mock_vllm_config.model_config.hf_config,
-            mock_vllm_config.model_config.dtype, rngs, mesh)
+        with jax.set_mesh(mesh):
+            attn_module = Qwen2_5_VisionAttention(
+                mock_vllm_config.model_config.hf_config,
+                mock_vllm_config.model_config.dtype, rngs, mesh)
         B, T, D = 1, 10, attn_module.hidden_size
         # sharded_flash_attention is a factory, so we mock the returned function
         mock_attn_fn = MagicMock(return_value=jnp.ones((B,
@@ -206,9 +208,10 @@ class TestQwen2_5_VisionAttention:
     def test_forward_windowed(self, mock_flash_attention: MagicMock,
                               mock_vllm_config: MockVllmConfig, rngs: nnx.Rngs,
                               mesh: Mesh, rng: PRNGKey):
-        attn_module = Qwen2_5_VisionAttention(
-            mock_vllm_config.model_config.hf_config,
-            mock_vllm_config.model_config.dtype, rngs, mesh)
+        with jax.set_mesh(mesh):
+            attn_module = Qwen2_5_VisionAttention(
+                mock_vllm_config.model_config.hf_config,
+                mock_vllm_config.model_config.dtype, rngs, mesh)
         B, T, D = 1, 10, attn_module.hidden_size
         mock_attn_fn = MagicMock(return_value=jnp.ones((B,
                                                         attn_module.num_heads,
@@ -229,9 +232,10 @@ class TestQwen2_5_VisionAttention:
 
     def test_batch_fail(self, mock_vllm_config: MockVllmConfig, rngs: nnx.Rngs,
                         mesh: Mesh, rng: PRNGKey):
-        attn_module = Qwen2_5_VisionAttention(
-            mock_vllm_config.model_config.hf_config,
-            mock_vllm_config.model_config.dtype, rngs, mesh)
+        with jax.set_mesh(mesh):
+            attn_module = Qwen2_5_VisionAttention(
+                mock_vllm_config.model_config.hf_config,
+                mock_vllm_config.model_config.dtype, rngs, mesh)
         T, B, D = 10, 2, attn_module.hidden_size
         x = jax.random.normal(rng, (T, B, D))
         rotary_pos_emb = jax.random.normal(rng, (T, attn_module.head_dim // 2))
@@ -259,8 +263,9 @@ class TestQwen2_5_VisionBlock:
         mock_attn_instance.return_value = jnp.zeros((T, B, D), dtype=dtype)
         mock_mlp_instance = MockMLP.return_value
         mock_mlp_instance.return_value = jnp.zeros((T, B, D), dtype=dtype)
-
-        block = Qwen2_5_VisionBlock(config, dtype, rngs, mesh)
+        
+        with jax.set_mesh(mesh):
+            block = Qwen2_5_VisionBlock(config, dtype, rngs, mesh)
         x = jax.random.normal(rng, (T, B, D))
         rotary_pos_emb = jax.random.normal(
             rng, (T, config.vision_config.hidden_size //
@@ -275,16 +280,17 @@ class TestQwen2_5_VisionBlock:
 class TestQwen2_5_VisionPatchEmbed:
 
     def test_forward(self, mock_vllm_config: MockVllmConfig, rngs: nnx.Rngs,
-                     rng: PRNGKey):
+                     rng: PRNGKey, mesh: Mesh):
         vc = mock_vllm_config.model_config.hf_config.vision_config
         dtype = mock_vllm_config.model_config.dtype
-        patch_embed = Qwen2_5_VisionPatchEmbed(
-            rngs,
-            patch_size=vc.patch_size,
-            temporal_patch_size=vc.temporal_patch_size,
-            in_channels=vc.in_channels,
-            hidden_size=vc.hidden_size,
-            dtype=dtype)
+        with jax.set_mesh(mesh):
+            patch_embed = Qwen2_5_VisionPatchEmbed(
+                rngs,
+                patch_size=vc.patch_size,
+                temporal_patch_size=vc.temporal_patch_size,
+                in_channels=vc.in_channels,
+                hidden_size=vc.hidden_size,
+                dtype=dtype)
         num_patches = 4
         patch_dim = vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size
         x = jax.random.normal(rng, (num_patches, patch_dim))
@@ -295,12 +301,13 @@ class TestQwen2_5_VisionPatchEmbed:
 class TestQwen2_5_VisionPatchMerger:
 
     def test_forward(self, mock_vllm_config: MockVllmConfig, rngs: nnx.Rngs,
-                     rng: PRNGKey):
+                     rng: PRNGKey, mesh: Mesh):
         vc = mock_vllm_config.model_config.hf_config.vision_config
         dtype = mock_vllm_config.model_config.dtype
-        merger = Qwen2_5_VisionPatchMerger(
-            d_model=vc.out_hidden_size,
-            context_dim=vc.hidden_size,
+        with jax.set_mesh(mesh):
+            merger = Qwen2_5_VisionPatchMerger(
+                d_model=vc.out_hidden_size,
+                context_dim=vc.hidden_size,
             norm_layer=partial(nnx.RMSNorm, epsilon=1e-6),
             spatial_merge_size=vc.spatial_merge_size,
             dtype=dtype,
@@ -313,10 +320,11 @@ class TestQwen2_5_VisionPatchMerger:
 
 class TestQwen2_5_VisionRotaryEmbedding:
 
-    def test_forward(self):
+    def test_forward(self, mesh: Mesh):
         dim = 16
         seqlen = 10
-        rotary_emb = Qwen2_5_VisionRotaryEmbedding(dim=dim)
+        with jax.set_mesh(mesh):
+            rotary_emb = Qwen2_5_VisionRotaryEmbedding(dim=dim)
         emb = rotary_emb(seqlen)
         assert emb.shape == (seqlen, dim // 2)
 
@@ -326,7 +334,8 @@ class TestQwen2_5_VisionTransformer:
     @pytest.fixture
     def vision_transformer(self, mock_vllm_config: MockVllmConfig,
                            rngs: nnx.Rngs, mesh: Mesh):
-        return Qwen2_5_VisionTransformer(mock_vllm_config, rngs, mesh)
+        with jax.set_mesh(mesh):
+            return Qwen2_5_VisionTransformer(mock_vllm_config, rngs, mesh)
 
     def test_rotary_pos_emb_thw(self,
                                 vision_transformer: Qwen2_5_VisionTransformer):
@@ -370,8 +379,9 @@ class TestQwen2_5_VisionTransformer:
         mock_vllm_config.additional_config = {
             "enable_dynamic_image_sizes": enable_dynamic_image_sizes
         }
-        vision_transformer = Qwen2_5_VisionTransformer(mock_vllm_config, rngs,
-                                                       mesh)
+        with jax.set_mesh(mesh):
+            vision_transformer = Qwen2_5_VisionTransformer(mock_vllm_config, rngs,
+                                                        mesh)
         # Mock the flash_attention call to avoid sharding errors in test environment
         for block in vision_transformer.blocks:
             # The mock should return a tensor of the same shape as the query 'q'
@@ -409,7 +419,7 @@ class TestQwen2_5_VLForConditionalGeneration:
     def model(self, mock_vllm_config: MockVllmConfig, rng: PRNGKey,
               mesh: Mesh):
         with patch('tpu_inference.models.jax.qwen2_5_vl.Qwen2_5_VisionTransformer', autospec=True) as MockVision, \
-             patch('tpu_inference.models.jax.qwen2_5_vl.Qwen2Model', autospec=True) as MockLM:
+             patch('tpu_inference.models.jax.qwen2_5_vl.Qwen2Model', autospec=True) as MockLM, jax.set_mesh(mesh):
             mock_visual = MockVision.return_value
             mock_visual.dtype = mock_vllm_config.model_config.dtype
             mock_visual.config = mock_vllm_config.model_config.hf_config.vision_config
@@ -475,15 +485,16 @@ class TestQwen2_5_VLForConditionalGeneration:
         assert not mm_inputs_empty
 
     def test_process_image_input_pixels(
-            self, model: Qwen2_5_VLForConditionalGeneration):
+            self, model: Qwen2_5_VLForConditionalGeneration, mesh: Mesh):
         grid_thw = ((2, 28, 28), (2, 28, 28))
         vc = model.config.vision_config
         num_patches = 8  # 4 per image
         patch_dim = vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size
         pixel_values = jnp.ones((num_patches, patch_dim))
-        image_input = Qwen2_5_VLImagePixelInputs(type="pixel_values",
-                                                 pixel_values=pixel_values,
-                                                 image_grid_thw=grid_thw)
+        with jax.set_mesh(mesh):
+            image_input = Qwen2_5_VLImagePixelInputs(type="pixel_values",
+                                                    pixel_values=pixel_values,
+                                                    image_grid_thw=grid_thw)
 
         tokens_per_image = (2 * 28 * 28) // (vc.spatial_merge_size**2)
         mock_embeds = jnp.ones((tokens_per_image, vc.out_hidden_size))
@@ -594,7 +605,7 @@ class TestQwen2_5_VLForConditionalGeneration:
                                rng: PRNGKey, mesh: Mesh):
         mock_vllm_config_tied = MockVllmConfig(tie_word_embeddings=True)
         with patch('tpu_inference.models.jax.qwen2_5_vl.Qwen2_5_VisionTransformer', autospec=True), \
-             patch('tpu_inference.models.jax.qwen2_5_vl.Qwen2Model', autospec=True):
+             patch('tpu_inference.models.jax.qwen2_5_vl.Qwen2Model', autospec=True), jax.set_mesh(mesh):
             model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config_tied,
                                                        rng, mesh)
 

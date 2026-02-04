@@ -786,12 +786,16 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                 elif "lm_head" in name:
                     permute_dims = (1, 0)
 
-                setattr(
-                    param, "weight_loader",
-                    functools.partial(load_nnx_param_from_reshaped_torch,
+                param.set_metadata("weight_loader", functools.partial(load_nnx_param_from_reshaped_torch,
                                       reshape_dims=reshape_dims,
                                       permute_dims=permute_dims,
                                       param_name=name))
+                # setattr(
+                #     param, "weight_loader",
+                #     functools.partial(load_nnx_param_from_reshaped_torch,
+                #                       reshape_dims=reshape_dims,
+                #                       permute_dims=permute_dims,
+                #                       param_name=name))
 
         super().__init__(model, **kwargs)
 

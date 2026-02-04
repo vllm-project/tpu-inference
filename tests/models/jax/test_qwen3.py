@@ -116,7 +116,8 @@ class TestQwen3ForCausalLM:
                 qwix=dict(rules=qwix_rules))
 
         # Test model init
-        model = Qwen3ForCausalLM(mock_vllm_config, rng, mesh)
+        with jax.set_mesh(mesh):
+            model = Qwen3ForCausalLM(mock_vllm_config, rng, mesh)
 
         model_config = mock_vllm_config.model_config
         hf_config = model_config.hf_config
@@ -209,7 +210,8 @@ class TestQwen3ForCausalLM:
         seq_len = 1
         input = [[0.01 * i for i in range(model_dim)] for _ in range(seq_len)]
 
-        model = Qwen3ForCausalLM(mock_vllm_config, rng, mesh)
+        with jax.set_mesh(mesh):
+            model = Qwen3ForCausalLM(mock_vllm_config, rng, mesh)
         # load weights from HF model
         with jax.set_mesh(mesh):
             loader = get_model_loader(LoadConfig(load_format="hf"))
