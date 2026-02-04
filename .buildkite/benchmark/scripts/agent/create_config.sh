@@ -74,3 +74,4 @@ CONTAINER_NAME=vllm-tpu
 DOWNLOAD_DIR=/mnt/disks/persist
 HF_TOKEN=$(gcloud secrets versions access latest --secret=bm-agent-hf-token --project=cloud-tpu-inference-test --quiet)
 EOF
+
