@@ -97,26 +97,26 @@ steps:
      soft_fail: true
      env:
        IS_FOR_V7X: "${IS_FOR_V7X}"
-     artifact_paths: ".coverage.part1"
+     artifact_paths: ".coverage.part1.${KEY_PREFIX}"
      agents:
        queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
      commands:
        - |
-         .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/layers --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part1; fi"         
-       - cp /mnt/disks/persist/models/.coverage.part1 ./
+         .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/layers --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part1.${KEY_PREFIX}; fi"         
+       - cp /mnt/disks/persist/models/.coverage.part1.${KEY_PREFIX} ./
          
    - label: "${LABEL_PREFIX}JAX unit tests part2"
      key: ${KEY_PREFIX}test_7_2
      soft_fail: true
      env:
        IS_FOR_V7X: "${IS_FOR_V7X}"
-     artifact_paths: ".coverage.part2"
+     artifact_paths: ".coverage.part2.${KEY_PREFIX}"
      agents:
        queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
      commands:
        - |
-         .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/ --ignore=/workspace/tpu_inference/tests/layers --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part2; fi"
-       - cp /mnt/disks/persist/models/.coverage.part2 ./
+         .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/ --ignore=/workspace/tpu_inference/tests/layers --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part2.${KEY_PREFIX}; fi"
+       - cp /mnt/disks/persist/models/.coverage.part2.${KEY_PREFIX} ./
        
    - label: "${LABEL_PREFIX}JAX unit tests combine and report"
      depends_on: 
@@ -130,18 +130,17 @@ steps:
        queue: cpu
      commands:
        - "buildkite-agent artifact download \".coverage.part*\" ."
-       - sudo apt-get update && sudo apt-get install -y python3-pip
+       - python3 -m venv venv_coverage
+       - source venv_coverage/bin/activate
        - |
          python3 -m pip install --upgrade pip
          python3 -m pip install coverage[toml] pytest-cov
-         export PATH="$HOME/.local/bin:$PATH"
-         coverage --version
        - |
          echo "[paths]" > .coveragerc
          echo "source =" >> .coveragerc
          echo "    ." >> .coveragerc
          echo "    /workspace/tpu_inference/" >> .coveragerc
-       - "coverage combine .coverage.part1 .coverage.part2"
+       - "coverage combine .coverage.part1.${KEY_PREFIX} .coverage.part2.${KEY_PREFIX}"
        - "coverage report --fail-under=69"
            
    - label: "${LABEL_PREFIX}JAX unit tests - kernels"
