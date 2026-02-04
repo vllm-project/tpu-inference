@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     PYTHON_TRACER_LEVEL: int = 1
     USE_MOE_EP_KERNEL: bool = False
     USE_MEGABLOCKS: bool = False
+    USE_DENSE_MOE: bool = False
     NUM_SLICES: int = 1
     RAY_USAGE_STATS_ENABLED: str = "0"
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: str = "shm"
@@ -152,6 +153,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "USE_MEGABLOCKS":
     env_bool("USE_MEGABLOCKS", default=False),
     # Number of TPU slices for multi-slice mesh
+    "USE_DENSE_MOE":
+    env_bool("USE_DENSE_MOE", default=False),
     "NUM_SLICES":
     lambda: int(os.getenv("NUM_SLICES") or "1"),
     # Enable/disable Ray usage statistics collection

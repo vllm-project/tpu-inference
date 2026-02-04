@@ -283,5 +283,9 @@ def select_moe_backend(use_ep: bool) -> MoEBackend:
         logger.info_once("[MoE]: Using GMM EP kernel")
         return MoEBackend.GMM_EP
 
+    if envs.USE_DENSE_MOE:
+        logger.info_once("[MoE]: Using DENSE_MOE")
+        return MoEBackend.DENSE_MAT
+
     logger.info_once("[MoE]: Using GMM TP kernel")
     return MoEBackend.GMM_TP

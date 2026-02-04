@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from enum import Enum
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -57,9 +57,9 @@ class MoEBackend(Enum):
 
 
 def moe_apply(
-    layer: FusedMoE | JaxMoE,
+    layer: Union[FusedMoE, JaxMoE],
     x: jax.Array,
-    gating_output: jax.Array,
+    gating_output: Union[jax.Array, Tuple[jax.Array, jax.Array]],
     weights: Union[FusedMoEWeights, UnfusedMoEWeights],
     moe_backend: MoEBackend,
     mesh: Mesh,
@@ -124,11 +124,32 @@ def moe_apply(
                     scoring_fn=layer.scoring_func,
                 )
             case MoEBackend.DENSE_MAT:
-                # TODO(jacobplatin): will implement in forthcoming PR
-                raise NotImplementedError
+                # NOTE: circular import avoidance
+                from tpu_inference.layers.jax.moe.dense_moe import \
+                    dense_moe_func
+                assert len(
+                    gating_output
+                ) == 2, "Expected the gating output to be have 2 entries: weights and indices"
+                return dense_moe_func(
+                    weights=weights,
+                    x_TD=x,
+                    gating_output=gating_output,
+                    cast_dtype=layer.dtype,
+                    num_local_experts=layer.num_local_experts,
+                    apply_expert_weight_before_computation=layer.
+                    apply_expert_weight_before_computation,
+                    activation_ffw_td=layer.activation_ffw_td,
+                    hidden_act=layer.hidden_act)
 
             case MoEBackend.MEGABLX_GMM:
-                # TODO(jacobplatin): will implement in forthcoming PR
-                raise NotImplementedError
+                # NOTE: circular import avoidance
+                from tpu_inference.layers.jax.moe.sparse_moe import \
+                    sparse_moe_func
+
+                return sparse_moe_func(weights=weights,
+                                       x_TD=x,
+                                       gating_output=gating_output,
+                                       layer=layer,
+                                       mesh=mesh)
 
         return output
