@@ -252,6 +252,21 @@ class TestMoESelector(unittest.TestCase):
                              MoEBackend.MEGABLX_GMM)
             self.assertEqual(select_moe_backend(use_ep=False),
                              MoEBackend.MEGABLX_GMM)
+        # Case 2: Dense (Next priority)
+        with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', False), \
+             mock.patch.object(envs, 'USE_DENSE_MOE', True):
+            self.assertEqual(select_moe_backend(use_ep=True),
+                             MoEBackend.GMM_EP)
+            self.assertEqual(select_moe_backend(use_ep=False),
+                             MoEBackend.DENSE_MAT)
+
+        # Default: GMM_TP
+        with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', False), \
+             mock.patch.object(envs, 'USE_DENSE_MOE', False):
+            self.assertEqual(select_moe_backend(use_ep=True),
+                             MoEBackend.GMM_EP)
+            self.assertEqual(select_moe_backend(use_ep=False),
+                             MoEBackend.GMM_TP)
 
     def test_select_moe_backend_precedence_conflict(self):
         """Test precedence when multiple flags are enabled."""
