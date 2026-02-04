@@ -121,6 +121,16 @@ def mock_vllm_config_llama4() -> MockVllmConfig:
     return MockVllmConfig(model_name="meta-llama/Llama-4-Scout-17B-16E")
 
 
+@pytest.fixture(autouse=True)
+def mock_get_pp_group():
+    with patch("tpu_inference.models.jax.llama4.get_pp_group",
+               return_value=MagicMock(is_first_rank=True,
+                                      is_last_rank=True,
+                                      rank_in_group=0,
+                                      world_size=1)):
+        yield
+
+
 class TestLlama4ForCausalLM:
     """Tests for the main LlamaForCausalLM model class."""
 

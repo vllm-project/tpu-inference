@@ -18,10 +18,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from vllm.config import ModelConfig
+from vllm.model_executor.model_loader import LoadConfig, get_model_loader
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.models.jax.qwen2 import Qwen2ForCausalLM
@@ -115,7 +115,6 @@ class TestQwen2ForCausalLM:
 
         layers = model.model.layers
         assert len(layers) == hf_config.num_hidden_layers
-        assert isinstance(model.rng, nnx.Rngs)
 
         attn = layers[0].self_attn
         hidden_size = hf_config.hidden_size
@@ -145,7 +144,9 @@ class TestQwen2ForCausalLM:
         assert mlp.down_proj.weight.shape == (intermediate_size, hidden_size)
 
         # Test model load
-        model.load_weights(rng)
+        with jax.set_mesh(mesh):
+            loader = get_model_loader(LoadConfig(load_format="hf"))
+            loader.load_weights(model, model_config)
 
         # Test model forward
         kv_caches = create_kv_caches(

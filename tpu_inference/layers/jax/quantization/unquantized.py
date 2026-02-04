@@ -17,11 +17,11 @@ from typing import Optional
 import jax
 
 from tpu_inference.layers.common.quantization import unquantized as jax_common
+from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
-from tpu_inference.layers.jax.quantization.configs import (
-    JaxQuantLinearConfig, QuantizationConfig)
+from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 
 
 class UnquantizedLinearMethod(QuantizeMethodBase,
@@ -32,11 +32,13 @@ class UnquantizedLinearMethod(QuantizeMethodBase,
     def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
         assert isinstance(layer, JaxEinsum)
 
-        with jax.named_scope(layer.__class__.__name__):
+        with jax.named_scope(layer._get_name()):
             if self.linear_config.fuse_matmuls:
                 out = self._apply_fused(
-                    x, layer.weight.value.T,
-                    layer.bias.value if layer.bias else None)
+                    x,
+                    layer.weight.value,
+                    layer.bias.value if layer.bias else None,
+                    einsum_str=layer.einsum_str)
             else:
                 raise NotImplementedError(
                     "Non-fused matmuls not implemented yet.")
@@ -49,6 +51,7 @@ class UnquantizedConfig(QuantizationConfig):
     def get_quant_method(self, layer: JaxModule,
                          prefix: str) -> Optional[QuantizeMethodBase]:
         if isinstance(layer, JaxEinsum):
-            linear_config = JaxQuantLinearConfig(layer)
+            linear_config = QuantLinearConfig(
+                enable_sp=False, output_sizes=[layer.kernel_shape[-1]])
             return UnquantizedLinearMethod(linear_config)
         return None
