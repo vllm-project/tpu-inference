@@ -78,6 +78,8 @@ class CompilationManager:
         if result is not None:
             if isinstance(result, tuple):
                 for r in result:
+                    if r is None:
+                        continue
                     r.block_until_ready()
             else:
                 result.block_until_ready()
