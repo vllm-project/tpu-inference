@@ -129,14 +129,13 @@ from vllm.model_executor.model_loader.utils import (
     initialize_model, process_weights_after_loading)
 from vllm.utils.torch_utils import set_default_torch_dtype
 
-from tpu_inference.layers.vllm.process_weights.cleanup_sharding import (
-    process_unquantized_linear_weight, process_unquantized_moe_weight)
+from tpu_inference.layers.vllm.quantization.base import VllmQuantizationMethod
 
 
 def attach_incremental_weight_loader(model: torch.nn.Module) -> None:
     """
     Traverses the model and overrides the weight_loader of each parameter to support incremental loading.
-    This allows processing and sharding of weights after all weights for a parameter have been loaded.
+    This allows processing and sharding of weights after all weights for a module have been loaded.
     """
 
     def create_weight_loader(layer, original_loader, layer_name, param_name):
@@ -149,35 +148,10 @@ def attach_incremental_weight_loader(model: torch.nn.Module) -> None:
 
             # Processing and sharding
             # For now, only handle unquantized linear and moe layers.
-            if isinstance(layer, LinearBase) and isinstance(
-                    layer.quant_method, UnquantizedLinearMethod):
-                if isinstance(layer, QKVParallelLinear):
-                    assert len(
-                        args) == 1, "Expecting shard_id as the only argument"
-                    shard_id = args[0]
-                    # Keep track of loaded weights for QKVLinear, e.g. (('weight', 'q'), ('bias', 'q'), ('weight', 'k'), ('bias', 'k'), ...)
-                    layer._loaded_weights.add((param_name, shard_id))
-                    if len(layer._loaded_weights) == len(
-                        ('q', 'k', 'v')) * len(
-                            dict(layer.named_parameters(recurse=False))):
-                        process_unquantized_linear_weight(layer)
-                else:
-                    # Keep track of loaded weights for other linear layers, e.g. ('weight', 'bias')
-                    layer._loaded_weights.add(param_name)
-                    if len(layer._loaded_weights) == len(
-                            dict(layer.named_parameters(recurse=False))):
-                        process_unquantized_linear_weight(layer)
-            if isinstance(layer, FusedMoE) and isinstance(
-                    layer.quant_method, UnquantizedFusedMoEMethod):
-                expert_id = kwargs.get('expert_id')
-                shard_id = kwargs.get('shard_id')
-                assert expert_id is not None, "Expecting expert_id argument"
-                assert shard_id is not None, "Expecting shard_id argument"
-                # Keep track of loaded weights for MoE layers, e.g. (('0', 'w1'), ('0', 'w2'), ('0', 'w3'), ('1', 'w1'), ...)
-                layer._loaded_weights.add((expert_id, shard_id))
-                if len(layer._loaded_weights
-                       ) == layer.global_num_experts * len(('w1', 'w2', 'w3')):
-                    process_unquantized_moe_weight(layer)
+            quant_method = layer.quant_method
+            if isinstance(quant_method, VllmQuantizationMethod):
+                quant_method.maybe_process_weights(layer, param_name, args,
+                                                   kwargs)
 
             return res
 
@@ -198,7 +172,7 @@ def attach_incremental_weight_loader(model: torch.nn.Module) -> None:
                                      param_name))
 
 
-@register_model_loader("incremental")
+@register_model_loader("tpu_streaming_loader")
 class IncrementalModelLoader(DefaultModelLoader):
     """
     Model loader that supports incremental weight loading and sharding.

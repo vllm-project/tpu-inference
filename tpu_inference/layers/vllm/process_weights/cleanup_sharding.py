@@ -32,14 +32,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 
 from tpu_inference import envs
-from tpu_inference.layers.common.process_weights.linear_weights import (
-    LinearWeights, process_linear_weights, shard_linear_weights,
-    to_parameter_list)
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.vllm.process_weights.fused_moe_weights import (
-    FusedMoEWeights, process_moe_weights, shard_moe_weights)
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import get_mesh_shape_product, to_jax_dtype
+from tpu_inference.utils import to_jax_dtype
 
 P = PartitionSpec
 
@@ -242,119 +237,3 @@ def _sharded_device_put(tensor: jax.Array, sharding) -> jax.Array:
                                                     sharding,
                                                     x_split,
                                                     dtype=tensor.dtype)
-
-
-def process_unquantized_linear_weight(layer: torch.nn.Module):
-    weight = t2j(layer.weight, use_dlpack=False)
-    # Free CPU memory immediately
-    layer.weight.untyped_storage().resize_(0)
-    delattr(layer, 'weight')
-    if layer.bias is not None and not layer.skip_bias_add:
-        if layer.return_bias:
-            logger.warning_once("Bias might return incorrect value.")
-        bias = t2j(layer.bias, use_dlpack=False)
-        layer.bias.untyped_storage().resize_(0)
-        delattr(layer, 'bias')
-    else:
-        bias = None
-
-    linear_config = layer.quant_method.linear_config
-
-    @jax.jit
-    def process_unquantized_linear_weights(
-        weight: jax.Array,
-        bias: jax.Array | None,
-    ) -> LinearWeights:
-        return process_linear_weights(
-            LinearWeights(
-                weight=weight,
-                weight_scale=None,
-                zero_point=None,
-                bias=bias,
-            ),
-            fused=linear_config.fuse_matmuls,
-            output_sizes=linear_config.output_sizes,
-            reorder_size=linear_config.n_shards,
-        )
-
-    weights = process_unquantized_linear_weights(weight, bias)
-    weights = torch_view(
-        shard_linear_weights(
-            weights,
-            mesh=linear_config.mesh,
-            weight_p_spec=linear_config.weight_sharding,
-            bias_p_spec=linear_config.bias_sharding,
-        ))
-
-    if linear_config.fuse_matmuls:
-        layer.weight = Parameter(weights.weight, requires_grad=False)
-        if bias is not None:
-            layer.bias = Parameter(weights.bias, requires_grad=False)
-    else:
-        layer.weight = to_parameter_list(weights.weight)
-        if bias is not None:
-            layer.bias = to_parameter_list(weights.bias)
-
-
-def process_unquantized_moe_weight(layer: torch.nn.Module):
-    w13_weight = t2j(layer.w13_weight, use_dlpack=False)
-    w2_weight = t2j(layer.w2_weight, use_dlpack=False)
-    # Free CPU memory immediately
-    layer.w13_weight.untyped_storage().resize_(0)
-    layer.w2_weight.untyped_storage().resize_(0)
-    delattr(layer, 'w13_weight')
-    delattr(layer, 'w2_weight')
-
-    quant_method = layer.quant_method
-
-    if quant_method.moe.has_bias:
-        w13_bias = t2j(layer.w13_bias, use_dlpack=False)
-        w2_bias = t2j(layer.w2_bias, use_dlpack=False)
-        layer.w13_bias.untyped_storage().resize_(0)
-        layer.w2_bias.untyped_storage().resize_(0)
-        delattr(layer, 'w13_bias')
-        delattr(layer, 'w2_bias')
-    else:
-        w13_bias = w2_bias = None
-
-    @jax.jit
-    def process_unquantized_moe_weights(
-        w13_weight: jax.Array,
-        w13_bias: jax.Array | None,
-        w2_weight: jax.Array,
-        w2_bias: jax.Array | None,
-    ) -> FusedMoEWeights:
-
-        w13_interleave = layer.activation == "swigluoai"
-        w13_reorder_size = get_mesh_shape_product(quant_method.mesh,
-                                                  ShardingAxisName.MLP_TENSOR)
-
-        return process_moe_weights(
-            FusedMoEWeights(
-                w13_weight=w13_weight,
-                w13_weight_scale=None,
-                w13_bias=w13_bias,
-                w2_weight=w2_weight,
-                w2_weight_scale=None,
-                w2_bias=w2_bias,
-            ),
-            moe_backend=quant_method.moe_backend,
-            w13_reorder_size=w13_reorder_size,
-            w13_interleave=w13_interleave,
-        )
-
-    weights = process_unquantized_moe_weights(
-        w13_weight,
-        w13_bias,
-        w2_weight,
-        w2_bias,
-    )
-    weights = torch_view(
-        shard_moe_weights(weights, quant_method.moe_backend,
-                          quant_method.mesh))
-    layer.w13_weight = Parameter(weights.w13_weight, requires_grad=False)
-    layer.w2_weight = Parameter(weights.w2_weight, requires_grad=False)
-
-    if quant_method.moe.has_bias:
-        layer.w13_bias = Parameter(weights.w13_bias, requires_grad=False)
-        layer.w2_bias = Parameter(weights.w2_bias, requires_grad=False)
