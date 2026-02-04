@@ -131,6 +131,11 @@ steps:
      commands:
        - "buildkite-agent artifact download \".coverage.part*\" ."
        - |
+         python3 -m pip install --upgrade pip
+         python3 -m pip install coverage[toml] pytest-cov
+         export PATH="$HOME/.local/bin:$PATH"
+         coverage --version
+       - |
          echo "[paths]" > .coveragerc
          echo "source =" >> .coveragerc
          echo "    ." >> .coveragerc
