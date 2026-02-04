@@ -251,18 +251,16 @@ def _jax_attn_func(
     del scale  # Unused for now, as the attention function applies a default scale.
 
     # Get shapes from vllm
-    q_len, q_compute_dim = q.shape
-    k_len, k_compute_dim = k.shape
-    assert k.shape == v.shape
-    assert q_compute_dim == head_size * num_heads
-    assert k_compute_dim == head_size * num_kv_heads
+    q_len = q.shape[0]
+    q_compute_dim = num_heads * head_size
 
     # Convert the shapes from vLLM's convetion to what the attention function expects
-    # bs, num_heads, q_len, head_size
-    q = q.reshape(q_len, num_heads, head_size)
-    # bs, num_kv_heads, k_len, head_size
-    k = k.reshape(k_len, num_kv_heads, head_size)
-    v = v.reshape(k_len, num_kv_heads, head_size)
+    if q.ndim == 2:
+        q = q.reshape(-1, num_heads, head_size)
+    if k.ndim == 2:
+        k = k.reshape(-1, num_kv_heads, head_size)
+    if v.ndim == 2:
+        v = v.reshape(-1, num_kv_heads, head_size)
 
     new_kv_cache, outputs = attention(
         kv_cache,
