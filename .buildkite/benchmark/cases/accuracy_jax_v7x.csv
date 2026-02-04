@@ -1,0 +1,2 @@
+Device,Model,MaxNumSeqs,MaxNumBatchedTokens,TensorParallelSize,MaxModelLen,Dataset,InputLen,OutputLen,ExpectedETEL,NumPrompts,AdditionalConfig
+tpu7x-8,deepseek-ai/DeepSeek-R1,128,1024,8,2048,mmlu,1800,128,,,""
