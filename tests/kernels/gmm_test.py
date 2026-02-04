@@ -197,5 +197,6 @@ class GmmTest(jtu.JaxTestCase):
 
         self.assertArraysAllClose(actual, expected, atol=3e-1, rtol=3e-1)
 
+
 if __name__ == "__main__":
     absltest.main(testLoader=jtu.JaxTestLoader())
