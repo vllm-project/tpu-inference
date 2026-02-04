@@ -101,7 +101,7 @@ rm -rf artifacts
 # Create running config
 #
 echo "Creating running config..."
-./.buildkite/benchmark/scripts/agent/create_config.sh "$RECORD_ID"
+.buildkite/benchmark/scripts/agent/create_config.sh "$RECORD_ID"
 if [ $? -ne 0 ]; then
   echo "Error creating running config."
   exit 1
