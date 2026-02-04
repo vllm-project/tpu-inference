@@ -21,6 +21,8 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 from tpu_inference.kernels.megablox.gmm import gmm
+from tpu_inference.kernels.megablox.gmm_v2 import (gmm_v2,
+                                                   is_supported_by_gmm_v2)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
 
@@ -127,19 +129,29 @@ def _get_tiling_size_for_gmm_kernel(m: int, k: int, n: int,
 
 
 def gmm_wrapper(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset):
-    m, g, k, n = lhs.shape[0], *rhs.shape
-    tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
+    if is_supported_by_gmm_v2(lhs, rhs, rhs_scale):
+        gmm_res = gmm_v2(
+            lhs=lhs,
+            rhs=rhs,
+            rhs_scale=rhs_scale,
+            rhs_bias=rhs_bias,
+            group_sizes=group_sizes,
+            group_offset=group_offset[0],
+        )
+    else:
+        m, g, k, n = lhs.shape[0], *rhs.shape
+        tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
 
-    gmm_res = gmm(
-        lhs=lhs,
-        rhs=rhs,
-        rhs_scale=rhs_scale,
-        rhs_bias=rhs_bias,
-        group_sizes=group_sizes,
-        preferred_element_type=lhs.dtype,
-        tiling=(tm, tk, tn),
-        group_offset=group_offset[0],
-    )
+        gmm_res = gmm(
+            lhs=lhs,
+            rhs=rhs,
+            rhs_scale=rhs_scale,
+            rhs_bias=rhs_bias,
+            group_sizes=group_sizes,
+            preferred_element_type=lhs.dtype,
+            tiling=(tm, tk, tn),
+            group_offset=group_offset[0],
+        )
 
     return gmm_res
 
