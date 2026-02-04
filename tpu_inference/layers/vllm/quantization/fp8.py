@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from typing import Optional, Union
 
 import jax
@@ -149,12 +150,14 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
 
                 weight_slice = weight[start:end]
                 weight_scale_slice = weight_scale[start //
-                                                  original_block_size:end //
-                                                  original_block_size]
+                                                  original_block_size:math.
+                                                  ceil(end /
+                                                       original_block_size)]
                 dequantized_weight = dequantize_tensor(
                     weight_slice,
                     weight_scale_slice,
                     (0, 1),
+                    block_size=self.weight_block_size,
                 )
                 weight_slice, weight_scale_slice = quantize_tensor(
                     self.linear_config.requant_weight_dtype,
@@ -286,9 +289,12 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
             w2_weight_scale: jax.Array,
         ) -> FusedMoEWeights:
             # Dequantize fp8 2d block quantized weights into fp32.
-            w13_weight = dequantize_tensor(w13_weight, w13_weight_scale,
-                                           (1, 2))
-            w2_weight = dequantize_tensor(w2_weight, w2_weight_scale, (1, 2))
+            w13_weight = dequantize_tensor(w13_weight,
+                                           w13_weight_scale, (1, 2),
+                                           block_size=self.weight_block_size)
+            w2_weight = dequantize_tensor(w2_weight,
+                                          w2_weight_scale, (1, 2),
+                                          block_size=self.weight_block_size)
 
             w13_interleave = layer.activation == "swigluoai"
             w13_reorder_size = get_mesh_shape_product(
