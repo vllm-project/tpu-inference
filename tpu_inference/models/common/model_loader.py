@@ -29,6 +29,7 @@ from vllm.utils.func_utils import supports_kw
 from tpu_inference import envs
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     apply_qwix_on_abstract_model, apply_qwix_quantization,
@@ -240,6 +241,7 @@ def get_flax_model(
 ) -> nnx.Module:
     model_dtype = to_jax_dtype(vllm_config.model_config.dtype)
     vllm_config.model_config.dtype = model_dtype
+    vllm_config.quant_config = get_tpu_quantization_config(vllm_config)
 
     # Only perform qwix quantization if it is jax model.
     if vllm_config.model_config:
