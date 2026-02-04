@@ -17,7 +17,7 @@ set -euo pipefail
 
 VLLM_COMMIT_HASH=$1
 TPU_INFERENCE_HASH=$2
-CODE_HASH="${VLLM_COMMIT_HASH}-${TPU_INFERENCE_HASH}-"
+# CODE_HASH="${VLLM_COMMIT_HASH}-${TPU_INFERENCE_HASH}-"
 
 # southamerica-west1-docker.pkg.dev/cloud-tpu-inference-test/vllm-tpu-bm-bk/vllm-tpu:4c4b6f7a9-4e6e6fb4-
 IMAGE_TAG="$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/$ARTIFACT_REPO/vllm-tpu:$CODE_HASH"

@@ -69,9 +69,12 @@ upload_pipeline() {
     buildkite-agent meta-data set "VLLM_SHORT_HASH" "${VLLM_SHORT_HASH}"
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
     buildkite-agent meta-data set "TPU_SHORT_HASH" "${TPU_SHORT_HASH}"
+    CODE_HAME="${VLLM_SHORT_HASH}-${TPU_SHORT_HASH}-"
+    buildkite-agent meta-data set "CODE_HASH" "${CODE_HAME}"
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     echo "Using vllm short commit hash: $(buildkite-agent meta-data get "VLLM_SHORT_HASH")"
     echo "Using tpu-inference short commit hash: $(buildkite-agent meta-data get "TPU_SHORT_HASH")"
+    echo "Using vllm-tpu commit hash: $(buildkite-agent meta-data get "CODE_HAME")"
 
     # BUILDKITE_COMMIT is tpu-inference latest commit
     

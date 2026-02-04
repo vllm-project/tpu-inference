@@ -34,7 +34,7 @@ steps:
        - VLLM_COMMIT_HASH=$$(buildkite-agent meta-data get 'VLLM_COMMIT_HASH')
        - VLLM_SHORT_HASH=$$(buildkite-agent meta-data get 'VLLM_SHORT_HASH')
        - TPU_SHORT_HASH=$$(buildkite-agent meta-data get 'TPU_SHORT_HASH')
-       - CODE_HASH="$${VLLM_SHORT_HASH}-$${TPU_SHORT_HASH}-"
+       - CODE_HASH=$$(buildkite-agent meta-data get 'CODE_HASH')
        - echo "CodeHash - $${CODE_HASH}"
       #  - bash .buildkite/hourly_benchmark/scripts/build_tpu_inference_image.sh $$VLLM_COMMIT_HASH $$BUILDKITE_COMMIT
 
@@ -55,10 +55,24 @@ steps:
        - VLLM_COMMIT_HASH=$$(buildkite-agent meta-data get 'VLLM_COMMIT_HASH')
        - VLLM_SHORT_HASH=$$(buildkite-agent meta-data get 'VLLM_SHORT_HASH')
        - TPU_SHORT_HASH=$$(buildkite-agent meta-data get 'TPU_SHORT_HASH')
-       - CODE_HASH="$${VLLM_SHORT_HASH}-$${TPU_SHORT_HASH}-"
+       - CODE_HASH=$$(buildkite-agent meta-data get 'CODE_HASH')
        - echo "CodeHash - $${CODE_HASH}"
       #  - bash .buildkite/hourly_benchmark/scripts/daily_benchmark.sh $$VLLM_COMMIT_HASH $$BUILDKITE_COMMIT
       # .buildkite/hourly_benchmark/cases/hourly_jax_dev.csv 
 
   #  - wait: ~
   #    continue_on_failure: true  # ensure we still generate support matrices even if some tests fail
+   - label: "Publish: benchmark - RecordId: 68db88d5-80e6-4973-9d24-0dbcea35cc59"
+     env:
+       GCP_PROJECT_ID: "cloud-tpu-inference-test"
+       GCP_REGION: "southamerica-west1"
+       GCS_BUCKET: "vllm-cb-storage2"
+       ARTIFACT_REPO: "vllm-tpu-bm-bk"
+       GCP_INSTANCE_ID: "vllm-bm-inst"
+       GCP_DATABASE_ID: "vllm-bm-bk-runs"
+     agents:
+       queue: $BUILDKITE_AGENT_QUEUE
+     command:
+      #  - CODE_HASH=$$(buildkite-agent meta-data get 'CODE_HASH')
+       - CODE_HASH="4c4b6f7a9-4e6e6fb4-"
+       - ".buildkite/benchmark/scripts/agent/run_job.sh 68db88d5-80e6-4973-9d24-0dbcea35cc59"
