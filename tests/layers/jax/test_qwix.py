@@ -595,25 +595,26 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
             self, mock_make_array, mock_logger_warning):
         """Test that sharding failure logs a warning and uses a fallback."""
         # First call raises an error, second call (fallback) succeeds
-        mock_make_array.side_effect = [
-            ValueError("Sharding failed"),
-            MagicMock()
-        ]
+        with jax.set_mesh(self.mesh):
+            mock_make_array.side_effect = [
+                ValueError("Sharding failed"),
+                MagicMock()
+            ]
 
-        param = nnx.Param(jnp.empty((2, 2)), sharding=P('data', None))
-        quantize_qwix.get_random_sharded_array(self.rng, self.mesh, param,
-                                               (2, 2), jnp.float32,
-                                               "test_param")
+            param = nnx.Param(jnp.empty((2, 2)), sharding=P('data', None))
+            quantize_qwix.get_random_sharded_array(self.rng, self.mesh, param,
+                                                (2, 2), jnp.float32,
+                                                "test_param")
 
-        # Check that a warning was logged
-        mock_logger_warning.assert_called_once()
-        self.assertIn("Could not create sharded scale for test_param",
-                      mock_logger_warning.call_args[0][0])
+            # Check that a warning was logged
+            mock_logger_warning.assert_called_once()
+            self.assertIn("Could not create sharded scale for test_param",
+                        mock_logger_warning.call_args[0][0])
 
-        # Check that the fallback was attempted with an empty PartitionSpec
-        fallback_call_args = mock_make_array.call_args_list[1]
-        fallback_sharding = fallback_call_args.args[1]
-        self.assertEqual(fallback_sharding, NamedSharding(self.mesh, P()))
+            # Check that the fallback was attempted with an empty PartitionSpec
+            fallback_call_args = mock_make_array.call_args_list[1]
+            fallback_sharding = fallback_call_args.args[1]
+            self.assertEqual(fallback_sharding, NamedSharding(self.mesh, P()))
 
 
 class TestManualQwixQuantization(unittest.TestCase):
