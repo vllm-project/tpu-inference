@@ -13,45 +13,66 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Build vLLM-TPU with tpu-inference from PyPI.
-# ./build_vllm_tpu.sh [--local] <tpu-inference-version> <vllm-tpu-version> [vllm-branch-tag-or-commit-hash](default: main)
-# Example: ./build_vllm_tpu.sh 0.12.0rc1 0.12.0rc1 releases/v0.12.0
-# ---------------------------
+# ------------------------------------------------------
+# Build vLLM-TPU with tpu-inference using either PyPI or a local wheel:
+# 1. PyPI Build: Uses specified version of tpu-inference from PyPI.
+#   ./build_vllm_tpu.sh <tpu-inference-version> <vllm-tpu-version> [vllm-branch-tag-or-commit-hash](default: main)
+# 2. Local Build: Uses local .whl file of tpu-inference
+#   ./build_vllm_tpu.sh <--local> <vllm-tpu-version> [vllm-branch-tag-or-commit-hash](default: main)
+#
+# Example:
+#   ./build_vllm_tpu.sh 0.12.0rc1 0.12.0rc1 releases/v0.12.0
+#   ./build_vllm_tpu.sh --local 0.12.0rc1
+# ------------------------------------------------------
 
 set -e
 
-# LOCAL_BUILD: Determine whether to use a local wheel or a PyPI package for tpu-inference.
-LOCAL_BUILD=0
-
-# --- Check for local build flag ---
-if [[ "$1" == "--local" ]]; then
-    LOCAL_BUILD=1
-    shift
-fi
-
-# --- Script Configuration ---
+# --- Argument Parsing & Validation ---
 # TPU_INFERENCE_VERSION: PyPI version or local wheel
 # VLLM_TPU_VERSION: Version assigned to the output wheel.
 # VLLM_BRANCH: vLLM branch, tag or commit hash to build (default: main).
-TPU_INFERENCE_VERSION=$1
-VLLM_TPU_VERSION=$2
-VLLM_BRANCH=${3:-"main"}
-VLLM_REPO="https://github.com/vllm-project/vllm.git"
-REPO_DIR="vllm"
+if [[ "$1" == "--local" ]]; then
+    shift
 
-# --- Argument Validation ---
-if [ "$#" -lt 2 ]; then
-    echo "Usage: $0 <tpu-inference-version> <vllm-tpu-version> [vllm-branch-tag-or-commit-hash]"
-    echo "  [vllm-branch-tag-or-commit-hash] is optional, defaults to 'main'."
-    exit 1
+    if [ "$#" -lt 1 ]; then
+        echo "Usage: $0 --local <vllm-tpu-version> [vllm-branch-tag-or-commit-hash]"
+        echo "  [vllm-branch-tag-or-commit-hash] is optional, defaults to 'main'."
+        exit 1
+    fi
+
+    # Detect local wheel and extract version automatically
+    WHL_PATH=$(find /workspace/tpu_inference/dist -name "tpu_inference-*.whl" 2>/dev/null | head -n 1)
+    if [ -z "${WHL_PATH}" ]; then
+        echo "ERROR: Local wheel not found. Please ensure you have built tpu-inference first."
+        exit 1
+    fi
+
+    TPU_INFERENCE_VERSION=$(basename "$WHL_PATH" | cut -d'-' -f2)
+    VLLM_TPU_VERSION=$1
+    VLLM_BRANCH=${2:-"main"}
+else
+    if [ "$#" -lt 2 ]; then
+        echo "Usage: $0 <tpu-inference-version> <vllm-tpu-version> [vllm-branch-tag-or-commit-hash]"
+        echo "  [vllm-branch-tag-or-commit-hash] is optional, defaults to 'main'."
+        exit 1
+    fi
+
+    # Pypi build requires explicit version for tpu-inference
+    TPU_INFERENCE_VERSION=$1
+    VLLM_TPU_VERSION=$2
+    VLLM_BRANCH=${3:-"main"}
 fi
 
 echo "--- Starting vLLM-TPU wheel build ---"
+echo "Mode: $([[ "${WHL_PATH}" ]] && echo "Local Build" || echo "Pypi Build")"
 echo "TPU Inference Version: ${TPU_INFERENCE_VERSION}"
 echo "vLLM-TPU Version: ${VLLM_TPU_VERSION}"
 echo "vLLM Branch/Tag/Commit Hash: ${VLLM_BRANCH}"
 
 # --- Step 1: Clone vLLM repository ---
+VLLM_REPO="https://github.com/vllm-project/vllm.git"
+REPO_DIR="vllm"
+
 if [ -d "$REPO_DIR" ]; then
     echo "Repository '$REPO_DIR' already exists. Skipping clone."
 else
@@ -74,16 +95,9 @@ REQUIRED_LINE="tpu-inference==${TPU_INFERENCE_VERSION}"
 REQUIREMENTS_FILE="requirements/tpu.txt"
 BACKUP_FILE="${REQUIREMENTS_FILE}.bak"
 
-if [ "$LOCAL_BUILD" == "1" ]; then
-    # Determine whether to use a local wheel or a PyPI package for tpu-inference.
+if [[ "${WHL_PATH}" ]]; then
     echo "Using local wheel for tpu-inference"
-    WHL_PATH="/workspace/tpu_inference/dist/tpu_inference-${TPU_INFERENCE_VERSION}-py3-none-any.whl"
     REQUIRED_LINE="tpu-inference @ file://${WHL_PATH}"
-
-    if [ ! -f "${WHL_PATH}" ]; then
-        echo "ERROR: Local wheel not found at ${WHL_PATH} Please ensure you have built tpu-inference first."
-        exit 1
-    fi
 fi
 
 echo "Updating tpu-inference version in $REQUIREMENTS_FILE..."
