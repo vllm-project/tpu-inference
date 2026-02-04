@@ -129,7 +129,9 @@ class ShardingConfigManager:
         sharding_strategy = vllm_config.additional_config.get(
             "sharding", {}).get("sharding_strategy", {})
         parallel_config = vllm_config.parallel_config
-        tensor_parallelism = parallel_config.tensor_parallel_size
+        # Currently tensor_parallelism is also used for other things like determining number of Ray workers.
+        pc_tensor_parallelism = parallel_config.tensor_parallel_size
+        ss_tensor_parallelsim = sharding_strategy.get("tensor_parallelism", 1)
         data_parallelism = parallel_config.data_parallel_size
         expert_parallelism = sharding_strategy.get("expert_parallelism", 1)
         sequence_parallelism = sharding_strategy.get("sequence_parallelism", 1)
@@ -137,6 +139,12 @@ class ShardingConfigManager:
 
         enable_dp_attention = sharding_strategy.get("enable_dp_attention",
                                                     False)
+        if pc_tensor_parallelism != ss_tensor_parallelsim:
+            # The user has explicitly set the tensor parallelism in the sharding config.
+            tensor_parallelism = ss_tensor_parallelsim
+        else:
+            tensor_parallelism = pc_tensor_parallelism
+
         if enable_dp_attention:
         # Replicate attention layer when num_kv_heads < TP
             num_kv_heads = 1 if vllm_config.model_config.use_mla else vllm_config.model_config.get_total_num_kv_heads(
