@@ -24,6 +24,10 @@ ENV_FILE=$1
 source /etc/environment
 source $ENV_FILE
 
+echo "--- Cat Env start"
+echo $(cat $ENV_FILE)
+echo "--- Cat Env end"
+
 remove_docker_container() {
     docker rm -f tpu-test || true;
     docker rm -f vllm-tpu || true;
