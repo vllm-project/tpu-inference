@@ -32,10 +32,22 @@ if gcloud artifacts docker images describe "$IMAGE_TAG" --format='value(image_su
     exit 0
 fi
 
+cleanup_image() {
+    echo "--- Starting cleanup docker image ---"
+    if [[ -n "$IMAGE_TAG" ]]; then
+        echo "Removing Docker image: $IMAGE_TAG"
+        docker rmi "$IMAGE_TAG" 2>/dev/null || true
+    fi
+    echo "--- Cleanup finished docker image ---"
+}
+
 VLLM_TARGET_DEVICE=tpu DOCKER_BUILDKIT=1 docker build \
 --build-arg BASE_IMAGE="python:3.12-slim-bookworm" \
 --build-arg VLLM_COMMIT_HASH="$VLLM_COMMIT_HASH" \
 --tag $IMAGE_TAG \
 --no-cache -f "docker/Dockerfile" .
 
+trap cleanup_image EXIT
+
+echo "--- Push Docker Image: $IMAGE_TAG ---"
 docker push "$IMAGE_TAG"

@@ -57,7 +57,8 @@ steps:
        - TPU_SHORT_HASH=$$(buildkite-agent meta-data get 'TPU_SHORT_HASH')
        - CODE_HASH="$${VLLM_SHORT_HASH}-$${TPU_SHORT_HASH}-"
        - echo "CodeHash - $${CODE_HASH}"
-      #  - bash .buildkite/hourly_benchmark/scripts/schedule_run.sh .buildkite/hourly_benchmark/cases/hourly_jax_dev.csv $$VLLM_COMMIT_HASH $$BUILDKITE_COMMIT
+      #  - bash .buildkite/hourly_benchmark/scripts/daily_benchmark.sh $$VLLM_COMMIT_HASH $$BUILDKITE_COMMIT
+      # .buildkite/hourly_benchmark/cases/hourly_jax_dev.csv 
 
   #  - wait: ~
   #    continue_on_failure: true  # ensure we still generate support matrices even if some tests fail

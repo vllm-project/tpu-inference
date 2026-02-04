@@ -78,15 +78,11 @@ upload_pipeline() {
     # export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
     # export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
 
-    buildkite-agent pipeline upload .buildkite/hourly_benchmark.yml
+    buildkite-agent pipeline upload .buildkite/pipeline_benchmark.yml
 }
 
 echo "--- Starting Buildkite Bootstrap"
 echo "Running in pipeline: $BUILDKITE_PIPELINE_SLUG"
-
-
 echo "This is not a Pull Request build. Uploading main pipeline."
 upload_pipeline
-
-
 echo "--- Buildkite Bootstrap Finished"
