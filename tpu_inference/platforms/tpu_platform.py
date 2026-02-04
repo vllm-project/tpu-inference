@@ -163,7 +163,8 @@ class TpuPlatform(Platform):
                         min_page_size,
                     )
                     cache_config.block_size = min_page_size  # type: ignore[assignment]
-            logger.info(f"Using KV cache block size: {cache_config.block_size}")
+            logger.info(
+                f"Using KV cache block size: {cache_config.block_size}")
 
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
