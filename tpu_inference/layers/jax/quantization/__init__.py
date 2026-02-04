@@ -26,6 +26,7 @@ def get_tpu_quantization_config(vllm_config: VllmConfig):
         UnquantizedConfig
 
     model_config = copy.deepcopy(vllm_config.model_config)
+    # TODO: add fp8
     method_to_config: dict[str | None, type] = {
         None: UnquantizedConfig,
     }

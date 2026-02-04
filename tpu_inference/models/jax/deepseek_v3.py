@@ -35,7 +35,7 @@ from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     ragged_paged_attention
 from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import \
     get_tuned_block_sizes
-from tpu_inference.layers.common.moe import MoEBackend, select_moe_backend
+from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.quantization import (quantize_kv,
                                                       u8_unpack_e2m1)
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -45,7 +45,8 @@ from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.layers import (Embedder, FlaxUtils, LMhead,
                                              RMSNorm)
 from tpu_inference.layers.jax.moe.moe import JaxMoE
-from tpu_inference.layers.jax.moe.utils import get_expert_parallelism
+from tpu_inference.layers.jax.moe.utils import (get_expert_parallelism,
+                                                select_moe_backend)
 from tpu_inference.layers.jax.rope import DeepseekScalingRotaryEmbedding
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (BaseWeightLoader,

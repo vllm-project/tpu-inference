@@ -116,9 +116,7 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
 
         router_logits = None
         # Fused weight backends
-        if layer.moe_backend in [
-                MoEBackend.FUSED_MOE, MoEBackend.GMM_EP, MoEBackend.GMM_TP
-        ]:
+        if layer.moe_backend in MoEBackend.fused_moe_backends():
             # of shape TE, only 1D in this case
             router_logits = layer.router(x_TD)
 
@@ -133,8 +131,7 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
                 w2_bias=None,  # TODO?
             )
         elif layer.moe_backend in [
-                MoEBackend.DENSE_MAT, MoEBackend.MEGABLX_GMM,
-                MoEBackend.RAGGED_DOT
+                MoEBackend.DENSE_MAT, MoEBackend.MEGABLX_GMM
         ]:
             # Composed of weights_TX and indices_TX, so 2D in this case
             router_logits = layer.router(x_TD)
@@ -150,7 +147,7 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
                 w3_bias=None,
             )
 
-            if layer in [MoEBackend.MEGABLX_GMM, MoEBackend.RAGGED_DOT]:
+            if layer == MoEBackend.MEGABLX_GMM:
                 # TODO
                 raise NotImplementedError
         else:
@@ -168,6 +165,6 @@ class UnquantizedConfig(QuantizationConfig):
             linear_config = QuantLinearConfig(layer)
             return UnquantizedLinearMethod(linear_config)
         if isinstance(layer, JaxMoE):
-            # TODO (jacobplatin): do we need to pass a config here?
+            # NOTE (jacobplatin): do we need to pass a config here?
             return UnquantizedFusedMoEMethod()
         return None

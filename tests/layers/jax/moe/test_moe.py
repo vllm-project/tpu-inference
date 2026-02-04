@@ -174,35 +174,26 @@ class TestMoE(unittest.TestCase):
 
     def test_sparse_distributed_backend_correctness(self):
         """
-        Verifies the RAGGED_DOT (Sparse) backend with expert parallelism
+        Verifies the Sparse backends with expert parallelism
         against the sequential ground truth.
         """
-        # 1. Instantiate MoE with RAGGED_DOT backend
         # TODO: add MoEBackend.FUSED_MOE, MoEBackend.GMM_TP/GMM_EP
-        for backend in [MoEBackend.RAGGED_DOT, MoEBackend.MEGABLX_GMM]:
-            moe = self._create_moe(backend)
+        backend = MoEBackend.MEGABLX_GMM
+        moe = self._create_moe(backend)
 
-            # 2. Run Forward Pass (Distributed)
-            # The __call__ invokes shard_map internally for RAGGED_DOT
-            with self.mesh:
-                actual_output = moe(self.x)
+        # Run Forward Pass (Distributed)
+        with self.mesh:
+            actual_output = moe(self.x)
 
-            # 3. Compute Ground Truth using the exact same weights
-            # (Weights are pulled from the initialized model)
-            expected_output = self._compute_ground_truth(moe, self.x)
+        # Compute Ground Truth using the exact same weights
+        expected_output = self._compute_ground_truth(moe, self.x)
 
-            # 4. Compare
-            # Due to permutation re-ordering and potential float precision diffs
-            # in different kernels, we allow a small tolerance.
-            diff = jnp.mean(jnp.abs(actual_output - expected_output))
+        diff = jnp.mean(jnp.abs(actual_output - expected_output))
 
-            self.assertTrue(
-                jnp.allclose(actual_output,
-                             expected_output,
-                             atol=5e-2,
-                             rtol=5e-2),
-                f"Sparse distributed output mismatch for backebd tyoe {backend}. Mean diff: {diff}"
-            )
+        self.assertTrue(
+            jnp.allclose(actual_output, expected_output, atol=5e-2, rtol=5e-2),
+            f"Sparse distributed output mismatch for backebd tyoe {backend}. Mean diff: {diff}"
+        )
 
     def test_backend_consistency(self):
         """

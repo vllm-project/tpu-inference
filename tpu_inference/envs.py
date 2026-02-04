@@ -22,8 +22,6 @@ if TYPE_CHECKING:
     PYTHON_TRACER_LEVEL: int = 1
     USE_MOE_EP_KERNEL: bool = False
     USE_MEGABLOCKS: bool = False
-    USE_RAGGED_DOT: bool = False
-    # TODO: add testing
     USE_DENSE_MOE: bool = False
     NUM_SLICES: int = 1
     RAY_USAGE_STATS_ENABLED: str = "0"
@@ -154,9 +152,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable megablocks for JAX sparse matmul for MoE (Mixture of Experts)
     "USE_MEGABLOCKS":
     env_bool("USE_MEGABLOCKS", default=False),
-    # Enable ragged_odt for JAX sparse matmul for MoE (Mixture of Experts)
-    "USE_RAGGED_DOT":
-    env_bool("USE_RAGGED_DOT", default=False),
     # Number of TPU slices for multi-slice mesh
     "USE_DENSE_MOE":
     env_bool("USE_DENSE_MOE", default=False),
