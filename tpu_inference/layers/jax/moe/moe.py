@@ -91,9 +91,7 @@ class Router(nnx.Module):
                                       self.kernel_DE.value)
 
         #TODO: Refactor the Router so that it will always only return router_logits_TE
-        if self.moe_backend in [
-                MoEBackend.FUSED_MOE, MoEBackend.GMM_EP, MoEBackend.GMM_TP
-        ]:
+        if self.moe_backend in MoEBackend.fused_moe_backends():
             return router_logits_TE
         else:
             weights_TX, selected_experts_TX = jax.lax.top_k(
@@ -147,7 +145,6 @@ class JaxMoE(JaxModule):
     # TODO: remove?
     expert_axis_name: str
     num_expert_parallelism: int
-    use_ep: bool
     random_init: bool = False
     moe_backend: MoEBackend = MoEBackend.DENSE_MAT
     # TODO: remove?
@@ -163,7 +160,7 @@ class JaxMoE(JaxModule):
 
     # ---- Quantization Specific Attributes ----
     quant_config: Optional[QuantizationConfig] = None
-    prefix: str = ""
+    quant_prefix: str = ""
 
     def __call__(self, x_TD: Float):
         """Performs the forward pass of the MoE layer.
@@ -180,10 +177,12 @@ class JaxMoE(JaxModule):
 
     def __post_init__(self, rngs: nnx.Rngs):
         """Generates the kernels (weights) for the router and experts (gating, up-projection, and down-projection layers)."""
+        self.use_ep = self.num_expert_parallelism > 1
         if self.quant_config is None:
             self.quant_method = None
         elif (quant_method :=
-              self.quant_config.get_quant_method(self, prefix=self.prefix)):
+              self.quant_config.get_quant_method(self,
+                                                 prefix=self.quant_prefix)):
             assert isinstance(quant_method, QuantizeMethodBase)
             self.quant_method = quant_method
             self.quant_method.create_weights_jax(self)

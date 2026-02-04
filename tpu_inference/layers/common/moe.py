@@ -23,15 +23,17 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from tpu_inference import envs
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
 from tpu_inference.layers.common.fused_moe_gmm import fused_moe_func
-# from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.logger import init_logger
 
 if TYPE_CHECKING:
     from tpu_inference.layers.common.process_weights.moe_weights import (
         FusedMoEWeights, UnfusedMoEWeights)
+    from tpu_inference.layers.jax.moe.moe import JaxMoE
+
 else:
     FusedMoEWeights = None
     UnfusedMoEWeights = None
+    JaxMoE = None
 
 logger = init_logger(__name__)
 
@@ -43,6 +45,11 @@ class MoEBackend(Enum):
     DENSE_MAT = "dense_mat"  # only used in the JAX path for now
     MEGABLX_GMM = "megablox_gmm"  # only used in the JAX path for now
     RAGGED_DOT = "ragged_dot_gmm"  # only used in the JAX path for now
+
+    @classmethod
+    def fused_moe_backends(cls):
+        """Returns those backends that use fused weights"""
+        return {cls.FUSED_MOE, cls.GMM_EP, cls.GMM_TP}
 
 
 def select_moe_backend(use_ep: bool):
@@ -76,7 +83,7 @@ def select_moe_backend(use_ep: bool):
 
 # TODO: JaxMoE
 def moe_apply(
-    layer: FusedMoE,
+    layer: Union[FusedMoE, JaxMoE],
     x: jax.Array,
     gating_output: Union[jax.Array, Tuple[jax.Array, jax.Array]],
     weights: Union[FusedMoEWeights, UnfusedMoEWeights],
@@ -84,7 +91,13 @@ def moe_apply(
     mesh: Mesh,
     extra_backend_kwargs: dict,
 ) -> jax.Array:
-    # assert isinstance(layer, (FusedMoE))
+    # Import locally to ensure isinstance works correctly at runtime
+    # while avoiding top-level circular dependencies.
+    from tpu_inference.layers.common.process_weights.moe_weights import \
+        UnfusedMoEWeights
+    from tpu_inference.layers.jax.moe.moe import JaxMoE
+
+    assert isinstance(layer, (FusedMoE, JaxMoE))
 
     with jax.named_scope(layer._get_name()):
         match moe_backend:
@@ -169,8 +182,9 @@ def moe_apply(
                 from tpu_inference.layers.jax.moe.sparse_moe import \
                     sparse_moe_func
 
-                # TODO: enable
-                # assert isinstance(weights, UnfusedMoEWeights), "Expected unfused weights for DENSE_MAT backend"
+                assert isinstance(
+                    weights, UnfusedMoEWeights
+                ), "Expected unfused weights for DENSE_MAT backend"
                 return sparse_moe_func(weights=weights,
                                        x_TD=x,
                                        gating_output=gating_output,

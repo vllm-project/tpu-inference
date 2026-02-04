@@ -137,7 +137,7 @@ def process_moe_weights(
         moe_backend: backend type the weights should be processed for.
         w13_reorder_size: only used when backend type is GMM_TP. in order to
             eliminate collective operations when using tensor parallelism,
-            group w13_weight into w13_reorder_size number of chuncks where each
+            group w13_weight into w13_reorder_size number of chunks where each
             chunk stores both w1 and w3 weights.
         w13_interleave: used when loaded w13_weight is stored in interleaved
             pattern where even index element is w1 and odd index element is w3.
