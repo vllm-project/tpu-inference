@@ -71,7 +71,7 @@ steps:
        GCP_INSTANCE_ID: "vllm-bm-inst"
        GCP_DATABASE_ID: "vllm-bm-bk-runs"
      agents:
-       queue: $BUILDKITE_AGENT_QUEUE
+       queue: tpu_v6e_queue
      command:
       #  - CODE_HASH=$$(buildkite-agent meta-data get 'CODE_HASH')
        - CODE_HASH="4c4b6f7a9-4e6e6fb4-"
