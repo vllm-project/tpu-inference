@@ -156,7 +156,13 @@ class TestFp8Linear:
         assert jnp.allclose(jax_scale, np_scale_from_torch)
 
     def test_fp8_linear_load_from_safetensors(self, mesh):
-        """Load weights and scales from a safetensors file simulating a quantized checkpoint."""
+        """Load weights and scales from a safetensors file simulating a quantized checkpoint.
+
+        This test focuses on verifying the safetensors loading mechanism.
+        Post-processing (process_weights_after_loading) is tested separately
+        in the other test methods in this class.
+        """
+        from unittest.mock import patch
 
         input_dim = 16
         output_dim = 32
@@ -215,7 +221,12 @@ class TestFp8Linear:
                 mock_model_config.quantization = "fp8"
                 mock_model_config.revision = None
 
-                loader.load_weights(jax_model, mock_model_config)
+                # Mock process_weights_after_loading to isolate this test
+                # to the loading mechanism only. Post-processing is tested
+                # in other test methods.
+                with patch.object(Fp8LinearMethod,
+                                  'process_weights_after_loading'):
+                    loader.load_weights(jax_model, mock_model_config)
 
         # Verify Weight
         expected_weight = torch_model.linear.weight.detach().numpy().T

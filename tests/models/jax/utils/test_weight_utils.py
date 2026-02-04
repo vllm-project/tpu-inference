@@ -108,3 +108,40 @@ class TestJaxAutoWeightsLoader:
                                    jax_output,
                                    rtol=1e-3,
                                    atol=1e-2)
+
+    def test_process_weights_after_loading_called_per_module(self):
+        """Verify that _load_module calls process_weights_after_loading on
+        modules with quant_method, enabling per-module post-processing
+        instead of processing after the entire model is loaded."""
+        torch_model = TorchMLP()
+        with torch.no_grad():
+            torch_model.w1.weight.fill_(1.0)
+            torch_model.w2.weight.fill_(1.0)
+            torch_model.w2.bias.fill_(0.0)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_file_path = os.path.join(tmpdir, "model.safetensors")
+            save_file(torch_model.state_dict(), tmp_file_path)
+
+            devices = jax.local_devices()
+            mesh = Mesh(devices, axis_names=('p', ))
+            with jax.set_mesh(mesh):
+                jax_model = JaxMLP(rngs=nnx.Rngs(0))
+
+                # Attach a mock quant_method to w1 with process_weights_after_loading
+                mock_quant_method = MagicMock()
+                mock_quant_method.process_weights_after_loading = MagicMock()
+                jax_model.w1.quant_method = mock_quant_method
+
+                model_config = MagicMock()
+                model_config.quantization = None
+                model_config.model = tmpdir
+                model_config.revision = None
+
+                loader = get_model_loader(
+                    LoadConfig(load_format="safetensors"))
+                loader.load_weights(jax_model, model_config)
+
+        # process_weights_after_loading should have been called on w1
+        mock_quant_method.process_weights_after_loading.assert_called_once_with(
+            jax_model.w1)

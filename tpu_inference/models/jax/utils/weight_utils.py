@@ -778,6 +778,13 @@ def load_nnx_param_from_reshaped_torch(
 class JaxAutoWeightsLoader(AutoWeightsLoader):
     """A weights loader for JAX models."""
 
+    def _load_module(self, base_prefix: str, module,
+                     weights: Iterable) -> Iterable:
+        yield from super()._load_module(base_prefix, module, weights)
+        if hasattr(module, 'quant_method') and module.quant_method is not None:
+            if hasattr(module.quant_method, 'process_weights_after_loading'):
+                module.quant_method.process_weights_after_loading(module)
+
     def __init__(self, model, **kwargs):
         assert isinstance(model, JaxModule)
 
