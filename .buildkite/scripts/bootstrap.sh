@@ -27,7 +27,7 @@ fi
 upload_pipeline() {
     # Prepare commit hash
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
-    CODE_HAME="${VLLM_COMMIT_HASH}-${$BUILDKITE_COMMIT}-"
+    CODE_HAME="${VLLM_COMMIT_HASH}-${BUILDKITE_COMMIT}-"
     buildkite-agent meta-data set "CODE_HASH" "${CODE_HAME}"
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     echo "Using vllm-tpu commit hash: $(buildkite-agent meta-data get "CODE_HAME")"
