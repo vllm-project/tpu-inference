@@ -47,6 +47,7 @@ IFS='-' read -r VLLM_HASH TPU_INFERENCE_HASH TORCHAX_HASH _ <<< "$CODE_HASH"
 
 echo "image tag: $image_tag"
 
+gcloud auth configure-docker $GCP_REGION-docker.pkg.dev --quiet
 docker pull $image_tag
 
 if [ $? -ne 0 ]; then
