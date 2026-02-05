@@ -132,8 +132,9 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
         else:
             bias = None
 
-        weights = common_fp8.process_blockwise_fp8_linear_weights(
-            weight, weight_scale, bias)
+        weights = common_fp8.process_blockwise_fp8_linear_weights(weight,
+                                                                  weight_scale,
+                                                                  bias=bias)
         if self.linear_config.enable_quantized_matmul_kernel:
             # The quantized_matmul_kernel expects weight scales shaped (n_out_features, 1, n_blocks) for blockwisze quantization.
             weights.weight_scale = jnp.expand_dims(
