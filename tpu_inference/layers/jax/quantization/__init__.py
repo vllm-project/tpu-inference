@@ -62,7 +62,6 @@ class QuantizeMethodBase(ABC):
         Expects create_weights to have been called before on the layer."""
         raise NotImplementedError
 
-    @abstractmethod
     def process_weights_after_loading(self, layer: JaxModule, *args,
                                       **kwargs) -> None:
         """
@@ -72,4 +71,4 @@ class QuantizeMethodBase(ABC):
             layer: The layer to process
         """
 
-        raise NotImplementedError
+        pass
