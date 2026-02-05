@@ -138,8 +138,8 @@ steps:
          echo "source =" >> .coveragerc
          echo "    ." >> .coveragerc
          echo "    /workspace/tpu_inference/" >> .coveragerc
-       - "python3 ./coverage.pex coverage combine .coverage.part1.${KEY_PREFIX} .coverage.part2.${KEY_PREFIX}"
-       - "python3 ./coverage.pex coverage report --fail-under=69"
+       - "python3 ./coverage.pex coverage .coverage.part1.${KEY_PREFIX} .coverage.part2.${KEY_PREFIX}"
+       - "python3 ./coverage.pex coverage --fail-under=69"
            
    - label: "${LABEL_PREFIX}JAX unit tests - kernels"
      key: ${KEY_PREFIX}test_8
