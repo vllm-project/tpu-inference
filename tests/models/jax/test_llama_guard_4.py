@@ -138,7 +138,7 @@ class TestLlamaGuard4ForCausalLM:
         """Tests correct initialization and parameter detection."""
         with jax.set_mesh(mesh):
             model = LlamaGuard4ForCausalLM(mock_vllm_config_llama_guard_4, rng,
-                                        mesh)
+                                           mesh)
 
         # Check model name is correctly set in the config
         assert "llama-guard-4" in model.vllm_config.model_config.model.lower()

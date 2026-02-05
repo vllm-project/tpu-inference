@@ -168,7 +168,7 @@ class TestLlama4ForCausalLM:
         """Tests that the weight loader is called correctly for checkpoint loading."""
         with jax.set_mesh(mesh):
             vllm_config = MockVllmConfig(model_name="llama4-scout",
-                                        random_weights=False)
+                                         random_weights=False)
             model = Llama4ForCausalLM(vllm_config, rng, mesh)
 
         # Patch the WeightLoader attribute specifically on the class

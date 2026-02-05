@@ -461,10 +461,12 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
         # Mock model structure
         with jax.set_mesh(self.mesh):
             self.model = MagicMock(spec=['weight_loader', 'initialize_cache'])
-            self.model.weight_loader = MagicMock(
-                spec=['scale_dtype', 'scale_shape_map_for_random_weight_loading'])
+            self.model.weight_loader = MagicMock(spec=[
+                'scale_dtype', 'scale_shape_map_for_random_weight_loading'
+            ])
             self.model.weight_loader.scale_dtype = jnp.float16
             self.model.weight_loader.scale_shape_map_for_random_weight_loading = {}
+
     @patch('tpu_inference.models.jax.utils.qwix.qwix_utils.nnx.iter_graph')
     @patch(
         'tpu_inference.models.jax.utils.qwix.qwix_utils.get_random_sharded_array'
@@ -523,9 +525,10 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
             mock_scale_var = nnx.Variable(old_scale_var_val)
 
             mock_iter_graph.return_value = [
-                (('layers', '0', 'attention', 'wq', 'kernel'), mock_weight_param),
+                (('layers', '0', 'attention', 'wq', 'kernel'),
+                 mock_weight_param),
                 (('layers', '0', 'attention', 'wq', 'array', 'scale'),
-                mock_scale_var),
+                 mock_scale_var),
             ]
 
             with self.assertRaises(ValueError):
@@ -548,9 +551,10 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
             }
 
             mock_iter_graph.return_value = [
-                (('layers', '0', 'attention', 'wq', 'kernel'), mock_weight_param),
+                (('layers', '0', 'attention', 'wq', 'kernel'),
+                 mock_weight_param),
                 (('layers', '0', 'attention', 'wq', 'array', 'scale'),
-                mock_scale_var),
+                 mock_scale_var),
             ]
 
             quantize_qwix.load_random_weights_into_qwix_abstract_model(
@@ -579,9 +583,8 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
         # Test integer
         with jax.set_mesh(self.mesh):
             param = nnx.Param(jnp.empty((8, 8)), sharding=P())
-        quantize_qwix.get_random_sharded_array(
-            self.rng, self.mesh, param,
-            (8, 8), jnp.int8, "int_param")
+        quantize_qwix.get_random_sharded_array(self.rng, self.mesh, param,
+                                               (8, 8), jnp.int8, "int_param")
         mock_randint.assert_called_once()
         mock_normal.assert_not_called()
 
@@ -589,9 +592,9 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
         mock_normal.reset_mock()
 
         # Test float
-        quantize_qwix.get_random_sharded_array(
-            self.rng, self.mesh, param,
-            (8, 8), jnp.float32, "float_param")
+        quantize_qwix.get_random_sharded_array(self.rng, self.mesh, param,
+                                               (8, 8), jnp.float32,
+                                               "float_param")
         mock_randint.assert_not_called()
         mock_normal.assert_called_once()
 
@@ -608,13 +611,13 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
         with jax.set_mesh(self.mesh):
             param = nnx.Param(jnp.empty((8, 8)), sharding=P('data', None))
         quantize_qwix.get_random_sharded_array(self.rng, self.mesh, param,
-                                            (8, 8), jnp.float32,
-                                            "test_param")
+                                               (8, 8), jnp.float32,
+                                               "test_param")
 
         # Check that a warning was logged
         mock_logger_warning.assert_called_once()
         self.assertIn("Could not create sharded scale for test_param",
-                    mock_logger_warning.call_args[0][0])
+                      mock_logger_warning.call_args[0][0])
 
         # # Check that the fallback was attempted with an empty PartitionSpec
         fallback_call_args = mock_make_array.call_args_list[1]

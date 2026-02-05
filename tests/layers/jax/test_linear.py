@@ -150,12 +150,13 @@ class TestJaxLinear(unittest.TestCase):
                 16,
                 32,
                 kernel_init=nnx.with_partitioning(nnx.initializers.uniform(),
-                                                sharding=(None, "model")),
+                                                  sharding=(None, "model")),
                 use_bias=True,
                 quant_config=unquantize_config,
                 rngs=nnx.Rngs(0),
             )
 
-        self.assertSequenceEqual(jax_linear.weight.sharding.spec, (None, "model"))
+        self.assertSequenceEqual(jax_linear.weight.sharding.spec,
+                                 (None, "model"))
         self.assertEqual(f"{jax.typeof(jax_linear.weight.value)}",
                          "float32[16,32]")

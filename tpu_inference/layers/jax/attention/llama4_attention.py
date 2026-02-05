@@ -17,7 +17,7 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from jax.sharding import Sharding, PartitionSpec as P
+from jax.sharding import Sharding
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv

@@ -18,7 +18,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import nnx
-from jax.sharding import Mesh, PartitionSpec
+from jax.sharding import Mesh
 
 from tpu_inference.layers.jax.moe.moe import JaxMoE, Router
 from tpu_inference.layers.jax.moe.utils import (MoEBackend,
@@ -56,7 +56,7 @@ class TestMoE(unittest.TestCase):
         # Input data
         with jax.set_mesh(self.mesh):
             self.x = jax.random.normal(self.key, (self.B * self.S, self.D),
-                                    dtype=self.dtype)
+                                       dtype=self.dtype)
 
     def _create_moe(self, backend: MoEBackend):
         """Helper to instantiate the MoE layer within the mesh context."""
@@ -90,8 +90,7 @@ class TestMoE(unittest.TestCase):
                 # Sharding Specs
                 activation_ffw_td=('data', None),
                 activation_ffw_ted=('data', None),
-                edf_sharding=('model', None,
-                                           None),  # Expert par on axis 0
+                edf_sharding=('model', None, None),  # Expert par on axis 0
                 efd_sharding=('model', None, None),
                 apply_expert_weight_before_computation=False,
                 moe_backend=backend,
@@ -159,7 +158,9 @@ class TestMoE(unittest.TestCase):
 
         return jnp.array(expected_output, dtype=self.dtype)
 
-    @unittest.skip("Skipping dense backend correctness test to allow lib versions upgrade.")
+    @unittest.skip(
+        "Skipping dense backend correctness test to allow lib versions upgrade."
+    )
     def test_dense_backend_correctness(self):
         """Verifies the DENSE_MAT backend against the sequential ground truth."""
         moe = self._create_moe(MoEBackend.DENSE_MAT)
@@ -173,9 +174,11 @@ class TestMoE(unittest.TestCase):
         self.assertTrue(
             jnp.allclose(actual_output, expected_output, atol=1e-2, rtol=1e-2),
             "Dense backend output does not match ground truth.")
-    
-    @unittest.skip("Skipping dense backend correctness test to allow lib versions upgrade.")
-    def test_sparse_distributed_backend_correctness(self):
+
+    @unittest.skip(
+        "Skipping dense backend correctness test to allow lib versions upgrade."
+    )
+    def test_sparse_distributed_backend_correctness_ragged_dot(self):
         """
         Verifies the Sparse backends with expert parallelism
         against the sequential ground truth.
@@ -184,7 +187,7 @@ class TestMoE(unittest.TestCase):
         backend = MoEBackend.MEGABLX_GMM
         moe = self._create_moe(backend)
 
-        # Run Forward Pass (Distributed)
+        # 2. Run Forward Pass (Distributed)
         with jax.set_mesh(self.mesh):
             actual_output = moe(self.x)
 
@@ -198,7 +201,9 @@ class TestMoE(unittest.TestCase):
             f"Sparse distributed output mismatch for backebd tyoe {backend}. Mean diff: {diff}"
         )
 
-    @unittest.skip("Skipping dense backend correctness test to allow lib versions upgrade.")
+    @unittest.skip(
+        "Skipping dense backend correctness test to allow lib versions upgrade."
+    )
     def test_backend_consistency(self):
         """
         Ensures that if we initialize two models with identical seeds/weights,
@@ -213,7 +218,7 @@ class TestMoE(unittest.TestCase):
             # self.x = jax.random.normal(self.key, (self.B * self.S, self.D),
             #                        dtype=self.dtype)
             out_dense = moe_dense(self.x)
-    
+
         # 2. Run Sparse
         # We must re-init with same key to get same weights
         moe_sparse = self._create_moe(MoEBackend.MEGABLX_GMM)

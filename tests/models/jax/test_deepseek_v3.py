@@ -624,9 +624,10 @@ class TestDeepseekV3Attention(unittest.TestCase):
         with jax.set_mesh(self.mesh):
             query_tnh_spec = PartitionSpec(None, ShardingAxisName.MLP_TENSOR,
                                            None)
-            keyvalue_skh_spec = PartitionSpec(None,
-                                              ShardingAxisName.MLP_TENSOR,
-                                              )
+            keyvalue_skh_spec = PartitionSpec(
+                None,
+                ShardingAxisName.MLP_TENSOR,
+            )
             attn_o_tnh_spec = PartitionSpec(None, ShardingAxisName.MLP_TENSOR,
                                             None)
 

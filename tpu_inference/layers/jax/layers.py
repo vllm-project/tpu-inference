@@ -17,9 +17,9 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
-from jax.sharding import PartitionSpec as P
 from flax import nnx
 from flax.typing import Sharding
+from jax.sharding import PartitionSpec as P
 from jaxtyping import Float, Int
 
 from tpu_inference.layers.jax.base import create_param
@@ -99,7 +99,7 @@ class RMSNorm(nnx.Module):
         with jax.named_scope("rms_norm_scale_apply"):
             normed_x_TD *= self.scale.value
         normed_x_TD = jax.lax.with_sharding_constraint(normed_x_TD,
-                                                   self.activation_ffw_td)
+                                                       self.activation_ffw_td)
         return normed_x_TD.astype(self.dtype)
 
     def __post_init__(self, rngs: nnx.Rngs):
@@ -143,7 +143,8 @@ class DenseFFW(nnx.Module):
         """
         # TODO consider to create factories for einsum(?)
         x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = jax.lax.with_sharding_constraint(x_TD, P(*self.activation_ffw_td))
+        x_TD = jax.lax.with_sharding_constraint(x_TD,
+                                                P(*self.activation_ffw_td))
         with jax.named_scope("wi_0"):
             gating_TF = jnp.einsum('TD,DF -> TF', x_TD,
                                    self.kernel_gating_DF.value)

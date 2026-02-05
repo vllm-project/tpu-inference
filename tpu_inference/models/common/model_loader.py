@@ -391,7 +391,8 @@ def get_model(
                     return get_vllm_model(vllm_config, rng, mesh)
                 try:
                     # Try to load the flax model first
-                    return get_flax_model(vllm_config, rng, mesh, is_draft_model)
+                    return get_flax_model(vllm_config, rng, mesh,
+                                          is_draft_model)
                 except UnsupportedArchitectureError as e:
                     # Convert the error message to a string to check its contents
                     error_msg = str(e)

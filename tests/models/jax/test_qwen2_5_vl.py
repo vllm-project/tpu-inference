@@ -164,7 +164,12 @@ class TestUtils:
 
 class TestQwen2_5_VisionMLP:
 
-    def test_forward(self, mock_vllm_config: MockVllmConfig, rngs: nnx.Rngs, mesh: Mesh,):
+    def test_forward(
+        self,
+        mock_vllm_config: MockVllmConfig,
+        rngs: nnx.Rngs,
+        mesh: Mesh,
+    ):
         config = mock_vllm_config.model_config.hf_config.vision_config
         dtype = mock_vllm_config.model_config.dtype
         with jax.set_mesh(mesh):
@@ -263,7 +268,7 @@ class TestQwen2_5_VisionBlock:
         mock_attn_instance.return_value = jnp.zeros((T, B, D), dtype=dtype)
         mock_mlp_instance = MockMLP.return_value
         mock_mlp_instance.return_value = jnp.zeros((T, B, D), dtype=dtype)
-        
+
         with jax.set_mesh(mesh):
             block = Qwen2_5_VisionBlock(config, dtype, rngs, mesh)
         x = jax.random.normal(rng, (T, B, D))
@@ -308,10 +313,10 @@ class TestQwen2_5_VisionPatchMerger:
             merger = Qwen2_5_VisionPatchMerger(
                 d_model=vc.out_hidden_size,
                 context_dim=vc.hidden_size,
-            norm_layer=partial(nnx.RMSNorm, epsilon=1e-6),
-            spatial_merge_size=vc.spatial_merge_size,
-            dtype=dtype,
-            rngs=rngs)
+                norm_layer=partial(nnx.RMSNorm, epsilon=1e-6),
+                spatial_merge_size=vc.spatial_merge_size,
+                dtype=dtype,
+                rngs=rngs)
         x = jax.random.normal(rng,
                               (5, vc.spatial_merge_size**2, vc.hidden_size))
         y = merger(x)
@@ -380,8 +385,8 @@ class TestQwen2_5_VisionTransformer:
             "enable_dynamic_image_sizes": enable_dynamic_image_sizes
         }
         with jax.set_mesh(mesh):
-            vision_transformer = Qwen2_5_VisionTransformer(mock_vllm_config, rngs,
-                                                        mesh)
+            vision_transformer = Qwen2_5_VisionTransformer(
+                mock_vllm_config, rngs, mesh)
         # Mock the flash_attention call to avoid sharding errors in test environment
         for block in vision_transformer.blocks:
             # The mock should return a tensor of the same shape as the query 'q'
@@ -493,8 +498,8 @@ class TestQwen2_5_VLForConditionalGeneration:
         pixel_values = jnp.ones((num_patches, patch_dim))
         with jax.set_mesh(mesh):
             image_input = Qwen2_5_VLImagePixelInputs(type="pixel_values",
-                                                    pixel_values=pixel_values,
-                                                    image_grid_thw=grid_thw)
+                                                     pixel_values=pixel_values,
+                                                     image_grid_thw=grid_thw)
 
         tokens_per_image = (2 * 28 * 28) // (vc.spatial_merge_size**2)
         mock_embeds = jnp.ones((tokens_per_image, vc.out_hidden_size))
