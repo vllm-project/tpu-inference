@@ -124,7 +124,7 @@ class TestDeepSeekV3:
     def test_random_weights(self, mock_config, rng, mesh):
         """Tests that force_random_weights initializes non-zero weights."""
         with patch("tpu_inference.models.jax.deepseek_v3.ShardingAxisName",
-                   ShardingAxisNameBase):
+                   ShardingAxisNameBase), jax.set_mesh(mesh):
             model = DeepSeekV3(mock_config,
                                rng,
                                mesh,

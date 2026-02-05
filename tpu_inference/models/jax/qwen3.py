@@ -249,19 +249,17 @@ class Qwen3Model(Qwen2Model):
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
                 quant_config=vllm_config.quant_config,
-            ))
+            ) for _ in range(hf_config.num_hidden_layers)
+        ]
         self.layers = nnx.List(layers)
-        if self.is_last_rank:
-            self.norm = JaxRmsNorm(
-                hidden_size,
-                epsilon=rms_norm_eps,
-                param_dtype=dtype,
-                scale_init=nnx.with_partitioning(init_fn, (None, )),
-                rngs=rng,
-                quant_config=vllm_config.quant_config,
-            )
-        else:
-            self.norm = PPMissingLayer()
+        self.norm = JaxRmsNorm(
+            hidden_size,
+            epsilon=rms_norm_eps,
+            param_dtype=dtype,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
+            rngs=rng,
+            quant_config=vllm_config.quant_config,
+        )
 
 
 class Qwen3ForCausalLM(JaxModule, LoadableWithIterator):

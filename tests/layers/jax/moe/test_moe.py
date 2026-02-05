@@ -174,11 +174,11 @@ class TestMoE(unittest.TestCase):
         self.assertTrue(
             jnp.allclose(actual_output, expected_output, atol=1e-2, rtol=1e-2),
             "Dense backend output does not match ground truth.")
-
+    
     @unittest.skip(
         "Skipping dense backend correctness test to allow lib versions upgrade."
     )
-    def test_sparse_distributed_backend_correctness_ragged_dot(self):
+    def test_sparse_distributed_backend_correctness(self):
         """
         Verifies the Sparse backends with expert parallelism
         against the sequential ground truth.
@@ -187,7 +187,7 @@ class TestMoE(unittest.TestCase):
         backend = MoEBackend.MEGABLX_GMM
         moe = self._create_moe(backend)
 
-        # 2. Run Forward Pass (Distributed)
+        # Run Forward Pass (Distributed)
         with jax.set_mesh(self.mesh):
             actual_output = moe(self.x)
 
