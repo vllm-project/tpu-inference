@@ -546,8 +546,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             get_kv_transfer_group().register_runner(self)
 
     def capture_model(self) -> None:
-        with jax.set_mesh(self.mesh):
-            self.compilation_manager.capture_model()
+        self.compilation_manager.capture_model()
 
     @time_function
     def execute_model(
