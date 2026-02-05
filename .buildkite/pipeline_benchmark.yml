@@ -33,7 +33,7 @@ steps:
      commands:
        - VLLM_COMMIT_HASH=$$(buildkite-agent meta-data get 'VLLM_COMMIT_HASH')
        - CODE_HASH=$$(buildkite-agent meta-data get 'CODE_HASH')
-       - bash .buildkite/benchmark/scripts/build_tpu_inference_image.sh $$VLLM_COMMIT_HASH $$CODE_HASH
+      #  - bash .buildkite/benchmark/scripts/build_tpu_inference_image.sh $$VLLM_COMMIT_HASH $$CODE_HASH
 
    - label: "Read CSV file and publish benchmark job"
      key: "read-csv-publish-job"
