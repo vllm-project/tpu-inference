@@ -459,12 +459,12 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
         }
 
         # Mock model structure
-        self.model = MagicMock(spec=['weight_loader', 'initialize_cache'])
-        self.model.weight_loader = MagicMock(
-            spec=['scale_dtype', 'scale_shape_map_for_random_weight_loading'])
-        self.model.weight_loader.scale_dtype = jnp.float16
-        self.model.weight_loader.scale_shape_map_for_random_weight_loading = {}
-
+        with jax.set_mesh(self.mesh):
+            self.model = MagicMock(spec=['weight_loader', 'initialize_cache'])
+            self.model.weight_loader = MagicMock(
+                spec=['scale_dtype', 'scale_shape_map_for_random_weight_loading'])
+            self.model.weight_loader.scale_dtype = jnp.float16
+            self.model.weight_loader.scale_shape_map_for_random_weight_loading = {}
     @patch('tpu_inference.models.jax.utils.qwix.qwix_utils.nnx.iter_graph')
     @patch(
         'tpu_inference.models.jax.utils.qwix.qwix_utils.get_random_sharded_array'
@@ -473,8 +473,9 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
                                        mock_iter_graph):
         """Test that variables are correctly initialized."""
         # Setup mock graph elements
-        mock_weight_param = nnx.Param(jnp.empty((128, 64), dtype=jnp.int8),
-                                      sharding=P('data', None))
+        with jax.set_mesh(self.mesh):
+            mock_weight_param = nnx.Param(jnp.empty((128, 64), dtype=jnp.int8),
+                                          sharding=P('data', None))
         mock_scale_var = nnx.Variable(jnp.empty((1, 1), dtype=jnp.float16))
         mock_rng_var = nnx.Variable(jax.random.PRNGKey(0))
         mock_random_array = jax.numpy.ones(1)
@@ -508,49 +509,52 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
         invalid_config = {"weight_block_size": [64]}  # Length is 1, not 2
         with self.assertRaisesRegex(AssertionError,
                                     "Expected only 2 quantization block"):
-            quantize_qwix.load_random_weights_into_qwix_abstract_model(
-                self.rng, self.model, self.mesh, invalid_config)
+            with jax.set_mesh(self.mesh):
+                quantize_qwix.load_random_weights_into_qwix_abstract_model(
+                    self.rng, self.model, self.mesh, invalid_config)
 
     @patch('tpu_inference.models.jax.utils.qwix.qwix_utils.nnx.iter_graph')
     def test_param_shape_setting_no_scale_map(self, mock_iter_graph):
         """Test correct scale shape calculation when not in the map."""
-        old_weight_param_val = jnp.empty((128, 64))
-        mock_weight_param = nnx.Param(old_weight_param_val, dtype=jnp.int8)
-        old_scale_var_val = jnp.empty((0, 0))
-        mock_scale_var = nnx.Variable(old_scale_var_val)
+        with jax.set_mesh(self.mesh):
+            old_weight_param_val = jnp.empty((128, 64))
+            mock_weight_param = nnx.Param(old_weight_param_val, dtype=jnp.int8)
+            old_scale_var_val = jnp.empty((0, 0))
+            mock_scale_var = nnx.Variable(old_scale_var_val)
 
-        mock_iter_graph.return_value = [
-            (('layers', '0', 'attention', 'wq', 'kernel'), mock_weight_param),
-            (('layers', '0', 'attention', 'wq', 'array', 'scale'),
-             mock_scale_var),
-        ]
+            mock_iter_graph.return_value = [
+                (('layers', '0', 'attention', 'wq', 'kernel'), mock_weight_param),
+                (('layers', '0', 'attention', 'wq', 'array', 'scale'),
+                mock_scale_var),
+            ]
 
-        with self.assertRaises(ValueError):
-            quantize_qwix.load_random_weights_into_qwix_abstract_model(
-                self.rng, self.model, self.mesh, self.quantization_config)
+            with self.assertRaises(ValueError):
+                quantize_qwix.load_random_weights_into_qwix_abstract_model(
+                    self.rng, self.model, self.mesh, self.quantization_config)
 
     @patch('tpu_inference.models.jax.utils.qwix.qwix_utils.nnx.iter_graph')
     def test_param_shape_setting_with_scale_map(self, mock_iter_graph):
         """Test correct scale shape calculation when in the map."""
-        old_weight_param_val = jnp.empty((128, 64))
-        mock_weight_param = nnx.Param(old_weight_param_val, dtype=jnp.int8)
-        old_scale_var_val = jnp.empty((0, 0))
-        mock_scale_var = nnx.Variable(old_scale_var_val)
+        with jax.set_mesh(self.mesh):
+            old_weight_param_val = jnp.empty((128, 64))
+            mock_weight_param = nnx.Param(old_weight_param_val, dtype=jnp.int8)
+            old_scale_var_val = jnp.empty((0, 0))
+            mock_scale_var = nnx.Variable(old_scale_var_val)
 
-        expected_scale_shape = (55, 34)
+            expected_scale_shape = (55, 34)
 
-        self.model.weight_loader.scale_shape_map_for_random_weight_loading = {
-            'attention.wq': expected_scale_shape
-        }
+            self.model.weight_loader.scale_shape_map_for_random_weight_loading = {
+                'attention.wq': expected_scale_shape
+            }
 
-        mock_iter_graph.return_value = [
-            (('layers', '0', 'attention', 'wq', 'kernel'), mock_weight_param),
-            (('layers', '0', 'attention', 'wq', 'array', 'scale'),
-             mock_scale_var),
-        ]
+            mock_iter_graph.return_value = [
+                (('layers', '0', 'attention', 'wq', 'kernel'), mock_weight_param),
+                (('layers', '0', 'attention', 'wq', 'array', 'scale'),
+                mock_scale_var),
+            ]
 
-        quantize_qwix.load_random_weights_into_qwix_abstract_model(
-            self.rng, self.model, self.mesh, self.quantization_config)
+            quantize_qwix.load_random_weights_into_qwix_abstract_model(
+                self.rng, self.model, self.mesh, self.quantization_config)
 
         new_weight_param_val = mock_weight_param.value
         new_scale_var_val = mock_scale_var.value
@@ -573,9 +577,11 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
                                                      mock_randint):
         """Test that integer dtypes call randint and floats call normal."""
         # Test integer
+        with jax.set_mesh(self.mesh):
+            param = nnx.Param(jnp.empty((8, 8)), sharding=P())
         quantize_qwix.get_random_sharded_array(
-            self.rng, self.mesh, nnx.Param(jnp.empty((2, 2)), sharding=P()),
-            (2, 2), jnp.int8, "int_param")
+            self.rng, self.mesh, param,
+            (8, 8), jnp.int8, "int_param")
         mock_randint.assert_called_once()
         mock_normal.assert_not_called()
 
@@ -584,8 +590,8 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
 
         # Test float
         quantize_qwix.get_random_sharded_array(
-            self.rng, self.mesh, nnx.Param(jnp.empty((2, 2)), sharding=P()),
-            (2, 2), jnp.float32, "float_param")
+            self.rng, self.mesh, param,
+            (8, 8), jnp.float32, "float_param")
         mock_randint.assert_not_called()
         mock_normal.assert_called_once()
 
@@ -595,26 +601,25 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
             self, mock_make_array, mock_logger_warning):
         """Test that sharding failure logs a warning and uses a fallback."""
         # First call raises an error, second call (fallback) succeeds
+        mock_make_array.side_effect = [
+            ValueError("Sharding failed"),
+            MagicMock()
+        ]
         with jax.set_mesh(self.mesh):
-            mock_make_array.side_effect = [
-                ValueError("Sharding failed"),
-                MagicMock()
-            ]
+            param = nnx.Param(jnp.empty((8, 8)), sharding=P('data', None))
+        quantize_qwix.get_random_sharded_array(self.rng, self.mesh, param,
+                                            (8, 8), jnp.float32,
+                                            "test_param")
 
-            param = nnx.Param(jnp.empty((2, 2)), sharding=P('data', None))
-            quantize_qwix.get_random_sharded_array(self.rng, self.mesh, param,
-                                                (2, 2), jnp.float32,
-                                                "test_param")
+        # Check that a warning was logged
+        mock_logger_warning.assert_called_once()
+        self.assertIn("Could not create sharded scale for test_param",
+                    mock_logger_warning.call_args[0][0])
 
-            # Check that a warning was logged
-            mock_logger_warning.assert_called_once()
-            self.assertIn("Could not create sharded scale for test_param",
-                        mock_logger_warning.call_args[0][0])
-
-            # Check that the fallback was attempted with an empty PartitionSpec
-            fallback_call_args = mock_make_array.call_args_list[1]
-            fallback_sharding = fallback_call_args.args[1]
-            self.assertEqual(fallback_sharding, NamedSharding(self.mesh, P()))
+        # # Check that the fallback was attempted with an empty PartitionSpec
+        fallback_call_args = mock_make_array.call_args_list[1]
+        fallback_sharding = fallback_call_args.args[1]
+        self.assertEqual(fallback_sharding, NamedSharding(self.mesh, P()))
 
 
 class TestManualQwixQuantization(unittest.TestCase):

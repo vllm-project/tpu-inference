@@ -614,8 +614,9 @@ def get_random_sharded_array(key: PRNGKey, mesh: Mesh, param: nnx.Param,
         return weight[index]
 
     try:
+        # new flax version use eager sharding which makes param.sharding a NamedSharding rather than a PartitionSpec
         sharded_array = jax.make_array_from_callback(
-            param_shape, NamedSharding(mesh, P(*param.sharding)), get_slice)
+            param_shape, NamedSharding(mesh, P(*param.sharding.spec)), get_slice)
     except (ValueError, TypeError):
         logger.warning(
             f"Could not create sharded scale for {param_name} with shape {param_shape} and sharding {param.sharding}, skipping sharding..."
