@@ -174,7 +174,7 @@ class TestMoE(unittest.TestCase):
         self.assertTrue(
             jnp.allclose(actual_output, expected_output, atol=1e-2, rtol=1e-2),
             "Dense backend output does not match ground truth.")
-    
+
     @unittest.skip(
         "Skipping dense backend correctness test to allow lib versions upgrade."
     )
