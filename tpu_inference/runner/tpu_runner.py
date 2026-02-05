@@ -26,7 +26,8 @@ import jaxtyping
 import numpy as np
 import vllm.envs as vllm_envs
 from flax import nnx
-from jax.experimental import mesh_utils
+from jax.experimental import (mesh_utils,
+                              multihost_utils)
 from jax.sharding import NamedSharding, PartitionSpec
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
@@ -443,7 +444,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.positions_cpu = np.zeros(self.max_num_tokens, dtype=np.int32)
         # Note: self.input_batch and self.block_tables_cpu are both initialized
         # with only 1 block_size. For hybrid kv cache, it will be re-init
-        # in ∏cache_manager's maybe_reinitialize_input_batch.
+        # in kv_cache_manager's maybe_reinitialize_input_batch.
         self.block_tables_cpu = [
             np.zeros((self.max_num_reqs, self.max_num_blocks_per_req),
                      dtype=np.int32)
@@ -914,7 +915,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         prompt_logprobs_dict = {}
         for req_id in self.input_batch.req_ids[:num_reqs]:
             prompt_logprobs_dict[req_id] = None
-
+        # if self.dp_size > 1:
+        #     next_tokens = multihost_utils.process_allgather(next_tokens, tiled=True)
         # If async scheduler enabled
         if self.scheduler_config.async_scheduling:
             # Get previous results from TPU and replace the placeholder.

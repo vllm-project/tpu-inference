@@ -514,6 +514,16 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
         q_TNA, q_rope_TNH = q_data
         k_SA, k_rope_SH = kv_data
 
+        q_scale = k_scale = v_scale = None
+        if self.kv_cache_quantized_dtype:
+            k_scale = self._k_scale
+            v_scale = self._v_scale
+            # TODO: May need to apply quantization separately for k_c & k_pe
+            k_SA, _ = quantize_kv(self.kv_cache_quantized_dtype, k_SA,
+                                       value=None, k_scale=k_scale)
+            k_rope_SH, _ = quantize_kv(self.kv_cache_quantized_dtype, k_rope_SH,
+                                       value=None, k_scale=k_scale)
+
         in_specs = (
             self.query_tnh,  # q
             self.query_tnh,  # q_rope
@@ -549,7 +559,11 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
                 *args,
                 sm_scale=self.scale,
                 num_kv_pages_per_block=num_kv_pages_per_block,
-                num_queries_per_block=num_queries_per_block)
+                num_queries_per_block=num_queries_per_block,
+                q_scale=q_scale,
+                k_scale=k_scale,
+                v_scale=k_scale)
+
             return new_cache, out
 
         kv_cache, output_TNA = jax.jit(
@@ -1608,8 +1622,8 @@ class DeepSeekV3(nnx.Module):
                 attn_o_tnh_spec=P(None, ShardingAxisName.MLP_TENSOR, None)
             rd_sharding=(ShardingAxisName.MLP_TENSOR, None)
             ap_sharding=(None, ShardingAxisName.MLP_TENSOR)
-            q_da_sharding=(None, ShardingAxisName.VOCAB)
-            kv_da_sharding=(None, ShardingAxisName.VOCAB)
+            q_da_sharding=(None, ShardingAxisName.MLP_TENSOR)
+            kv_da_sharding=(None, ShardingAxisName.MLP_TENSOR)
             
             if self.vllm_config.additional_config.get(
                 "replicate_attn_weights", False):
@@ -1729,6 +1743,7 @@ class DeepSeekV3(nnx.Module):
                     mesh=self.mesh,
                     hidden_act=hidden_act,
                     rngs=self.rng,
+                    # TODO: Undo to MLP_DATA, None?
                     activation_ffw_td=(ShardingAxisName.MLP_DATA,
                                        ShardingAxisName.MOE_TENSOR),
                     activation_ffw_ted=(ShardingAxisName.MLP_DATA, None,

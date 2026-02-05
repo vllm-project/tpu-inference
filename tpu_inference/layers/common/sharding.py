@@ -32,7 +32,7 @@ MESH_AXIS_NAMES_2D = ('data', 'model')
 
 class ShardingAxisNameBase:
     """Base class for sharding axis names."""
-    SEQUENCE = ('data', 'attn_dp')
+    SEQUENCE = ('data', 'attn_dp', 'attn_dp_expert',)
     ATTN_DATA = ('data', 'attn_dp', 'attn_dp_expert')
     ATTN_DATA_EXPERT = ('attn_dp_expert', 'expert')
     MLP_DATA = 'data'
@@ -40,8 +40,8 @@ class ShardingAxisNameBase:
     ATTN_TENSOR = None
     MLP_TENSOR = ('attn_dp', 'attn_dp_expert', 'model', 'expert')
     MOE_TENSOR = ('attn_dp', 'model')
-    EXPERT = ('attn_dp', 'expert', 'model')
-    VOCAB = ('model', 'attn_dp', 'expert')
+    EXPERT = ('attn_dp', 'attn_dp_expert', 'expert', 'model')
+    VOCAB = ('model', 'attn_dp', 'attn_dp_expert', 'expert')
     MODEL_1 = 'model'
     MODEL_2 = 'expert'
 
@@ -139,14 +139,14 @@ class ShardingConfigManager:
 
         enable_dp_attention = sharding_strategy.get("enable_dp_attention",
                                                     False)
-        if pc_tensor_parallelism != ss_tensor_parallelsim:
+        if pc_tensor_parallelism != ss_tensor_parallelsim and ss_tensor_parallelsim > 1:
             # The user has explicitly set the tensor parallelism in the sharding config.
             tensor_parallelism = ss_tensor_parallelsim
         else:
             tensor_parallelism = pc_tensor_parallelism
 
         if enable_dp_attention:
-        # Replicate attention layer when num_kv_heads < TP
+            # Replicate attention layer when num_kv_heads < TP
             num_kv_heads = 1 if vllm_config.model_config.use_mla else vllm_config.model_config.get_total_num_kv_heads(
             )
             cache_dtype = vllm_config.cache_config.cache_dtype
@@ -164,6 +164,8 @@ class ShardingConfigManager:
             # duplicate KV heads across devices, wasting kv cache memory.
             # Use attention DP instead to reduce per-device num_kv_heads and
             # eliminate this waste.
+            
+            # TODO: Use representative_spec.num_kv_heads instead as we have more models that have a shared KV.
             num_kv_heads_per_device_in_kv_cache = max(1, (num_kv_heads * 2) / packing)
             attn_dp = max(
                 int(tensor_parallelism // num_kv_heads_per_device_in_kv_cache),
@@ -171,8 +173,6 @@ class ShardingConfigManager:
             tensor_parallelism = tensor_parallelism // attn_dp
             attn_dp_expert = expert_parallelism
             expert_parallelism = 1
-            if vllm_config.model_config.use_mla:
-                attn_dp *= expert_parallelism
         else:
             attn_dp = 1
             attn_dp_expert = 1
