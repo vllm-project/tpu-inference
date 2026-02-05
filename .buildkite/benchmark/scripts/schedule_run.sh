@@ -178,7 +178,6 @@ while read -r line || [ -n "${line}" ]; do
   agents:
     queue: $BUILDKITE_AGENT_QUEUE
   command: 
-    - CODE_HASH=\$\$(buildkite-agent meta-data get 'CODE_HASH')
     - ".buildkite/benchmark/scripts/agent/run_job.sh ${RECORD_ID}"
 EOF
 )
