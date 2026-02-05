@@ -509,8 +509,9 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
     def test_invalid_config_raises_assertion_error(self):
         """Test that an invalid quantization_block_sizes config raises an error."""
         invalid_config = {"weight_block_size": [64]}  # Length is 1, not 2
-        with self.assertRaisesRegex(AssertionError,
-                                    "Expected only 2 quantization block"), jax.set_mesh(self.mesh):
+        with self.assertRaisesRegex(
+                AssertionError,
+                "Expected only 2 quantization block"), jax.set_mesh(self.mesh):
             quantize_qwix.load_random_weights_into_qwix_abstract_model(
                 self.rng, self.model, self.mesh, invalid_config)
 
