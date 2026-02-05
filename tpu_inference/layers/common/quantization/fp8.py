@@ -75,7 +75,7 @@ class Fp8LinearMethod:
 
 
 @jax.jit
-def process_fp8_linear_weights(
+def process_blockwise_fp8_linear_weights(
     weight: jax.Array,
     weight_scale: jax.Array,
     *,
