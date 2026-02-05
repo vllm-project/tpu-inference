@@ -242,6 +242,7 @@ EOF
 
   pipeline_steps+=("${pipeline_yaml}")
   echo "generate yml: ${pipeline_yaml}"
+  echo "steps: ${pipeline_steps}"
 
   echo "$RECORD_ID handled."
 done
