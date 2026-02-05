@@ -20,17 +20,20 @@
 # GPU memory. This streaming process is significantly faster than the traditional
 # disk-based loading method.
 steps:
-  - label: "Correctness Test | JAX UniProcExecutor"
-    key: "runai_model_streamer_loader_jax_uniproc"
+  - label: "${TPU_VERSION:-tpu6e} Correctness Test | JAX UniProcExecutor"
+    key: "${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_jax_uniproc"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_jax_uni_proc_executor
-  - label: "Record Result | JAX UniProcExecutor"
-    key: "record_runai_model_streamer_loader_jax_uniproc"
-    depends_on: "runai_model_streamer_loader_jax_uniproc"
+  - label: "${TPU_VERSION:-tpu6e} Record Result | JAX UniProcExecutor"
+    key: "${TPU_VERSION:-tpu6e}_record_runai_model_streamer_loader_jax_uniproc"
+    depends_on: "${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_jax_uniproc"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "runai_model_streamer_loader"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "feature support matrix"
@@ -38,18 +41,21 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh runai_model_streamer_loader_jax_uniproc
-  - label: "Correctness Test | Torchax UniProcExecutor"
-    key: "runai_model_streamer_loader_torchax_uniproc"
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_jax_uniproc
+  - label: "${TPU_VERSION:-tpu6e} Correctness Test | Torchax UniProcExecutor"
+    key: "${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_torchax_uniproc"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_torchax_uni_proc_executor
-  - label: "Record Result | Torchax UniProcExecutor"
-    key: "record_runai_model_streamer_loader_torchax_uniproc"
-    depends_on: "runai_model_streamer_loader_torchax_uniproc"
+  - label: "${TPU_VERSION:-tpu6e} Record Result | Torchax UniProcExecutor"
+    key: "${TPU_VERSION:-tpu6e}_record_runai_model_streamer_loader_torchax_uniproc"
+    depends_on: "${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_torchax_uniproc"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "runai_model_streamer_loader"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "feature support matrix"
@@ -57,27 +63,32 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh runai_model_streamer_loader_torchax_uniproc
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_torchax_uniproc
 
-  - label: "Correctness Test | JAX RayDistributedExecutor"
-    key: "runai_model_streamer_loader_jax_ray_distributed"
+  - label: "${TPU_VERSION:-tpu6e} Correctness Test | JAX RayDistributedExecutor"
+    key: "${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_jax_ray_distributed"
     soft_fail: true
     agents:
-      queue: tpu_v6e_8_queue # Using a queue with more devices for distributed tests
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}" # Using a queue with more devices for distributed tests
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_jax_ray_distributed_executor
 
-  - label: "Correctness Test | Torchax RayDistributedExecutor"
-    key: "runai_model_streamer_loader_torchax_ray_distributed"
+  - label: "${TPU_VERSION:-tpu6e} Correctness Test | Torchax RayDistributedExecutor"
+    key: "${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_torchax_ray_distributed"
     soft_fail: true
     agents:
-      queue: tpu_v6e_8_queue # Using a queue with more devices for distributed tests
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}" # Using a queue with more devices for distributed tests
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_torchax_ray_distributed_executor
-  - label: "Record Result | Torchax RayDistributedExecutor"
-    key: "record_runai_model_streamer_loader_torchax_ray_distributed"
-    depends_on: "runai_model_streamer_loader_torchax_ray_distributed"
+  - label: "${TPU_VERSION:-tpu6e} Record Result | Torchax RayDistributedExecutor"
+    key: "${TPU_VERSION:-tpu6e}_record_runai_model_streamer_loader_torchax_ray_distributed"
+    depends_on: "${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_torchax_ray_distributed"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "runai_model_streamer_loader"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "feature support matrix"
@@ -85,4 +96,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh runai_model_streamer_loader_torchax_ray_distributed
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_torchax_ray_distributed
