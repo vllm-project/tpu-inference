@@ -48,6 +48,7 @@ steps:
        GCP_DATABASE_ID: "vllm-bm-bk-runs"
      commands:
        - CODE_HASH=$$(buildkite-agent meta-data get 'CODE_HASH')
+       - echo "code - $${CODE_HASH}"
        - bash .buildkite/benchmark/scripts/daily_benchmark.sh
 
 
