@@ -159,12 +159,19 @@ class Fp8Config(QuantizationConfig):
 
     ACTIVATION_SCHEMES = ["dynamic", "static"]
 
-    def __init__(self,
-                 is_checkpoint_fp8_serialized: bool,
-                 activation_scheme: str = "dynamic",
-                 ignored_layers: Optional[list] = None,
-                 weight_block_size: Optional[list] = None):
-        self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
+    def __init__(self, hf_quant_config: dict):
+        quant_method = self.get_from_keys(hf_quant_config, ["quant_method"])
+        self.is_checkpoint_fp8_serialized = "fp8" in quant_method
+        activation_scheme = self.get_from_keys(hf_quant_config,
+                                               ["activation_scheme"])
+        ignored_layers = self.get_from_keys(hf_quant_config,
+                                            ["ignored_layers"], None)
+        weight_block_size = self.get_from_keys(hf_quant_config,
+                                               ["weight_block_size"], None)
+        if not ignored_layers:
+            ignored_layers = self.get_from_keys(hf_quant_config,
+                                                ["modules_to_not_convert"],
+                                                None)
 
         if activation_scheme not in self.ACTIVATION_SCHEMES:
             raise ValueError(
@@ -172,7 +179,7 @@ class Fp8Config(QuantizationConfig):
         self.activation_scheme = activation_scheme
         self.ignored_layers = ignored_layers or []
         if weight_block_size is not None:
-            if not is_checkpoint_fp8_serialized:
+            if not self.is_checkpoint_fp8_serialized:
                 raise ValueError(
                     "The block-wise quantization only supports fp8-serialized "
                     "checkpoint for now.")
@@ -185,26 +192,6 @@ class Fp8Config(QuantizationConfig):
                                  "dynamic activation scheme for now, but got "
                                  f"{activation_scheme} activation scheme.")
         self.weight_block_size = weight_block_size
-
-    @classmethod
-    def from_config(cls, config: dict):
-        """Create instance from huggingface config dict."""
-        quant_method = cls.get_from_keys(config, ["quant_method"])
-        is_checkpoint_fp8_serialized = "fp8" in quant_method
-        activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
-        ignored_layers = cls.get_from_keys(config, ["ignored_layers"], None)
-        weight_block_size = cls.get_from_keys(config, ["weight_block_size"],
-                                              None)
-        if not ignored_layers:
-            ignored_layers = cls.get_from_keys(config,
-                                               ["modules_to_not_convert"],
-                                               None)
-        return cls(
-            is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
-            activation_scheme=activation_scheme,
-            ignored_layers=ignored_layers,
-            weight_block_size=weight_block_size,
-        )
 
     def get_quant_method(self, layer: JaxModule,
                          prefix: str) -> Optional[QuantizeMethodBase]:
