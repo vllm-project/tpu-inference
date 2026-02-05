@@ -43,7 +43,7 @@ def dense_moe_fwd(weights: UnfusedMoEWeights, x_TD: Float,
         The output of the dense Moe layer.
     """
     x_TD = jnp.asarray(x_TD, cast_dtype)
-    x_TD = nnx.with_sharding_constraint(x_TD, activation_ffw_td)
+    x_TD = jax.lax.with_sharding_constraint(x_TD, activation_ffw_td)
     with jax.named_scope("gating"):
         gating_TEF = jnp.einsum('TD,EDF -> TEF', x_TD, weights.w1_weight)
         activated_gating_TEF = modeling_flax_utils.ACT2FN[hidden_act](
@@ -83,7 +83,7 @@ def dense_moe_fwd_preapply_router_weights(
     num_experts = full_weights_TE.shape[-1]
     x_TED = jnp.repeat(x_TD[:, None, :], num_experts, 1)
     x_TED = jnp.asarray(x_TED, cast_dtype) * full_weights_TE[..., None]
-    x_TED = nnx.with_sharding_constraint(x_TED, activation_ffw_ted)
+    x_TED = jax.lax.with_sharding_constraint(x_TED, activation_ffw_ted)
 
     with jax.named_scope("gating"):
         gating_TEF = jnp.einsum('TED,EDF -> TEF', x_TED, weights.w1_weight)

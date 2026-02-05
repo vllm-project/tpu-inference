@@ -488,14 +488,14 @@ class Qwen2_5_VisionTransformer(nnx.Module):
         head_dim = vision_config.hidden_size // vision_config.num_heads
         self.rotary_pos_emb = Qwen2_5_VisionRotaryEmbedding(head_dim // 2)
 
-        self.blocks = [
+        self.blocks = nnx.List([
             Qwen2_5_VisionBlock(
                 config=hf_config,
                 dtype=dtype,
                 rngs=rngs,
                 mesh=mesh,
             ) for _ in range(vision_config.depth)
-        ]
+        ])
         self.merger = Qwen2_5_VisionPatchMerger(
             d_model=vision_config.out_hidden_size,
             context_dim=vision_config.hidden_size,
