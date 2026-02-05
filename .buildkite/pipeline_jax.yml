@@ -133,7 +133,6 @@ steps:
        - curl -L https://github.com/pantsbuild/pex/releases/download/v2.1.151/pex -o pex
        - chmod +x pex
        - python3 ./pex coverage -c coverage -o coverage.pex
-       - python3 -m pip install coverage[toml] pytest-cov
        - |
          echo "[paths]" > .coveragerc
          echo "source =" >> .coveragerc
