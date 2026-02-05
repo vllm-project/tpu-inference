@@ -54,15 +54,13 @@ RUN --mount=type=cache,target=/root/.cache/pip if [ "$IS_FOR_V7X" = "true" ]; th
 COPY . .
 # Build tpu_inference
 RUN python3 -m pip install build
-RUN TPU_INFERENCE_VERSION=$(date -u +%Y%m%d) && \
-    echo $TPU_INFERENCE_VERSION > /tmp/version.txt && \
-    VLLM_VERSION_OVERRIDE=${TPU_INFERENCE_VERSION} python3 -m build
+RUN python3 -m build
 
 # Build vllm-tpu wheel
 WORKDIR /workspace
 ARG VLLM_COMMIT_HASH
-RUN TPU_INFERENCE_VERSION=$(cat /tmp/version.txt) && VLLM_TPU_VERSION=${TPU_INFERENCE_VERSION} && \
-    bash tpu_inference/.buildkite/scripts/build_vllm_tpu.sh --local "${TPU_INFERENCE_VERSION}" "${VLLM_TPU_VERSION}" "${VLLM_COMMIT_HASH}"
+RUN VLLM_TPU_VERSION=$(date -u +%Y%m%d) && \
+    bash tpu_inference/.buildkite/scripts/build_vllm_tpu.sh --local "${VLLM_TPU_VERSION}" "${VLLM_COMMIT_HASH}"
 
 # Install vllm-tpu wheel
 RUN pip install --no-cache-dir vllm/dist/*.whl
