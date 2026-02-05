@@ -222,7 +222,7 @@ tail -n +2 "$CSV_FILE" | while read -r line || [ -n "${line}" ]; do
     queue: $BUILDKITE_AGENT_QUEUE
   command: 
     - CODE_HASH=$$(buildkite-agent meta-data get 'CODE_HASH')
-    - ".buildkite/benchmark/scripts/agent/run_job.sh $${RECORD_ID}"
+    - ".buildkite/benchmark/scripts/agent/run_job.sh ${RECORD_ID}"
 EOF
 )
 
@@ -242,10 +242,11 @@ EOF
 
   pipeline_steps+=("${pipeline_yaml}")
   echo "generate yml: ${pipeline_yaml}"
-  echo "steps: ${pipeline_steps}"
 
   echo "$RECORD_ID handled."
 done
+
+echo "steps: ${pipeline_steps}"
 
 # --- Upload Benchmark Dynamic Pipeline ---
 if [[ "${#pipeline_steps[@]}" -gt 0 ]]; then
