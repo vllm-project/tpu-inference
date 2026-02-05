@@ -90,7 +90,7 @@ echo "--- Starting Buildkite Bootstrap"
 echo "Running in pipeline: $BUILDKITE_PIPELINE_SLUG"
 
 echo "Configure notification"
-ONCALL_EMAIL="ullm-oncall@rotations.google.com"
+ONCALL_EMAIL="ullm-test-notifications-external@google.com"
 NOTIFY_FILE="generated_notification.yml"
 
 # Logic
