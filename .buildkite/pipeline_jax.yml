@@ -132,15 +132,15 @@ steps:
        - "buildkite-agent artifact download \".coverage.part*\" ."
        - curl -L https://github.com/pantsbuild/pex/releases/download/v2.1.151/pex -o pex
        - chmod +x pex
-       - ./pex coverage -c coverage -- --version
+       - python3 ./pex coverage -c coverage -o coverage.pex
        - python3 -m pip install coverage[toml] pytest-cov
        - |
          echo "[paths]" > .coveragerc
          echo "source =" >> .coveragerc
          echo "    ." >> .coveragerc
          echo "    /workspace/tpu_inference/" >> .coveragerc
-       - "./pex coverage combine .coverage.part1.${KEY_PREFIX} .coverage.part2.${KEY_PREFIX}"
-       - "./pex coverage report --fail-under=69"
+       - "python3 ./coverage.pex coverage combine .coverage.part1.${KEY_PREFIX} .coverage.part2.${KEY_PREFIX}"
+       - "python3 ./coverage.pex coverage report --fail-under=69"
            
    - label: "${LABEL_PREFIX}JAX unit tests - kernels"
      key: ${KEY_PREFIX}test_8
