@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+CODE_HASH=$1
 TIMEZONE="America/Los_Angeles"
 TAG="$(TZ="$TIMEZONE" date +%Y%m%d_%H%M%S)"
 
