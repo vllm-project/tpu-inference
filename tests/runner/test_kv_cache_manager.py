@@ -59,11 +59,7 @@ class TestKVCacheManager:
              patch('jax.random.key', return_value=self.mock_rng_key), \
              patch('tpu_inference.runner.tpu_runner.get_model', return_value=MagicMock()):
 
-            model_config = ModelConfig(tokenizer_mode="auto",
-                                       trust_remote_code=False,
-                                       seed=0,
-                                       dtype='bfloat16',
-                                       use_mla=use_mla)
+            model_config = ModelConfig()
             cache_config = CacheConfig(
                 block_size=16,
                 gpu_memory_utilization=0.9,
@@ -76,7 +72,6 @@ class TestKVCacheManager:
             parallel_config = ParallelConfig(
                 pipeline_parallel_size=1,
                 tensor_parallel_size=1,
-                worker_use_ray=False,
             )
             vllm_config = VllmConfig(
                 model_config=model_config,
