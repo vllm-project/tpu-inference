@@ -12,15 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# x-run-condition: &run-on-nightly-or-tag
-#   if: build.env("NIGHTLY") == "1" || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/
-
-
-
-# 1. Build image (combire create_job.sh and build_image.sh)
-# 2. Scan csv file
-# 3. publish job and generate pipeline step (include execute bm and report result)
-
 steps:
    - label: "Build vllm-tpu image"
      key: "build-vllm-tpu-image"
@@ -33,7 +24,7 @@ steps:
      commands:
        - VLLM_COMMIT_HASH=$$(buildkite-agent meta-data get 'VLLM_COMMIT_HASH')
        - CODE_HASH=$$(buildkite-agent meta-data get 'CODE_HASH')
-      #  - bash .buildkite/benchmark/scripts/build_tpu_inference_image.sh $$VLLM_COMMIT_HASH $$CODE_HASH
+       - bash .buildkite/benchmark/scripts/build_tpu_inference_image.sh $$VLLM_COMMIT_HASH $$CODE_HASH
 
    - label: "Read CSV file and publish benchmark job"
      key: "read-csv-publish-job"
@@ -50,18 +41,3 @@ steps:
        - CODE_HASH=$$(buildkite-agent meta-data get 'CODE_HASH')
        - echo "CODE_HASH=$${CODE_HASH}"
        - bash .buildkite/benchmark/scripts/daily_benchmark.sh $${CODE_HASH}
-
-
-  #  - label: "Publish: benchmark - RecordId: 68db88d5-80e6-4973-9d24-0dbcea35cc59"
-  #    depends_on: "read-csv-publish-job"
-  #    env:
-  #      GCP_PROJECT_ID: "cloud-tpu-inference-test"
-  #      GCP_REGION: "southamerica-west1"
-  #      GCS_BUCKET: "vllm-cb-storage2"
-  #      ARTIFACT_REPO: "vllm-tpu-bm-bk"
-  #      GCP_INSTANCE_ID: "vllm-bm-inst"
-  #      GCP_DATABASE_ID: "vllm-bm-bk-runs"
-  #    agents:
-  #      queue: tpu_v6e_queue
-  #    command:
-  #      - ".buildkite/benchmark/scripts/agent/run_job.sh 68db88d5-80e6-4973-9d24-0dbcea35cc59"

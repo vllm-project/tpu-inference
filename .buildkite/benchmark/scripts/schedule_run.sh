@@ -63,7 +63,6 @@ BUILDKITE_QUEUE_DEVICE_MAP=(
 # export GCP_INSTANCE_ID="your-instance"
 # export GCP_DATABASE_ID="your-database"
 
-# TODO: Maybe using another method to read csv
 # === Read CSV and skip header ===
 while read -r line || [ -n "${line}" ]; do
 
@@ -185,13 +184,9 @@ EOF
 )
 
   pipeline_steps+=("${pipeline_yaml}")
-  echo "generate yml: ${pipeline_yaml}"
-  echo "steps: ${pipeline_steps}"
 
   echo "$RECORD_ID handled."
 done < <(tail -n +2 "$CSV_FILE")
-
-echo "steps: ${pipeline_steps}"
 
 # --- Upload Benchmark Dynamic Pipeline ---
 if [[ "${#pipeline_steps[@]}" -gt 0 ]]; then
@@ -199,7 +194,7 @@ if [[ "${#pipeline_steps[@]}" -gt 0 ]]; then
   final_pipeline_yaml="steps:"$'\n'
   final_pipeline_yaml+=$(printf "%s\n" "${pipeline_steps[@]}")
   echo "Upload YML: ${final_pipeline_yaml}"
-  # echo -e "${final_pipeline_yaml}" | buildkite-agent pipeline upload
+  echo -e "${final_pipeline_yaml}" | buildkite-agent pipeline upload
 else
   echo "--- No benchmark records found, no new Pipeline Steps to upload."
   exit 0
