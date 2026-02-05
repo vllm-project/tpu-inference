@@ -102,7 +102,10 @@ def load_blockwise_fp8_scale(
 
 
 class Fp8LinearMethod(QuantizeMethodBase, jax_common.Fp8LinearMethod):
-    """Fp8 method for JAX Linear layer."""
+    """FP8 quantization method for JAX linear layers (JaxEinsum).
+
+    Supports both blockwise and per-channel FP8 quantization.
+    """
 
     def create_weights_jax(self, layer: JaxModule, *weight_args,
                            **extra_weight_attrs):
@@ -110,6 +113,7 @@ class Fp8LinearMethod(QuantizeMethodBase, jax_common.Fp8LinearMethod):
 
         input_dim = self.linear_config.input_size
         output_dim = self.linear_config.output_size
+        out_shard = self.linear_config.weight_sharding[0]
 
         if self.linear_config.enable_quantized_matmul_kernel:
             # Blockwise quantization: 3D scales (n_blocks, 1, n_out)
@@ -120,20 +124,26 @@ class Fp8LinearMethod(QuantizeMethodBase, jax_common.Fp8LinearMethod):
                     f"for blockwise quantization. Got {input_dim} % {block_size} = {input_dim % block_size}."
                 )
             n_blocks = input_dim // block_size
-            layer.weight_scale = nnx.Param(
-                jnp.ones((n_blocks, 1, output_dim), dtype=jnp.float32))
-            layer.weight_scale.weight_loader = partial(
+            # Shard scales along output dim (last axis), matching weight sharding.
+            scale_init = nnx.with_partitioning(
+                lambda *_: jnp.ones(
+                    (n_blocks, 1, output_dim), dtype=jnp.float32),
+                (None, None, out_shard))
+            layer.weight_scale_inv = nnx.Param(scale_init(None))
+            layer.weight_scale_inv.weight_loader = partial(
                 load_blockwise_fp8_scale,
                 output_dim=output_dim,
                 n_blocks=n_blocks,
-                param_name="weight_scale")
+                param_name="weight_scale_inv")
         else:
             # Per-channel quantization: 1D scales (n_out,)
-            # TODO(patemotter): Support per-channel quantization and quantized matmul kernel
-            layer.weight_scale = nnx.Param(
-                jnp.ones((output_dim, ), dtype=jnp.float32))
-            layer.weight_scale.weight_loader = partial(
-                load_nnx_param_from_reshaped_torch, param_name="weight_scale")
+            scale_init = nnx.with_partitioning(
+                lambda *_: jnp.ones((output_dim, ), dtype=jnp.float32),
+                (out_shard, ))
+            layer.weight_scale_inv = nnx.Param(scale_init(None))
+            layer.weight_scale_inv.weight_loader = partial(
+                load_nnx_param_from_reshaped_torch,
+                param_name="weight_scale_inv")
 
     def process_weights_after_loading(self,
                                       layer: JaxModule,
@@ -141,7 +151,7 @@ class Fp8LinearMethod(QuantizeMethodBase, jax_common.Fp8LinearMethod):
         assert isinstance(layer, JaxEinsum)
 
         weight = layer.weight.value
-        weight_scale = layer.weight_scale.value
+        weight_scale = layer.weight_scale_inv.value
         input_size = self.linear_config.input_size
         output_size = self.linear_config.output_size
         c_dims = self.linear_config.contracting_dims
@@ -156,15 +166,10 @@ class Fp8LinearMethod(QuantizeMethodBase, jax_common.Fp8LinearMethod):
             # Pre-quantized FP8 checkpoint, no block size specified -> keep as-is
             return
 
-        if not is_fp8 and not needs_blockwise:
-            # Float32/BF16 weights but no block size -> error (per-channel requant not supported)
-            # TODO(patemotter): Allow per-channel requantization
-            raise ValueError(
-                "FP8 requantization from float32/bfloat16 requires REQUANTIZE_BLOCK_SIZE "
-                "to be set. Per-channel FP8 is only supported when loading from a "
-                "pre-quantized checkpoint.")
-
-        # Permute to (Contracting..., Output...)
+        # Reshape weight dims to (Contracting..., Output...) then flatten to 2D.
+        # This is needed because JaxEinsum can have multi-dimensional weights
+        # (e.g., q_proj shape (D, N, H) for (hidden, heads, head_dim)) but the
+        # FP8 kernel requires 2D (In, Out) format.
         perm = tuple(c_dims + o_dims)
         if perm != tuple(range(len(perm))):
             weight_perm = weight.transpose(perm)
@@ -175,7 +180,7 @@ class Fp8LinearMethod(QuantizeMethodBase, jax_common.Fp8LinearMethod):
         weight_flat = weight_perm.reshape(input_size, output_size)
 
         if is_fp8:
-            # Dequantize
+            # Dequantize from existing FP8 before re-quantizing
             if weight_scale.ndim == 3:
                 # Blockwise: scale shape (n_blocks, 1, output_size)
                 scale_for_dequant = jnp.squeeze(weight_scale, axis=1)
@@ -188,29 +193,33 @@ class Fp8LinearMethod(QuantizeMethodBase, jax_common.Fp8LinearMethod):
                                                 weight_scale,
                                                 axis=0)
 
-        # Quantize along input axis (0) for blockwise
-        w_q, scale = quantize_tensor(jnp.float8_e4m3fn,
-                                     weight_flat,
-                                     axis=0,
-                                     block_size=block_size)
-        # Scale shape (n_blocks, Out) -> (n_blocks, 1, Out)
-        scale = jnp.expand_dims(scale, axis=1)
+        if needs_blockwise:
+            # Blockwise quantization along input axis (0)
+            w_q, scale = quantize_tensor(jnp.float8_e4m3fn,
+                                         weight_flat,
+                                         axis=0,
+                                         block_size=block_size)
+            # Scale shape (n_blocks, Out) -> (n_blocks, 1, Out) for kernel
+            scale = jnp.expand_dims(scale, axis=1)
+        else:
+            # Per-channel quantization along input axis (0)
+            w_q, scale = quantize_tensor(jnp.float8_e4m3fn,
+                                         weight_flat,
+                                         axis=0)
 
-        # Reshape back: (In, Out) -> (Contracting..., Output...) -> Permute back
+        # Reshape back: (In, Out) -> original multi-dim shape with inverse permute
         w_q_reshaped = w_q.reshape([weight.shape[i] for i in perm])
-
-        # Inverse permutation
         inv_perm = np.argsort(perm)
         w_q_orig = w_q_reshaped.transpose(inv_perm)
 
-        # Update parameters
+        # Update parameters with proper sharding
         spec = getattr(layer.weight.sharding, 'spec', layer.weight.sharding)
         mesh = getattr(layer.weight, 'mesh', None) or mesh
         layer.weight.value = shard_put(w_q_orig, spec, mesh)
 
-        scale_spec = getattr(layer.weight_scale.sharding, 'spec',
-                             layer.weight_scale.sharding)
-        layer.weight_scale.value = shard_put(scale, scale_spec, mesh)
+        scale_spec = getattr(layer.weight_scale_inv.sharding, 'spec',
+                             layer.weight_scale_inv.sharding)
+        layer.weight_scale_inv.value = shard_put(scale, scale_spec, mesh)
 
     def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
         assert isinstance(layer, JaxEinsum)
@@ -220,7 +229,8 @@ class Fp8LinearMethod(QuantizeMethodBase, jax_common.Fp8LinearMethod):
         c_dims = self.linear_config.contracting_dims
         o_dims = self.linear_config.output_dims
 
-        # Permute and reshape weight to (In, Out)
+        # Permute and reshape weight to 2D (In, Out) for the FP8 kernel.
+        # See class docstring for why this is needed for JaxEinsum layers.
         perm = tuple(c_dims + o_dims)
         if perm != tuple(range(len(perm))):
             w_val = layer.weight.value.transpose(perm)
@@ -240,7 +250,7 @@ class Fp8LinearMethod(QuantizeMethodBase, jax_common.Fp8LinearMethod):
             if self.linear_config.fuse_matmuls:
                 # _apply_fused expects transposed data -> (Out, In).
                 out = self._apply_fused(x_reshaped, w_val.T,
-                                        layer.weight_scale.value, bias)
+                                        layer.weight_scale_inv.value, bias)
             else:
                 raise NotImplementedError(
                     "Non-fused matmuls not implemented yet.")
@@ -255,12 +265,16 @@ class Fp8Config(QuantizationConfig):
     """FP8 quantization config for JAX models.
 
     Uses REQUANTIZE_BLOCK_SIZE environment variable for blockwise quantization,
-    consistent with vLLM's approach.
+    consistent with vLLM's approach. When loading pre-quantized FP8 checkpoints,
+    weight_block_size from the HF config is used for dequantization.
     """
+
+    def __init__(self, weight_block_size=None):
+        self.weight_block_size = weight_block_size
 
     def get_quant_method(self, layer: JaxModule,
                          prefix: str) -> Optional[QuantizeMethodBase]:
         if isinstance(layer, JaxEinsum):
-            linear_config = JaxQuantLinearConfig(layer)
+            linear_config = JaxQuantLinearConfig(layer, self)
             return Fp8LinearMethod(linear_config)
         return None

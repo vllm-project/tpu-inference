@@ -36,8 +36,21 @@ def get_tpu_quantization_config(vllm_config: VllmConfig):
         raise NotImplementedError(
             f"{model_config.quantization} quantization method not supported."
             f" Supported methods are {method_to_config.keys()}")
-    quant_config = method_to_config[model_config.quantization]
-    return quant_config()
+    quant_cls = method_to_config[model_config.quantization]
+
+    if quant_cls == Fp8Config:
+        # Extract weight_block_size from HuggingFace quantization config
+        # (e.g., Qwen3-4B-FP8 has quantization_config.weight_block_size = [128, 128])
+        hf_quant_config = getattr(model_config.hf_config,
+                                  'quantization_config', None) or {}
+        if isinstance(hf_quant_config, dict):
+            weight_block_size = hf_quant_config.get('weight_block_size', None)
+        else:
+            weight_block_size = getattr(hf_quant_config, 'weight_block_size',
+                                        None)
+        return Fp8Config(weight_block_size=weight_block_size)
+
+    return quant_cls()
 
 
 class QuantizeMethodBase(ABC):

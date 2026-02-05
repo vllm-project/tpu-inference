@@ -25,7 +25,10 @@ import torch
 from jax.sharding import Mesh
 from safetensors.torch import save_file
 from vllm.config import ModelConfig
+from vllm.model_executor.model_loader import LoadConfig, get_model_loader
 
+from tpu_inference.distributed.jax_parallel_state import \
+    init_pp_distributed_environment
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
 from tpu_inference.layers.jax.quantization.fp8 import Fp8LinearMethod
@@ -65,6 +68,16 @@ class MockVllmConfig:
         self.quant_config = get_tpu_quantization_config(self)
 
 
+@pytest.fixture(scope="module", autouse=True)
+def init_pp():
+    """Initialize pipeline parallel distributed environment for tests."""
+    init_pp_distributed_environment(ip="",
+                                    rank=0,
+                                    world_size=1,
+                                    device=None,
+                                    need_pp=False)
+
+
 @pytest.fixture(scope="module")
 def mesh():
     """Creates a mesh with 1 device."""
@@ -75,8 +88,8 @@ def mesh():
     num_devices = len(devices)
     device_mesh = devices.reshape((num_devices, 1, 1, 1))
 
-    with Mesh(device_mesh,
-              axis_names=('data', 'attn_dp', 'expert', 'model')) as m:
+    m = Mesh(device_mesh, axis_names=('data', 'attn_dp', 'expert', 'model'))
+    with jax.set_mesh(m):
         yield m
 
 
@@ -109,9 +122,9 @@ def mock_model_inputs():
 
 class TestQwen2Fp8E2E:
 
-    def test_qwen2_fp8_loading_and_inference(self, mesh, rng,
-                                             mock_model_inputs, monkeypatch):
-        """End-to-end test for FP8 loading, requantization, and inference."""
+    def test_qwen2_f32_to_fp8_requantization_and_inference(
+            self, mesh, rng, mock_model_inputs, monkeypatch):
+        """Tests FP8 requantization from Float32 weights and inference."""
 
         monkeypatch.setenv("REQUANTIZE_BLOCK_SIZE", "256")
 
@@ -142,7 +155,7 @@ class TestQwen2Fp8E2E:
             with open(os.path.join(tmpdir, "config.json"), "w") as f:
                 json.dump(config_data, f)
 
-            # Create initial model state dict (simulating a Float32 checkpoint)
+            # Creating random Float32 weights (to test requantization to FP8)
             state_dict = {}
             state_dict["model.embed_tokens.weight"] = torch.randn(
                 vocab_size, hidden_size)
@@ -225,34 +238,183 @@ class TestQwen2Fp8E2E:
             for proj in layers_to_fix:
                 if isinstance(proj.quant_method, Fp8LinearMethod):
                     proj.quant_method.linear_config.mesh = mesh
+                    proj.weight.mesh = mesh
+                    proj.weight_scale_inv.mesh = mesh
 
             q_proj = model.model.layers[0].self_attn.q_proj
             assert isinstance(q_proj.quant_method, Fp8LinearMethod)
 
-            # Load Weights and trigger requantization
-            with mesh:
-                model.load_weights(rng)
+            # Load weights and trigger requantization
+            loader = get_model_loader(LoadConfig(load_format="safetensors"))
+            loader.load_weights(model, mock_config.model_config)
 
-                # Verify weights are quantized
-                assert q_proj.weight.value.dtype == jnp.float8_e4m3fn
+            # Verify weights are quantized
+            assert q_proj.weight.value.dtype == jnp.float8_e4m3fn
 
-                input_ids, attention_metadata = mock_model_inputs
-                kv_caches = create_kv_caches(
-                    num_blocks=2,
-                    block_size=mock_config.cache_config.block_size,
-                    num_kv_heads=num_kv_heads,
-                    head_size=head_dim,
-                    mesh=mesh,
-                    layer_names=["model.layers.0", "model.layers.1"],
-                    cache_dtype=jnp.bfloat16)
+            input_ids, attention_metadata = mock_model_inputs
+            kv_caches = create_kv_caches(
+                num_blocks=2,
+                block_size=mock_config.cache_config.block_size,
+                num_kv_heads=num_kv_heads,
+                head_size=head_dim,
+                mesh=mesh,
+                layer_names=["model.layers.0", "model.layers.1"],
+                cache_dtype=jnp.bfloat16)
 
-                kv_caches, hidden_states, _ = model(kv_caches, input_ids,
-                                                    attention_metadata)
+            kv_caches, hidden_states, _ = model(kv_caches, input_ids,
+                                                attention_metadata)
 
-                # Check output shape
-                assert hidden_states.shape == (16, hidden_size)
-                assert not jnp.isnan(hidden_states).any()
+            # Check output shape
+            assert hidden_states.shape == (16, hidden_size)
+            assert not jnp.isnan(hidden_states).any()
 
-                # Compute logits
-                logits = model.compute_logits(hidden_states)
-                assert logits.shape == (16, vocab_size)
+            # Compute logits
+            logits = model.compute_logits(hidden_states)
+            assert logits.shape == (16, vocab_size)
+
+    def test_qwen2_fp8_checkpoint_loading(self, mesh, rng, mock_model_inputs,
+                                          monkeypatch):
+        """Tests loading a pre-quantized FP8 checkpoint.
+
+        Simulates a real FP8 checkpoint (e.g. Qwen3-4B-FP8) where weights
+        are stored as float8_e4m3fn (viewed as uint8 in safetensors) and
+        scales are stored as weight_scale_inv.
+        """
+        block_size = 256
+        monkeypatch.setenv("REQUANTIZE_BLOCK_SIZE", str(block_size))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            hidden_size = 5120
+            head_dim = 128
+            num_heads = 40
+            num_kv_heads = 40
+            vocab_size = 5120
+            intermediate_size = 5120
+            n_blocks = hidden_size // block_size  # 20
+
+            config_data = {
+                "model_type": "qwen2",
+                "hidden_size": hidden_size,
+                "num_attention_heads": num_heads,
+                "num_key_value_heads": num_kv_heads,
+                "num_hidden_layers": 2,
+                "vocab_size": vocab_size,
+                "intermediate_size": intermediate_size,
+                "rms_norm_eps": 1e-6,
+                "rope_theta": 10000.0,
+                "head_dim": head_dim,
+                "tie_word_embeddings": False,
+                "architectures": ["Qwen2ForCausalLM"],
+                "quantization_config": {
+                    "quant_method": "fp8",
+                    "weight_block_size": [block_size, block_size],
+                },
+            }
+            with open(os.path.join(tmpdir, "config.json"), "w") as f:
+                json.dump(config_data, f)
+
+            # Create FP8 weights (stored as uint8 view in safetensors)
+            state_dict = {}
+            state_dict["model.embed_tokens.weight"] = torch.randn(
+                vocab_size, hidden_size)
+
+            for i in range(2):
+                for proj, out_size in [
+                    ("q_proj", num_heads * head_dim),
+                    ("k_proj", num_kv_heads * head_dim),
+                    ("v_proj", num_kv_heads * head_dim),
+                ]:
+                    # FP8 weight as uint8 view
+                    w = torch.randn(out_size,
+                                    hidden_size).to(torch.float8_e4m3fn)
+                    state_dict[
+                        f"model.layers.{i}.self_attn.{proj}.weight"] = w.view(
+                            torch.uint8)
+                    # Blockwise scale_inv: (n_blocks, out_size)
+                    state_dict[
+                        f"model.layers.{i}.self_attn.{proj}.weight_scale_inv"] = torch.ones(
+                            n_blocks, out_size, dtype=torch.float32)
+
+                    if proj in ("q_proj", "k_proj", "v_proj"):
+                        state_dict[
+                            f"model.layers.{i}.self_attn.{proj}.bias"] = torch.randn(
+                                out_size)
+
+                # o_proj: (hidden, heads*head_dim)
+                n_blocks_o = (num_heads * head_dim) // block_size
+                w_o = torch.randn(hidden_size,
+                                  num_heads * head_dim).to(torch.float8_e4m3fn)
+                state_dict[
+                    f"model.layers.{i}.self_attn.o_proj.weight"] = w_o.view(
+                        torch.uint8)
+                state_dict[
+                    f"model.layers.{i}.self_attn.o_proj.weight_scale_inv"] = torch.ones(
+                        n_blocks_o, hidden_size, dtype=torch.float32)
+
+                # MLP
+                for proj, in_size, out_size in [
+                    ("gate_proj", hidden_size, intermediate_size),
+                    ("up_proj", hidden_size, intermediate_size),
+                    ("down_proj", intermediate_size, hidden_size),
+                ]:
+                    n_blk = in_size // block_size
+                    w = torch.randn(out_size, in_size).to(torch.float8_e4m3fn)
+                    state_dict[f"model.layers.{i}.mlp.{proj}.weight"] = w.view(
+                        torch.uint8)
+                    state_dict[
+                        f"model.layers.{i}.mlp.{proj}.weight_scale_inv"] = torch.ones(
+                            n_blk, out_size, dtype=torch.float32)
+
+                # Norms
+                state_dict[
+                    f"model.layers.{i}.input_layernorm.weight"] = torch.ones(
+                        hidden_size)
+                state_dict[
+                    f"model.layers.{i}.post_attention_layernorm.weight"] = torch.ones(
+                        hidden_size)
+
+            state_dict["model.norm.weight"] = torch.ones(hidden_size)
+            state_dict["lm_head.weight"] = torch.randn(vocab_size, hidden_size)
+
+            save_file(state_dict, os.path.join(tmpdir, "model.safetensors"))
+
+            mock_config = MockVllmConfig(tmpdir,
+                                         quantization="fp8",
+                                         dtype="bfloat16")
+
+            model = Qwen2ForCausalLM(mock_config, rng, mesh)
+            for layer in model.model.layers:
+                for proj in [
+                        layer.self_attn.q_proj, layer.self_attn.k_proj,
+                        layer.self_attn.v_proj, layer.self_attn.o_proj,
+                        layer.mlp.gate_proj, layer.mlp.up_proj,
+                        layer.mlp.down_proj
+                ]:
+                    if isinstance(proj.quant_method, Fp8LinearMethod):
+                        proj.quant_method.linear_config.mesh = mesh
+                        proj.weight.mesh = mesh
+                        proj.weight_scale_inv.mesh = mesh
+
+            loader = get_model_loader(LoadConfig(load_format="safetensors"))
+            loader.load_weights(model, mock_config.model_config)
+
+            # Verify weights loaded as FP8
+            q_proj = model.model.layers[0].self_attn.q_proj
+            assert q_proj.weight.value.dtype == jnp.float8_e4m3fn
+
+            # Run inference
+            input_ids, attention_metadata = mock_model_inputs
+            kv_caches = create_kv_caches(
+                num_blocks=2,
+                block_size=mock_config.cache_config.block_size,
+                num_kv_heads=num_kv_heads,
+                head_size=head_dim,
+                mesh=mesh,
+                layer_names=["model.layers.0", "model.layers.1"],
+                cache_dtype=jnp.bfloat16)
+
+            kv_caches, hidden_states, _ = model(kv_caches, input_ids,
+                                                attention_metadata)
+
+            assert hidden_states.shape == (16, hidden_size)
+            assert not jnp.isnan(hidden_states).any()

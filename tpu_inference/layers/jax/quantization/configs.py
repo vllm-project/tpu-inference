@@ -35,7 +35,7 @@ class JaxQuantLinearConfig(QuantLinearConfig):
     VllmQuantLinearConfig extracts config from LinearBase in vLLM.
     """
 
-    def __init__(self, layer: "JaxEinsum"):
+    def __init__(self, layer: "JaxEinsum", quant_config=None):
         # Parse einsum dimensions
         einsum_str = getattr(layer, 'einsum_str', '')
         weight_shape = layer.weight.shape
@@ -48,9 +48,14 @@ class JaxQuantLinearConfig(QuantLinearConfig):
             output_sizes=[self.output_size],
         )
 
-        # Block size from environment (same as vLLM uses REQUANTIZE_BLOCK_SIZE)
         self.block_size = envs.REQUANTIZE_BLOCK_SIZE
         self.enable_quantized_matmul_kernel = self.block_size is not None
+
+        # Block size from HF checkpoint config (for dequantizing pre-quantized
+        # checkpoints before re-quantizing to a different block size)
+        self.checkpoint_block_size = None
+        if quant_config and hasattr(quant_config, 'weight_block_size'):
+            self.checkpoint_block_size = quant_config.weight_block_size
 
         # Compute weight sharding from layer
         self.weight_sharding = self._compute_weight_sharding(layer)

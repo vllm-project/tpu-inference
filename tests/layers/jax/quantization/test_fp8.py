@@ -82,10 +82,10 @@ class TestFp8Linear:
                           quant_config=quant_config)
 
         assert isinstance(layer.quant_method, Fp8LinearMethod)
-        assert hasattr(layer, "weight_scale")
-        assert layer.weight_scale.value.shape == (output_dim, )
-        assert layer.weight_scale.value.dtype == jnp.float32
-        assert hasattr(layer.weight_scale, "weight_loader")
+        assert hasattr(layer, "weight_scale_inv")
+        assert layer.weight_scale_inv.value.shape == (output_dim, )
+        assert layer.weight_scale_inv.value.dtype == jnp.float32
+        assert hasattr(layer.weight_scale_inv, "weight_loader")
 
         layer.quant_method.linear_config.mesh = mesh
 
@@ -113,7 +113,7 @@ class TestFp8Linear:
         s_val = jax.random.uniform(k2, (output_dim, ), dtype=jnp.float32)
 
         layer.weight.value = w_val
-        layer.weight_scale.value = s_val
+        layer.weight_scale_inv.value = s_val
 
         hidden_states = jax.random.uniform(k3, (batch_size, input_dim),
                                            dtype=jnp.float32)
@@ -148,9 +148,10 @@ class TestFp8Linear:
         # Create a dummy torch tensor for scale
         torch_scale = torch.rand((output_dim, ), dtype=torch.float32)
 
-        layer.weight_scale.mesh = mesh
-        layer.weight_scale.weight_loader(layer.weight_scale, torch_scale)
-        jax_scale = layer.weight_scale.value
+        layer.weight_scale_inv.mesh = mesh
+        layer.weight_scale_inv.weight_loader(layer.weight_scale_inv,
+                                             torch_scale)
+        jax_scale = layer.weight_scale_inv.value
         np_scale_from_torch = torch_scale.numpy()
 
         assert jnp.allclose(jax_scale, np_scale_from_torch)
@@ -175,7 +176,7 @@ class TestFp8Linear:
                 self.linear = torch.nn.Linear(input_dim,
                                               output_dim,
                                               bias=False)
-                self.linear.weight_scale = torch.nn.Parameter(
+                self.linear.weight_scale_inv = torch.nn.Parameter(
                     torch.rand((output_dim, ), dtype=torch.float32))
 
         class JaxFP8Model(JaxModule, LoadableWithIterator):
@@ -211,7 +212,7 @@ class TestFp8Linear:
                 jax_model = JaxFP8Model(rngs=nnx.Rngs(0),
                                         quant_config=quant_config)
                 jax_model.linear.weight.mesh = mesh
-                jax_model.linear.weight_scale.mesh = mesh
+                jax_model.linear.weight_scale_inv.mesh = mesh
 
                 loader = get_model_loader(
                     LoadConfig(load_format="safetensors"))
@@ -235,8 +236,8 @@ class TestFp8Linear:
                                    rtol=1e-5)
 
         # Verify Scale
-        expected_scale = torch_model.linear.weight_scale.detach().numpy()
-        np.testing.assert_allclose(jax_model.linear.weight_scale.value,
+        expected_scale = torch_model.linear.weight_scale_inv.detach().numpy()
+        np.testing.assert_allclose(jax_model.linear.weight_scale_inv.value,
                                    expected_scale,
                                    rtol=1e-5)
 
@@ -278,7 +279,7 @@ class TestFp8Linear:
                 jax_model = JaxFP8Model(rngs=nnx.Rngs(0),
                                         quant_config=quant_config)
                 jax_model.linear.weight.mesh = mesh
-                jax_model.linear.weight_scale.mesh = mesh
+                jax_model.linear.weight_scale_inv.mesh = mesh
 
                 loader = get_model_loader(
                     LoadConfig(load_format="safetensors"))
@@ -305,7 +306,7 @@ class TestFp8Linear:
         state_dict = {
             "linear.weight":
             rng.standard_normal((output_dim, input_dim)).astype(np.float32),
-            "linear.weight_scale":
+            "linear.weight_scale_inv":
             rng.random((n_blocks * output_dim, )).astype(np.float32),
         }
 
@@ -314,8 +315,8 @@ class TestFp8Linear:
                                                monkeypatch)
 
         assert jax_model.linear.weight.value.dtype == jnp.float8_e4m3fn
-        assert jax_model.linear.weight_scale.value.shape == (n_blocks, 1,
-                                                             output_dim)
+        assert jax_model.linear.weight_scale_inv.value.shape == (n_blocks, 1,
+                                                                 output_dim)
 
     def test_load_checkpoint_fp8_perchannel(self, mesh):
         """Pre-quantized per-channel FP8 checkpoint → kept as-is."""
@@ -331,7 +332,7 @@ class TestFp8Linear:
 
         state_dict = {
             "linear.weight": weight.astype(ml_dtypes.float8_e4m3fn),
-            "linear.weight_scale": scale,
+            "linear.weight_scale_inv": scale,
         }
 
         jax_model = self._load_from_checkpoint(mesh, state_dict, input_dim,
@@ -341,7 +342,7 @@ class TestFp8Linear:
         # Weight values preserved (transposed: HF (out, in) → JAX (in, out))
         expected = jnp.array(weight.T).astype(jnp.float8_e4m3fn)
         assert jnp.array_equal(jax_model.linear.weight.value, expected)
-        np.testing.assert_allclose(jax_model.linear.weight_scale.value,
+        np.testing.assert_allclose(jax_model.linear.weight_scale_inv.value,
                                    scale,
                                    rtol=1e-5)
 
@@ -371,7 +372,7 @@ class TestFp8Linear:
             "linear.weight":
             rng.standard_normal(
                 (output_dim, input_dim)).astype(ml_dtypes.float8_e4m3fn),
-            "linear.weight_scale":
+            "linear.weight_scale_inv":
             scales,
         }
 
@@ -380,8 +381,8 @@ class TestFp8Linear:
                                                monkeypatch)
 
         assert jax_model.linear.weight.value.dtype == jnp.float8_e4m3fn
-        assert jax_model.linear.weight_scale.value.shape == (n_blocks, 1,
-                                                             output_dim)
+        assert jax_model.linear.weight_scale_inv.value.shape == (n_blocks, 1,
+                                                                 output_dim)
 
     def test_fp8_linear_blockwise_init(self, mesh, monkeypatch):
         """Test Fp8Config with blockwise quantization initialization.
@@ -406,24 +407,26 @@ class TestFp8Linear:
                           quant_config=quant_config)
 
         assert isinstance(layer.quant_method, Fp8LinearMethod)
-        assert hasattr(layer, "weight_scale")
+        assert hasattr(layer, "weight_scale_inv")
 
         n_blocks = input_dim // block_size
-        assert layer.weight_scale.value.shape == (n_blocks, 1, output_dim)
-        assert layer.weight_scale.value.dtype == jnp.float32
-        assert hasattr(layer.weight_scale, "weight_loader")
+        assert layer.weight_scale_inv.value.shape == (n_blocks, 1, output_dim)
+        assert layer.weight_scale_inv.value.dtype == jnp.float32
+        assert hasattr(layer.weight_scale_inv, "weight_loader")
 
         assert layer.quant_method.linear_config.enable_quantized_matmul_kernel
         assert layer.quant_method.linear_config.block_size == block_size
 
         layer.quant_method.linear_config.mesh = mesh
+        layer.weight.mesh = mesh
+        layer.weight_scale_inv.mesh = mesh
 
         # Requantize weights (randomly initialized as float32) to valid FP8 for the kernel
-        layer.quant_method.process_weights_after_loading(layer)
+        layer.quant_method.process_weights_after_loading(layer, mesh)
 
         # Verify requantization produced FP8 weights and correct scale shape
         assert layer.weight.value.dtype == jnp.float8_e4m3fn
-        assert layer.weight_scale.value.shape == (n_blocks, 1, output_dim)
+        assert layer.weight_scale_inv.value.shape == (n_blocks, 1, output_dim)
 
         with mesh:
             hidden_states = jnp.ones((batch_size, input_dim))
@@ -462,7 +465,7 @@ class TestFp8Linear:
                                    dtype=jnp.float32)
 
         layer.weight.value = w_f8
-        layer.weight_scale.value = s_val
+        layer.weight_scale_inv.value = s_val
 
         hidden_states = jax.random.uniform(k3, (batch_size, input_dim),
                                            dtype=jnp.float32)
@@ -504,9 +507,10 @@ class TestFp8Linear:
         # Create checkpoint-format scale: (n_blocks, n_out)
         torch_scale = torch.rand((n_blocks, output_dim), dtype=torch.float32)
 
-        layer.weight_scale.mesh = mesh
-        layer.weight_scale.weight_loader(layer.weight_scale, torch_scale)
-        jax_scale = layer.weight_scale.value
+        layer.weight_scale_inv.mesh = mesh
+        layer.weight_scale_inv.weight_loader(layer.weight_scale_inv,
+                                             torch_scale)
+        jax_scale = layer.weight_scale_inv.value
 
         # Verify shape transformation: (n_blocks, n_out) -> (n_blocks, 1, n_out)
         assert jax_scale.shape == (n_blocks, 1, output_dim)
@@ -554,23 +558,24 @@ class TestFp8Linear:
         torch_scale_wrong = torch.rand((wrong_blocks, output_dim),
                                        dtype=torch.float32)
 
-        layer.weight_scale.mesh = mesh
+        layer.weight_scale_inv.mesh = mesh
         with pytest.raises(ValueError,
                            match="Checkpoint scale shape mismatch"):
-            layer.weight_scale.weight_loader(layer.weight_scale,
-                                             torch_scale_wrong)
+            layer.weight_scale_inv.weight_loader(layer.weight_scale_inv,
+                                                 torch_scale_wrong)
 
-    def test_fp8_requantization_requires_block_size(self, mesh, rng):
-        """Test that requantization without REQUANTIZE_BLOCK_SIZE raises an error.
+    def test_fp8_perchannel_requantization(self, mesh, rng):
+        """Test that per-channel requantization works from float32 weights.
 
-        Consistent with vLLM, per-channel requantization is not supported.
-        Per-channel FP8 is only supported when loading from a pre-quantized checkpoint.
+        When no REQUANTIZE_BLOCK_SIZE is set, float32 weights are
+        requantized using per-channel quantization.
         """
         # No monkeypatch.setenv - per-channel mode (no block size)
         quant_config = Fp8Config()
 
         input_dim = 16
         output_dim = 32
+        batch_size = 4
 
         layer = JaxLinear(input_size=input_dim,
                           output_size=output_dim,
@@ -579,19 +584,31 @@ class TestFp8Linear:
 
         # Verify per-channel config
         assert not layer.quant_method.linear_config.enable_quantized_matmul_kernel
-        assert layer.weight_scale.value.shape == (output_dim, )
+        assert layer.weight_scale_inv.value.shape == (output_dim, )
 
         # Set float32 weights (simulating a non-quantized checkpoint)
-        k1 = jax.random.PRNGKey(0)
+        k1, k2 = jax.random.split(rng, 2)
         original_weight = jax.random.normal(k1, (input_dim, output_dim),
                                             dtype=jnp.float32)
         layer.weight.value = original_weight
 
         layer.quant_method.linear_config.mesh = mesh
+        layer.weight.mesh = mesh
+        layer.weight_scale_inv.mesh = mesh
 
-        # Attempting to requantize without REQUANTIZE_BLOCK_SIZE should raise
-        with pytest.raises(ValueError, match="REQUANTIZE_BLOCK_SIZE"):
-            layer.quant_method.process_weights_after_loading(layer)
+        # Per-channel requantization
+        layer.quant_method.process_weights_after_loading(layer, mesh)
+
+        assert layer.weight.value.dtype == jnp.float8_e4m3fn
+        assert layer.weight_scale_inv.value.shape == (output_dim, )
+
+        # Verify forward pass works
+        with mesh:
+            hidden_states = jax.random.uniform(k2, (batch_size, input_dim),
+                                               dtype=jnp.float32)
+            out = layer(hidden_states)
+            assert out.shape == (batch_size, output_dim)
+            assert not jnp.isnan(out).any()
 
     def test_fp8_perchannel_from_checkpoint(self, mesh, rng):
         """Test that per-channel FP8 works when loaded from pre-quantized checkpoint.
@@ -612,7 +629,7 @@ class TestFp8Linear:
 
         # Verify per-channel config
         assert not layer.quant_method.linear_config.enable_quantized_matmul_kernel
-        assert layer.weight_scale.value.shape == (output_dim, )
+        assert layer.weight_scale_inv.value.shape == (output_dim, )
 
         # Simulate loading from pre-quantized checkpoint (weights already FP8)
         k1, k2 = jax.random.split(rng, 2)
@@ -622,7 +639,7 @@ class TestFp8Linear:
         scale = jax.random.uniform(k2, (output_dim, ), dtype=jnp.float32)
 
         layer.weight.value = fp8_weight
-        layer.weight_scale.value = scale
+        layer.weight_scale_inv.value = scale
 
         layer.quant_method.linear_config.mesh = mesh
 
@@ -633,6 +650,145 @@ class TestFp8Linear:
         assert layer.weight.value.dtype == jnp.float8_e4m3fn
 
         # Verify forward pass works
+        with mesh:
+            hidden_states = jax.random.uniform(k1, (batch_size, input_dim),
+                                               dtype=jnp.float32)
+            out = layer(hidden_states)
+            assert out.shape == (batch_size, output_dim)
+            assert not jnp.isnan(out).any()
+
+    def test_bf16_to_fp8_blockwise_requantization(self, mesh, rng,
+                                                  monkeypatch):
+        """Test BF16 weights → blockwise FP8 requantization.
+
+        Uses dimensions from tuned configurations:
+        - TPU v7: (7, 16, 14336, 4096, 'float8_e4m3fn', 'float8_e4m3fn')
+        """
+        block_size = 128
+        monkeypatch.setenv("REQUANTIZE_BLOCK_SIZE", str(block_size))
+        quant_config = Fp8Config()
+
+        input_dim = 4096
+        output_dim = 14336
+        batch_size = 16
+        n_blocks = input_dim // block_size
+
+        layer = JaxLinear(input_size=input_dim,
+                          output_size=output_dim,
+                          rngs=nnx.Rngs(0),
+                          quant_config=quant_config)
+
+        k1, k2 = jax.random.split(rng, 2)
+        bf16_weight = jax.random.normal(k1, (input_dim, output_dim),
+                                        dtype=jnp.bfloat16)
+        layer.weight.value = bf16_weight
+
+        layer.quant_method.linear_config.mesh = mesh
+        layer.weight.mesh = mesh
+        layer.weight_scale_inv.mesh = mesh
+
+        layer.quant_method.process_weights_after_loading(layer, mesh)
+
+        assert layer.weight.value.dtype == jnp.float8_e4m3fn
+        assert layer.weight_scale_inv.value.shape == (n_blocks, 1, output_dim)
+
+        with mesh:
+            hidden_states = jax.random.uniform(k2, (batch_size, input_dim),
+                                               dtype=jnp.float32)
+            out = layer(hidden_states)
+            assert out.shape == (batch_size, output_dim)
+            assert not jnp.isnan(out).any()
+
+    def test_bf16_to_fp8_perchannel_requantization(self, mesh, rng):
+        """Test BF16 weights → per-channel FP8 requantization."""
+        # No REQUANTIZE_BLOCK_SIZE → per-channel mode
+        quant_config = Fp8Config()
+
+        input_dim = 16
+        output_dim = 32
+        batch_size = 4
+
+        layer = JaxLinear(input_size=input_dim,
+                          output_size=output_dim,
+                          rngs=nnx.Rngs(0),
+                          quant_config=quant_config)
+
+        k1, k2 = jax.random.split(rng, 2)
+        bf16_weight = jax.random.normal(k1, (input_dim, output_dim),
+                                        dtype=jnp.bfloat16)
+        layer.weight.value = bf16_weight
+
+        layer.quant_method.linear_config.mesh = mesh
+        layer.weight.mesh = mesh
+        layer.weight_scale_inv.mesh = mesh
+
+        layer.quant_method.process_weights_after_loading(layer, mesh)
+
+        assert layer.weight.value.dtype == jnp.float8_e4m3fn
+        assert layer.weight_scale_inv.value.shape == (output_dim, )
+
+        with mesh:
+            hidden_states = jax.random.uniform(k2, (batch_size, input_dim),
+                                               dtype=jnp.float32)
+            out = layer(hidden_states)
+            assert out.shape == (batch_size, output_dim)
+            assert not jnp.isnan(out).any()
+
+    def test_fp8_blocksize_change_requantization(self, mesh, rng, monkeypatch):
+        """Test FP8 → FP8 re-quantization with a different block size.
+
+        Simulates loading an FP8 checkpoint with block_size=64, then
+        re-quantizing to block_size=128 via REQUANTIZE_BLOCK_SIZE. 
+
+        Uses dimensions from tuned configurations:
+        - TPU v7: (7, 16, 14336, 4096, 'float8_e4m3fn', 'float8_e4m3fn')
+        """
+        original_block_size = 64
+        target_block_size = 128
+        monkeypatch.setenv("REQUANTIZE_BLOCK_SIZE", str(target_block_size))
+        quant_config = Fp8Config()
+
+        input_dim = 4096
+        output_dim = 14336
+        batch_size = 16
+        original_n_blocks = input_dim // original_block_size  # 64
+        target_n_blocks = input_dim // target_block_size  # 32
+
+        layer = JaxLinear(input_size=input_dim,
+                          output_size=output_dim,
+                          rngs=nnx.Rngs(0),
+                          quant_config=quant_config)
+
+        # Verify layer was created with the TARGET block size
+        assert layer.weight_scale_inv.value.shape == (target_n_blocks, 1,
+                                                      output_dim)
+
+        # Simulate a pre-quantized FP8 checkpoint with the ORIGINAL block size.
+        # Manually set FP8 weights and scales (bypassing the loader).
+        k1, k2 = jax.random.split(rng, 2)
+        fp8_weight = jax.random.normal(k1, (input_dim, output_dim),
+                                       dtype=jnp.float32).astype(
+                                           jnp.float8_e4m3fn)
+        original_scale = jax.random.uniform(k2,
+                                            (original_n_blocks, 1, output_dim),
+                                            dtype=jnp.float32)
+
+        layer.weight.value = fp8_weight
+        layer.weight_scale_inv.value = original_scale
+
+        layer.quant_method.linear_config.mesh = mesh
+        layer.weight.mesh = mesh
+        layer.weight_scale_inv.mesh = mesh
+
+        # Re-quantize: dequant with original scale → requant with target block size
+        layer.quant_method.process_weights_after_loading(layer, mesh)
+
+        # Scale shape should now match the TARGET block size
+        assert layer.weight.value.dtype == jnp.float8_e4m3fn
+        assert layer.weight_scale_inv.value.shape == (target_n_blocks, 1,
+                                                      output_dim)
+
+        # Verify forward pass works with the new block size
         with mesh:
             hidden_states = jax.random.uniform(k1, (batch_size, input_dim),
                                                dtype=jnp.float32)
@@ -677,13 +833,15 @@ class TestFp8Linear:
         expected_output = jnp.dot(hidden_states, original_weight)
 
         layer.quant_method.linear_config.mesh = mesh
+        layer.weight.mesh = mesh
+        layer.weight_scale_inv.mesh = mesh
 
         # Trigger requantization
-        layer.quant_method.process_weights_after_loading(layer)
+        layer.quant_method.process_weights_after_loading(layer, mesh)
 
         # Get quantized weights and scales
         w_q = layer.weight.value
-        scale = layer.weight_scale.value
+        scale = layer.weight_scale_inv.value
 
         assert w_q.dtype == jnp.float8_e4m3fn
         assert scale.shape == (n_blocks, 1, output_dim)
