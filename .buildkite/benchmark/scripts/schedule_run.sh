@@ -241,6 +241,8 @@ EOF
 #     - ".buildkite/benchmark/scripts/agent/run_job.sh 68db88d5-80e6-4973-9d24-0dbcea35cc59"
 
   pipeline_steps+=("${pipeline_yaml}")
+  echo "generate yml: ${pipeline_yaml}"
+  echo "steps: ${pipeline_steps}"
 
   echo "$RECORD_ID handled."
 done
