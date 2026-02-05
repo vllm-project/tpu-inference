@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import jax
+import jax.numpy as jnp
 import torch
 import torch.nn.functional as F
 
@@ -100,3 +101,53 @@ def ref_moe(x,
     x = x[seq_indexes, expert_indices]
 
     return torch.einsum("tai,ta->ti", x, expert_weights)
+
+
+def ref_moe_jax(x,
+                router_logits,
+                w1,
+                w2,
+                w1_bias,
+                w2_bias,
+                top_k,
+                renormalize,
+                activation,
+                scoring_func="softmax"):
+    match scoring_func:
+        case "softmax":
+            expert_weights = jax.nn.softmax(router_logits, axis=-1)
+        case "sigmoid":
+            expert_weights = jax.nn.sigmoid(router_logits)
+        case _:
+            raise NotImplementedError(
+                f"No reference implementation for {scoring_func} scoring")
+
+    expert_weights, expert_indices = jax.lax.top_k(expert_weights, top_k)
+    if renormalize:
+        expert_weights /= expert_weights.sum(axis=-1, keepdims=True)
+
+    x = jnp.einsum("ti,eoi->teo", x, w1)
+    if w1_bias is not None:
+        x += w1_bias[None, ...]
+
+    match activation:
+        case "silu":
+            x1, x3 = jnp.split(x, 2, axis=-1)
+            x = jax.nn.silu(x1) * x3
+        case "swigluoai":
+            x1, x3 = x[..., ::2], x[..., 1::2]
+            x1 = jnp.minimum(x1, 7.0)
+            x3 = jnp.clip(x3, -7.0, 7.0)
+            gated_activation = x1 * jax.nn.sigmoid(x1 * 1.702)
+            x = gated_activation * (x3 + 1)
+        case _:
+            raise NotImplementedError(
+                f"No reference implementation for {activation} activation")
+
+    x = jnp.einsum("teo,eio->tei", x, w2)
+    if w2_bias is not None:
+        x += w2_bias[None, ...]
+
+    x = jnp.take_along_axis(x, expert_indices[..., None], axis=1)
+
+    return jnp.einsum("tai,ta->ti", x, expert_weights)

@@ -33,9 +33,6 @@ def get_tpu_quantization_config(vllm_config: VllmConfig):
         None: UnquantizedConfig,
         FP8: Fp8Config,
     }
-    # TODO (jacobplatin): temporary workaround for now before FP8 is fully ready for DeepSeek
-    if vllm_config.model_config.hf_config.model_type == "deepseek_v3":
-        method_to_config[FP8] = UnquantizedConfig
 
     if model_config.quantization not in method_to_config:
         raise NotImplementedError(

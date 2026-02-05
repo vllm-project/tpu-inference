@@ -35,6 +35,7 @@ DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS = 512
 DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS = 256
 DEFAULT_MAX_NUM_BLOCKS_PER_REQ = 16
 
+# TODO: remove once FP8 linear support lands
 DEFAULT_DEEPSEEK_FP8_CONFIG = {
     "qwix": {
         "use_abstract_model":
@@ -55,6 +56,7 @@ DEFAULT_DEEPSEEK_FP8_CONFIG = {
     }
 }
 
+# TODO: remove once FP8 linear support lands
 DEFAULT_DEEPSEEK_FP4_MLP_MOE_FP8_ATTN_CONFIG = {
     "qwix": {
         "use_abstract_model":

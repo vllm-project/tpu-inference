@@ -148,16 +148,14 @@ def sparse_moe_distributed_fwd(
     with jax.named_scope("gating"):
         gating_TEF = gmm_fn(compute_inputs, kernel_gating, compute_group_sizes,
                             moe_instance.tile_size, moe_instance.moe_backend,
-                            moe_instance.dtype,
-                            moe_instance.qwix_quantized_weight_dtype)
+                            moe_instance.dtype)
         activated_gating_TEF = modeling_flax_utils.ACT2FN[
             moe_instance.hidden_act](gating_TEF)
 
     with jax.named_scope("up_projection"):
         up_proj_TEF = gmm_fn(compute_inputs, kernel_up_proj,
                              compute_group_sizes, moe_instance.tile_size,
-                             moe_instance.moe_backend, moe_instance.dtype,
-                             moe_instance.qwix_quantized_weight_dtype)
+                             moe_instance.moe_backend, moe_instance.dtype)
 
     fuse_TEF = activated_gating_TEF * up_proj_TEF
 
@@ -166,8 +164,7 @@ def sparse_moe_distributed_fwd(
                                      compute_group_sizes,
                                      moe_instance.tile_size,
                                      moe_instance.moe_backend,
-                                     moe_instance.dtype,
-                                     moe_instance.qwix_quantized_weight_dtype)
+                                     moe_instance.dtype)
 
     # 5. Return Results (All-to-All)
     if moe_instance.num_expert_parallelism > 1:

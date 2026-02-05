@@ -1669,7 +1669,7 @@ class DeepSeekV3(nnx.Module):
 
                 # routed experts
                 custom_module = JaxMoE(
-                    dtype=dtype,
+                    dtype=jnp.float8_e4m3fn,
                     num_local_experts=num_local_experts,
                     apply_expert_weight_before_computation=False,
                     expert_axis_name=self.expert_axis_name,
