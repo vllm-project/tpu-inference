@@ -28,13 +28,13 @@ EXTRA_ENVS="$5"
 if [[ "$CSV_FILE_ARG" == gs://* ]]; then
   echo "GCS path detected. Downloading from $CSV_FILE_ARG"
   CSV_FILE=$(mktemp)
+  # Schedule cleanup of the temporary file on exit
+  trap 'rm -f "$CSV_FILE"' EXIT
   if ! gsutil cp "$CSV_FILE_ARG" "$CSV_FILE"; then
     echo "Failed to download from GCS: $CSV_FILE_ARG"
     rm "$CSV_FILE"
     exit 1
   fi
-  # Schedule cleanup of the temporary file on exit
-  trap 'rm -f "$CSV_FILE"' EXIT
 else
   CSV_FILE="$CSV_FILE_ARG"
 fi
@@ -65,26 +65,9 @@ BUILDKITE_QUEUE_DEVICE_MAP=(
 
 # TODO: Maybe using another method to read csv
 # === Read CSV and skip header ===
-tail -n +2 "$CSV_FILE" | while read -r line || [ -n "${line}" ]; do
+while read -r line || [ -n "${line}" ]; do
 
   line=$(echo "$line" | tr -d '\r')
-  
-  # # Safely split CSV line into variables
-  # IFS=',' read -r \
-  #   DEVICE \
-  #   MODEL \
-  #   MAX_NUM_SEQS \
-  #   MAX_NUM_BATCHED_TOKENS \
-  #   TENSOR_PARALLEL_SIZE \
-  #   MAX_MODEL_LEN \
-  #   DATASET \
-  #   INPUT_LEN \
-  #   OUTPUT_LEN \
-  #   EXPECTED_ETEL \
-  #   NUM_PROMPTS \
-  #   MODELTAG \
-  #   PREFIX_LEN <<< "$line"
-  # Skip empty lines
   [ -z "$line" ] && continue
 
   # Use Python to safely parse the CSV line.
@@ -138,31 +121,6 @@ tail -n +2 "$CSV_FILE" | while read -r line || [ -n "${line}" ]; do
   SQL_EXTRA_ARGS=$(prepare_sql_val "$EXTRA_ARGS" "''")
   
   echo "Inserting Run: $RECORD_ID"
-  # gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
-  #   --instance="$GCP_INSTANCE_ID" \
-  #   --project="$GCP_PROJECT_ID" \
-  #   --sql="INSERT INTO RunRecord (
-  #     RecordId, Status, CreatedTime, Device, Model, RunType, CodeHash,
-  #     MaxNumSeqs, MaxNumBatchedTokens, TensorParallelSize, MaxModelLen,
-  #     Dataset, InputLen, OutputLen, LastUpdate, CreatedBy,JobReference, ExpectedETEL, NumPrompts, ModelTag, PrefixLen, ExtraEnvs
-  #   ) VALUES (
-  #     '$RECORD_ID', 'CREATED', PENDING_COMMIT_TIMESTAMP(), '$DEVICE', '$MODEL', '$RUN_TYPE', '$CODE_HASH',
-  #     $MAX_NUM_SEQS,
-  #     $MAX_NUM_BATCHED_TOKENS,
-  #     $TENSOR_PARALLEL_SIZE,
-  #     $MAX_MODEL_LEN,
-  #     '$DATASET',
-  #     $INPUT_LEN,
-  #     $OUTPUT_LEN,
-  #     PENDING_COMMIT_TIMESTAMP(),
-  #     '$USER',
-  #     '$JOB_REFERENCE',
-  #     ${EXPECTED_ETEL:-$VERY_LARGE_EXPECTED_ETEL},
-  #     ${NUM_PROMPTS:-1000},
-  #     '${MODELTAG:-PROD}',
-  #     ${PREFIX_LEN:-0},
-  #     '$EXTRA_ENVS'
-  #   );"
   gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
     --instance="$GCP_INSTANCE_ID" \
     --project="$GCP_PROJECT_ID" \
@@ -226,26 +184,12 @@ tail -n +2 "$CSV_FILE" | while read -r line || [ -n "${line}" ]; do
 EOF
 )
 
-# - label: "Publish: benchmark - RecordId: 68db88d5-80e6-4973-9d24-0dbcea35cc59"
-#   env:
-#     GCP_PROJECT_ID: "cloud-tpu-inference-test"
-#     GCP_REGION: "southamerica-west1"
-#     GCS_BUCKET: "vllm-cb-storage2"
-#     ARTIFACT_REPO: "vllm-tpu-bm-bk"
-#     GCP_INSTANCE_ID: "vllm-bm-inst"
-#     GCP_DATABASE_ID: "vllm-bm-bk-runs"
-#   agents:
-#     queue: tpu_v6e_queue
-#   command:
-#     - CODE_HASH=$$(buildkite-agent meta-data get 'CODE_HASH')
-#     - ".buildkite/benchmark/scripts/agent/run_job.sh 68db88d5-80e6-4973-9d24-0dbcea35cc59"
-
   pipeline_steps+=("${pipeline_yaml}")
   echo "generate yml: ${pipeline_yaml}"
   echo "steps: ${pipeline_steps}"
 
   echo "$RECORD_ID handled."
-done
+done < <(tail -n +2 "$CSV_FILE")
 
 echo "steps: ${pipeline_steps}"
 
