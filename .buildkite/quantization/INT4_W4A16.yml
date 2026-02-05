@@ -15,18 +15,21 @@
 # pipeline-name: INT4 W4A16
 # pipeline-type: quantization support matrix
 steps:
-  - label: "Correctness tests for INT4 W4A16"
-    key: "INT4_W4A16_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Correctness tests for INT4 W4A16"
+    key: "${TPU_VERSION:-tpu6e}_INT4_W4A16_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
-        buildkite-agent meta-data set "INT4_W4A16_CorrectnessTest" "unverified"
-  - label: "Record correctness test result for INT4 W4A16"
-    key: "record_INT4_W4A16_CorrectnessTest"
-    depends_on: "INT4_W4A16_CorrectnessTest"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_INT4_W4A16_CorrectnessTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for INT4 W4A16"
+    key: "${TPU_VERSION:-tpu6e}_record_INT4_W4A16_CorrectnessTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_INT4_W4A16_CorrectnessTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "INT4 W4A16"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "quantization support matrix"
@@ -34,21 +37,24 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh INT4_W4A16_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_INT4_W4A16_CorrectnessTest
 
-  - label: "Performance tests for INT4 W4A16"
-    key: "INT4_W4A16_PerformanceTest"
-    depends_on: "record_INT4_W4A16_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Performance tests for INT4 W4A16"
+    key: "${TPU_VERSION:-tpu6e}_INT4_W4A16_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_INT4_W4A16_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
-        buildkite-agent meta-data set "INT4_W4A16_PerformanceTest" "unverified"
-  - label: "Record performance test result for INT4 W4A16"
-    key: "record_INT4_W4A16_PerformanceTest"
-    depends_on: "INT4_W4A16_PerformanceTest"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_INT4_W4A16_PerformanceTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for INT4 W4A16"
+    key: "${TPU_VERSION:-tpu6e}_record_INT4_W4A16_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_INT4_W4A16_PerformanceTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "INT4 W4A16"
       CI_STAGE: "PerformanceTest"
       CI_CATEGORY: "quantization support matrix"
@@ -56,4 +62,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh INT4_W4A16_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_INT4_W4A16_PerformanceTest

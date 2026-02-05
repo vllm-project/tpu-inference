@@ -15,18 +15,21 @@
 # pipeline-name: MLA
 # pipeline-type: kernel support matrix
 steps:
-  - label: "Correctness tests for MLA"
-    key: "MLA_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Correctness tests for MLA"
+    key: "${TPU_VERSION:-tpu6e}_MLA_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
-        buildkite-agent meta-data set "MLA_CorrectnessTest" "unverified"
-  - label: "Record correctness test result for MLA"
-    key: "record_MLA_CorrectnessTest"
-    depends_on: "MLA_CorrectnessTest"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_MLA_CorrectnessTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for MLA"
+    key: "${TPU_VERSION:-tpu6e}_record_MLA_CorrectnessTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_MLA_CorrectnessTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "MLA"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "kernel support matrix"
@@ -34,21 +37,24 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh MLA_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_MLA_CorrectnessTest
 
-  - label: "Performance tests for MLA"
-    key: "MLA_PerformanceTest"
-    depends_on: "record_MLA_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Performance tests for MLA"
+    key: "${TPU_VERSION:-tpu6e}_MLA_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_MLA_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
-        buildkite-agent meta-data set "MLA_PerformanceTest" "unverified"
-  - label: "Record performance test result for MLA"
-    key: "record_MLA_PerformanceTest"
-    depends_on: "MLA_PerformanceTest"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_MLA_PerformanceTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for MLA"
+    key: "${TPU_VERSION:-tpu6e}_record_MLA_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_MLA_PerformanceTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "MLA"
       CI_STAGE: "PerformanceTest"
       CI_CATEGORY: "kernel support matrix"
@@ -56,4 +62,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh MLA_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_MLA_PerformanceTest

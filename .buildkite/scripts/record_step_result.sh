@@ -22,7 +22,13 @@ fi
 
 STEP_KEY="$1"
 
-echo "--- Checking ${STEP_KEY} Outcome"
+# Determine the prefix based on hardware version to prevent data collisions.
+TPU_METADATA_PREFIX="v6"
+if echo "${CI_TPU_VERSION}" | grep -qi "tpu7x"; then
+  TPU_METADATA_PREFIX="v7"
+fi
+
+echo "--- Checking ${STEP_KEY} Outcome (Hardware: ${CI_TPU_VERSION:-v6})"
 
 # Try to get the custom string you saved
 CUSTOM_STATUS=$(buildkite-agent meta-data get "${STEP_KEY}" --default "")
@@ -51,8 +57,9 @@ case $OUTCOME in
     ;;
 esac
 
-buildkite-agent meta-data set "${CI_TARGET}_category" "${CI_CATEGORY}"
-buildkite-agent meta-data set "${CI_TARGET}:${CI_STAGE}" "${message}"
+# Save the results using the hardware-specific prefix.
+buildkite-agent meta-data set "${TPU_METADATA_PREFIX}${CI_TARGET}_category" "${CI_CATEGORY}"
+buildkite-agent meta-data set "${TPU_METADATA_PREFIX}${CI_TARGET}:${CI_STAGE}" "${message}"
 
 if [ "${OUTCOME}" != "passed" ] && [ "${OUTCOME}" != "skipped" ] && [ "${OUTCOME}" != "unverified" ]; then
     exit 1
