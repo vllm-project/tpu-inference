@@ -55,8 +55,13 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             ])
 
             # E.g. if weight shape is (NH, D), sharding is ('x', None, 'y'), we need to fuse sharding to ('x', 'y')
-            sharding = layer.weight.sharding + (None, ) * (
-                len(layer.kernel_shape) - len(layer.weight.sharding))
+            spec = layer.weight.sharding
+            if isinstance(layer.weight.sharding, jax.NamedSharding):
+                spec = layer.weight.sharding.spec
+            elif isinstance(layer.weight.sharding,
+                            jax.sharding.SingleDeviceSharding):
+                spec = ()
+            sharding = spec + (None, ) * (len(layer.kernel_shape) - len(spec))
             in_sharding = set(
                 s for i, s in enumerate(sharding)
                 if w_axis[i] in contracting_axis and s is not None)
@@ -67,9 +72,14 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 f"Cannot fuse sharding {layer.weight.sharding} into 2D weight sharding for {layer.einsum_str}"
             self.weight_sharding = (next(iter(in_sharding),
                                          None), next(iter(out_sharding), None))
+            self.output_shape = tuple([
+                layer.kernel_shape[i] for i, c in enumerate(w_axis)
+                if c not in contracting_axis
+            ])
         else:
             in_features, out_features = kernel_shape
             self.weight_sharding = layer.weight.sharding
+            self.output_shape = (out_features, )
 
         self.linear_config.output_sizes = [out_features]
         self.in_features = in_features
@@ -106,15 +116,17 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 load_nnx_param_from_reshaped_torch,
                 permute_dims=(0, 1),
             ))
-        layer.weight_scale_inv.sharding = layer.weight.sharding[::-1]
 
     def process_weights_after_loading(self, layer):
         assert isinstance(layer, JaxEinsum)
         assert self.quant_config.weight_block_size is not None
 
-        weight = layer.weight
-        weight_scale_inv = layer.weight_scale_inv
-        bias = layer.bias if hasattr(layer, 'bias') else None
+        weight = layer.weight.value
+        weight_scale_inv = layer.weight_scale_inv.value
+        bias = layer.bias.value if getattr(layer, 'bias',
+                                           None) is not None else None
+        if bias is not None:
+            bias = bias.reshape(-1)
         weights = common_fp8.process_blockwise_fp8_linear_weights(
             weight,
             weight_scale_inv,
@@ -152,7 +164,9 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 "Fp8 block-wise linear method only supports fuse_matmuls.")
         weight, scale = layer.weight.value, layer.weight_scale_inv.value
         bias = layer.bias.value if layer.bias is not None else None
-        return self._apply_fused(x, weight, scale, bias=bias)
+        out = self._apply_fused(x, weight, scale, bias=bias)
+        out = out.reshape(out.shape[:-1] + self.output_shape)
+        return out
 
 
 class Fp8Config(QuantizationConfig):
