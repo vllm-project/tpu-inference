@@ -240,6 +240,149 @@ class TestFp8Linear:
                                    expected_scale,
                                    rtol=1e-5)
 
+    def _load_from_checkpoint(self,
+                              mesh,
+                              state_dict,
+                              input_dim,
+                              output_dim,
+                              block_size=None,
+                              monkeypatch=None):
+        """Helper: save state_dict to safetensors, load into a JaxFP8Model."""
+        import json
+
+        from safetensors.numpy import save_file as np_save_file
+
+        if block_size is not None and monkeypatch is not None:
+            monkeypatch.setenv("REQUANTIZE_BLOCK_SIZE", str(block_size))
+
+        class JaxFP8Model(JaxModule, LoadableWithIterator):
+
+            def __init__(self, rngs, quant_config):
+                super().__init__()
+                self.linear = JaxLinear(input_size=input_dim,
+                                        output_size=output_dim,
+                                        rngs=rngs,
+                                        quant_config=quant_config)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            np_save_file(state_dict, os.path.join(tmpdir, "model.safetensors"))
+
+            with open(os.path.join(tmpdir, "config.json"), "w") as f:
+                json.dump({"model_type": "qwen2", "hidden_size": 16}, f)
+
+            vllm_config = VllmConfig(
+                model_config=ModelConfig(model=tmpdir, quantization="fp8"))
+            quant_config = get_tpu_quantization_config(vllm_config)
+
+            with mesh:
+                jax_model = JaxFP8Model(rngs=nnx.Rngs(0),
+                                        quant_config=quant_config)
+                jax_model.linear.weight.mesh = mesh
+                jax_model.linear.weight_scale.mesh = mesh
+
+                loader = get_model_loader(
+                    LoadConfig(load_format="safetensors"))
+
+                mock_model_config = MagicMock()
+                mock_model_config.model = tmpdir
+                mock_model_config.quantization = "fp8"
+                mock_model_config.revision = None
+
+                loader.load_weights(jax_model, mock_model_config)
+
+        return jax_model
+
+    def test_load_checkpoint_unquantized(self, mesh, monkeypatch):
+        """Float32 checkpoint → blockwise FP8 via REQUANTIZE_BLOCK_SIZE."""
+
+        input_dim = 16
+        output_dim = 32
+        block_size = 8
+        n_blocks = input_dim // block_size
+
+        rng = np.random.default_rng(42)
+        # HF checkpoint format: (output_dim, input_dim), float32
+        state_dict = {
+            "linear.weight":
+            rng.standard_normal((output_dim, input_dim)).astype(np.float32),
+            "linear.weight_scale":
+            rng.random((n_blocks * output_dim, )).astype(np.float32),
+        }
+
+        jax_model = self._load_from_checkpoint(mesh, state_dict, input_dim,
+                                               output_dim, block_size,
+                                               monkeypatch)
+
+        assert jax_model.linear.weight.value.dtype == jnp.float8_e4m3fn
+        assert jax_model.linear.weight_scale.value.shape == (n_blocks, 1,
+                                                             output_dim)
+
+    def test_load_checkpoint_fp8_perchannel(self, mesh):
+        """Pre-quantized per-channel FP8 checkpoint → kept as-is."""
+        import ml_dtypes
+
+        input_dim = 16
+        output_dim = 32
+
+        rng = np.random.default_rng(42)
+        weight = rng.standard_normal(
+            (output_dim, input_dim)).astype(np.float32)
+        scale = rng.random((output_dim, )).astype(np.float32)
+
+        state_dict = {
+            "linear.weight": weight.astype(ml_dtypes.float8_e4m3fn),
+            "linear.weight_scale": scale,
+        }
+
+        jax_model = self._load_from_checkpoint(mesh, state_dict, input_dim,
+                                               output_dim)
+
+        assert jax_model.linear.weight.value.dtype == jnp.float8_e4m3fn
+        # Weight values preserved (transposed: HF (out, in) → JAX (in, out))
+        expected = jnp.array(weight.T).astype(jnp.float8_e4m3fn)
+        assert jnp.array_equal(jax_model.linear.weight.value, expected)
+        np.testing.assert_allclose(jax_model.linear.weight_scale.value,
+                                   scale,
+                                   rtol=1e-5)
+
+    @pytest.mark.parametrize("scale_shape", ["flat", "2d"],
+                             ids=["flat_scales", "shaped_scales"])
+    def test_load_checkpoint_fp8_blockwise(self, mesh, monkeypatch,
+                                           scale_shape):
+        """Pre-quantized blockwise FP8 checkpoint → dequant and re-quantized.
+
+        Scales may be stored flat (n_blocks * n_out,) or shaped (n_blocks, n_out)
+        in the checkpoint; both are supported.
+        """
+        import ml_dtypes
+
+        input_dim = 16
+        output_dim = 32
+        block_size = 8
+        n_blocks = input_dim // block_size
+
+        rng = np.random.default_rng(42)
+        if scale_shape == "flat":
+            scales = rng.random((n_blocks * output_dim, )).astype(np.float32)
+        else:
+            scales = rng.random((n_blocks, output_dim)).astype(np.float32)
+
+        state_dict = {
+            "linear.weight":
+            rng.standard_normal(
+                (output_dim, input_dim)).astype(ml_dtypes.float8_e4m3fn),
+            "linear.weight_scale":
+            scales,
+        }
+
+        jax_model = self._load_from_checkpoint(mesh, state_dict, input_dim,
+                                               output_dim, block_size,
+                                               monkeypatch)
+
+        assert jax_model.linear.weight.value.dtype == jnp.float8_e4m3fn
+        assert jax_model.linear.weight_scale.value.shape == (n_blocks, 1,
+                                                             output_dim)
+
     def test_fp8_linear_blockwise_init(self, mesh, monkeypatch):
         """Test Fp8Config with blockwise quantization initialization.
 

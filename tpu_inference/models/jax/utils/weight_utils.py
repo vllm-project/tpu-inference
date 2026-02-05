@@ -769,10 +769,11 @@ def load_nnx_param_from_reshaped_torch(
         spec = ()
     mesh = getattr(jax_param, 'mesh', None)
 
-    jax_param.value = shard_put(t2j(torch_weight, use_dlpack=False).astype(
-        jax_param.value.dtype),
-                                spec,
-                                mesh=mesh)
+    jax_weight = t2j(torch_weight, use_dlpack=False)
+    if jax_weight.dtype not in (jnp.float8_e4m3fn, jnp.float8_e5m2):
+        jax_weight = jax_weight.astype(jax_param.value.dtype)
+
+    jax_param.value = shard_put(jax_weight, spec, mesh=mesh)
 
 
 class JaxAutoWeightsLoader(AutoWeightsLoader):
