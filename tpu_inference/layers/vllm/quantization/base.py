@@ -12,4 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from tpu_inference.models.vllm import vllm_model_loader  # noqa F401
+from abc import ABC, abstractmethod
+
+import torch
+
+
+class VllmQuantizationMethod(ABC):
+
+    @abstractmethod
+    def maybe_process_weights(self, layer: torch.nn.Module, param_name: str,
+                              args, kwargs):
+        raise NotImplementedError
