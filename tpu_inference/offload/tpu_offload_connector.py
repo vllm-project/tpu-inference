@@ -1474,10 +1474,11 @@ class TPUOffloadConnectorScheduler():
         _finished_reqs = list(self._finished_reqs_w_pending_ops)
         for req_id in _finished_reqs:
             is_gather_done = req_id not in self._save_reqs_w_pending_gather
-            is_save_done = req_id not in self._reqs_being_saved
             is_load_done = req_id not in self._reqs_being_loaded
 
-            if is_gather_done and is_save_done and is_load_done:
+            # NOTE(jcgu): we need to wait for gathers and loads before
+            # release the request
+            if is_gather_done and is_load_done:
                 self._fully_finished_reqs.add(req_id)
                 self._finished_reqs_w_pending_ops.discard(req_id)
                 logger.info(f"Request {req_id} is now fully finished.")
