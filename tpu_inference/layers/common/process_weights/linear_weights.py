@@ -142,13 +142,13 @@ def process_linear_weights(
 
 def shard_linear_weights(
     weights: LinearWeights,
-    mesh: Mesh,
+    mesh: Mesh | None,
     weight_p_spec: PartitionSpec,
     bias_p_spec: PartitionSpec,
     transposed: bool = True,
     per_tensor: bool = False,
 ) -> LinearWeights:
-
+    mesh = mesh or jax.sharding.get_mesh()
     if not transposed:
         # By defualt, we use transposed weights. If it is not transposed,
         # we need to transpose the sharding as well.
