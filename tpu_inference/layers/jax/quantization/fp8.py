@@ -42,11 +42,13 @@ def load_blockwise_fp8_scale(
     output_dim: int,
     n_blocks: int,
     param_name: str,
+    block_size: Optional[int] = None,
 ) -> None:
     """Load blockwise FP8 weight scales from checkpoint.
 
     Transforms scale shape from checkpoint format to kernel format:
     - Checkpoint: (n_blocks, n_out) or (n_blocks * n_out,) flattened
+    - Checkpoint (2D blocked): (n_blocks, n_out_blocks) or (n_out_blocks, n_blocks)
     - Kernel: (n_blocks, 1, n_out)
 
     Args:
@@ -55,6 +57,7 @@ def load_blockwise_fp8_scale(
         output_dim: Output dimension of the layer
         n_blocks: Number of quantization blocks
         param_name: Name of the parameter
+        block_size: Block size (optional). Used to handle 2D block scales.
 
     Raises:
         ValueError: If checkpoint scale shape doesn't match expected block size.
@@ -71,7 +74,25 @@ def load_blockwise_fp8_scale(
                 f"expected {expected_size} ({n_blocks} blocks × {output_dim} outputs), "
                 f"got {scale_jax.size}.")
         scale_jax = scale_jax.reshape(n_blocks, output_dim)
-    elif scale_jax.ndim == 2:
+
+    # Handle 2D blocked scales (scalar per block) or Transposed scales
+    if scale_jax.ndim == 2 and block_size is not None and scale_jax.shape != (
+            n_blocks, output_dim):
+        output_blocks = (output_dim + block_size - 1) // block_size
+
+        # Check for transposed 2D blocked: (output_blocks, n_blocks)
+        if scale_jax.shape == (output_blocks, n_blocks):
+            scale_jax = scale_jax.T
+
+        # Check for 2D blocked: (n_blocks, output_blocks)
+        if scale_jax.shape == (n_blocks, output_blocks):
+            # Expand to (n_blocks, output_blocks * block_size)
+            scale_jax = jnp.repeat(scale_jax, block_size, axis=1)
+            # Slice to exact output_dim
+            if scale_jax.shape[1] > output_dim:
+                scale_jax = scale_jax[:, :output_dim]
+
+    if scale_jax.ndim == 2:
         if scale_jax.shape != (n_blocks, output_dim):
             raise ValueError(
                 f"Checkpoint scale shape mismatch for '{param_name}': "
@@ -113,7 +134,10 @@ class Fp8LinearMethod(QuantizeMethodBase, jax_common.Fp8LinearMethod):
 
         input_dim = self.linear_config.input_size
         output_dim = self.linear_config.output_size
-        out_shard = self.linear_config.weight_sharding[0]
+
+        weight_sharding = self.linear_config.weight_sharding
+        spec = getattr(weight_sharding, 'spec', weight_sharding)
+        out_shard = spec[0]
 
         if self.linear_config.enable_quantized_matmul_kernel:
             # Blockwise quantization: 3D scales (n_blocks, 1, n_out)
@@ -134,7 +158,8 @@ class Fp8LinearMethod(QuantizeMethodBase, jax_common.Fp8LinearMethod):
                 load_blockwise_fp8_scale,
                 output_dim=output_dim,
                 n_blocks=n_blocks,
-                param_name="weight_scale_inv")
+                param_name="weight_scale_inv",
+                block_size=block_size)
         else:
             # Per-channel quantization: 1D scales (n_out,)
             scale_init = nnx.with_partitioning(

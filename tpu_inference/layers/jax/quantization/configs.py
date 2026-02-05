@@ -49,13 +49,20 @@ class JaxQuantLinearConfig(QuantLinearConfig):
         )
 
         self.block_size = envs.REQUANTIZE_BLOCK_SIZE
-        self.enable_quantized_matmul_kernel = self.block_size is not None
 
         # Block size from HF checkpoint config (for dequantizing pre-quantized
         # checkpoints before re-quantizing to a different block size)
         self.checkpoint_block_size = None
         if quant_config and hasattr(quant_config, 'weight_block_size'):
             self.checkpoint_block_size = quant_config.weight_block_size
+
+        if self.block_size is None and self.checkpoint_block_size is not None:
+            if isinstance(self.checkpoint_block_size, (list, tuple)):
+                self.block_size = self.checkpoint_block_size[0]
+            else:
+                self.block_size = self.checkpoint_block_size
+
+        self.enable_quantized_matmul_kernel = self.block_size is not None
 
         # Compute weight sharding from layer
         self.weight_sharding = self._compute_weight_sharding(layer)
@@ -124,7 +131,8 @@ class JaxQuantLinearConfig(QuantLinearConfig):
 
         return input_size, output_size, contracting_dims, output_dims
 
-    def _compute_weight_sharding(self, layer: "JaxEinsum") -> P:
+    def _compute_weight_sharding(self,
+                                 layer: "JaxEinsum") -> NamedSharding | P:
         """Extract and adapt weight sharding for 2D quantized kernel.
 
         The FP8 kernel expects (Out, In) shaped weights, so we need to
@@ -134,11 +142,14 @@ class JaxQuantLinearConfig(QuantLinearConfig):
         if sharding is None:
             return P(None, None)
 
+        mesh = None
         # Extract the spec from various sharding types
         if isinstance(sharding, NamedSharding):
             spec = sharding.spec
+            mesh = sharding.mesh
         elif isinstance(sharding, (tuple, P)):
             spec = sharding
+            mesh = getattr(layer.weight, 'mesh', None)
         else:
             return P(None, None)
 
@@ -156,7 +167,12 @@ class JaxQuantLinearConfig(QuantLinearConfig):
         out_spec = get_spec_for_dims(self.output_dims)
 
         # Kernel expects (Out, In) format
-        return P(out_spec, in_spec)
+        new_spec = P(out_spec, in_spec)
+
+        if mesh is not None:
+            return NamedSharding(mesh, new_spec)
+
+        return new_spec
 
 
 class QuantizationConfig(ABC):

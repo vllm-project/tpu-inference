@@ -796,6 +796,28 @@ class TestFp8Linear:
             assert out.shape == (batch_size, output_dim)
             assert not jnp.isnan(out).any()
 
+    def test_fp8_fallback_block_size(self, mesh, rng, monkeypatch):
+        """Test fallback to checkpoint block size when env var is unset."""
+        # Ensure env var is NOT set
+        monkeypatch.delenv("REQUANTIZE_BLOCK_SIZE", raising=False)
+
+        block_size = 128
+        quant_config = Fp8Config(weight_block_size=block_size)
+
+        input_dim = 1024
+        output_dim = 1024
+        n_blocks = input_dim // block_size
+
+        layer = JaxLinear(input_size=input_dim,
+                          output_size=output_dim,
+                          rngs=nnx.Rngs(0),
+                          quant_config=quant_config)
+
+        assert layer.quant_method.linear_config.block_size == block_size
+        assert layer.quant_method.linear_config.enable_quantized_matmul_kernel
+        # Verify shape is blockwise
+        assert layer.weight_scale_inv.value.shape == (n_blocks, 1, output_dim)
+
     def test_fp8_requantization_numerical_correctness(self, mesh, rng,
                                                       monkeypatch):
         """Test that requantization preserves numerical accuracy.
