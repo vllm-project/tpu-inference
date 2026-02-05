@@ -15,21 +15,23 @@
 # pipeline-name: DP
 # pipeline-type: parallelism support matrix
 steps:
-  - label: "Correctness tests for DP"
-    key: "DP_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Correctness tests for DP"
+    key: "${TPU_VERSION:-tpu6e}_DP_CorrectnessTest"
     soft_fail: true
     env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
       NEW_MODEL_DESIGN: "1"
     agents:
-      queue: tpu_v6e_8_queue
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_data_parallel.py::test_dp_correctness'
-  - label: "Record correctness test result for DP"
-    key: "record_DP_CorrectnessTest"
-    depends_on: "DP_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for DP"
+    key: "${TPU_VERSION:-tpu6e}_record_DP_CorrectnessTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_DP_CorrectnessTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "DP"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "parallelism support matrix"
@@ -37,13 +39,14 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh DP_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_DP_CorrectnessTest
 
-  - label: "Performance tests for DP"
-    key: "DP_PerformanceTest"
-    depends_on: "record_DP_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Performance tests for DP"
+    key: "${TPU_VERSION:-tpu6e}_DP_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_DP_CorrectnessTest"
     soft_fail: true
     env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
       NEW_MODEL_DESIGN: "1"
     agents:
       queue: tpu_v6e_8_queue
@@ -51,10 +54,11 @@ steps:
       - |
         .buildkite/scripts/run_in_docker.sh \
           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_data_parallel.py::test_dp_performance'
-  - label: "Record performance test result for DP"
-    key: "record_DP_PerformanceTest"
-    depends_on: "DP_PerformanceTest"
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for DP"
+    key: "${TPU_VERSION:-tpu6e}_record_DP_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_DP_PerformanceTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "DP"
       CI_STAGE: "PerformanceTest"
       CI_CATEGORY: "parallelism support matrix"
@@ -62,4 +66,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh DP_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_DP_PerformanceTest
