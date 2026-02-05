@@ -20,9 +20,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from tpu_inference.layers.common.process_weights.linear_weights import \
-    shard_linear_weights
-from tpu_inference.layers.common.quantization import fp8 as common_fp8
+from tpu_inference.layers.common.quantization import fp8 as jax_common
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import JaxEinsum
