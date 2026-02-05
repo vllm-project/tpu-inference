@@ -74,7 +74,7 @@ class Fp8LinearMethod:
         return jnp.concatenate(outs, axis=-1)
 
 
-@jax.jit
+@jax.jit(static_argnames=('linear_config', 'weight_block_size'))
 def process_blockwise_fp8_linear_weights(
     weight: jax.Array,
     weight_scale: jax.Array,
@@ -101,8 +101,8 @@ def process_blockwise_fp8_linear_weights(
             block_size=weight_block_size,
         )
         weight_slice, weight_scale_slice = quantize_tensor(
-            linear_config.requant_weight_dtype,
             dequantized_weight,
+            linear_config.requant_weight_dtype,
             block_size=requant_block_size)
 
         weights.append(weight_slice)
