@@ -12,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from functools import partial
 from typing import Optional
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from flax import nnx
 
 from tpu_inference.layers.common.process_weights.linear_weights import \
@@ -35,38 +35,24 @@ from tpu_inference.models.jax.utils.weight_utils import \
 class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
     """Block-wise Fp8 method for JAX Linear layer."""
 
-    def __init__(self, quant_config: "Fp8Config",
+    def __init__(self, quant_config: "Fp8Config", layer: JaxEinsum,
                  linear_config: QuantLinearConfig):
         common_fp8.Fp8LinearMethod.__init__(self, linear_config)
         self.quant_config = quant_config
 
-    def create_weights_jax(self, layer: JaxModule, *weight_args, rngs,
-                           **extra_weight_attrs):
-        assert isinstance(layer, JaxEinsum)
-
-        kernel_init = layer.kernel_init
-        # Follow upstream limitation that only float8_e4m3 is supported.
-        # https://github.com/vllm-project/vllm/blob/2a99c5a6c86daef8c766ba2dbf05c385b192c64b/vllm/model_executor/layers/quantization/fp8.py#L283-L284
-        param_dtype = jnp.float8_e4m3
         kernel_shape = layer.kernel_shape
         if len(kernel_shape) > 2:
             # HF model stores weight in 2-D shape. E.g. for "TD,DNH->TNH", weight shape in HF is (NH, D)
             x_axis, w_axis = layer.einsum_str.split("->")[0].split(",")
             contracting_axis = set(x_axis) & set(w_axis)
-            in_features = np.prod(
-                np.array([
-                    layer.kernel_shape[i] for i, c in enumerate(w_axis)
-                    if c in contracting_axis
-                ]))
-            out_features = np.prod(
-                np.array([
-                    layer.kernel_shape[i] for i, c in enumerate(w_axis)
-                    if c not in contracting_axis
-                ]))
-            kernel_shape = (in_features, out_features)
-            layer.weight = nnx.Param(
-                kernel_init(rngs.params(), kernel_shape, param_dtype),
-                weight_loader=load_nnx_param_from_reshaped_torch)
+            in_features = math.prod([
+                layer.kernel_shape[i] for i, c in enumerate(w_axis)
+                if c in contracting_axis
+            ])
+            out_features = math.prod([
+                layer.kernel_shape[i] for i, c in enumerate(w_axis)
+                if c not in contracting_axis
+            ])
 
             # E.g. if weight shape is (NH, D), sharding is ('x', None, 'y'), we need to fuse sharding to ('x', 'y')
             sharding = layer.weight.sharding + (None, ) * (
@@ -79,14 +65,32 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 if w_axis[i] not in contracting_axis and s is not None)
             assert len(in_sharding) <= 1 and len(out_sharding) <= 1, \
                 f"Cannot fuse sharding {layer.weight.sharding} into 2D weight sharding for {layer.einsum_str}"
-            layer.weight.sharding = (next(iter(in_sharding),
-                                          None), next(iter(out_sharding),
-                                                      None))
+            self.weight_sharding = (next(iter(in_sharding),
+                                         None), next(iter(out_sharding), None))
         else:
             in_features, out_features = kernel_shape
-            layer.weight = nnx.Param(
-                kernel_init(rngs.params(), kernel_shape, param_dtype),
-                weight_loader=load_nnx_param_from_reshaped_torch)
+            self.weight_sharding = layer.weight.sharding
+
+        self.linear_config.output_sizes = [out_features]
+        self.in_features = in_features
+
+    def create_weights_jax(self, layer: JaxModule, *weight_args, rngs,
+                           **extra_weight_attrs):
+        assert isinstance(layer, JaxEinsum)
+
+        out_features = sum(self.linear_config.output_sizes)
+        kernel_init = layer.kernel_init
+        # Follow upstream limitation that only float8_e4m3 is supported.
+        # https://github.com/vllm-project/vllm/blob/2a99c5a6c86daef8c766ba2dbf05c385b192c64b/vllm/model_executor/layers/quantization/fp8.py#L283-L284
+        param_dtype = jnp.float8_e4m3
+        layer.weight = nnx.Param(kernel_init(rngs.params(),
+                                             (out_features, self.in_features),
+                                             param_dtype),
+                                 weight_loader=partial(
+                                     load_nnx_param_from_reshaped_torch,
+                                     permute_dims=(0, 1),
+                                 ))
+        layer.weight.sharding = self.weight_sharding
 
         # Block-wise quantization scale
         block_n, block_k = self.quant_config.weight_block_size[
@@ -95,12 +99,11 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             kernel_init(
                 rngs.params(),
                 [(out_features + block_n - 1) // block_n,
-                 (in_features + block_k - 1) // block_k],
+                 (self.in_features + block_k - 1) // block_k],
                 layer.dtype,
             ),
             weight_loader=partial(
                 load_nnx_param_from_reshaped_torch,
-                # Don't transpose, as the scale shape is already [out, in].
                 permute_dims=(0, 1),
             ))
         layer.weight_scale_inv.sharding = layer.weight.sharding[::-1]
@@ -110,13 +113,13 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         assert self.quant_config.weight_block_size is not None
 
         weight = layer.weight
-        weight_scale = layer.weight_scale_inv
+        weight_scale_inv = layer.weight_scale_inv
         bias = layer.bias if hasattr(layer, 'bias') else None
         weights = common_fp8.process_blockwise_fp8_linear_weights(
             weight,
-            weight_scale,
+            weight_scale_inv,
             bias=bias,
-            weight_block_size=self.quant_config.weight_block_size,
+            weight_block_size=tuple(self.quant_config.weight_block_size),
             linear_config=self.linear_config)
         delattr(layer, 'weight')
         delattr(layer, 'weight_scale_inv')
@@ -137,16 +140,19 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
 
         if self.linear_config.fuse_matmuls:
             layer.weight = nnx.Param(weights.weight)
-            layer.weight_scale = nnx.Param(weights.weight_scale)
-            if bias is not None:
-                layer.bias = nnx.Param(weights.bias)
+            layer.weight_scale_inv = nnx.Param(weights.weight_scale)
+            layer.bias = nnx.Param(weights.bias) if bias is not None else None
         else:
             raise NotImplementedError(
                 "Fp8 block-wise linear method only supports fuse_matmuls.")
 
     def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
-        # TODO(#1623): Implement FP8 linear method for JAX
-        raise NotImplementedError()
+        if not self.linear_config.fuse_matmuls:
+            raise NotImplementedError(
+                "Fp8 block-wise linear method only supports fuse_matmuls.")
+        weight, scale = layer.weight.value, layer.weight_scale_inv.value
+        bias = layer.bias.value if layer.bias is not None else None
+        return self._apply_fused(x, weight, scale, bias=bias)
 
 
 class Fp8Config(QuantizationConfig):
@@ -206,5 +212,5 @@ class Fp8Config(QuantizationConfig):
             linear_config = QuantLinearConfig(
                 output_sizes=[layer.weight.shape[-1]], enable_sp=False)
             if self.weight_block_size is not None:
-                return Fp8BlockwiseLinearMethod(self, linear_config)
+                return Fp8BlockwiseLinearMethod(self, layer, linear_config)
         return None

@@ -20,7 +20,6 @@ import jax
 from jax import numpy as jnp
 from jax.sharding import Mesh
 
-from tpu_inference.kernels.quantized_matmul.util import quantize_tensor
 from tpu_inference.layers.common.linear import sharded_quantized_matmul
 from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, process_linear_weights)
