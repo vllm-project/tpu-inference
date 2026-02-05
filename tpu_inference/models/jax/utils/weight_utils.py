@@ -797,6 +797,16 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
 
         super().__init__(model, **kwargs)
 
+    def _load_module(self, base_prefix: str, module: JaxModule,
+                     weights: Iterable) -> Iterable:
+        yield from super()._load_module(base_prefix, module, weights)
+        # Post-process module after loading weights. Unlike vLLM post-process
+        # weights after loading all weights, we do it per-module here to
+        # avoid OOM.
+        if (quant_method := getattr(module, 'quant_method', None)) is not None:
+            if hasattr(quant_method, 'process_weights_after_loading'):
+                quant_method.process_weights_after_loading(module)
+
 
 class LoadableWithIterator:
     """Mixin for models that support loading weights with an iterator.
