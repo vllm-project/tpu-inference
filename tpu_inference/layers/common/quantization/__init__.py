@@ -87,6 +87,7 @@ def dequantize_tensor(
     scale: jax.Array,
     axis: int | None | tuple = -1,
     out_dtype: jnp.dtype = jnp.bfloat16,
+    block_size: tuple[int, ...] | None = None,
 ) -> jax.Array:
     """Dequantize a quantized tensor
 
@@ -95,6 +96,7 @@ def dequantize_tensor(
         scale: Quantization scale.
         axis: The axis tensor was quantized. None denotes per-tensor.
         out_dtype: Dtype of the output.
+        block_size: Block sizes corresponding to `axis`, used to pad partial blocks.
 
     Returns:
         Dequantized tensor_q.
@@ -106,18 +108,28 @@ def dequantize_tensor(
         axis = [axis]
 
     orig_shape = tensor_q.shape
+    if block_size is not None:
+        pad_width = [[0, 0] for _ in range(tensor_q.ndim)]
+        for ax, bs in zip(axis, block_size):
+            pad_width[ax][1] = scale.shape[ax] * bs - tensor_q.shape[ax]
+
+        tensor_q = jnp.pad(tensor_q, pad_width)
+
+    aligned_shape = tensor_q.shape
     if tensor_q.ndim == scale.ndim:
         # Indicates the tensor was block quantized.
-        blocked_shape = [[i] for i in orig_shape]
+        blocked_shape = [[i] for i in aligned_shape]
         for i in axis:
             num_blocks = scale.shape[i]
             if tensor_q.shape[i] % num_blocks:
                 raise ValueError(
                     f"Unable to perform block dequantization. axis={i} of "
-                    f"{tensor_q.shape=} is not divisible by {num_blocks=}", )
-            block_size = tensor_q.shape[i] // num_blocks
+                    f"{tensor_q.shape=} is not divisible by {num_blocks=}."
+                    "To perform unaligned dequantization, pass block_size as"
+                    "an argument.")
+            calc_block_size = tensor_q.shape[i] // num_blocks
 
-            blocked_shape[i] = (num_blocks, block_size)
+            blocked_shape[i] = (num_blocks, calc_block_size)
 
         # Convert all axis into positive values.
         axis = sorted([(i + tensor_q.ndim) % tensor_q.ndim for i in axis])
@@ -133,8 +145,8 @@ def dequantize_tensor(
     scale = jnp.expand_dims(scale, axis)
 
     tensor = (tensor_q.astype(jnp.float32) * scale).astype(out_dtype)
-
-    return tensor.reshape(orig_shape)
+    tensor = tensor.reshape(aligned_shape)
+    return jax.lax.slice(tensor, [0] * tensor.ndim, orig_shape)
 
 
 def dequantize_tensor_from_mxfp4_packed(

@@ -82,6 +82,13 @@ class TPUWorker:
         self.pp_config = PPConfig(rank, ip, prev_worker_ip,
                                   self.parallel_config.pipeline_parallel_size)
 
+        # Explicitly trigger RunAI download on the worker if needed.
+        # This handles downloading config.json and other non-weight files to the
+        # worker's local cache before VllmModelWrapper initialization.
+        if hasattr(self.model_config, "maybe_pull_model_tokenizer_for_runai"):
+            self.model_config.maybe_pull_model_tokenizer_for_runai(
+                self.model_config.model, self.model_config.tokenizer)
+
         # Delay profiler initialization to the start of the profiling.
         # This is because in vLLM V1, MP runtime is initialized before the
         # TPU Worker is initialized. The profiler server needs to start after

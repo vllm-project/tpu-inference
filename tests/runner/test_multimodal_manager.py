@@ -98,12 +98,12 @@ class TestMultiModalManager:
         # Mock request state
         dummy_pixel_values = torch.randn(3, 224, 224, dtype=torch.bfloat16)
         dummy_grid_thw = torch.tensor([[1, 1, 1]], dtype=torch.int64)
-        mm_item = MultiModalKwargsItem.from_elems([
-            MultiModalFieldElem("image", "pixel_values", dummy_pixel_values,
-                                MultiModalBatchedField()),
-            MultiModalFieldElem("image", "image_grid_thw", dummy_grid_thw,
-                                MultiModalBatchedField())
-        ])
+        mm_item = MultiModalKwargsItem({
+            "pixel_values":
+            MultiModalFieldElem(dummy_pixel_values, MultiModalBatchedField()),
+            "image_grid_thw":
+            MultiModalFieldElem(dummy_grid_thw, MultiModalBatchedField())
+        })
 
         req_state = CachedRequestState(
             req_id="req-1",
@@ -183,12 +183,12 @@ class TestMultiModalManager:
         px_1 = torch.randn(3, 224, 224, dtype=torch.bfloat16)
         grid_1 = torch.tensor([[1, 1, 1]], dtype=torch.int64)
 
-        mm_item_1 = MultiModalKwargsItem.from_elems([
-            MultiModalFieldElem("image", "pixel_values", px_1,
-                                MultiModalBatchedField()),
-            MultiModalFieldElem("image", "image_grid_thw", grid_1,
-                                MultiModalBatchedField())
-        ])
+        mm_item_1 = MultiModalKwargsItem({
+            "pixel_values":
+            MultiModalFieldElem(px_1, MultiModalBatchedField()),
+            "image_grid_thw":
+            MultiModalFieldElem(grid_1, MultiModalBatchedField())
+        })
 
         req_state_1 = CachedRequestState(
             req_id="req-1",
@@ -210,12 +210,12 @@ class TestMultiModalManager:
 
         px_2 = torch.randn(3, 224, 224, dtype=torch.bfloat16)
         grid_2 = torch.tensor([[1, 2, 2]], dtype=torch.int64)
-        mm_item_2 = MultiModalKwargsItem.from_elems([
-            MultiModalFieldElem("image", "pixel_values", px_2,
-                                MultiModalBatchedField()),
-            MultiModalFieldElem("image", "image_grid_thw", grid_2,
-                                MultiModalBatchedField())
-        ])
+        mm_item_2 = MultiModalKwargsItem({
+            "pixel_values":
+            MultiModalFieldElem(px_2, MultiModalBatchedField()),
+            "image_grid_thw":
+            MultiModalFieldElem(grid_2, MultiModalBatchedField())
+        })
 
         req_state_2 = CachedRequestState(
             req_id="req-2",

@@ -12,15 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Protocol
+from typing import Iterable, List, Protocol
 
 from flax import nnx
 from vllm.distributed.utils import get_pp_indices
 
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
+from tpu_inference.layers.jax import JaxModule
 
 
-class PPMissingLayer(nnx.Module):
+class PPMissingLayer(JaxModule):
     """
     A placeholder layer for missing layers in a pipeline parallel model.
     """
@@ -32,6 +33,11 @@ class PPMissingLayer(nnx.Module):
         """Return the first arg from args or the first value from kwargs."""
         return args[0] if args else next(iter(kwargs.values()))
 
+    def load_weights(self, weights: Iterable, *args, **kwargs):
+        """No-op for loading weights."""
+        for _ in weights:
+            pass
+
 
 class LayerFn(Protocol):
 
@@ -39,13 +45,18 @@ class LayerFn(Protocol):
         ...
 
 
+def get_start_end_layer(num_hidden_layers: int, rank: int,
+                        world_size: int) -> tuple[int, int]:
+    return get_pp_indices(num_hidden_layers, rank, world_size)
+
+
 def make_layers(
     num_hidden_layers: int,
     layer_fn: LayerFn,
 ) -> tuple[int, int, List[nnx.Module]]:
-    start_layer, end_layer = get_pp_indices(num_hidden_layers,
-                                            get_pp_group().rank_in_group,
-                                            get_pp_group().world_size)
+    start_layer, end_layer = get_start_end_layer(num_hidden_layers,
+                                                 get_pp_group().rank_in_group,
+                                                 get_pp_group().world_size)
 
     layers = [PPMissingLayer() for _ in range(start_layer)] \
         + [layer_fn() for _ in range(start_layer, end_layer)] \

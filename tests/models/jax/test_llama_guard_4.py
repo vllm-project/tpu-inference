@@ -120,6 +120,16 @@ def mock_vllm_config_llama_guard_4() -> MockVllmConfig:
     return MockVllmConfig(model_name="meta-llama/Llama-Guard-4-12B")
 
 
+@pytest.fixture(autouse=True)
+def mock_get_pp_group():
+    with patch("tpu_inference.models.jax.llama_guard_4.get_pp_group",
+               return_value=MagicMock(is_first_rank=True,
+                                      is_last_rank=True,
+                                      rank_in_group=0,
+                                      world_size=1)):
+        yield
+
+
 class TestLlamaGuard4ForCausalLM:
     """Tests for the main LlamaGuard4ForCausalLM model class."""
 

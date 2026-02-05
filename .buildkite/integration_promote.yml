@@ -11,12 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
- 
-notify:
-  # TODO(weiyulin) Add back branch checcking
-  # TODO(weiyulin) Update the email to the team email.
-  - email: "weiyulin@google.com"
-    if: build.state == "failed"
 
 steps:
   - wait: ~

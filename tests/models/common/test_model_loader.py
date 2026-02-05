@@ -30,6 +30,8 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.models.registry import ModelRegistry
 
+from tpu_inference.distributed.jax_parallel_state import \
+    init_pp_distributed_environment
 from tpu_inference.models.common import model_loader
 from tpu_inference.models.jax.qwen3 import Qwen3ForCausalLM
 
@@ -71,9 +73,11 @@ def vllm_config() -> MagicMock:
     mock_config.load_config = MagicMock()
     mock_config.load_config.download_dir = None
     mock_config.load_config.load_format = "auto"
-    mock_config.additional_config = {}
+    mock_config.load_config.model_loader_extra_config = dict()
+    mock_config.additional_config = dict()
     mock_config.cache_config = MagicMock(cache_dtype="auto")
     mock_config.parallel_config = ParallelConfig(pipeline_parallel_size=1)
+    mock_config.quant_config = None
     return mock_config
 
 
@@ -237,15 +241,28 @@ def test_register_model_vllm_wrapper_methods():
     assert instance.load_weights() is None
 
 
-def test_get_flax_model(vllm_config, mesh):
+@pytest.mark.parametrize("tie_word_embeddings", [True, False])
+def test_get_flax_model(vllm_config, mesh, tie_word_embeddings):
     """
     An integration test for the main public function `get_flax_model`.
     It verifies that the function returns two valid, JIT-compiled functions
     that execute correctly and produce outputs with the expected sharding.
+
+    The model under test is Qwen3-0.6B, whose config sets tie_word_embeddings
+    to True by default, but also provides lm_head weights in the checkpoint.
+    This test runs with both tie_word_embeddings=True and False to ensure
+    that the model loading logic handles both cases correctly.
     """
     rng = jax.random.PRNGKey(42)
+    assert hasattr(vllm_config.model_config.hf_config, "tie_word_embeddings")
+    vllm_config.model_config.hf_config.tie_word_embeddings = tie_word_embeddings
 
     # 1. Get the compiled model and logit computation functions
+    init_pp_distributed_environment(ip="",
+                                    rank=0,
+                                    world_size=1,
+                                    device=jax.devices()[0],
+                                    need_pp=False)
     model_fn, compute_logits_fn, *_ = model_loader.get_flax_model(
         vllm_config, rng, mesh)
 

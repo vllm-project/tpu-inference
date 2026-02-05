@@ -90,8 +90,8 @@ class TestDPScheduler:
                 assert len(scheduler.processes) == 2
                 assert len(scheduler.input_queues) == 2
                 # output_queues is a dict with (rank, command) tuple keys
-                # 2 ranks × 14 commands (SchedulerCommand enum)
-                assert len(scheduler.output_queues) == 28
+                # 2 ranks × 15 commands (SchedulerCommand enum)
+                assert len(scheduler.output_queues) == 30
                 assert scheduler.log_stats is True
                 assert len(scheduler.per_rank_kv_cache_configs) == 2
 
@@ -666,6 +666,41 @@ class TestDPScheduler:
                     (SchedulerCommand.RESET_PREFIX_CACHE, None))
 
                 assert result is True
+
+    def test_reset_encoder_cache(self, mock_vllm_config, mock_kv_cache_config,
+                                 mock_structured_output_manager):
+        """Test reset_encoder_cache sends command to all workers."""
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
+            with patch('multiprocessing.get_context'):
+                scheduler = DPScheduler(
+                    vllm_config=mock_vllm_config,
+                    kv_cache_config=mock_kv_cache_config,
+                    structured_output_manager=mock_structured_output_manager,
+                    block_size=16,
+                )
+
+                scheduler.input_queues = [MagicMock(), MagicMock()]
+
+                # Create proper mocks for queue.get() calls
+                mock_queue_0 = MagicMock()
+                mock_queue_0.get.return_value = None
+                mock_queue_1 = MagicMock()
+                mock_queue_1.get.return_value = None
+
+                scheduler.output_queues = {
+                    (0, "reset_encoder_cache"): mock_queue_0,
+                    (1, "reset_encoder_cache"): mock_queue_1,
+                }
+
+                scheduler.reset_encoder_cache()
+
+                # Verify commands were sent
+                scheduler.input_queues[0].put.assert_called_with(
+                    (SchedulerCommand.RESET_ENCODER_CACHE, None))
+                scheduler.input_queues[1].put.assert_called_with(
+                    (SchedulerCommand.RESET_ENCODER_CACHE, None))
 
     def test_make_stats_aggregates_from_workers(
             self, mock_vllm_config, mock_kv_cache_config,

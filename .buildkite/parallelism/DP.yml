@@ -25,7 +25,7 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
-          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_data_parallel.py'
+          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_data_parallel.py::test_dp_correctness'
   - label: "Record correctness test result for DP"
     key: "record_DP_CorrectnessTest"
     depends_on: "DP_CorrectnessTest"
@@ -43,11 +43,14 @@ steps:
     key: "DP_PerformanceTest"
     depends_on: "record_DP_CorrectnessTest"
     soft_fail: true
+    env:
+      NEW_MODEL_DESIGN: "1"
     agents:
-      queue: tpu_v6e_queue
+      queue: tpu_v6e_8_queue
     commands:
       - |
-        buildkite-agent meta-data set "DP_PerformanceTest" "unverified"
+        .buildkite/scripts/run_in_docker.sh \
+          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_data_parallel.py::test_dp_performance'
   - label: "Record performance test result for DP"
     key: "record_DP_PerformanceTest"
     depends_on: "DP_PerformanceTest"

@@ -13,11 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
+# Exit on error, exit on unset variable, fail on pipe errors.
+set -euo pipefail
 
 BUILDKITE_DIR=".buildkite"
 MODEL_LIST_KEY="model-list"
 FEATURE_LIST_KEY="feature-list"
+
+# TODO: Add CURRENT_IMPL_TYPE to Buildkite group name for easier monitoring.
+CURRENT_IMPL_TYPE="${MODEL_IMPL_TYPE:-auto}"
+echo "current MODEL_IMPL_TYPE: $CURRENT_IMPL_TYPE"
 
 declare -a TARGET_FOLDERS=(
     "quantization"

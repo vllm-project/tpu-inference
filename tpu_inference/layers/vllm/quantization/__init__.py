@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import copy
+from typing import Type
 
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
@@ -34,7 +35,7 @@ def get_tpu_quantization_config(vllm_config: VllmConfig,
                                 mesh: Mesh) -> QuantizationConfig:
     model_config = copy.deepcopy(vllm_config.model_config)
     # TODO(kyuyeunk): Add support for "tpu_int8".
-    method_to_config: dict[str, str] = {
+    method_to_config: dict[str | None, Type[QuantizationConfig]] = {
         None: VllmUnquantizedConfig,
         quant_methods.COMPRESSED_TENSORS: VllmCompressedTensorsConfig,
         quant_methods.AWQ: VllmAWQConfig,

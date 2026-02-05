@@ -15,12 +15,6 @@
 x-run-condition: &run-on-nightly-or-tag
   if: build.env("NIGHTLY") == "1" || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/
 
-notify:
-  - email: "ullm-test-notifications-external@google.com"
-    if: build.state == "failed" && build.branch == "main"
-  - slack: "vllm#tpu-ci-notifications"
-    if: build.state == "failed" && build.branch == "main"
-
 steps:
    - label: "Upload Tests for Models & Features"
      <<: *run-on-nightly-or-tag

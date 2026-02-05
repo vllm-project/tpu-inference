@@ -17,13 +17,23 @@ set -e
 
 # --- Configuration ---
 REPO_URL="https://github.com/vllm-project/tpu-inference.git"
-TARGET_BRANCH="main"
+TARGET_BRANCH="${BUILDKITE_BRANCH:-main}"
 
 # Conditional Configuration for Release vs. Nightly
 if [ "${NIGHTLY}" = "1" ]; then
   # Set path and commit message for nightly builds.
-  ARTIFACT_DOWNLOAD_PATH="support_matrices/nightly"
-  COMMIT_MESSAGE="[skip ci] Update nightly support matrices"
+  BASE_PATH="support_matrices/nightly"
+  
+  # Check for specific model implementation type to enable directory isolation.
+  # If MODEL_IMPL_TYPE is 'vllm' or 'flax_nnx', use a implementation-specific subfolder.
+  if [ "${MODEL_IMPL_TYPE:-auto}" = "vllm" ] || [ "${MODEL_IMPL_TYPE:-auto}" = "flax_nnx" ]; then
+    ARTIFACT_DOWNLOAD_PATH="${BASE_PATH}/${MODEL_IMPL_TYPE}"
+    COMMIT_MESSAGE="[skip ci] Update nightly support matrices for ${MODEL_IMPL_TYPE}"
+  else
+    # Default case: support_matrices/nightly
+    ARTIFACT_DOWNLOAD_PATH="${BASE_PATH}"
+    COMMIT_MESSAGE="[skip ci] Update nightly support matrices"
+  fi
 else
   # Set path and commit message for release tag builds.
   COMMIT_TAG="${BUILDKITE_TAG:-unknown-tag}"

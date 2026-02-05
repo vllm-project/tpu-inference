@@ -12,12 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-notify:
-  - email: "ullm-test-notifications-external@google.com"
-    if: build.state == "failed"
-  - slack: "vllm#tpu-ci-notifications"
-    if: build.state == "failed"
-
 steps:
   - label: "Publish vllm/vllm-tpu nightly image"
     if: build.branch == "main" && build.env("NIGHTLY") == "1"

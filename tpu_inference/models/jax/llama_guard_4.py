@@ -12,7 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# yapf: disable
+# isort: skip_file
+
 import re
+from itertools import islice
 from typing import Any, List, Optional, Tuple
 
 import jax
@@ -25,18 +29,21 @@ from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
 
+from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
 from tpu_inference.layers.jax.attention.llama4_attention import Llama4Attention
 from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
 from tpu_inference.layers.jax.misc import shard_put
+from tpu_inference.layers.jax.pp_utils import (PPMissingLayer,
+                                               get_start_end_layer)
 from tpu_inference.layers.jax.transformer_block import TransformerBlock
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.utils.weight_utils import (BaseWeightLoader,
-                                                         get_param,
-                                                         print_param_info,
-                                                         reshape_params,
-                                                         transpose_params)
+from tpu_inference.models.jax.jax_intermediate_tensor import \
+    JaxIntermediateTensors
+from tpu_inference.models.jax.utils.weight_utils import (
+    BaseWeightLoader, _is_pp_missing_layer, get_param, print_param_info,
+    reshape_params, transpose_params)
 
 logger = init_logger(__name__)
 
@@ -116,6 +123,14 @@ class LlamaGuard4WeightLoader(BaseWeightLoader):
 
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)
+
+        self.pp_missing_layers = []
+        for path, module in nnx.iter_graph(model_for_loading):
+            if isinstance(module, PPMissingLayer):
+                # this layer name is layers.{i} or final_norm, embedder, lm_head, etc
+                layer_name = ".".join([str(s) for s in path])
+                self.pp_missing_layers.append(layer_name)
+
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in self.get_weights_iterator():
                 # The RunAI model streamer yields weights as PyTorch tensors, while the
@@ -131,6 +146,11 @@ class LlamaGuard4WeightLoader(BaseWeightLoader):
                     continue
 
                 mapped_name = self.map_loaded_to_standardized_name(loaded_name)
+                if _is_pp_missing_layer(mapped_name, self.pp_missing_layers):
+                    logger.debug(
+                        f"Skip loading {mapped_name} as it doesn't belong to this PP stage."
+                    )
+                    continue
                 model_weight = get_param(model_params, mapped_name)
 
                 if not loaded_name.endswith(".bias"):
@@ -206,18 +226,32 @@ class LlamaGuard4ForCausalLM(nnx.Module):
 
         self.rng = nnx.Rngs(rng)
 
-        self.embedder = Embedder(
-            vocab_size=vocab_size,
-            hidden_size=self.hidden_size,
-            dtype=self.dtype,
-            vd_sharding=(('data', 'model'), None),
-            rngs=self.rng,
-            random_init=force_random_weights,
-        )
+        self.is_first_rank = get_pp_group().is_first_rank
+        self.is_last_rank = get_pp_group().is_last_rank
+
+        if self.is_first_rank or (model_config.hf_config.tie_word_embeddings
+                                  and self.is_last_rank):
+            self.embedder = Embedder(
+                vocab_size=vocab_size,
+                hidden_size=self.hidden_size,
+                dtype=self.dtype,
+                vd_sharding=(('data', 'model'), None),
+                rngs=self.rng,
+                random_init=force_random_weights,
+            )
+        else:
+            self.embedder = PPMissingLayer()
 
         self.layers = []
+        self.start_layer, self.end_layer = get_start_end_layer(
+            self.num_layers,
+            get_pp_group().rank_in_group,
+            get_pp_group().world_size)
 
-        for i in range(self.num_layers):
+        for i in range(self.start_layer):
+            self.layers.append(PPMissingLayer())
+
+        for i in range(self.start_layer, self.end_layer):
             use_attention_rope = True
 
             custom_module = DenseFFW(dtype=self.dtype,
@@ -296,23 +330,30 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                                      use_attention_rope=use_attention_rope)
             self.layers.append(block)
 
-        self.final_norm = RMSNorm(
-            dims=self.hidden_size,
-            activation_ffw_td=P(),
-            epsilon=rms_norm_eps,
-            rngs=self.rng,
-            with_scale=True,
-            dtype=self.dtype,
-            random_init=force_random_weights,
-        )
+        for i in range(self.end_layer, self.num_layers):
+            self.layers.append(PPMissingLayer())
 
-        self.lm_head = LMhead(vocab_size=vocab_size,
-                              hidden_size=self.hidden_size,
-                              dtype=self.dtype,
-                              rngs=self.rng,
-                              vd_sharding=(('data', 'model'), None),
-                              dv_sharding=(None, ('data', 'model')),
-                              random_init=force_random_weights)
+        if self.is_last_rank:
+            self.final_norm = RMSNorm(
+                dims=self.hidden_size,
+                activation_ffw_td=P(),
+                epsilon=rms_norm_eps,
+                rngs=self.rng,
+                with_scale=True,
+                dtype=self.dtype,
+                random_init=force_random_weights,
+            )
+            self.lm_head = LMhead(vocab_size=vocab_size,
+                                  hidden_size=self.hidden_size,
+                                  dtype=self.dtype,
+                                  rngs=self.rng,
+                                  vd_sharding=(('data', 'model'), None),
+                                  dv_sharding=(None, ('data', 'model')),
+                                  random_init=force_random_weights)
+        else:
+            self.final_norm = PPMissingLayer()
+            self.lm_head = PPMissingLayer()
+
         if self.is_verbose:
             self._print_model_architecture()
 
@@ -346,27 +387,38 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
         inputs_embeds: Optional[jax.Array] = None,
-        layer_metadata_tuple: Optional[Tuple] = None,
-        lora_metadata: Optional[Any] = None,
+        _input_positions: Optional[jax.Array] = None,
+        _layer_name_to_kv_cache: Optional[Tuple[Tuple[str, int]]] = None,
+        _lora_metadata: Any = None,
+        intermediate_tensors: Optional[JaxIntermediateTensors] = None,
         *args,
     ) -> Tuple[List[KVCacheType], jax.Array]:
         is_prefill = False
 
-        if inputs_embeds is not None:
-            x_TD = inputs_embeds
-        elif input_ids is not None:
-            x_TD = self.embedder.encode(input_ids)
+        if self.is_first_rank:
+            if inputs_embeds is not None:
+                x_TD = inputs_embeds
+            elif input_ids is not None:
+                x_TD = self.embedder.encode(input_ids)
+            else:
+                raise ValueError(
+                    "Cannot run forward pass: Both input_ids and inputs_embeds are None."
+                )
         else:
-            raise ValueError(
-                "Cannot run forward pass: Both input_ids and inputs_embeds are None."
-            )
+            assert intermediate_tensors is not None
+            x_TD = intermediate_tensors["hidden_states"]
 
-        for (i, block) in enumerate(self.layers):
+        for (i, block) in enumerate(
+                islice(self.layers, self.start_layer, self.end_layer)):
             kv_cache = kv_caches[i]
             new_kv_cache, x_TD = block(x_TD, is_prefill, kv_cache,
                                        attention_metadata)
             jax.block_until_ready(x_TD)
             kv_caches[i] = new_kv_cache
+
+        if not self.is_last_rank:
+            return kv_caches, JaxIntermediateTensors({"hidden_states":
+                                                      x_TD}), []
 
         final_activation_TD = self.final_norm(x_TD)
 

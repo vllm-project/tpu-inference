@@ -22,7 +22,7 @@ from flax import nnx
 from tpu_inference.layers.jax.attention.attention import (AttentionMetadata,
                                                           KVCache)
 from tpu_inference.layers.jax.layers import DenseFFW
-from tpu_inference.layers.jax.moe.moe import MoE
+from tpu_inference.layers.jax.moe.moe import JaxMoE
 
 
 @dataclass(kw_only=True)
@@ -78,7 +78,7 @@ class SharedExpertsTransformerBlock(TransformerBlock):
     with the `shared_experts` module.
     """
 
-    moe_ffw: Optional[MoE] = None
+    moe_ffw: Optional[JaxMoE] = None
     dense_ffw: Optional[DenseFFW] = None
     shared_experts: Optional[DenseFFW] = None
 
@@ -95,7 +95,7 @@ class SharedExpertsTransformerBlock(TransformerBlock):
         ffw_residual_TD = attn_output_TD
         normed_ffw_input_TD = self.pre_mlp_norm(attn_output_TD)
 
-        if isinstance(self.custom_module, MoE):
+        if isinstance(self.custom_module, JaxMoE):
             moe_layer = self.custom_module
         else:
             moe_layer = self.moe_ffw
