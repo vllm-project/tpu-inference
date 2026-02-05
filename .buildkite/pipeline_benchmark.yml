@@ -35,20 +35,20 @@ steps:
        - CODE_HASH=$$(buildkite-agent meta-data get 'CODE_HASH')
       #  - bash .buildkite/benchmark/scripts/build_tpu_inference_image.sh $$VLLM_COMMIT_HASH $$CODE_HASH
 
-   - label: "Read CSV file and publish benchmark job"
-     key: "read-csv-publish-job"
-     depends_on: "build-vllm-tpu-image"
-     agents:
-       queue: cpu
-     env:
-       GCP_PROJECT_ID: "cloud-tpu-inference-test"
-       GCP_REGION: "southamerica-west1"
-       ARTIFACT_REPO: "vllm-tpu-bm-bk"
-       GCP_INSTANCE_ID: "vllm-bm-inst"
-       GCP_DATABASE_ID: "vllm-bm-bk-runs"
-     commands:
-       - CODE_HASH=$$(buildkite-agent meta-data get 'CODE_HASH')
-       - bash .buildkite/benchmark/scripts/daily_benchmark.sh
+  #  - label: "Read CSV file and publish benchmark job"
+  #    key: "read-csv-publish-job"
+  #    depends_on: "build-vllm-tpu-image"
+  #    agents:
+  #      queue: cpu
+  #    env:
+  #      GCP_PROJECT_ID: "cloud-tpu-inference-test"
+  #      GCP_REGION: "southamerica-west1"
+  #      ARTIFACT_REPO: "vllm-tpu-bm-bk"
+  #      GCP_INSTANCE_ID: "vllm-bm-inst"
+  #      GCP_DATABASE_ID: "vllm-bm-bk-runs"
+  #    commands:
+  #      - CODE_HASH=$$(buildkite-agent meta-data get 'CODE_HASH')
+  #      - bash .buildkite/benchmark/scripts/daily_benchmark.sh
 
 
   #  - label: "Publish: benchmark - RecordId: 68db88d5-80e6-4973-9d24-0dbcea35cc59"

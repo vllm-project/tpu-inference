@@ -68,32 +68,110 @@ BUILDKITE_QUEUE_DEVICE_MAP=(
 tail -n +2 "$CSV_FILE" | while read -r line || [ -n "${line}" ]; do
 
   line=$(echo "$line" | tr -d '\r')
-    # Safely split CSV line into variables
-  IFS=',' read -r \
-    DEVICE \
-    MODEL \
-    MAX_NUM_SEQS \
-    MAX_NUM_BATCHED_TOKENS \
-    TENSOR_PARALLEL_SIZE \
-    MAX_MODEL_LEN \
-    DATASET \
-    INPUT_LEN \
-    OUTPUT_LEN \
-    EXPECTED_ETEL \
-    NUM_PROMPTS \
-    MODELTAG \
-    PREFIX_LEN <<< "$line"
+  
+  # # Safely split CSV line into variables
+  # IFS=',' read -r \
+  #   DEVICE \
+  #   MODEL \
+  #   MAX_NUM_SEQS \
+  #   MAX_NUM_BATCHED_TOKENS \
+  #   TENSOR_PARALLEL_SIZE \
+  #   MAX_MODEL_LEN \
+  #   DATASET \
+  #   INPUT_LEN \
+  #   OUTPUT_LEN \
+  #   EXPECTED_ETEL \
+  #   NUM_PROMPTS \
+  #   MODELTAG \
+  #   PREFIX_LEN <<< "$line"
+  # Skip empty lines
+  [ -z "$line" ] && continue
+
+  # Use Python to safely parse the CSV line.
+  # This handles internal commas inside quoted fields (like JSON in AdditionalConfig).
+  # mapfile captures the output into an array called 'fields'.
+  mapfile -t fields < <(python3 -c "import csv, sys; line = sys.stdin.read(); reader = csv.reader([line], quotechar=\"'\"); print('\n'.join(next(reader)))" <<< "$line")
+
+  # Map array indices to descriptive variables
+  DEVICE="${fields[0]}"
+  MODEL="${fields[1]}"
+  MAX_NUM_SEQS="${fields[2]}"
+  MAX_NUM_BATCHED_TOKENS="${fields[3]}"
+  TENSOR_PARALLEL_SIZE="${fields[4]}"
+  MAX_MODEL_LEN="${fields[5]}"
+  DATASET="${fields[6]}"
+  INPUT_LEN="${fields[7]}"
+  OUTPUT_LEN="${fields[8]}"
+  EXPECTED_ETEL="${fields[9]}"
+  NUM_PROMPTS="${fields[10]}"
+  MODELTAG="${fields[11]}"
+  PREFIX_LEN="${fields[12]}"
+  ADDITIONAL_CONFIG="${fields[13]}"
+  EXTRA_ARGS="${fields[14]}"
 
   RECORD_ID=$(uuidgen | tr 'A-Z' 'a-z')
+
+  # Helper to handle SQL quoting for JSON/String fields.
+  # This now properly escapes internal single quotes by doubling them (' -> '').
+  prepare_sql_val() {
+    local val="$1"
+    local default="$2"
+
+    # if empty, return default
+    if [ -z "$val" ]; then
+      echo "$default"
+      return
+    fi
+
+    # Remove leading/trailing single quotes if the CSV parser preserved them
+    val="${val#\'}"
+    val="${val%\'}"
+
+    # Escape internal single quotes for Spanner SQL (replace ' with '')
+    local escaped_val="${val//\'/\'\'}"
+
+    # Wrap the escaped value in single quotes for the SQL statement
+    echo "'$escaped_val'"
+  }
+
+  SQL_ADDITIONAL_CONFIG=$(prepare_sql_val "$ADDITIONAL_CONFIG" "'{}'")
+  SQL_EXTRA_ARGS=$(prepare_sql_val "$EXTRA_ARGS" "''")
   
   echo "Inserting Run: $RECORD_ID"
+  # gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
+  #   --instance="$GCP_INSTANCE_ID" \
+  #   --project="$GCP_PROJECT_ID" \
+  #   --sql="INSERT INTO RunRecord (
+  #     RecordId, Status, CreatedTime, Device, Model, RunType, CodeHash,
+  #     MaxNumSeqs, MaxNumBatchedTokens, TensorParallelSize, MaxModelLen,
+  #     Dataset, InputLen, OutputLen, LastUpdate, CreatedBy,JobReference, ExpectedETEL, NumPrompts, ModelTag, PrefixLen, ExtraEnvs
+  #   ) VALUES (
+  #     '$RECORD_ID', 'CREATED', PENDING_COMMIT_TIMESTAMP(), '$DEVICE', '$MODEL', '$RUN_TYPE', '$CODE_HASH',
+  #     $MAX_NUM_SEQS,
+  #     $MAX_NUM_BATCHED_TOKENS,
+  #     $TENSOR_PARALLEL_SIZE,
+  #     $MAX_MODEL_LEN,
+  #     '$DATASET',
+  #     $INPUT_LEN,
+  #     $OUTPUT_LEN,
+  #     PENDING_COMMIT_TIMESTAMP(),
+  #     '$USER',
+  #     '$JOB_REFERENCE',
+  #     ${EXPECTED_ETEL:-$VERY_LARGE_EXPECTED_ETEL},
+  #     ${NUM_PROMPTS:-1000},
+  #     '${MODELTAG:-PROD}',
+  #     ${PREFIX_LEN:-0},
+  #     '$EXTRA_ENVS'
+  #   );"
   gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
     --instance="$GCP_INSTANCE_ID" \
     --project="$GCP_PROJECT_ID" \
     --sql="INSERT INTO RunRecord (
       RecordId, Status, CreatedTime, Device, Model, RunType, CodeHash,
       MaxNumSeqs, MaxNumBatchedTokens, TensorParallelSize, MaxModelLen,
-      Dataset, InputLen, OutputLen, LastUpdate, CreatedBy,JobReference, ExpectedETEL, NumPrompts, ModelTag, PrefixLen, ExtraEnvs
+      Dataset, InputLen, OutputLen, LastUpdate, CreatedBy, JobReference,
+      ExpectedETEL, NumPrompts, ModelTag, PrefixLen, ExtraEnvs,
+      AdditionalConfig, ExtraArgs
     ) VALUES (
       '$RECORD_ID', 'CREATED', PENDING_COMMIT_TIMESTAMP(), '$DEVICE', '$MODEL', '$RUN_TYPE', '$CODE_HASH',
       $MAX_NUM_SEQS,
@@ -110,7 +188,9 @@ tail -n +2 "$CSV_FILE" | while read -r line || [ -n "${line}" ]; do
       ${NUM_PROMPTS:-1000},
       '${MODELTAG:-PROD}',
       ${PREFIX_LEN:-0},
-      '$EXTRA_ENVS'
+      '$EXTRA_ENVS',
+      $SQL_ADDITIONAL_CONFIG,
+      $SQL_EXTRA_ARGS
     );"
   
   # If insert failed, just continue without publishing
@@ -145,6 +225,21 @@ tail -n +2 "$CSV_FILE" | while read -r line || [ -n "${line}" ]; do
     - ".buildkite/benchmark/scripts/agent/run_job.sh $${RECORD_ID}"
 EOF
 )
+
+# - label: "Publish: benchmark - RecordId: 68db88d5-80e6-4973-9d24-0dbcea35cc59"
+#   env:
+#     GCP_PROJECT_ID: "cloud-tpu-inference-test"
+#     GCP_REGION: "southamerica-west1"
+#     GCS_BUCKET: "vllm-cb-storage2"
+#     ARTIFACT_REPO: "vllm-tpu-bm-bk"
+#     GCP_INSTANCE_ID: "vllm-bm-inst"
+#     GCP_DATABASE_ID: "vllm-bm-bk-runs"
+#   agents:
+#     queue: tpu_v6e_queue
+#   command:
+#     - CODE_HASH=$$(buildkite-agent meta-data get 'CODE_HASH')
+#     - ".buildkite/benchmark/scripts/agent/run_job.sh 68db88d5-80e6-4973-9d24-0dbcea35cc59"
+
   pipeline_steps+=("${pipeline_yaml}")
 
   echo "$RECORD_ID handled."
