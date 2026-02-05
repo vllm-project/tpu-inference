@@ -80,8 +80,8 @@ def process_blockwise_fp8_linear_weights(
     weight_scale: jax.Array,
     *,
     bias: jax.Array | None,
-    weight_block_size: Sequence[int] = [],
-    linear_config=None,
+    weight_block_size: Sequence[int],
+    linear_config,
 ) -> LinearWeights:
     weights = []
     weight_scales = []
