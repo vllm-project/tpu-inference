@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import math
 from dataclasses import InitVar, dataclass
 from functools import partial
 from typing import Optional
@@ -25,13 +24,15 @@ from jaxtyping import Float
 from qwix._src.providers import ptq
 
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
+from tpu_inference.layers.common.moe import MoEBackend, fused_moe_func
+from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.layers.jax.moe.dense_moe import (
     dense_moe_fwd, dense_moe_fwd_preapply_router_weights)
 from tpu_inference.layers.jax.moe.sparse_moe import sparse_moe_distributed_fwd
-from tpu_inference.layers.jax.moe.utils import MoEBackend
-from tpu_inference.layers.vllm.fused_moe import fused_moe_func
+from tpu_inference.layers.jax.quantization import QuantizeMethodBase
+from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.models.jax.utils.qwix.qwix_utils import \
     manually_quantize_qwix_weight
 
@@ -98,7 +99,7 @@ class Router(nnx.Module):
                                       self.kernel_DE.value)
 
         #TODO: Refactor the Router so that it will always only return router_logits_TE
-        if self.moe_backend == MoEBackend.FUSED_MOE or self.moe_backend == MoEBackend.VLLM_MOE:
+        if self.moe_backend in MoEBackend.fused_moe_backends():
             return router_logits_TE
         else:
             weights_TX, selected_experts_TX = jax.lax.top_k(
@@ -124,7 +125,7 @@ class Router(nnx.Module):
 
 # --- Main Class for MoE ---
 @dataclass(kw_only=True)
-class MoE(nnx.Module):
+class JaxMoE(JaxModule):
     """Mixture-of-Experts (MoE) Routed MLP Layer.
 
     This module implements a MoE layer with a router and multiple expert MLPs.
@@ -149,8 +150,12 @@ class MoE(nnx.Module):
 
     # --- Flags & Configs ---
     apply_expert_weight_before_computation: bool
+    expert_axis_name: str
+    num_expert_parallelism: int
     random_init: bool = False
     moe_backend: MoEBackend = MoEBackend.DENSE_MAT
+    scoring_func = "softmax"
+
     # --- Sparse MoE Specific Attributes ---
     num_experts_per_tok: int = 1  # Required for Sparse, optional/derived for Dense
     tile_size: tuple[int, int, int] = (128, 128, 128)
@@ -159,6 +164,10 @@ class MoE(nnx.Module):
 
     # --- MoE Kernel Specific Attributes ---
     renormalize: bool = True
+
+    # ---- Quantization Specific Attributes ----
+    quant_config: Optional[QuantizationConfig] = None
+    quant_prefix: str = ""
 
     def __call__(self, x_TD: Float):
         """Performs the forward pass of the MoE layer.
@@ -169,6 +178,11 @@ class MoE(nnx.Module):
         Returns:
             Output array of shape (sequence_length, d_model) after passing through MoE.
         """
+        # TODO (jacobplatin): wire this up so that `quant_method` is actually used and
+        # the forward pass is delegated to it
+        if self.quant_method is not None:
+            return self.quant_method.apply_jax(self, x_TD)
+
         x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = jax.lax.with_sharding_constraint(x_TD, PartitionSpec(*self.activation_ffw_td))
         if self.moe_backend == MoEBackend.FUSED_MOE:
@@ -187,7 +201,7 @@ class MoE(nnx.Module):
                 **self.block_size,
             )
             return output_TD
-        elif self.moe_backend == MoEBackend.VLLM_MOE:
+        elif self.moe_backend in [MoEBackend.GMM_EP, MoEBackend.GMM_TP]:
             router_logits_TE = self.router(x_TD)
             # TODO (jacobplatin): the current GMM kernel expects that w1/w2 have the second and third dimensions
             # transposed, but this is likely not optimal for DeepSeek, so we will need to fix this
@@ -204,14 +218,15 @@ class MoE(nnx.Module):
                 topk=self.router.num_experts_per_tok,
                 renormalize=self.renormalize,
                 mesh=self.mesh,
-                use_ep=self.num_expert_parallelism > 1,
+                use_ep=self.use_ep,
                 activation=self.hidden_act,
+                scoring_fn=self.scoring_func,
             )
             return output_TD
         else:
             weights_TX, indices_TX = self.router(x_TD)
 
-            if self.moe_backend == MoEBackend.MEGABLX_GMM or self.moe_backend == MoEBackend.RAGGED_DOT:
+            if self.moe_backend == MoEBackend.MEGABLX_GMM:
                 # NOTE: for the qwix_quantized_weight_dtype case, we make the spec a tuple of 2 PartitionSpecs
                 # since the first entry corresponds to the weight and the second entry corresponds to the scale.
                 # For the scale, we don't shard on the "D" dimmension because this is the subchannel dimmension
@@ -289,6 +304,19 @@ class MoE(nnx.Module):
 
     def __post_init__(self, rngs: nnx.Rngs):
         """Generates the kernels (weights) for the router and experts (gating, up-projection, and down-projection layers)."""
+        # TODO (jacobplatin): wire this up so that `quant_method` is actually used and is not None
+        self.use_ep = self.num_expert_parallelism > 1
+        if self.quant_config is None:
+            self.quant_method = None
+        elif (quant_method :=
+              self.quant_config.get_quant_method(self,
+                                                 prefix=self.quant_prefix)):
+            assert isinstance(quant_method, QuantizeMethodBase)
+            self.quant_method = quant_method
+            self.quant_method.create_weights_jax(self)
+        else:
+            self.quant_method = None
+
         E = self.num_local_experts
         D = self.hidden_size
         F = self.intermediate_size_moe
@@ -320,7 +348,7 @@ class MoE(nnx.Module):
                 "bd1c": 256,
                 "bd2c": 256,
             }
-        elif self.moe_backend == MoEBackend.VLLM_MOE:
+        elif self.moe_backend in [MoEBackend.GMM_EP, MoEBackend.GMM_TP]:
             # TODO (jacobplatin): the current GMM kernel expects that w1/w2 have the second and third
             # dimensions transposed, but this is likely not optimal for DeepSeek, so we will
             # need to fix this in the future
@@ -360,17 +388,6 @@ class MoE(nnx.Module):
 
         # TODO: Add quantization scale params for VLLM MoE kernel
         self.w1_scale, self.w2_scale = (None, None)
-
-        self.expert_axis_name = self.edf_sharding[0]
-        if self.expert_axis_name is None:
-            self.num_expert_parallelism = 1
-        else:
-            if isinstance(self.expert_axis_name, str):
-                self.num_expert_parallelism = self.mesh.shape[
-                    self.expert_axis_name]
-            else:
-                self.num_expert_parallelism = math.prod(
-                    self.mesh.shape[axis] for axis in self.expert_axis_name)
 
         # Derive if data is sharded by expert
         self.data_axis_name = self.activation_ffw_td[0]

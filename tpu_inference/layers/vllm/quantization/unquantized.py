@@ -29,19 +29,19 @@ from vllm.model_executor.layers.quantization import \
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 
+from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, process_linear_weights, shard_linear_weights,
     to_parameter_list)
+from tpu_inference.layers.common.process_weights.moe_weights import (
+    FusedMoEWeights, process_moe_weights, shard_moe_weights)
 from tpu_inference.layers.common.quant_methods import (UNQUANTIZED,
                                                        get_tpu_quant_method)
 from tpu_inference.layers.common.quantization import \
     unquantized as common_unquantized
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.vllm.fused_moe import (FusedMoEBackend,
-                                                 fused_moe_apply,
-                                                 select_moe_backend)
-from tpu_inference.layers.vllm.process_weights.fused_moe_weights import (
-    FusedMoEWeights, process_moe_weights, shard_moe_weights)
+from tpu_inference.layers.vllm.moe import (
+    select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.quantization.configs import (
     VllmQuantConfig, VllmQuantLinearConfig)
 from tpu_inference.logger import init_logger
@@ -185,10 +185,10 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     ):
         super().__init__(moe)
         self.mesh = mesh
-        self.moe_backend = select_moe_backend(self.moe)
+        self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
 
         self.extra_backend_kwargs = {}
-        if self.moe_backend == FusedMoEBackend.FUSED_MOE:
+        if self.moe_backend == MoEBackend.FUSED_MOE:
             # When fused moe kernle is used, we pass extra arguments like
             # tuned block sizes to the kernel.
             self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name, )
@@ -270,13 +270,8 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2_bias=jax_view(layer.w2_bias) if self.moe.has_bias else None,
         )
 
-        return torch_view(
-            fused_moe_apply(
-                layer,
-                jax_view(x),
-                jax_view(router_logits),
-                weights,
-                self.moe_backend,
-                self.mesh,
-                self.extra_backend_kwargs,
-            ))
+        return vllm_moe_apply(layer=layer,
+                              weights=weights,
+                              quant_method_instance=self,
+                              x=x,
+                              router_logits=router_logits)

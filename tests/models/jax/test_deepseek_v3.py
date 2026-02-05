@@ -30,7 +30,9 @@ from vllm.config import ModelConfig
 import tpu_inference.kernels.mla.v1.kernel as mla
 from tpu_inference.layers.common.attention_interface import get_kv_cache_shape
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.sharding import (ShardingAxisName,
+                                                  ShardingAxisNameBase)
+from tpu_inference.layers.jax.moe.moe import MoEBackend
 from tpu_inference.models.jax.deepseek_v3 import (DeepSeekV3,
                                                   DeepseekV3Attention,
                                                   DeepseekV3MLA,
@@ -112,15 +114,17 @@ class TestDeepSeekV3:
 
     def test_init(self, mock_config, rng, mesh):
         """Tests if the model initializes with the correct hierarchy."""
-        with jax.set_mesh(mesh):
+        with patch("tpu_inference.models.jax.deepseek_v3.ShardingAxisName",
+                   ShardingAxisNameBase), jax.set_mesh(mesh):
             model = DeepSeekV3(mock_config, rng, mesh)
-        assert len(model.layers) == 1
-        assert isinstance(model.embedder, nnx.Module)
-        assert model.vllm_config.model_config.hf_config.num_hidden_layers == 1
+            assert len(model.layers) == 1
+            assert isinstance(model.embedder, nnx.Module)
+            assert model.vllm_config.model_config.hf_config.num_hidden_layers == 1
 
     def test_random_weights(self, mock_config, rng, mesh):
         """Tests that force_random_weights initializes non-zero weights."""
-        with jax.set_mesh(mesh):
+        with patch("tpu_inference.models.jax.deepseek_v3.ShardingAxisName",
+                   ShardingAxisNameBase):
             model = DeepSeekV3(mock_config,
                                rng,
                                mesh,
@@ -138,12 +142,13 @@ class TestDeepSeekV3:
     )
     def test_load_weights_called(self, mock_weights_generator, mock_loader_cls,
                                  mock_config, rng, mesh):
-        with jax.set_mesh(mesh):
+        with patch("tpu_inference.models.jax.deepseek_v3.ShardingAxisName",
+                   ShardingAxisNameBase), jax.set_mesh(mesh):
             model = DeepSeekV3(mock_config, rng, mesh)
 
-        model.load_weights(rng)
+            model.load_weights(rng)
 
-        model.weight_loader.load_weights.assert_called_once_with(model)
+            model.weight_loader.load_weights.assert_called_once_with(model)
 
 
 class TestDeepSeekV3WeightLoader:
@@ -164,6 +169,7 @@ class TestDeepSeekV3WeightLoader:
                                           qk_rope_head_dim=64,
                                           v_head_dim=128,
                                           num_local_experts=256,
+                                          moe_backend=MoEBackend.DENSE_MAT,
                                           model_dtype=jnp.bfloat16)
 
     @pytest.mark.parametrize("loaded_key, expected_mapped", [
@@ -447,6 +453,7 @@ class TestDeepSeekV3NativeFP8:
                                           v_head_dim=32,
                                           num_local_experts=8,
                                           model_dtype=jnp.bfloat16,
+                                          moe_backend=MoEBackend.DENSE_MAT,
                                           use_mla_kernel=True)
 
     def test_native_fp8_initialization(self, fp8_loader):
