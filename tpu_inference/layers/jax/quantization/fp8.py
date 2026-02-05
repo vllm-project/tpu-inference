@@ -20,7 +20,9 @@ import jax.numpy as jnp
 import numpy as np
 from flax import nnx
 
-from tpu_inference.layers.common.quantization import fp8 as jax_common
+from tpu_inference.layers.common.process_weights.linear_weights import \
+    shard_linear_weights
+from tpu_inference.layers.common.quantization import fp8 as common_fp8
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import JaxEinsum
@@ -30,12 +32,12 @@ from tpu_inference.models.jax.utils.weight_utils import \
     load_nnx_param_from_reshaped_torch
 
 
-class Fp8BlockwiseLinearMethod(QuantizeMethodBase, jax_common.Fp8LinearMethod):
+class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
     """Block-wise Fp8 method for JAX Linear layer."""
 
     def __init__(self, quant_config: "Fp8Config",
                  linear_config: QuantLinearConfig):
-        jax_common.Fp8LinearMethod.__init__(self, linear_config)
+        common_fp8.Fp8LinearMethod.__init__(self, linear_config)
         self.quant_config = quant_config
 
     def create_weights_jax(self, layer: JaxModule, *weight_args, rngs,
@@ -103,8 +105,44 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, jax_common.Fp8LinearMethod):
             ))
         layer.weight_scale_inv.sharding = layer.weight.sharding[::-1]
 
-    def process_weights_after_loading(self, layer: JaxEinsum):
-        pass
+    def process_weights_after_loading(self, layer):
+        assert isinstance(layer, JaxEinsum)
+        assert self.quant_config.weight_block_size is not None
+
+        weight = layer.weight
+        weight_scale = layer.weight_scale_inv
+        bias = layer.bias if hasattr(layer, 'bias') else None
+        weights = common_fp8.process_blockwise_fp8_linear_weights(
+            weight,
+            weight_scale,
+            bias=bias,
+            weight_block_size=self.quant_config.weight_block_size,
+            linear_config=self.linear_config)
+        delattr(layer, 'weight')
+        delattr(layer, 'weight_scale_inv')
+        delattr(layer, 'bias')
+
+        if self.linear_config.enable_quantized_matmul_kernel:
+            # The quantized_matmul_kernel expects weight scales shaped (n_out_features, 1, n_blocks) for blockwisze quantization.
+            weights.weight_scale = jnp.expand_dims(
+                jnp.transpose(weights.weight_scale),
+                axis=1,
+            )
+        weights = shard_linear_weights(
+            weights,
+            mesh=self.linear_config.mesh,
+            weight_p_spec=self.linear_config.weight_sharding,
+            bias_p_spec=self.linear_config.bias_sharding,
+        )
+
+        if self.linear_config.fuse_matmuls:
+            layer.weight = nnx.Param(weights.weight)
+            layer.weight_scale = nnx.Param(weights.weight_scale)
+            if bias is not None:
+                layer.bias = nnx.Param(weights.bias)
+        else:
+            raise NotImplementedError(
+                "Fp8 block-wise linear method only supports fuse_matmuls.")
 
     def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
         # TODO(#1623): Implement FP8 linear method for JAX
