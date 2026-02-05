@@ -48,8 +48,8 @@ steps:
        GCP_DATABASE_ID: "vllm-bm-bk-runs"
      commands:
        - CODE_HASH=$$(buildkite-agent meta-data get 'CODE_HASH')
-       - echo "code - $${CODE_HASH}"
-       - bash .buildkite/benchmark/scripts/daily_benchmark.sh
+       - echo "CODE_HASH=$${CODE_HASH}"
+       - bash .buildkite/benchmark/scripts/daily_benchmark.sh $${CODE_HASH}
 
 
   #  - label: "Publish: benchmark - RecordId: 68db88d5-80e6-4973-9d24-0dbcea35cc59"
