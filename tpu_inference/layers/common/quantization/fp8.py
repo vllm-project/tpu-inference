@@ -19,11 +19,11 @@ import jax
 from jax import numpy as jnp
 from jax.sharding import Mesh
 
-from tpu_inference.kernels.quantized_matmul.util import quantize_tensor
 from tpu_inference.layers.common.linear import sharded_quantized_matmul
 from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, process_linear_weights)
-from tpu_inference.layers.common.quantization import dequantize_tensor
+from tpu_inference.layers.common.quantization import (dequantize_tensor,
+                                                      quantize_tensor)
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
@@ -101,8 +101,8 @@ def process_blockwise_fp8_linear_weights(
             block_size=weight_block_size,
         )
         weight_slice, weight_scale_slice = quantize_tensor(
-            dequantized_weight,
             linear_config.requant_weight_dtype,
+            dequantized_weight,
             block_size=requant_block_size)
 
         weights.append(weight_slice)
