@@ -3,9 +3,11 @@
 Implements a few utility functions for the various runners.
 """
 import bisect
+import copy
 import datetime
 import functools
 import json
+import logging
 import os
 import time
 from enum import Enum
@@ -293,9 +295,10 @@ class PhasedBasedProfiler:
         current_phase: The current phase.
     """
 
-    def __init__(self, profile_dir: str):
+    def __init__(self, profile_dir: str, mlrun: Any = None):
         self.profiling_n_steps_left: int = 0
         self.profile_dir_with_phase_suffix: str = None
+        self.mlrun = mlrun
         self.num_steps_to_profile_for: int = int(
             os.getenv("PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR",
                       PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR))
@@ -357,8 +360,12 @@ class PhasedBasedProfiler:
 
             logger.info(f"Starting profiling for {self.current_phase} phase")
             logger.info(f"Batch composition stats: {batch_composition_stats}")
-            self.profile_dir_with_phase_suffix = os.path.join(
-                self.profile_dir, self.current_phase)
+            if not self.mlrun:
+                self.profile_dir_with_phase_suffix = os.path.join(
+                    self.profile_dir, self.current_phase)
+            else:
+                self.profile_dir_with_phase_suffix = f"{self.mlrun.gcs_path}/{self.mlrun.name}"
+                logging.info(f"mldiagnostics enable used flat phased profiler dir {self.profile_dir_with_phase_suffix}")
 
             # Create the profile subdirectory if it doesn't exist
             os.makedirs(self.profile_dir_with_phase_suffix, exist_ok=True)
