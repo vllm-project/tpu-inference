@@ -127,6 +127,9 @@ def moe_apply(
                 # NOTE: circular import avoidance
                 from tpu_inference.layers.jax.moe.dense_moe import \
                     dense_moe_func
+                assert isinstance(
+                    gating_output,
+                    tuple), "Expected the gating output to be a tuple"
                 assert len(
                     gating_output
                 ) == 2, "Expected the gating output to be have 2 entries: weights and indices"

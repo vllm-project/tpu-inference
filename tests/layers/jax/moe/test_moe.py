@@ -99,7 +99,7 @@ class TestMoE(unittest.TestCase):
                 expert_axis_name='model',
                 num_expert_parallelism=num_expert_parallelism,
                 # TODO (jacobplatin): we shouldn't hardcode this
-                quant_config=UnquantizedConfig())
+                quant_config=UnquantizedConfig({}))
         return moe
 
     def _compute_ground_truth(self, moe_instance, x_input):

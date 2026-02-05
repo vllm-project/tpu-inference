@@ -27,7 +27,6 @@ def get_tpu_quantization_config(vllm_config: VllmConfig):
         UnquantizedConfig
 
     model_config = copy.deepcopy(vllm_config.model_config)
-    # TODO: add fp8
     method_to_config: dict[str | None, type] = {
         None: UnquantizedConfig,
         # We want to support FP8 model (e.g. DeepSeek) in jax path.
@@ -36,9 +35,6 @@ def get_tpu_quantization_config(vllm_config: VllmConfig):
         # TODO(#1623): replace with actual FP8 config when delegation is ready.
         FP8: lambda _: None,
     }
-    # TODO (jacobplatin): temporary workaround for now before FP8 is fully ready for DeepSeek
-    if vllm_config.model_config.hf_config.model_type == "deepseek_v3":
-        method_to_config[FP8] = UnquantizedConfig
 
     if model_config.quantization not in method_to_config:
         raise NotImplementedError(
@@ -70,7 +66,6 @@ class QuantizeMethodBase(ABC):
         Expects create_weights to have been called before on the layer."""
         raise NotImplementedError
 
-    @abstractmethod
     def process_weights_after_loading(self, layer: JaxModule, *args,
                                       **kwargs) -> None:
         """
@@ -80,4 +75,4 @@ class QuantizeMethodBase(ABC):
             layer: The layer to process
         """
 
-        raise NotImplementedError
+        pass

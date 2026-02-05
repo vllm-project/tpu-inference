@@ -191,25 +191,16 @@ class JaxMoE(JaxModule):
         D = self.hidden_size
         F = self.intermediate_size_moe
 
-        # TODO (jacobplatin): we need to clean up the shardings, but the issue is that
-        # the fused backends expect a different sharding.  Ideally, we'd apply this
-        # in `process_weights_after_loading` in the QuantMethods but I was running
-        # into issues just setting `layer.kernel_gating_EDF.sharding = layer.efd_sharding`
-        # as it didn't seem to have any effect.
-        self.kernel_gating_EDF = create_param(
-            rngs,
-            shape=(E, D, F),
-            dtype=self.dtype,
-            sharding=self.edf_sharding if self.moe_backend
-            not in MoEBackend.fused_moe_backends() else self.efd_sharding,
-            random_init=self.random_init)
-        self.kernel_up_proj_EDF = create_param(
-            rngs,
-            shape=(E, D, F),
-            dtype=self.dtype,
-            sharding=self.edf_sharding if self.moe_backend
-            not in MoEBackend.fused_moe_backends() else self.efd_sharding,
-            random_init=self.random_init)
+        self.kernel_gating_EDF = create_param(rngs,
+                                              shape=(E, D, F),
+                                              dtype=self.dtype,
+                                              sharding=self.edf_sharding,
+                                              random_init=self.random_init)
+        self.kernel_up_proj_EDF = create_param(rngs,
+                                               shape=(E, D, F),
+                                               dtype=self.dtype,
+                                               sharding=self.edf_sharding,
+                                               random_init=self.random_init)
         self.kernel_down_proj_EFD = create_param(
             rngs,
             shape=(E, F, D),

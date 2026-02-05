@@ -63,7 +63,8 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
         super().__init__(*args, **kwargs)
         self.extra_backend_kwargs = {}
 
-    def process_weights_after_loading(self, layer: JaxMoE) -> None:
+    def process_weights_after_loading(self, layer: JaxMoE, *args,
+                                      **kwargs) -> None:
         """
         Process weights after loading.
 
@@ -78,7 +79,7 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
             w_gate = layer.kernel_gating_EDF.value
             w_up = layer.kernel_up_proj_EDF.value
 
-            # stack to create a 4d matrix
+            # stack to create a 4d array
             w13_val = jnp.stack([w_gate, w_up], axis=1)
 
             layer.kernel_gating_upproj_E2DF = nnx.Param(w13_val,
@@ -101,9 +102,6 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
                 "bd2c": 256,
             }
 
-            # TODO (jacobplatin): why is this sharding flipped?
-            layer.kernel_down_proj_EFD.sharding = layer.edf_sharding
-
         elif layer.moe_backend in [MoEBackend.GMM_EP, MoEBackend.GMM_TP]:
             w_gate = layer.kernel_gating_EDF.value
             w_up = layer.kernel_up_proj_EDF.value
@@ -117,9 +115,6 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
 
             del layer.kernel_gating_EDF
             del layer.kernel_up_proj_EDF
-
-            # TODO (jacobplatin): why is this sharding flipped?
-            layer.kernel_down_proj_EFD.sharding = layer.edf_sharding
 
     def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
         assert isinstance(layer, JaxMoE)
