@@ -21,6 +21,9 @@ from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 
 class QuantizationConfig(ABC):
 
+    def __init__(self, hf_quant_config: dict):
+        pass
+
     @abstractmethod
     def get_quant_method(self, layer: JaxModule,
                          prefix: str) -> Optional[QuantizeMethodBase]:
