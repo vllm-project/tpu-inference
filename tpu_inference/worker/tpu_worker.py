@@ -8,7 +8,6 @@ from typing import Callable, Dict, Optional, Tuple
 import jax
 import jaxlib
 import jaxtyping
-import vllm.envs as vllm_envs
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
                                           has_kv_transfer_group)
@@ -72,6 +71,7 @@ class TPUWorker:
         self.model_config = vllm_config.model_config
         self.parallel_config = vllm_config.parallel_config
         self.cache_config = vllm_config.cache_config
+        self.profiler_config = vllm_config.profiler_config
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
@@ -94,18 +94,18 @@ class TPUWorker:
         # TPU Worker is initialized. The profiler server needs to start after
         # MP runtime is initialized.
         self.profile_dir = None
-        if vllm_envs.VLLM_TORCH_PROFILER_DIR and self.rank < 1 and self.pp_config.pp_world_size == 1:
+        if self.profiler_config.torch_profiler_dir and self.rank < 1 and self.pp_config.pp_world_size == 1:
             if not self.devices or 0 in self.device_ranks:
                 # For TPU, we can only have 1 active profiler session for 1 profiler
                 # server. So we only profile on rank0.
-                self.profile_dir = vllm_envs.VLLM_TORCH_PROFILER_DIR
+                self.profile_dir = self.profiler_config.torch_profiler_dir
                 logger.info("Profiling enabled. Traces will be saved to: %s",
                             self.profile_dir)
 
         # For PP, we use MPMD so we want to profile every worker.
-        if self.pp_config.pp_world_size > 1 and vllm_envs.VLLM_TORCH_PROFILER_DIR:
+        if self.pp_config.pp_world_size > 1 and self.profiler_config.torch_profiler_dir:
             self.profile_dir = os.path.join(
-                vllm_envs.VLLM_TORCH_PROFILER_DIR,
+                self.profiler_config.torch_profiler_dir,
                 f"pprank_{self.rank}_ppworldsize_{self.pp_config.pp_world_size}"
             )
             os.makedirs(self.profile_dir, exist_ok=True)
