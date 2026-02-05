@@ -15,17 +15,20 @@
 # pipeline-name: async scheduler
 # pipeline-type: feature support matrix
 steps:
-  - label: "Correctness tests for async scheduler"
-    key: "async_scheduler_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Correctness tests for async scheduler"
+    key: "${TPU_VERSION:-tpu6e}_async_scheduler_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_async_scheduler.py::test_async_correctness
-  - label: "Record correctness test result for async scheduler"
-    key: "record_async_scheduler_CorrectnessTest"
-    depends_on: "async_scheduler_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for async scheduler"
+    key: "${TPU_VERSION:-tpu6e}_record_async_scheduler_CorrectnessTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_async_scheduler_CorrectnessTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "async scheduler"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "feature support matrix"
@@ -33,20 +36,23 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh async_scheduler_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_async_scheduler_CorrectnessTest
 
-  - label: "Performance tests for async scheduler"
-    key: "async_scheduler_PerformanceTest"
-    depends_on: "record_async_scheduler_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Performance tests for async scheduler"
+    key: "${TPU_VERSION:-tpu6e}_async_scheduler_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_async_scheduler_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_async_scheduler.py::test_performance
-  - label: "Record performance test result for async scheduler"
-    key: "record_async_scheduler_PerformanceTest"
-    depends_on: "async_scheduler_PerformanceTest"
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for async scheduler"
+    key: "${TPU_VERSION:-tpu6e}_record_async_scheduler_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_async_scheduler_PerformanceTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "async scheduler"
       CI_STAGE: "PerformanceTest"
       CI_CATEGORY: "feature support matrix"
@@ -54,4 +60,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh async_scheduler_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_async_scheduler_PerformanceTest

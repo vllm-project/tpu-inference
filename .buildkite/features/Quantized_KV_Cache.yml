@@ -15,18 +15,21 @@
 # pipeline-name: Quantized KV Cache
 # pipeline-type: kernel support matrix
 steps:
-  - label: "Correctness tests for Quantized KV Cache"
-    key: "Quantized_KV_Cache_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Correctness tests for Quantized KV Cache"
+    key: "${TPU_VERSION:-tpu6e}_Quantized_KV_Cache_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
-        buildkite-agent meta-data set "Quantized_KV_Cache_CorrectnessTest" "unverified"
-  - label: "Record correctness test result for Quantized KV Cache"
-    key: "record_Quantized_KV_Cache_CorrectnessTest"
-    depends_on: "Quantized_KV_Cache_CorrectnessTest"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_Quantized_KV_Cache_CorrectnessTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for Quantized KV Cache"
+    key: "${TPU_VERSION:-tpu6e}_record_Quantized_KV_Cache_CorrectnessTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_Quantized_KV_Cache_CorrectnessTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "Quantized KV Cache"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "kernel support matrix"
@@ -34,21 +37,24 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh Quantized_KV_Cache_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Quantized_KV_Cache_CorrectnessTest
 
-  - label: "Performance tests for Quantized KV Cache"
-    key: "Quantized_KV_Cache_PerformanceTest"
-    depends_on: "record_Quantized_KV_Cache_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Performance tests for Quantized KV Cache"
+    key: "${TPU_VERSION:-tpu6e}_Quantized_KV_Cache_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_Quantized_KV_Cache_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
-        buildkite-agent meta-data set "Quantized_KV_Cache_PerformanceTest" "unverified"
-  - label: "Record performance test result for Quantized KV Cache"
-    key: "record_Quantized_KV_Cache_PerformanceTest"
-    depends_on: "Quantized_KV_Cache_PerformanceTest"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_Quantized_KV_Cache_PerformanceTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for Quantized KV Cache"
+    key: "${TPU_VERSION:-tpu6e}_record_Quantized_KV_Cache_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_Quantized_KV_Cache_PerformanceTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "Quantized KV Cache"
       CI_STAGE: "PerformanceTest"
       CI_CATEGORY: "kernel support matrix"
@@ -56,4 +62,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh Quantized_KV_Cache_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Quantized_KV_Cache_PerformanceTest
