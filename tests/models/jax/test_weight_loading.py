@@ -31,7 +31,7 @@ class SourceModel(nnx.Module):
 
     def __init__(self, rngs):
         self.src_lm_head = nnx.Param(jax.random.normal(rngs(), (2, 4)))
-        self.layers = {0: SourceLayer(rngs)}
+        self.layers = nnx.Dict({'0': SourceLayer(rngs)})
 
 
 class TargetLinear(nnx.Module):
@@ -44,14 +44,14 @@ class TargetLinear(nnx.Module):
 class TargetBlock(nnx.Module):
 
     def __init__(self, rngs):
-        self.mlp = {"up_proj": TargetLinear(rngs)}
+        self.mlp = nnx.Dict({"up_proj": TargetLinear(rngs)})
 
 
 class TargetModel(nnx.Module):
 
     def __init__(self, rngs):
         self.tgt_lm_head = nnx.Param(jnp.zeros((2, 4)))
-        self.model = {"layers": {0: TargetBlock(rngs)}}
+        self.model = nnx.Dict({"layers": nnx.Dict({'0': TargetBlock(rngs)})})
 
 
 # ----- Test -----
@@ -67,8 +67,8 @@ class WeightTransfer(jtu.JaxTestCase):
         _, tgt_state = nnx.split(tgt_model)
 
         # Overwrite known values
-        src_state["layers"][0]["kernel"].value = jnp.ones((4, 4)) * 42.0
-        src_state["layers"][0]["bias"].value = jnp.ones((4, )) * 7.0
+        src_state["layers"]['0']["kernel"].value = jnp.ones((4, 4)) * 42.0
+        src_state["layers"]['0']["bias"].value = jnp.ones((4, )) * 7.0
         src_state["src_lm_head"].value = jnp.ones((2, 4)) * 6.0
         # Mapping for both kernel and bias
         mappings = {
@@ -83,10 +83,10 @@ class WeightTransfer(jtu.JaxTestCase):
 
         # Assert correctness
         assert jnp.allclose(
-            new_tgt_state["model"]["layers"][0]["mlp"]["up_proj"]
+            new_tgt_state["model"]["layers"]['0']["mlp"]["up_proj"]
             ["kernel"].value, 42.0)
         assert jnp.allclose(
-            new_tgt_state["model"]["layers"][0]["mlp"]["up_proj"]
+            new_tgt_state["model"]["layers"]['0']["mlp"]["up_proj"]
             ["bias"].value, 7.0)
         assert jnp.allclose(new_tgt_state["tgt_lm_head"].value, 6.0)
 

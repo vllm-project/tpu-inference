@@ -115,7 +115,7 @@ class TestDeepSeekV3:
     def test_init(self, mock_config, rng, mesh):
         """Tests if the model initializes with the correct hierarchy."""
         with patch("tpu_inference.models.jax.deepseek_v3.ShardingAxisName",
-                   ShardingAxisNameBase):
+                   ShardingAxisNameBase), jax.set_mesh(mesh):
             model = DeepSeekV3(mock_config, rng, mesh)
             assert len(model.layers) == 1
             assert isinstance(model.embedder, nnx.Module)
@@ -124,7 +124,7 @@ class TestDeepSeekV3:
     def test_random_weights(self, mock_config, rng, mesh):
         """Tests that force_random_weights initializes non-zero weights."""
         with patch("tpu_inference.models.jax.deepseek_v3.ShardingAxisName",
-                   ShardingAxisNameBase):
+                   ShardingAxisNameBase), jax.set_mesh(mesh):
             model = DeepSeekV3(mock_config,
                                rng,
                                mesh,
@@ -143,7 +143,7 @@ class TestDeepSeekV3:
     def test_load_weights_called(self, mock_weights_generator, mock_loader_cls,
                                  mock_config, rng, mesh):
         with patch("tpu_inference.models.jax.deepseek_v3.ShardingAxisName",
-                   ShardingAxisNameBase):
+                   ShardingAxisNameBase), jax.set_mesh(mesh):
             model = DeepSeekV3(mock_config, rng, mesh)
 
             model.load_weights(rng)
@@ -624,9 +624,10 @@ class TestDeepseekV3Attention(unittest.TestCase):
         with jax.set_mesh(self.mesh):
             query_tnh_spec = PartitionSpec(None, ShardingAxisName.MLP_TENSOR,
                                            None)
-            keyvalue_skh_spec = PartitionSpec(None,
-                                              ShardingAxisName.MLP_TENSOR,
-                                              None)
+            keyvalue_skh_spec = PartitionSpec(
+                None,
+                ShardingAxisName.MLP_TENSOR,
+            )
             attn_o_tnh_spec = PartitionSpec(None, ShardingAxisName.MLP_TENSOR,
                                             None)
 
@@ -660,10 +661,10 @@ class TestDeepseekV3Attention(unittest.TestCase):
                 query_tnh=query_tnh_spec,
                 keyvalue_skh=keyvalue_skh_spec,
                 attn_o_tnh=attn_o_tnh_spec,
-                q_da_sharding=(None, ShardingAxisName.VOCAB),
-                ap_sharding=(None, ShardingAxisName.MLP_TENSOR),
-                kv_da_sharding=(None, ShardingAxisName.VOCAB),
-                rd_sharding=(ShardingAxisName.MLP_TENSOR, None),
+                q_da_sharding=PartitionSpec(None, ShardingAxisName.VOCAB),
+                ap_sharding=PartitionSpec(None, ShardingAxisName.MLP_TENSOR),
+                kv_da_sharding=PartitionSpec(None, ShardingAxisName.VOCAB),
+                rd_sharding=PartitionSpec(ShardingAxisName.MLP_TENSOR, None),
             )
 
             seq_len = 32

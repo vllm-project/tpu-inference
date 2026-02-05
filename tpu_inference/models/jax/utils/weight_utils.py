@@ -788,24 +788,14 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                 elif "lm_head" in name:
                     permute_dims = (1, 0)
 
-                setattr(
-                    param, "weight_loader",
+                param.set_metadata(
+                    "weight_loader",
                     functools.partial(load_nnx_param_from_reshaped_torch,
                                       reshape_dims=reshape_dims,
                                       permute_dims=permute_dims,
                                       param_name=name))
 
         super().__init__(model, **kwargs)
-
-    def _load_module(self, base_prefix: str, module: JaxModule,
-                     weights: Iterable) -> Iterable:
-        yield from super()._load_module(base_prefix, module, weights)
-        # Post-process module after loading weights. Unlike vLLM post-process
-        # weights after loading all weights, we do it per-module here to
-        # avoid OOM.
-        if (quant_method := getattr(module, 'quant_method', None)) is not None:
-            if hasattr(quant_method, 'process_weights_after_loading'):
-                quant_method.process_weights_after_loading(module)
 
 
 class LoadableWithIterator:
