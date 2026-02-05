@@ -517,6 +517,16 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
         q_TNA, q_rope_TNH = q_data
         k_SA, k_rope_SH = kv_data
 
+        q_scale = k_scale = v_scale = None
+        if self.kv_cache_quantized_dtype:
+            k_scale = self._k_scale
+            v_scale = self._v_scale
+            # TODO: May need to apply quantization separately for k_c & k_pe
+            k_SA, _ = quantize_kv(self.kv_cache_quantized_dtype, k_SA,
+                                       value=None, k_scale=k_scale)
+            k_rope_SH, _ = quantize_kv(self.kv_cache_quantized_dtype, k_rope_SH,
+                                       value=None, k_scale=k_scale)
+
         in_specs = (
             self.query_tnh,  # q
             self.query_tnh,  # q_rope
@@ -552,7 +562,11 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
                 *args,
                 sm_scale=self.scale,
                 num_kv_pages_per_block=num_kv_pages_per_block,
-                num_queries_per_block=num_queries_per_block)
+                num_queries_per_block=num_queries_per_block,
+                q_scale=q_scale,
+                k_scale=k_scale,
+                v_scale=k_scale)
+
             return new_cache, out
 
         kv_cache, output_TNA = jax.jit(
@@ -965,11 +979,11 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
             # TODO (jacobplatin): remove or clean this up
             self.scale_shape_map_for_random_weight_loading = {
                 # MoE experts (3D)
-                "custom_module.experts.kernel_down_proj_EFD": (256, 1, 7168),
+                "custom_module.experts.kernel_down_proj_EFD": (256, 8, 7168),
                 "custom_module.experts.kernel_gating_EDF": (256, 28, 2048),
                 "custom_module.experts.kernel_up_proj_EDF": (256, 28, 2048),
                 # Shared experts (2D)
-                "custom_module.shared_experts.kernel_down_proj_FD": (1, 7168),
+                "custom_module.shared_experts.kernel_down_proj_FD": (8, 7168),
                 "custom_module.shared_experts.kernel_gating_DF": (28, 2048),
                 "custom_module.shared_experts.kernel_up_proj_DF": (28, 2048),
                 # Dense FFW (2D)
@@ -1575,8 +1589,8 @@ class DeepSeekV3(nnx.Module):
                 attn_o_tnh_spec=P(None, ShardingAxisName.MLP_TENSOR, None)
             rd_sharding=(ShardingAxisName.MLP_TENSOR, None)
             ap_sharding=(None, ShardingAxisName.MLP_TENSOR)
-            q_da_sharding=(None, ShardingAxisName.VOCAB)
-            kv_da_sharding=(None, ShardingAxisName.VOCAB)
+            q_da_sharding=(None, ShardingAxisName.MLP_TENSOR)
+            kv_da_sharding=(None, ShardingAxisName.MLP_TENSOR)
             
             if self.vllm_config.additional_config.get(
                 "replicate_attn_weights", False):
@@ -1720,8 +1734,7 @@ class DeepSeekV3(nnx.Module):
                     intermediate_size=num_shared_experts *
                     moe_intermediate_size,
                     rngs=self.rng,
-                    activation_ffw_td=(ShardingAxisName.MLP_DATA,
-                                       ShardingAxisName.MOE_TENSOR),
+                    activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
                     df_sharding=(None, ShardingAxisName.MLP_TENSOR),
                     fd_sharding=(ShardingAxisName.MLP_TENSOR, None))
 
