@@ -16,10 +16,8 @@
 set -euo pipefail
 
 VLLM_COMMIT_HASH=$1
-TPU_INFERENCE_HASH=$2
-# CODE_HASH="${VLLM_COMMIT_HASH}-${TPU_INFERENCE_HASH}-"
+CODE_HASH=$2
 
-# southamerica-west1-docker.pkg.dev/cloud-tpu-inference-test/vllm-tpu-bm-bk/vllm-tpu:4c4b6f7a9-4e6e6fb4-
 IMAGE_TAG="$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/$ARTIFACT_REPO/vllm-tpu:$CODE_HASH"
 
 gcloud auth configure-docker $GCP_REGION-docker.pkg.dev --quiet
@@ -33,12 +31,11 @@ if gcloud artifacts docker images describe "$IMAGE_TAG" --format='value(image_su
 fi
 
 cleanup_image() {
-    echo "--- Starting cleanup docker image ---"
+    echo "--- Cleanup docker image ---"
     if [[ -n "$IMAGE_TAG" ]]; then
         echo "Removing Docker image: $IMAGE_TAG"
         docker rmi "$IMAGE_TAG" 2>/dev/null || true
     fi
-    echo "--- Cleanup finished docker image ---"
 }
 
 VLLM_TARGET_DEVICE=tpu DOCKER_BUILDKIT=1 docker build \

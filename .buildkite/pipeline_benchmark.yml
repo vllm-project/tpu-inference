@@ -32,11 +32,8 @@ steps:
        ARTIFACT_REPO: "vllm-tpu-bm-bk"
      commands:
        - VLLM_COMMIT_HASH=$$(buildkite-agent meta-data get 'VLLM_COMMIT_HASH')
-       - VLLM_SHORT_HASH=$$(buildkite-agent meta-data get 'VLLM_SHORT_HASH')
-       - TPU_SHORT_HASH=$$(buildkite-agent meta-data get 'TPU_SHORT_HASH')
        - CODE_HASH=$$(buildkite-agent meta-data get 'CODE_HASH')
-       - echo "CodeHash - $${CODE_HASH}"
-      #  - bash .buildkite/hourly_benchmark/scripts/build_tpu_inference_image.sh $$VLLM_COMMIT_HASH $$BUILDKITE_COMMIT
+       - bash .buildkite/hourly_benchmark/scripts/build_tpu_inference_image.sh $$VLLM_COMMIT_HASH $$CODE_HASH
 
    - label: "Read CSV file and publish benchmark job"
      key: "read-csv-publish-job"
@@ -44,36 +41,26 @@ steps:
      agents:
        queue: cpu
      env:
-       # Temp hack when dev
-       TPU_IMAGE: "vllm-tpu:64a40a7ab4d0053830fae04c83763fa67f2183e6-32d1ad9716eb2d70354de84b46be7ea85fa61c85-"
        GCP_PROJECT_ID: "cloud-tpu-inference-test"
        GCP_REGION: "southamerica-west1"
        ARTIFACT_REPO: "vllm-tpu-bm-bk"
        GCP_INSTANCE_ID: "vllm-bm-inst"
        GCP_DATABASE_ID: "vllm-bm-bk-runs"
      commands:
-       - VLLM_COMMIT_HASH=$$(buildkite-agent meta-data get 'VLLM_COMMIT_HASH')
-       - VLLM_SHORT_HASH=$$(buildkite-agent meta-data get 'VLLM_SHORT_HASH')
-       - TPU_SHORT_HASH=$$(buildkite-agent meta-data get 'TPU_SHORT_HASH')
        - CODE_HASH=$$(buildkite-agent meta-data get 'CODE_HASH')
-       - echo "CodeHash - $${CODE_HASH}"
-      #  - bash .buildkite/hourly_benchmark/scripts/daily_benchmark.sh $$VLLM_COMMIT_HASH $$BUILDKITE_COMMIT
-      # .buildkite/hourly_benchmark/cases/hourly_jax_dev.csv 
+       - bash .buildkite/hourly_benchmark/scripts/daily_benchmark.sh
 
-  #  - wait: ~
-  #    continue_on_failure: true  # ensure we still generate support matrices even if some tests fail
-   - label: "Publish: benchmark - RecordId: 68db88d5-80e6-4973-9d24-0dbcea35cc59"
-     depends_on: "read-csv-publish-job"
-     env:
-       GCP_PROJECT_ID: "cloud-tpu-inference-test"
-       GCP_REGION: "southamerica-west1"
-       GCS_BUCKET: "vllm-cb-storage2"
-       ARTIFACT_REPO: "vllm-tpu-bm-bk"
-       GCP_INSTANCE_ID: "vllm-bm-inst"
-       GCP_DATABASE_ID: "vllm-bm-bk-runs"
-     agents:
-       queue: tpu_v6e_queue
-     command:
-      #  - CODE_HASH=$$(buildkite-agent meta-data get 'CODE_HASH')
-       - CODE_HASH="64a40a7ab4d0053830fae04c83763fa67f2183e6-32d1ad9716eb2d70354de84b46be7ea85fa61c85-"
-       - ".buildkite/benchmark/scripts/agent/run_job.sh 68db88d5-80e6-4973-9d24-0dbcea35cc59"
+
+  #  - label: "Publish: benchmark - RecordId: 68db88d5-80e6-4973-9d24-0dbcea35cc59"
+  #    depends_on: "read-csv-publish-job"
+  #    env:
+  #      GCP_PROJECT_ID: "cloud-tpu-inference-test"
+  #      GCP_REGION: "southamerica-west1"
+  #      GCS_BUCKET: "vllm-cb-storage2"
+  #      ARTIFACT_REPO: "vllm-tpu-bm-bk"
+  #      GCP_INSTANCE_ID: "vllm-bm-inst"
+  #      GCP_DATABASE_ID: "vllm-bm-bk-runs"
+  #    agents:
+  #      queue: tpu_v6e_queue
+  #    command:
+  #      - ".buildkite/benchmark/scripts/agent/run_job.sh 68db88d5-80e6-4973-9d24-0dbcea35cc59"

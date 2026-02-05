@@ -33,8 +33,15 @@ remove_docker_container() {
     docker rm -f vllm-tpu || true;
     docker rm -f $CONTAINER_NAME || true;
 }
-
 trap remove_docker_container EXIT
+
+cleanup_docker_image() {
+    if [[ -n "$IMAGE_TAG" ]]; then
+        echo "Removing Docker image: $IMAGE_TAG"
+        docker rmi "$IMAGE_TAG" 2>/dev/null || true
+    fi
+}
+trap cleanup_docker_image EXIT
 
 # Remove the container that might not be cleaned up in the previous run.
 remove_docker_container

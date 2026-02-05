@@ -25,10 +25,6 @@ JOB_REFERENCE="$3"
 RUN_TYPE="$4"
 EXTRA_ENVS="$5"
 
-# VLLM_COMMIT_HASH="$2"
-# TPU_INFERENCE_HASH="$3"
-# CODE_HASH="${VLLM_COMMIT_HASH}-${TPU_INFERENCE_HASH}-"
-
 if [[ "$CSV_FILE_ARG" == gs://* ]]; then
   echo "GCS path detected. Downloading from $CSV_FILE_ARG"
   CSV_FILE=$(mktemp)
@@ -61,19 +57,6 @@ BUILDKITE_QUEUE_DEVICE_MAP=(
     ["v6e-8"]="tpu_v6e_8_queue"
 )
 
-# get_queue_for_device() {
-#     local device_key="$1"
-    
-#     # Check if the key exists in the map
-#     if [[ -v BUILDKITE_QUEUE_DEVICE_MAP["$device_key"] ]]; then
-#         echo "${BUILDKITE_QUEUE_DEVICE_MAP[$device_key]}"
-#     else
-#         # Error handling: Output to stderr and return non-zero
-#         echo "Error: Device '$device_key' not found in map." >&2
-#         return 1
-#     fi
-# }
-
 # === Config ===
 # Make sure these environment variables are set or export here
 # export GCP_PROJECT_ID="your-project"
@@ -102,8 +85,6 @@ tail -n +2 "$CSV_FILE" | while read -r line || [ -n "${line}" ]; do
     PREFIX_LEN <<< "$line"
 
   RECORD_ID=$(uuidgen | tr 'A-Z' 'a-z')
-
-  # ** TODO: Using DEVICE to depart in which buildkite queue
   
   echo "Inserting Run: $RECORD_ID"
   gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
@@ -138,7 +119,7 @@ tail -n +2 "$CSV_FILE" | while read -r line || [ -n "${line}" ]; do
     continue
   fi
 
-  # Check if the DEVICE exists in the map
+  # Check if the DEVICE exists in the buildkite queue map
   if [[ -v BUILDKITE_QUEUE_DEVICE_MAP["$DEVICE"] ]]; then
     BUILDKITE_AGENT_QUEUE="${BUILDKITE_QUEUE_DEVICE_MAP[$DEVICE]}"
   else
@@ -147,29 +128,26 @@ tail -n +2 "$CSV_FILE" | while read -r line || [ -n "${line}" ]; do
   fi
 
   # Publishing to Buildkite step (main parameter: $RECORD_ID)
-
-
   # For each line in csv file, generate a command step
   pipeline_yaml=$(cat <<EOF
 - label: "Publish: benchmark - RecordId: ${RECORD_ID}"
   env:
-    RECORD_ID: "${RECORD_ID}"
     GCP_PROJECT_ID: "cloud-tpu-inference-test"
     GCP_REGION: "southamerica-west1"
     GCS_BUCKET: "vllm-cb-storage2"
     ARTIFACT_REPO: "vllm-tpu-bm-bk"
     GCP_INSTANCE_ID: "vllm-bm-inst"
     GCP_DATABASE_ID: "vllm-bm-bk-runs"
-    VLLM_TPU_IMAGE: ""
   agents:
     queue: $BUILDKITE_AGENT_QUEUE
   command: 
+    - CODE_HASH=$$(buildkite-agent meta-data get 'CODE_HASH')
     - ".buildkite/benchmark/scripts/agent/run_job.sh $${RECORD_ID}"
 EOF
 )
   pipeline_steps+=("${pipeline_yaml}")
 
-  echo "$RECORD_ID published."
+  echo "$RECORD_ID handled."
 done
 
 # --- Upload Benchmark Dynamic Pipeline ---
@@ -178,7 +156,7 @@ if [[ "${#pipeline_steps[@]}" -gt 0 ]]; then
   final_pipeline_yaml="steps:"$'\n'
   final_pipeline_yaml+=$(printf "%s\n" "${pipeline_steps[@]}")
   echo "Upload YML: ${final_pipeline_yaml}"
-  echo -e "${final_pipeline_yaml}" | buildkite-agent pipeline upload
+  # echo -e "${final_pipeline_yaml}" | buildkite-agent pipeline upload
 else
   echo "--- No benchmark records found, no new Pipeline Steps to upload."
   exit 0
