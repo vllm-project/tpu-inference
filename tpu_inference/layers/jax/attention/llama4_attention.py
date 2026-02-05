@@ -59,8 +59,6 @@ class Llama4Attention(Attention):
     activation_attention_td: Sharding
     activation_attention_out_td: Sharding
 
-    is_causal: bool = True
-
     def __call__(self,
                  x,
                  is_prefill,
@@ -346,7 +344,7 @@ class Llama4VisionAttention(nnx.Module):
         with jax.named_scope("flash_attn_op"):
             outputs_BNTH = sharded_flash_attention(
                 mesh=self.mesh,
-                causal=False,
+                causal=self.is_causal,
                 sm_scale=self.head_dim**-0.5,
             )(q_BNTH, k_BKTH, v_BKTH, segment_ids)
             new_kv_cache = kv_cache

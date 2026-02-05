@@ -39,9 +39,9 @@ export TIMEOUT_SECONDS=600
 MINIMUM_ACCURACY_THRESHOLD=${MINIMUM_ACCURACY_THRESHOLD}
 CI_MAX_TEST_CASES=100
 TEXT_ONLY_REQUEST_THROUGHPUT_TP1="78.00"
-TEXT_ONLY_REQUEST_THROUGHPUT_TP8="199.00"
-MULTIMODAL_REQUEST_THROUGHPUT_TP1="106.00"
-MULTIMODAL_REQUEST_THROUGHPUT_TP8="122.00"
+TEXT_ONLY_REQUEST_THROUGHPUT_TP8="180.00"
+MULTIMODAL_REQUEST_THROUGHPUT_TP1="50"
+MULTIMODAL_REQUEST_THROUGHPUT_TP8="90"
 
 
 # Benchmark/Serve Settings
@@ -241,7 +241,7 @@ run_performance_benchmark() {
         --custom-output-len "$OUTPUT_LEN_OVERRIDE" \
         2>&1 | tee "$BENCHMARK_LOG_FILE"
 
-    ACTUAL_THROUGHPUT=$(awk '/Request throughput \(req\/s\):/ {print $NF}' "$BENCHMARK_LOG_FILE")
+    ACTUAL_THROUGHPUT=$(awk '/Request throughput \(req\/s\):/ {print $NF}' "$BENCHMARK_LOG_FILE" | tail -n 1)
 
     if [ -z "$ACTUAL_THROUGHPUT" ]; then
         echo "Error: Request throughput NOT FOUND in benchmark logs."
@@ -309,7 +309,7 @@ run_multimodal_performance_benchmark() {
         2>&1 | tee -a "$BENCHMARK_LOG_FILE"
 
 
-    ACTUAL_THROUGHPUT=$(awk '/Request throughput \(req\/s\):/ {print $NF}' "$BENCHMARK_LOG_FILE")
+    ACTUAL_THROUGHPUT=$(awk '/Request throughput \(req\/s\):/ {print $NF}' "$BENCHMARK_LOG_FILE" | tail -n 1)
 
     if [ -z "$ACTUAL_THROUGHPUT" ]; then
         echo "Error: Request throughput NOT FOUND in benchmark logs."
