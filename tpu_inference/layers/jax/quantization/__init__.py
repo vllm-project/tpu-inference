@@ -33,7 +33,7 @@ def get_tpu_quantization_config(vllm_config: VllmConfig):
         # But the overall delegation mechanism is not fully ready yet.
         # So here we accept FP8 but returns None for now.
         # TODO(#1623): replace with actual FP8 config when delegation is ready.
-        FP8: None,
+        FP8: lambda _: None,
     }
 
     if model_config.quantization not in method_to_config:
@@ -41,8 +41,6 @@ def get_tpu_quantization_config(vllm_config: VllmConfig):
             f"{model_config.quantization} quantization method not supported."
             f" Supported methods are {method_to_config.keys()}")
     quant_config = method_to_config[model_config.quantization]
-    if quant_config is None:
-        return None
     hg_quant_config = getattr(model_config.hf_config, "quantization_config",
                               {})
     # There are some cases to be supported in the future:

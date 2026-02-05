@@ -30,11 +30,6 @@ class QuantizationConfig(ABC):
         raise NotImplementedError
 
     @classmethod
-    def from_config(cls, config: dict):
-        """Create QuantizationConfig from a config dict."""
-        return cls()
-
-    @classmethod
     def get_from_keys(cls, config: dict, keys: list, *args):
         """Get value from config using the first matching key.'
         

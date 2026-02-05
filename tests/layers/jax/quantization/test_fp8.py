@@ -49,12 +49,14 @@ class TestFp8BlockwiseJaxLinear:
             use_bias=use_bias,
             quant_config=quant_config,
         )
-        layer.quant_method.process_weights_after_loading(layer)
 
         # Use a dummy mesh for testing
         devices = jax.devices()
         mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
         with jax.set_mesh(mesh):
+            # Process weights in mesh context
+            layer.quant_method.process_weights_after_loading(layer)
+
             # Prepare input
             x = jax.random.normal(rngs.params(), (batch_size, in_features))
 
@@ -82,14 +84,15 @@ class TestFp8BlockwiseJaxLinear:
             bias_shape=kernel_shape[1:] if use_bias else None,
             quant_config=quant_config,
         )
-        layer.quant_method.process_weights_after_loading(layer)
 
         # Use a dummy mesh for testing
         devices = jax.devices()
         mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
         with jax.set_mesh(mesh):
+            # Process weights in mesh context
+            layer.quant_method.process_weights_after_loading(layer)
+
             # Prepare input (B, D)
-            # kernel_shape[0] is D
             x = jax.random.normal(rngs.params(), (batch_size, kernel_shape[0]))
 
             # Forward pass
