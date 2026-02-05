@@ -94,7 +94,8 @@ class TestTPUWorker:
     def test_init_with_profiler_on_rank_zero(self, mock_envs,
                                              mock_vllm_config):
         """Tests that the profiler directory is set correctly on rank 0."""
-        mock_envs.VLLM_TORCH_PROFILER_DIR = "/tmp/profiles"
+        mock_vllm_config.profiler_config.profiler = "torch"
+        mock_vllm_config.profiler_config.torch_profiler_dir = "/tmp_profiles"
         worker = TPUWorker(vllm_config=mock_vllm_config,
                            local_rank=0,
                            rank=0,
@@ -105,7 +106,8 @@ class TestTPUWorker:
     def test_init_with_profiler_on_other_ranks(self, mock_envs,
                                                mock_vllm_config):
         """Tests that the profiler directory is NOT set on non-rank 0 workers."""
-        mock_envs.VLLM_TORCH_PROFILER_DIR = "/tmp/profiles"
+        mock_vllm_config.profiler_config.profiler = "torch"
+        mock_vllm_config.profiler_config.torch_profiler_dir = "/tmp_profiles"
         worker = TPUWorker(vllm_config=mock_vllm_config,
                            local_rank=1,
                            rank=1,

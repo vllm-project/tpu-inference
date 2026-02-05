@@ -4,7 +4,6 @@
 import os
 import time
 
-import vllm.envs as vllm_envs
 from vllm import LLM, EngineArgs
 from vllm.lora.request import LoRARequest
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -55,13 +54,14 @@ def main(args: dict):
         "lora_adapter_3", 3,
         "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_3_adapter")
 
-    if vllm_envs.VLLM_TORCH_PROFILER_DIR is not None:
+    profiler_config = llm.llm_engine.vllm_config.profiler_config
+    if profiler_config.profiler == "torch":
         llm.start_profile()
     start = time.perf_counter()
     outputs = llm.generate(prompt,
                            sampling_params=sampling_params,
                            lora_request=lora_request)
-    if vllm_envs.VLLM_TORCH_PROFILER_DIR is not None:
+    if profiler_config.profiler == "torch":
         llm.stop_profile()
 
     # Print the outputs.
