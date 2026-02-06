@@ -15,18 +15,18 @@
 
 # Entrypoint script for vLLM TPU Docker image
 # 
-# Default behavior: Starts /bin/bash 
-# To start vLLM server: Set VLLM_SERVER=true
+# Default behavior: Starts the vLLM OpenAI-compatible API server
+# To start bash shell instead: Set DISABLE_VLLM_SERVER=true
 #
 # Examples:
-#   # Default: Start bash shell 
-#   docker run -it vllm-tpu
-#
-#   # Start vLLM server
-#   docker run -e VLLM_SERVER=true vllm-tpu
+#   # Default: Start vLLM server
+#   docker run vllm-tpu
 #   
 #   # Start vLLM server with arguments
-#   docker run -e VLLM_SERVER=true -e VLLM_ARGS="--model=meta-llama/Llama-2-7b --port=8080" vllm-tpu
+#   docker run -e VLLM_ARGS="--model=meta-llama/Llama-2-7b --port=8080" vllm-tpu
+#
+#   # Start bash shell instead (backward compatible)
+#   docker run -e DISABLE_VLLM_SERVER=true -it vllm-tpu
 #
 #   # Run custom command
 #   docker run vllm-tpu python3 my_script.py
@@ -38,11 +38,11 @@ if [ $# -gt 0 ]; then
     exec "$@"
 fi
 
-# If VLLM_SERVER is set to true, start the vLLM OpenAI-compatible API server
-if [ "${VLLM_SERVER:-false}" = "true" ]; then
-    echo "Starting vLLM OpenAI-compatible API server..."
-    exec python3 -m vllm.entrypoints.openai.api_server ${VLLM_ARGS:-}
+# If DISABLE_VLLM_SERVER is set to true, start bash shell (backward compatible)
+if [ "${DISABLE_VLLM_SERVER:-false}" = "true" ]; then
+    exec /bin/bash
 fi
 
-# Default: Start bash shell (backward compatible)
-exec /bin/bash
+# Default: Start vLLM OpenAI-compatible API server
+echo "Starting vLLM OpenAI-compatible API server..."
+exec python3 -m vllm.entrypoints.openai.api_server ${VLLM_ARGS:-}
