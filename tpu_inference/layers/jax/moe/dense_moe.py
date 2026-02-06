@@ -14,7 +14,6 @@
 
 import jax
 import jax.numpy as jnp
-from flax import nnx
 from jaxtyping import Float
 
 from tpu_inference.layers.jax.moe.utils import modeling_flax_utils
@@ -22,7 +21,8 @@ from tpu_inference.layers.jax.moe.utils import modeling_flax_utils
 
 def dense_moe_fwd(moe_instance, x_TD: Float, weights):
     x_TD = jnp.asarray(x_TD, moe_instance.dtype)
-    x_TD = nnx.with_sharding_constraint(x_TD, moe_instance.activation_ffw_td)
+    x_TD = jax.lax.with_sharding_constraint(x_TD,
+                                            moe_instance.activation_ffw_td)
     with jax.named_scope("gating"):
         gating_TEF = jnp.einsum('TD,EDF -> TEF', x_TD,
                                 moe_instance.kernel_gating_EDF.value)
@@ -45,8 +45,8 @@ def dense_moe_fwd_preapply_router_weights(moe_instance, x_TD: jax.Array,
     num_experts = weights_TE.shape[-1]
     x_TED = jnp.repeat(x_TD[:, None, :], num_experts, 1)
     x_TED = jnp.asarray(x_TED, moe_instance.dtype) * weights_TE[..., None]
-    x_TED = nnx.with_sharding_constraint(x_TED,
-                                         moe_instance.activation_ffw_ted)
+    x_TED = jax.lax.with_sharding_constraint(x_TED,
+                                             moe_instance.activation_ffw_ted)
 
     with jax.named_scope("gating"):
         gating_TEF = jnp.einsum('TED,EDF -> TEF', x_TED,

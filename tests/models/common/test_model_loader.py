@@ -263,8 +263,9 @@ def test_get_flax_model(vllm_config, mesh, tie_word_embeddings):
                                     world_size=1,
                                     device=jax.devices()[0],
                                     need_pp=False)
-    model_fn, compute_logits_fn, *_ = model_loader.get_flax_model(
-        vllm_config, rng, mesh)
+    with jax.set_mesh(mesh):
+        model_fn, compute_logits_fn, *_ = model_loader.get_flax_model(
+            vllm_config, rng, mesh)
 
     assert callable(model_fn)
     assert callable(compute_logits_fn)

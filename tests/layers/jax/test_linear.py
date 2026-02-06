@@ -121,12 +121,13 @@ class TestJaxLinear(unittest.TestCase):
 
         mesh = Mesh(jax.devices('cpu')[:1], ("model", ))
         unquantize_config = get_tpu_quantization_config(vllm_config, mesh)
-        jax_mlp = JaxMLP(
-            hidden_size,
-            intermediate_size,
-            quant_config=unquantize_config,
-            rng=nnx.Rngs(0),
-        )
+        with jax.set_mesh(mesh):
+            jax_mlp = JaxMLP(
+                hidden_size,
+                intermediate_size,
+                quant_config=unquantize_config,
+                rng=nnx.Rngs(0),
+            )
 
         self.assertDictEqual(
             {
@@ -144,16 +145,18 @@ class TestJaxLinear(unittest.TestCase):
         unquantize_config = get_tpu_quantization_config(
             VllmConfig(model_config=ModelConfig(model="Qwen/Qwen3-0.6B")),
             mesh)
-        jax_linear = JaxLinear(
-            16,
-            32,
-            kernel_init=nnx.with_partitioning(nnx.initializers.uniform(),
-                                              sharding=(None, "model")),
-            use_bias=True,
-            quant_config=unquantize_config,
-            rngs=nnx.Rngs(0),
-        )
+        with jax.set_mesh(mesh):
+            jax_linear = JaxLinear(
+                16,
+                32,
+                kernel_init=nnx.with_partitioning(nnx.initializers.uniform(),
+                                                  sharding=(None, "model")),
+                use_bias=True,
+                quant_config=unquantize_config,
+                rngs=nnx.Rngs(0),
+            )
 
-        self.assertSequenceEqual(jax_linear.weight.sharding, (None, "model"))
+        self.assertSequenceEqual(jax_linear.weight.sharding.spec,
+                                 (None, "model"))
         self.assertEqual(f"{jax.typeof(jax_linear.weight.value)}",
                          "float32[16,32]")

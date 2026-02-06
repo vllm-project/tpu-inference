@@ -93,7 +93,8 @@ class Router(nnx.Module):
                 - selected_experts_TX: Indices of selected experts, shape (sequence_length, num_experts_per_tok).
         """
         x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
+        x_TD = jax.lax.with_sharding_constraint(
+            x_TD, PartitionSpec(*self.activation_ffw_td))
         router_act = modeling_flax_utils.ACT2FN[self.router_act]
         router_logits_TE = jnp.einsum('TD,DE -> TE', x_TD,
                                       self.kernel_DE.value)
@@ -184,7 +185,8 @@ class JaxMoE(JaxModule):
             return self.quant_method.apply_jax(self, x_TD)
 
         x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
+        x_TD = jax.lax.with_sharding_constraint(
+            x_TD, PartitionSpec(*self.activation_ffw_td))
         if self.moe_backend == MoEBackend.FUSED_MOE:
             router_logits_TE = self.router(x_TD)
             ep_axis_name = self.efd_sharding[0]

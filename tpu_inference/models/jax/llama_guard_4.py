@@ -242,14 +242,14 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         else:
             self.embedder = PPMissingLayer()
 
-        self.layers = []
+        layers = []
         self.start_layer, self.end_layer = get_start_end_layer(
             self.num_layers,
             get_pp_group().rank_in_group,
             get_pp_group().world_size)
 
         for i in range(self.start_layer):
-            self.layers.append(PPMissingLayer())
+            layers.append(PPMissingLayer())
 
         for i in range(self.start_layer, self.end_layer):
             use_attention_rope = True
@@ -328,10 +328,12 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                                      pre_attention_norm=pre_attention_norm,
                                      pre_mlp_norm=pre_mlp_norm,
                                      use_attention_rope=use_attention_rope)
-            self.layers.append(block)
+            layers.append(block)
 
         for i in range(self.end_layer, self.num_layers):
-            self.layers.append(PPMissingLayer())
+            layers.append(PPMissingLayer())
+
+        self.layers = nnx.List(layers)
 
         if self.is_last_rank:
             self.final_norm = RMSNorm(
