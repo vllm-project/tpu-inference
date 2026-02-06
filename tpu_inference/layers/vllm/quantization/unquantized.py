@@ -112,7 +112,9 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
 
         if len(layer._loaded_weights) == self.linear_config.num_proj * len(
                 dict(layer.named_parameters(recurse=False))):
+            logger.debug(f"Start sharding weights for layer {type(layer)}")
             self.process_weights_after_loading(layer)
+            logger.debug(f"Complete sharding weights for layer {type(layer)}")
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if not _tensor_is_in_cpu(layer.weight):
@@ -147,6 +149,7 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
                 output_sizes=self.linear_config.output_sizes,
                 reorder_size=self.linear_config.n_shards,
             )
+
         weights = process_unquantized_linear_weights(weight, bias)
         weights = torch_view(
             shard_linear_weights(
@@ -236,7 +239,9 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         layer._loaded_weights.add((expert_id, shard_id))
         if len(layer._loaded_weights) == layer.global_num_experts * len(
             ('w1', 'w2', 'w3')):
+            logger.debug(f"Start sharding weights for layer {type(layer)}")
             self.process_weights_after_loading(layer)
+            logger.debug(f"Complete sharding weights for layer {type(layer)}")
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if not _tensor_is_in_cpu(layer.w13_weight):
