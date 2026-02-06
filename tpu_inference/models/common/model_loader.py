@@ -28,12 +28,15 @@ from vllm.utils.func_utils import supports_kw
 
 from tpu_inference import envs
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     apply_qwix_on_abstract_model, apply_qwix_quantization,
     load_random_weights_into_qwix_abstract_model,
     update_vllm_config_for_qwix_quantization)
-from tpu_inference.models.jax.utils.weight_utils import BaseWeightLoader
+from tpu_inference.models.jax.utils.weight_utils import (BaseWeightLoader,
+                                                         LoadableWithIterator)
 from tpu_inference.utils import to_jax_dtype, to_torch_dtype
 
 logger = init_logger(__name__)
@@ -61,6 +64,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     from tpu_inference.models.jax.llama4 import Llama4ForCausalLM
     from tpu_inference.models.jax.llama_eagle3 import EagleLlama3ForCausalLM
     from tpu_inference.models.jax.llama_guard_4 import LlamaGuard4ForCausalLM
+    from tpu_inference.models.jax.qwen2 import Qwen2ForCausalLM
     from tpu_inference.models.jax.qwen2_5_vl import \
         Qwen2_5_VLForConditionalGeneration
     from tpu_inference.models.jax.qwen3 import Qwen3ForCausalLM
@@ -81,6 +85,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
         "Qwen3VLMoeForConditionalGeneration"] = Qwen3VLMoeForConditionalGeneration
     _MODEL_REGISTRY["Eagle3LlamaForCausalLM"] = EagleLlama3ForCausalLM
     _MODEL_REGISTRY["GptOssForCausalLM"] = GptOss
+    _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
@@ -208,9 +213,12 @@ def _get_nnx_model(
         # Although the created model can already work, we still need to jit
         # the model creation again, otherwise the model forward will have
         # non-trivial overhead in PjitFunction.
-        with mesh:
+        with jax.set_mesh(mesh):
             loader = get_model_loader(vllm_config.load_config)
-            if isinstance(loader, RunaiModelStreamerLoader):
+            if isinstance(model, LoadableWithIterator):
+                assert isinstance(model, JaxModule)
+                loader.load_weights(model, vllm_config.model_config)
+            elif isinstance(loader, RunaiModelStreamerLoader):
                 model_weights = vllm_config.model_config.model
                 if hasattr(vllm_config.model_config, "model_weights"):
                     model_weights = vllm_config.model_config.model_weights
@@ -241,6 +249,7 @@ def get_flax_model(
 ) -> nnx.Module:
     model_dtype = to_jax_dtype(vllm_config.model_config.dtype)
     vllm_config.model_config.dtype = model_dtype
+    vllm_config.quant_config = get_tpu_quantization_config(vllm_config)
 
     # Only perform qwix quantization if it is jax model.
     if vllm_config.model_config:

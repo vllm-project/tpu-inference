@@ -58,6 +58,16 @@ def mock_vllm_config():
     return config
 
 
+@pytest.fixture
+def mock_get_pp_group():
+    with patch("tpu_inference.distributed.jax_parallel_state.get_pp_group",
+               return_value=MagicMock(is_first_rank=True,
+                                      is_last_rank=True,
+                                      rank_in_group=0,
+                                      world_size=1)):
+        yield
+
+
 class TestTPUWorker:
     """Test suite for the TPUWorker class."""
 
@@ -80,22 +90,20 @@ class TestTPUWorker:
         assert worker.profile_dir is None
         assert worker.devices == ['tpu:0']
 
-    @patch('tpu_inference.worker.tpu_worker.vllm_envs')
-    def test_init_with_profiler_on_rank_zero(self, mock_envs,
-                                             mock_vllm_config):
+    def test_init_with_profiler_on_rank_zero(self, mock_vllm_config):
         """Tests that the profiler directory is set correctly on rank 0."""
-        mock_envs.VLLM_TORCH_PROFILER_DIR = "/tmp/profiles"
+        mock_vllm_config.profiler_config.profiler = "torch"
+        mock_vllm_config.profiler_config.torch_profiler_dir = "/tmp/profiles"
         worker = TPUWorker(vllm_config=mock_vllm_config,
                            local_rank=0,
                            rank=0,
                            distributed_init_method="test_method")
         assert worker.profile_dir == "/tmp/profiles"
 
-    @patch('tpu_inference.worker.tpu_worker.vllm_envs')
-    def test_init_with_profiler_on_other_ranks(self, mock_envs,
-                                               mock_vllm_config):
+    def test_init_with_profiler_on_other_ranks(self, mock_vllm_config):
         """Tests that the profiler directory is NOT set on non-rank 0 workers."""
-        mock_envs.VLLM_TORCH_PROFILER_DIR = "/tmp/profiles"
+        mock_vllm_config.profiler_config.profiler = "torch"
+        mock_vllm_config.profiler_config.torch_profiler_dir = "/tmp/profiles"
         worker = TPUWorker(vllm_config=mock_vllm_config,
                            local_rank=1,
                            rank=1,
@@ -122,7 +130,7 @@ class TestTPUWorker:
     @patch('tpu_inference.worker.tpu_worker.ensure_kv_transfer_initialized')
     def test_init_device_with_provided_devices(
             self, mock_ensure_kv_transfer_initialized, mock_jax, mock_utils,
-            mock_runner_cls, mock_vllm_config):
+            mock_runner_cls, mock_vllm_config, mock_get_pp_group):
         """Tests init_device when devices are provided during construction."""
         mock_devices = ['tpu:0', 'tpu:1']
         worker = TPUWorker(vllm_config=mock_vllm_config,

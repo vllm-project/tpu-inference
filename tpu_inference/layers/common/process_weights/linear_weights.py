@@ -142,13 +142,13 @@ def process_linear_weights(
 
 def shard_linear_weights(
     weights: LinearWeights,
-    mesh: Mesh,
+    mesh: Mesh | None,
     weight_p_spec: PartitionSpec,
     bias_p_spec: PartitionSpec,
     transposed: bool = True,
     per_tensor: bool = False,
 ) -> LinearWeights:
-
+    mesh = mesh or jax.sharding.get_mesh()
     if not transposed:
         # By defualt, we use transposed weights. If it is not transposed,
         # we need to transpose the sharding as well.
@@ -157,10 +157,25 @@ def shard_linear_weights(
 
     weight_sharding = NamedSharding(mesh, weight_p_spec)
     bias_sharding = NamedSharding(mesh, bias_p_spec)
+    if isinstance(weights.weight_scale, (jax.Array, Tensor)) and len(
+            weights.weight_scale.shape) == 3:
+        num_blocks = weights.weight_scale.shape[0]
+        if len(weight_p_spec) != 2:
+            raise ValueError(
+                F"The weight sharding shape length should be 2, but given {len(weight_p_spec)}."
+            )
+        # Cannot be sharded on the first dimension in case the number of blocks is 1.
+        in_axis = weight_p_spec[1] if num_blocks > 1 else None
+        out_axis = weight_p_spec[0]
+        weight_scale_p_spec = P(in_axis, None, out_axis)
+        weight_scale_sharding = NamedSharding(mesh, weight_scale_p_spec)
+    else:
+        weight_scale_sharding = NamedSharding(
+            mesh, P()) if per_tensor else bias_sharding
 
     weight_shardings = LinearWeights(
         weight=weight_sharding,
-        weight_scale=NamedSharding(mesh, P()) if per_tensor else bias_sharding,
+        weight_scale=weight_scale_sharding,
         zero_point=bias_sharding,
         bias=bias_sharding,
     )

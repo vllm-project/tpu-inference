@@ -6,7 +6,6 @@ import jax.numpy as jnp
 import torch
 import vllm.envs as vllm_envs
 from tpu_info import device
-from vllm.inputs import ProcessorInputs, PromptType
 from vllm.platforms.interface import Platform, PlatformEnum
 
 from tpu_inference import envs
@@ -16,6 +15,7 @@ from tpu_inference.logger import init_logger
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.config.cache import BlockSize
+    from vllm.inputs import ProcessorInputs, PromptType
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams, SamplingType
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -28,6 +28,8 @@ else:
     AttentionBackendEnum = None
     SamplingParams = None
     SamplingType = None
+    PromptType = None
+    ProcessorInputs = None
 
 logger = init_logger(__name__)
 
@@ -177,13 +179,18 @@ class TpuPlatform(Platform):
             else:
                 logger.info("Force using MultiprocExecutor for JAX on "
                             "single host with pipeline parallelism.")
-                parallel_config.distributed_executor_backend = "mp"
+                from tpu_inference.executors.multiproc_executor import \
+                    MultiprocExecutor
+                parallel_config.distributed_executor_backend = MultiprocExecutor
         elif multihost_backend == "ray":
             from tpu_inference.executors.ray_distributed_executor import \
                 RayDistributedExecutor
             parallel_config.distributed_executor_backend = RayDistributedExecutor
             logger.info(
                 "Force using RayDistributedExecutor for JAX on multihost.")
+            if parallel_config.pipeline_parallel_size > 1:
+                raise ValueError(
+                    "PP on Ray is disabled due to a pending change on vLLM.")
         else:
             logger.warning(
                 f"Unknown TPU multihost backend: {multihost_backend}. "

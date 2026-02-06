@@ -15,61 +15,67 @@
 # pipeline-name: Qwen/Qwen3-4B
 # pipeline-type: text-only
 steps:
-  - label: "Unit tests for Qwen/Qwen3-4B"
-    key: "Qwen_Qwen3-4B_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} Unit tests for Qwen/Qwen3-4B"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-4B_UnitTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/models/jax/test_qwen3.py'
-  - label: "Record unit test result for Qwen/Qwen3-4B"
-    key: "record_Qwen_Qwen3-4B_UnitTest"
-    depends_on: "Qwen_Qwen3-4B_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} Record unit test result for Qwen/Qwen3-4B"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-4B_UnitTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-4B_UnitTest"
     env:
-      CI_TARGET: Qwen/Qwen3-4B
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen3-4B"
       CI_STAGE: "UnitTest"
       CI_CATEGORY: "text-only"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh Qwen_Qwen3-4B_UnitTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3-4B_UnitTest
 
-  - label: "Integration tests for Qwen/Qwen3-4B"
-    key: "Qwen_Qwen3-4B_IntegrationTest"
-    depends_on: "record_Qwen_Qwen3-4B_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} Accuracy for Qwen/Qwen3-4B"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-4B_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-4B_UnitTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
       TEST_MODEL: Qwen/Qwen3-4B
       TENSOR_PARALLEL_SIZE: 1
       MINIMUM_ACCURACY_THRESHOLD: 0.85
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
-  - label: "Record integration test result for Qwen/Qwen3-4B"
-    key: "record_Qwen_Qwen3-4B_IntegrationTest"
-    depends_on: "Qwen_Qwen3-4B_IntegrationTest"
+  - label: "${TPU_VERSION:-tpu6e} Record accuracy test result for Qwen/Qwen3-4B"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-4B_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-4B_Accuracy"
     env:
-      CI_TARGET: Qwen/Qwen3-4B
-      CI_STAGE: "IntegrationTest"
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen3-4B"
+      CI_STAGE: "Accuracy/Correctness"
       CI_CATEGORY: "text-only"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh Qwen_Qwen3-4B_IntegrationTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3-4B_Accuracy
 
-  - label: "Performance benchmarks for Qwen/Qwen3-4B"
-    key: "Qwen_Qwen3-4B_Benchmark"
-    depends_on: "record_Qwen_Qwen3-4B_IntegrationTest"
+  - label: "${TPU_VERSION:-tpu6e} Performance benchmarks for Qwen/Qwen3-4B"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-4B_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-4B_Accuracy"
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     soft_fail: true
     env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
       TEST_MODEL: Qwen/Qwen3-4B
       TENSOR_PARALLEL_SIZE: 1
       MINIMUM_THROUGHPUT_THRESHOLD: 11.00
@@ -82,15 +88,16 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
-  - label: "Record performance benchmark result for Qwen/Qwen3-4B"
-    key: "record_Qwen_Qwen3-4B_Benchmark"
-    depends_on: "Qwen_Qwen3-4B_Benchmark"
+  - label: "${TPU_VERSION:-tpu6e} Record performance benchmark result for Qwen/Qwen3-4B"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-4B_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-4B_Benchmark"
     env:
-      CI_TARGET: Qwen/Qwen3-4B
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen3-4B"
       CI_STAGE: "Benchmark"
       CI_CATEGORY: "text-only"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh Qwen_Qwen3-4B_Benchmark
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3-4B_Benchmark

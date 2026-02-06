@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Exit on error, exit on unset variable, fail on pipe errors.
+set -euo pipefail
 
 # --- Skip build if only docs/icons changed ---
 echo "--- :git: Checking changed files"
@@ -35,73 +37,124 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
         echo "Warning: PR diff failed. Falling back to single commit check."
         FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r -m "$BUILDKITE_COMMIT")
     fi
+    
+    echo "Files changed:"
+    echo "$FILES_CHANGED"
+
+    # Filter out files we want to skip builds for.
+    NON_SKIPPABLE_FILES=$(echo "$FILES_CHANGED" | grep -vE "(\.md$|\.ico$|\.png$|^README$|^docs\/)")
+
+    if [ -z "$NON_SKIPPABLE_FILES" ]; then
+      echo "Only documentation or icon files changed. Skipping build."
+      # No pipeline will be uploaded, and the build will complete.
+      exit 0
+    else
+      echo "Code files changed. Proceeding with pipeline upload."
+    fi
+
+    # Validate modified YAML pipelines using bk pipeline validate
+    if .buildkite/scripts/validate_all_pipelines.sh "$NON_SKIPPABLE_FILES"; then
+      echo "All pipelines syntax are valid. Proceeding with pipeline upload."
+    else
+      echo "Some pipelines syntax are invalid. Failing build."
+      exit 1
+    fi
 else
-    echo "Non-PR build. Checking the latest commit."
-    # -m ensures merge commits show files brought into the branch
-    FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r -m "$BUILDKITE_COMMIT")
-fi
-
-echo "Files changed:"
-echo "$FILES_CHANGED"
-
-# Filter out files we want to skip builds for.
-NON_SKIPPABLE_FILES=$(echo "$FILES_CHANGED" | grep -vE "(\.md$|\.ico$|\.png$|^README$|^docs\/)")
-
-if [ -z "$NON_SKIPPABLE_FILES" ]; then
-  echo "Only documentation or icon files changed. Skipping build."
-  # No pipeline will be uploaded, and the build will complete.
-  exit 0
-else
-  echo "Code files changed. Proceeding with pipeline upload."
+    echo "Non-PR build. Bypassing file change check."
 fi
 
 upload_pipeline() {
-    VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
-    buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
-    echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
-    
-    # Upload JAX pipeline for v6 (default)
-    buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
+    if [ "${MODEL_IMPL_TYPE:-auto}" == "auto" ]; then
+      # Upload JAX pipeline for v6 (default)
+      buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
 
-    # Upload JAX pipeline for v7
-    export LABEL_PREFIX="TPU7x "
-    export KEY_PREFIX="tpu7x_"
-    export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
-    export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
-    export IS_FOR_V7X="true"
-    export COV_FAIL_UNDER="67"
-    buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
-    unset LABEL_PREFIX KEY_PREFIX TPU_QUEUE_SINGLE TPU_QUEUE_MULTI IS_FOR_V7X COV_FAIL_UNDER
+      # Upload JAX pipeline for v7
+      export TESTS_GROUP_LABEL="[jax] TPU7x Tests Group"
+      export TPU_VERSION="tpu7x"
+      export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
+      export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
+      export IS_FOR_V7X="true"
+      export COV_FAIL_UNDER="67"
+      buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
+      unset TPU_VERSION TPU_QUEUE_SINGLE TPU_QUEUE_MULTI IS_FOR_V7X COV_FAIL_UNDER
 
-    # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
-    buildkite-agent pipeline upload .buildkite/main.yml
-    buildkite-agent pipeline upload .buildkite/nightly_releases.yml
+      # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
+      buildkite-agent pipeline upload .buildkite/nightly_releases.yml
+    fi
+
+    buildkite-agent pipeline upload .buildkite/nightly_verify.yml
     buildkite-agent pipeline upload .buildkite/pipeline_pypi.yml
 }
 
-echo "--- Starting Buildkite Bootstrap ---"
+echo "--- Starting Buildkite Bootstrap"
 echo "Running in pipeline: $BUILDKITE_PIPELINE_SLUG"
+
+echo "Configure notification"
+ONCALL_EMAIL="ullm-test-notifications-external@google.com"
+NOTIFY_FILE="generated_notification.yml"
+
+# Logic
+# 1. Official Integration/Nightly: If it's triggered by schedule -> Notify Oncall & Slack.
+# 2. Everything else (PRs, Manual Triggers): Notify the creator of this build.
+#    - This ensures that if you manually trigger the integration pipeline for debugging, 
+#      it won't alert the oncall team.
+
+if [[ "$BUILDKITE_PIPELINE_SLUG" == "tpu-vllm-integration" && "$BUILDKITE_SOURCE" == "schedule" ]] || \
+   [[ "${NIGHTLY:-0}" == "1" && "$BUILDKITE_SOURCE" == "schedule" ]]; then
+    echo "Context: Scheduled Integration/Nightly. Notifying Oncall."
+    cat <<EOF > "$NOTIFY_FILE"
+notify:
+  - email: "$ONCALL_EMAIL"
+    if: build.state == "failed"
+  - slack: "vllm#tpu-ci-notifications"
+    if: build.state == "failed"
+EOF
+else
+    echo "Context: PR/Manual. Notifying Owner ($BUILDKITE_BUILD_CREATOR_EMAIL)."
+    cat <<EOF > "$NOTIFY_FILE"
+notify:
+  - email: "$BUILDKITE_BUILD_CREATOR_EMAIL"
+    if: build.state == "failed"
+EOF
+
+fi
+
+buildkite-agent pipeline upload "$NOTIFY_FILE"
+rm "$NOTIFY_FILE"
+
+echo "Configure testing logic"
 if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
+    # Note: Integration pipeline always fetch latest vllm version
     VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     # Note: upload are inserted in reverse order, so promote LKG should upload before tests
-    buildkite-agent pipeline upload .buildkite/pipeline_integration.yml
-    
+    buildkite-agent pipeline upload .buildkite/integration_promote.yml
+  
     # Upload JAX pipeline for v7
-    export LABEL_PREFIX="TPU7x "
-    export KEY_PREFIX="tpu7x_"
+    export TESTS_GROUP_LABEL="[jax] TPU7x Tests Group"
+    export TPU_VERSION="tpu7x"
     export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
     export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
     export IS_FOR_V7X="true"
     export COV_FAIL_UNDER="67"
     buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
-    unset LABEL_PREFIX KEY_PREFIX TPU_QUEUE_SINGLE TPU_QUEUE_MULTI IS_FOR_V7X COV_FAIL_UNDER
+    unset TPU_VERSION TPU_QUEUE_SINGLE TPU_QUEUE_MULTI IS_FOR_V7X COV_FAIL_UNDER
 
     # Upload JAX pipeline for v6 (default)
     buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
 
 else
+  # Note: PR and Nightly pipelines will load VLLM_COMMIT_HASH from vllm_lkg.version file, if not exists, get the latest commit hash from vllm repo
+  if [ -f .buildkite/vllm_lkg.version ]; then
+      VLLM_COMMIT_HASH="$(cat .buildkite/vllm_lkg.version)"
+  fi
+  if [ -z "${VLLM_COMMIT_HASH:-}" ]; then
+      VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
+  fi
+  buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
+  echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
+    
   # Check if the current build is a pull request
   if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     echo "This is a Pull Request build."
@@ -142,4 +195,4 @@ else
 fi
 
 
-echo "--- Buildkite Bootstrap Finished ---"
+echo "--- Buildkite Bootstrap Finished"

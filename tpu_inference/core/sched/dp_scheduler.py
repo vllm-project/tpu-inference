@@ -58,6 +58,7 @@ class SchedulerCommand(Enum):
     GET_REQUEST_COUNTS = "get_request_counts"
     GET_TOKEN_COUNT = "get_token_count"
     GET_COMPUTED_BLOCKS = "get_computed_blocks"
+    RESET_ENCODER_CACHE = "reset_encoder_cache"
     SHUTDOWN = "shutdown"
 
 
@@ -68,6 +69,10 @@ class SchedulerWorkerError(Exception):
         self.rank = rank
         self.message = message
         super().__init__(f"Scheduler worker {rank} error: {message}")
+
+    def __reduce__(self):
+        """Enable proper pickling/unpickling of this exception."""
+        return (self.__class__, (self.rank, self.message))
 
 
 # Monkey-patch multiprocessing to use cloudpickle
@@ -183,6 +188,10 @@ def _scheduler_worker_process(
                     result = scheduler.reset_prefix_cache()
                     output_queues[command.value].put(result)
 
+                case SchedulerCommand.RESET_ENCODER_CACHE:
+                    scheduler.reset_encoder_cache()
+                    output_queues[command.value].put(None)
+
                 case SchedulerCommand.GET_NUM_UNFINISHED_REQUESTS:
                     result = scheduler.get_num_unfinished_requests()
                     output_queues[command.value].put(result)
@@ -225,8 +234,12 @@ def _scheduler_worker_process(
                     raise error
 
         except Exception as e:
-            logger.error(f"Error in scheduler worker {rank}: {e}",
-                         exc_info=True)
+            logger.error(
+                f"Error in scheduler worker {rank}: {e}. If "
+                "async scheduling is enabled, consider disabling it to "
+                "debug this issue.",
+                exc_info=True)
+
             error = SchedulerWorkerError(rank, str(e))
             output_queues[command.value].put(error)
 
@@ -282,6 +295,15 @@ class DPScheduler(SchedulerInterface):
         self.assigned_dp_rank: Dict[str, int] = {}  # req_id -> dp_rank
         self.cached_schedulers_output = deque()
         self._create_per_rank_configs(kv_cache_config)
+
+        # Initialize NONE_HASH global before forking worker processes
+        # This ensures all workers inherit the initialized value
+        if vllm_config.cache_config.enable_prefix_caching:
+            from vllm.utils.hashing import get_hash_fn_by_name
+            from vllm.v1.core.kv_cache_utils import init_none_hash
+            caching_hash_fn = get_hash_fn_by_name(
+                vllm_config.cache_config.prefix_caching_hash_algo)
+            init_none_hash(caching_hash_fn)
 
         # The original scheduler class could be Scheduler or AsyncScheduler
         original_scheduler_cls = vllm_config.scheduler_config._original_scheduler_cls
@@ -728,6 +750,16 @@ class DPScheduler(SchedulerInterface):
                 rank, SchedulerCommand.RESET_PREFIX_CACHE)
             all_success &= success
         return all_success
+
+    def reset_encoder_cache(self) -> None:
+        """Reset encoder cache for all DP rank schedulers."""
+        for rank in range(self.dp_size):
+            self.input_queues[rank].put(
+                (SchedulerCommand.RESET_ENCODER_CACHE, None))
+
+        for rank in range(self.dp_size):
+            self._get_result_from_queue(rank,
+                                        SchedulerCommand.RESET_ENCODER_CACHE)
 
     def make_stats(self,
                    spec_decoding_stats=None,

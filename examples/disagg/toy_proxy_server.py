@@ -12,8 +12,12 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
+# Configure logging to show info-level messages
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
 
 
 @asynccontextmanager
@@ -59,8 +63,9 @@ async def lifespan(app: FastAPI):
     app.state.decode_iterator = itertools.cycle(
         range(len(app.state.decode_clients)))
 
-    print(f"Initialized {len(app.state.prefill_clients)} prefill clients "
-          f"and {len(app.state.decode_clients)} decode clients.")
+    logger.info(
+        f"Initialized {len(app.state.prefill_clients)} prefill clients "
+        f"and {len(app.state.decode_clients)} decode clients.")
 
     yield
 
@@ -197,18 +202,25 @@ async def _handle_completions(api: str, request: Request):
     try:
         req_data = await request.json()
         request_id = str(uuid.uuid4())
+        logger.info(f"[{request_id}] Request generated.")
 
         # Get the next prefill client in round-robin fashion
         prefill_client_info = get_next_client(request.app, 'prefill')
-        print("------------------")
-        print(f"prefill request:{req_data}")
+        logger.info(f"[{request_id}] Sending prefill request to "
+                    f"client {prefill_client_info['id']}")
+        logger.debug(f"[{request_id}] Prefill request body: {req_data}")
+
         # Send request to prefill service
         response = await send_request_to_prefill(prefill_client_info, api,
                                                  req_data, request_id)
+        logger.info(f"[{request_id}] Prefill request finished.")
 
         # Extract the needed fields
         response_json = response.json()
-        print(f"prefill response: {response_json}")
+        logger.info(
+            f"[{request_id}] Prefill response parsed. Starting decode.")
+        logger.debug(
+            f"[{request_id}] Prefill response content: {response_json}")
 
         kv_transfer_params = response_json.get('kv_transfer_params', {})
         if kv_transfer_params:
@@ -217,17 +229,23 @@ async def _handle_completions(api: str, request: Request):
         # Get the next decode client in round-robin fashion
         decode_client_info = get_next_client(request.app, 'decode')
 
-        logger.debug("Using %s %s", prefill_client_info, decode_client_info)
-
-        print(f"decode request:{req_data}")
+        logger.debug(
+            f"[{request_id}] Using prefill client {prefill_client_info['id']} "
+            f"and decode client {decode_client_info['id']}")
+        logger.info(f"[{request_id}] Sending decode request to "
+                    f"client {decode_client_info['id']}")
+        logger.debug(f"[{request_id}] Decode request body: {req_data}")
 
         # Stream response from decode service
         async def generate_stream():
-            async for chunk in stream_from_decode(decode_client_info,
-                                                  api,
-                                                  req_data,
-                                                  request_id=request_id):
-                yield chunk
+            try:
+                async for chunk in stream_from_decode(decode_client_info,
+                                                      api,
+                                                      req_data,
+                                                      request_id=request_id):
+                    yield chunk
+            finally:
+                logger.info(f"[{request_id}] Decode stream finished.")
 
         return StreamingResponse(generate_stream(),
                                  media_type="application/json")
@@ -236,10 +254,10 @@ async def _handle_completions(api: str, request: Request):
         import sys
         import traceback
         exc_info = sys.exc_info()
-        print("Error occurred in disagg prefill proxy server"
-              f" - {api} endpoint")
-        print(e)
-        print("".join(traceback.format_exception(*exc_info)))
+        logger.error("Error occurred in disagg prefill proxy server"
+                     f" - {api} endpoint")
+        logger.error(e)
+        logger.error("".join(traceback.format_exception(*exc_info)))
         raise
 
 

@@ -108,6 +108,7 @@ class RMSNorm(nnx.Module):
                                   random_init=self.random_init)
 
 
+# TODO (jacobplatin): deprecate this and move to model-specific modules
 @dataclass(kw_only=True)
 class DenseFFW(nnx.Module):
     """A Gated Feed-Forward Network (FFN) layer.
@@ -178,6 +179,7 @@ class DenseFFW(nnx.Module):
                                                 random_init=self.random_init)
 
 
+# TODO (jacobplatin): deprecate this and move to model-specific modules
 @dataclass(kw_only=True)
 class Embedder(nnx.Module):
     """A module for token embedding and, optionally, decoding (tied embeddings).

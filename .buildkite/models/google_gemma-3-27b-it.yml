@@ -15,61 +15,67 @@
 # pipeline-name: google/gemma-3-27b-it
 # pipeline-type: text-only
 steps:
-  - label: "Unit tests for google/gemma-3-27b-it"
-    key: "google_gemma-3-27b-it_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} Unit tests for google/gemma-3-27b-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-3-27b-it_UnitTest"
     agents:
-      queue: tpu_v6e_8_queue
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     soft_fail: true
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
           bash -c 'SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 python3 /workspace/tpu_inference/examples/offline_inference.py --model=google/gemma-3-27b-it --tensor_parallel_size=8 --max_model_len=1024 --max_num_seqs=1'
-  - label: "Record unit test result for google/gemma-3-27b-it"
-    key: "record_google_gemma-3-27b-it_UnitTest"
-    depends_on: "google_gemma-3-27b-it_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} Record unit test result for google/gemma-3-27b-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-3-27b-it_UnitTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_google_gemma-3-27b-it_UnitTest"
     env:
-      CI_TARGET: google/gemma-3-27b-it
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-3-27b-it"
       CI_STAGE: "UnitTest"
       CI_CATEGORY: "text-only"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh google_gemma-3-27b-it_UnitTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-3-27b-it_UnitTest
 
-  - label: "Integration tests for google/gemma-3-27b-it"
-    key: "google_gemma-3-27b-it_IntegrationTest"
-    depends_on: "record_google_gemma-3-27b-it_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} Accuracy for google/gemma-3-27b-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-3-27b-it_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_google_gemma-3-27b-it_UnitTest"
     agents:
-      queue: tpu_v6e_8_queue
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     soft_fail: true
     env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
       TEST_MODEL: google/gemma-3-27b-it
       TENSOR_PARALLEL_SIZE: 8
       MINIMUM_ACCURACY_THRESHOLD: 0.56
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
-  - label: "Record integration test result for google/gemma-3-27b-it"
-    key: "record_google_gemma-3-27b-it_IntegrationTest"
-    depends_on: "google_gemma-3-27b-it_IntegrationTest"
+  - label: "${TPU_VERSION:-tpu6e} Record accuracy result for google/gemma-3-27b-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-3-27b-it_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_google_gemma-3-27b-it_Accuracy"
     env:
-      CI_TARGET: google/gemma-3-27b-it
-      CI_STAGE: "IntegrationTest"
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-3-27b-it"
+      CI_STAGE: "Accuracy/Correctness"
       CI_CATEGORY: "text-only"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh google_gemma-3-27b-it_IntegrationTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-3-27b-it_Accuracy
 
-  - label: "Performance benchmarks for google/gemma-3-27b-it"
-    key: "google_gemma-3-27b-it_Benchmark"
-    depends_on: "record_google_gemma-3-27b-it_IntegrationTest"
+  - label: "${TPU_VERSION:-tpu6e} Performance benchmarks for google/gemma-3-27b-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-3-27b-it_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_google_gemma-3-27b-it_Accuracy"
     agents:
-      queue: tpu_v6e_8_queue
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     soft_fail: true
     env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
       TEST_MODEL: google/gemma-3-27b-it
       TENSOR_PARALLEL_SIZE: 8
       MINIMUM_THROUGHPUT_THRESHOLD: 21
@@ -82,15 +88,16 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
-  - label: "Record performance benchmark result for google/gemma-3-27b-it"
-    key: "record_google_gemma-3-27b-it_Benchmark"
-    depends_on: "google_gemma-3-27b-it_Benchmark"
+  - label: "${TPU_VERSION:-tpu6e} Record performance benchmark result for google/gemma-3-27b-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-3-27b-it_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_google_gemma-3-27b-it_Benchmark"
     env:
-      CI_TARGET: google/gemma-3-27b-it
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-3-27b-it"
       CI_STAGE: "Benchmark"
       CI_CATEGORY: "text-only"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh google_gemma-3-27b-it_Benchmark
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-3-27b-it_Benchmark

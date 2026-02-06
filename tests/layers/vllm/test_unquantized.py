@@ -14,6 +14,7 @@
 
 import tempfile
 from unittest import mock
+from unittest.mock import MagicMock, patch
 
 import jax
 import pytest
@@ -36,7 +37,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 
-from tpu_inference.layers.vllm.fused_moe import FusedMoEBackend
+from tpu_inference.layers.common.moe import MoEBackend
+from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.unquantized import (
     VllmUnquantizedConfig, VllmUnquantizedFusedMoEMethod,
@@ -46,6 +48,16 @@ from . import utils as test_utils
 
 P = PartitionSpec
 MODELS = ["Qwen/Qwen2-1.5B-Instruct"]
+
+
+@pytest.fixture(autouse=True)
+def mock_get_pp_group():
+    with patch("tpu_inference.distributed.jax_parallel_state.get_pp_group",
+               return_value=MagicMock(is_first_rank=True,
+                                      is_last_rank=True,
+                                      rank_in_group=0,
+                                      world_size=1)):
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -415,7 +427,9 @@ def test_merged_column_parallel_linear(model, bias, num_devices, fuse_matmuls,
             return_bias=False,
             quant_config=quant_config,
         )
-        jax_merged_column_linear.quant_method.fuse_matmuls = fuse_matmuls
+        assert isinstance(jax_merged_column_linear.quant_method.linear_config,
+                          QuantLinearConfig)
+        jax_merged_column_linear.quant_method.linear_config.fuse_matmuls = fuse_matmuls
 
     jax_merged_column_linear.weight.data = weight_data
     if bias:
@@ -512,9 +526,9 @@ def test_fused_moe(use_ep, num_devices, num_tokens, intermediate_size,
         assert isinstance(vllm_fused_moe.quant_method,
                           VllmUnquantizedFusedMoEMethod)
         if use_ep:
-            assert vllm_fused_moe.quant_method.moe_backend == FusedMoEBackend.GMM_EP
+            assert vllm_fused_moe.quant_method.moe_backend == MoEBackend.GMM_EP
         else:
-            assert vllm_fused_moe.quant_method.moe_backend == FusedMoEBackend.GMM_TP
+            assert vllm_fused_moe.quant_method.moe_backend == MoEBackend.GMM_TP
 
         jax_a = a.to('jax')
         score = score.to('jax')
@@ -634,7 +648,7 @@ def test_fused_moe_use_kernel(num_devices, num_tokens, intermediate_size,
     with torchax.default_env(), set_forward_context(None, vllm_config):
         assert isinstance(vllm_fused_moe.quant_method,
                           VllmUnquantizedFusedMoEMethod)
-        assert vllm_fused_moe.quant_method.moe_backend == FusedMoEBackend.FUSED_MOE
+        assert vllm_fused_moe.quant_method.moe_backend == MoEBackend.FUSED_MOE
 
         jax_a = a.to('jax')
         score = score.to('jax')

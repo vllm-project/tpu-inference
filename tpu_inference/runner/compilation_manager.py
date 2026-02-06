@@ -75,12 +75,7 @@ class CompilationManager:
         logger.info(f"Precompile {name} --> {kwargs}")
         start = time.perf_counter()
         result = fn(*args)
-        if result is not None:
-            if isinstance(result, tuple):
-                for r in result:
-                    r.block_until_ready()
-            else:
-                result.block_until_ready()
+        jax.tree.map(lambda r: r.block_until_ready(), result)
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
 
@@ -453,8 +448,10 @@ class CompilationManager:
                 source_paddings=self.runner.num_logits_paddings,
                 indices_paddings=self.runner.num_reqs_paddings,
                 hidden_dim=vocab_size,
-                input_sharding=NamedSharding(self.runner.mesh,
-                                             PartitionSpec(None, "model")),
+                input_sharding=NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(ShardingAxisName.MLP_DATA,
+                                  ShardingAxisName.MLP_TENSOR)),
             )
             self._precompile_select_from_array_helper(
                 name=
@@ -462,8 +459,10 @@ class CompilationManager:
                 source_paddings=self.runner.num_logits_paddings,
                 indices_paddings=self.runner.num_logits_paddings,
                 hidden_dim=vocab_size,
-                input_sharding=NamedSharding(self.runner.mesh,
-                                             PartitionSpec(None, "model")),
+                input_sharding=NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(ShardingAxisName.MLP_DATA,
+                                  ShardingAxisName.MLP_TENSOR)),
                 only_equal_paddings=True,
             )
 
@@ -599,8 +598,10 @@ class CompilationManager:
         vocab_size = self.runner.model_config.get_vocab_size()
         for num_logits in self.runner.num_logits_paddings:
             for num_reqs in self.runner.num_reqs_paddings:
-                sharding = NamedSharding(self.runner.mesh,
-                                         PartitionSpec(None, "model"))
+                sharding = NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(ShardingAxisName.MLP_DATA,
+                                  ShardingAxisName.MLP_TENSOR))
                 target_probs = self._create_dummy_tensor(
                     (num_logits, vocab_size), jnp.bfloat16, sharding)
                 draft_token_ids = self._create_dummy_tensor((num_logits, ),
@@ -805,7 +806,10 @@ class CompilationManager:
 
             draft_hidden_states = self._create_dummy_tensor(
                 (num_tokens, draft_hidden_size), dtype,
-                NamedSharding(self.runner.mesh, PartitionSpec(None, "model")))
+                NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(ShardingAxisName.MLP_DATA,
+                                  ShardingAxisName.MLP_TENSOR)))
             input_ids = self._create_dummy_tensor(
                 (num_tokens, ), jnp.int32,
                 NamedSharding(self.runner.mesh, PartitionSpec()))

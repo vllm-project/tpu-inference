@@ -25,7 +25,7 @@ LOCAL_TPU_VERSION="${BUILDKITE_TAG:-nightly_$(date +%Y%m%d)}"
 # Note: This script assumes the metadata keys contain newline-separated lists.
 mapfile -t model_list < <(buildkite-agent meta-data get "${MODEL_LIST_KEY}" --default "")
 mapfile -t metadata_feature_list < <(buildkite-agent meta-data get "${FEATURE_LIST_KEY}" --default "")
-MODEL_STAGES=("UnitTest" "IntegrationTest" "Benchmark")
+MODEL_STAGES=("UnitTest" "Accuracy/Correctness" "Benchmark")
 FEATURE_STAGES=("CorrectnessTest" "PerformanceTest")
 FEATURE_STAGES_QUANTIZATION=("QuantizationMethods" "RecommendedTPUGenerations" "CorrectnessTest" "PerformanceTest")
 FEATURE_STAGES_MICROBENCHMARKS=("CorrectnessTest" "PerformanceTest" "TPU Versions")
@@ -50,6 +50,18 @@ declare -a model_csv_files=()
 declare -a feature_csv_files=()
 declare -a default_feature_names=()
 
+# Determine sub-directory based on TPU_VERSION
+if [[ "${TPU_VERSION:-tpu6e}" == "v7"* ]]; then
+    TPU_DIR="v7"
+    TPU_METADATA_PREFIX="v7"
+else
+    TPU_DIR="v6"
+    TPU_METADATA_PREFIX="v6"
+fi
+
+mkdir -p "${TPU_DIR}"
+echo "Output directory set to: ${TPU_DIR} (Prefix: '${TPU_METADATA_PREFIX}')"
+
 # Parse Default Features File & Set Categories
 if [[ -f "${DEFAULT_FEATURES_FILE}" ]]; then
     mapfile -t raw_default_lines < <(sed 's/\r$//; /^$/d' "${DEFAULT_FEATURES_FILE}")
@@ -64,7 +76,7 @@ if [[ -f "${DEFAULT_FEATURES_FILE}" ]]; then
             default_feature_names+=("$feature_name")
             # Set metadata so we know which CSV to put it in later
             echo "Setting category for '$feature_name': $category"
-            buildkite-agent meta-data set "${feature_name}_category" "$category"
+            buildkite-agent meta-data set "${TPU_METADATA_PREFIX}${feature_name}_category" "$category"
         else
             # Fallback if no category found
             default_feature_names+=("$line")
@@ -81,7 +93,7 @@ process_models() {
         if [[ -z "$model" ]]; then continue; fi
         # Get category (default: text-only)
         local category
-        category=$(buildkite-agent meta-data get "${model}_category" --default "text-only")
+        category=$(buildkite-agent meta-data get "${TPU_METADATA_PREFIX}${model}_category" --default "text-only")
         # Define the category-specific CSV filename
         local category_filename
         if [ "$category" == "text-only" ]; then
@@ -91,17 +103,18 @@ process_models() {
         else
             category_filename=${category// /_}
         fi
-        local category_csv="${category_filename}_support_matrix.csv"
+        # Use the TPU_DIR prefix for the CSV path
+        local category_csv="${TPU_DIR}/${category_filename}_support_matrix.csv"
         # Initialize CSV if not exists
         if [ ! -f "$category_csv" ]; then
-            echo "Model,UnitTest,IntegrationTest,Benchmark" > "$category_csv"
+            echo "Model,UnitTest,Accuracy/Correctness,Benchmark" > "$category_csv"
             model_csv_files+=("$category_csv")
         fi
         # Build Row
         local row="\"$model\""
         for stage in "${MODEL_STAGES[@]}"; do
             local result
-            result=$(buildkite-agent meta-data get "${model}:${stage}" --default "N/A")
+            result=$(buildkite-agent meta-data get "${TPU_METADATA_PREFIX}${model}:${stage}" --default "N/A")
             row="$row,$result"
             if [ "${result}" != "✅" ] && [ "${result}" != "N/A" ] && [ "${result}" != "unverified" ]; then
                 ANY_FAILED=true
@@ -121,10 +134,11 @@ process_features() {
 
         # Get Category (default: feature support matrix)
         local category
-        category=$(buildkite-agent meta-data get "${feature}_category" --default "feature support matrix")
+        category=$(buildkite-agent meta-data get "${TPU_METADATA_PREFIX}${feature}_category" --default "feature support matrix")
 
         local category_filename=${category// /_}
-        local category_csv="${category_filename}.csv"
+        # Use the TPU_DIR prefix for the CSV path
+        local category_csv="${TPU_DIR}/${category_filename}.csv"
 
         # Determine which stages array and header to use
         local stages_to_use=("${FEATURE_STAGES[@]}")
@@ -164,7 +178,7 @@ process_features() {
             elif [[ "$mode" == "DEFAULT" ]]; then
                 result="✅"
             else
-                result=$(buildkite-agent meta-data get "${feature}:${stage}" --default "N/A")
+                result=$(buildkite-agent meta-data get "${TPU_METADATA_PREFIX}${feature}:${stage}" --default "N/A")
             fi
 
             row="$row,$result"
@@ -181,8 +195,8 @@ process_features() {
 }
 
 process_kernel_matrix_to_pivot() {
-    local input_csv="kernel_support_matrix_microbenchmarks.csv"
-    local output_file="kernel_support_matrix-microbenchmarks.csv"
+    local input_csv="${TPU_DIR}/kernel_support_matrix_microbenchmarks.csv"
+    local output_file="${TPU_DIR}/kernel_support_matrix-microbenchmarks.csv"
 
     if [ ! -f "$input_csv" ]; then
         echo "Warning: Input CSV $input_csv not found. Skipping pivot."
@@ -288,25 +302,29 @@ fi
 buildkite-agent meta-data set "CI_TESTS_FAILED" "${ANY_FAILED}"
 
 # Model support matrices
-for csv_file in "${model_csv_files[@]}"; do
-    if [[ -f "$csv_file" ]]; then
-        echo "--- $csv_file ---"
+for csv_file in "${model_csv_files[@]:-}"; do
+    if [[ -n "$csv_file" && -f "$csv_file" ]]; then
+        echo "--- Uploading Model Matrix: $csv_file ---"
         cat "$csv_file"
         buildkite-agent artifact upload "$csv_file"
     fi
 done
 
 # Feature support matrices
-for csv_file in "${feature_csv_files[@]}"; do
-    if [[ -f "$csv_file" ]]; then
-        sorted_content=$(tail -n +2 "$csv_file" | sort -V)
+for csv_file in "${feature_csv_files[@]:-}"; do
+    if [[ -n "$csv_file" && -f "$csv_file" ]]; then
         header=$(head -n 1 "$csv_file")
+        sorted_content=$(tail -n +2 "$csv_file" | sort -V)
         echo "$header" > "$csv_file"
         echo "$sorted_content" >> "$csv_file"
-        if [[ "$csv_file" != "kernel_support_matrix_microbenchmarks.csv" ]]; then
-            echo "--- $csv_file ---"
+        
+        # Skip raw kernel microbenchmarks; upload only the pivoted version
+        if [[ "$csv_file" != *"kernel_support_matrix_microbenchmarks.csv" ]]; then
+            echo "--- Uploading Feature Matrix: $csv_file ---"
             cat "$csv_file"
             buildkite-agent artifact upload "$csv_file"
+        else
+            echo "Skipping direct upload for $csv_file (will be pivoted later)."
         fi
     fi
 done
@@ -317,4 +335,4 @@ process_kernel_matrix_to_pivot
 echo "Reports uploaded successfully."
 
 # Cleanup
-rm -f "${model_csv_files[@]}" "${feature_csv_files[@]}"
+rm -rf "${TPU_DIR}"

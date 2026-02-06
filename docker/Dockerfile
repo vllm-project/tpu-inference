@@ -31,8 +31,10 @@ RUN apt-get update && apt-get install -y \
     libomp-dev \
     procps \
     curl \
+    netcat-openbsd \
     rclone \
     wget \
+    bc \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -54,7 +56,7 @@ RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install -e tests/v
 RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install \
     git+https://github.com/thuml/depyf.git \
     pytest-asyncio \
-    "lm-eval[api]>=0.4.9.2" \
+    "lm-eval[api]==0.4.9.2" \
     pytest-cov \
     tblib
 
@@ -68,7 +70,7 @@ COPY requirements_benchmarking.txt .
 RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements_benchmarking.txt --retries 3
 # Install test requirements
 COPY requirements_test.txt .
-Run  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then \
+RUN  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then \
         pip install -r requirements_test.txt --retries 3; \
     fi
 COPY . .

@@ -21,12 +21,10 @@ from jax.sharding import Mesh, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
-from vllm.attention.layer import Attention
+from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig, FusedMoEQuantConfig, mxfp4_w4a16_moe_quant_config)
-from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
-                                                        FusedMoEMethodBase,
-                                                        FusedMoERouter)
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
@@ -38,17 +36,17 @@ from vllm.model_executor.layers.quantization.mxfp4 import (Mxfp4Backend,
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
+from tpu_inference.layers.common.moe import MoEBackend
+from tpu_inference.layers.common.process_weights.moe_weights import (
+    FusedMoEWeights, process_moe_weights, quantize_moe_weights,
+    shard_moe_weights)
 from tpu_inference.layers.common.quant_methods import (MXFP4,
                                                        get_tpu_quant_method)
 from tpu_inference.layers.common.quantization import \
     dequantize_tensor_from_mxfp4_packed
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.vllm.fused_moe import (FusedMoEBackend,
-                                                 fused_moe_apply,
-                                                 select_moe_backend)
-from tpu_inference.layers.vllm.process_weights.fused_moe_weights import (
-    FusedMoEWeights, process_moe_weights, quantize_moe_weights,
-    shard_moe_weights)
+from tpu_inference.layers.vllm.moe import (
+    select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedLinearMethod
@@ -108,26 +106,13 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
         self.mxfp4_backend = Mxfp4Backend.TRITON
 
         self.mesh = mesh
-        self.moe_backend = select_moe_backend(self.moe)
+        self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
 
         self.extra_backend_kwargs = {}
-        if self.moe_backend == FusedMoEBackend.FUSED_MOE:
+        if self.moe_backend == MoEBackend.FUSED_MOE:
             # When fused moe kernle is used, we pass extra arguments like
             # tuned block sizes to the kernel.
-            self.extra_backend_kwargs = dict(
-                subc_quant_w1_sz=REQUANTIZED_BLOCK_SIZE,
-                subc_quant_w2_sz=REQUANTIZED_BLOCK_SIZE,
-                ep_axis_name=ep_axis_name,
-                # TODO: Use autotune table once we have it.
-                bt=256,
-                bf=1024,
-                bd1=1024,
-                bd2=1024,
-                btc=256,
-                bfc=1024,
-                bd1c=1024,
-                bd2c=1024,
-            )
+            self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name, )
 
     def get_fused_moe_quant_config(
             self, layer: torch.nn.Module) -> FusedMoEQuantConfig | None:
@@ -137,6 +122,10 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
             w1_bias=layer.w13_bias,
             w2_bias=layer.w2_bias,
         )
+
+    @property
+    def is_monolithic(self) -> bool:
+        return True
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
         assert isinstance(layer, FusedMoE)
@@ -210,10 +199,9 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
         layer.w13_bias = Parameter(weights.w13_bias, requires_grad=False)
         layer.w2_bias = Parameter(weights.w2_bias, requires_grad=False)
 
-    def apply(
+    def apply_monolithic(
         self,
         layer: FusedMoE,
-        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
@@ -227,13 +215,8 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
             w2_bias=jax_view(layer.w2_bias),
         )
 
-        return torch_view(
-            fused_moe_apply(
-                layer,
-                jax_view(x),
-                jax_view(router_logits),
-                weights,
-                self.moe_backend,
-                self.mesh,
-                self.extra_backend_kwargs,
-            ))
+        return vllm_moe_apply(layer=layer,
+                              weights=weights,
+                              quant_method_instance=self,
+                              x=x,
+                              router_logits=router_logits)

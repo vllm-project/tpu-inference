@@ -17,17 +17,20 @@
 # Sampling parameters control how the model selects tokens during generation.
 # These tests verify that temperature, top_p, top_k, and logprobs work correctly.
 steps:
-  - label: "Correctness tests for sampling_params"
-    key: "sampling_params_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Correctness tests for sampling_params"
+    key: "${TPU_VERSION:-tpu6e}_sampling_params_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_sampling_params.py
-  - label: "Record correctness test result for sampling_params"
-    key: "record_sampling_params_CorrectnessTest"
-    depends_on: "sampling_params_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for sampling_params"
+    key: "${TPU_VERSION:-tpu6e}_record_sampling_params_CorrectnessTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_sampling_params_CorrectnessTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "sampling_params"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "feature support matrix"
@@ -35,4 +38,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh sampling_params_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_sampling_params_CorrectnessTest

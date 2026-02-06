@@ -15,67 +15,76 @@
 # pipeline-name: openai/gpt-oss-120b
 # pipeline-type: text-only
 steps:
-  - label: "Unit tests for openai/gpt-oss-120b"
-    key: "openai_gpt-oss-120b_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} Unit tests for openai/gpt-oss-120b"
+    key: "${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_UnitTest"
     agents:
-      queue: tpu_v6e_8_queue
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     soft_fail: true
     commands:
       - |
-        buildkite-agent meta-data set "openai_gpt-oss-120b_UnitTest" "unverified"
-  - label: "Record unit test result for openai/gpt-oss-120b"
-    key: "record_openai_gpt-oss-120b_UnitTest"
-    depends_on: "openai_gpt-oss-120b_UnitTest"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_UnitTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record unit test result for openai/gpt-oss-120b"
+    key: "${TPU_VERSION:-tpu6e}_record_openai_gpt-oss-120b_UnitTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_UnitTest"
     env:
-      CI_TARGET: openai/gpt-oss-120b
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "openai/gpt-oss-120b"
       CI_STAGE: "UnitTest"
       CI_CATEGORY: "text-only"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh openai_gpt-oss-120b_UnitTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_UnitTest
 
-  - label: "Integration tests for openai/gpt-oss-120b"
-    key: "openai_gpt-oss-120b_IntegrationTest"
-    depends_on: "record_openai_gpt-oss-120b_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} Accuracy for openai/gpt-oss-120b"
+    key: "${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_openai_gpt-oss-120b_UnitTest"
     agents:
-      queue: tpu_v6e_8_queue
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     soft_fail: true
     commands:
       - |
-        buildkite-agent meta-data set "openai_gpt-oss-120b_IntegrationTest" "unverified"
-  - label: "Record integration test result for openai/gpt-oss-120b"
-    key: "record_openai_gpt-oss-120b_IntegrationTest"
-    depends_on: "openai_gpt-oss-120b_IntegrationTest"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_Accuracy" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record accuracy result for openai/gpt-oss-120b"
+    key: "${TPU_VERSION:-tpu6e}_record_openai_gpt-oss-120b_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_Accuracy"
     env:
-      CI_TARGET: openai/gpt-oss-120b
-      CI_STAGE: "IntegrationTest"
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "openai/gpt-oss-120b"
+      CI_STAGE: "Accuracy/Correctness"
       CI_CATEGORY: "text-only"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh openai_gpt-oss-120b_IntegrationTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_Accuracy
 
-  - label: "Performance benchmarks for openai/gpt-oss-120b"
-    key: "openai_gpt-oss-120b_Benchmark"
-    depends_on: "record_openai_gpt-oss-120b_IntegrationTest"
+  - label: "${TPU_VERSION:-tpu6e} Performance benchmarks for openai/gpt-oss-120b"
+    key: "${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_openai_gpt-oss-120b_Accuracy"
     agents:
-      queue: tpu_v6e_8_queue
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     soft_fail: true
     commands:
       - |
-        buildkite-agent meta-data set "openai_gpt-oss-120b_Benchmark" "unverified"
-  - label: "Record performance benchmark result for openai/gpt-oss-120b"
-    key: "record_openai_gpt-oss-120b_Benchmark"
-    depends_on: "openai_gpt-oss-120b_Benchmark"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_Benchmark" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record performance benchmark result for openai/gpt-oss-120b"
+    key: "${TPU_VERSION:-tpu6e}_record_openai_gpt-oss-120b_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_Benchmark"
     env:
-      CI_TARGET: openai/gpt-oss-120b
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "openai/gpt-oss-120b"
       CI_STAGE: "Benchmark"
       CI_CATEGORY: "text-only"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh openai_gpt-oss-120b_Benchmark
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_Benchmark

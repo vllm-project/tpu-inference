@@ -15,67 +15,76 @@
 # pipeline-name: deepseek-ai/DeepSeek-V3.1
 # pipeline-type: text-only
 steps:
-  - label: "Unit tests for deepseek-ai/DeepSeek-V3.1"
-    key: "deepseek-ai_DeepSeek-V3_1_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} Unit tests for deepseek-ai/DeepSeek-V3.1"
+    key: "${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-V3_1_UnitTest"
     agents:
-      queue: tpu_v6e_8_queue
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     soft_fail: true
     commands:
       - |
-        buildkite-agent meta-data set "deepseek-ai_DeepSeek-V3_1_UnitTest" "unverified"
-  - label: "Record unit test result for deepseek-ai/DeepSeek-V3.1"
-    key: "record_deepseek-ai_DeepSeek-V3_1_UnitTest"
-    depends_on: "deepseek-ai_DeepSeek-V3_1_UnitTest"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-V3_1_UnitTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record unit test result for deepseek-ai/DeepSeek-V3.1"
+    key: "${TPU_VERSION:-tpu6e}_record_deepseek-ai_DeepSeek-V3_1_UnitTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-V3_1_UnitTest"
     env:
-      CI_TARGET: deepseek-ai/DeepSeek-V3.1
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "deepseek-ai/DeepSeek-V3.1"
       CI_STAGE: "UnitTest"
       CI_CATEGORY: "text-only"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh deepseek-ai_DeepSeek-V3_1_UnitTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-V3_1_UnitTest
 
-  - label: "Integration tests for deepseek-ai/DeepSeek-V3.1"
-    key: "deepseek-ai_DeepSeek-V3_1_IntegrationTest"
-    depends_on: "record_deepseek-ai_DeepSeek-V3_1_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} Accuracy for deepseek-ai/DeepSeek-V3.1"
+    key: "${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-V3_1_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_deepseek-ai_DeepSeek-V3_1_UnitTest"
     agents:
-      queue: tpu_v6e_8_queue
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     soft_fail: true
     commands:
       - |
-        buildkite-agent meta-data set "deepseek-ai_DeepSeek-V3_1_IntegrationTest" "unverified"
-  - label: "Record integration test result for deepseek-ai/DeepSeek-V3.1"
-    key: "record_deepseek-ai_DeepSeek-V3_1_IntegrationTest"
-    depends_on: "deepseek-ai_DeepSeek-V3_1_IntegrationTest"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-V3_1_Accuracy" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record accuracy result for deepseek-ai/DeepSeek-V3.1"
+    key: "${TPU_VERSION:-tpu6e}_record_deepseek-ai_DeepSeek-V3_1_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-V3_1_Accuracy"
     env:
-      CI_TARGET: deepseek-ai/DeepSeek-V3.1
-      CI_STAGE: "IntegrationTest"
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "deepseek-ai/DeepSeek-V3.1"
+      CI_STAGE: "Accuracy/Correctness"
       CI_CATEGORY: "text-only"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh deepseek-ai_DeepSeek-V3_1_IntegrationTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-V3_1_Accuracy
 
-  - label: "Performance benchmarks for deepseek-ai/DeepSeek-V3.1"
-    key: "deepseek-ai_DeepSeek-V3_1_Benchmark"
-    depends_on: "record_deepseek-ai_DeepSeek-V3_1_IntegrationTest"
+  - label: "${TPU_VERSION:-tpu6e} Performance benchmarks for deepseek-ai/DeepSeek-V3.1"
+    key: "${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-V3_1_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_deepseek-ai_DeepSeek-V3_1_Accuracy"
     agents:
-      queue: tpu_v6e_8_queue
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     soft_fail: true
     commands:
       - |
-        buildkite-agent meta-data set "deepseek-ai_DeepSeek-V3_1_Benchmark" "unverified"
-  - label: "Record performance benchmark result for deepseek-ai/DeepSeek-V3.1"
-    key: "record_deepseek-ai_DeepSeek-V3_1_Benchmark"
-    depends_on: "deepseek-ai_DeepSeek-V3_1_Benchmark"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-V3_1_Benchmark" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record performance benchmark result for deepseek-ai/DeepSeek-V3.1"
+    key: "${TPU_VERSION:-tpu6e}_record_deepseek-ai_DeepSeek-V3_1_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-V3_1_Benchmark"
     env:
-      CI_TARGET: deepseek-ai/DeepSeek-V3.1
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "deepseek-ai/DeepSeek-V3.1"
       CI_STAGE: "Benchmark"
       CI_CATEGORY: "text-only"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh deepseek-ai_DeepSeek-V3_1_Benchmark
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-V3_1_Benchmark
