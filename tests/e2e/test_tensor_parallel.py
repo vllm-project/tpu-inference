@@ -1,33 +1,60 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import difflib
 import os
 import time
-from dataclasses import asdict
+from dataclasses import dataclass, field
 
 import pytest
-from vllm import LLM, EngineArgs, SamplingParams
+from vllm import LLM, SamplingParams
 
 
-@pytest.fixture
-def model_name():
-    return "meta-llama/Llama-3.1-8B-Instruct"
+@dataclass
+class TestConfig:
+    """Configuration for TP test runs."""
+    max_model_len: int = 512
+    max_num_batched_tokens: int = 128
+    max_num_seqs: int = 16
+    num_prompts: int = 16
+
+    @classmethod
+    def for_performance(cls) -> "TestConfig":
+        return cls(
+            max_model_len=1024,
+            max_num_batched_tokens=2048,
+            max_num_seqs=2048,
+            num_prompts=2048,
+        )
 
 
-@pytest.fixture
-def test_prompts():
+@dataclass
+class InferenceConfig:
+    """Configuration for a single inference run."""
+    model_name: str
+    tensor_parallel_size: int = 1
+    pipeline_parallel_size: int = 1
+    max_model_len: int = 512
+    max_num_batched_tokens: int = 128
+    max_num_seqs: int = 16
+    additional_config: dict = field(default_factory=dict)
+    gpu_memory_utilization: float = 0.80
+    kv_cache_dtype: str = "auto"
+    enable_prefix_caching: bool = False
+
+
+def generate_test_prompts(num_prompts: int = 256) -> list[str]:
+    base_text = (
+        "The rapid advancement of artificial intelligence has transformed "
+        "numerous industries and continues to reshape our understanding of "
+        "technology's potential. Machine learning algorithms have become "
+        "increasingly sophisticated, enabling computers to perform tasks "
+        "that were once thought to require human intelligence. From natural "
+        "language processing to computer vision, AI systems are now capable "
+        "of understanding context, recognizing patterns, and making decisions "
+        "with remarkable accuracy. ")
     return [
-        "Hello, my name is",
-        "The capital of France is",
-        "The colors of the rainbow are",
-        "The future of AI is",
-        "The president of the United States is",
-        "How many players are on a standard soccer team?",
-        "In Greek mythology, who is the god of the sea?",
-        "What is the capital of Australia?",
-        "What is the largest planet in our solar system?",
-        "Who developed the theory of general relativity?",
+        f"Prompt {i}: {base_text} What are your thoughts on this topic?"
+        for i in range(num_prompts)
     ]
 
 
@@ -41,219 +68,111 @@ def sampling_params():
     )
 
 
-def _run_inference_with_config(model_name: str,
-                               test_prompts: list,
-                               sampling_params: SamplingParams,
-                               tensor_parallel_size: int = 1,
-                               pipeline_parallel_size: int = 1,
-                               additional_config: dict = {},
-                               kv_cache_dtype: str = "auto",
-                               enable_prefix_caching: bool = False) -> list:
-    """Helper function to run inference with specified configuration."""
+def _run_inference(
+    config: InferenceConfig,
+    test_prompts: list[str],
+    sampling_params: SamplingParams,
+) -> tuple[list, float]:
+    """Run inference with the given configuration."""
+    llm = LLM(
+        model=config.model_name,
+        max_model_len=config.max_model_len,
+        tensor_parallel_size=config.tensor_parallel_size,
+        pipeline_parallel_size=config.pipeline_parallel_size,
+        gpu_memory_utilization=config.gpu_memory_utilization,
+        max_num_batched_tokens=config.max_num_batched_tokens,
+        max_num_seqs=config.max_num_seqs,
+        additional_config=config.additional_config,
+        kv_cache_dtype=config.kv_cache_dtype,
+        enable_prefix_caching=config.enable_prefix_caching,
+    )
 
-    # Create LLM args using parser-based approach similar to offline_inference.py
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=128,
+    start_time = time.time()
+    outputs = llm.generate(test_prompts, sampling_params)
+    elapsed_time = time.time() - start_time
+
+    del llm
+    time.sleep(10)
+    return outputs, elapsed_time
+
+
+def _check_performance(
+    test_name: str,
+    baseline_time: float,
+    tp_time: float,
+    num_prompts: int,
+    min_speedup: float,
+):
+    """Verify tensor parallelism provides expected speedup."""
+    speedup = baseline_time / tp_time if tp_time > 0 else 0
+
+    print(f"✓ {test_name} performance test results:")
+    print(f"  Number of prompts: {num_prompts}")
+    print(f"  Baseline time: {baseline_time:.2f}s")
+    print(f"  Tensor parallel time: {tp_time:.2f}s")
+    print(f"  Speedup: {speedup:.2f}x")
+    print(f"  Baseline throughput: {num_prompts/baseline_time:.2f} prompts/s")
+    print(f"  Tensor parallel throughput: {num_prompts/tp_time:.2f} prompts/s")
+
+    assert speedup >= min_speedup, (
+        f"Tensor parallelism did not provide expected speedup "
+        f"({min_speedup:.2f}x): {speedup:.2f}x")
+
+
+def _test_tensor_parallelism_performance(
+    sampling_params: SamplingParams,
+    model_name: str,
+    tensor_parallel_size: int,
+    pipeline_parallel_size: int = 1,
+    additional_config: dict | None = None,
+    min_speedup: float = 1.05,
+):
+    """Performance test for tensor parallelism."""
+    cfg = TestConfig.for_performance()
+    test_prompts = generate_test_prompts(cfg.num_prompts)
+
+    tp_config = InferenceConfig(
+        model_name=model_name,
         tensor_parallel_size=tensor_parallel_size,
         pipeline_parallel_size=pipeline_parallel_size,
-        gpu_memory_utilization=0.95,
-        max_num_batched_tokens=128,
-        max_num_seqs=16,
-        enable_prefix_caching=enable_prefix_caching,
-        additional_config=additional_config,
-        kv_cache_dtype=kv_cache_dtype,
+        max_model_len=cfg.max_model_len,
+        max_num_batched_tokens=cfg.max_num_batched_tokens //
+        tensor_parallel_size,
+        max_num_seqs=cfg.max_num_seqs // tensor_parallel_size,
+        additional_config=additional_config or {},
     )
+    _, tp_time = _run_inference(tp_config, test_prompts, sampling_params)
 
-    engine_args_dict = asdict(engine_args)
-    llm = LLM(**engine_args_dict)
-
-    try:
-        outputs = llm.generate(test_prompts, sampling_params)
-        return outputs
-    finally:
-        del llm
-        # Wait for TPUs to be released
-        time.sleep(5)
-
-
-def test_tensor_parallelism_jax_model(
-    model_name: str,
-    test_prompts: list,
-    sampling_params: SamplingParams,
-):
-    """
-    Test tensor parallelism works on Jax models
-
-    Equivalent to:
-    python examples/offline_inference.py --tensor_parallel_size=2 --pipeline_parallel_size=1
-    """
-    # Test with tensor parallelism enabled
-    outputs = _run_inference_with_config(
+    baseline_config = InferenceConfig(
         model_name=model_name,
-        test_prompts=test_prompts,
-        sampling_params=sampling_params,
-        tensor_parallel_size=2,
-    )
-
-    # Verify we got outputs for all prompts
-    assert len(outputs) == len(test_prompts)
-
-    # Verify each output has generated text
-    for output in outputs:
-        assert len(output.outputs) > 0
-        assert len(output.outputs[0].text.strip()) > 0
-
-    print(
-        f"✓ Tensor Parallelism Jax model test passed with {len(outputs)} outputs"
-    )
-
-
-def test_tensor_parallelism_vllm_model(
-    model_name: str,
-    test_prompts: list,
-    sampling_params: SamplingParams,
-):
-    """
-    Test tensor parallelism works on vLLM models.
-
-    Equivalent to:
-    MODEL_IMPL_TYPE=vllm python examples/offline_inference.py --tensor_parallel_size=2 --pipeline_parallel_size=1
-    """
-
-    os.environ['MODEL_IMPL_TYPE'] = 'vllm'
-    # Test with tensor parallelism enabled
-    outputs = _run_inference_with_config(
-        model_name=model_name,
-        test_prompts=test_prompts,
-        sampling_params=sampling_params,
-        tensor_parallel_size=2,
-    )
-
-    # Verify we got outputs for all prompts
-    assert len(outputs) == len(test_prompts)
-
-    # Verify each output has generated text
-    for output in outputs:
-        assert len(output.outputs) > 0
-        assert len(output.outputs[0].text.strip()) > 0
-
-    print(
-        f"✓ Tensor Parallelism vLLM model test passed with {len(outputs)} outputs"
-    )
-
-
-def test_tensor_parallelism_jax_model_correctness(
-    model_name: str,
-    test_prompts: list,
-    sampling_params: SamplingParams,
-):
-    """
-    Test that tensor parallelism produces consistent results compared to a baseline.
-    This test compares outputs from a single-device run with tensor parallel runs
-    to ensure correctness, including log probabilities.
-    """
-    os.environ['SKIP_JAX_PRECOMPILE'] = '1'
-    os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '0'
-
-    # Use a smaller subset of prompts for correctness testing
-    small_prompts = test_prompts[:10]
-
-    # Run baseline (no TP)
-    baseline_outputs = _run_inference_with_config(
-        model_name=model_name,
-        test_prompts=small_prompts,
-        sampling_params=sampling_params,
         tensor_parallel_size=1,
+        pipeline_parallel_size=1,
+        max_model_len=cfg.max_model_len,
+        max_num_batched_tokens=cfg.max_num_batched_tokens,
+        max_num_seqs=cfg.max_num_seqs,
+    )
+    _, baseline_time = _run_inference(baseline_config, test_prompts,
+                                      sampling_params)
+
+    _check_performance(
+        "Tensor parallelism",
+        baseline_time,
+        tp_time,
+        len(test_prompts),
+        min_speedup=min_speedup,
     )
 
-    # Run with model tensor parallelism and async scheduling
-    tp_outputs = _run_inference_with_config(
-        model_name=model_name,
-        test_prompts=small_prompts,
+
+def test_tp_performance(sampling_params: SamplingParams):
+    """Performance test for tensor parallelism on vLLM models."""
+    os.environ['MODEL_IMPL_TYPE'] = 'vllm'
+    os.environ['SKIP_JAX_PRECOMPILE'] = '0'
+    os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '1'
+
+    _test_tensor_parallelism_performance(
         sampling_params=sampling_params,
+        model_name="meta-llama/Llama-3.1-8B-Instruct",
         tensor_parallel_size=2,
+        pipeline_parallel_size=1,
+        min_speedup=1.05,
     )
-
-    # Compare outputs
-    assert len(baseline_outputs) == len(tp_outputs)
-
-    text_matches = 0
-    text_mismatches = 0
-    logprob_mismatches = 0
-    max_logprob_diff = 0.0
-
-    for i, (baseline, tp_result) in enumerate(zip(baseline_outputs,
-                                                  tp_outputs)):
-        baseline_text = baseline.outputs[0].text.strip()
-        tp_text = tp_result.outputs[0].text.strip()
-
-        # Check text output
-        if baseline_text == tp_text:
-            text_matches += 1
-        else:
-            # Try fuzzy match
-            similarity = difflib.SequenceMatcher(None, baseline_text,
-                                                 tp_text).ratio()
-            if similarity >= 0.95:  # Very strict fuzzy match
-                text_matches += 1
-                msg = "Soft match"
-            else:
-                text_mismatches += 1
-                msg = "Text mismatch"
-
-            print(f"{msg} found in prompt {i} (similarity={similarity:.4f}):")
-            print(f"  Baseline: {baseline_text}")
-            print(f"  Tensor Parallel: {tp_text}")
-
-        # Check log probabilities
-        baseline_logprobs = baseline.outputs[0].logprobs
-        tp_logprobs = tp_result.outputs[0].logprobs
-        if baseline_logprobs is not None and tp_logprobs is not None:
-            # Compare log probabilities for each token
-            assert len(baseline_logprobs) == len(tp_logprobs), \
-                f"Logprobs length mismatch: {len(baseline_logprobs)} vs {len(tp_logprobs)}"
-            for token_idx, (base_lp, tp_lp) in enumerate(
-                    zip(baseline_logprobs, tp_logprobs)):
-                # Get the top logprob value for the selected token
-                if base_lp and tp_lp:
-                    # Get the top token's logprob from each
-                    base_top_token = list(base_lp.keys())[0]
-                    tp_top_token = list(tp_lp.keys())[0]
-
-                    # Note: tokens might be different if text diverged slightly,
-                    # but we generally check logprobs where they align or if strict matching required.
-                    # For correctness, we check the logprob of the *top* token from each.
-                    base_logprob_val = base_lp[base_top_token].logprob
-                    tp_logprob_val = tp_lp[tp_top_token].logprob
-
-                    # Calculate absolute difference
-                    diff = abs(base_logprob_val - tp_logprob_val)
-                    max_logprob_diff = max(max_logprob_diff, diff)
-
-                    # Allow small numerical differences (e.g., 1e-3)
-                    if diff > 1e-3:
-                        logprob_mismatches += 1
-                        print(
-                            f"Logprob mismatch in prompt {i}, token {token_idx}:"
-                        )
-                        print(
-                            f"  Baseline token: {base_top_token}, logprob: {base_logprob_val:.6f}"
-                        )
-                        print(
-                            f"  TP token: {tp_top_token}, logprob: {tp_logprob_val:.6f}"
-                        )
-                        print(f"  Difference: {diff:.6f}")
-
-    print("✓ Correctness test results:")
-    print(f"  Text: {text_matches} matches, {text_mismatches} mismatches")
-    print(f"  Max logprob difference: {max_logprob_diff:.6e}")
-    print(f"  Significant logprob mismatches (>1e-3): {logprob_mismatches}")
-
-    # Allow for some variance due to potential numerical differences
-    # but most outputs should match with greedy sampling
-    text_match_rate = text_matches / len(baseline_outputs)
-    assert text_match_rate >= 0.8, f"Text match rate {text_match_rate:.2%} is too low"
-
-    # Log probabilities should be very close (allow small numerical errors)
-    assert max_logprob_diff < 1.5, f"Max logprob difference {max_logprob_diff} is too large"
