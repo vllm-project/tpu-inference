@@ -16,15 +16,15 @@ from dataclasses import dataclass, fields
 
 import jax
 import jax.numpy as jnp
-from jax.experimental.layout import Format, Layout, with_layout_constraint
+from jax.experimental.layout import Layout, with_layout_constraint
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.tensor import Tensor
 
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.common.utils import \
-    reorder_concatenated_tensor_for_sharding
+from tpu_inference.layers.common.utils import (
+    general_device_put, reorder_concatenated_tensor_for_sharding)
 from tpu_inference.utils import align_to
 
 P = PartitionSpec
@@ -386,6 +386,6 @@ def shard_moe_weights(
         if (weight := getattr(weights, key, None)) is not None:
             layout = getattr(weight_layouts, key)
             sharding = getattr(weight_shardings, key)
-            weight = jax.device_put(weight, Format(layout, sharding))
+            weight = general_device_put(weight, sharding, layout)
             setattr(weights, key, weight)
     return weights
