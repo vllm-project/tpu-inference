@@ -1397,16 +1397,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         seq_lens_cpu = seq_lens
 
         (input_ids, logits_indices) = device_array(
-             self.mesh,
-             (input_ids, logits_indices),
-             sharding=data_parallel_sharding,
-         )
+            self.mesh,
+            (input_ids, logits_indices),
+            sharding=data_parallel_sharding,
+        )
 
         (positions, query_start_loc, seq_lens,
          request_distribution) = device_array(
              self.mesh,
-             (positions, query_start_loc, seq_lens,
-              request_distribution),
+             (positions, query_start_loc, seq_lens, request_distribution),
              sharding=data_parallel_attn_sharding,
          )
 

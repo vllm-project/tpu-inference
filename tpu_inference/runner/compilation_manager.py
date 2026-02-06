@@ -75,7 +75,12 @@ class CompilationManager:
         logger.info(f"Precompile {name} --> {kwargs}")
         start = time.perf_counter()
         result = fn(*args)
-        jax.tree.map(lambda r: r.block_until_ready(), result)
+        if result is not None:
+            if isinstance(result, tuple):
+                for r in result:
+                    r.block_until_ready()
+            else:
+                result.block_until_ready()
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
 
@@ -163,7 +168,8 @@ class CompilationManager:
         seq_lens = self._create_dummy_tensor((self.runner.max_num_reqs, ),
                                              jnp.int32, dp_attn_sharding)
         query_start_loc = self._create_dummy_tensor(
-            (self.runner.max_num_reqs + dp_size, ), jnp.int32, dp_attn_sharding)
+            (self.runner.max_num_reqs + dp_size, ), jnp.int32,
+            dp_attn_sharding)
 
         # Keep existing pattern for specific value arrays
         request_distribution = np.array([0, 0, 0] * dp_size, dtype=np.int32)
@@ -297,14 +303,14 @@ class CompilationManager:
     def _precompile_backbone_text_only(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()
         for num_tokens in self.runner.num_tokens_paddings:
-            dp_size=self.runner.vllm_config.sharding_config.total_dp_size
+            dp_size = self.runner.vllm_config.sharding_config.total_dp_size
             if dp_size > 1:
                 dp_attn_sharding = NamedSharding(
-                    self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, )
-                )
+                    self.runner.mesh,
+                    PartitionSpec(ShardingAxisName.ATTN_DATA, ))
                 dp_sharding = NamedSharding(
-                    self.runner.mesh, PartitionSpec(ShardingAxisName.MLP_DATA, )
-                ) 
+                    self.runner.mesh,
+                    PartitionSpec(ShardingAxisName.MLP_DATA, ))
             else:
                 dp_attn_sharding = None
                 dp_sharding = None
