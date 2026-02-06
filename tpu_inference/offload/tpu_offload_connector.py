@@ -175,6 +175,14 @@ START_SAVE_KV_CALLS = Counter(
     "vllm_start_save_kv_calls_total",
     "Total number of times start_save_kv has been called.")
 
+START_SAVE_KV_SKIP_SAVE_CALLS = Counter(
+    "vllm_start_save_kv_skip_save_calls_total",
+    "Total number of times start_save_kv skip_save has been called.")
+
+START_SAVE_KV_IS_FINAL_SAVE_CALLS = Counter(
+    "vllm_start_save_kv_is_final_save_calls_total",
+    "Total number of times start_save_kv is_final_save has been called.")
+
 PROCESS_COMPLETED_SAVE_CALLS = Counter(
     "vllm_process_completed_saves_calls_total",
     "Total number of times process_completed_saves has been called.")
@@ -294,21 +302,70 @@ STAGING_BUFFER_BLOCKS_FOR_LOAD = Gauge(
     'vllm_kv_cache_staging_buffer_blocks_for_load_total',
     'Total occupied staging blocks for load')
 
+ADJUSTED_NUM_BLOCKS_TO_SAVE = Gauge(
+    'vllm_kv_cache_adjusted_num_blocks_to_save',
+    'Number of blocks to save after adjusted')
+
+STAGING_BUFFER_BLOCKS_FREE = Gauge(
+    'vllm_kv_cache_staging_buffer_blocks_free',
+    'Number of free staging blocks',
+    ['source'])
+
 STAGING_BUFFER_BLOCKS_FOR_SAVE_ALLOCATE = Gauge(
     'vllm_kv_cache_staging_buffer_blocks_for_save_allocate',
-    'Total allocated staging blocks for save')
+    'Total allocated staging blocks for save',
+    ['source'])
 
 STAGING_BUFFER_BLOCKS_FOR_SAVE_FREE = Gauge(
     'vllm_kv_cache_staging_buffer_blocks_for_save_free',
-    'Total freed staging blocks for save')
+    'Total freed staging blocks for save',
+    ['source'])
 
 STAGING_BUFFER_BLOCKS_FOR_LOAD_ALLOCATE = Gauge(
     'vllm_kv_cache_staging_buffer_blocks_for_load_allocate',
-    'Total allocated staging blocks for load')
+    'Total allocated staging blocks for load',
+    ['source'])
 
 STAGING_BUFFER_BLOCKS_FOR_LOAD_FREE = Gauge(
     'vllm_kv_cache_staging_buffer_blocks_for_load_free',
-    'Total freed staging blocks for load')
+    'Total freed staging blocks for load',
+    ['source'])
+
+FINISHED_REQS_W_PENDING_OPS_SIZE = Gauge(
+    'vllm_kv_cache_finished_reqs_w_pending_ops_size',
+    'The size of the _finished_reqs_w_pending_ops set',
+    ['source'])
+
+FINISHED_SAVE_REQS_SIZE = Gauge(
+    'vllm_kv_cache_finished_save_reqs_size',
+    'The size of the _finished_save_reqs set')
+
+FINISHED_LOAD_REQS_SIZE = Gauge(
+    'vllm_kv_cache_finished_load_reqs_size',
+    'The size of the _finished_load_reqs set')
+
+FULLY_FINISHED_REQS_SIZE = Gauge(
+    'vllm_kv_cache_fully_finished_reqs_size',
+    'The size of the _fully_finished_reqs set')
+
+SAVE_REQS_W_PENDING_GATHER_SIZE = Gauge(
+    'vllm_kv_cache_save_reqs_w_pending_gather_size',
+    'The size of the _save_reqs_w_pending_gather set')
+
+DELAY_FREE_TOTAL = Counter("vllm_kv_delay_free_total",
+                          "Total number of delay free requests.")
+
+PENDING_SAVE_FUTURES_SIZE = Gauge(
+    'vllm_kv_cache_pending_save_futures_size',
+    'The size of the _pending_save_futures list')
+
+FUTURE_DONE_TOTAL = Counter(
+    'vllm_kv_cache_future_done_total',
+    'Total number of save futures done.')
+
+RECORD_SAVE_TOTAL = Counter(
+    'vllm_kv_cache_record_save_total',
+    'Total number of record_save calls total.')
 
 KV_HIT_WITH_LOAD_BUF = Counter(
     'vllm_kv_cache_hit_with_load_staging_buf',
@@ -818,6 +875,7 @@ class TPUOffloadConnectorScheduler():
             # planning staging blocks for load
             num_avail_staging_blocks = self.staging_buffer_manager.get_num_free_staging_blocks(
             )
+            STAGING_BUFFER_BLOCKS_FREE.labels(source="load").set(num_avail_staging_blocks)
             # num_avail_staging_blocks = self.staging_buffer_manager.get_num_free_load_staging_blocks(
             # )
             if num_blocks_to_load > num_avail_staging_blocks:
@@ -849,7 +907,8 @@ class TPUOffloadConnectorScheduler():
                 assert num_allocated_staging_blocks == num_blocks_to_load >= 0, f" failed to allocate {num_allocated_staging_blocks} (load) staging blocks for request {request.request_id}, expected {num_blocks_to_load}."
                 STAGING_BUFFER_BLOCKS_FOR_LOAD.set(
                     self.staging_buffer_manager.get_num_blocks_for_load())
-                STAGING_BUFFER_BLOCKS_FOR_LOAD_ALLOCATE.set(
+                STAGING_BUFFER_BLOCKS_FOR_LOAD_ALLOCATE.labels(
+                    source="get_num_new_matched_tokens").set(
                     self.staging_buffer_manager.
                     get_num_total_allocate_blocks_for_load())
 
@@ -1038,6 +1097,7 @@ class TPUOffloadConnectorScheduler():
             # planning staging blocks for save
             num_avail_staging_blocks = self.staging_buffer_manager.get_num_free_staging_blocks(
             )
+            STAGING_BUFFER_BLOCKS_FREE.labels(source="save").set(num_avail_staging_blocks)
             # num_avail_staging_blocks = self.staging_buffer_manager.get_num_free_save_staging_blocks(
             # )
             if num_blocks_to_save > num_avail_staging_blocks:
@@ -1076,15 +1136,19 @@ class TPUOffloadConnectorScheduler():
                     )
                     self._reqs_being_saved[req_id] |= set(dst_chunks)
                     self._save_reqs_w_pending_gather[req_id] |= set(src_blocks)
+                    SAVE_REQS_W_PENDING_GATHER_SIZE.set(
+                        len(self._save_reqs_w_pending_gather))
                     num_allocated_blocks = self.staging_buffer_manager.allocate(
                         tracker.req_id,
                         num_blocks=adjusted_num_blocks_to_save,
                         usage="save")
                     assert num_allocated_blocks == adjusted_num_blocks_to_save >= 0, f" failed to allocate {num_allocated_blocks} (save) staging blocks for request {tracker.req_id}, expected {adjusted_num_blocks_to_save}."
 
+                    ADJUSTED_NUM_BLOCKS_TO_SAVE.set(adjusted_num_blocks_to_save)
                     STAGING_BUFFER_BLOCKS_FOR_SAVE.set(
                         self.staging_buffer_manager.get_num_blocks_for_save())
-                    STAGING_BUFFER_BLOCKS_FOR_SAVE_ALLOCATE.set(
+                    STAGING_BUFFER_BLOCKS_FOR_SAVE_ALLOCATE.labels(
+                        source="_prepare_save_spec").set(
                         self.staging_buffer_manager.
                         get_num_total_allocate_blocks_for_save())
 
@@ -1330,7 +1394,8 @@ class TPUOffloadConnectorScheduler():
 
         STAGING_BUFFER_BLOCKS_FOR_LOAD.set(
             self.staging_buffer_manager.get_num_blocks_for_load())
-        STAGING_BUFFER_BLOCKS_FOR_LOAD_FREE.set(
+        STAGING_BUFFER_BLOCKS_FOR_LOAD_FREE.labels(
+            source="pre_load_specs").set(
             self.staging_buffer_manager.get_num_total_free_blocks_for_load())
 
         return metadata
@@ -1387,9 +1452,12 @@ class TPUOffloadConnectorScheduler():
                     req_id, usage="save", num_finished_blocks=num_saved_chunks)
                 STAGING_BUFFER_BLOCKS_FOR_SAVE.set(
                     self.staging_buffer_manager.get_num_blocks_for_save())
-                STAGING_BUFFER_BLOCKS_FOR_SAVE_FREE.set(
+                STAGING_BUFFER_BLOCKS_FOR_SAVE_FREE.labels(
+                    source="finished_save_chunks").set(
                     self.staging_buffer_manager.
                     get_num_total_free_blocks_for_save())
+                STAGING_BUFFER_BLOCKS_FREE.labels(source="finished_save_chunks").set(
+                    self.staging_buffer_manager.get_num_free_staging_blocks())
 
                 # update in-flight save
                 for saved_chunk_id in saved_chunk_ids:
@@ -1422,9 +1490,13 @@ class TPUOffloadConnectorScheduler():
                     num_finished_blocks=num_loaded_chunks)
                 STAGING_BUFFER_BLOCKS_FOR_LOAD.set(
                     self.staging_buffer_manager.get_num_blocks_for_load())
-                STAGING_BUFFER_BLOCKS_FOR_LOAD_FREE.set(
+                STAGING_BUFFER_BLOCKS_FOR_LOAD_FREE.labels(
+                    source="finished_load_chunks").set(
                     self.staging_buffer_manager.
                     get_num_total_free_blocks_for_load())
+                STAGING_BUFFER_BLOCKS_FREE.labels(
+                    source="finished_load_chunks").set(
+                    self.staging_buffer_manager.get_num_free_staging_blocks())
                 # update in-flight save
                 for loaded_chunk_id in loaded_chunk_ids:
                     assert loaded_chunk_id in self._reqs_being_loaded[req_id]
@@ -1451,7 +1523,8 @@ class TPUOffloadConnectorScheduler():
             )
             STAGING_BUFFER_BLOCKS_FOR_SAVE.set(
                 self.staging_buffer_manager.get_num_blocks_for_save())
-            STAGING_BUFFER_BLOCKS_FOR_SAVE_FREE.set(
+            STAGING_BUFFER_BLOCKS_FOR_SAVE_FREE.labels(
+                source="finished_sending").set(
                 self.staging_buffer_manager.get_num_total_free_blocks_for_save(
                 ))
 
@@ -1467,11 +1540,13 @@ class TPUOffloadConnectorScheduler():
             )
             STAGING_BUFFER_BLOCKS_FOR_LOAD.set(
                 self.staging_buffer_manager.get_num_blocks_for_load())
-            STAGING_BUFFER_BLOCKS_FOR_LOAD_FREE.set(
+            STAGING_BUFFER_BLOCKS_FOR_LOAD_FREE.labels(
+                source="finished_recving").set(
                 self.staging_buffer_manager.get_num_total_free_blocks_for_load(
                 ))
 
         _finished_reqs = list(self._finished_reqs_w_pending_ops)
+        FINISHED_REQS_W_PENDING_OPS_SIZE.labels(source="update_connector_output").set(len(_finished_reqs))
         for req_id in _finished_reqs:
             is_gather_done = req_id not in self._save_reqs_w_pending_gather
             is_load_done = req_id not in self._reqs_being_loaded
@@ -1480,6 +1555,7 @@ class TPUOffloadConnectorScheduler():
             # release the request
             if is_gather_done and is_load_done:
                 self._fully_finished_reqs.add(req_id)
+                FULLY_FINISHED_REQS_SIZE.set(len(self._fully_finished_reqs))
                 self._finished_reqs_w_pending_ops.discard(req_id)
                 logger.info(f"Request {req_id} is now fully finished.")
 
@@ -1509,6 +1585,7 @@ class TPUOffloadConnectorScheduler():
         if req_id in self._save_reqs_w_pending_gather and len(
                 self._save_reqs_w_pending_gather[req_id]) > 0:
             self._finished_reqs_w_pending_ops.add(req_id)
+            FINISHED_REQS_W_PENDING_OPS_SIZE.labels(source="_save_reqs_w_pending_gather").set(len(self._finished_reqs_w_pending_ops))
             logger.info(
                 f"not_free_with_gather:{req_id}, {self._save_reqs_w_pending_gather[req_id]}"
             )
@@ -1516,6 +1593,7 @@ class TPUOffloadConnectorScheduler():
         if req_id in self._reqs_being_loaded and len(
                 self._reqs_being_loaded[req_id]) > 0:
             self._finished_reqs_w_pending_ops.add(req_id)
+            FINISHED_REQS_W_PENDING_OPS_SIZE.labels(source="_reqs_being_loaded").set(len(self._finished_reqs_w_pending_ops))
             logger.info(
                 f"not_free_with_load:{req_id}, {self._reqs_being_loaded[req_id]}"
             )
@@ -1525,6 +1603,9 @@ class TPUOffloadConnectorScheduler():
             logger.info(f" finished request: {req_id}")
             self._save_reqs_w_pending_gather.pop(req_id, None)
             self._reqs_being_loaded.pop(req_id, None)
+
+        if delay_free:
+            DELAY_FREE_TOTAL.inc()
 
         return delay_free, None
 
@@ -2140,10 +2221,12 @@ class TPUOffloadConnectorWorker:
         for meta in metadata.requests_meta:
             if meta.save_spec:
                 if meta.save_spec.skip_save:
+                    START_SAVE_KV_SKIP_SAVE_CALLS.inc()
                     logger.info(
                         f"Request {meta.req_id}: Scheduler signaled to skip save."
                     )
                     if meta.save_spec.is_final_save:
+                        START_SAVE_KV_IS_FINAL_SAVE_CALLS.inc()
                         logger.info(
                             f"Request {meta.req_id}: Final save is a no-op. Marking as finished."
                         )
@@ -2208,8 +2291,10 @@ class TPUOffloadConnectorWorker:
         start_time = time.time()
         completed_count = 0
         remaining_futures: list[tuple[Future, TPUReqMeta]] = []
+        PENDING_SAVE_FUTURES_SIZE.set(len(self._pending_save_futures))
         for future, meta in self._pending_save_futures:
             if future.done():
+                FUTURE_DONE_TOTAL.inc()
                 try:
                     # The result of _save_blocks_to_cpu is the request_id
                     finished_req_id = future.result()
@@ -2221,6 +2306,7 @@ class TPUOffloadConnectorWorker:
                         self.offload_stats.record_save(
                             req=finished_req_id,
                             saved_chunk_ids=meta.save_spec.dst_chunks)
+                        RECORD_SAVE_TOTAL.inc()
 
                     # if meta.save_spec and meta.save_spec.is_final_save:
                     #     logger.info(
@@ -2418,8 +2504,10 @@ class TPUOffloadConnectorWorker:
         self._process_completed_saves()
 
         finished_saves = self.finished_save_reqs
+        FINISHED_SAVE_REQS_SIZE.set(len(finished_saves))
         self.finished_save_reqs = set()
         finished_loads = self.finished_load_reqs
+        FINISHED_LOAD_REQS_SIZE.set(len(finished_loads))
         self.finished_load_reqs = set()
         logger.info(f"Finished saves: {finished_saves}, "
                     f"Finished loads: {finished_loads}")
