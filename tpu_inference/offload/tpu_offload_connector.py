@@ -154,6 +154,12 @@ KV_SAVE_TRANSFER_BW_GBPS = Histogram(
     labelnames=["num_blocks", "is_batched"],
     buckets=[0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 40, 60, 80, 100])
 
+KV_LOAD_TRANSFER_BW_GBPS = Histogram(
+    "vllm_kv_cache_load_transfer_gbps",
+    "Bandwidth of CPU-to-TPU KV cache transfer in GB/s.",
+    labelnames=["num_blocks", "is_batched"],
+    buckets=[0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 40, 60, 80, 100])
+
 KV_SAVE_POST_TRANSFER_LATENCY = Histogram(
     'vllm_kv_cache_save_post_transfer_seconds',
     'Time spent registering chunks and updating CPU backend (Software Phase)',
@@ -2152,6 +2158,12 @@ class TPUOffloadConnectorWorker:
         LOAD_KV_LATENCY_SECONDS.labels(is_batched=True).observe(load_duration)
         LOAD_KV_SIZE_BLOCKS.labels(is_batched=True).inc(len(all_dst_blocks))
 
+        if load_duration > 0:
+            bw_gbps = (total_size_bytes / (1024**3)) / load_duration
+            KV_LOAD_TRANSFER_BW_GBPS.labels(num_blocks=str(
+                len(all_dst_blocks)),
+                                            is_batched=True).observe(bw_gbps)
+
         for info in manifest:
             self.finished_load_reqs.add(info.req_id)
             if info.num_blocks > 0:
@@ -2730,6 +2742,7 @@ class TPUOffloadConnectorWorker:
                 f"Fetching delta of {num_tokens_to_load_delta} tokens from cache for "
                 f"{num_blocks_to_load} blocks.")
 
+            total_size_bytes = 0
             if not self.no_op_load:
                 # Assemble the per-layer data for the delta tokens on the CPU.
                 # We create a list of lists, where the outer list represents layers
@@ -2793,6 +2806,13 @@ class TPUOffloadConnectorWorker:
             load_times.append(load_duration)
             LOAD_KV_SIZE_BLOCKS.labels(
                 is_batched=False).inc(num_blocks_to_load)
+
+            if load_duration > 0:
+                bw_gbps = (total_size_bytes / (1024**3)) / load_duration
+                KV_LOAD_TRANSFER_BW_GBPS.labels(
+                    num_blocks=str(num_blocks_to_load),
+                    is_batched=False).observe(bw_gbps)
+
             self.finished_load_reqs.add(meta.req_id)
             if num_blocks_to_load > 0:
                 self.offload_stats.record_load(req=meta.req_id,
