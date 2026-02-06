@@ -50,6 +50,7 @@ EVERY STEP HAS NEW MATMUL WORK because we delay computing until needed!
 
 # TODO(rupengliu) allow run ahead with recv_sem
 # TODO(rupengliu) add bidirectional support
+# TODO(rupengliu) increase pipeline depth through m and n tiling
 
 import functools
 from typing import Any, NamedTuple
