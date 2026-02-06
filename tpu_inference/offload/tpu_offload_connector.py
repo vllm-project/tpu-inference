@@ -431,6 +431,24 @@ class SaveReqInfo:
 
 
 @dataclass
+class LoadReqInfo:
+    """
+    Metadata for a request's contribution to a batched load.
+
+    Attributes:
+        req_id: Unique identifier for the request.
+        num_blocks: The number of KV blocks to be loaded for this request.
+        src_chunks: The specific CPU cache chunk IDs where these blocks are stored.
+        dst_blocks: The specific TPU KV cache block IDs where these chunks must
+            be loaded.
+    """
+    req_id: str
+    num_blocks: int
+    src_chunks: list[int]
+    dst_blocks: list[int]
+
+
+@dataclass
 class RequestTracker:
     """Tracks the evolving state of a single request across multiple scheduling steps."""
     # The unique identifier for the request.
@@ -1598,9 +1616,11 @@ class TPUOffloadConnectorWorker:
         assert self.swap_op_type in get_args(CPU_OFFLOADING_SWAP_OP_TYPE)
         self.use_bucketed_swap_ops = not envs.TPU_OFFLOAD_SKIP_JAX_PRECOMPILE
         self.batched_save = envs.TPU_OFFLOAD_BATCHED_SAVE
+        self.batched_load = envs.TPU_OFFLOAD_BATCHED_LOAD
         logger.info(f" swap operation type is {self.swap_op_type}, "
                     f"use_bucketed_swap_ops={self.use_bucketed_swap_ops}, "
-                    f"batched_save={self.batched_save}.")
+                    f"batched_save={self.batched_save}, "
+                    f"batched_load={self.batched_load}.")
 
         # cpu cache
         self.num_cpu_chunks = envs.TPU_OFFLOAD_NUM_CPU_CHUNKS
@@ -2019,6 +2039,114 @@ class TPUOffloadConnectorWorker:
             )
 
         return blocks_to_save, dst_chunks
+
+    def _start_batched_load_kv(self, metadata: TPUOffloadConnectorMetadata):
+        """
+        Consolidates KV cache loads across all requests in a batch into a
+        single unified H2D transfer and TPU scatter operation.
+        """
+        manifest: list[LoadReqInfo] = []
+        all_dst_blocks = []
+        assembled_kv_on_cpu = [[] for _ in range(self.num_layers)]
+
+        for meta in metadata.requests_meta:
+            if not (meta.load_spec and meta.load_spec.can_load):
+                continue
+
+            dst_blocks = meta.load_spec.dst_blocks
+            src_chunks = meta.load_spec.src_chunks
+            num_blocks_to_load = len(dst_blocks)
+            num_matched_tokens = meta.load_spec.num_matched_tokens
+            num_skip_leading_tokens = meta.load_spec.num_skip_leading_tokens
+            num_tokens_to_load_delta = num_matched_tokens - num_skip_leading_tokens
+
+            if num_tokens_to_load_delta <= 0:
+                continue
+
+            # Verify if dst_blocks is a contiguous subarray of meta.local_block_ids
+            first_dst_block = dst_blocks[0]
+            last_dst_block = dst_blocks[-1]
+            try:
+                first_block_idx_in_local = meta.local_block_ids.index(
+                    first_dst_block)
+                last_block_idx_in_local = meta.local_block_ids.index(
+                    last_dst_block)
+                if not (last_block_idx_in_local - first_block_idx_in_local + 1
+                        == len(dst_blocks)):
+                    raise ValueError(
+                        f"Request({meta.req_id}): dst_blocks {dst_blocks} does not exist in local_block_ids {meta.local_block_ids}"
+                    )
+            except ValueError:
+                raise ValueError(
+                    f"Request({meta.req_id}): dst_blocks {dst_blocks} contains blocks not present in local_block_ids {meta.local_block_ids}"
+                )
+
+            # Accumulate per-layer data from CPU backend
+            for i in range(num_blocks_to_load):
+                src_chunk_id = src_chunks[i]
+                cached_value = self.cpu_backend.get(src_chunk_id)
+                if cached_value:
+                    for j in range(self.num_layers):
+                        assembled_kv_on_cpu[j].append(cached_value[j])
+                else:
+                    logger.error(
+                        f"Chunk[{src_chunk_id}] not found in CPU backend for request {meta.req_id}. Inconsistent state detected."
+                    )
+                    return
+
+            manifest.append(
+                LoadReqInfo(req_id=meta.req_id,
+                            num_blocks=num_blocks_to_load,
+                            src_chunks=src_chunks,
+                            dst_blocks=dst_blocks))
+            all_dst_blocks.extend(dst_blocks)
+
+        if not manifest:
+            return
+
+        # Synchronous Batch Load
+        LOAD_KV_REQUESTS.inc(len(manifest))
+        batch_load_start_time = time.time()
+        logger.info(
+            f"TPUOffloadConnectorWorker: Starting Batched KV cache load process for {len(manifest)} requests."
+        )
+
+        if not self.no_op_load:
+            if self.use_bucketed_swap_ops:
+                raw_chunked_kv_on_tpu = self._bucketed_swap_in_fn(
+                    assembled_kv_on_cpu)
+            else:
+                raw_chunked_kv_on_tpu = self.swap_in_fn(assembled_kv_on_cpu)
+            jax.block_until_ready(raw_chunked_kv_on_tpu)
+
+            if self.use_bucketed_swap_ops:
+                self.runner.kv_caches = self._bucketed_jitted_insert_kv_cache_slices(
+                    self.runner.kv_caches,
+                    raw_chunked_kv_on_tpu,
+                    jnp.array(all_dst_blocks),
+                )
+            else:
+                self.runner.kv_caches = jitted_insert_kv_cache_slices(
+                    self.block_size,
+                    self.runner.kv_caches,
+                    raw_chunked_kv_on_tpu,
+                    jnp.array(all_dst_blocks),
+                )
+            jax.block_until_ready(self.runner.kv_caches)
+
+        load_duration = time.time() - batch_load_start_time
+        LOAD_KV_LATENCY_SECONDS.observe(load_duration)
+        LOAD_KV_SIZE_BLOCKS.inc(len(all_dst_blocks))
+
+        for info in manifest:
+            self.finished_load_reqs.add(info.req_id)
+            if info.num_blocks > 0:
+                self.offload_stats.record_load(
+                    req=info.req_id, loaded_chunk_ids=info.src_chunks)
+
+        logger.info(
+            f"Batched Load: finished {len(manifest)} requests, {len(all_dst_blocks)} blocks in {load_duration:.4f} seconds."
+        )
 
     def _gather_tpu_blocks(self, req_id: ReqId, full_block_ids: list[int],
                            full_token_ids: list[int],
@@ -2534,6 +2662,10 @@ class TPUOffloadConnectorWorker:
             )
 
         assert self.runner is not None and self.runner.kv_caches is not None
+
+        if self.batched_load:
+            self._start_batched_load_kv(metadata)
+            return
 
         # Process each request that needs its KV cache loaded
         load_times = []
