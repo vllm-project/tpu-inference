@@ -116,8 +116,8 @@ steps:
            
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests combine and report"
         depends_on: 
-          - "${TPU_VERSION:-tpu6e}test_7_1"
-          - "${TPU_VERSION:-tpu6e}test_7_2"
+          - "${TPU_VERSION:-tpu6e}_test_7_1"
+          - "${TPU_VERSION:-tpu6e}_test_7_2"
         key: ${TPU_VERSION:-tpu6e}_test_7_3
         soft_fail: true
         env:
