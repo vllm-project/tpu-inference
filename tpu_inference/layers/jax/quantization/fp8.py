@@ -81,6 +81,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             self.weight_sharding = layer.weight.sharding
             self.output_shape = (out_features, )
 
+        # Storing list of output sizes (instead of self.out_features) for compatibility.
         self.linear_config.output_sizes = [out_features]
         self.in_features = in_features
 

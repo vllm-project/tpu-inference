@@ -38,6 +38,7 @@ from vllm.model_executor.models.utils import AutoWeightsLoader
 
 from tpu_inference import envs, utils
 from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils import file_utils
 
@@ -804,8 +805,8 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
         # weights after loading all weights, we do it per-module here to
         # avoid OOM.
         if (quant_method := getattr(module, 'quant_method', None)) is not None:
-            if hasattr(quant_method, 'process_weights_after_loading'):
-                quant_method.process_weights_after_loading(module)
+            assert isinstance(quant_method, QuantizeMethodBase)
+            quant_method.process_weights_after_loading(module)
 
 
 class LoadableWithIterator:
