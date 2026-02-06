@@ -43,10 +43,7 @@ class MockModelConfig:
     def __init__(self, hf_config, dtype):
         self.hf_config = hf_config
         self.dtype = dtype
-        self.multimodal_config = MultiModalConfig(
-            image_input_type="pixel",
-            image_token_id=hf_config.image_token_id,
-            image_input_shape=None)
+        self.multimodal_config = MultiModalConfig()
         self.model = "mock_qwen2_5_vl"
         # Add other attributes if needed by the code
         self.tokenizer = "mock_tokenizer"
