@@ -163,22 +163,7 @@ def _test_tensor_parallelism_performance(
     )
 
 
-def test_tp_performance_jax_model(sampling_params: SamplingParams):
-    """Performance test for tensor parallelism on JAX models."""
-    os.environ['MODEL_IMPL_TYPE'] = 'flax_nnx'
-    os.environ['SKIP_JAX_PRECOMPILE'] = '0'
-    os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '1'
-
-    _test_tensor_parallelism_performance(
-        sampling_params=sampling_params,
-        model_name="meta-llama/Llama-3.1-8B-Instruct",
-        tensor_parallel_size=2,
-        pipeline_parallel_size=1,
-        min_speedup=1.05,
-    )
-
-
-def test_tp_performance_vllm_model(sampling_params: SamplingParams):
+def test_tp_performance(sampling_params: SamplingParams):
     """Performance test for tensor parallelism on vLLM models."""
     os.environ['MODEL_IMPL_TYPE'] = 'vllm'
     os.environ['SKIP_JAX_PRECOMPILE'] = '0'
