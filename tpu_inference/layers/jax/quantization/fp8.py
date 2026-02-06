@@ -42,40 +42,12 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
 
         kernel_shape = layer.kernel_shape
         if len(kernel_shape) > 2:
-            # HF model stores weight in 2-D shape. E.g. for "TD,DNH->TNH", weight shape in HF is (NH, D)
-            x_axis, w_axis = layer.einsum_str.split("->")[0].split(",")
-            contracting_axis = set(x_axis) & set(w_axis)
-            in_features = math.prod([
-                layer.kernel_shape[i] for i, c in enumerate(w_axis)
-                if c in contracting_axis
-            ])
-            out_features = math.prod([
-                layer.kernel_shape[i] for i, c in enumerate(w_axis)
-                if c not in contracting_axis
-            ])
-
-            # E.g. if weight shape is (NH, D), sharding is ('x', None, 'y'), we need to fuse sharding to ('x', 'y')
-            spec = layer.weight.sharding
-            if isinstance(layer.weight.sharding, jax.NamedSharding):
-                spec = layer.weight.sharding.spec
-            elif isinstance(layer.weight.sharding,
-                            jax.sharding.SingleDeviceSharding):
-                spec = ()
-            sharding = spec + (None, ) * (len(layer.kernel_shape) - len(spec))
-            in_sharding = set(
-                s for i, s in enumerate(sharding)
-                if w_axis[i] in contracting_axis and s is not None)
-            out_sharding = set(
-                s for i, s in enumerate(sharding)
-                if w_axis[i] not in contracting_axis and s is not None)
-            assert len(in_sharding) <= 1 and len(out_sharding) <= 1, \
-                f"Cannot fuse sharding {layer.weight.sharding} into 2D weight sharding for {layer.einsum_str}"
-            self.weight_sharding = (next(iter(in_sharding),
-                                         None), next(iter(out_sharding), None))
-            self.output_shape = tuple([
-                layer.kernel_shape[i] for i, c in enumerate(w_axis)
-                if c not in contracting_axis
-            ])
+            adapt_info = linear_config.get_adapt_info(
+                einsum_str=layer.einsum_str, weight=layer.weight)
+            self.weight_sharding = adapt_info.weight_sharding
+            self.output_shape = adapt_info.output_shape
+            out_features = math.prod(self.output_shape)
+            in_features = math.prod(adapt_info.in_features)
         else:
             in_features, out_features = kernel_shape
             self.weight_sharding = layer.weight.sharding
@@ -175,6 +147,8 @@ class Fp8Config(QuantizationConfig):
     ACTIVATION_SCHEMES = ["dynamic", "static"]
 
     def __init__(self, hf_quant_config: dict):
+        # Replicating upstream https://github.com/vllm-project/vllm/blob/77c09e1130661197ccac2d968a28cd4a557922d5/vllm/model_executor/layers/quantization/fp8.py#L167-L175
+
         quant_method = self.get_from_keys(hf_quant_config, ["quant_method"])
         self.is_checkpoint_fp8_serialized = "fp8" in quant_method
         activation_scheme = self.get_from_keys(hf_quant_config,
