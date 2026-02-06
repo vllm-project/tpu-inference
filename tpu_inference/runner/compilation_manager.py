@@ -155,21 +155,21 @@ class CompilationManager:
         assert num_tokens is not None
 
         dp_size = self.runner.vllm_config.sharding_config.total_dp_size
-        dp_sharding = NamedSharding(
+        dp_attn_sharding = NamedSharding(
             self.runner.mesh, PartitionSpec(
-                ShardingAxisName.MLP_DATA, )) if dp_size > 1 else None
+                ShardingAxisName.ATTN_DATA, )) if dp_size > 1 else None
 
         # Keep existing pattern for complex array operations
         seq_lens = self._create_dummy_tensor((self.runner.max_num_reqs, ),
-                                             jnp.int32, dp_sharding)
+                                             jnp.int32, dp_attn_sharding)
         query_start_loc = self._create_dummy_tensor(
-            (self.runner.max_num_reqs + dp_size, ), jnp.int32, dp_sharding)
+            (self.runner.max_num_reqs + dp_size, ), jnp.int32, dp_attn_sharding)
 
         # Keep existing pattern for specific value arrays
         request_distribution = np.array([0, 0, 0] * dp_size, dtype=np.int32)
         request_distribution = device_array(self.runner.mesh,
                                             request_distribution,
-                                            sharding=dp_sharding)
+                                            sharding=dp_attn_sharding)
 
         attention_metadata_per_layer: Dict[str, AttentionMetadata] = {}
         uniform_attention_metadata: AttentionMetadata = None
@@ -180,7 +180,7 @@ class CompilationManager:
             block_tables = block_tables.reshape(-1)
             block_tables = device_array(self.runner.mesh,
                                         block_tables,
-                                        sharding=dp_sharding)
+                                        sharding=dp_attn_sharding)
 
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
@@ -297,14 +297,22 @@ class CompilationManager:
     def _precompile_backbone_text_only(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()
         for num_tokens in self.runner.num_tokens_paddings:
-            dp_sharding = NamedSharding(
-                self.runner.mesh, PartitionSpec(ShardingAxisName.MLP_DATA, )
-            ) if self.runner.vllm_config.sharding_config.total_dp_size > 1 else None
+            dp_size=self.runner.vllm_config.sharding_config.total_dp_size
+            if dp_size > 1:
+                dp_attn_sharding = NamedSharding(
+                    self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, )
+                )
+                dp_sharding = NamedSharding(
+                    self.runner.mesh, PartitionSpec(ShardingAxisName.MLP_DATA, )
+                ) 
+            else:
+                dp_attn_sharding = None
+                dp_sharding = None
 
             input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32,
                                                   dp_sharding)
             positions = self._create_dummy_tensor((num_tokens, ), jnp.int32,
-                                                  dp_sharding)
+                                                  dp_attn_sharding)
             is_first_rank = self.runner.is_first_rank
             is_last_rank = self.runner.is_last_rank
             if is_first_rank:

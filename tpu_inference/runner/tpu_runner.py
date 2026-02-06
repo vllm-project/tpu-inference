@@ -1206,6 +1206,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         dp_size = self.dp_size
         data_parallel_attn_sharding = NamedSharding(
+            self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
+        data_parallel_sharding = NamedSharding(
             self.mesh, PartitionSpec(ShardingAxisName.MLP_DATA))
 
         (req_ids_dp, req_indices_dp, num_scheduled_tokens_per_dp_rank,
@@ -1394,10 +1396,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         logits_indices_cpu = logits_indices
         seq_lens_cpu = seq_lens
 
-        (input_ids, positions, query_start_loc, seq_lens, logits_indices,
+        (input_ids, logits_indices) = device_array(
+             self.mesh,
+             (input_ids, logits_indices),
+             sharding=data_parallel_sharding,
+         )
+
+        (positions, query_start_loc, seq_lens,
          request_distribution) = device_array(
              self.mesh,
-             (input_ids, positions, query_start_loc, seq_lens, logits_indices,
+             (positions, query_start_loc, seq_lens,
               request_distribution),
              sharding=data_parallel_attn_sharding,
          )
