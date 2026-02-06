@@ -23,14 +23,6 @@ Output:
     - Pass/fail status for each test
 """
 
-import pathlib
-# Setup path for direct script execution (not needed when running via pytest)
-import sys
-
-_PACKAGE_ROOT = pathlib.Path(__file__).parent.parent.parent / "msl-tpu-kernel"
-if str(_PACKAGE_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PACKAGE_ROOT))
-
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
