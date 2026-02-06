@@ -84,9 +84,6 @@ RUN --mount=type=cache,target=/root/.cache/pip if [ "$IS_FOR_V7X" = "true" ]; th
         pip install -r requirements_v7x.txt; \
     fi
 
-# Copy and set up entrypoint script
-# Default: Starts vLLM OpenAI-compatible API server
-# Override: Pass any command as arguments (e.g., docker run <image> /bin/bash)
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
