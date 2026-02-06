@@ -15,18 +15,21 @@
 # pipeline-name: MoE
 # pipeline-type: kernel support matrix
 steps:
-  - label: "Correctness tests for MoE"
-    key: "MoE_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Correctness tests for MoE"
+    key: "${TPU_VERSION:-tpu6e}_MoE_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
-        buildkite-agent meta-data set "MoE_CorrectnessTest" "unverified"
-  - label: "Record correctness test result for MoE"
-    key: "record_MoE_CorrectnessTest"
-    depends_on: "MoE_CorrectnessTest"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_MoE_CorrectnessTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for MoE"
+    key: "${TPU_VERSION:-tpu6e}_record_MoE_CorrectnessTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_MoE_CorrectnessTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "MoE"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "kernel support matrix"
@@ -34,21 +37,24 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh MoE_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_MoE_CorrectnessTest
 
-  - label: "Performance tests for MoE"
-    key: "MoE_PerformanceTest"
-    depends_on: "record_MoE_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Performance tests for MoE"
+    key: "${TPU_VERSION:-tpu6e}_MoE_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_MoE_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
-        buildkite-agent meta-data set "MoE_PerformanceTest" "unverified"
-  - label: "Record performance test result for MoE"
-    key: "record_MoE_PerformanceTest"
-    depends_on: "MoE_PerformanceTest"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_MoE_PerformanceTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for MoE"
+    key: "${TPU_VERSION:-tpu6e}_record_MoE_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_MoE_PerformanceTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "MoE"
       CI_STAGE: "PerformanceTest"
       CI_CATEGORY: "kernel support matrix"
@@ -56,4 +62,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh MoE_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_MoE_PerformanceTest

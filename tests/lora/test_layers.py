@@ -630,7 +630,7 @@ def _create_lora_wrapper(linear,
                          vllm_config,
                          mesh,
                          repeats=1):
-    base_linear.weight.data = linear.weight.data
+    base_linear.weight.data = linear.weight.data.clone()
     jax_config = VllmQuantLinearConfig(vllm_config, mesh, base_linear)
     linear_method = VllmUnquantizedLinearMethod(jax_config)
     base_linear.quant_method = linear_method

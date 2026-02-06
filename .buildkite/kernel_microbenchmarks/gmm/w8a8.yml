@@ -15,18 +15,21 @@
 # pipeline-name: gmm-w8a8
 # pipeline-type: kernel support matrix microbenchmarks
 steps:
-  - label: "Correctness tests for gmm-w8a8"
-    key: "gmm-w8a8_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Correctness tests for gmm-w8a8"
+    key: "${TPU_VERSION:-tpu6e}_gmm-w8a8_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
-        buildkite-agent meta-data set "gmm-w8a8_CorrectnessTest" "unverified"
-  - label: "Record correctness test result for gmm-w8a8"
-    key: "record_gmm-w8a8_CorrectnessTest"
-    depends_on: "gmm-w8a8_CorrectnessTest"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_gmm-w8a8_CorrectnessTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for gmm-w8a8"
+    key: "${TPU_VERSION:-tpu6e}_record_gmm-w8a8_CorrectnessTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_gmm-w8a8_CorrectnessTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "gmm-w8a8"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "kernel support matrix microbenchmarks"
@@ -34,21 +37,24 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh gmm-w8a8_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_gmm-w8a8_CorrectnessTest
 
-  - label: "Performance tests for gmm-w8a8"
-    key: "gmm-w8a8_PerformanceTest"
-    depends_on: "record_gmm-w8a8_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Performance tests for gmm-w8a8"
+    key: "${TPU_VERSION:-tpu6e}_gmm-w8a8_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_gmm-w8a8_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
-        buildkite-agent meta-data set "gmm-w8a8_PerformanceTest" "unverified"
-  - label: "Record performance test result for gmm-w8a8"
-    key: "record_gmm-w8a8_PerformanceTest"
-    depends_on: "gmm-w8a8_PerformanceTest"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_gmm-w8a8_PerformanceTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for gmm-w8a8"
+    key: "${TPU_VERSION:-tpu6e}_record_gmm-w8a8_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_gmm-w8a8_PerformanceTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "gmm-w8a8"
       CI_STAGE: "PerformanceTest"
       CI_CATEGORY: "kernel support matrix microbenchmarks"
@@ -56,4 +62,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh gmm-w8a8_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_gmm-w8a8_PerformanceTest
