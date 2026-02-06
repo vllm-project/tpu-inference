@@ -84,4 +84,4 @@ RUN --mount=type=cache,target=/root/.cache/pip if [ "$IS_FOR_V7X" = "true" ]; th
         pip install -r requirements_v7x.txt; \
     fi
 
-CMD ["/bin/bash"]
+CMD ["python3", "-m", "vllm.entrypoints.openai.api_server"]
