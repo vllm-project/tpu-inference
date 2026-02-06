@@ -45,7 +45,7 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_record_TP_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_8_queue}"
     env:
       IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
