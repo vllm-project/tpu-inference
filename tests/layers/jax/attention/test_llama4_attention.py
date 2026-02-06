@@ -122,7 +122,8 @@ class Llama4AttentionTest(unittest.TestCase):
                 dtype=jnp.bfloat16)
             output = llama4_attention.apply_temperature_tuning(
                 attention_metadata, input_arr_TNH)
-            self.assertEqual(output.shape, (seq_len, num_attention_heads, head_dim))
+            self.assertEqual(output.shape,
+                             (seq_len, num_attention_heads, head_dim))
 
             expected_output = jnp.ones_like(
                 input_arr_TNH) * expected_scales[:, None, None]
