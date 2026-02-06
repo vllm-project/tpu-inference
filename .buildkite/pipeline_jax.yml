@@ -98,7 +98,7 @@ steps:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
         commands:
           - |
-            .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/layers/jax --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part1.${TPU_VERSION:-tpu6e}; fi"         
+            .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/layers/vllm --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part1.${TPU_VERSION:-tpu6e}; fi"         
           - cp /mnt/disks/persist/models/.coverage.part1.${TPU_VERSION:-tpu6e} ./
              
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests part2"
@@ -111,7 +111,7 @@ steps:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
         commands:
           - |
-            .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/ --ignore=/workspace/tpu_inference/tests/layers/jax --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part2.${TPU_VERSION:-tpu6e}; fi"
+            .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/ --ignore=/workspace/tpu_inference/tests/layers/vllm --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part2.${TPU_VERSION:-tpu6e}; fi"
           - cp /mnt/disks/persist/models/.coverage.part2.${TPU_VERSION:-tpu6e} ./
            
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests combine and report"
