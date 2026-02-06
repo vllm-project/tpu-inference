@@ -37,49 +37,6 @@ class TestMoEUtils(unittest.TestCase):
     def setUp(self):
         self.key = jax.random.PRNGKey(0)
 
-    def test_select_moe_backend_defaults(self):
-        """Test default backend selection (Dense)."""
-        # Ensure all flags are False
-        with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', False), \
-             mock.patch.object(envs, 'USE_VLLM_MOE_KERNEL', False), \
-             mock.patch.object(envs, 'USE_MEGABLOCKS', False), \
-             mock.patch.object(envs, 'USE_RAGGED_DOT', False):
-
-            backend = select_moe_backend()
-            self.assertEqual(backend, MoEBackend.DENSE_MAT)
-
-    def test_select_moe_backend_priority(self):
-        """Test priority logic for backend selection."""
-        # Case 1: Fused MoE has highest priority
-        with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', True), \
-             mock.patch.object(envs, 'USE_VLLM_MOE_KERNEL', False):
-            self.assertEqual(select_moe_backend(), MoEBackend.FUSED_MOE)
-
-        # Case 2: VLLM MoE
-        with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', False), \
-             mock.patch.object(envs, 'USE_VLLM_MOE_KERNEL', True):
-            self.assertEqual(select_moe_backend(), MoEBackend.VLLM_MOE)
-
-        # Case 3: MegaBlocks
-        with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', False), \
-             mock.patch.object(envs, 'USE_VLLM_MOE_KERNEL', False), \
-             mock.patch.object(envs, 'USE_MEGABLOCKS', True):
-            self.assertEqual(select_moe_backend(), MoEBackend.MEGABLX_GMM)
-
-        # Case 4: Ragged Dot
-        with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', False), \
-             mock.patch.object(envs, 'USE_VLLM_MOE_KERNEL', False), \
-             mock.patch.object(envs, 'USE_MEGABLOCKS', False), \
-             mock.patch.object(envs, 'USE_RAGGED_DOT', True):
-            self.assertEqual(select_moe_backend(), MoEBackend.RAGGED_DOT)
-
-    def test_select_moe_backend_conflict(self):
-        """Test conflict detection."""
-        with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', True), \
-             mock.patch.object(envs, 'USE_VLLM_MOE_KERNEL', True):
-            with self.assertRaises(ValueError):
-                select_moe_backend()
-
     def test_sort_activations_fn(self):
         """Test stateless sorting of activations."""
         inputs = jnp.array([[10], [20], [30], [40]])
@@ -204,35 +161,6 @@ class TestMoEUtils(unittest.TestCase):
         # RECV_SIZE: I am Shard 0. I receive column 0: [10, 30]
         self.assertTrue(jnp.array_equal(recv_sizes, jnp.array([10, 30])))
 
-    @mock.patch('jax.lax.ragged_dot')
-    @mock.patch(
-        'tpu_inference.layers.jax.moe.utils.round_up_to_multiple_of_128_within_limit'
-    )
-    def test_gmm_fn_ragged_dot(self, mock_round, mock_ragged_dot):
-        """Test GMM function calls Ragged Dot correctly."""
-        # Setup
-        inputs = jnp.ones((128, 7168))
-        kernel = jnp.ones((1, 7168, 2048))
-        group_sizes = jnp.array([32])
-        tile_size = (128, 128, 128)
-
-        # Mock return
-        mock_ragged_dot.return_value = jnp.zeros((128, 128))
-        mock_round.side_effect = lambda x, y: x  # Identity for test
-
-        # Execute
-        out = gmm_fn(inputs,
-                     kernel,
-                     group_sizes,
-                     tile_size,
-                     moe_backend=MoEBackend.RAGGED_DOT,
-                     dtype=jnp.bfloat16,
-                     quantized_dtype=None)
-
-        # Verify call
-        mock_ragged_dot.assert_called_once()
-        self.assertEqual(out.shape, (128, 128))
-
     @mock.patch('tpu_inference.layers.jax.moe.utils.megablox_gmm')
     @mock.patch(
         'tpu_inference.layers.jax.moe.utils.round_up_to_multiple_of_128_within_limit'
@@ -280,3 +208,76 @@ class TestMoEUtils(unittest.TestCase):
                quantized_dtype=jnp.float8_e4m3fn)
 
         mock_megablox.assert_called_once()
+
+
+class TestMoESelector(unittest.TestCase):
+
+    def setUp(self):
+        self.key = jax.random.PRNGKey(0)
+
+    def test_select_moe_backend_defaults(self):
+        """Test default backend selection (GMM_TP/GMM_EP)."""
+        # Ensure all explicit backend flags are False
+        with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', False), \
+             mock.patch.object(envs, 'USE_UNFUSED_MEGABLOCKS', False):
+
+            # Case 1: No EP enabled -> Fallback to GMM_TP
+            backend_tp = select_moe_backend(use_ep=False)
+            self.assertEqual(backend_tp, MoEBackend.GMM_TP)
+
+            # Case 2: EP enabled -> Fallback to GMM_EP
+            backend_ep = select_moe_backend(use_ep=True)
+            self.assertEqual(backend_ep, MoEBackend.GMM_EP)
+
+    def test_select_moe_backend_priority(self):
+        """Test priority logic for backend selection."""
+
+        # Case 1: Fused MoE (Highest priority when USE_MOE_EP_KERNEL=True AND use_ep=True)
+        with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', True), \
+             mock.patch.object(envs, 'USE_UNFUSED_MEGABLOCKS', False):
+            self.assertEqual(select_moe_backend(use_ep=True),
+                             MoEBackend.FUSED_MOE)
+
+        # Case 1.5: Fused MoE Flag is True, but use_ep is False.
+        # Should fall through to defaults (GMM_TP) because Fused kernel requires EP.
+        with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', True), \
+             mock.patch.object(envs, 'USE_UNFUSED_MEGABLOCKS', False):
+            self.assertEqual(select_moe_backend(use_ep=False),
+                             MoEBackend.GMM_TP)
+
+        # Case 2: MegaBlocks (Next priority)
+        with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', False), \
+             mock.patch.object(envs, 'USE_UNFUSED_MEGABLOCKS', True):
+            self.assertEqual(select_moe_backend(use_ep=True),
+                             MoEBackend.MEGABLX_GMM)
+            self.assertEqual(select_moe_backend(use_ep=False),
+                             MoEBackend.MEGABLX_GMM)
+        # Case 2: Dense (Next priority)
+        with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', False), \
+             mock.patch.object(envs, 'USE_DENSE_MOE', True):
+            self.assertEqual(select_moe_backend(use_ep=True),
+                             MoEBackend.GMM_EP)
+            self.assertEqual(select_moe_backend(use_ep=False),
+                             MoEBackend.DENSE_MAT)
+
+        # Default: GMM_TP
+        with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', False), \
+             mock.patch.object(envs, 'USE_DENSE_MOE', False):
+            self.assertEqual(select_moe_backend(use_ep=True),
+                             MoEBackend.GMM_EP)
+            self.assertEqual(select_moe_backend(use_ep=False),
+                             MoEBackend.GMM_TP)
+
+    def test_select_moe_backend_precedence_conflict(self):
+        """Test precedence when multiple flags are enabled."""
+        # EP Kernel + MegaBlocks: EP Kernel takes precedence if use_ep=True
+        with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', True), \
+             mock.patch.object(envs, 'USE_UNFUSED_MEGABLOCKS', True):
+            self.assertEqual(select_moe_backend(use_ep=True),
+                             MoEBackend.FUSED_MOE)
+
+        # MegaBlocks + Ragged Dot: MegaBlocks takes precedence
+        with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', False), \
+             mock.patch.object(envs, 'USE_UNFUSED_MEGABLOCKS', True):
+            self.assertEqual(select_moe_backend(use_ep=True),
+                             MoEBackend.MEGABLX_GMM)

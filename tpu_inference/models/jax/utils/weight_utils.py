@@ -723,7 +723,7 @@ def load_nnx_param_from_reshaped_torch(
         permute_dims: Optional[tuple[int, ...]] = None,
         param_name: str = "Unknown"):
     """Load a nnx.Param from a torch.Tensor with reshaping and transposing.
-    
+
     HuggingFace model almost always store linear layer weights with contracting dimension
     last, and only support 1D/2D weight tensors. This function reshapes then transposes
     the torch weight to match the jax_param shape before loading.
@@ -776,6 +776,8 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                     permute_dims = (2, 0, 1)
                 elif any(substr in name for substr in
                          ["q_proj.bias", "k_proj.bias", "v_proj.bias"]):
+                    N, H = param.value.shape
+                    reshape_dims = (N, H)
                     permute_dims = (0, 1)
                 elif "o_proj.weight" in name:
                     N, H, D = param.value.shape
@@ -795,10 +797,20 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
 
         super().__init__(model, **kwargs)
 
+    def _load_module(self, base_prefix: str, module: JaxModule,
+                     weights: Iterable) -> Iterable:
+        yield from super()._load_module(base_prefix, module, weights)
+        # Post-process module after loading weights. Unlike vLLM post-process
+        # weights after loading all weights, we do it per-module here to
+        # avoid OOM.
+        if (quant_method := getattr(module, 'quant_method', None)) is not None:
+            if hasattr(quant_method, 'process_weights_after_loading'):
+                quant_method.process_weights_after_loading(module)
+
 
 class LoadableWithIterator:
     """Mixin for models that support loading weights with an iterator.
-    
+
     This is replicating what vLLM does for most models, e.g. https://github.com/vllm-project/vllm/blob/8e2a469b3b2f67bc900ed72724fe3f05e3564994/vllm/model_executor/models/gemma3_mm.py#L644-L646
     """
 
@@ -808,5 +820,8 @@ class LoadableWithIterator:
             # Use next parent class in MRO.
             return super().load_weights(weights)
 
-        loader = JaxAutoWeightsLoader(self)
+        loader = JaxAutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head"]
+                           if not hasattr(self, 'lm_head') else None))
         return loader.load_weights(weights)

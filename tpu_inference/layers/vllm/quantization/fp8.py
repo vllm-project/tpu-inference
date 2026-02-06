@@ -32,20 +32,18 @@ from vllm.model_executor.layers.quantization.base_config import \
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
+from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.linear_weights import (
-    LinearWeights, process_linear_weights, shard_linear_weights,
-    to_parameter_list)
+    shard_linear_weights, to_parameter_list)
+from tpu_inference.layers.common.process_weights.moe_weights import (
+    FusedMoEWeights, process_moe_weights, quantize_moe_weights,
+    shard_moe_weights)
 from tpu_inference.layers.common.quant_methods import FP8, get_tpu_quant_method
 from tpu_inference.layers.common.quantization import dequantize_tensor
 from tpu_inference.layers.common.quantization import fp8 as common_fp8
-from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.vllm.fused_moe import (FusedMoEBackend,
-                                                 fused_moe_apply,
-                                                 select_moe_backend)
-from tpu_inference.layers.vllm.process_weights.fused_moe_weights import (
-    FusedMoEWeights, process_moe_weights, quantize_moe_weights,
-    shard_moe_weights)
+from tpu_inference.layers.vllm.moe import (
+    select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.quantization.configs import (
     VllmQuantConfig, VllmQuantLinearConfig)
 from tpu_inference.layers.vllm.quantization.unquantized import (
@@ -133,55 +131,12 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
         else:
             bias = None
 
-        @jax.jit
-        def process_fp8_linear_weights(
-            weight: jax.Array,
-            weight_scale: jax.Array,
-            bias: jax.Array | None,
-        ) -> LinearWeights:
-            weights = []
-            weight_scales = []
-            original_block_size = self.weight_block_size[0]
-            requant_block_size = self.linear_config.requant_block_size
-            start = 0
-            for output_size in self.linear_config.output_sizes:
-                end = start + output_size
-
-                weight_slice = weight[start:end]
-                weight_scale_slice = weight_scale[start //
-                                                  original_block_size:end //
-                                                  original_block_size]
-                dequantized_weight = dequantize_tensor(
-                    weight_slice,
-                    weight_scale_slice,
-                    (0, 1),
-                )
-                weight_slice, weight_scale_slice = quantize_tensor(
-                    self.linear_config.requant_weight_dtype,
-                    dequantized_weight,
-                    block_size=requant_block_size)
-
-                weights.append(weight_slice)
-                weight_scales.append(weight_scale_slice)
-
-                start = end
-
-            weight = jnp.concat(weights, axis=0)
-            weight_scale = jnp.concat(weight_scales, axis=0)
-
-            return process_linear_weights(
-                LinearWeights(
-                    weight=weight,
-                    weight_scale=weight_scale,
-                    zero_point=None,
-                    bias=bias,
-                ),
-                fused=self.linear_config.fuse_matmuls,
-                output_sizes=self.linear_config.output_sizes,
-                reorder_size=self.linear_config.n_shards,
-            )
-
-        weights = process_fp8_linear_weights(weight, weight_scale, bias)
+        weights = common_fp8.process_blockwise_fp8_linear_weights(
+            weight,
+            weight_scale,
+            bias=bias,
+            weight_block_size=tuple(self.weight_block_size),
+            linear_config=self.linear_config)
         if self.linear_config.enable_quantized_matmul_kernel:
             # The quantized_matmul_kernel expects weight scales shaped (n_out_features, 1, n_blocks) for blockwisze quantization.
             weights.weight_scale = jnp.expand_dims(
@@ -256,10 +211,10 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
         self.fp8_backend = None
 
         self.mesh = mesh
-        self.moe_backend = select_moe_backend(self.moe)
+        self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
 
         self.extra_backend_kwargs = {}
-        if self.moe_backend == FusedMoEBackend.FUSED_MOE:
+        if self.moe_backend == MoEBackend.FUSED_MOE:
             self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name, )
 
     @property
@@ -286,9 +241,12 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
             w2_weight_scale: jax.Array,
         ) -> FusedMoEWeights:
             # Dequantize fp8 2d block quantized weights into fp32.
-            w13_weight = dequantize_tensor(w13_weight, w13_weight_scale,
-                                           (1, 2))
-            w2_weight = dequantize_tensor(w2_weight, w2_weight_scale, (1, 2))
+            w13_weight = dequantize_tensor(w13_weight,
+                                           w13_weight_scale, (1, 2),
+                                           block_size=self.weight_block_size)
+            w2_weight = dequantize_tensor(w2_weight,
+                                          w2_weight_scale, (1, 2),
+                                          block_size=self.weight_block_size)
 
             w13_interleave = layer.activation == "swigluoai"
             w13_reorder_size = get_mesh_shape_product(
@@ -346,14 +304,8 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
             w2_weight_scale=jax_view(layer.w2_weight_scale_inv),
             w2_bias=jax_view(layer.w2_bias) if self.moe.has_bias else None,
         )
-
-        return torch_view(
-            fused_moe_apply(
-                layer,
-                jax_view(x),
-                jax_view(router_logits),
-                weights,
-                self.moe_backend,
-                self.mesh,
-                self.extra_backend_kwargs,
-            ))
+        return vllm_moe_apply(layer=layer,
+                              weights=weights,
+                              quant_method_instance=self,
+                              x=x,
+                              router_logits=router_logits)

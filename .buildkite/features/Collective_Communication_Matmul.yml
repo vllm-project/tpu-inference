@@ -15,17 +15,20 @@
 # pipeline-name: Collective Communication Matmul
 # pipeline-type: kernel support matrix
 steps:
-  - label: "Correctness tests for Collective Communication Matmul"
-    key: "Collective_Communication_Matmul_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Correctness tests for Collective Communication Matmul"
+    key: "${TPU_VERSION:-tpu6e}_Collective_Communication_Matmul_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/kernels/collectives/all_gather_matmul_kernel_test.py
-  - label: "Record correctness test result for Collective Communication Matmul"
-    key: "record_Collective_Communication_Matmul_CorrectnessTest"
-    depends_on: "Collective_Communication_Matmul_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for Collective Communication Matmul"
+    key: "${TPU_VERSION:-tpu6e}_record_Collective_Communication_Matmul_CorrectnessTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_Collective_Communication_Matmul_CorrectnessTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "Collective Communication Matmul"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "kernel support matrix"
@@ -33,21 +36,24 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh Collective_Communication_Matmul_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Collective_Communication_Matmul_CorrectnessTest
 
-  - label: "Performance tests for Collective Communication Matmul"
-    key: "Collective_Communication_Matmul_PerformanceTest"
-    depends_on: "record_Collective_Communication_Matmul_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Performance tests for Collective Communication Matmul"
+    key: "${TPU_VERSION:-tpu6e}_Collective_Communication_Matmul_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_Collective_Communication_Matmul_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
-        buildkite-agent meta-data set "Collective_Communication_Matmul_PerformanceTest" "unverified"
-  - label: "Record performance test result for Collective Communication Matmul"
-    key: "record_Collective_Communication_Matmul_PerformanceTest"
-    depends_on: "Collective_Communication_Matmul_PerformanceTest"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_Collective_Communication_Matmul_PerformanceTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for Collective Communication Matmul"
+    key: "${TPU_VERSION:-tpu6e}_record_Collective_Communication_Matmul_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_Collective_Communication_Matmul_PerformanceTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "Collective Communication Matmul"
       CI_STAGE: "PerformanceTest"
       CI_CATEGORY: "kernel support matrix"
@@ -55,4 +61,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh Collective_Communication_Matmul_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Collective_Communication_Matmul_PerformanceTest
