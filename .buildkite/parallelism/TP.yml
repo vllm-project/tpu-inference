@@ -15,19 +15,22 @@
 # pipeline-name: TP
 # pipeline-type: parallelism support matrix
 steps:
-  - label: "Correctness tests for TP"
-    key: "TP_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Correctness tests for TP"
+    key: "${TPU_VERSION:-tpu6e}_TP_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_8_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_8_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
-          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_tensor_parallel.py'
-  - label: "Record correctness test result for TP"
-    key: "record_TP_CorrectnessTest"
-    depends_on: "TP_CorrectnessTest"
+          bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh --model_name "meta-llama/Llama-3.1-8B-Instruct" --use_moe_ep_kernel 0 --tensor_parallel_size 4 --max_model_len 1024 --max_num_batched_tokens 128 --max_gen_toks 128 --enable_expert_parallel 0 --flex_threshold 0.58 --strict_threshold 0.52
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for TP"
+    key: "${TPU_VERSION:-tpu6e}_record_TP_CorrectnessTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_TP_CorrectnessTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "TP"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "parallelism support matrix"
@@ -35,21 +38,24 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh TP_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_TP_CorrectnessTest
 
-  - label: "Performance tests for TP"
-    key: "TP_PerformanceTest"
-    depends_on: "record_TP_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Performance tests for TP"
+    key: "${TPU_VERSION:-tpu6e}_TP_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_TP_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
-        buildkite-agent meta-data set "TP_PerformanceTest" "unverified"
-  - label: "Record performance test result for TP"
-    key: "record_TP_PerformanceTest"
-    depends_on: "TP_PerformanceTest"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_TP_PerformanceTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for TP"
+    key: "${TPU_VERSION:-tpu6e}_record_TP_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_TP_PerformanceTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "TP"
       CI_STAGE: "PerformanceTest"
       CI_CATEGORY: "parallelism support matrix"
@@ -57,4 +63,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh TP_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_TP_PerformanceTest

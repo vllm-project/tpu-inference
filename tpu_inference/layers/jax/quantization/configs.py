@@ -156,6 +156,9 @@ class JaxQuantLinearConfig(QuantLinearConfig):
 
 class QuantizationConfig(ABC):
 
+    def __init__(self, hf_quant_config: dict):
+        self.hf_quant_config = hf_quant_config
+
     @abstractmethod
     def get_quant_method(self, layer: JaxModule,
                          prefix: str) -> Optional[QuantizeMethodBase]:

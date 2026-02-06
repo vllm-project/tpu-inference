@@ -965,7 +965,6 @@ class TestFp8FusedMoE:
 
         mesh = test_utils.get_spmd_mesh(num_devices, enable_attn_dp)
 
-        # TODO: do we need this full model?
         vllm_config = VllmConfig(model_config=ModelConfig(
             model="Qwen/Qwen3-0.6B-FP8", quantization="fp8"))
 
@@ -977,8 +976,6 @@ class TestFp8FusedMoE:
         expert_axis_name = edf_sharding[0]
         moe_backend = MoEBackend.GMM_EP if use_ep else MoEBackend.GMM_TP
 
-        n_group = 8
-        routed_scaling_factor = 2.5
         dtype = jnp.bfloat16
 
         # This won't be used in reality since we are patching
@@ -987,11 +984,11 @@ class TestFp8FusedMoE:
             hidden_size=hidden_size,
             num_experts=num_experts,
             num_experts_per_tok=topk,
-            n_groups=n_group,
+            n_groups=8,
             topk_groups=4,
             norm_topk_prob=True,
             rngs=nnx.Rngs(0),
-            routed_scaling_factor=routed_scaling_factor,
+            routed_scaling_factor=2.5,
             dtype=dtype,
             moe_backend=moe_backend,
             activation_ffw_td=(ShardingAxisNameBase.MLP_DATA, None),
@@ -1043,8 +1040,7 @@ class TestFp8FusedMoE:
         else:
             assert layer.moe_backend == MoEBackend.GMM_TP
 
-        # TODO
-        block_m, block_n = 128, 128
+        block_m, block_n = quant_config.hf_quant_config.weight_block_size
         w1_weight, w1_weight_scale = quantize_to_fp8_block_3d(
             w13, block_m, block_n, jnp.float8_e4m3fn)
         w2_weight, w2_weight_scale = quantize_to_fp8_block_3d(

@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import math
 from typing import Optional, Union
 
 import jax
@@ -35,14 +34,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import \
 
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.linear_weights import (
-    LinearWeights, process_linear_weights, shard_linear_weights,
-    to_parameter_list)
+    shard_linear_weights, to_parameter_list)
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_fp8_moe_weights, shard_moe_weights)
 from tpu_inference.layers.common.quant_methods import FP8, get_tpu_quant_method
-from tpu_inference.layers.common.quantization import dequantize_tensor
 from tpu_inference.layers.common.quantization import fp8 as common_fp8
-from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.vllm.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.quantization.configs import (
@@ -131,57 +127,12 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
         else:
             bias = None
 
-        @jax.jit
-        def process_fp8_linear_weights(
-            weight: jax.Array,
-            weight_scale: jax.Array,
-            bias: jax.Array | None,
-        ) -> LinearWeights:
-            weights = []
-            weight_scales = []
-            original_block_size = self.weight_block_size[0]
-            requant_block_size = self.linear_config.requant_block_size
-            start = 0
-            for output_size in self.linear_config.output_sizes:
-                end = start + output_size
-
-                weight_slice = weight[start:end]
-                weight_scale_slice = weight_scale[start //
-                                                  original_block_size:math.
-                                                  ceil(end /
-                                                       original_block_size)]
-                dequantized_weight = dequantize_tensor(
-                    weight_slice,
-                    weight_scale_slice,
-                    (0, 1),
-                    block_size=self.weight_block_size,
-                )
-                weight_slice, weight_scale_slice = quantize_tensor(
-                    self.linear_config.requant_weight_dtype,
-                    dequantized_weight,
-                    block_size=requant_block_size)
-
-                weights.append(weight_slice)
-                weight_scales.append(weight_scale_slice)
-
-                start = end
-
-            weight = jnp.concat(weights, axis=0)
-            weight_scale = jnp.concat(weight_scales, axis=0)
-
-            return process_linear_weights(
-                LinearWeights(
-                    weight=weight,
-                    weight_scale=weight_scale,
-                    zero_point=None,
-                    bias=bias,
-                ),
-                fused=self.linear_config.fuse_matmuls,
-                output_sizes=self.linear_config.output_sizes,
-                reorder_size=self.linear_config.n_shards,
-            )
-
-        weights = process_fp8_linear_weights(weight, weight_scale, bias)
+        weights = common_fp8.process_blockwise_fp8_linear_weights(
+            weight,
+            weight_scale,
+            bias=bias,
+            weight_block_size=tuple(self.weight_block_size),
+            linear_config=self.linear_config)
         if self.linear_config.enable_quantized_matmul_kernel:
             # The quantized_matmul_kernel expects weight scales shaped (n_out_features, 1, n_blocks) for blockwisze quantization.
             weights.weight_scale = jnp.expand_dims(

@@ -62,7 +62,6 @@ class TestMultiModalManager:
             parallel_config = ParallelConfig(
                 pipeline_parallel_size=1,
                 tensor_parallel_size=1,
-                worker_use_ray=False,
             )
             speculative_config = SpeculativeConfig(
                 model='ngram',

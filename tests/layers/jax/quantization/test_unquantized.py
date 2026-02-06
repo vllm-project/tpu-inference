@@ -43,7 +43,7 @@ class TestUnquantizedJaxLinear:
                                use_bias=use_bias)
         y_from_layer = jax_linear(x)
 
-        method = UnquantizedConfig().get_quant_method(jax_linear, prefix='')
+        method = UnquantizedConfig({}).get_quant_method(jax_linear, prefix='')
         assert isinstance(method, QuantizeMethodBase)
         y_from_method = method.apply_jax(jax_linear, x)
 
@@ -68,7 +68,7 @@ class TestUnquantizedJaxLinear:
             bias_shape=kernel_shape[1:] if use_bias else None)
         y_from_layer = jax_einsum(x)
 
-        method = UnquantizedConfig().get_quant_method(jax_einsum, prefix='')
+        method = UnquantizedConfig({}).get_quant_method(jax_einsum, prefix='')
         assert isinstance(method, QuantizeMethodBase)
         y_from_method = method.apply_jax(jax_einsum, x)
 

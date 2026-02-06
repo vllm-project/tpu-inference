@@ -262,11 +262,10 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
     TODO (jacobplatin): support weight loading -- currently, model-dependent.
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, hf_quant_config: dict, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.extra_backend_kwargs = {}
-        # TODO (jacobplatin): implement
-        self.weight_block_size = [128, 128]
+        self.weight_block_size = hf_quant_config["weight_block_size"]
         self.block_quant: bool = self.weight_block_size is not None
         self.weight_scale_name = ("weight_scale_inv"
                                   if self.block_quant else "weight_scale")
@@ -411,7 +410,9 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
         elif layer.moe_backend in [
                 MoEBackend.DENSE_MAT, MoEBackend.MEGABLX_GMM
         ]:
-            raise NotImplementedError("TODO (jacobplatin)")
+            raise NotImplementedError(
+                "Fp8FusedMoEMethod not implemented for DENSE_MAT and MEGABLX_GMM (unfused weight) backends yet."
+            )
         else:
             raise ValueError(f"Unsupported moe backend {layer.moe_backend}")
 
@@ -433,5 +434,5 @@ class Fp8Config(QuantizationConfig):
             linear_config = JaxQuantLinearConfig(layer)
             return Fp8LinearMethod(linear_config)
         elif isinstance(layer, JaxMoE):
-            return Fp8FusedMoEMethod()
+            return Fp8FusedMoEMethod(self.hf_quant_config)
         return None

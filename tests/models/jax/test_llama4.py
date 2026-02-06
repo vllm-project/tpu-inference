@@ -92,7 +92,7 @@ class MockVllmConfig:
         self.model_config.hf_config = hf_config_mock
 
         # TODO (jacobplatin): we shouldn't hardcode the quant config
-        self.quant_config = UnquantizedConfig()
+        self.quant_config = UnquantizedConfig({})
 
 
 @pytest.fixture(scope="module")

@@ -39,7 +39,12 @@ def get_tpu_quantization_config(vllm_config: VllmConfig):
             f"{model_config.quantization} quantization method not supported."
             f" Supported methods are {method_to_config.keys()}")
     quant_config = method_to_config[model_config.quantization]
-    return quant_config()
+    hg_quant_config = getattr(model_config.hf_config, "quantization_config",
+                              {})
+    # There are some cases to be supported in the future:
+    # 1) Some vision model keep quantization config under text_config
+    # 2) overriding through `--hf_overrides`
+    return quant_config(hg_quant_config)
 
 
 class QuantizeMethodBase(ABC):

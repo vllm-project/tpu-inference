@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     PHASED_PROFILING_DIR: str = ""
     PYTHON_TRACER_LEVEL: int = 1
     USE_MOE_EP_KERNEL: bool = False
-    USE_MEGABLOCKS: bool = False
+    USE_UNFUSED_MEGABLOCKS: bool = False
     USE_DENSE_MOE: bool = False
     NUM_SLICES: int = 1
     RAY_USAGE_STATS_ENABLED: str = "0"
@@ -150,11 +150,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "USE_MOE_EP_KERNEL":
     env_bool("USE_MOE_EP_KERNEL", default=False),
     # Enable megablocks for JAX sparse matmul for MoE (Mixture of Experts)
-    "USE_MEGABLOCKS":
-    env_bool("USE_MEGABLOCKS", default=False),
-    # Number of TPU slices for multi-slice mesh
+    # using Unfused weights
+    "USE_UNFUSED_MEGABLOCKS":
+    env_bool("USE_UNFUSED_MEGABLOCKS", default=False),
+    # Enable the dense backend for Jax MoE (Mixture of Experts)
+    # NOTE: this is a naive implementation and should not be used in production
     "USE_DENSE_MOE":
     env_bool("USE_DENSE_MOE", default=False),
+    # Number of TPU slices for multi-slice mesh
     "NUM_SLICES":
     lambda: int(os.getenv("NUM_SLICES") or "1"),
     # Enable/disable Ray usage statistics collection

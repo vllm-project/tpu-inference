@@ -219,7 +219,7 @@ class TestMoESelector(unittest.TestCase):
         """Test default backend selection (GMM_TP/GMM_EP)."""
         # Ensure all explicit backend flags are False
         with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', False), \
-             mock.patch.object(envs, 'USE_MEGABLOCKS', False):
+             mock.patch.object(envs, 'USE_UNFUSED_MEGABLOCKS', False):
 
             # Case 1: No EP enabled -> Fallback to GMM_TP
             backend_tp = select_moe_backend(use_ep=False)
@@ -234,20 +234,20 @@ class TestMoESelector(unittest.TestCase):
 
         # Case 1: Fused MoE (Highest priority when USE_MOE_EP_KERNEL=True AND use_ep=True)
         with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', True), \
-             mock.patch.object(envs, 'USE_MEGABLOCKS', False):
+             mock.patch.object(envs, 'USE_UNFUSED_MEGABLOCKS', False):
             self.assertEqual(select_moe_backend(use_ep=True),
                              MoEBackend.FUSED_MOE)
 
         # Case 1.5: Fused MoE Flag is True, but use_ep is False.
         # Should fall through to defaults (GMM_TP) because Fused kernel requires EP.
         with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', True), \
-             mock.patch.object(envs, 'USE_MEGABLOCKS', False):
+             mock.patch.object(envs, 'USE_UNFUSED_MEGABLOCKS', False):
             self.assertEqual(select_moe_backend(use_ep=False),
                              MoEBackend.GMM_TP)
 
         # Case 2: MegaBlocks (Next priority)
         with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', False), \
-             mock.patch.object(envs, 'USE_MEGABLOCKS', True):
+             mock.patch.object(envs, 'USE_UNFUSED_MEGABLOCKS', True):
             self.assertEqual(select_moe_backend(use_ep=True),
                              MoEBackend.MEGABLX_GMM)
             self.assertEqual(select_moe_backend(use_ep=False),
@@ -272,12 +272,12 @@ class TestMoESelector(unittest.TestCase):
         """Test precedence when multiple flags are enabled."""
         # EP Kernel + MegaBlocks: EP Kernel takes precedence if use_ep=True
         with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', True), \
-             mock.patch.object(envs, 'USE_MEGABLOCKS', True):
+             mock.patch.object(envs, 'USE_UNFUSED_MEGABLOCKS', True):
             self.assertEqual(select_moe_backend(use_ep=True),
                              MoEBackend.FUSED_MOE)
 
         # MegaBlocks + Ragged Dot: MegaBlocks takes precedence
         with mock.patch.object(envs, 'USE_MOE_EP_KERNEL', False), \
-             mock.patch.object(envs, 'USE_MEGABLOCKS', True):
+             mock.patch.object(envs, 'USE_UNFUSED_MEGABLOCKS', True):
             self.assertEqual(select_moe_backend(use_ep=True),
                              MoEBackend.MEGABLX_GMM)

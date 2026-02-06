@@ -47,6 +47,7 @@ from tpu_inference.layers.jax.layers import (Embedder, FlaxUtils, LMhead,
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.moe.utils import (get_expert_parallelism,
                                                 select_moe_backend)
+from tpu_inference.layers.jax.quantization.unquantized import UnquantizedConfig
 from tpu_inference.layers.jax.rope import DeepseekScalingRotaryEmbedding
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (BaseWeightLoader,
@@ -1533,6 +1534,17 @@ class DeepSeekV3(nnx.Module):
         self.use_ep = self.num_expert_parallelism > 1
         self.moe_backend = select_moe_backend(self.use_ep)
 
+        # TODO (jacobplatin): temporary workaround for now before FP8 is fully ready for DeepSeek
+        vllm_config.quant_config = UnquantizedConfig(
+            vllm_config.model_config.hf_config.quantization_config)
+
+        # TODO (jacobplatin): we will resolve this issue in a forthcoming PR that will refactor weight loading
+        if vllm_config.load_config.load_format == "dummy" and self.moe_backend in MoEBackend.fused_moe_backends(
+        ):
+            raise ValueError(
+                f"Random / dummy weights are not supported for {MoEBackend.fused_moe_backends()} backends right now."
+            )
+
         self.weight_loader = self.WeightLoader(
             vllm_config=vllm_config,
             num_layers=num_layers,
@@ -1669,7 +1681,7 @@ class DeepSeekV3(nnx.Module):
 
                 # routed experts
                 custom_module = JaxMoE(
-                    dtype=jnp.float8_e4m3fn,
+                    dtype=dtype,
                     num_local_experts=num_local_experts,
                     apply_expert_weight_before_computation=False,
                     expert_axis_name=self.expert_axis_name,
@@ -1680,7 +1692,7 @@ class DeepSeekV3(nnx.Module):
                     mesh=self.mesh,
                     hidden_act=hidden_act,
                     rngs=self.rng,
-                    quant_config=vllm_config.quant_config,
+                    quant_config=self.vllm_config.quant_config,
                     activation_ffw_td=(ShardingAxisName.MLP_DATA,
                                        ShardingAxisName.MODEL_1),
                     activation_ffw_ted=(ShardingAxisName.MLP_DATA, None,
@@ -1764,6 +1776,8 @@ class DeepSeekV3(nnx.Module):
         self.rng = nnx.Rngs(rng)
         self.weight_loader.load_weights(self)
         self.initialize_cache()
+        # TODO (jacobplatin): remove this once we switch to using JaxAutoWeightsLoader
+        process_modules_after_loading(self, self.mesh)
 
     def initialize_cache(self):
         # Initialize RoPE caches after weights are loaded and before JIT compilation.
@@ -1794,6 +1808,25 @@ class DeepSeekV3(nnx.Module):
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         return self.lm_head.decode(hidden_states)
+
+
+def process_modules_after_loading(module, mesh):
+    """Recursively call process_weights_after_loading on modules with quant_method.
+
+    TODO (jacobplatin): remove this once we switch to using JaxAutoWeightsLoader
+    """
+    # Process this module if it has a quant_method
+    if hasattr(module, 'quant_method') and module.quant_method is not None:
+        if hasattr(module.quant_method, 'process_weights_after_loading'):
+            module.quant_method.process_weights_after_loading(module, mesh)
+
+    for name, value in vars(module).items():
+        if isinstance(value, nnx.Module):
+            process_modules_after_loading(value, mesh)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                if isinstance(item, nnx.Module):
+                    process_modules_after_loading(item, mesh)
 
 
 def weights_dequant_cpu(x: torch.Tensor,
