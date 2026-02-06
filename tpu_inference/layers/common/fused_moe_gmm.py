@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import functools
+from typing import Literal
 
 import jax
 from jax import numpy as jnp
@@ -158,20 +159,28 @@ def moe_gmm_local(
     *,
     activation: str,
     topk: int,
-    reduction_axis: str,
+    parallelism: Literal["tp", "ep"],
 ) -> jax.Array:
     """ Main MoE logic on a local shard can run in TP or EP mode.
     
-    For TP, set reduction_axis=tensor and for EP set reduction_axis=expert.
-    Local reduciton will be performed on experts first locally and then globally 
-    on the reduction_axis
+    Set parallelism for "tp" or "ep"
     """
+
+    assert parallelism in ["tp", "ep"]
+
     # GMM1 computes x @ (W_up | W_gate) tegether and then split out to apply activation
     # to the gate result
     gmm1_res_gate_up = gmm_wrapper(x, w1, w1_scale, w1_bias, group_sizes,
                                    group_offset)
     gmm1_res_gate, gmm1_res_up = jnp.split(gmm1_res_gate_up, 2, -1)
     gmm1_res = apply_act_fn(activation, gmm1_res_gate, gmm1_res_up)
+
+    # When the parallelism is TP since w2_bias is not sharded, we should only apply bias
+    # once, not applying to every shard. So we set w2_bias to 0 to all shards other than
+    # shard 0. For EP, it is not needed since bias is sharded on leading expert axis.
+    if parallelism == "tp" and w2_bias is not None:
+        shard_id = jax.lax.axis_index(ShardingAxisName.MLP_TENSOR).sum()
+        w2_bias = jnp.where(shard_id == 0, w2_bias, 0)
 
     gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
                            group_offset)
@@ -183,6 +192,7 @@ def moe_gmm_local(
                                                             axis=-1)
     token_hidden = token_topk_hidden.sum(axis=-2)
 
+    reduction_axis = ShardingAxisName.MLP_TENSOR if parallelism == "tp" else ShardingAxisName.EXPERT
     # Then global reduction on all ranks for all tokens and all experts
     return jax.lax.psum(token_hidden, axis_name=reduction_axis)
 
@@ -223,7 +233,7 @@ def tensor_parallel_gmm(
         functools.partial(moe_gmm_local,
                           activation=activation,
                           topk=topk,
-                          reduction_axis=ShardingAxisName.MLP_TENSOR),
+                          parallelism="tp"),
         mesh=mesh,
         in_specs=(data_p_spec, w1_spec, w1_scale_spec, w1_bias_spec, w2_spec,
                   w2_scale_spec, w2_bias_spec, data_p_spec, data_p_spec,
@@ -266,7 +276,7 @@ def expert_parallel_gmm(
         functools.partial(moe_gmm_local,
                           activation=activation,
                           topk=topk,
-                          reduction_axis=ShardingAxisName.MLP_TENSOR),
+                          parallelism="ep"),
         mesh=mesh,
         in_specs=(data_p_spec, ep_p_spec, w1_scale_spec, w1_bias_spec,
                   ep_p_spec, w2_scale_spec, w2_bias_spec, data_p_spec,
