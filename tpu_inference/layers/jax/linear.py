@@ -58,7 +58,7 @@ class JaxEinsum(nnx.Einsum, JaxModule):
                                                             prefix=prefix)):
             assert isinstance(quant_method, QuantizeMethodBase)
             self.quant_method = quant_method
-            self.quant_method.create_weights_jax(self)
+            self.quant_method.create_weights_jax(self, rngs=rngs)
         else:
             self.quant_method = None
 
