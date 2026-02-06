@@ -89,7 +89,7 @@ steps:
                 bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py'
                 
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests part1"
-        key: ${TPU_VERSION:-tpu6e}test_7_1
+        key: ${TPU_VERSION:-tpu6e}_test_7_1
         soft_fail: true
         env:
           IS_FOR_V7X: "${IS_FOR_V7X}"
@@ -98,11 +98,11 @@ steps:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
         commands:
           - |
-            .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/layers/vllm --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part1.${TPU_VERSION:-tpu6e}; fi"         
+            .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/layers/vllm/test_attention.py /workspace/tpu_inference/tests/layers/vllm/test_awq.py /workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_fp8.py /workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_int8.py --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part1.${TPU_VERSION:-tpu6e}; fi"         
           - cp /mnt/disks/persist/models/.coverage.part1.${TPU_VERSION:-tpu6e} ./
              
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests part2"
-        key: ${TPU_VERSION:-tpu6e}test_7_2
+        key: ${TPU_VERSION:-tpu6e}_test_7_2
         soft_fail: true
         env:
           IS_FOR_V7X: "${IS_FOR_V7X}"
@@ -111,14 +111,14 @@ steps:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
         commands:
           - |
-            .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/ --ignore=/workspace/tpu_inference/tests/layers/vllm --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part2.${TPU_VERSION:-tpu6e}; fi"
+            .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/ --ignore=/workspace/tpu_inference/tests/layers/vllm/test_attention.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_awq.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_fp8.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_int8.py --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part2.${TPU_VERSION:-tpu6e}; fi"
           - cp /mnt/disks/persist/models/.coverage.part2.${TPU_VERSION:-tpu6e} ./
            
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests combine and report"
         depends_on: 
           - "${TPU_VERSION:-tpu6e}test_7_1"
           - "${TPU_VERSION:-tpu6e}test_7_2"
-        key: "${TPU_VERSION:-tpu6e}test_7_3"
+        key: ${TPU_VERSION:-tpu6e}_test_7_3
         soft_fail: true
         env:
           IS_FOR_V7X: "${IS_FOR_V7X}"
@@ -371,35 +371,35 @@ steps:
   # -----------------------------------------------------------------
   # NOTIFICATION STEP
   # -----------------------------------------------------------------
-      - label: "${LABEL_PREFIX}TPU Test Notification"
-        key: ${TPU_VERSION:-tpu6e}tpu_test_notification
+      - label: "${TPU_VERSION:-tpu6e} TPU Test Notification"
+        key: ${TPU_VERSION:-tpu6e}_tpu_test_notification
         depends_on:
-          - ${TPU_VERSION:-tpu6e}test_0
-          - ${TPU_VERSION:-tpu6e}test_1
-          - ${TPU_VERSION:-tpu6e}test_2
-          - ${TPU_VERSION:-tpu6e}test_3
-          - ${TPU_VERSION:-tpu6e}test_4
-          - ${TPU_VERSION:-tpu6e}test_6
-          - ${TPU_VERSION:-tpu6e}test_7_1
-          - ${TPU_VERSION:-tpu6e}test_7_2
-          - ${TPU_VERSION:-tpu6e}test_7_3
-          - ${TPU_VERSION:-tpu6e}test_8
-          - ${TPU_VERSION:-tpu6e}test_9
-          - ${TPU_VERSION:-tpu6e}test_10
-          - ${TPU_VERSION:-tpu6e}test_11
-          - ${TPU_VERSION:-tpu6e}test_12
-          - ${TPU_VERSION:-tpu6e}test_13
-          - ${TPU_VERSION:-tpu6e}test_15
-          - ${TPU_VERSION:-tpu6e}test_16
-          - ${TPU_VERSION:-tpu6e}test_17
-          - ${TPU_VERSION:-tpu6e}test_18
-          - ${TPU_VERSION:-tpu6e}test_19
-          - ${TPU_VERSION:-tpu6e}test_20
-          - ${TPU_VERSION:-tpu6e}test_21
-          - ${TPU_VERSION:-tpu6e}test_24
+          - ${TPU_VERSION:-tpu6e}_test_0
+          - ${TPU_VERSION:-tpu6e}_test_1
+          - ${TPU_VERSION:-tpu6e}_test_2
+          - ${TPU_VERSION:-tpu6e}_test_3
+          - ${TPU_VERSION:-tpu6e}_test_4
+          - ${TPU_VERSION:-tpu6e}_test_6
+          - ${TPU_VERSION:-tpu6e}_test_7_1
+          - ${TPU_VERSION:-tpu6e}_test_7_2
+          - ${TPU_VERSION:-tpu6e}_test_7_3
+          - ${TPU_VERSION:-tpu6e}_test_8
+          - ${TPU_VERSION:-tpu6e}_test_9
+          - ${TPU_VERSION:-tpu6e}_test_10
+          - ${TPU_VERSION:-tpu6e}_test_11
+          - ${TPU_VERSION:-tpu6e}_test_12
+          - ${TPU_VERSION:-tpu6e}_test_13
+          - ${TPU_VERSION:-tpu6e}_test_15
+          - ${TPU_VERSION:-tpu6e}_test_16
+          - ${TPU_VERSION:-tpu6e}_test_17
+          - ${TPU_VERSION:-tpu6e}_test_18
+          - ${TPU_VERSION:-tpu6e}_test_19
+          - ${TPU_VERSION:-tpu6e}_test_20
+          - ${TPU_VERSION:-tpu6e}_test_21
+          - ${TPU_VERSION:-tpu6e}_test_24
         agents:
           queue: cpu
         commands:
           - |
-           .buildkite/scripts/check_results.sh \
-             "TPU JAX Tests Failed" ${TPU_VERSION:-tpu6e}test_0 ${TPU_VERSION:-tpu6e}test_1 ${TPU_VERSION:-tpu6e}test_2 ${TPU_VERSION:-tpu6e}test_3 ${TPU_VERSION:-tpu6e}test_4 ${TPU_VERSION:-tpu6e}test_6 ${TPU_VERSION:-tpu6e}test_7_1 ${TPU_VERSION:-tpu6e}test_7_2 ${TPU_VERSION:-tpu6e}test_7_3 ${TPU_VERSION:-tpu6e}test_8 ${TPU_VERSION:-tpu6e}test_9 ${TPU_VERSION:-tpu6e}test_10 ${TPU_VERSION:-tpu6e}test_11 ${TPU_VERSION:-tpu6e}test_12 ${TPU_VERSION:-tpu6e}test_13 ${TPU_VERSION:-tpu6e}test_15 ${TPU_VERSION:-tpu6e}test_16 ${TPU_VERSION:-tpu6e}test_17 ${TPU_VERSION:-tpu6e}test_18 ${TPU_VERSION:-tpu6e}test_19 ${TPU_VERSION:-tpu6e}test_20 ${TPU_VERSION:-tpu6e}test_21 ${TPU_VERSION:-tpu6e}test_22 ${TPU_VERSION:-tpu6e}test_23 ${TPU_VERSION:-tpu6e}test_24
+            .buildkite/scripts/check_results.sh \
+              "TPU JAX Tests Failed" ${TPU_VERSION:-tpu6e}_test_0 ${TPU_VERSION:-tpu6e}_test_1 ${TPU_VERSION:-tpu6e}_test_2 ${TPU_VERSION:-tpu6e}_test_3 ${TPU_VERSION:-tpu6e}_test_4 ${TPU_VERSION:-tpu6e}_test_6 ${TPU_VERSION:-tpu6e}_test_7_1 ${TPU_VERSION:-tpu6e}_test_7_2 ${TPU_VERSION:-tpu6e}_test_7_3 ${TPU_VERSION:-tpu6e}_test_8 ${TPU_VERSION:-tpu6e}_test_9 ${TPU_VERSION:-tpu6e}_test_10 ${TPU_VERSION:-tpu6e}_test_11 ${TPU_VERSION:-tpu6e}_test_12 ${TPU_VERSION:-tpu6e}_test_13 ${TPU_VERSION:-tpu6e}_test_15 ${TPU_VERSION:-tpu6e}_test_16 ${TPU_VERSION:-tpu6e}_test_17 ${TPU_VERSION:-tpu6e}_test_18 ${TPU_VERSION:-tpu6e}_test_19 ${TPU_VERSION:-tpu6e}_test_20 ${TPU_VERSION:-tpu6e}_test_21 ${TPU_VERSION:-tpu6e}_test_22 ${TPU_VERSION:-tpu6e}_test_23 ${TPU_VERSION:-tpu6e}_test_24
