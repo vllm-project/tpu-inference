@@ -157,7 +157,7 @@ class CompilationManager:
         dp_size = self.runner.vllm_config.sharding_config.total_dp_size
         dp_sharding = NamedSharding(
             self.runner.mesh, PartitionSpec(
-                ShardingAxisName.MLP_DATA, )) if dp_size > 1 else None
+                ShardingAxisName.ATTN_DATA, )) if dp_size > 1 else None
 
         # Keep existing pattern for complex array operations
         seq_lens = self._create_dummy_tensor((self.runner.max_num_reqs, ),
@@ -255,7 +255,7 @@ class CompilationManager:
             if self.runner.vllm_config.sharding_config.total_dp_size > 1:
                 dp_sharding = NamedSharding(
                     self.runner.mesh,
-                    PartitionSpec(ShardingAxisName.MLP_DATA, ))
+                    PartitionSpec(ShardingAxisName.ATTN_DATA, ))
                 next_tokens_sharding = dp_sharding
             else:
                 dp_sharding = None
@@ -298,7 +298,7 @@ class CompilationManager:
         hidden_size = self.runner.model_config.get_hidden_size()
         for num_tokens in self.runner.num_tokens_paddings:
             dp_sharding = NamedSharding(
-                self.runner.mesh, PartitionSpec(ShardingAxisName.MLP_DATA, )
+                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, )
             ) if self.runner.vllm_config.sharding_config.total_dp_size > 1 else None
 
             input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32,
@@ -424,9 +424,9 @@ class CompilationManager:
         else:
             index_paddings = self.runner.num_reqs_paddings
         dp_sharding = NamedSharding(self.runner.mesh,
-                                    PartitionSpec(ShardingAxisName.MLP_DATA))
+                                    PartitionSpec(ShardingAxisName.ATTN_DATA))
         hidden_states_sharding = NamedSharding(
-            self.runner.mesh, PartitionSpec(ShardingAxisName.MLP_DATA, None))
+            self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None))
         dp_size = self.runner.vllm_config.sharding_config.total_dp_size
         self._precompile_select_from_array_helper(
             name=f"worker{self.runner.rank} select all logits",
@@ -468,7 +468,7 @@ class CompilationManager:
         hsize = self.runner.model_config.get_hidden_size()
         leading_shape = self.runner.num_reqs_paddings if not self.runner.speculative_config else self.runner.num_logits_paddings
         dp_sharding = NamedSharding(self.runner.mesh,
-                                    PartitionSpec(ShardingAxisName.MLP_DATA))
+                                    PartitionSpec(ShardingAxisName.ATTN_DATA))
         for num_reqs in leading_shape:
             hidden_states = self._create_dummy_tensor(
                 (num_reqs, hsize), jnp.bfloat16, dp_sharding)

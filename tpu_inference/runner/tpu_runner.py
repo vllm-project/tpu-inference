@@ -1028,9 +1028,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         ret = jax.shard_map(
             select_local_fn,
             mesh=self.mesh,
-            in_specs=(PartitionSpec(ShardingAxisName.MLP_DATA),
-                      PartitionSpec(ShardingAxisName.MLP_DATA)),
-            out_specs=PartitionSpec(ShardingAxisName.MLP_DATA))(
+            in_specs=(PartitionSpec(ShardingAxisName.ATTN_DATA),
+                      PartitionSpec(ShardingAxisName.ATTN_DATA)),
+            out_specs=PartitionSpec(ShardingAxisName.ATTN_DATA))(
                 array, indices_to_select)
 
         return ret
@@ -1206,7 +1206,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         dp_size = self.dp_size
         data_parallel_attn_sharding = NamedSharding(
-            self.mesh, PartitionSpec(ShardingAxisName.MLP_DATA))
+            self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
 
         (req_ids_dp, req_indices_dp, num_scheduled_tokens_per_dp_rank,
          scheduled_tokens_per_dp_rank, num_req_per_dp_rank,
