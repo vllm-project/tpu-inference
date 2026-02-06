@@ -30,6 +30,7 @@ from tpu_inference.distributed.jax_parallel_state import \
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     get_kv_cache_shape
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
 from tpu_inference.models.jax.qwen3 import Qwen3ForCausalLM
 from tpu_inference.models.jax.utils.qwix.qwix_utils import \
     apply_qwix_quantization
@@ -215,32 +216,8 @@ class TestQwen3ForCausalLM:
             device=jax.devices()[0],
             need_pp=False,
         )
-        if True:
-            # `get_tpu_quantization_config` returns None for "fp8" because
-            # the work in #1623 is not fully merged. So this block overrides
-            # the logic to return Fp8Config when model_name indicates fp8.
-            # TODO(#1623): Remove this block when `get_tpu_quantization_config`
-            # is updated.
-            import copy
-
-            from tpu_inference.layers.common.quant_methods import FP8
-            from tpu_inference.layers.jax.quantization.fp8 import Fp8Config
-            from tpu_inference.layers.jax.quantization.unquantized import \
-                UnquantizedConfig
-
-            model_config = copy.deepcopy(mock_vllm_config.model_config)
-            method_to_config: dict[str | None, type] = {
-                None: UnquantizedConfig,
-                FP8: Fp8Config,
-            }
-            if model_config.quantization not in method_to_config:
-                raise NotImplementedError(
-                    f"{model_config.quantization} quantization method not supported."
-                    f" Supported methods are {method_to_config.keys()}")
-            quant_config = method_to_config[model_config.quantization]
-            hg_quant_config = getattr(model_config.hf_config,
-                                      "quantization_config", {})
-            mock_vllm_config.quant_config = quant_config(hg_quant_config)
+        mock_vllm_config.quant_config = get_tpu_quantization_config(
+            mock_vllm_config)
 
         model_dim = mock_vllm_config.model_config.hf_config.hidden_size
         model_config = mock_vllm_config.model_config
