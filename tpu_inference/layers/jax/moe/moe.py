@@ -11,8 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 from dataclasses import InitVar, dataclass
-from typing import Optional
+from typing import Iterable, Optional
 
 import jax
 import jax.numpy as jnp
@@ -218,3 +219,6 @@ class JaxMoE(JaxModule):
         self.use_ep = self.num_expert_parallelism > 1
         self.activation = self.hidden_act
         self.scoring_func = self.scoring_func
+
+    def load_weights(self, weights: Iterable):
+        ...
