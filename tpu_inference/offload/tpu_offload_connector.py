@@ -212,11 +212,12 @@ SAVE_BLOCKS_TO_CPU_CALLS = Counter(
 # NOTE(jcgu): not suggest to use; every model_execute will trigger this fn call.
 START_LOAD_KV_CALLS = Counter(
     "vllm_start_load_kv_calls_total",
-    "Total number of times start_to_load has been called.")
+    "Total number of times start_to_load has been called.",
+    labelnames=["is_batched"])
 
-LOAD_KV_REQUESTS = Counter(
-    "vllm_num_requests_with_real_kv_load",
-    "Total number of requests with kv load operations.")
+LOAD_KV_REQUESTS = Counter("vllm_num_requests_with_real_kv_load",
+                           "Total number of requests with kv load operations.",
+                           labelnames=["is_batched"])
 
 GET_KV_CONNECTOR_STATS_CALLS = Counter(
     "vllm_get_kv_connector_stats_calls_total",
@@ -265,7 +266,8 @@ KV_SAVED_BYTES = Counter("vllm_kv_offload_saved_bytes_total",
                          "Total bytes saved to CPU KV cache.",
                          labelnames=["is_batched"])
 KV_LOADED_BYTES = Counter("vllm_kv_offload_loaded_bytes_total",
-                          "Total bytes loaded from CPU KV cache.")
+                          "Total bytes loaded from CPU KV cache.",
+                          labelnames=["is_batched"])
 
 GATHER_NUM_BLOCKS = Histogram(
     "vllm_kv_cache_gather_num_blocks",
@@ -289,12 +291,14 @@ GATHER_SLICE_LATENCY = Histogram(
 
 LOAD_KV_LATENCY_SECONDS = Histogram(
     'vllm_kv_cache_load_data_latency_seconds',
-    'Latency of loading KV cache data from CPU to TPU per request',
+    'Latency of loading KV cache data from CPU to TPU',
+    labelnames=["is_batched"],
     buckets=[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0])
 
 LOAD_KV_SIZE_BLOCKS = Counter(
     'vllm_kv_cache_load_blocks_total',
-    'Total number of KV cache blocks loaded from CPU to TPU')
+    'Total number of KV cache blocks loaded from CPU to TPU',
+    labelnames=["is_batched"])
 
 STAGING_BUFFER_BLOCKS_FOR_SAVE = Gauge(
     'vllm_kv_cache_staging_buffer_blocks_for_save_total',
@@ -2105,7 +2109,7 @@ class TPUOffloadConnectorWorker:
             return
 
         # Synchronous Batch Load
-        LOAD_KV_REQUESTS.inc(len(manifest))
+        LOAD_KV_REQUESTS.labels(is_batched=True).inc(len(manifest))
         batch_load_start_time = time.time()
         logger.info(
             f"TPUOffloadConnectorWorker: Starting Batched KV cache load process for {len(manifest)} requests."
@@ -2118,6 +2122,16 @@ class TPUOffloadConnectorWorker:
             else:
                 raw_chunked_kv_on_tpu = self.swap_in_fn(assembled_kv_on_cpu)
             jax.block_until_ready(raw_chunked_kv_on_tpu)
+
+            def _chunk_nbytes(chunk):
+                if isinstance(chunk, list):
+                    return sum(s.nbytes for s in chunk)
+                return chunk.nbytes
+
+            total_size_bytes = sum(
+                sum(_chunk_nbytes(chunk) for chunk in layer_chunks)
+                for layer_chunks in assembled_kv_on_cpu)
+            KV_LOADED_BYTES.labels(is_batched=True).inc(total_size_bytes)
 
             if self.use_bucketed_swap_ops:
                 self.runner.kv_caches = self._bucketed_jitted_insert_kv_cache_slices(
@@ -2135,8 +2149,8 @@ class TPUOffloadConnectorWorker:
             jax.block_until_ready(self.runner.kv_caches)
 
         load_duration = time.time() - batch_load_start_time
-        LOAD_KV_LATENCY_SECONDS.observe(load_duration)
-        LOAD_KV_SIZE_BLOCKS.inc(len(all_dst_blocks))
+        LOAD_KV_LATENCY_SECONDS.labels(is_batched=True).observe(load_duration)
+        LOAD_KV_SIZE_BLOCKS.labels(is_batched=True).inc(len(all_dst_blocks))
 
         for info in manifest:
             self.finished_load_reqs.add(info.req_id)
@@ -2646,7 +2660,7 @@ class TPUOffloadConnectorWorker:
           data from the staging buffer into the specific non-contiguous
           physical blocks assigned to the request.
         """
-        START_LOAD_KV_CALLS.inc()
+        START_LOAD_KV_CALLS.labels(is_batched=self.batched_load).inc()
         # Reset the save processing flag at the start of a new step.
         self._processed_save_for_step = False
         metadata = self.connector._get_connector_metadata()
@@ -2673,7 +2687,7 @@ class TPUOffloadConnectorWorker:
             if not (meta.load_spec and meta.load_spec.can_load):
                 continue
 
-            LOAD_KV_REQUESTS.inc()
+            LOAD_KV_REQUESTS.labels(is_batched=False).inc()
             request_load_start_time = time.time()
             logger.info(
                 "TPUOffloadConnectorWorker: Starting KV cache load process.")
@@ -2745,6 +2759,16 @@ class TPUOffloadConnectorWorker:
                         assembled_kv_on_cpu)
                 jax.block_until_ready(raw_chunked_kv_on_tpu)
 
+                def _chunk_nbytes(chunk):
+                    if isinstance(chunk, list):
+                        return sum(s.nbytes for s in chunk)
+                    return chunk.nbytes
+
+                total_size_bytes = sum(
+                    sum(_chunk_nbytes(chunk) for chunk in layer_chunks)
+                    for layer_chunks in assembled_kv_on_cpu)
+                KV_LOADED_BYTES.labels(is_batched=False).inc(total_size_bytes)
+
                 if self.use_bucketed_swap_ops:
                     self.runner.kv_caches = self._bucketed_jitted_insert_kv_cache_slices(
                         self.runner.kv_caches,
@@ -2764,9 +2788,11 @@ class TPUOffloadConnectorWorker:
                 f"{num_blocks_to_load} new blocks.")
 
             load_duration = time.time() - request_load_start_time
-            LOAD_KV_LATENCY_SECONDS.observe(load_duration)
+            LOAD_KV_LATENCY_SECONDS.labels(
+                is_batched=False).observe(load_duration)
             load_times.append(load_duration)
-            LOAD_KV_SIZE_BLOCKS.inc(num_blocks_to_load)
+            LOAD_KV_SIZE_BLOCKS.labels(
+                is_batched=False).inc(num_blocks_to_load)
             self.finished_load_reqs.add(meta.req_id)
             if num_blocks_to_load > 0:
                 self.offload_stats.record_load(req=meta.req_id,

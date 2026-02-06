@@ -52,6 +52,7 @@ def _test_kv_cache_cpu_offloading_accuracy(
     skip_precompile: str,
     decode_save: str,
     batched_save: str,
+    batched_load: str,
     cpu_chunks: str,
     prompt_file: str,
 ):
@@ -61,6 +62,7 @@ def _test_kv_cache_cpu_offloading_accuracy(
         os.environ['TPU_OFFLOAD_SKIP_JAX_PRECOMPILE'] = skip_precompile
         os.environ['TPU_OFFLOAD_DECODE_SAVE'] = decode_save
         os.environ['TPU_OFFLOAD_BATCHED_SAVE'] = batched_save
+        os.environ['TPU_OFFLOAD_BATCHED_LOAD'] = batched_load
         os.environ['TPU_OFFLOAD_NUM_CPU_CHUNKS'] = cpu_chunks
         llm = LLM(model="meta-llama/Llama-3.2-3B",
                   max_model_len=3072,
@@ -111,8 +113,10 @@ def test_kv_cache_cpu_offloading_accuracy_smaller_then_cpu_ram(
     decode_saves = ["0", "1"]
     skip_precompile = ["0", "1"]
     batched_saves = ["0", "1"]
-    for swap_op_type, decode_save, _skip_precompile, batched_save in itertools.product(
-            swap_op_types, decode_saves, skip_precompile, batched_saves):
+    batched_loads = ["0", "1"]
+    for swap_op_type, decode_save, _skip_precompile, batched_save, batched_load in itertools.product(
+            swap_op_types, decode_saves, skip_precompile, batched_saves,
+            batched_loads):
         _test_kv_cache_cpu_offloading_accuracy(
             monkeypatch,
             sampling_config,
@@ -121,6 +125,7 @@ def test_kv_cache_cpu_offloading_accuracy_smaller_then_cpu_ram(
             _skip_precompile,
             decode_save,
             batched_save,
+            batched_load,
             # The total CPU RAM size = # cpu chunks * cpu_chunk_size. cpu_chunk_size represent the number of tokens can fit into a single CPU RAM chunk.
             # cpu_chunk_size for llama-3.2-3B(used above in test)= 256
             # CPU RAM size = 4*256=1024 tokens
@@ -145,8 +150,10 @@ def test_kv_cache_cpu_offloading_accuracy_larger_than_cpu_ram(
     decode_saves = ["0", "1"]
     skip_precompile = ["0", "1"]
     batched_saves = ["0", "1"]
-    for swap_op_type, decode_save, _skip_precompile, batched_save in itertools.product(
-            swap_op_types, decode_saves, skip_precompile, batched_saves):
+    batched_loads = ["0", "1"]
+    for swap_op_type, decode_save, _skip_precompile, batched_save, batched_load in itertools.product(
+            swap_op_types, decode_saves, skip_precompile, batched_saves,
+            batched_loads):
         _test_kv_cache_cpu_offloading_accuracy(
             monkeypatch,
             sampling_config,
@@ -155,6 +162,7 @@ def test_kv_cache_cpu_offloading_accuracy_larger_than_cpu_ram(
             _skip_precompile,
             decode_save,
             batched_save,
+            batched_load,
             # The total CPU RAM size = # cpu chunks * cpu_chunk_size. cpu_chunk_size represent the number of tokens can fit into a single CPU RAM chunk.
             # cpu_chunk_size for llama-3.2-3B(used above in test)= 256
             # CPU RAM size = 4*256=1024 tokens
@@ -220,6 +228,73 @@ def test_kv_cache_cpu_offloading_batch_save_multi_request(
             time.sleep(1)
 
             # 2nd generate (Loads from CPU cache)
+            outputs = llm.generate(prompts, sampling_config)
+            out_texts2, out_tokens2 = parse_outputs(outputs)
+            time.sleep(1)
+
+            # Verify results are identical
+            assert len(out_texts1) == len(out_texts2)
+            for i in range(len(out_texts1)):
+                assert out_texts1[i] == out_texts2[
+                    i], f"Text mismatch in request {i}"
+                assert out_tokens1[i] == out_tokens2[
+                    i], f"Token mismatch in request {i}"
+
+            del llm
+            # Waiting for TPUs to be released.
+            time.sleep(20)
+
+
+def test_kv_cache_cpu_offloading_batch_load_multi_request(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    kv_transfer_config: KVTransferConfig,
+):
+    """
+    Verifies accuracy for multiple simultaneous requests when batched load is enabled.
+    This ensures that the consolidated H2D transfer and subsequent scatter
+    correctly populates the physical KV cache from the CPU backend.
+    """
+    num_requests = 10
+    swap_op_types = ["pallas", "jax", "jax_copy"]
+    decode_save = "0"
+    skip_precompile = "1"
+    batched_load = "1"
+
+    # Logic for cpu_chunks:
+    # Providing sufficient headroom to store all requests in the CPU cache.
+    cpu_chunks = str(num_requests * 20)
+
+    for swap_op_type in swap_op_types:
+        with monkeypatch.context():
+            os.environ['SKIP_JAX_PRECOMPILE'] = '1'
+            os.environ['TPU_OFFLOAD_SWAP_OP_TYPE'] = swap_op_type
+            os.environ['TPU_OFFLOAD_SKIP_JAX_PRECOMPILE'] = skip_precompile
+            os.environ['TPU_OFFLOAD_DECODE_SAVE'] = decode_save
+            os.environ['TPU_OFFLOAD_BATCHED_LOAD'] = batched_load
+            os.environ['TPU_OFFLOAD_NUM_CPU_CHUNKS'] = cpu_chunks
+
+            llm = LLM(model="meta-llama/Llama-3.2-3B",
+                      max_model_len=3072,
+                      task="generate",
+                      kv_transfer_config=kv_transfer_config)
+
+            base_prompt = read_prompt_from_file("small_prompt.txt")
+            prompts = [
+                f"{base_prompt}\nRequest index: {i}"
+                for i in range(num_requests)
+            ]
+
+            # 1st generate (Populates CPU cache)
+            outputs = llm.generate(prompts, sampling_config)
+            out_texts1, out_tokens1 = parse_outputs(outputs)
+            time.sleep(1)
+
+            # Reset prefix cache to force loading from CPU cache in the next step
+            llm.llm_engine.engine_core.reset_prefix_cache()
+            time.sleep(1)
+
+            # 2nd generate (Loads from CPU cache using BATCHED LOAD)
             outputs = llm.generate(prompts, sampling_config)
             out_texts2, out_tokens2 = parse_outputs(outputs)
             time.sleep(1)
