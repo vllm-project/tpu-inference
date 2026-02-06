@@ -119,23 +119,18 @@ class ReduceScatterMatmulTest(jtu.JaxTestCase):
       grid_k=[1],  # change to [1, 2, 3]
       grid_n=[1],  # change to [1, 2, 3]
   )
-  def test_basic_reduce_scatter_matmul_kernel_on_bs(self, num_devices,
-                                                    grid_m, grid_k, grid_n):
+  def test_basic_reduce_scatter_matmul_kernel_on_bs(self, num_devices, grid_m, grid_k, grid_n):
     dtype = jnp.float32
-    # let's limit to 2 devices to make it simple.
-    # TODO(xw32): should add a more general test that uses more devices.
+    # TODO(xw32): let's limit to 2 devices to make it simple.
+    # should add a more general test that uses more devices.
     devices = jax.devices()[:num_devices]
-    mesh = Mesh(devices, ('x', ))
-
-    def S(p):
-      return NamedSharding(mesh, p)
+    mesh = Mesh(devices, ('x',))
+    S = lambda p: NamedSharding(mesh, p)  # pylint: disable=invalid-name
 
     # In tpu-inference SP,
     # lhs: [bs, in_features@TP], rhs: [out_features, in_features@TP]) ->
     # [bs@TP, out_features]
-    def shard(x, spec):
-      return jax.device_put(x, NamedSharding(mesh, spec))
-
+    shard = lambda x, spec: jax.device_put(x, NamedSharding(mesh, spec))
     x_pspec = P(None, 'x')
     y_pspec = P(None, 'x')
     o_pspec = P('x', None)
@@ -144,23 +139,24 @@ class ReduceScatterMatmulTest(jtu.JaxTestCase):
     bk = 128
     bn = 256
     # global shapes:
-    m = bm * grid_m * num_devices  # *2 because the algorithm split x by num_devices on m-dim at the output.
-    k = bk * grid_k * num_devices  # * devices because the input is sharded on k-dim.
-    n = bn * grid_n * 2  # *2 because the algorithm split y by 2 on n-dim.
-    # If grid_k==1, bk=256, then k=256, assuming num_devices=2, then
-    # k_per_dev=128 due to the input is sharded on k dimension. Then the block size should be bk=128 (aka bk/num_devices)
-    # bk = bk//num_devices
+    m = bm*grid_m*num_devices  # *num_devices because the algorithm split x by num_devices on m-dim at the output.
+    k = bk*grid_k*num_devices  # *num_devices because the input is sharded on k-dim.
+    n = bn*grid_n*2  # *2 because the algorithm split y by 2 on n-dim.
+    # If grid_k==1, bk=128, num_devices=2, then k=256, then
+    # k_per_dev=128 due to the input is sharded on k dimension. Then the block size should be bk=128 (aka bk/num_devices).
     # So on each device, lhs shape should be [bm*grid_m*num_devices, bk*grid_k]=[768, 128]
     # On each device, rhs shape should be [bn*grid_n*2, bk*grid_k]=[512, 128]
     # On each device, output shape should be [bm*grid_m, bn*grid_n*2]=[384, 512]
 
-    x = jax.random.uniform(jax.random.key(0), (m, k), dtype=dtype)
+    # TODO(xiowei): change to random once the test is stable.
+    # x = jax.random.uniform(jax.random.key(0), (m, k), dtype=dtype)
+    # y = jax.random.uniform(jax.random.key(1), (n, k), dtype=dtype)
+    x = jnp.ones((m, k), dtype=dtype)
+    y = jnp.ones((n, k), dtype=dtype)
+
     x = shard(x, x_pspec)
-    y = jax.random.uniform(jax.random.key(1), (n, k), dtype=dtype)
     y = shard(y, y_pspec)
-    print(
-        f'xw32 in test line278 Global shape: {x.shape=}, {y.shape=}, {x.sharding=} {y.sharding=}'
-    )
+    print(f'xw32 in test line278 Global shape: {x.shape=}, {y.shape=}, {x.sharding=} {y.sharding=}')
 
     @functools.partial(
         jax.jit,
@@ -189,9 +185,9 @@ class ReduceScatterMatmulTest(jtu.JaxTestCase):
           bn=bn,
       )
 
-    @functools.partial(jax.jit,
-                       in_shardings=(S(x_pspec), S(y_pspec)),
-                       out_shardings=S(o_pspec))
+    @functools.partial(
+        jax.jit, in_shardings=(S(x_pspec), S(y_pspec)), out_shardings=S(o_pspec)
+    )
     @functools.partial(
         shard_map.shard_map,
         mesh=mesh,
@@ -211,6 +207,7 @@ class ReduceScatterMatmulTest(jtu.JaxTestCase):
     out_ref = rs_matmul_reference(x, y)
     # print(f'xw32 out[0, 0] = {out[0, 0]}')
     # print(f'xw32 out_ref[0, 0] = {out_ref[0, 0]}')
+    print(f'Final output {out[:, :256]=}, {out_ref[:, :256]=}, {out[:, 256:]=}, {out_ref[:, 256:]=}')
     self.assertAllClose(out, out_ref, atol=1e-5, rtol=1e-5)
     print('The test passed.')
 

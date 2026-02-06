@@ -22,8 +22,6 @@ from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference.kernels.collectives import util
 
-P = jax.sharding.PartitionSpec
-
 LEFT = 0
 RIGHT = 1
 
@@ -41,7 +39,7 @@ def signal(left_or_right, semaphore, num_devices):
   pltpu.semaphore_signal(
       semaphore,
       inc=1,
-      device_id=(neighbor, ),
+      device_id=(neighbor,),
       device_id_type=pltpu.DeviceIdType.MESH,
   )
 
@@ -85,19 +83,17 @@ def reduce_scatter_matmul_kernel(
   assert n == 512
   assert k_per_dev == 128
 
-  m_shard_sz = m // num_devices
-  n_shard_sz = n // 2
+  m_shard_sz = m//num_devices
+  n_shard_sz = n//2
   assert left_hbm_scratch.shape == (2, m_shard_sz, n_shard_sz)
   assert right_hbm_scratch.shape == (2, m_shard_sz, n_shard_sz)
-  print(
-      f'xw32 reduce_scatter_matmul_kernel begins: {x_ref.shape=}, {y_ref.shape=}, {o_ref.shape=}, {left_hbm_scratch.shape=}, {right_hbm_scratch.shape=}, {left_hbm_scratch.shape=}, {right_hbm_scratch.shape=}'
-  )
+  print(f'xw32 reduce_scatter_matmul_kernel begins: {x_ref.shape=}, {y_ref.shape=}, {o_ref.shape=}, {left_hbm_scratch.shape=}, {right_hbm_scratch.shape=}, {left_hbm_scratch.shape=}, {right_hbm_scratch.shape=}')
 
   outer_idx = pl.program_id(0)
   phase_idx = pl.program_id(1)
   num_outer_steps = pl.num_programs(0)
   num_phases = pl.num_programs(1)
-  global_idx = outer_idx * num_phases + phase_idx
+  global_idx = outer_idx*num_phases + phase_idx
   num_global_steps = num_outer_steps * num_phases
   debug_print(
       '===== starting a grid, outer_step={}, phase={}, num_devices={}, m={}, n={}, k_per_dev={} =====',
@@ -113,14 +109,14 @@ def reduce_scatter_matmul_kernel(
 
   left_working_slot = lax.rem(outer_idx, 2)
   left_receiving_slot = 1 - left_working_slot
-  right_working_slot = lax.rem(global_idx + 1, 2)
+  right_working_slot = lax.rem(pl.cdiv(global_idx, 2), 2)
   right_receiving_slot = 1 - right_working_slot
   right_neighbor = mod(my_id + 1, num_devices)
   left_neighbor = mod(my_id - 1, num_devices)
 
   # the device from where we receive a left copy.
-  # left_copy_device = mod(my_id + outer_idx + 1, num_devices)
-  # right_copy_device = mod(my_id - outer_idx - 1, num_devices)
+  left_copy_device = mod(my_id + outer_idx + 1, num_devices)
+  right_copy_device = mod(my_id - outer_idx - 1, num_devices)
   left_copy_slice = pl.ds(0, n_shard_sz)
   right_copy_slice = pl.ds(n_shard_sz, n_shard_sz)
 
@@ -130,7 +126,7 @@ def reduce_scatter_matmul_kernel(
       dst_ref=left_hbm_scratch.at[left_receiving_slot],
       send_sem=left_send_sem,
       recv_sem=left_recv_sem,
-      device_id=(left_neighbor, ),
+      device_id=(left_neighbor,),
       device_id_type=pltpu.DeviceIdType.MESH,
   )
   right_copy = pltpu.make_async_remote_copy(
@@ -138,7 +134,7 @@ def reduce_scatter_matmul_kernel(
       dst_ref=right_hbm_scratch.at[right_receiving_slot],
       send_sem=right_send_sem,
       recv_sem=right_recv_sem,
-      device_id=(right_neighbor, ),
+      device_id=(right_neighbor,),
       device_id_type=pltpu.DeviceIdType.MESH,
   )
   debug_print(
@@ -173,10 +169,8 @@ def reduce_scatter_matmul_kernel(
       outer_idx,
       phase_idx,
   )
-
   @pl.when(~jnp.logical_or(is_start, is_end))
   def _():
-
     @pl.when(phase_idx == LEFT)
     def _():
       # We block here until our right neighbor tells use we can send to
@@ -186,26 +180,10 @@ def reduce_scatter_matmul_kernel(
 
     @pl.when(phase_idx == RIGHT)
     def _():
-      debug_print(
-          '===== outer_step={}, phase={}, line177 =====',
-          outer_idx,
-          phase_idx,
-      )
       # We block here until our left neighbor tells use we can send to
       # the left.
       pltpu.semaphore_wait(left_capacity_sem, 1)
       left_copy.start()
-      debug_print(
-          '===== outer_step={}, phase={}, line186 =====',
-          outer_idx,
-          phase_idx,
-      )
-
-  debug_print(
-      '===== outer_step={}, phase={}, line182 =====',
-      outer_idx,
-      phase_idx,
-  )
 
   # --- Body ---
   def inner_matmul_kernel(x_ref, y_ref, z_ref):
@@ -215,29 +193,24 @@ def reduce_scatter_matmul_kernel(
     # Accumulator should be in float32.
     # z_ref[...] += (x_ref[...] @ y_ref[...].T).astype(jnp.float32)
     # dimension_numbers: ((lhs_contracting_dims, rhs_contracting_dims), (lhs_batch_dims, rhs_batch_dims))
+    @pl.when(outer_idx == 0)
+    def _():
+      z_ref[...] = jnp.zeros_like(z_ref, dtype=jnp.float32)
     z_ref[...] += jax.lax.dot_general(
         x_ref[...],
         y_ref[...],
-        dimension_numbers=(((1, ), (1, )), ((), ())),
+        dimension_numbers=(((1,), (1,)), ((), ())),
         preferred_element_type=jnp.float32,
     )
-
   matmul_pipeline = pltpu.emit_pipeline(
       inner_matmul_kernel,
-      in_specs=[
-          pl.BlockSpec((bm, bk), lambda i, j, k: (i, k)),
-          pl.BlockSpec((bn, bk), lambda i, j, k: (j, k))
-      ],
+      in_specs=[pl.BlockSpec((bm, bk), lambda i, j, k: (i, k)),
+                pl.BlockSpec((bn, bk), lambda i, j, k: (j, k))],
       out_specs=pl.BlockSpec((bm, bn), lambda i, j, k: (i, j)),
       should_accumulate_out=False,
       # m_shard_sz=384, n_shard_sz=256, k_per_dev=128, bm=384, bn=256, bk=128 xw32: temp comments.
-      grid=(m_shard_sz // bm, n_shard_sz // bn, k_per_dev // bk),
+      grid=(m_shard_sz//bm, n_shard_sz//bn, k_per_dev//bk),
       dimension_semantics=(pltpu.PARALLEL, pltpu.PARALLEL, pltpu.ARBITRARY),
-  )
-  debug_print(
-      '===== outer_step={}, phase={}, line211 =====',
-      outer_idx,
-      phase_idx,
   )
 
   @pl.when(global_idx < num_global_steps - 2)
@@ -248,16 +221,14 @@ def reduce_scatter_matmul_kernel(
     # NB: left_hbm_scratch,  # [2, m//num_devices, n//2]
     @pl.when(phase_idx == LEFT)
     def _():
-      x_start = (outer_idx) * (m_shard_sz)
-      debug_print(
-          '===== outer_step={}, phase={}, x_start={}, m_shard_sz={} left matmul begins =====',
-          outer_idx,
-          phase_idx,
-          x_start,
-          m_shard_sz,
-      )
+      x_start = ((outer_idx+my_id)%num_devices)*m_shard_sz
       x_left_ref = x_ref.at[pl.ds(x_start, m_shard_sz)]
       y_left_ref = y_ref.at[left_copy_slice, :]
+
+      # TODO(xw32): remove the special case assert
+      assert x_left_ref.shape == (384, 128)
+      assert y_left_ref.shape == (256, 128)
+
       left_hbm_scratch_ref = left_hbm_scratch.at[left_working_slot]
       matmul_pipeline(
           x_left_ref,
@@ -268,30 +239,19 @@ def reduce_scatter_matmul_kernel(
     @pl.when(phase_idx == RIGHT)
     def _():
       # m_shard_sz=384 # xw32: remove the temp comments later.
-      x_start = outer_idx * (m_shard_sz)
+      x_start = ((outer_idx+my_id)%num_devices)*m_shard_sz
       x_right_ref = x_ref.at[pl.ds(x_start, m_shard_sz)]
       y_right_ref = y_ref.at[right_copy_slice, :]
       right_hbm_scratch_ref = right_hbm_scratch.at[right_working_slot]
-      print(
-          f'xw32 line 304 right before the right matmul {x_right_ref.shape=}, {y_right_ref.shape=}, {right_hbm_scratch_ref.shape=}'
-      )
-      debug_print(
-          '===== outer_step={}, phase={}, line260 x_start={}, m_shard_sz={}, n_shard_sz={} =====',
-          outer_idx,
-          phase_idx,
-          x_start,
-          m_shard_sz,
-          n_shard_sz,
-      )
+
+      # TODO(xw32): remove the special case assert
+      assert x_right_ref.shape == (384, 128)
+      assert y_right_ref.shape == (256, 128)
+
       matmul_pipeline(
           x_right_ref,
           y_right_ref,
           right_hbm_scratch_ref,
-      )
-      debug_print(
-          '===== outer_step={}, phase={}, matmul ends =====',
-          outer_idx,
-          phase_idx,
       )
 
   def inner_save_to_output_kernel(x_ref, o_ref):
@@ -299,12 +259,10 @@ def reduce_scatter_matmul_kernel(
 
   save_to_output_pipeline = pltpu.emit_pipeline(
       inner_save_to_output_kernel,
-      in_specs=[
-          pl.BlockSpec((bm, bn), lambda i, j: (i, j)),
-      ],
+      in_specs=[pl.BlockSpec((bm, bn), lambda i, j: (i, j)),],
       out_specs=pl.BlockSpec((bm, bn), lambda i, j: (i, j)),
       should_accumulate_out=False,
-      grid=(m_shard_sz // bm, n_shard_sz // bn),
+      grid=(m_shard_sz//bm, n_shard_sz//bn),
       dimension_semantics=(pltpu.PARALLEL, pltpu.PARALLEL),
   )
 
@@ -328,15 +286,9 @@ def reduce_scatter_matmul_kernel(
           o_ref.at[:, pl.ds(n_shard_sz, n_shard_sz)],
       )
 
-  debug_print(
-      '===== outer_step={}, phase={}, end of body =====',
-      outer_idx,
-      phase_idx,
-  )
   # --- Epilogue ---
   @pl.when(~jnp.logical_or(is_start, is_end))
   def _():
-
     @pl.when(phase_idx == LEFT)
     def _():
       right_copy.wait()
@@ -347,16 +299,9 @@ def reduce_scatter_matmul_kernel(
       left_copy.wait()
       signal(RIGHT, left_capacity_sem, num_devices)
 
-  debug_print(
-      '===== outer_step={}, phase={}, end of epilogue =====',
-      outer_idx,
-      phase_idx,
-  )
-
   # Clean up semaphores so that they exit with a value of 0.
   @pl.when(outer_idx == num_outer_steps - 1)
   def _():
-
     @pl.when(phase_idx == LEFT)
     def _():
       pltpu.semaphore_wait(right_capacity_sem, 1)
@@ -398,7 +343,7 @@ def reduce_scatter_matmul(
     bn: int = 128,
 ):
   """Reduce-scatter matmul kernel.
-
+  
   Args:
     x: The left hand side of the matmul [m, k]
     y: The right hand side of the matmul [n, k]
@@ -432,12 +377,18 @@ def reduce_scatter_matmul(
   num_devices = jax.lax.psum(1, axis_name)
   out_shape = (
       # final result.
-      jax.ShapeDtypeStruct((m // num_devices, n), jnp.float32),
+      jax.ShapeDtypeStruct(
+          (m//num_devices, n), jnp.float32
+      ),
       # The rs kernel put the hbm scratch space in out_shape.
       # out_left_hbm_scratch: [working/recv, m//num_devices//2, n//2]
-      jax.ShapeDtypeStruct((2, m // num_devices, n // 2), jnp.float32),
+      jax.ShapeDtypeStruct(
+          (2, m//num_devices, n//2), jnp.float32
+      ),
       # out_right_hbm_scratch: [working/recv, m//num_devices//2, n//2]
-      jax.ShapeDtypeStruct((2, m // num_devices, n // 2), jnp.float32),
+      jax.ShapeDtypeStruct(
+          (2, m//num_devices, n//2), jnp.float32
+      ),
   )
   grid_spec = pltpu.PrefetchScalarGridSpec(
       num_scalar_prefetch=0,
@@ -450,10 +401,10 @@ def reduce_scatter_matmul(
           pl.BlockSpec(memory_space=pltpu.MemorySpace.ANY),
           pl.BlockSpec(memory_space=pltpu.MemorySpace.ANY),
       ],
-      grid=(num_devices + 1, 2),
+      grid=(num_devices+1, 2),
       scratch_shapes=(
-          [pltpu.SemaphoreType.DMA] * 6 +
-          [pltpu.SemaphoreType.REGULAR] * 2  # Capacity semaphores
+          [pltpu.SemaphoreType.DMA] * 6
+          + [pltpu.SemaphoreType.REGULAR] * 2  # Capacity semaphores
       ),
   )
   return pl.pallas_call(
