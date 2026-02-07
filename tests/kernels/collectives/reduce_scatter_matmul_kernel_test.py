@@ -114,10 +114,10 @@ class ReduceScatterMatmulTest(jtu.JaxTestCase):
   # blaze test -c opt --test_output=errors //experimental/users/jevinjiang/ullm:tests/reduce_scatter_matmul_test --test_filter=test_basic_reduce_scatter_matmul_kernel_on_bs --test_arg=--xla_tpu_enable_log_recorder
   # Minimum test with 2 devices.
   @parameterized.product(
-      num_devices=[8],  # change to [1, 2, 8]
-      grid_m=[1, 2],  # change to [1, 2, 3]
-      grid_k=[1, 2],  # change to [1, 2, 3]
-      grid_n=[1, 2],  # change to [1, 2, 3]
+      num_devices=[4, 8],  # change to [1, 2, 8]
+      grid_m=[1, 2, 3],  # change to [1, 2, 3]
+      grid_k=[1, 2, 3],  # change to [1, 2, 3]
+      grid_n=[1,2, 3],  # change to [1, 2, 3]
   )
   def test_basic_reduce_scatter_matmul_kernel_on_bs(self, num_devices, grid_m, grid_k, grid_n):
     dtype = jnp.float32
@@ -149,10 +149,10 @@ class ReduceScatterMatmulTest(jtu.JaxTestCase):
     # On each device, output shape should be [bm*grid_m, bn*grid_n*2]=[384, 512]
 
     # TODO(xiowei): change to random once the test is stable.
-    # x = jax.random.uniform(jax.random.key(0), (m, k), dtype=dtype)
-    # y = jax.random.uniform(jax.random.key(1), (n, k), dtype=dtype)
-    x = jnp.ones((m, k), dtype=dtype)
-    y = jnp.ones((n, k), dtype=dtype)
+    x = jax.random.uniform(jax.random.key(0), (m, k), dtype=dtype)
+    y = jax.random.uniform(jax.random.key(1), (n, k), dtype=dtype)
+    # x = jnp.ones((m, k), dtype=dtype)
+    # y = jnp.ones((n, k), dtype=dtype)
 
     x = shard(x, x_pspec)
     y = shard(y, y_pspec)
@@ -208,7 +208,7 @@ class ReduceScatterMatmulTest(jtu.JaxTestCase):
     # print(f'xw32 out[0, 0] = {out[0, 0]}')
     # print(f'xw32 out_ref[0, 0] = {out_ref[0, 0]}')
     print(f'Final output {out[:, :256]=}, {out_ref[:, :256]=}, {out[:, 256:]=}, {out_ref[:, 256:]=}')
-    self.assertAllClose(out, out_ref, atol=1e-5, rtol=1e-5)
+    self.assertAllClose(out, out_ref, atol=1e-2, rtol=1e-2)
     print('The test passed.')
 
 

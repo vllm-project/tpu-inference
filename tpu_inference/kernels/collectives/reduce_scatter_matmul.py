@@ -244,7 +244,8 @@ def reduce_scatter_matmul_kernel(
     @pl.when(phase_idx == RIGHT)
     def _():
       # m_shard_sz=384 # xw32: remove the temp comments later.
-      x_start = ((outer_idx+my_id)%num_devices)*m_shard_sz
+      # The LEFT and RIGHT halves of the reduce-scatter use bidirectional rings flowing in opposite directions. The LEFT ring sends data left (device d → d-1), so the x-block index should advance forward: (outer_idx + my_id) % N. The RIGHT ring sends data right (device d → d+1), so the x-block index should advance backward: (my_id - outer_idx) % N. Both phases were incorrectly using the forward formula. This was masked with 2 devices because (a+b) % 2 ≡ (a-b) % 2 for all integers, but breaks for 4+ devices
+      x_start = mod(my_id - outer_idx, num_devices)*m_shard_sz
       x_right_ref = x_ref.at[pl.ds(x_start, m_shard_sz)]
       y_right_ref = y_ref.at[right_copy_slice, :]
       right_hbm_scratch_ref = right_hbm_scratch.at[right_working_slot]
