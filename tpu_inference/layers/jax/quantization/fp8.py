@@ -12,28 +12,109 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 import math
 from functools import partial
 from typing import Optional
 
 import jax
 import jax.numpy as jnp
+import torch
 from flax import nnx
+from jax.sharding import PartitionSpec as P
+from torchax.ops.mappings import t2j
 
 from tpu_inference.layers.common.process_weights.linear_weights import \
     shard_linear_weights
 from tpu_inference.layers.common.quantization import fp8 as common_fp8
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
-from tpu_inference.models.jax.utils.weight_utils import \
-    load_nnx_param_from_reshaped_torch
+from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.utils.weight_utils import (
+    load_nnx_param_from_reshaped_torch, shard_put)
+
+logger = init_logger(__name__)
+
+
+def load_fp8_weight(jax_param: nnx.Param, torch_weight: torch.Tensor,
+                    param_name: str):
+    """Loads FP8 weights from a torch tensor into a JAX parameter.
+
+    Args:
+        jax_param: The nnx parameter to hold the FP8 weight.
+        torch_weight: The source PyTorch tensor.
+        param_name: Name of the parameter.
+    """
+    spec = jax_param.sharding
+    if isinstance(jax_param.sharding, jax.sharding.NamedSharding):
+        spec = jax_param.sharding.spec
+    mesh = getattr(jax_param, 'mesh', None)
+
+    jax_weight = t2j(torch_weight, use_dlpack=False)
+
+    if jax_weight.dtype != jnp.float8_e4m3fn:
+        logger.warning(
+            f"Loading {param_name}: casting from {jax_weight.dtype} to {jax_param.value.dtype}"
+        )
+        jax_weight = jax_weight.astype(jax_param.value.dtype)
+
+    jax_param.value = shard_put(jax_weight, spec, mesh=mesh)
+
+
+class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
+                                common_fp8.Fp8LinearMethod):
+    """Tensorwise Fp8 method for JAX Linear layer."""
+
+    def create_weights_jax(self, layer: JaxModule, *weight_args, rngs,
+                           **extra_weight_attrs):
+        assert isinstance(layer, JaxEinsum)
+
+        # Derive shape and sharding from the existing layer weight
+        shape = layer.kernel_shape
+        sharding = layer.weight.sharding
+        if isinstance(sharding, jax.sharding.NamedSharding):
+            sharding = sharding.spec
+
+        weight_dtype = jnp.float8_e4m3fn
+        scale_dtype = jnp.float32
+
+        layer.weight = create_param(rngs,
+                                    shape=shape,
+                                    dtype=weight_dtype,
+                                    sharding=sharding)
+
+        # Attach custom loader to avoid default upcasting behavior
+        setattr(layer.weight, "weight_loader",
+                functools.partial(load_fp8_weight, param_name="weight"))
+
+        scale_shape = (shape[0], )
+        scale_sharding = None
+        if sharding:
+            if isinstance(sharding, (tuple, list)) and len(sharding) > 0:
+                scale_sharding = (sharding[0], )
+            elif isinstance(sharding, P) and len(sharding) > 0:
+                scale_sharding = P(sharding[0])
+
+        layer.weight_scale = create_param(rngs,
+                                          shape=scale_shape,
+                                          dtype=scale_dtype,
+                                          sharding=scale_sharding)
+
+    def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
+        bias = layer.bias.value if layer.bias is not None else None
+
+        return self._apply_fused(x,
+                                 layer.weight.value,
+                                 layer.weight_scale.value,
+                                 bias=bias)
 
 
 class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
-    """Block-wise Fp8 method for JAX Linear layer."""
+    """Blockwise Fp8 method for JAX Linear layer."""
 
     def __init__(self, quant_config: "Fp8Config", layer: JaxEinsum,
                  linear_config: QuantLinearConfig):
@@ -189,4 +270,6 @@ class Fp8Config(QuantizationConfig):
                 output_sizes=[layer.weight.shape[-1]], enable_sp=False)
             if self.weight_block_size is not None:
                 return Fp8BlockwiseLinearMethod(self, layer, linear_config)
+            else:
+                return Fp8TensorwiseLinearMethod(linear_config)
         return None

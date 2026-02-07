@@ -13,12 +13,16 @@
 # limitations under the License.
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
+import torch
 from flax import nnx
 
+from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
-from tpu_inference.layers.jax.quantization.fp8 import Fp8Config
+from tpu_inference.layers.jax.quantization.fp8 import (
+    Fp8Config, Fp8TensorwiseLinearMethod)
 
 
 @pytest.fixture
@@ -101,3 +105,31 @@ class TestFp8BlockwiseJaxLinear:
         # Output shape should be (B, N, H)
         expected_shape = (batch_size, ) + kernel_shape[1:]
         assert output.shape == expected_shape
+
+
+class TestFp8TensorwiseJaxLinear:
+
+    def test_fp8_linear_method_create_weights(self, rngs):
+        layer = JaxEinsum("ab,bc->ac", (32, 16), rngs, bias_shape=None)
+        config = QuantLinearConfig(enable_sp=False, output_sizes=[32])
+        method = Fp8TensorwiseLinearMethod(config)
+        method.create_weights_jax(layer, rngs=rngs)
+
+        assert hasattr(layer, 'weight')
+        assert hasattr(layer, 'weight_scale')
+        assert layer.weight.value.dtype == jnp.float8_e4m3fn
+        assert layer.weight_scale.value.dtype == jnp.float32
+        assert layer.weight.value.shape == (32, 16)
+        assert layer.weight_scale.value.shape == (32, )
+        assert hasattr(layer.weight, 'weight_loader')
+
+    def test_fp8_loader_prevents_upcast(self, rngs):
+        layer = JaxEinsum("ab,bc->ac", (4, 2), rngs, bias_shape=None)
+        config = QuantLinearConfig(enable_sp=False, output_sizes=[32])
+        method = Fp8TensorwiseLinearMethod(config)
+        method.create_weights_jax(layer, rngs=rngs)
+
+        torch_fp8 = torch.zeros((4, 2), dtype=torch.float8_e4m3fn)
+        layer.weight.weight_loader(layer.weight, torch_fp8)
+
+        assert layer.weight.value.dtype == jnp.float8_e4m3fn
