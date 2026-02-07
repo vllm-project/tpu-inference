@@ -38,7 +38,7 @@ def _get_x_q_dtype(w_q_dtype: jnp.dtype) -> jnp.dtype:
 def sharded_quantized_matmul(x: jax.Array,
                              w_q: jax.Array,
                              w_s: jax.Array,
-                             weight_sharding: P,
+                             weight_sharding: P | NamedSharding,
                              *,
                              mesh: Mesh | None = None) -> jax.Array:
     """
@@ -48,16 +48,23 @@ def sharded_quantized_matmul(x: jax.Array,
         x:  Activation.
         w_q: Weight quantized array. [n_output_features, n_input_features]
         w_s: Weight quantization scale. [n_output_features] for xla quantized matmul, [n_blocks, 1, n_output_features] for quantized matmul kernel
-        weight_sharding: PartitionSpec for the weight tensor.
+        weight_sharding: PartitionSpec or NamedSharding for the weight tensor.
         mesh: (Optional) Mesh to shard on. If None, mesh from current context is used, similar to jax.shard_map().
 
     Returns:
         Output of the quantized matmul.
     """
 
+    if isinstance(weight_sharding, NamedSharding):
+        if mesh is None:
+            mesh = weight_sharding.mesh
+        weight_spec = weight_sharding.spec
+    else:
+        weight_spec = weight_sharding
+
     # NOTE (jacobplatin/kyuyeunk) there have been numeric issues (concerning) NaNs
     # with the kernel and thus we disable it for now.
-    out_axis, in_axis = weight_sharding
+    out_axis, in_axis = weight_spec
     x_sharding = P(None, in_axis)
     enable_quantized_matmul_kernel = len(w_s.shape) == 3
     if enable_quantized_matmul_kernel:
@@ -95,7 +102,7 @@ def sharded_quantized_matmul(x: jax.Array,
     return jax.shard_map(
         wrapper,
         mesh=mesh,
-        in_specs=(x_sharding, weight_sharding, scale_sharding),
+        in_specs=(x_sharding, weight_spec, scale_sharding),
         out_specs=(out_sharding),
         check_vma=False,
     )(x, w_q, w_s)
