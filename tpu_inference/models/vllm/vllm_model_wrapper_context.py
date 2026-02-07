@@ -25,6 +25,7 @@ class VllmModelWrapperContext:
     kv_caches: List[jax.Array]
     mesh: Mesh
     layer_name_to_kvcache_index: Dict[str, int]
+    ratios: List[jax.Array]
 
 
 _vllm_model_wrapper_context: Optional[VllmModelWrapperContext] = None
@@ -51,6 +52,7 @@ def set_vllm_model_wrapper_context(
         kv_caches=kv_caches,
         mesh=mesh,
         layer_name_to_kvcache_index=layer_name_to_kvcache_index,
+        ratios=[],
     )
 
     try:

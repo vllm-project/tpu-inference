@@ -24,6 +24,8 @@ from tpu_inference.kernels.megablox.gmm import gmm
 from tpu_inference.kernels.megablox.gmm_v2 import (gmm_v2,
                                                    is_supported_by_gmm_v2)
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.models.vllm.vllm_model_wrapper_context import \
+    get_vllm_model_wrapper_context
 from tpu_inference.utils import get_mesh_shape_product
 
 
@@ -280,14 +282,14 @@ def expert_parallel_gmm(
     )
 
 
-@jax.jit(static_argnames=(
-    "topk",
-    "renormalize",
-    "mesh",
-    "use_ep",
-    "activation",
-    "scoring_fn",
-))
+# @jax.jit(static_argnames=(
+#     "topk",
+#     "renormalize",
+#     "mesh",
+#     "use_ep",
+#     "activation",
+#     "scoring_fn",
+# ))
 def fused_moe_func(
     hidden_states: jax.Array,
     w1: jax.Array,
@@ -375,6 +377,8 @@ def fused_moe_func(
         ),
     )(hidden_states, topk_indices)
 
+    ratio = jnp.count_nonzero(group_sizes) / global_num_experts
+    get_vllm_model_wrapper_context().ratios.append(ratio)
     x = jnp.pad(x, ((0, 0), (0, padded_hidden_size - hidden_size)))
 
     if use_ep:
