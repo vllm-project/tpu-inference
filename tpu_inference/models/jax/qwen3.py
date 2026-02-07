@@ -168,6 +168,7 @@ class Qwen3Attention(JaxModule):
             v_scale = self._v_scale
             k, v = quantize_kv(self.kv_cache_quantized_dtype, k, v, k_scale,
                                v_scale)
+
         new_kv_cache, outputs = attention(
             kv_cache,
             q,

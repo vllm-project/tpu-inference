@@ -356,6 +356,7 @@ class Qwen2Model(JaxModule):
             x = inputs_embeds
         else:
             x = self.embed_tokens(input_ids)
+
         for i, layer in enumerate(
                 islice(self.layers, self.start_layer, self.end_layer)):
             kv_cache = kv_caches[i]
