@@ -67,54 +67,76 @@ def load_fp8_weight(jax_param: nnx.Param, torch_weight: torch.Tensor,
 
 class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
                                 common_fp8.Fp8LinearMethod):
-    """Tensorwise Fp8 method for JAX Linear layer."""
+    """Tensor-wise Fp8 method for JAX Linear layer."""
+
+    def __init__(self, layer: JaxEinsum, linear_config: QuantLinearConfig):
+        common_fp8.Fp8LinearMethod.__init__(self, linear_config)
+
+        kernel_shape = layer.kernel_shape
+        if len(kernel_shape) > 2:
+            adapt_info = linear_config.get_adapt_info(
+                einsum_str=layer.einsum_str, weight=layer.weight)
+            self.weight_sharding = adapt_info.weight_sharding
+            self.output_shape = adapt_info.output_shape
+            out_features = math.prod(self.output_shape)
+            in_features = math.prod(adapt_info.in_features)
+        else:
+            in_features, out_features = kernel_shape
+            # Reverse sharding to match transposed weight layout (out, in).
+            sharding = layer.weight.sharding
+            if isinstance(sharding, jax.sharding.NamedSharding):
+                sharding = sharding.spec
+            if isinstance(sharding, P) and len(sharding) == 2:
+                sharding = P(sharding[1], sharding[0])
+            elif isinstance(sharding, (tuple, list)) and len(sharding) == 2:
+                sharding = (sharding[1], sharding[0])
+            self.weight_sharding = sharding
+            self.output_shape = (out_features, )
+
+        self.linear_config.output_sizes = [out_features]
+        self.in_features = in_features
 
     def create_weights_jax(self, layer: JaxModule, *weight_args, rngs,
                            **extra_weight_attrs):
         assert isinstance(layer, JaxEinsum)
 
-        # Derive shape and sharding from the existing layer weight
-        shape = layer.kernel_shape
-        sharding = layer.weight.sharding
-        if isinstance(sharding, jax.sharding.NamedSharding):
-            sharding = sharding.spec
-
-        weight_dtype = jnp.float8_e4m3fn
-        scale_dtype = jnp.float32
+        out_features = sum(self.linear_config.output_sizes)
 
         layer.weight = create_param(rngs,
-                                    shape=shape,
-                                    dtype=weight_dtype,
-                                    sharding=sharding)
+                                    shape=(out_features, self.in_features),
+                                    dtype=jnp.float8_e4m3fn,
+                                    sharding=self.weight_sharding)
 
         # Attach custom loader to avoid default upcasting behavior
         setattr(layer.weight, "weight_loader",
                 functools.partial(load_fp8_weight, param_name="weight"))
 
-        scale_shape = (shape[0], )
         scale_sharding = None
-        if sharding:
-            if isinstance(sharding, (tuple, list)) and len(sharding) > 0:
-                scale_sharding = (sharding[0], )
-            elif isinstance(sharding, P) and len(sharding) > 0:
-                scale_sharding = P(sharding[0])
+        if isinstance(self.weight_sharding, P) and len(
+                self.weight_sharding) > 0:
+            scale_sharding = P(self.weight_sharding[0])
+        elif isinstance(self.weight_sharding,
+                        (tuple, list)) and len(self.weight_sharding) > 0:
+            scale_sharding = (self.weight_sharding[0], )
 
         layer.weight_scale = create_param(rngs,
-                                          shape=scale_shape,
-                                          dtype=scale_dtype,
+                                          shape=(out_features, ),
+                                          dtype=jnp.float32,
                                           sharding=scale_sharding)
 
     def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
         bias = layer.bias.value if layer.bias is not None else None
 
-        return self._apply_fused(x,
-                                 layer.weight.value,
-                                 layer.weight_scale.value,
-                                 bias=bias)
+        out = self._apply_fused(x,
+                                layer.weight.value,
+                                layer.weight_scale.value,
+                                bias=bias)
+        out = out.reshape(out.shape[:-1] + self.output_shape)
+        return out
 
 
 class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
-    """Blockwise Fp8 method for JAX Linear layer."""
+    """Block-wise Fp8 method for JAX Linear layer."""
 
     def __init__(self, quant_config: "Fp8Config", layer: JaxEinsum,
                  linear_config: QuantLinearConfig):
@@ -271,5 +293,5 @@ class Fp8Config(QuantizationConfig):
             if self.weight_block_size is not None:
                 return Fp8BlockwiseLinearMethod(self, layer, linear_config)
             else:
-                return Fp8TensorwiseLinearMethod(linear_config)
+                return Fp8TensorwiseLinearMethod(layer, linear_config)
         return None
