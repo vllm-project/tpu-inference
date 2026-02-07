@@ -79,9 +79,9 @@ def reduce_scatter_matmul_kernel(
   m, k_per_dev = x_ref.shape
   n, _ = y_ref.shape
   # TODO(xw32): temp assertion. Remove before merging.
-  assert m == 768
-  assert n == 512
-  assert k_per_dev == 128
+  # assert m == 768
+  # assert n == 512
+  # assert k_per_dev == 128
 
   m_shard_sz = m//num_devices
   n_shard_sz = n//2
@@ -190,13 +190,14 @@ def reduce_scatter_matmul_kernel(
     # With should_accumulate_out=False, emit_pipeline does NOT load the
     # existing HBM output into VMEM. We pass the scratch as an explicit input
     # (prev_z_ref) so the received DMA data is loaded from HBM into VMEM.
-    @pl.when(outer_idx == 0)
+    @pl.when(jnp.logical_and(outer_idx == 0, pl.program_id(2) == 0))
     def _():
       z_ref[...] = jnp.zeros_like(z_ref, dtype=jnp.float32)
       
     # Why having prev_z_ref?: emit_pipeline with should_accumulate_out=False does not load the existing HBM output into VMEM. The VMEM output buffer retains stale data from the previous pipeline call. Since LEFT and RIGHT matmul share the same pipeline, the LEFT result leaked into the RIGHT's VMEM accumulator at outer_idx=1, adding an extra 128.
     # Fix: Added prev_z_ref as a third input to the pipeline (same HBM ref as the output). The kernel explicitly initializes z_ref from prev_z_ref when outer_idx != 0, ensuring the DMA-received data is properly loaded from HBM rather than relying on stale VMEM state.
-    @pl.when(outer_idx != 0)
+    
+    @pl.when(jnp.logical_and(outer_idx != 0, pl.program_id(2) == 0))
     def _():
       z_ref[...] = prev_z_ref[...].astype(jnp.float32)
     z_ref[...] += jax.lax.dot_general(
@@ -229,8 +230,8 @@ def reduce_scatter_matmul_kernel(
       y_left_ref = y_ref.at[left_copy_slice, :]
 
       # TODO(xw32): remove the special case assert
-      assert x_left_ref.shape == (384, 128)
-      assert y_left_ref.shape == (256, 128)
+      # assert x_left_ref.shape == (384, 128)
+      # assert y_left_ref.shape == (256, 128)
 
       left_hbm_scratch_ref = left_hbm_scratch.at[left_working_slot]
       matmul_pipeline(
@@ -249,8 +250,8 @@ def reduce_scatter_matmul_kernel(
       right_hbm_scratch_ref = right_hbm_scratch.at[right_working_slot]
 
       # TODO(xw32): remove the special case assert
-      assert x_right_ref.shape == (384, 128)
-      assert y_right_ref.shape == (256, 128)
+      # assert x_right_ref.shape == (384, 128)
+      # assert y_right_ref.shape == (256, 128)
 
       matmul_pipeline(
           x_right_ref,
@@ -375,9 +376,9 @@ def reduce_scatter_matmul(
   m, k = x.shape
   n, _ = y.shape
   # TODO(xw32): temp assertion. Remove before merging.
-  assert m == 768
-  assert n == 512
-  assert k == 128
+  # assert m == 768
+  # assert n == 512
+  # assert k == 128
 
   num_devices = jax.lax.psum(1, axis_name)
   out_shape = (
