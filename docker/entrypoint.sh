@@ -45,4 +45,5 @@ fi
 
 # Default: Start vLLM OpenAI-compatible API server
 echo "Starting vLLM OpenAI-compatible API server..."
+# shellcheck disable=SC2086  # Word splitting is intentional for VLLM_ARGS
 exec python3 -m vllm.entrypoints.openai.api_server ${VLLM_ARGS:-}
