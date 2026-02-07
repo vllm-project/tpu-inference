@@ -74,8 +74,9 @@ class CompilationManager:
                          **kwargs) -> None:
         logger.info(f"Precompile {name} --> {kwargs}")
         start = time.perf_counter()
-        result = fn(*args)
-        jax.tree.map(lambda r: r.block_until_ready(), result)
+        with jax.set_mesh(self.runner.mesh):
+            result = fn(*args)
+            jax.tree.map(lambda r: r.block_until_ready(), result)
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
 
