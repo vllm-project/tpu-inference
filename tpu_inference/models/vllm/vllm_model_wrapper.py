@@ -193,6 +193,7 @@ class VllmModelWrapper:
                 NamedSharding(self.mesh,
                               PartitionSpec(ShardingAxisName.MLP_DATA, None)),
                 None,  # empty list
+                None,
             ),
             compiler_options={
                 "xla_tpu_all_gather_collective_matmul_mode":
@@ -246,15 +247,50 @@ class VllmModelWrapper:
                                       self.vllm_config.lora_config)
                 vllm_model_wrapper_context = get_vllm_model_wrapper_context()
                 new_kv_caches = vllm_model_wrapper_context.kv_caches
+                ratios = vllm_model_wrapper_context.ratios
             # Wrap the output(hidden states or intermediate tensor)
             # from torch land into a JaxValue for the jax code to consume.
             if not is_last_rank:
                 output = JaxIntermediateTensors.from_torch(output_from_torch)
             else:
                 output = jax_view(output_from_torch)
-            return new_kv_caches, output, []
+            return new_kv_caches, output, [], ratios
 
-        return step_fun
+        def wrapper(
+            params_and_buffers,  # This has been wrapped into torchax TorchValue
+            kv_caches: List[jax.Array],
+            input_ids: jax.Array,
+            attn_metadata: AttentionMetadata,
+            input_embeds: jax.Array,
+            input_positions: jax.Array,
+            layer_name_to_kvcache_index: Sequence[Tuple[str, int]],
+            lora_metadata,
+            intermediate_tensors: JaxIntermediateTensors = None,
+            is_first_rank: bool = True,
+            is_last_rank: bool = True,
+            *args,
+        ):
+            outs = step_fun(
+                params_and_buffers,
+                kv_caches,
+                input_ids,
+                attn_metadata,
+                input_embeds,
+                input_positions,
+                layer_name_to_kvcache_index,
+                lora_metadata,
+                intermediate_tensors,
+                is_first_rank,
+                is_last_rank,
+                *args,
+            )
+            ratios = jax.tree.map(lambda x: x.tolist(), outs[-1])
+            average_ratio = sum(ratios) / len(ratios)
+            print(f"ratios of active experts: {ratios=}")
+            print(f"average ratio of active experts: {average_ratio=}")
+            return outs[:-1]
+
+        return wrapper
 
     def jit_compute_logits_func(self):
 
