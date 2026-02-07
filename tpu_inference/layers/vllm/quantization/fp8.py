@@ -49,7 +49,8 @@ from tpu_inference.layers.vllm.quantization.configs import (
 from tpu_inference.layers.vllm.quantization.unquantized import (
     VllmUnquantizedFusedMoEMethod, VllmUnquantizedLinearMethod)
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import get_mesh_shape_product
+from tpu_inference.utils import (device_array, get_mesh_shape_product,
+                                 time_function)
 
 P = PartitionSpec
 
@@ -113,20 +114,25 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
                 "Blockwise quantization is supported by quantized matmul kernel. Please enable quantized_matmul_kernel or unset the quantize block size to trigger XLA per-channel quantization."
             )
 
+    @time_function
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         assert isinstance(layer, vllm_linear.LinearBase)
 
         assert self.block_quant
-        weight = t2j(layer.weight, use_dlpack=False)
+        weight = device_array(self.linear_config.mesh,
+                              t2j(layer.weight, use_dlpack=False))
         delattr(layer, "weight")
 
-        weight_scale = t2j(layer.weight_scale_inv, use_dlpack=False)
+        weight_scale = device_array(
+            self.linear_config.mesh,
+            t2j(layer.weight_scale_inv, use_dlpack=False))
         delattr(layer, "weight_scale_inv")
 
         if layer.bias is not None and not layer.skip_bias_add:
             if layer.return_bias:
                 logger.warning_once("Bias might return incorrect value.")
-            bias = t2j(layer.bias, use_dlpack=False)
+            bias = device_array(self.linear_config.mesh,
+                                t2j(layer.bias, use_dlpack=False))
             delattr(layer, "bias")
         else:
             bias = None
