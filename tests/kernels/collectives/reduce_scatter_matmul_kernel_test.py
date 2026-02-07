@@ -114,10 +114,10 @@ class ReduceScatterMatmulTest(jtu.JaxTestCase):
   # blaze test -c opt --test_output=errors //experimental/users/jevinjiang/ullm:tests/reduce_scatter_matmul_test --test_filter=test_basic_reduce_scatter_matmul_kernel_on_bs --test_arg=--xla_tpu_enable_log_recorder
   # Minimum test with 2 devices.
   @parameterized.product(
-      num_devices=[2],  # change to [1, 2, 8]
-      grid_m=[1],  # change to [1, 2, 3]
-      grid_k=[1],  # change to [1, 2, 3]
-      grid_n=[1],  # change to [1, 2, 3]
+      num_devices=[8],  # change to [1, 2, 8]
+      grid_m=[1, 2],  # change to [1, 2, 3]
+      grid_k=[1, 2],  # change to [1, 2, 3]
+      grid_n=[1, 2],  # change to [1, 2, 3]
   )
   def test_basic_reduce_scatter_matmul_kernel_on_bs(self, num_devices, grid_m, grid_k, grid_n):
     dtype = jnp.float32
