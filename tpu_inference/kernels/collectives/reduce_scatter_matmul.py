@@ -186,16 +186,19 @@ def reduce_scatter_matmul_kernel(
       left_copy.start()
 
   # --- Body ---
-  def inner_matmul_kernel(x_ref, y_ref, z_ref):
-    # @pl.when(pl.program_id(2) == 0)
-    # def _():
-    #   z_ref[...] = jnp.zeros_like(z_ref)
-    # Accumulator should be in float32.
-    # z_ref[...] += (x_ref[...] @ y_ref[...].T).astype(jnp.float32)
-    # dimension_numbers: ((lhs_contracting_dims, rhs_contracting_dims), (lhs_batch_dims, rhs_batch_dims))
+  def inner_matmul_kernel(x_ref, y_ref, prev_z_ref, z_ref):
+    # With should_accumulate_out=False, emit_pipeline does NOT load the
+    # existing HBM output into VMEM. We pass the scratch as an explicit input
+    # (prev_z_ref) so the received DMA data is loaded from HBM into VMEM.
     @pl.when(outer_idx == 0)
     def _():
       z_ref[...] = jnp.zeros_like(z_ref, dtype=jnp.float32)
+      
+    # Why having prev_z_ref?: emit_pipeline with should_accumulate_out=False does not load the existing HBM output into VMEM. The VMEM output buffer retains stale data from the previous pipeline call. Since LEFT and RIGHT matmul share the same pipeline, the LEFT result leaked into the RIGHT's VMEM accumulator at outer_idx=1, adding an extra 128.
+    # Fix: Added prev_z_ref as a third input to the pipeline (same HBM ref as the output). The kernel explicitly initializes z_ref from prev_z_ref when outer_idx != 0, ensuring the DMA-received data is properly loaded from HBM rather than relying on stale VMEM state.
+    @pl.when(outer_idx != 0)
+    def _():
+      z_ref[...] = prev_z_ref[...].astype(jnp.float32)
     z_ref[...] += jax.lax.dot_general(
         x_ref[...],
         y_ref[...],
@@ -205,10 +208,10 @@ def reduce_scatter_matmul_kernel(
   matmul_pipeline = pltpu.emit_pipeline(
       inner_matmul_kernel,
       in_specs=[pl.BlockSpec((bm, bk), lambda i, j, k: (i, k)),
-                pl.BlockSpec((bn, bk), lambda i, j, k: (j, k))],
+                pl.BlockSpec((bn, bk), lambda i, j, k: (j, k)),
+                pl.BlockSpec((bm, bn), lambda i, j, k: (i, j))],
       out_specs=pl.BlockSpec((bm, bn), lambda i, j, k: (i, j)),
       should_accumulate_out=False,
-      # m_shard_sz=384, n_shard_sz=256, k_per_dev=128, bm=384, bn=256, bk=128 xw32: temp comments.
       grid=(m_shard_sz//bm, n_shard_sz//bn, k_per_dev//bk),
       dimension_semantics=(pltpu.PARALLEL, pltpu.PARALLEL, pltpu.ARBITRARY),
   )
@@ -234,6 +237,7 @@ def reduce_scatter_matmul_kernel(
           x_left_ref,
           y_left_ref,
           left_hbm_scratch_ref,
+          left_hbm_scratch_ref,
       )
 
     @pl.when(phase_idx == RIGHT)
@@ -251,6 +255,7 @@ def reduce_scatter_matmul_kernel(
       matmul_pipeline(
           x_right_ref,
           y_right_ref,
+          right_hbm_scratch_ref,
           right_hbm_scratch_ref,
       )
 
