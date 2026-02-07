@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     TPU_OFFLOAD_NUM_CPU_CHUNKS: int = 1024
     TPU_OFFLOAD_NUM_STAGING_BLOCKS: int = 128
     TPU_OFFLOAD_SAVE_THREADS: int = 1
+    TPU_OFFLOAD_BATCHED_SAVE: bool = False
 
 
 def env_with_choices(
@@ -146,6 +147,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # kv offload to dram: number of threads for asynchronous TPU -> CPU data transfer
     "TPU_OFFLOAD_SAVE_THREADS":
     lambda: int(os.getenv("TPU_OFFLOAD_SAVE_THREADS", "1")),
+    # kv offload to dram: batch multiple requests' save operations into a single swap call
+    "TPU_OFFLOAD_BATCHED_SAVE":
+    lambda: bool(int(os.getenv("TPU_OFFLOAD_BATCHED_SAVE", "0"))),
 }
 
 
