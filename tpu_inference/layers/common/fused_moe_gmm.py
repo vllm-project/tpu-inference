@@ -23,7 +23,7 @@ from tpu_inference.kernels.megablox.gmm import gmm
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
-from tpu_inference.utils import get_mesh_shape_product
+from tpu_inference.utils import align_to, get_mesh_shape_product
 
 
 def apply_scoring_fn(scoring_fn: str, x: jax.Array) -> jax.Array:
@@ -431,7 +431,8 @@ def fused_moe_func(
                      None), P(ShardingAxisName.MLP_DATA),
                    P(ShardingAxisName.MLP_DATA)))(hidden_states, topk_indices)
 
-    x = jnp.pad(x, ((0, 0), (0, padded_hidden_size - hidden_size)))
+    x = jnp.pad(x, ((0, align_to(x.shape[0], 128) - x.shape[0]),
+                    (0, padded_hidden_size - hidden_size)))
 
     if use_ep:
         x = expert_sharded_gmm(
