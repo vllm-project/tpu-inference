@@ -243,9 +243,11 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
             # Dequantize fp8 2d block quantized weights into fp32.
             w13_weight = dequantize_tensor(w13_weight,
                                            w13_weight_scale, (1, 2),
+                                           jnp.float32,
                                            block_size=self.weight_block_size)
             w2_weight = dequantize_tensor(w2_weight,
                                           w2_weight_scale, (1, 2),
+                                          jnp.float32,
                                           block_size=self.weight_block_size)
 
             w13_interleave = layer.activation == "swigluoai"
