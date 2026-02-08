@@ -31,8 +31,8 @@ from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 
-from tpu_inference import envs
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.utils import general_device_put
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import to_jax_dtype
 
@@ -105,7 +105,7 @@ def _convert_to_torchax_and_shard(tensor: torch.Tensor,
             tensor = jax_view(tensor)
         else:
             tensor = t2j(tensor)
-        return torch_view(_sharded_device_put(tensor, sharding))
+        return torch_view(general_device_put(tensor, sharding))
 
 
 def _shard_tensor_to_tpu_replicated(tensor: torch.Tensor,
@@ -216,24 +216,3 @@ def _shard_module_to_tpu(model: torch.nn.Module, mesh: Mesh) -> None:
                 logger.debug("shard %s with %s", path, sharding_func)
                 sharding_func(module, mesh)
                 break
-
-
-def _sharded_device_put(tensor: jax.Array, sharding) -> jax.Array:
-    if isinstance(tensor, tuple):
-        return tuple(_sharded_device_put(t, sharding) for t in tensor)
-    multihost_backend = envs.TPU_MULTIHOST_BACKEND
-    if multihost_backend != "ray":
-        return jax.device_put(tensor, sharding)
-
-    # NOTE: at here, num_global_devices != num_local_devices
-    # meaning we are in multi-host setup. Each host will run the same process
-    # and each process only need to handle the devices accessible to this host.
-    shape = tensor.shape
-    x_split = [
-        jax.device_put(tensor[i], device) for device, i in
-        sharding.addressable_devices_indices_map(shape).items()
-    ]
-    return jax.make_array_from_single_device_arrays(shape,
-                                                    sharding,
-                                                    x_split,
-                                                    dtype=tensor.dtype)

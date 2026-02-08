@@ -14,6 +14,9 @@
 
 import jax
 import jax.numpy as jnp
+from jax.experimental.layout import Format
+
+from tpu_inference import envs
 
 
 def reorder_concatenated_tensor_for_sharding(concatenated_tensor: jax.Array,
@@ -92,3 +95,31 @@ def slice_sharded_tensor_for_concatenation(sharded_tensor: jax.Array,
         start_offset = end_offset
 
     return split_tensors
+
+
+def general_device_put(tensor: jax.Array, sharding, layout=None) -> jax.Array:
+    """
+    Put a tensor onto devices with the given sharding.
+    This method handles both single-host and multi-host cases.
+    """
+    if isinstance(tensor, tuple):
+        return tuple(general_device_put(t, sharding, layout) for t in tensor)
+    multihost_backend = envs.TPU_MULTIHOST_BACKEND
+    if multihost_backend != "ray":
+        return jax.device_put(tensor, sharding)
+
+    # NOTE: at here, num_global_devices != num_local_devices
+    # meaning we are in multi-host setup. Each host will run the same process
+    # and each process only need to handle the devices accessible to this host.
+    shape = tensor.shape
+    x_split = [
+        jax.device_put(tensor[i], device) for device, i in
+        sharding.addressable_devices_indices_map(shape).items()
+    ]
+    global_array = jax.make_array_from_single_device_arrays(shape,
+                                                            sharding,
+                                                            x_split,
+                                                            dtype=tensor.dtype)
+    if layout is not None:
+        global_array = jax.device_put(global_array, Format(layout, sharding))
+    return global_array

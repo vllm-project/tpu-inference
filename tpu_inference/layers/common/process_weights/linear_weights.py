@@ -22,8 +22,8 @@ from torch.nn import ParameterList
 from torch.nn.parameter import Parameter
 from torchax.tensor import Tensor
 
-from tpu_inference.layers.common.utils import \
-    reorder_concatenated_tensor_for_sharding
+from tpu_inference.layers.common.utils import (
+    general_device_put, reorder_concatenated_tensor_for_sharding)
 from tpu_inference.logger import init_logger
 
 P = PartitionSpec
@@ -187,6 +187,6 @@ def shard_linear_weights(
         key = field.name
         if (weight := getattr(weights, key, None)) is not None:
             sharding = getattr(weight_shardings, key)
-            weight = jax.device_put(weight, sharding)
+            weight = general_device_put(weight, sharding)
             setattr(weights, key, weight)
     return weights
