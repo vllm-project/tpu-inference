@@ -161,3 +161,11 @@ class TestFp8TensorwiseJaxLinear:
             output = layer(x)
 
         assert output.shape == (batch_size, out_features)
+
+
+class TestFp8Config:
+
+    def test_skip_layers(self):
+        """Test that if quantization_config has ignored layers, those layers are skipped from quantization."""
+        # TODO: prepare MLP with 2 linear layers, set one to be ignored in quantization config, and check that only the other one is quantized.
+        pass
