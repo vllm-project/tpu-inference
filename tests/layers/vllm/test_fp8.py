@@ -497,7 +497,7 @@ def test_fused_moe(use_ep, num_devices, num_tokens, intermediate_size,
                                    actual,
                                    check_device=False,
                                    atol=2e-2,
-                                   rtol=1e-1)
+                                   rtol=5e-2)
 
 
 @pytest.mark.parametrize("requant_block_size", (128, 512))
