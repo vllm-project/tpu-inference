@@ -62,6 +62,9 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
         self.weight_block_size = self.weight_quant.block_structure
 
         if self.weight_block_size is not None:
+            self.cutlass_block_fp8_supported = False
+            self.use_aiter_and_is_supported = False
+
             assert not self.is_static_input_scheme
             self.act_q_group_shape = GroupShape(1, self.weight_block_size[0])
             self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
