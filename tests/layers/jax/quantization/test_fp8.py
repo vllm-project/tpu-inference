@@ -376,12 +376,12 @@ class TestFp8Config:
                                        out_features,
                                        rngs=rngs,
                                        quant_config=quant_config,
-                                       prefix="proj1")
+                                       prefix=prefix + ".proj1")
                 self.proj2 = JaxLinear(in_features,
                                        out_features,
                                        rngs=rngs,
                                        quant_config=quant_config,
-                                       prefix="proj2")
+                                       prefix=prefix + ".proj2")
 
             def __call__(self, x):
                 return self.proj2(self.proj1(x))
