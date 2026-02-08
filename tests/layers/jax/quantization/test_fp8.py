@@ -355,3 +355,11 @@ class TestFp8FusedMoE:
             actual = layer(a).astype(expected.dtype)
 
         assert jnp.allclose(expected, actual, atol=2.5e-2, rtol=1e-1)
+
+
+class TestFp8Config:
+
+    def test_skip_layers(self):
+        """Test that if quantization_config has ignored layers, those layers are skipped from quantization."""
+        # TODO: prepare MLP with 2 linear layers, set one to be ignored in quantization config, and check that only the other one is quantized.
+        pass

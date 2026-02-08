@@ -37,6 +37,8 @@ from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
+from tpu_inference.layers.jax.quantization.unquantized import \
+    UnquantizedLinearMethod
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
     load_nnx_param_from_reshaped_torch, shard_put)
@@ -487,6 +489,9 @@ class Fp8Config(QuantizationConfig):
         if isinstance(layer, JaxEinsum):
             linear_config = QuantLinearConfig(
                 output_sizes=[layer.weight.shape[-1]], enable_sp=False)
+            if self.is_layer_skipped(prefix,
+                                     ignored_layers=self.ignored_layers):
+                return UnquantizedLinearMethod(linear_config)
             if self.weight_block_size is not None:
                 return Fp8BlockwiseLinearMethod(self, layer, linear_config)
             else:
