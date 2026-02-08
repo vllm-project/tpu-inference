@@ -30,6 +30,7 @@ from tpu_inference.distributed.jax_parallel_state import \
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     get_kv_cache_shape
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
 from tpu_inference.models.jax.qwen3 import Qwen3ForCausalLM
 from tpu_inference.models.jax.utils.qwix.qwix_utils import \
     apply_qwix_quantization
@@ -196,13 +197,17 @@ class TestQwen3ForCausalLM:
         logits = model.compute_logits(hidden_states)
         assert logits.shape == (1, hf_config.vocab_size)
 
+    @pytest.mark.parametrize("model_name",
+                             ["Qwen/Qwen3-0.6B", "Qwen/Qwen3-0.6B-FP8"])
     @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
                                                        (3, 4)])
-    def test_model_loading(self, pp_rank, pp_world_size, rng, mesh):
+    def test_model_loading(self, model_name, pp_rank, pp_world_size, rng,
+                           mesh):
         """Tests loading weights from HF model"""
-        model_name = "Qwen/Qwen3-0.6B"
         kv_cache_type = "auto"
         mock_vllm_config = MockVllmConfig(model_name, kv_cache_type)
+        # No need to load full model.
+        mock_vllm_config.model_config.hf_overrides = {"num_hidden_layers": 3}
 
         init_pp_distributed_environment(
             ip="",
@@ -211,6 +216,8 @@ class TestQwen3ForCausalLM:
             device=jax.devices()[0],
             need_pp=False,
         )
+        mock_vllm_config.quant_config = get_tpu_quantization_config(
+            mock_vllm_config)
 
         model_dim = mock_vllm_config.model_config.hf_config.hidden_size
         model_config = mock_vllm_config.model_config
@@ -239,17 +246,19 @@ class TestQwen3ForCausalLM:
         cache_shape = get_kv_cache_shape(num_blocks, block_size,
                                          num_key_value_heads, qk_head_dim,
                                          kv_dtype)
-        jax_output, _ = jax_layer_0(
-            kv_cache=jnp.zeros(cache_shape, dtype=kv_dtype),
-            x=input_tensor_jax,
-            attention_metadata=AttentionMetadata(
-                input_positions=jnp.array(seq_len),
-                block_tables=jnp.array(list(range(1))),
-                seq_lens=jnp.array([seq_len]),
-                query_start_loc=jnp.array([0, seq_len]),
-                request_distribution=jnp.array([0, 0, 1]),
-            ),
-        )
+
+        with jax.set_mesh(mesh):
+            jax_output, _ = jax_layer_0(
+                kv_cache=jnp.zeros(cache_shape, dtype=kv_dtype),
+                x=input_tensor_jax,
+                attention_metadata=AttentionMetadata(
+                    input_positions=jnp.array(seq_len),
+                    block_tables=jnp.array(list(range(1))),
+                    seq_lens=jnp.array([seq_len]),
+                    query_start_loc=jnp.array([0, seq_len]),
+                    request_distribution=jnp.array([0, 0, 1]),
+                ),
+            )
         assert jax_output is not None
 
         # TODO(#1604): Enable HF comparison when issue resolved.

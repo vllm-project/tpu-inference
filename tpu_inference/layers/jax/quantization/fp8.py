@@ -148,17 +148,16 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             adapt_info = linear_config.get_adapt_info(
                 einsum_str=layer.einsum_str, weight=layer.weight)
             self.weight_sharding = adapt_info.weight_sharding
-            self.output_shape = adapt_info.output_shape
-            out_features = math.prod(self.output_shape)
-            in_features = math.prod(adapt_info.in_features)
+            self.out_features = adapt_info.out_features
+            self.in_features = math.prod(adapt_info.in_features)
         else:
             in_features, out_features = kernel_shape
             self.weight_sharding = layer.weight.sharding
-            self.output_shape = (out_features, )
+            self.in_features = in_features
+            self.out_features = (out_features, )
 
         # Storing list of output sizes (instead of self.out_features) for compatibility.
-        self.linear_config.output_sizes = [out_features]
-        self.in_features = in_features
+        self.linear_config.output_sizes = [math.prod(self.out_features)]
 
     def create_weights_jax(self, layer: JaxModule, *weight_args, rngs,
                            **extra_weight_attrs):
@@ -169,13 +168,12 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         # Follow upstream limitation that only float8_e4m3 is supported.
         # https://github.com/vllm-project/vllm/blob/2a99c5a6c86daef8c766ba2dbf05c385b192c64b/vllm/model_executor/layers/quantization/fp8.py#L283-L284
         param_dtype = jnp.float8_e4m3
-        layer.weight = nnx.Param(kernel_init(rngs.params(),
-                                             (out_features, self.in_features),
-                                             param_dtype),
-                                 weight_loader=partial(
-                                     load_nnx_param_from_reshaped_torch,
-                                     permute_dims=(0, 1),
-                                 ))
+        layer.weight = nnx.Param(
+            kernel_init(rngs.params(), (out_features, self.in_features),
+                        param_dtype),
+            weight_loader=partial(load_nnx_param_from_reshaped_torch,
+                                  permute_dims=(0, 1),
+                                  param_name="linear_fp8_weight"))
         layer.weight.sharding = self.weight_sharding
 
         # Block-wise quantization scale
@@ -191,7 +189,9 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             weight_loader=partial(
                 load_nnx_param_from_reshaped_torch,
                 permute_dims=(0, 1),
+                param_name="linear_fp8_weight_scale_inv",
             ))
+        layer.weight_scale_inv.sharding = self.weight_sharding
 
     def process_weights_after_loading(self, layer):
         assert isinstance(layer, JaxEinsum)
@@ -240,8 +240,10 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 "Fp8 block-wise linear method only supports fuse_matmuls.")
         weight, scale = layer.weight.value, layer.weight_scale_inv.value
         bias = layer.bias.value if layer.bias is not None else None
+        if len(x.shape) > 2:
+            x = x.reshape(-1, self.in_features)
         out = self._apply_fused(x, weight, scale, bias=bias)
-        out = out.reshape(out.shape[:-1] + self.output_shape)
+        out = out.reshape(out.shape[:-1] + self.out_features)
         return out
 
 

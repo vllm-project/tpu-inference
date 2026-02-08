@@ -267,6 +267,17 @@ class Qwen3ForCausalLM(JaxModule, LoadableWithIterator):
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
                  mesh: Mesh) -> None:
+        if getattr(vllm_config.model_config, "quantization", None) == "fp8":
+            # `get_tpu_quantization_config` returns None for "fp8" because
+            # the work in #1623 is not fully merged. So this block overrides
+            # the logic to return Fp8Config when model_config indicates fp8.
+            # TODO(#1623): Remove this block when `get_tpu_quantization_config`
+            # is updated.
+            from tpu_inference.layers.jax.quantization.fp8 import Fp8Config
+            hg_quant_config = getattr(vllm_config.model_config.hf_config,
+                                      "quantization_config", {})
+            vllm_config.quant_config = Fp8Config(hg_quant_config)
+
         self.vllm_config = vllm_config
         rng = nnx.Rngs(rng_key)
         self.mesh = mesh
