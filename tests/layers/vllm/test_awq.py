@@ -37,13 +37,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import \
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.scalar_type import scalar_types
 
+from tests.layers.common import utils as test_utils
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.awq import (VllmAWQConfig,
                                                         VllmAWQLinearMethod)
 from tpu_inference.layers.vllm.quantization.configs import \
     VllmQuantLinearConfig
-
-from . import utils as test_utils
 
 P = PartitionSpec
 MODELS = ["Qwen/Qwen2.5-1.5B-Instruct-AWQ"]
