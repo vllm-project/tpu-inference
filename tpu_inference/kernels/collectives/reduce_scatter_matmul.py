@@ -245,6 +245,7 @@ def reduce_scatter_matmul_kernel(
     def _():
       # m_shard_sz=384 # xw32: remove the temp comments later.
       # The LEFT and RIGHT halves of the reduce-scatter use bidirectional rings flowing in opposite directions. The LEFT ring sends data left (device d → d-1), so the x-block index should advance forward: (outer_idx + my_id) % N. The RIGHT ring sends data right (device d → d+1), so the x-block index should advance backward: (my_id - outer_idx) % N. Both phases were incorrectly using the forward formula. This was masked with 2 devices because (a+b) % 2 ≡ (a-b) % 2 for all integers, but breaks for 4+ devices
+      # Here is the reason why we need "my_id-outer_idx" instead of "my_id+outer_idx" https://gist.github.com/vanbasten23/edfb673c0352c49efa8158c8338ec307
       x_start = mod(my_id - outer_idx, num_devices)*m_shard_sz
       x_right_ref = x_ref.at[pl.ds(x_start, m_shard_sz)]
       y_right_ref = y_ref.at[right_copy_slice, :]
@@ -437,7 +438,7 @@ def reduce_scatter_matmul_ref_impl(
     rhs_transpose: bool = False,
 ):
   print(
-      f'xw32 reduce_scatter_matmul_ref_impl begins: {x.shape=}, {y.shape=}')
+      f'xw32 reduce_scatter_matmul_ref_impl begins: local shapes are {x.shape=}, {y.shape=}')
   m, k = x.shape
   n, _ = y.shape
   assert x.shape[1] == y.shape[1]
@@ -457,7 +458,7 @@ def reduce_scatter_matmul_ref_impl(
   out_left = jnp.zeros((m_shard_sz, n_shard_sz), accum_dtype)
   out_right = jnp.zeros((m_shard_sz, n_shard_sz), accum_dtype)
   print(
-      f'xw32 reduce_scatter_matmul_ref_impl before fori_loop {out_left.shape=}, {out_right.shape=}'
+      f'xw32 reduce_scatter_matmul_ref_impl before fori_loop {m_shard_sz=}, {n_shard_sz=}, {out_left.shape=}, {out_right.shape=}'
   )
 
   # (int, a) -> a
@@ -484,6 +485,7 @@ def reduce_scatter_matmul_ref_impl(
                                    (n_shard_sz, k))
     y_right = jax.lax.dynamic_slice(y, (y_right_chunk_index, 0),
                                     (n_shard_sz, k))
+    jax.debug.print('xw32 ref impl, my_id={}, i={}, x_left=x[{}:{}, {}:{}], x_right=x[{}:{},{}:{}], y_left=y[{}:{},{}:{}], y_right=y[{}:{},{}:{}]', my_id, i, x_left_chunk_index, x_left_chunk_index+m_shard_sz, 0, k, x_right_chunk_index, x_right_chunk_index+m_shard_sz, 0, k, y_left_chunk_index, y_left_chunk_index+n_shard_sz, 0, k, y_right_chunk_index, y_right_chunk_index+n_shard_sz, 0, k)
 
     assert x_left.shape == (m // axis_size, k)
     assert x_right.shape == (m // axis_size, k)
