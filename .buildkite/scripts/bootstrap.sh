@@ -42,7 +42,7 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     echo "$FILES_CHANGED"
 
     # Filter out files we want to skip builds for.
-    NON_SKIPPABLE_FILES=$(echo "$FILES_CHANGED" | grep -vE "(\.md$|\.ico$|\.png$|^README$|^docs\/)")
+    NON_SKIPPABLE_FILES=$(echo "$FILES_CHANGED" | grep -vE "(\.md$|\.ico$|\.png$|^README$|^docs\/|support_matrices\/.*\.csv$)" || true)
 
     if [ -z "$NON_SKIPPABLE_FILES" ]; then
       echo "Only documentation or icon files changed. Skipping build."
