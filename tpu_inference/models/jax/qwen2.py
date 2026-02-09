@@ -47,8 +47,12 @@ init_fn = nnx.initializers.uniform()
 
 class Qwen2MLP(JaxModule):
 
-    def __init__(self, config: Qwen2Config, dtype: jnp.dtype, rng: nnx.Rngs,
-                 quant_config: VllmQuantConfig):
+    def __init__(self,
+                 config: Qwen2Config,
+                 dtype: jnp.dtype,
+                 rng: nnx.Rngs,
+                 quant_config: VllmQuantConfig,
+                 prefix: str = ""):
         hidden_size = config.hidden_size
         intermediate_size = config.intermediate_size
         act = config.hidden_act
@@ -61,6 +65,7 @@ class Qwen2MLP(JaxModule):
             kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
             quant_config=quant_config,
+            prefix=prefix + ".gate_proj",
         )
         self.up_proj = JaxLinear(
             hidden_size,
@@ -70,6 +75,7 @@ class Qwen2MLP(JaxModule):
             kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
             quant_config=quant_config,
+            prefix=prefix + ".up_proj",
         )
         self.down_proj = JaxLinear(
             intermediate_size,
@@ -79,6 +85,7 @@ class Qwen2MLP(JaxModule):
             kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
             quant_config=quant_config,
+            prefix=prefix + ".down_proj",
         )
         self.act_fn = modeling_flax_utils.ACT2FN[act]
 
@@ -92,8 +99,14 @@ class Qwen2MLP(JaxModule):
 
 class Qwen2Attention(JaxModule):
 
-    def __init__(self, config: Qwen2Config, dtype: jnp.dtype, rng: nnx.Rngs,
-                 mesh: Mesh, kv_cache_dtype: str, quant_config):
+    def __init__(self,
+                 config: Qwen2Config,
+                 dtype: jnp.dtype,
+                 rng: nnx.Rngs,
+                 mesh: Mesh,
+                 kv_cache_dtype: str,
+                 quant_config: VllmQuantConfig,
+                 prefix: str = ""):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
@@ -121,6 +134,7 @@ class Qwen2Attention(JaxModule):
             bias_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
             quant_config=quant_config,
+            prefix=prefix + ".q_proj",
         )
         self.k_proj = JaxEinsum(
             "TD,DKH->TKH",
@@ -131,6 +145,7 @@ class Qwen2Attention(JaxModule):
             bias_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
             quant_config=quant_config,
+            prefix=prefix + ".k_proj",
         )
         self.v_proj = JaxEinsum(
             "TD,DKH->TKH",
@@ -141,6 +156,7 @@ class Qwen2Attention(JaxModule):
             bias_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
             quant_config=quant_config,
+            prefix=prefix + ".v_proj",
         )
         self.o_proj = JaxEinsum(
             "TNH,NHD->TD",
@@ -149,6 +165,7 @@ class Qwen2Attention(JaxModule):
             kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
             rngs=rng,
             quant_config=quant_config,
+            prefix=prefix + ".o_proj",
         )
 
         self._q_scale = 1.0
@@ -206,9 +223,14 @@ class Qwen2Attention(JaxModule):
 
 class Qwen2DecoderLayer(JaxModule):
 
-    def __init__(self, config: Qwen2Config, dtype: jnp.dtype, rng: nnx.Rngs,
-                 mesh: Mesh, kv_cache_dtype: str,
-                 quant_config: VllmQuantConfig):
+    def __init__(self,
+                 config: Qwen2Config,
+                 dtype: jnp.dtype,
+                 rng: nnx.Rngs,
+                 mesh: Mesh,
+                 kv_cache_dtype: str,
+                 quant_config: VllmQuantConfig,
+                 prefix: str = ""):
         rms_norm_eps = config.rms_norm_eps
         hidden_size = config.hidden_size
 
@@ -219,13 +241,15 @@ class Qwen2DecoderLayer(JaxModule):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
             quant_config=quant_config,
+            prefix=prefix + ".input_layernorm",
         )
         self.self_attn = Qwen2Attention(config=config,
                                         dtype=dtype,
                                         rng=rng,
                                         mesh=mesh,
                                         kv_cache_dtype=kv_cache_dtype,
-                                        quant_config=quant_config)
+                                        quant_config=quant_config,
+                                        prefix=prefix + ".self_attn")
         self.post_attention_layernorm = JaxRmsNorm(
             hidden_size,
             epsilon=rms_norm_eps,
@@ -233,12 +257,14 @@ class Qwen2DecoderLayer(JaxModule):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
             quant_config=quant_config,
+            prefix=prefix + ".post_attention_layernorm",
         )
         self.mlp = Qwen2MLP(
             config=config,
             dtype=dtype,
             rng=rng,
             quant_config=quant_config,
+            prefix=prefix + ".mlp",
         )
 
     def __call__(
@@ -264,8 +290,11 @@ class Qwen2DecoderLayer(JaxModule):
 
 class Qwen2Model(JaxModule):
 
-    def __init__(self, vllm_config: VllmConfig, rng: nnx.Rngs,
-                 mesh: Mesh) -> None:
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 rng: nnx.Rngs,
+                 mesh: Mesh,
+                 prefix: str = "model") -> None:
         model_config = vllm_config.model_config
         hf_config = model_config.hf_config
         vocab_size = model_config.get_vocab_size()
@@ -285,20 +314,24 @@ class Qwen2Model(JaxModule):
                 embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
                 rngs=rng,
                 quant_config=vllm_config.quant_config,
+                prefix=prefix + ".embed_tokens",
             )
         else:
             self.embed_tokens = PPMissingLayer()
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             hf_config.num_hidden_layers,
-            lambda: Qwen2DecoderLayer(
+            lambda layer_index: Qwen2DecoderLayer(
                 config=hf_config,
                 dtype=dtype,
                 rng=rng,
                 mesh=mesh,
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
-                quant_config=vllm_config.quant_config))
+                quant_config=vllm_config.quant_config,
+                prefix=f"{prefix}.layers.{layer_index}",
+            ),
+        )
         if self.is_last_rank:
             self.norm = JaxRmsNorm(
                 hidden_size,
@@ -307,6 +340,7 @@ class Qwen2Model(JaxModule):
                 scale_init=nnx.with_partitioning(init_fn, (None, )),
                 rngs=rng,
                 quant_config=vllm_config.quant_config,
+                prefix=prefix + ".norm",
             )
         else:
             self.norm = PPMissingLayer()
@@ -348,6 +382,7 @@ class Qwen2ForCausalLM(JaxModule, LoadableWithIterator):
             vllm_config=vllm_config,
             rng=rng,
             mesh=mesh,
+            prefix="model",
         )
         model_config = vllm_config.model_config
         if not model_config.hf_config.tie_word_embeddings:
@@ -359,6 +394,7 @@ class Qwen2ForCausalLM(JaxModule, LoadableWithIterator):
                 dtype=model_config.dtype,
                 rngs=rng,
                 quant_config=vllm_config.quant_config,
+                prefix="lm_head",
             )
 
     def __call__(

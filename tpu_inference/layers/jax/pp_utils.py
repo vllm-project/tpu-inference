@@ -41,7 +41,7 @@ class PPMissingLayer(JaxModule):
 
 class LayerFn(Protocol):
 
-    def __call__(self) -> nnx.Module:
+    def __call__(self, layer_index: int) -> nnx.Module:
         ...
 
 
@@ -59,7 +59,7 @@ def make_layers(
                                                  get_pp_group().world_size)
 
     layers = [PPMissingLayer() for _ in range(start_layer)] \
-        + [layer_fn() for _ in range(start_layer, end_layer)] \
+        + [layer_fn(i) for i in range(start_layer, end_layer)] \
         + [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)]
 
     return start_layer, end_layer, layers
