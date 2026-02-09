@@ -653,32 +653,51 @@ class TestQwen2_5_VLPipelineParallel:
     def test_call_first_rank(self, mock_vllm_config, rng, mesh, mock_pp_group):
         mock_pp_group.return_value.is_first_rank = True
         mock_pp_group.return_value.is_last_rank = False
-        model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config, rng, mesh)
-        kv_caches = [jnp.array([])]
-        input_ids = jnp.array([[1, 2, 3]])
-        attn_meta = MagicMock(spec=AttentionMetadata)
 
-        with patch.object(model.model, '__call__', return_value=(kv_caches, jnp.array([[0.1, 0.2]]))) as mock_model_call:
-            new_kvs, x, aux = model(kv_caches, input_ids, attn_meta, is_first_rank=True, is_last_rank=False)
+        with patch('tpu_inference.models.jax.qwen2_5_vl.Qwen2_5_VisionTransformer', autospec=True), \
+             patch('tpu_inference.models.jax.qwen2_5_vl.Qwen2Model', autospec=True):
+            model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config,
+                                                       rng, mesh)
+            kv_caches = [jnp.array([])]
+            input_ids = jnp.array([1, 2, 3])
+            attn_meta = MagicMock(spec=AttentionMetadata)
+
+            model.model.return_value = (kv_caches, jnp.ones((3, 16)))
+            new_kvs, x, aux = model(kv_caches,
+                                    input_ids,
+                                    attn_meta,
+                                    is_first_rank=True,
+                                    is_last_rank=False)
             assert isinstance(x, JaxIntermediateTensors)
             assert "hidden_states" in x.tensors
-            mock_model_call.assert_called_once()
-            _, kwargs = mock_model_call.call_args
-            assert kwargs['input_ids'] is input_ids
+            model.model.assert_called_once()
+            _, kwargs = model.model.call_args
+            np.testing.assert_array_equal(kwargs['input_ids'], input_ids)
 
-    def test_call_non_first_rank(self, mock_vllm_config, rng, mesh, mock_pp_group):
+    def test_call_non_first_rank(self, mock_vllm_config, rng, mesh,
+                                 mock_pp_group):
         mock_pp_group.return_value.is_first_rank = False
         mock_pp_group.return_value.is_last_rank = True
-        model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config, rng, mesh)
-        kv_caches = [jnp.array([])]
-        attn_meta = MagicMock(spec=AttentionMetadata)
-        intermediate = JaxIntermediateTensors(tensors={"hidden_states": jnp.array([[0.1, 0.2]])})
 
-        with patch.object(model.model, '__call__', return_value=(kv_caches, jnp.array([[0.3, 0.4]]))) as mock_model_call:
-            new_kvs, x, aux = model(kv_caches, None, attn_meta, intermediate_tensors=intermediate, is_first_rank=False, is_last_rank=True)
+        with patch('tpu_inference.models.jax.qwen2_5_vl.Qwen2_5_VisionTransformer', autospec=True), \
+             patch('tpu_inference.models.jax.qwen2_5_vl.Qwen2Model', autospec=True):
+            model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config,
+                                                       rng, mesh)
+            kv_caches = [jnp.array([])]
+            attn_meta = MagicMock(spec=AttentionMetadata)
+            intermediate = JaxIntermediateTensors(
+                tensors={"hidden_states": jnp.ones((3, 16))})
+
+            model.model.return_value = (kv_caches, jnp.ones((3, 16)))
+            new_kvs, x, aux = model(kv_caches,
+                                    None,
+                                    attn_meta,
+                                    intermediate_tensors=intermediate,
+                                    is_first_rank=False,
+                                    is_last_rank=True)
             assert isinstance(x, jax.Array)
-            mock_model_call.assert_called_once()
-            _, kwargs = mock_model_call.call_args
+            model.model.assert_called_once()
+            _, kwargs = model.model.call_args
             assert kwargs['inputs_embeds'] is intermediate["hidden_states"]
 
     def test_load_weights_pp_missing_layers(self, mock_vllm_config, rng, mesh, mock_pp_group):
