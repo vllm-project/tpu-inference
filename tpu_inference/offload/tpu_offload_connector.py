@@ -145,17 +145,19 @@ KV_CACHE_MISSES = Counter("vllm_kv_offload_cache_misses",
 KV_SAVE_TRANSFER_LATENCY = Histogram(
     "vllm_kv_cache_save_transfer_seconds",
     "Time spent transferring KV blocks from TPU to CPU memory (Hardware Phase).",
+    labelnames=["is_batched"],
     buckets=[0.01, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0])
 
 KV_SAVE_TRANSFER_BW_GBPS = Histogram(
     "vllm_kv_cache_save_transfer_gbps",
     "Bandwidth of TPU-to-CPU KV cache transfer in GB/s.",
-    labelnames=["num_blocks"],
+    labelnames=["num_blocks", "is_batched"],
     buckets=[0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 40, 60, 80, 100])
 
 KV_SAVE_POST_TRANSFER_LATENCY = Histogram(
     'vllm_kv_cache_save_post_transfer_seconds',
     'Time spent registering chunks and updating CPU backend (Software Phase)',
+    labelnames=["is_batched"],
     # Buckets often need to be smaller here (e.g., 1ms to 500ms) as Python loops are fast but variable
     buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0))
 
@@ -173,7 +175,8 @@ WAIT_FOR_SAVE_CALLS = Counter(
 
 START_SAVE_KV_CALLS = Counter(
     "vllm_start_save_kv_calls_total",
-    "Total number of times start_save_kv has been called.")
+    "Total number of times start_save_kv has been called.",
+    labelnames=["is_batched"])
 
 START_SAVE_KV_SKIP_SAVE_CALLS = Counter(
     "vllm_start_save_kv_skip_save_calls_total",
@@ -207,7 +210,8 @@ GATHER_TPU_BLOCKS_CALLS = Counter(
 
 TRANSFER_AND_REGISTER_CPU_CHUNKS_CALLS = Counter(
     "vllm_transfer_and_register_cpu_chunks_calls_total",
-    "Total number of times _transfer_and_register_cpu_chunks has been called.")
+    "Total number of times _transfer_and_register_cpu_chunks has been called.",
+    labelnames=["is_batched"])
 
 SAVE_BLOCKS_TO_CPU_CALLS = Counter(
     "vllm_save_blocks_to_cpu_calls_total",
@@ -253,7 +257,11 @@ REQUEST_FINISHED_CALLS = Counter(
 # Measures the concurrency level (how many requests are saved in one batch)
 SAVE_BATCH_SIZE = Histogram(
     'vllm_kv_cache_save_batch_size',
-    'Number of save requests submitted concurrently in a single step',
+    """Number of concurrent calls to _transfer_and_register_cpu_chunks in one
+    step for a non batched mode (which indirectly correlates to unique requests
+    being swapped out of HBM to CPU in a given batch in a single step). For a
+    batched mode, this captures the number of unique requests in a single step
+    that is collated and handled by _batch_transfer_and_register_cpu_chunks""",
     buckets=(1, 2, 4, 8, 16, 32, 64, 128))
 
 # Measures reliability
@@ -262,7 +270,8 @@ SAVE_OPERATION_ERRORS = Counter(
     'Total number of failed KV cache save operations')
 
 KV_SAVED_BYTES = Counter("vllm_kv_offload_saved_bytes_total",
-                         "Total bytes saved to CPU KV cache.")
+                         "Total bytes saved to CPU KV cache.",
+                         labelnames=["is_batched"])
 KV_LOADED_BYTES = Counter("vllm_kv_offload_loaded_bytes_total",
                           "Total bytes loaded from CPU KV cache.")
 
@@ -306,66 +315,54 @@ ADJUSTED_NUM_BLOCKS_TO_SAVE = Gauge(
     'vllm_kv_cache_adjusted_num_blocks_to_save',
     'Number of blocks to save after adjusted')
 
-STAGING_BUFFER_BLOCKS_FREE = Gauge(
-    'vllm_kv_cache_staging_buffer_blocks_free',
-    'Number of free staging blocks',
-    ['source'])
+STAGING_BUFFER_BLOCKS_FREE = Gauge('vllm_kv_cache_staging_buffer_blocks_free',
+                                   'Number of free staging blocks', ['source'])
 
 STAGING_BUFFER_BLOCKS_FOR_SAVE_ALLOCATE = Gauge(
     'vllm_kv_cache_staging_buffer_blocks_for_save_allocate',
-    'Total allocated staging blocks for save',
-    ['source'])
+    'Total allocated staging blocks for save', ['source'])
 
 STAGING_BUFFER_BLOCKS_FOR_SAVE_FREE = Gauge(
     'vllm_kv_cache_staging_buffer_blocks_for_save_free',
-    'Total freed staging blocks for save',
-    ['source'])
+    'Total freed staging blocks for save', ['source'])
 
 STAGING_BUFFER_BLOCKS_FOR_LOAD_ALLOCATE = Gauge(
     'vllm_kv_cache_staging_buffer_blocks_for_load_allocate',
-    'Total allocated staging blocks for load',
-    ['source'])
+    'Total allocated staging blocks for load', ['source'])
 
 STAGING_BUFFER_BLOCKS_FOR_LOAD_FREE = Gauge(
     'vllm_kv_cache_staging_buffer_blocks_for_load_free',
-    'Total freed staging blocks for load',
-    ['source'])
+    'Total freed staging blocks for load', ['source'])
 
 FINISHED_REQS_W_PENDING_OPS_SIZE = Gauge(
     'vllm_kv_cache_finished_reqs_w_pending_ops_size',
-    'The size of the _finished_reqs_w_pending_ops set',
-    ['source'])
+    'The size of the _finished_reqs_w_pending_ops set', ['source'])
 
-FINISHED_SAVE_REQS_SIZE = Gauge(
-    'vllm_kv_cache_finished_save_reqs_size',
-    'The size of the _finished_save_reqs set')
+FINISHED_SAVE_REQS_SIZE = Gauge('vllm_kv_cache_finished_save_reqs_size',
+                                'The size of the _finished_save_reqs set')
 
-FINISHED_LOAD_REQS_SIZE = Gauge(
-    'vllm_kv_cache_finished_load_reqs_size',
-    'The size of the _finished_load_reqs set')
+FINISHED_LOAD_REQS_SIZE = Gauge('vllm_kv_cache_finished_load_reqs_size',
+                                'The size of the _finished_load_reqs set')
 
-FULLY_FINISHED_REQS_SIZE = Gauge(
-    'vllm_kv_cache_fully_finished_reqs_size',
-    'The size of the _fully_finished_reqs set')
+FULLY_FINISHED_REQS_SIZE = Gauge('vllm_kv_cache_fully_finished_reqs_size',
+                                 'The size of the _fully_finished_reqs set')
 
 SAVE_REQS_W_PENDING_GATHER_SIZE = Gauge(
     'vllm_kv_cache_save_reqs_w_pending_gather_size',
     'The size of the _save_reqs_w_pending_gather set')
 
 DELAY_FREE_TOTAL = Counter("vllm_kv_delay_free_total",
-                          "Total number of delay free requests.")
+                           "Total number of delay free requests.")
 
 PENDING_SAVE_FUTURES_SIZE = Gauge(
     'vllm_kv_cache_pending_save_futures_size',
     'The size of the _pending_save_futures list')
 
-FUTURE_DONE_TOTAL = Counter(
-    'vllm_kv_cache_future_done_total',
-    'Total number of save futures done.')
+FUTURE_DONE_TOTAL = Counter('vllm_kv_cache_future_done_total',
+                            'Total number of save futures done.')
 
-RECORD_SAVE_TOTAL = Counter(
-    'vllm_kv_cache_record_save_total',
-    'Total number of record_save calls total.')
+RECORD_SAVE_TOTAL = Counter('vllm_kv_cache_record_save_total',
+                            'Total number of record_save calls total.')
 
 KV_HIT_WITH_LOAD_BUF = Counter(
     'vllm_kv_cache_hit_with_load_staging_buf',
@@ -453,6 +450,29 @@ class TPUReqMeta:
                 f"num_token_ids={len(self.token_ids)}, "
                 f"num_local_block_ids={len(self.local_block_ids)}, "
                 f"{load_info}, {save_info})")
+
+
+@dataclass
+class SaveReqInfo:
+    """
+    This dataclass preserves the metadata necessary to decompose that large array
+    back into individual request-owned chunks on the Host, for example in batched
+    save mode, multiple requests have their KV blocks gathered into a single contiguous
+    TPU array to maximize swap operation bandwidth during the D2H transfer.
+
+    Attributes:
+        req_id: Unique identifier for the request.
+        num_blocks: The number of KV blocks contributed by this request to the
+            unified batch. This acts as the "stride" or "slice width" during
+            unstitching.
+        dst_chunks: The specific CPU cache chunk IDs where these blocks must be
+            registered.
+        is_final_save: Signal to indicate if this is the last save for the request.
+    """
+    req_id: str
+    num_blocks: int
+    dst_chunks: list[int]
+    is_final_save: bool
 
 
 @dataclass
@@ -875,7 +895,8 @@ class TPUOffloadConnectorScheduler():
             # planning staging blocks for load
             num_avail_staging_blocks = self.staging_buffer_manager.get_num_free_staging_blocks(
             )
-            STAGING_BUFFER_BLOCKS_FREE.labels(source="load").set(num_avail_staging_blocks)
+            STAGING_BUFFER_BLOCKS_FREE.labels(
+                source="load").set(num_avail_staging_blocks)
             # num_avail_staging_blocks = self.staging_buffer_manager.get_num_free_load_staging_blocks(
             # )
             if num_blocks_to_load > num_avail_staging_blocks:
@@ -909,8 +930,8 @@ class TPUOffloadConnectorScheduler():
                     self.staging_buffer_manager.get_num_blocks_for_load())
                 STAGING_BUFFER_BLOCKS_FOR_LOAD_ALLOCATE.labels(
                     source="get_num_new_matched_tokens").set(
-                    self.staging_buffer_manager.
-                    get_num_total_allocate_blocks_for_load())
+                        self.staging_buffer_manager.
+                        get_num_total_allocate_blocks_for_load())
 
         # record the matched tokens in the cache, it will be needed in
         # init save_spec
@@ -1097,7 +1118,8 @@ class TPUOffloadConnectorScheduler():
             # planning staging blocks for save
             num_avail_staging_blocks = self.staging_buffer_manager.get_num_free_staging_blocks(
             )
-            STAGING_BUFFER_BLOCKS_FREE.labels(source="save").set(num_avail_staging_blocks)
+            STAGING_BUFFER_BLOCKS_FREE.labels(
+                source="save").set(num_avail_staging_blocks)
             # num_avail_staging_blocks = self.staging_buffer_manager.get_num_free_save_staging_blocks(
             # )
             if num_blocks_to_save > num_avail_staging_blocks:
@@ -1144,13 +1166,14 @@ class TPUOffloadConnectorScheduler():
                         usage="save")
                     assert num_allocated_blocks == adjusted_num_blocks_to_save >= 0, f" failed to allocate {num_allocated_blocks} (save) staging blocks for request {tracker.req_id}, expected {adjusted_num_blocks_to_save}."
 
-                    ADJUSTED_NUM_BLOCKS_TO_SAVE.set(adjusted_num_blocks_to_save)
+                    ADJUSTED_NUM_BLOCKS_TO_SAVE.set(
+                        adjusted_num_blocks_to_save)
                     STAGING_BUFFER_BLOCKS_FOR_SAVE.set(
                         self.staging_buffer_manager.get_num_blocks_for_save())
                     STAGING_BUFFER_BLOCKS_FOR_SAVE_ALLOCATE.labels(
                         source="_prepare_save_spec").set(
-                        self.staging_buffer_manager.
-                        get_num_total_allocate_blocks_for_save())
+                            self.staging_buffer_manager.
+                            get_num_total_allocate_blocks_for_save())
 
                     if adjusted_num_total_tokens > tracker.save_watermark:
                         logger.info(
@@ -1395,8 +1418,8 @@ class TPUOffloadConnectorScheduler():
         STAGING_BUFFER_BLOCKS_FOR_LOAD.set(
             self.staging_buffer_manager.get_num_blocks_for_load())
         STAGING_BUFFER_BLOCKS_FOR_LOAD_FREE.labels(
-            source="pre_load_specs").set(
-            self.staging_buffer_manager.get_num_total_free_blocks_for_load())
+            source="pre_load_specs").set(self.staging_buffer_manager.
+                                         get_num_total_free_blocks_for_load())
 
         return metadata
 
@@ -1454,10 +1477,12 @@ class TPUOffloadConnectorScheduler():
                     self.staging_buffer_manager.get_num_blocks_for_save())
                 STAGING_BUFFER_BLOCKS_FOR_SAVE_FREE.labels(
                     source="finished_save_chunks").set(
-                    self.staging_buffer_manager.
-                    get_num_total_free_blocks_for_save())
-                STAGING_BUFFER_BLOCKS_FREE.labels(source="finished_save_chunks").set(
-                    self.staging_buffer_manager.get_num_free_staging_blocks())
+                        self.staging_buffer_manager.
+                        get_num_total_free_blocks_for_save())
+                STAGING_BUFFER_BLOCKS_FREE.labels(
+                    source="finished_save_chunks").set(
+                        self.staging_buffer_manager.
+                        get_num_free_staging_blocks())
 
                 # update in-flight save
                 for saved_chunk_id in saved_chunk_ids:
@@ -1492,11 +1517,12 @@ class TPUOffloadConnectorScheduler():
                     self.staging_buffer_manager.get_num_blocks_for_load())
                 STAGING_BUFFER_BLOCKS_FOR_LOAD_FREE.labels(
                     source="finished_load_chunks").set(
-                    self.staging_buffer_manager.
-                    get_num_total_free_blocks_for_load())
+                        self.staging_buffer_manager.
+                        get_num_total_free_blocks_for_load())
                 STAGING_BUFFER_BLOCKS_FREE.labels(
                     source="finished_load_chunks").set(
-                    self.staging_buffer_manager.get_num_free_staging_blocks())
+                        self.staging_buffer_manager.
+                        get_num_free_staging_blocks())
                 # update in-flight save
                 for loaded_chunk_id in loaded_chunk_ids:
                     assert loaded_chunk_id in self._reqs_being_loaded[req_id]
@@ -1525,8 +1551,8 @@ class TPUOffloadConnectorScheduler():
                 self.staging_buffer_manager.get_num_blocks_for_save())
             STAGING_BUFFER_BLOCKS_FOR_SAVE_FREE.labels(
                 source="finished_sending").set(
-                self.staging_buffer_manager.get_num_total_free_blocks_for_save(
-                ))
+                    self.staging_buffer_manager.
+                    get_num_total_free_blocks_for_save())
 
         # load
         for req_id in connector_output.finished_recving or []:
@@ -1542,11 +1568,12 @@ class TPUOffloadConnectorScheduler():
                 self.staging_buffer_manager.get_num_blocks_for_load())
             STAGING_BUFFER_BLOCKS_FOR_LOAD_FREE.labels(
                 source="finished_recving").set(
-                self.staging_buffer_manager.get_num_total_free_blocks_for_load(
-                ))
+                    self.staging_buffer_manager.
+                    get_num_total_free_blocks_for_load())
 
         _finished_reqs = list(self._finished_reqs_w_pending_ops)
-        FINISHED_REQS_W_PENDING_OPS_SIZE.labels(source="update_connector_output").set(len(_finished_reqs))
+        FINISHED_REQS_W_PENDING_OPS_SIZE.labels(
+            source="update_connector_output").set(len(_finished_reqs))
         for req_id in _finished_reqs:
             is_gather_done = req_id not in self._save_reqs_w_pending_gather
             is_load_done = req_id not in self._reqs_being_loaded
@@ -1585,7 +1612,9 @@ class TPUOffloadConnectorScheduler():
         if req_id in self._save_reqs_w_pending_gather and len(
                 self._save_reqs_w_pending_gather[req_id]) > 0:
             self._finished_reqs_w_pending_ops.add(req_id)
-            FINISHED_REQS_W_PENDING_OPS_SIZE.labels(source="_save_reqs_w_pending_gather").set(len(self._finished_reqs_w_pending_ops))
+            FINISHED_REQS_W_PENDING_OPS_SIZE.labels(
+                source="_save_reqs_w_pending_gather").set(
+                    len(self._finished_reqs_w_pending_ops))
             logger.info(
                 f"not_free_with_gather:{req_id}, {self._save_reqs_w_pending_gather[req_id]}"
             )
@@ -1593,7 +1622,9 @@ class TPUOffloadConnectorScheduler():
         if req_id in self._reqs_being_loaded and len(
                 self._reqs_being_loaded[req_id]) > 0:
             self._finished_reqs_w_pending_ops.add(req_id)
-            FINISHED_REQS_W_PENDING_OPS_SIZE.labels(source="_reqs_being_loaded").set(len(self._finished_reqs_w_pending_ops))
+            FINISHED_REQS_W_PENDING_OPS_SIZE.labels(
+                source="_reqs_being_loaded").set(
+                    len(self._finished_reqs_w_pending_ops))
             logger.info(
                 f"not_free_with_load:{req_id}, {self._reqs_being_loaded[req_id]}"
             )
@@ -1647,8 +1678,10 @@ class TPUOffloadConnectorWorker:
         # TODO(jcgu): check libtpu compatibility for pallas dma kernel
         assert self.swap_op_type in get_args(CPU_OFFLOADING_SWAP_OP_TYPE)
         self.use_bucketed_swap_ops = not envs.TPU_OFFLOAD_SKIP_JAX_PRECOMPILE
+        self.batched_save = envs.TPU_OFFLOAD_BATCHED_SAVE
         logger.info(f" swap operation type is {self.swap_op_type}, "
-                    f"use_bucketed_swap_ops={self.use_bucketed_swap_ops}.")
+                    f"use_bucketed_swap_ops={self.use_bucketed_swap_ops}, "
+                    f"batched_save={self.batched_save}.")
 
         # cpu cache
         self.num_cpu_chunks = envs.TPU_OFFLOAD_NUM_CPU_CHUNKS
@@ -1667,8 +1700,8 @@ class TPUOffloadConnectorWorker:
         self.finished_load_reqs: set[ReqId] = set()
         # Tracks if wait_for_save has been called for the current step's metadata.
         self._processed_save_for_step = False
-        # On-going save operations
-        self._pending_save_futures: list[tuple[Future, TPUReqMeta]] = []
+        # On-going asynchronous save operations tracking futures and their associated manifest.
+        self._pending_save_futures: list[tuple[Future, list[SaveReqInfo]]] = []
 
         # record finished save / load blocks (with req_ids) for each iteration
         self.offload_stats = KVOffloadConnectorStats()
@@ -1997,29 +2030,27 @@ class TPUOffloadConnectorWorker:
 
         return updated_kv_caches
 
-    def _gather_tpu_blocks(self, req_id: ReqId, full_block_ids: list[int],
-                           full_token_ids: list[int],
-                           save_spec: SaveSpec) -> tuple | None:
+    def _validate_and_prepare_save(
+        self,
+        meta: TPUReqMeta,
+    ) -> tuple[list[int], list[int]] | None:
         """
-        Implements Stage 1 of the Save pipeline:
-        Validates request, calculates blocks to save, and gathers data from TPU
-        physical cache into the HBM staging buffer.
-
-        Returns: None if early exit, or tuple(flat_kv_caches_tpu, num_blocks_to_save, dst_chunks, start_time)
+        Validate and plan the blocks for the save operation for the given request.
+        Returns:
+            Optional[tuple[list[int], list[int]]]: A tuple containing the list of
+                source TPU blocks and destination CPU chunks if the save operation
+                is valid and contains data to be gathered. Returns None if the
+                request should be skipped or contains no new tokens to gather.
         """
-        GATHER_TPU_BLOCKS_CALLS.inc()
-        if not self.runner or not self.runner.kv_caches:
-            logger.error(f"Cannot save blocks for request {req_id}: runner or "
-                         "KV caches not registered.")
-            return None
-
+        req_id = meta.req_id
+        save_spec = meta.save_spec
+        full_block_ids = meta.local_block_ids
+        full_token_ids = meta.token_ids
         blocks_to_save = save_spec.src_blocks
         dst_chunks = save_spec.dst_chunks
 
         num_total_tokens = save_spec.num_total_tokens
         num_skip_leading_tokens = save_spec.num_skip_leading_tokens
-        num_blocks_to_save = len(blocks_to_save)
-
         assert num_total_tokens <= len(
             full_token_ids), f"{num_total_tokens} > {len(full_token_ids)}"
 
@@ -2068,6 +2099,35 @@ class TPUOffloadConnectorWorker:
                 f"Request({req_id}): blocks_to_save {blocks_to_save} contains blocks not present in local_block_ids {full_block_ids}"
             )
 
+        return blocks_to_save, dst_chunks
+
+    def _gather_tpu_blocks(self, req_id: ReqId, full_block_ids: list[int],
+                           full_token_ids: list[int],
+                           save_spec: SaveSpec) -> tuple | None:
+        """
+        Implements Stage 1 of the Save pipeline:
+        Validates request, calculates blocks to save, and gathers data from TPU
+        physical cache into the HBM staging buffer.
+
+        Returns: None if early exit, or tuple(flat_kv_caches_tpu, num_blocks_to_save, dst_chunks, blocks_to_save)
+        """
+        GATHER_TPU_BLOCKS_CALLS.inc()
+        if not self.runner or not self.runner.kv_caches:
+            logger.error(f"Cannot save blocks for request {req_id}: runner or "
+                         "KV caches not registered.")
+            return None
+
+        meta = TPUReqMeta(req_id=req_id,
+                          token_ids=full_token_ids,
+                          local_block_ids=full_block_ids,
+                          save_spec=save_spec)
+        plan = self._validate_and_prepare_save(meta)
+        if plan is None:
+            return None
+
+        blocks_to_save, dst_chunks = plan
+        num_blocks_to_save = len(blocks_to_save)
+
         start_time = time.time()
         if not self.no_op_gather:
             blocks_to_save_arr = jnp.array(blocks_to_save)
@@ -2091,18 +2151,151 @@ class TPUOffloadConnectorWorker:
         # We return the data needed for the next phase
         return flat_kv_caches_tpu, num_blocks_to_save, dst_chunks, blocks_to_save
 
-    def _transfer_and_register_cpu_chunks(self, req_id: ReqId,
-                                          flat_kv_caches_tpu: Any,
-                                          num_blocks_to_save: int,
-                                          dst_chunks: list[int],
-                                          blocks_to_save: list[int]):
+    def _batched_gather_tpu_blocks(
+        self, metadata: TPUOffloadConnectorMetadata
+    ) -> tuple[Any, list[SaveReqInfo], int] | None:
         """
-        Implements Stage 2 of the Save pipeline:
-        Swaps data from HBM staging buffer to Host RAM, splits into chunks,
-        and registers with CPU backend.
+        Implements Stage 1 of the Batched Save pipeline:
+        Validates all requests in the batch using the standard _validate_and_prepare_save
+        logic (ensuring per-request block contiguity), and gathers all data into
+        a single contiguous unified HBM staging buffer.
+
+        Returns:
+            A tuple containing:
+                - flat_kv_caches_tpu (Any): The unified HBM staging buffer containing
+                    gathered KV blocks from all requests in the batch.
+                - manifest (list[SaveReqInfo]): A list of metadata for each request
+                    in the batch, used to "unstitch" the unified buffer back into
+                    individual request chunks on the Host.
+                - total_blocks (int): The total number of KV blocks gathered into the
+                    unified buffer.
+            Or None if no blocks were gathered for saving.
         """
-        TRANSFER_AND_REGISTER_CPU_CHUNKS_CALLS.inc()
+        if not self.runner or not self.runner.kv_caches:
+            logger.error(
+                "Cannot save blocks: runner or KV caches not registered.")
+            return None
+
+        all_src_blocks = []
+        manifest = []
+        for meta in metadata.requests_meta:
+            if meta.save_spec is None:
+                continue
+
+            if meta.save_spec.skip_save:
+                logger.info(
+                    f"Request {meta.req_id}: Scheduler signaled to skip save.")
+                if meta.save_spec.is_final_save:
+                    logger.info(
+                        f"Request {meta.req_id}: Final save is a no-op. Marking as finished."
+                    )
+                    self.finished_save_reqs.add(meta.req_id)
+                continue
+
+            plan = self._validate_and_prepare_save(meta)
+            if plan is None:
+                continue
+
+            blocks_to_save, dst_chunks = plan
+            num_blocks_to_save = len(blocks_to_save)
+
+            all_src_blocks.extend(blocks_to_save)
+            manifest.append(
+                SaveReqInfo(req_id=meta.req_id,
+                            num_blocks=num_blocks_to_save,
+                            dst_chunks=dst_chunks,
+                            is_final_save=meta.save_spec.is_final_save))
+
+            logger.info(
+                f"Request {meta.req_id} contributes {num_blocks_to_save} "
+                f"blocks to unified batch. Current total: {len(all_src_blocks)} "
+                f"blocks from {len(manifest)} requests.")
+
+        if not all_src_blocks:
+            if manifest:
+                return None, manifest, 0
+            return None
+
+        # 2. SYNC BLOCKING: Unified Batch Gather
+        GATHER_TPU_BLOCKS_CALLS.inc()
         start_time = time.time()
+        total_num_blocks_to_save = len(all_src_blocks)
+        if not self.no_op_gather:
+            all_src_blocks_arr = jnp.array(all_src_blocks)
+            if self.use_bucketed_swap_ops:
+                flat_kv_caches_tpu = self._bucketed_gather_kv_cache(
+                    self.runner.kv_caches, all_src_blocks_arr)
+            else:
+                flat_kv_caches_tpu = KVCacheManager._jitted_gather_kv_cache(
+                    self.runner.kv_caches, all_src_blocks_arr)
+            jax.block_until_ready(flat_kv_caches_tpu)
+        else:
+            flat_kv_caches_tpu = None
+        duration = time.time() - start_time
+        GATHER_TPU_BLOCKS_LATENCY.observe(duration)
+
+        # Record gather synchronously to signal scheduler for these requests
+        # after successful TPU gather.
+        for info in manifest:
+            if info.num_blocks > 0:
+                self.offload_stats.record_gather(
+                    req=info.req_id,
+                    gathered_block_ids=self._get_blocks_for_req_from_metadata(
+                        info, metadata))
+
+        if flat_kv_caches_tpu is not None:
+            logger.info(
+                f"extracted_blocks_tpu (batch): {flat_kv_caches_tpu[0].shape}, {flat_kv_caches_tpu[0].sharding}"
+            )
+
+        return flat_kv_caches_tpu, manifest, total_num_blocks_to_save
+
+    def _transfer_and_register_cpu_chunks(self,
+                                          flat_kv_caches_tpu: Any,
+                                          total_num_blocks_to_save: int,
+                                          manifest: list[SaveReqInfo],
+                                          is_batched: bool = False):
+        """
+        Asynchronously transfers KV blocks from TPU to CPU, unstitches them,
+        and registers them with the CPU RAM backend store.
+
+        Unstitching Mechanism:
+        1. Unified Transfer: A single large swap operation moves total_num_blocks_to_save
+           from TPU to CPU.
+        2. Sequential Slicing: The logic iterates through the manifest.
+        3. Request Decomposition: Slices 'num_blocks' from the unified buffer
+           and maps them to their respective 'dst_chunks' IDs.
+           For non-batched save (is_batched=False), we expect only one
+           request metadata in the manifest.
+
+        The following diagram illustrates the batched save case (is_batched=True).
+        TPU HBM (Non-Contiguous)          Unified Staging Buffer (TPU)
+        +-------+                         +-------+-------+-------+-------+-------+
+        | Req A | B1, B2                  | B1    | B2    | B3    | B4    | B5    |
+        | Req B | B3, B4, B5      ====>   +-------+-------+-------+-------+-------+
+        +-------+                         | <--- Req A -->| <------ Req B ------> |
+                                          +-------+-------+-------+-------+-------+
+                                                             ||
+                                                             || DMA (Single Call)
+                                                             \/
+                                           Unified Host Buffer (CPU RAM)
+                                          +-------+-------+-------+-------+-------+
+                                          | B1    | B2    | B3    | B4    | B5    |
+                                          +-------+-------+-------+-------+-------+
+                                                             ||
+              Unstitching Logic <============================++
+                      ||
+                      \/
+        Local CPU Backend (Cache)
+        +---------------------------------------+
+        | ID: C100 (B1) | ID: C101 (B2) | ...   |  <-- Req A chunks
+        +---------------------------------------+
+        """
+        TRANSFER_AND_REGISTER_CPU_CHUNKS_CALLS.labels(
+            is_batched=is_batched).inc()
+        start_time = time.time()
+
+        # 1. Swap Out the buffer
         chunks_on_cpu = None
         if not self.no_op_swap_out:
             if self.use_bucketed_swap_ops:
@@ -2113,10 +2306,9 @@ class TPUOffloadConnectorWorker:
                     jax.block_until_ready(flat_kv_caches_cpu)
                     # NOTE(jcgu): we keep cpu_chunk_size == block_size
                     split_size_list = [self.cpu_chunk_size
-                                       ] * num_blocks_to_save
+                                       ] * total_num_blocks_to_save
                     if isinstance(flat_kv_caches_cpu[0], list):
-                        # Per-shard format: List[List[jax.Array]] (layers × shards)
-                        # Split each shard, then regroup by block index.
+                        # Per-shard format
                         chunks_on_cpu = _split_per_shard_to_chunks(
                             flat_kv_caches_cpu, split_size_list)
                     else:
@@ -2128,13 +2320,15 @@ class TPUOffloadConnectorWorker:
             if chunks_on_cpu and chunks_on_cpu[0]:
                 jax.block_until_ready(chunks_on_cpu)
         else:
-            chunks_on_cpu = [[(j * num_blocks_to_save + i)
-                              for i in range(num_blocks_to_save)]
+            chunks_on_cpu = [[(j * total_num_blocks_to_save + i)
+                              for i in range(total_num_blocks_to_save)]
                              for j in range(self.num_layers)]
+
         duration = time.time() - start_time
-        KV_SAVE_TRANSFER_LATENCY.observe(duration)
-        logger.info(f"Successfully saved {len(blocks_to_save)} blocks for "
-                    f"request {req_id} to CPU in {duration:.4f} seconds.")
+        KV_SAVE_TRANSFER_LATENCY.labels(
+            is_batched=is_batched).observe(duration)
+        logger.info(f"Successfully saved {total_num_blocks_to_save} blocks "
+                    f"to CPU in {duration:.4f} seconds.")
 
         if not self.no_op_swap_out:
 
@@ -2149,34 +2343,90 @@ class TPUOffloadConnectorWorker:
             logger.info(
                 f"Total size of chunks_on_cpu: {total_size_bytes / 1024**2:.2f} MB"
             )
-            KV_SAVED_BYTES.inc(total_size_bytes)
+            KV_SAVED_BYTES.labels(is_batched=is_batched).inc(total_size_bytes)
 
             if duration > 0:
                 bw_gbps = (total_size_bytes / (1024**3)) / duration
                 KV_SAVE_TRANSFER_BW_GBPS.labels(
-                    num_blocks=str(num_blocks_to_save)).observe(bw_gbps)
+                    num_blocks=str(total_num_blocks_to_save),
+                    is_batched=is_batched).observe(bw_gbps)
 
+        # 2. Unstitch and Register
         post_transfer_start_time = time.time()
+        block_offset = 0
+        for info in manifest:
+            for i in range(info.num_blocks):
+                chunk_id = info.dst_chunks[i]
+                cur_chunk_cross_layers = [
+                    chunks_on_cpu[j][block_offset + i]
+                    for j in range(self.num_layers)
+                ]
+                self.cpu_backend.add(chunk_id, cur_chunk_cross_layers)
 
-        for i in range(num_blocks_to_save):
-            chunk_id = dst_chunks[i]
-            cur_chunk_cross_layers = [
-                chunks_on_cpu[j][i] for j in range(self.num_layers)
-            ]
-            self.cpu_backend.add(chunk_id, cur_chunk_cross_layers)
-            logger.info(f"Request {req_id}: Saving to CPU chunk: "
-                        f"chunk_id={chunk_id}, "
-                        f" local_chunk_idx={i}")
-
-        logger.info(
-            f"Request {req_id}: Added {num_blocks_to_save} chunks to CPU backend."
-        )
+            block_offset += info.num_blocks
 
         post_transfer_duration = time.time() - post_transfer_start_time
-        KV_SAVE_POST_TRANSFER_LATENCY.observe(post_transfer_duration)
+        KV_SAVE_POST_TRANSFER_LATENCY.labels(
+            is_batched=is_batched).observe(post_transfer_duration)
+
+        log_prefix = "Batch" if is_batched else f"Request {manifest[0].req_id}"
         logger.info(
-            f"Request {req_id}: e2e host processing of {num_blocks_to_save} chunks took {post_transfer_duration:.4f} seconds."
+            f"{log_prefix}: e2e host processing of {total_num_blocks_to_save} chunks took {post_transfer_duration:.4f} seconds."
         )
+
+    def _start_batched_save_kv(self, metadata: TPUOffloadConnectorMetadata):
+        """
+        Groups all HBM->CPU transfers across requests for a given batch
+        into a single gather and swap operation
+
+        Budgeting & Correctness:
+        This optimization is "transparent" to the StagingBufferManager. The Scheduler
+        performs per-request transactional allocations in build_connector_meta.
+        Because the total staging area is fixed, and the sum of individual
+        allocations is guaranteed to be within that limit, the unified batch
+        created here is always correctly budgeted and will not cause HBM OOM.
+        """
+        START_SAVE_KV_CALLS.labels(is_batched=True).inc()
+        # 1. SYNC BLOCKING: Unified Gather and Validation
+        gather_result = self._batched_gather_tpu_blocks(metadata)
+        if gather_result is None:
+            logger.info("Batched gather returned None, no blocks to save.")
+            return
+
+        flat_kv_caches_tpu, manifest, total_num_blocks_to_save = gather_result
+
+        # 2. ASYNC NON-BLOCKING: Single Batch Transfer
+        def _async_batch_transfer_task(*args, **kwargs):
+            try:
+                self._transfer_and_register_cpu_chunks(*args, **kwargs)
+            except Exception as e:
+                logger.error(f"Error in batched transfer: {e}", exc_info=True)
+
+        logger.info(
+            f"Submitting batched transfer task for {len(manifest)} requests, {total_num_blocks_to_save} blocks total."
+        )
+        # Note: We use manifest for the pending future tracking.
+        # record_save will be handled in the main thread by _process_completed_saves.
+
+        SAVE_BATCH_SIZE.observe(len(manifest))
+        future = self.save_executor.submit(_async_batch_transfer_task,
+                                           flat_kv_caches_tpu,
+                                           total_num_blocks_to_save,
+                                           manifest,
+                                           is_batched=True)
+        self._pending_save_futures.append((future, manifest))
+
+    def _get_blocks_for_req_from_metadata(
+            self, info: SaveReqInfo,
+            metadata: TPUOffloadConnectorMetadata) -> list[int]:
+        """
+        Retrieves the source TPU block IDs for a specific request from the
+        unified metadata.
+        """
+        for meta in metadata.requests_meta:
+            if meta.req_id == info.req_id and meta.save_spec:
+                return meta.save_spec.src_blocks
+        return []
 
     def start_save_kv(self):
         """
@@ -2197,7 +2447,7 @@ class TPUOffloadConnectorWorker:
         - The background thread moves data from HBM to Host RAM and
           registers the chunks in the LocalCPUBackend.
         """
-        START_SAVE_KV_CALLS.inc()
+        START_SAVE_KV_CALLS.labels(is_batched=False).inc()
         # assert self.cpu_backend, "please initialize cpu_backend first."
         # This method is idempotent. If the save operations for the current
         # step's metadata have already been processed, we can exit early.
@@ -2214,6 +2464,11 @@ class TPUOffloadConnectorWorker:
             return
 
         if not metadata.requests_meta:
+            self._processed_save_for_step = True
+            return
+
+        if self.batched_save:
+            self._start_batched_save_kv(metadata)
             self._processed_save_for_step = True
             return
 
@@ -2256,10 +2511,16 @@ class TPUOffloadConnectorWorker:
             (flat_kv_caches_tpu, num_blocks_to_save, dst_chunks,
              blocks_to_save) = gather_result
 
+            # Create a single-item manifest for the unified transfer function
+            info = SaveReqInfo(req_id=meta.req_id,
+                               num_blocks=num_blocks_to_save,
+                               dst_chunks=dst_chunks,
+                               is_final_save=meta.save_spec.is_final_save)
+
             # Define a safe wrapper for the async part to ensure logging
             def _async_transfer_task(req_id, *args):
                 try:
-                    self._transfer_and_register_cpu_chunks(req_id, *args)
+                    self._transfer_and_register_cpu_chunks(*args)
                 except Exception as e:
                     raise ValueError(
                         f"Error transferring blocks for request {req_id}: {e}")
@@ -2269,10 +2530,10 @@ class TPUOffloadConnectorWorker:
             logger.info(f"Submitting transfer task for request {meta.req_id}")
             future = self.save_executor.submit(_async_transfer_task,
                                                meta.req_id, flat_kv_caches_tpu,
-                                               num_blocks_to_save, dst_chunks,
-                                               blocks_to_save)
+                                               num_blocks_to_save, [info],
+                                               False)
 
-            self._pending_save_futures.append((future, meta))
+            self._pending_save_futures.append((future, [info]))
 
         self._processed_save_for_step = True
         SAVE_BATCH_SIZE.observe(len(self._pending_save_futures))
@@ -2280,50 +2541,43 @@ class TPUOffloadConnectorWorker:
     def _process_completed_saves(self):
         """
         Checks for and processes completed asynchronous save operations.
+        Supports both single and batched mode save operations using the
+        list[SaveReqInfo] manifest.
         """
         PROCESS_COMPLETED_SAVE_CALLS.inc()
         if not self._pending_save_futures:
             return
 
-        logger.info(
-            f"Checking for {len(self._pending_save_futures)} pending save "
-            "operations to complete...")
         start_time = time.time()
         completed_count = 0
-        remaining_futures: list[tuple[Future, TPUReqMeta]] = []
+        remaining_futures: list[tuple[Future, list[SaveReqInfo]]] = []
         PENDING_SAVE_FUTURES_SIZE.set(len(self._pending_save_futures))
-        for future, meta in self._pending_save_futures:
+        for future, manifest in self._pending_save_futures:
             if future.done():
                 FUTURE_DONE_TOTAL.inc()
+                # Ensure the task finished successfully.
+
                 try:
-                    # The result of _save_blocks_to_cpu is the request_id
-                    finished_req_id = future.result()
-                    logger.info(
-                        f"Save operation completed for request {finished_req_id}"
-                    )
+                    future.result()
+                    # Record saves for all requests in the manifest
+                    for info in manifest:
+                        if info.num_blocks > 0:
+                            self.offload_stats.record_save(
+                                req=info.req_id,
+                                saved_chunk_ids=info.dst_chunks)
+                            RECORD_SAVE_TOTAL.inc()
 
-                    if len(meta.save_spec.src_blocks) > 0:
-                        self.offload_stats.record_save(
-                            req=finished_req_id,
-                            saved_chunk_ids=meta.save_spec.dst_chunks)
-                        RECORD_SAVE_TOTAL.inc()
-
-                    # if meta.save_spec and meta.save_spec.is_final_save:
-                    #     logger.info(
-                    #         f"Request {finished_req_id}: Final save completed. Marking as finished."
-                    #     )
-                    #     self.finished_save_reqs.add(finished_req_id)
                     completed_count += 1
                 except Exception as e:
                     raise ValueError(f"A save operation failed: {e}")
             else:
-                remaining_futures.append((future, meta))
+                remaining_futures.append((future, manifest))
 
         if completed_count > 0:
             duration = time.time() - start_time
             PROCESS_COMPLETED_SAVE_LATENCY.observe(duration)
-            logger.info(f"{completed_count} save operations "
-                        f"completed in {duration:.4f} seconds.")
+            logger.info(f"{completed_count} future(s) processed "
+                        f"in {duration:.4f} seconds.")
 
         self._pending_save_futures = remaining_futures
 
