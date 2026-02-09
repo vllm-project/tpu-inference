@@ -67,9 +67,11 @@ def get_num_chips() -> int:
         # Skip non-numeric entries like "vfio" (the vfio-noiommu device)
         numeric_entries = [entry for entry in vfio_entries if entry.isdigit()]
         return len(numeric_entries)
-    except FileNotFoundError:
+    except FileNotFoundError as e:
+        print(f"Warning: Failed to detect TPU devices: {e}")
         return 0
-    except Exception:
+    except Exception as e:
+        print(f"Error: Unexpected error detecting TPU devices: {e}")
         return 0
 
 
