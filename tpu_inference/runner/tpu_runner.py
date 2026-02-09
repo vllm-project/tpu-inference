@@ -29,6 +29,7 @@ from flax import nnx
 from jax.experimental import mesh_utils
 from jax.sharding import NamedSharding, PartitionSpec
 from vllm.config import VllmConfig
+from vllm.distributed import get_pp_group
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
@@ -87,6 +88,12 @@ logging.getLogger("torchax.tensor").setLevel(logging.ERROR)
 INVALID_TOKEN_ID = -1
 # Smallest output size
 MIN_NUM_SEQS = 8
+
+DUMMY_METADATA = AttentionMetadata(
+    input_positions=[],
+    block_tables=[],
+    request_distribution=[0, 0, 0],
+)
 
 
 class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
@@ -517,14 +524,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self.rng_params_for_sampling = nnx.Rngs(
             jax.random.key(self.model_config.seed)).params()
-        self.is_multimodal_model = (
-            self.model_config.is_multimodal_model
-            and self.embed_multimodal_fn is not None and hasattr(
-                self.model_config.hf_config, "architectures"
-            )  #TODO: Remove Llama Guard 4 specific condition once the LG4 Vision portion is implemented
-            and len(self.model_config.hf_config.architectures) >= 1
-            and self.model_config.hf_config.architectures[0]
-            != "Llama4ForConditionalGeneration")
+        self.is_multimodal_model = (self.model_config.is_multimodal_model
+                                    and self.embed_multimodal_fn is not None
+                                    and hasattr(self.model_config.hf_config,
+                                                "architectures"))
 
         logger.info(f"Init model | "
                     f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")
@@ -557,7 +560,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called "
                                "after execute_model() returns None.")
-        output = self._execute_model(scheduler_output, intermediate_tensors)
+        _, output = self._execute_model(scheduler_output, intermediate_tensors)
         return output
 
     def sample_tokens(
@@ -684,13 +687,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self,
         scheduler_output: "VllmSchedulerOutput",
         intermediate_tensors: Optional[JaxIntermediateTensors] = None,
-    ) -> JaxIntermediateTensors | ModelRunnerOutput | None:
+    ) -> tuple[AttentionMetadata, JaxIntermediateTensors | ModelRunnerOutput
+               | None]:
         self.persistent_batch_manager.update_states(
             scheduler_output, self.get_mrope_input_positions_fn)
         if not scheduler_output.total_num_scheduled_tokens:
             if has_kv_transfer_group():
-                return self.kv_connector_no_forward(scheduler_output,
-                                                    self.vllm_config)
+                return DUMMY_METADATA, self.kv_connector_no_forward(
+                    scheduler_output, self.vllm_config)
 
             # Return empty ModelRunnerOutput if there's no work to do.
             # TODO(fhzhang): We rely on empty cycles to remove requests in input batch. Fix it to reduce overhead.
@@ -702,7 +706,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     "Should not schedule a request that does nothing!")
                 # raise Exception(
                 #     "Should not schedule a request that does nothing!")
-            return EMPTY_MODEL_RUNNER_OUTPUT
+            return DUMMY_METADATA, EMPTY_MODEL_RUNNER_OUTPUT
 
         # TODO(pooyam): I guess we can remove returning sampling_metadata in `_prepare_inputs` after https://github.com/njhill/vllm/commit/b7433ca1a47732394b1bdea4099d98389515954b
         (
@@ -716,14 +720,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             padded_num_reqs,
         ) = self._prepare_inputs(scheduler_output)
 
-        is_llama_guard_4 = (
-            hasattr(
-                self.model_config.hf_config, "architectures"
-            )  #TODO: Remove Llama Guard 4 specific condition once the LG4 Vision portion is implemented
-            and len(self.model_config.hf_config.architectures) >= 1
-            and self.model_config.hf_config.architectures[0]
-            == "Llama4ForConditionalGeneration")
-
         # multi-modal support
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
@@ -731,13 +727,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.mm_manager.execute_mm_encoder(scheduler_output)
             mm_embeds = self.mm_manager.gather_mm_embeddings(
                 scheduler_output, input_ids.shape[0])
-        #TODO: Remove the follow elif statement once Llama Guard 4 Vision portion has been implemented
-        elif is_llama_guard_4 and any(
-                self.mm_manager.runner.requests[req_id].mm_features
-                for req_id in self.mm_manager.runner.input_batch.req_ids):
-            raise NotImplementedError(
-                "Llama Guard 4 (JAX) currently supports only text inputs. "
-                "Multimodal processing not yet implemented.")
         else:
             mm_embeds = []
 
@@ -776,10 +765,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      self.is_first_rank,
                      self.is_last_rank,
                  )
-            if not self.is_last_rank:
+            if not get_pp_group().is_last_rank:
                 assert isinstance(hidden_states, JaxIntermediateTensors)
                 hidden_states.kv_connector_output = kv_connector_output
-                return hidden_states
+                return attn_metadata, hidden_states
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
             logits = self.compute_logits_fn(
@@ -799,7 +788,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             kv_connector_output=kv_connector_output,
             logits_indices_selector=logits_indices_selector,
             padded_num_reqs=padded_num_reqs)
-        return None
+        return attn_metadata, None
 
     def _sample_from_logits(
         self,
