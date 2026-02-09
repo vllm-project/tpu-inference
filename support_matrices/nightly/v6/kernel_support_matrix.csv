@@ -1,5 +1,5 @@
 Feature,CorrectnessTest,PerformanceTest
-"Collective Communication Matmul",✅,❌
+"Collective Communication Matmul",❌,N/A
 "MLA",unverified,unverified
 "MoE",unverified,unverified
 "Quantized Attention",unverified,unverified
