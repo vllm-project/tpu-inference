@@ -84,4 +84,8 @@ RUN --mount=type=cache,target=/root/.cache/pip if [ "$IS_FOR_V7X" = "true" ]; th
         pip install -r requirements_v7x.txt; \
     fi
 
-CMD ["/bin/bash"]
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD []

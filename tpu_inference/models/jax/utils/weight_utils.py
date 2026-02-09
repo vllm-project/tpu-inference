@@ -38,6 +38,7 @@ from vllm.model_executor.models.utils import AutoWeightsLoader
 
 from tpu_inference import envs, utils
 from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils import file_utils
 
@@ -751,10 +752,14 @@ def load_nnx_param_from_reshaped_torch(
         spec = ()
     mesh = getattr(jax_param, 'mesh', None)
 
-    jax_param.value = shard_put(t2j(torch_weight, use_dlpack=False).astype(
-        jax_param.value.dtype),
-                                spec,
-                                mesh=mesh)
+    try:
+        jax_param.value = shard_put(t2j(torch_weight, use_dlpack=False),
+                                    spec,
+                                    mesh=mesh)
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to load weight '{param_name}' with shape {torch_weight.shape} into param with shape {jax_param.value.shape}"
+        ) from e
 
 
 class JaxAutoWeightsLoader(AutoWeightsLoader):
@@ -804,8 +809,8 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
         # weights after loading all weights, we do it per-module here to
         # avoid OOM.
         if (quant_method := getattr(module, 'quant_method', None)) is not None:
-            if hasattr(quant_method, 'process_weights_after_loading'):
-                quant_method.process_weights_after_loading(module)
+            assert isinstance(quant_method, QuantizeMethodBase)
+            quant_method.process_weights_after_loading(module)
 
 
 class LoadableWithIterator:
