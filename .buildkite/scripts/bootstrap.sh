@@ -19,8 +19,8 @@ set -euo pipefail
 # --- Skip build if only docs/icons changed ---
 echo "--- :git: Checking changed files"
 
-BASE_BRANCH=${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-"main"}
-
+BASE_BRANCH=${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-"teresa_test"}
+BASE_BRANCH="teresa_test"
 # if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     echo "PR detected. Target branch: $BASE_BRANCH"
 
