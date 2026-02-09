@@ -35,6 +35,7 @@ def get_tpu_quantization_config(vllm_config: VllmConfig):
         # TODO(#1623): replace with actual FP8 config when delegation is ready.
         FP8: lambda _: None,
     }
+
     if model_config.quantization not in method_to_config:
         raise NotImplementedError(
             f"{model_config.quantization} quantization method not supported."
@@ -64,3 +65,14 @@ class QuantizeMethodBase(ABC):
 
         Expects create_weights to have been called before on the layer."""
         raise NotImplementedError
+
+    def process_weights_after_loading(self, layer: JaxModule, *args,
+                                      **kwargs) -> None:
+        """
+        Processes weigths after loading.
+
+        Args:
+            layer: The layer to process
+        """
+
+        pass

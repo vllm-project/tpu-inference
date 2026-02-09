@@ -38,6 +38,7 @@ from vllm.model_executor.models.utils import AutoWeightsLoader
 
 from tpu_inference import envs, utils
 from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils import file_utils
 
@@ -723,7 +724,7 @@ def load_nnx_param_from_reshaped_torch(
         permute_dims: Optional[tuple[int, ...]] = None,
         param_name: str = "Unknown"):
     """Load a nnx.Param from a torch.Tensor with reshaping and transposing.
-    
+
     HuggingFace model almost always store linear layer weights with contracting dimension
     last, and only support 1D/2D weight tensors. This function reshapes then transposes
     the torch weight to match the jax_param shape before loading.
@@ -751,10 +752,14 @@ def load_nnx_param_from_reshaped_torch(
         spec = ()
     mesh = getattr(jax_param, 'mesh', None)
 
-    jax_param.value = shard_put(t2j(torch_weight, use_dlpack=False).astype(
-        jax_param.value.dtype),
-                                spec,
-                                mesh=mesh)
+    try:
+        jax_param.value = shard_put(t2j(torch_weight, use_dlpack=False),
+                                    spec,
+                                    mesh=mesh)
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to load weight '{param_name}' with shape {torch_weight.shape} into param with shape {jax_param.value.shape}"
+        ) from e
 
 
 class JaxAutoWeightsLoader(AutoWeightsLoader):
@@ -804,13 +809,13 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
         # weights after loading all weights, we do it per-module here to
         # avoid OOM.
         if (quant_method := getattr(module, 'quant_method', None)) is not None:
-            if hasattr(quant_method, 'process_weights_after_loading'):
-                quant_method.process_weights_after_loading(module)
+            assert isinstance(quant_method, QuantizeMethodBase)
+            quant_method.process_weights_after_loading(module)
 
 
 class LoadableWithIterator:
     """Mixin for models that support loading weights with an iterator.
-    
+
     This is replicating what vLLM does for most models, e.g. https://github.com/vllm-project/vllm/blob/8e2a469b3b2f67bc900ed72724fe3f05e3564994/vllm/model_executor/models/gemma3_mm.py#L644-L646
     """
 

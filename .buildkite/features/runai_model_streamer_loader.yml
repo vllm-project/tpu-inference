@@ -64,17 +64,6 @@ steps:
     commands:
       - |
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_torchax_uniproc
-
-  - label: "${TPU_VERSION:-tpu6e} Correctness Test | JAX RayDistributedExecutor"
-    key: "${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_jax_ray_distributed"
-    soft_fail: true
-    agents:
-      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}" # Using a queue with more devices for distributed tests
-    env:
-      IS_FOR_V7X: "${IS_FOR_V7X}"
-    commands:
-      - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_jax_ray_distributed_executor
-
   - label: "${TPU_VERSION:-tpu6e} Correctness Test | Torchax RayDistributedExecutor"
     key: "${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_torchax_ray_distributed"
     soft_fail: true

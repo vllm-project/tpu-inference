@@ -23,6 +23,7 @@ from jax.sharding import Mesh, PartitionSpec
 from tpu_inference.layers.jax.moe.moe import JaxMoE, Router
 from tpu_inference.layers.jax.moe.utils import (MoEBackend,
                                                 get_expert_parallelism)
+from tpu_inference.layers.jax.quantization.unquantized import UnquantizedConfig
 
 EXPERT_AXIS_NAME = "model"
 
@@ -96,7 +97,9 @@ class TestMoE(unittest.TestCase):
                 moe_backend=backend,
                 num_experts_per_tok=self.K,
                 expert_axis_name='model',
-                num_expert_parallelism=num_expert_parallelism)
+                num_expert_parallelism=num_expert_parallelism,
+                # TODO (jacobplatin): we shouldn't hardcode this
+                quant_config=UnquantizedConfig({}))
         return moe
 
     def _compute_ground_truth(self, moe_instance, x_input):

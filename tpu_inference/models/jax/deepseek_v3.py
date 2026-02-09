@@ -47,6 +47,7 @@ from tpu_inference.layers.jax.layers import (Embedder, FlaxUtils, LMhead,
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.moe.utils import (get_expert_parallelism,
                                                 select_moe_backend)
+from tpu_inference.layers.jax.quantization.unquantized import UnquantizedConfig
 from tpu_inference.layers.jax.rope import DeepseekScalingRotaryEmbedding
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (BaseWeightLoader,
@@ -940,23 +941,6 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
             "model.layers.*.mlp.shared_experts.up_proj.weight":
             "layers.*.custom_module.shared_experts.kernel_up_proj_DF",
         }
-        if self.moe_backend in [MoEBackend.GMM_EP, MoEBackend.GMM_TP]:
-            # NOTE (jacobplatin): the first rule is needed because
-            # the current GMM kernel expects that the second/third
-            # dimensions are transposed.  The second rule is needed
-            # because the GMM kernel expects that the up/gate proj
-            # are fused into a single weight tensor.
-            self._loaded_to_standardized_keys.update({
-                "model.layers.*.mlp.experts.*.down_proj.weight":
-                "layers.*.custom_module.experts.kernel_down_proj_EFD",
-                "model.layers.*.mlp.experts.*.gating_upproj_EDF.weight":
-                "layers.*.custom_module.experts.kernel_gating_upproj_EDF",
-            })
-            # NOTE (jacobplatin): only used for the MOE_VLLM backend, which
-            # expects 2/3 dimensions to be transposed.
-            self._transpose_map.update({
-                r"mlp\.experts\.\d+\.gating_upproj_EDF": (0, 2, 1),
-            })
 
         if self.use_mla_kernel:
             self._loaded_to_standardized_keys.update({
@@ -1344,81 +1328,36 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                             down_w, down_s = stacked_tensors.pop(layer_num +
                                                                  "down_proj")
 
-                            is_moe_kernel = model_for_loading.moe_backend in [
-                                MoEBackend.FUSED_MOE, MoEBackend.GMM_TP,
-                                MoEBackend.GMM_EP
-                            ]
                             gate_name = loaded_name.replace(
                                 proj_type, "gate_proj")
                             up_name = loaded_name.replace(proj_type, "up_proj")
                             down_name = loaded_name.replace(
                                 proj_type, "down_proj")
-                            if is_moe_kernel:
-                                if model_for_loading.moe_backend in [
-                                        MoEBackend.GMM_EP, MoEBackend.GMM_TP
-                                ]:
-                                    # (E, D, F) -> (E, 2 * F, D)
-                                    fused_w = torch.cat([gate_w, up_w], dim=1)
-                                    fused_s = torch.cat(
-                                        [gate_s, up_s], dim=1
-                                    ) if gate_s is not None and up_s is not None else None
-                                    fused_name = loaded_name.replace(
-                                        proj_type, "gating_upproj_EDF")
 
-                                else:
-                                    # (E, D, F) -> (E, 2, D, F)
-                                    fused_w = torch.stack([gate_w, up_w],
-                                                          dim=1)
-                                    fused_s = torch.stack(
-                                        [gate_s, up_s], dim=1
-                                    ) if gate_s is not None and up_s is not None else None
+                            weight_bytes, weight_shards = self._load_individual_weight(
+                                gate_name,
+                                gate_w,
+                                model_params,
+                                model_for_loading.mesh,
+                                scale=gate_s)
 
-                                    fused_name = loaded_name.replace(
-                                        proj_type, "gate_upproj_fused")
-                                weight_bytes, weight_shards = self._load_individual_weight(
-                                    fused_name,
-                                    fused_w,
-                                    model_params,
-                                    model_for_loading.mesh,
-                                    scale=fused_s)
+                            weight_bytes_up, weight_shards_up = self._load_individual_weight(
+                                up_name,
+                                up_w,
+                                model_params,
+                                model_for_loading.mesh,
+                                scale=up_s)
+                            weight_bytes += weight_bytes_up
+                            weight_shards += weight_shards_up
 
-                                weight_bytes_down, weight_shards_down = self._load_individual_weight(
-                                    down_name,
-                                    down_w,
-                                    model_params,
-                                    model_for_loading.mesh,
-                                    scale=down_s)
-
-                                # Update cumulative memory
-                                weight_bytes += weight_bytes_down
-                                weight_shards += weight_shards_down
-
-                            else:
-
-                                weight_bytes, weight_shards = self._load_individual_weight(
-                                    gate_name,
-                                    gate_w,
-                                    model_params,
-                                    model_for_loading.mesh,
-                                    scale=gate_s)
-
-                                weight_bytes_up, weight_shards_up = self._load_individual_weight(
-                                    up_name,
-                                    up_w,
-                                    model_params,
-                                    model_for_loading.mesh,
-                                    scale=up_s)
-                                weight_bytes += weight_bytes_up
-                                weight_shards += weight_shards_up
-
-                                weight_bytes_down, weight_shards_down = self._load_individual_weight(
-                                    down_name,
-                                    down_w,
-                                    model_params,
-                                    model_for_loading.mesh,
-                                    scale=down_s)
-                                weight_bytes += weight_bytes_down
-                                weight_shards += weight_shards_down
+                            weight_bytes_down, weight_shards_down = self._load_individual_weight(
+                                down_name,
+                                down_w,
+                                model_params,
+                                model_for_loading.mesh,
+                                scale=down_s)
+                            weight_bytes += weight_bytes_down
+                            weight_shards += weight_shards_down
                         else:
                             continue
                         if self.is_verbose:
@@ -1588,6 +1527,17 @@ class DeepSeekV3(nnx.Module):
         self.use_ep = self.num_expert_parallelism > 1
         self.moe_backend = select_moe_backend(self.use_ep)
 
+        # TODO (jacobplatin): temporary workaround for now before FP8 is fully ready for DeepSeek
+        vllm_config.quant_config = UnquantizedConfig(
+            vllm_config.model_config.hf_config.quantization_config)
+
+        # TODO (jacobplatin): we will resolve this issue in a forthcoming PR that will refactor weight loading
+        if vllm_config.load_config.load_format == "dummy" and self.moe_backend in MoEBackend.fused_moe_backends(
+        ):
+            raise ValueError(
+                f"Random / dummy weights are not supported for {MoEBackend.fused_moe_backends()} backends right now."
+            )
+
         self.weight_loader = self.WeightLoader(
             vllm_config=vllm_config,
             num_layers=num_layers,
@@ -1735,7 +1685,7 @@ class DeepSeekV3(nnx.Module):
                     mesh=self.mesh,
                     hidden_act=hidden_act,
                     rngs=self.rng,
-                    quant_config=vllm_config.quant_config,
+                    quant_config=self.vllm_config.quant_config,
                     activation_ffw_td=(ShardingAxisName.MLP_DATA,
                                        ShardingAxisName.MODEL_1),
                     activation_ffw_ted=(ShardingAxisName.MLP_DATA, None,
@@ -1819,6 +1769,8 @@ class DeepSeekV3(nnx.Module):
         self.rng = nnx.Rngs(rng)
         self.weight_loader.load_weights(self)
         self.initialize_cache()
+        # TODO (jacobplatin): remove this once we switch to using JaxAutoWeightsLoader
+        process_modules_after_loading(self, self.mesh)
 
     def initialize_cache(self):
         # Initialize RoPE caches after weights are loaded and before JIT compilation.
@@ -1849,6 +1801,25 @@ class DeepSeekV3(nnx.Module):
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         return self.lm_head.decode(hidden_states)
+
+
+def process_modules_after_loading(module, mesh):
+    """Recursively call process_weights_after_loading on modules with quant_method.
+
+    TODO (jacobplatin): remove this once we switch to using JaxAutoWeightsLoader
+    """
+    # Process this module if it has a quant_method
+    if hasattr(module, 'quant_method') and module.quant_method is not None:
+        if hasattr(module.quant_method, 'process_weights_after_loading'):
+            module.quant_method.process_weights_after_loading(module, mesh)
+
+    for name, value in vars(module).items():
+        if isinstance(value, nnx.Module):
+            process_modules_after_loading(value, mesh)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                if isinstance(item, nnx.Module):
+                    process_modules_after_loading(item, mesh)
 
 
 def weights_dequant_cpu(x: torch.Tensor,
