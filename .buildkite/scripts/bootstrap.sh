@@ -21,7 +21,7 @@ echo "--- :git: Checking changed files"
 
 BASE_BRANCH=${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-"main"}
 
-if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
+# if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     echo "PR detected. Target branch: $BASE_BRANCH"
 
     # Fetch base and current commit to ensure local history exists for diff
@@ -59,9 +59,9 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
       echo "Some pipelines syntax are invalid. Failing build."
       exit 1
     fi
-else
-    echo "Non-PR build. Bypassing file change check."
-fi
+# else
+#     echo "Non-PR build. Bypassing file change check."
+# fi
 
 upload_pipeline() {
     if [ "${MODEL_IMPL_TYPE:-auto}" == "auto" ]; then
