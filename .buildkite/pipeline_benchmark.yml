@@ -28,7 +28,6 @@ steps:
 
    - label: "Read CSV file and publish benchmark job"
      key: "read-csv-publish-job"
-     depends_on: "build-vllm-tpu-image"
      agents:
        queue: cpu
      env:

@@ -1,0 +1,6 @@
+Device,Model,MaxNumSeqs,MaxNumBatchedTokens,TensorParallelSize,MaxModelLen,Dataset,InputLen,OutputLen,ExpectedETEL,NumPrompts,ModelTag,PrefixLen,AdditionalConfig,ExtraArgs
+tpu7x-8,unsloth/gpt-oss-120b-BF16,500,16384,4,8192,random,2048,6144,43200000,1000,NEW,0,,'--data-parallel-size=2 --gpu-memory-utilization=0.98'
+tpu7x-2,openai/gpt-oss-120b,1024,16384,2,9216,random,1024,8192,43200000,1024,NEW,0,,'--kv-cache-dtype=fp8 --gpu-memory-utilization=0.97'
+tpu7x-2,openai/gpt-oss-120b,1024,8192,2,9216,random,8192,1024,43200000,1024,NEW,0,,'--kv-cache-dtype=fp8 --gpu-memory-utilization=0.95'
+tpu7x-8,openai/gpt-oss-120b,1024,16384,2,9216,random,1024,8192,43200000,4096,NEW,0,,'--data-parallel-size=4 --kv-cache-dtype=fp8 --gpu-memory-utilization=0.97'
+tpu7x-8,openai/gpt-oss-120b,1024,8192,2,9216,random,8192,1024,43200000,4096,NEW,0,,'--data-parallel-size=4 --kv-cache-dtype=fp8 --gpu-memory-utilization=0.95'
