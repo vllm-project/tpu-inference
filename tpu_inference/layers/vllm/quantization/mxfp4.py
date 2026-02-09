@@ -60,6 +60,7 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
+@register_quantization_config(MXFP4)
 @register_quantization_config(get_tpu_quant_method(MXFP4))
 class VllmMxfp4Config(Mxfp4Config, VllmQuantConfig):
 

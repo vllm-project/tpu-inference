@@ -56,6 +56,7 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
+@register_quantization_config(FP8)
 @register_quantization_config(get_tpu_quant_method(FP8))
 class VllmFp8Config(vllm_fp8.Fp8Config, VllmQuantConfig):
 

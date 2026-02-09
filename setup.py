@@ -106,4 +106,9 @@ setup(
         "Programming Language :: Python :: 3.12",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
+    entry_points={
+        "vllm.general_plugins": [
+            "tpu_quant_configs = tpu_inference.vllm_plugin:register_tpu_quantization_configs",
+        ],
+    },
 )

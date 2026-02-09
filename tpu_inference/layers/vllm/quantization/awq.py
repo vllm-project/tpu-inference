@@ -50,6 +50,7 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
+@register_quantization_config(AWQ)
 @register_quantization_config(get_tpu_quant_method(AWQ))
 class VllmAWQConfig(AWQConfig, VllmQuantConfig):
 
