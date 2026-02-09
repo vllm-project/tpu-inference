@@ -133,6 +133,12 @@ class VllmModelWrapper:
             self.vllm_config.device_config.slice = slice_config
         assert self.vllm_config.model_config.dtype in TORCH_DTYPE_TO_JAX, "The model_config.dtype must be a PyTorch dtype."
         vllm_config_for_load.device_config.device = "cpu"
+        # Remove the dynamically added sharding_config attribute to avoid errors
+        # when vLLM's replace() function checks for dataclass fields.
+        # This is safe because vllm_config_for_load is only used for model loading
+        # which doesn't need sharding_config, and self.vllm_config still has it.
+        if hasattr(vllm_config_for_load, 'sharding_config'):
+            delattr(vllm_config_for_load, 'sharding_config')
         # Clearing the cached compilation config, otherwise vllm model init will fail
 
         # When expert parallelism is enabled, vLLM loads weight in sharding
