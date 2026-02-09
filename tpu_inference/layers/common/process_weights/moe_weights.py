@@ -26,7 +26,7 @@ from tpu_inference.layers.common.quantization import (dequantize_tensor,
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import (
     general_device_put, reorder_concatenated_tensor_for_sharding)
-from tpu_inference.utils import align_to, get_mesh_shape_product
+from tpu_inference.utils import align_to
 
 P = PartitionSpec
 
