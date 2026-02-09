@@ -1,0 +1,4 @@
+Device,Model,MaxNumSeqs,MaxNumBatchedTokens,TensorParallelSize,MaxModelLen,Dataset,InputLen,OutputLen,ExpectedETEL,NumPrompts,ModelTag,PrefixLen,AdditionalConfig,ExtraArgs
+tpu7x-8,BCCard/Qwen3-Coder-480B-A35B-Instruct-FP8-Dynamic,512,8192,8,10240,random,1024,1024,43200000,320,NEW,0,'{"is_verbose": true}','--kv_cache_dtype=fp8 --enable-expert-parallel --gpu-memory-utilization=0.95'
+tpu7x-8,BCCard/Qwen3-Coder-480B-A35B-Instruct-FP8-Dynamic,512,8192,8,10240,random,8192,1024,43200000,320,NEW,0,'{"is_verbose": true}','--kv_cache_dtype=fp8 --enable-expert-parallel --gpu-memory-utilization=0.95'
+tpu7x-8,BCCard/Qwen3-Coder-480B-A35B-Instruct-FP8-Dynamic,512,8192,8,10240,random,1024,8192,43200000,320,NEW,0,'{"is_verbose": true}','--kv_cache_dtype=fp8 --enable-expert-parallel --gpu-memory-utilization=0.95'

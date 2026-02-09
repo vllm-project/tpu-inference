@@ -1,0 +1,3 @@
+Device,Model,MaxNumSeqs,MaxNumBatchedTokens,TensorParallelSize,MaxModelLen,Dataset,InputLen,OutputLen,ExpectedETEL,NumPrompts,ModelTag,PrefixLen,AdditionalConfig
+tpu7x-8,deepseek-ai/DeepSeek-R1,2,1024,8,5120,bench-custom-token,1024,4096,43200000,100,NEW,0,'{"is_verbose": true}'
+tpu7x-8,deepseek-ai/DeepSeek-R1,2,1024,8,10240,bench-custom-token,2048,8192,43200000,100,NEW,0,'{"is_verbose": true}'
