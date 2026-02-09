@@ -29,6 +29,8 @@ from vllm.config import (CacheConfig, DeviceConfig, MultiModalConfig,
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer
+from tpu_inference.distributed.jax_parallel_state import \
+    init_pp_distributed_environment
 
 # Import the module itself to allow patching
 # Corrected imports for the code under test
@@ -102,6 +104,7 @@ class MockVllmConfig:
         )
         self.model_config = MockModelConfig(hf_config, jnp.bfloat16)
         self.cache_config = MagicMock(spec=CacheConfig)
+        self.cache_config.cache_dtype = "auto"
         self.parallelism_config = MagicMock(spec=ParallelConfig)
         self.scheduler_config = MagicMock(spec=SchedulerConfig)
         self.device_config = MagicMock(spec=DeviceConfig)
@@ -135,6 +138,17 @@ def mock_vllm_config() -> MockVllmConfig:
 @pytest.fixture
 def rngs(rng: PRNGKey) -> nnx.Rngs:
     return nnx.Rngs(params=rng)
+
+
+@pytest.fixture(autouse=True, scope="module")
+def initialize_pp():
+    init_pp_distributed_environment(
+        ip="",
+        rank=0,
+        world_size=1,
+        device=jax.devices()[0],
+        need_pp=False,
+    )
 
 
 # --- Test Classes ---
