@@ -83,7 +83,7 @@ def get_num_chips() -> int:
     if accel_files:
         logger.debug(f"Detected {len(accel_files)} TPU chips via /dev/accel*")
         return len(accel_files)
-    
+
     # Fall back to older driver path (/dev/vfio/*)
     try:
         vfio_entries = os.listdir("/dev/vfio")
