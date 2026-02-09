@@ -26,6 +26,9 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import \
     Qwen2_5_VLConfig
 from vllm.config import (CacheConfig, DeviceConfig, MultiModalConfig,
                          ParallelConfig, SchedulerConfig)
+from tpu_inference.models.jax.jax_intermediate_tensor import \
+    JaxIntermediateTensors
+from tpu_inference.layers.jax.pp_utils import PPMissingLayer
 
 # Import the module itself to allow patching
 # Corrected imports for the code under test
@@ -594,8 +597,91 @@ class TestQwen2_5_VLForConditionalGeneration:
              patch('tpu_inference.models.jax.qwen2_5_vl.Qwen2Model', autospec=True):
             model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config_tied,
                                                        rng, mesh)
+            model.load_weights(rng)
+            mock_load_weights.assert_called_once()
+            kwargs = mock_load_weights.call_args.kwargs
+            assert "lm_head" not in kwargs['metadata_map'].name_map
 
-        model.load_weights(rng)
-        mock_load_weights.assert_called_once()
-        kwargs = mock_load_weights.call_args.kwargs
-        assert "lm_head" not in kwargs['metadata_map'].name_map
+class TestQwen2_5_VLPipelineParallel:
+
+    @pytest.fixture
+    def mock_pp_group(self):
+        with patch('tpu_inference.models.jax.qwen2_5_vl.get_pp_group') as mock:
+            yield mock
+
+    def test_init_first_rank(self, mock_vllm_config, rng, mesh, mock_pp_group):
+        mock_pp_group.return_value.is_first_rank = True
+        mock_pp_group.return_value.is_last_rank = False
+        model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+        assert not isinstance(model.visual, PPMissingLayer)
+        assert isinstance(model.lm_head, PPMissingLayer)
+        assert model.is_first_rank is True
+        assert model.is_last_rank is False
+
+    def test_init_last_rank(self, mock_vllm_config, rng, mesh, mock_pp_group):
+        mock_pp_group.return_value.is_first_rank = False
+        mock_pp_group.return_value.is_last_rank = True
+        model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+        assert isinstance(model.visual, PPMissingLayer)
+        assert not isinstance(model.lm_head, PPMissingLayer)
+        assert model.is_first_rank is False
+        assert model.is_last_rank is True
+
+    def test_init_middle_rank(self, mock_vllm_config, rng, mesh, mock_pp_group):
+        mock_pp_group.return_value.is_first_rank = False
+        mock_pp_group.return_value.is_last_rank = False
+        model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+        assert isinstance(model.visual, PPMissingLayer)
+        assert isinstance(model.lm_head, PPMissingLayer)
+        assert model.is_first_rank is False
+        assert model.is_last_rank is False
+
+    def test_call_first_rank(self, mock_vllm_config, rng, mesh, mock_pp_group):
+        mock_pp_group.return_value.is_first_rank = True
+        mock_pp_group.return_value.is_last_rank = False
+        model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+        kv_caches = [jnp.array([])]
+        input_ids = jnp.array([[1, 2, 3]])
+        attn_meta = MagicMock(spec=AttentionMetadata)
+
+        with patch.object(model.model, '__call__', return_value=(kv_caches, jnp.array([[0.1, 0.2]]))) as mock_model_call:
+            new_kvs, x, aux = model(kv_caches, input_ids, attn_meta, is_first_rank=True, is_last_rank=False)
+            assert isinstance(x, JaxIntermediateTensors)
+            assert "hidden_states" in x.tensors
+            mock_model_call.assert_called_once()
+            _, kwargs = mock_model_call.call_args
+            assert kwargs['input_ids'] is input_ids
+
+    def test_call_non_first_rank(self, mock_vllm_config, rng, mesh, mock_pp_group):
+        mock_pp_group.return_value.is_first_rank = False
+        mock_pp_group.return_value.is_last_rank = True
+        model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+        kv_caches = [jnp.array([])]
+        attn_meta = MagicMock(spec=AttentionMetadata)
+        intermediate = JaxIntermediateTensors(tensors={"hidden_states": jnp.array([[0.1, 0.2]])})
+
+        with patch.object(model.model, '__call__', return_value=(kv_caches, jnp.array([[0.3, 0.4]]))) as mock_model_call:
+            new_kvs, x, aux = model(kv_caches, None, attn_meta, intermediate_tensors=intermediate, is_first_rank=False, is_last_rank=True)
+            assert isinstance(x, jax.Array)
+            mock_model_call.assert_called_once()
+            _, kwargs = mock_model_call.call_args
+            assert kwargs['inputs_embeds'] is intermediate["hidden_states"]
+
+    def test_load_weights_pp_missing_layers(self, mock_vllm_config, rng, mesh, mock_pp_group):
+        mock_pp_group.return_value.is_first_rank = False
+        mock_pp_group.return_value.is_last_rank = False
+        model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+
+        with patch("tpu_inference.models.jax.utils.weight_utils.load_hf_weights") as mock_load:
+            model.load_weights(rng)
+            mock_load.assert_called_once()
+            pp_missing = mock_load.call_args.kwargs['pp_missing_layers']
+            assert "visual" in pp_missing
+            assert "lm_head" in pp_missing
+
+    def test_precompile_vision_encoder_non_first_rank(self, mock_vllm_config, rng, mesh, mock_pp_group):
+        mock_pp_group.return_value.is_first_rank = False
+        model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+        run_compilation_fn = MagicMock()
+        model.precompile_vision_encoder(run_compilation_fn)
+        run_compilation_fn.assert_not_called()
