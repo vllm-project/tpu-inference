@@ -168,6 +168,7 @@ while read -r line || [ -n "${line}" ]; do
   # For each line in csv file, generate a command step
   pipeline_yaml=$(cat <<EOF
 - label: "Publish: benchmark - RecordId: ${RECORD_ID}"
+  depends_on: "build-vllm-tpu-image"
   env:
     GCP_PROJECT_ID: "cloud-tpu-inference-test"
     GCP_REGION: "southamerica-west1"
