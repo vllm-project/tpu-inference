@@ -52,6 +52,7 @@ def _test_kv_cache_cpu_offloading_accuracy(
     skip_precompile: str,
     decode_save: str,
     batched_save: str,
+    batched_load: str,
     cpu_chunks: str,
     prompt_file: str,
 ):
@@ -61,6 +62,7 @@ def _test_kv_cache_cpu_offloading_accuracy(
         os.environ['TPU_OFFLOAD_SKIP_JAX_PRECOMPILE'] = skip_precompile
         os.environ['TPU_OFFLOAD_DECODE_SAVE'] = decode_save
         os.environ['TPU_OFFLOAD_BATCHED_SAVE'] = batched_save
+        os.environ['TPU_OFFLOAD_BATCHED_LOAD'] = batched_load
         os.environ['TPU_OFFLOAD_NUM_CPU_CHUNKS'] = cpu_chunks
         llm = LLM(model="meta-llama/Llama-3.2-3B",
                   max_model_len=3072,
@@ -111,8 +113,10 @@ def test_kv_cache_cpu_offloading_accuracy_smaller_then_cpu_ram(
     decode_saves = ["0", "1"]
     skip_precompile = ["0", "1"]
     batched_saves = ["0", "1"]
-    for swap_op_type, decode_save, _skip_precompile, batched_save in itertools.product(
-            swap_op_types, decode_saves, skip_precompile, batched_saves):
+    batched_loads = ["0", "1"]
+    for swap_op_type, decode_save, _skip_precompile, batched_save, batched_load in itertools.product(
+            swap_op_types, decode_saves, skip_precompile, batched_saves,
+            batched_loads):
         _test_kv_cache_cpu_offloading_accuracy(
             monkeypatch,
             sampling_config,
@@ -121,6 +125,7 @@ def test_kv_cache_cpu_offloading_accuracy_smaller_then_cpu_ram(
             _skip_precompile,
             decode_save,
             batched_save,
+            batched_load,
             # The total CPU RAM size = # cpu chunks * cpu_chunk_size. cpu_chunk_size represent the number of tokens can fit into a single CPU RAM chunk.
             # cpu_chunk_size for llama-3.2-3B(used above in test)= 256
             # CPU RAM size = 4*256=1024 tokens
@@ -145,8 +150,10 @@ def test_kv_cache_cpu_offloading_accuracy_larger_than_cpu_ram(
     decode_saves = ["0", "1"]
     skip_precompile = ["0", "1"]
     batched_saves = ["0", "1"]
-    for swap_op_type, decode_save, _skip_precompile, batched_save in itertools.product(
-            swap_op_types, decode_saves, skip_precompile, batched_saves):
+    batched_loads = ["0", "1"]
+    for swap_op_type, decode_save, _skip_precompile, batched_save, batched_load in itertools.product(
+            swap_op_types, decode_saves, skip_precompile, batched_saves,
+            batched_loads):
         _test_kv_cache_cpu_offloading_accuracy(
             monkeypatch,
             sampling_config,
@@ -155,6 +162,7 @@ def test_kv_cache_cpu_offloading_accuracy_larger_than_cpu_ram(
             _skip_precompile,
             decode_save,
             batched_save,
+            batched_load,
             # The total CPU RAM size = # cpu chunks * cpu_chunk_size. cpu_chunk_size represent the number of tokens can fit into a single CPU RAM chunk.
             # cpu_chunk_size for llama-3.2-3B(used above in test)= 256
             # CPU RAM size = 4*256=1024 tokens
@@ -164,7 +172,7 @@ def test_kv_cache_cpu_offloading_accuracy_larger_than_cpu_ram(
         )
 
 
-def test_kv_cache_cpu_offloading_batch_save_multi_request(
+def test_kv_cache_cpu_offloading_batch_save_load_multi_request(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     kv_transfer_config: KVTransferConfig,
@@ -173,12 +181,19 @@ def test_kv_cache_cpu_offloading_batch_save_multi_request(
     Verifies accuracy for multiple simultaneous requests when batched save is enabled.
     This ensures that the unified DMA transfer and subsequent 'unstitching'
     on the host correctly distributes KV blocks to their respective requests.
+
+    By prepending each prompt with a unique index '{i}', we ensure that there is
+    no prefix sharing between the N requests. This forces the offloading system
+    to manage N distinct KV cache sequences, which exercises the batched save
+    and load paths for multiple concurrent requests, ensuring they are
+    correctly stitched/unstitched during host-device transfers.
     """
     num_requests = 10
     swap_op_types = ["pallas", "jax", "jax_copy"]
     decode_save = "0"
     skip_precompile = "1"
     batched_save = "1"
+    batched_load = "1"
 
     # Logic for cpu_chunks:
     # 1. small_prompt.txt is ~246 tokens. With block_size=16, each prompt
@@ -196,6 +211,7 @@ def test_kv_cache_cpu_offloading_batch_save_multi_request(
             os.environ['TPU_OFFLOAD_SKIP_JAX_PRECOMPILE'] = skip_precompile
             os.environ['TPU_OFFLOAD_DECODE_SAVE'] = decode_save
             os.environ['TPU_OFFLOAD_BATCHED_SAVE'] = batched_save
+            os.environ['TPU_OFFLOAD_BATCHED_LOAD'] = batched_load
             os.environ['TPU_OFFLOAD_NUM_CPU_CHUNKS'] = cpu_chunks
 
             llm = LLM(model="meta-llama/Llama-3.2-3B",
@@ -203,11 +219,12 @@ def test_kv_cache_cpu_offloading_batch_save_multi_request(
                       task="generate",
                       kv_transfer_config=kv_transfer_config)
 
-            base_prompt = read_prompt_from_file("small_prompt.txt")
-            # Create a list of slightly different prompts to test collation and unstitching
+            base_prompt = read_prompt_from_file("large_prompt.txt")
+            # Create a list of slightly different prompts to test collation and unstitching.
+            # The {i} prefix ensures each prompt is unique from the first token,
+            # preventing prefix sharing and forcing batched save/load for N distinct requests.
             prompts = [
-                f"{base_prompt}\nRequest index: {i}"
-                for i in range(num_requests)
+                f"{i}\n{base_prompt}\nRequest" for i in range(num_requests)
             ]
 
             # 1st generate (Populates CPU cache)
