@@ -7,3 +7,4 @@ kernels,correctness,performance,tpu versions,correctness,performance,tpu version
 "gmm",unverified,unverified,nightly_20260208,unverified,unverified,nightly_20260208,unverified,unverified,nightly_20260208,unverified,unverified,nightly_20260208,unverified,unverified,nightly_20260208,unverified,unverified,nightly_20260208
 "mla*",unverified,unverified,nightly_20260208,unverified,unverified,nightly_20260208,unverified,unverified,nightly_20260208,unverified,unverified,nightly_20260208,unverified,unverified,nightly_20260208,unverified,unverified,nightly_20260208
 "ragged paged attention v3 head_dim 64*",unverified,unverified,nightly_20260208,unverified,unverified,nightly_20260208,unverified,unverified,nightly_20260208,unverified,unverified,nightly_20260208,unverified,unverified,nightly_20260208,unverified,unverified,nightly_20260208
+test

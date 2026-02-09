@@ -5,3 +5,4 @@ Feature,Recommended TPU Generations,CorrectnessTest,PerformanceTest
 "FP8 W8A16",v7,unverified,unverified
 "INT4 W4A16","v5, v6",unverified,unverified
 "INT8 W8A8","v5, v6",unverified,unverified
+test
