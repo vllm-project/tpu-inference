@@ -1538,10 +1538,6 @@ class TPUOffloadConnectorScheduler():
             if req_id in self._save_reqs_w_pending_gather:
                 assert len(self._save_reqs_w_pending_gather[req_id]) == 0
                 self._save_reqs_w_pending_gather.pop(req_id)
-            if req_id in self._reqs_being_saved:
-                assert len(self._reqs_being_saved[req_id]) == 0
-                self._reqs_being_saved.pop(req_id)
-            # TODO: Addd metrics
             num_freed_blocks = self.staging_buffer_manager.free(req_id,
                                                                 usage="save")
             logger.info(
