@@ -78,15 +78,27 @@ def get_num_cores_per_chip() -> int:
 
 
 def get_num_chips() -> int:
+    # Try newer driver path first (/dev/accel*)
     accel_files = glob.glob("/dev/accel*")
     if accel_files:
+        logger.debug(f"Detected {len(accel_files)} TPU chips via /dev/accel*")
         return len(accel_files)
+    
+    # Fall back to older driver path (/dev/vfio/*)
     try:
         vfio_entries = os.listdir("/dev/vfio")
-        numeric_entries = [
-            int(entry) for entry in vfio_entries if entry.isdigit()
-        ]
-        return len(numeric_entries)
+        # Filter for numeric entries only (e.g., "0", "1", "2")
+        # Skip non-numeric entries like "vfio" (the vfio-noiommu device)
+        numeric_entries = [entry for entry in vfio_entries if entry.isdigit()]
+        num_chips = len(numeric_entries)
+        if num_chips > 0:
+            logger.debug(f"Detected {num_chips} TPU chips via /dev/vfio/*")
+        else:
+            logger.warning("No TPU devices found in /dev/accel* or /dev/vfio")
+        return num_chips
     except FileNotFoundError as e:
         logger.error("Failed to detect number of TPUs: %s", e)
+        return 0
+    except Exception as e:
+        logger.error("Unexpected error detecting TPU devices: %s", e)
         return 0

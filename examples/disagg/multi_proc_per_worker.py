@@ -56,16 +56,20 @@ TPU_PROCESS_PORT = "TPU_PROCESS_PORT"
 
 
 def get_num_chips() -> int:
+    # Try newer driver path first (/dev/accel*)
     accel_files = glob.glob("/dev/accel*")
     if accel_files:
         return len(accel_files)
+    # Fall back to older driver path (/dev/vfio/*)
     try:
         vfio_entries = os.listdir("/dev/vfio")
-        numeric_entries = [
-            int(entry) for entry in vfio_entries if entry.isdigit()
-        ]
+        # Filter for numeric entries only (e.g., "0", "1", "2")
+        # Skip non-numeric entries like "vfio" (the vfio-noiommu device)
+        numeric_entries = [entry for entry in vfio_entries if entry.isdigit()]
         return len(numeric_entries)
     except FileNotFoundError:
+        return 0
+    except Exception:
         return 0
 
 
