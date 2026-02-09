@@ -20,7 +20,6 @@ import numpy as np
 import pytest
 from flax import nnx
 from jax.sharding import Mesh
-from vllm.config import ModelConfig
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer
@@ -31,7 +30,8 @@ from tpu_inference.runner.kv_cache import create_kv_caches
 
 class MockVllmConfig:
     def __init__(self, model: str, num_hidden_layers: int = 4):
-        self.model_config = ModelConfig(model)
+        self.model_config = MagicMock()
+        self.model_config.model = model
         self.model_config.dtype = jnp.bfloat16
         self.load_config = MagicMock()
         self.load_config.download_dir = None
@@ -40,16 +40,17 @@ class MockVllmConfig:
         self.additional_config = MagicMock()
         self.additional_config.get.return_value = False
         
-        # Override HF config for testing
+        # Mock HF config for testing
+        self.model_config.hf_config = MagicMock()
         hf_config = self.model_config.hf_config
         hf_config.num_hidden_layers = num_hidden_layers
         hf_config.num_local_experts = 2
         hf_config.vocab_size = 1000
         hf_config.num_attention_heads = 4
         hf_config.num_key_value_heads = 2
-        hf_config.head_dim = 32
-        hf_config.hidden_size = 128
-        hf_config.intermediate_size = 256
+        hf_config.head_dim = 64
+        hf_config.hidden_size = 256
+        hf_config.intermediate_size = 512
         hf_config.num_experts_per_tok = 1
         hf_config.rms_norm_eps = 1e-6
         hf_config.swiglu_limit = 1.0
@@ -94,7 +95,7 @@ def mock_model_inputs():
 class TestGptOss:
     def test_init_single_rank(self, rng, mesh):
         mock_pp = MagicMock(is_first_rank=True, is_last_rank=True, rank_in_group=0, world_size=1)
-        with patch("tpu_inference.models.jax.gpt_oss.get_pp_group", return_value=mock_pp), 
+        with patch("tpu_inference.models.jax.gpt_oss.get_pp_group", return_value=mock_pp), \
              patch("tpu_inference.layers.jax.pp_utils.get_pp_group", return_value=mock_pp):
             config = MockVllmConfig("test-model", num_hidden_layers=4)
             model = GptOss(config, rng, mesh)
@@ -109,7 +110,7 @@ class TestGptOss:
     def test_init_pipeline_parallel_rank0(self, rng, mesh):
         # 2 stages, rank 0 (layers 0, 1)
         mock_pp = MagicMock(is_first_rank=True, is_last_rank=False, rank_in_group=0, world_size=2)
-        with patch("tpu_inference.models.jax.gpt_oss.get_pp_group", return_value=mock_pp), 
+        with patch("tpu_inference.models.jax.gpt_oss.get_pp_group", return_value=mock_pp), \
              patch("tpu_inference.layers.jax.pp_utils.get_pp_group", return_value=mock_pp):
             config = MockVllmConfig("test-model", num_hidden_layers=4)
             model = GptOss(config, rng, mesh)
@@ -127,7 +128,7 @@ class TestGptOss:
     def test_init_pipeline_parallel_rank1(self, rng, mesh):
         # 2 stages, rank 1 (layers 2, 3)
         mock_pp = MagicMock(is_first_rank=False, is_last_rank=True, rank_in_group=1, world_size=2)
-        with patch("tpu_inference.models.jax.gpt_oss.get_pp_group", return_value=mock_pp), 
+        with patch("tpu_inference.models.jax.gpt_oss.get_pp_group", return_value=mock_pp), \
              patch("tpu_inference.layers.jax.pp_utils.get_pp_group", return_value=mock_pp):
             config = MockVllmConfig("test-model", num_hidden_layers=4)
             model = GptOss(config, rng, mesh)
@@ -144,14 +145,14 @@ class TestGptOss:
 
     def test_forward_rank0(self, rng, mesh, mock_model_inputs):
         mock_pp = MagicMock(is_first_rank=True, is_last_rank=False, rank_in_group=0, world_size=2)
-        with patch("tpu_inference.models.jax.gpt_oss.get_pp_group", return_value=mock_pp), 
+        with patch("tpu_inference.models.jax.gpt_oss.get_pp_group", return_value=mock_pp), \
              patch("tpu_inference.layers.jax.pp_utils.get_pp_group", return_value=mock_pp):
             config = MockVllmConfig("test-model", num_hidden_layers=4)
             model = GptOss(config, rng, mesh)
             
             input_ids, attention_metadata = mock_model_inputs
             kv_caches = create_kv_caches(
-                num_blocks=4, block_size=32, num_kv_heads=2, head_size=32,
+                num_blocks=4, block_size=32, num_kv_heads=2, head_size=64,
                 mesh=mesh, layer_names=["layer"] * 2, cache_dtype=jnp.bfloat16
             )
             
@@ -160,23 +161,23 @@ class TestGptOss:
             
             assert isinstance(output, JaxIntermediateTensors)
             assert "hidden_states" in output.tensors
-            assert output["hidden_states"].shape == (4, 128)
+            assert output["hidden_states"].shape == (4, 256)
 
     def test_forward_rank1(self, rng, mesh, mock_model_inputs):
         mock_pp = MagicMock(is_first_rank=False, is_last_rank=True, rank_in_group=1, world_size=2)
-        with patch("tpu_inference.models.jax.gpt_oss.get_pp_group", return_value=mock_pp), 
+        with patch("tpu_inference.models.jax.gpt_oss.get_pp_group", return_value=mock_pp), \
              patch("tpu_inference.layers.jax.pp_utils.get_pp_group", return_value=mock_pp):
             config = MockVllmConfig("test-model", num_hidden_layers=4)
             model = GptOss(config, rng, mesh)
             
             input_ids, attention_metadata = mock_model_inputs
             kv_caches = create_kv_caches(
-                num_blocks=4, block_size=32, num_kv_heads=2, head_size=32,
+                num_blocks=4, block_size=32, num_kv_heads=2, head_size=64,
                 mesh=mesh, layer_names=["layer"] * 2, cache_dtype=jnp.bfloat16
             )
             
             # For rank 1, we need to pass intermediate_tensors
-            hidden_states = jnp.ones((4, 128), dtype=jnp.bfloat16)
+            hidden_states = jnp.ones((4, 256), dtype=jnp.bfloat16)
             intermediate_tensors = JaxIntermediateTensors({"hidden_states": hidden_states})
             
             kv_caches, output, aux = model(kv_caches, input_ids, attention_metadata, 
@@ -184,4 +185,4 @@ class TestGptOss:
             
             # For last rank, output should be hidden states after final norm
             assert isinstance(output, jax.Array)
-            assert output.shape == (4, 128)
+            assert output.shape == (4, 256)
