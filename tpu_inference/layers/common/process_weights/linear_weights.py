@@ -184,6 +184,9 @@ def shard_linear_weights(
         key = field.name
         if (weight := getattr(weights, key, None)) is not None:
             sharding = getattr(weight_shardings, key)
+            print(
+                f"Putting weight {key} with shape {weight.shape} to devices with sharding {sharding}."
+            )
             weight = general_device_put(weight, sharding)
             setattr(weights, key, weight)
     return weights
