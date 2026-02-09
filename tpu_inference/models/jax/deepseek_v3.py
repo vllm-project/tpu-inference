@@ -540,7 +540,6 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
         q_scale = k_scale = v_scale = None
         if self.kv_cache_quantized_dtype:
             k_scale = self._k_scale
-            v_scale = self._v_scale
             # TODO: May need to apply quantization separately for k_c & k_pe
             k_SA, _ = quantize_kv(self.kv_cache_quantized_dtype, k_SA,
                                        value=None, k_scale=k_scale)
