@@ -15,3 +15,6 @@
 
 def register_tpu_quantization_configs():
     import tpu_inference.layers.vllm.quantization.awq  # noqa: F401
+    import tpu_inference.layers.vllm.quantization.fp8  # noqa: F401
+    import tpu_inference.layers.vllm.quantization.mxfp4  # noqa: F401
+    import tpu_inference.layers.vllm.quantization.unquantized  # noqa: F401
