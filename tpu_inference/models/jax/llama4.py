@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 import re
 from itertools import islice
 from typing import Any, List, Optional, Tuple
@@ -26,7 +27,8 @@ from vllm.config import VllmConfig
 
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
-from tpu_inference.layers.jax.attention.llama4_attention import Llama4Attention
+from tpu_inference.layers.jax.attention.llama4_attention import (
+    Llama4Attention, Llama4VisionAttention)
 from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
 from tpu_inference.layers.jax.misc import shard_put
@@ -41,6 +43,8 @@ from tpu_inference.models.jax.jax_intermediate_tensor import \
 from tpu_inference.models.jax.utils.weight_utils import (
     BaseWeightLoader, _is_pp_missing_layer, convert_torch_to_jax_with_view,
     get_param, print_param_info, reshape_params, transpose_params)
+
+from ...layers.jax.llama4_vision_rope import Llama4VisionRotaryEmbedding
 
 logger = init_logger(__name__)
 
@@ -719,3 +723,458 @@ class Llama4ForCausalLM(nnx.Module):
         logits_TV = jnp.dot(hidden_states,
                             self.lm_head.input_embedding_table_DV.value)
         return logits_TV
+
+
+# --- Vision Classes ---
+
+
+def gelu_jax(x):
+    return jax.nn.gelu(x)
+
+
+class JAXUnfoldConvolution(nnx.Module):
+
+    def __init__(self,
+                 config: dict,
+                 rngs: nnx.Rngs,
+                 dtype: jnp.dtype = jnp.bfloat16,
+                 random_init: bool = False):
+        cfg = config
+        self.kernel_size = cfg.patch_size
+        self.num_channels = cfg.num_channels
+        patch_flat_dim = cfg.num_channels * cfg.patch_size * cfg.patch_size
+
+        self.linear = nnx.Linear(
+            patch_flat_dim,
+            cfg.hidden_size,
+            use_bias=False,
+            dtype=dtype,
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(),
+                                              (None, "model")),
+            rngs=rngs,
+        )
+
+    def __call__(self, inputs: jax.Array) -> jax.Array:
+        # Check if NCHW, flip to NHWC
+        if inputs.shape[1] == self.num_channels and inputs.shape[
+                -1] != self.num_channels:
+            inputs = jnp.transpose(inputs, (0, 2, 3, 1))
+
+        batch_size, height, width, channels = inputs.shape
+        patch_size = self.kernel_size
+
+        # 1. Reshape to separate tiles
+        patches = inputs.reshape(batch_size, height // patch_size, patch_size,
+                                 width // patch_size, patch_size, channels)
+
+        # 2. Transpose to group grid cells
+        patches = jnp.transpose(patches, (0, 1, 3, 2, 4, 5))
+
+        # 3. Flatten patches
+        patches = patches.reshape(batch_size, -1,
+                                  patch_size * patch_size * channels)
+
+        # 4. Project
+        hidden_states = self.linear(patches)
+
+        return hidden_states
+
+
+class JAXLlama4VisionMLP(nnx.Module):
+
+    def __init__(self,
+                 config: dict,
+                 rngs: nnx.Rngs,
+                 dtype: jnp.dtype = jnp.bfloat16,
+                 random_init: bool = False):
+        cfg = config
+        self.fc1 = nnx.Linear(
+            cfg.hidden_size,
+            cfg.intermediate_size,
+            use_bias=True,
+            dtype=dtype,
+            kernel_init=nnx.with_partitioning(
+                nnx.initializers.glorot_uniform(), (None, "model")),
+            bias_init=nnx.with_partitioning(nnx.initializers.zeros,
+                                            ("model", )),
+            rngs=rngs,
+        )
+        self.fc2 = nnx.Linear(
+            cfg.intermediate_size,
+            cfg.hidden_size,
+            use_bias=True,
+            dtype=dtype,
+            kernel_init=nnx.with_partitioning(
+                nnx.initializers.glorot_uniform(), ("model", None)),
+            bias_init=nnx.with_partitioning(nnx.initializers.zeros, (None, )),
+            rngs=rngs,
+        )
+
+    def __call__(self, hidden_states: jax.Array) -> jax.Array:
+        hidden_states = self.fc1(hidden_states)
+        hidden_states = gelu_jax(hidden_states)
+        hidden_states = self.fc2(hidden_states)
+        return hidden_states
+
+
+class JAXLlama4VisionEncoderLayer(nnx.Module):
+
+    def __init__(self,
+                 config: dict,
+                 rngs: nnx.Rngs,
+                 mesh: Mesh,
+                 dtype: jnp.dtype = jnp.bfloat16,
+                 random_init: bool = False):
+        cfg = config
+        self.hidden_size = cfg.hidden_size
+
+        self.self_attn = Llama4VisionAttention(
+            hidden_size=cfg.hidden_size,
+            dtype=dtype,
+            num_attention_heads=cfg.num_attention_heads,
+            num_key_value_heads=cfg.num_attention_heads,
+            # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
+            #kv_cache_dtype="auto",
+            head_dim=cfg.hidden_size // cfg.num_attention_heads,
+            rope_theta=10000.0,  # From vision_config
+            rope_scaling=None,
+            rngs=rngs,
+            rope_input_ordering="interleaved",
+            temperature_tuning=False,
+            use_qk_norm=False,
+            mesh=mesh,
+            is_causal=False,  # Forces bidirectional mask for ViT Encoder
+            temperature_tuning_floor_scale=0,
+            temperature_tuning_scale=0.0,
+            activation_attention_td=None,
+            activation_attention_out_td=None,
+        )
+
+        self.mlp = JAXLlama4VisionMLP(cfg,
+                                      rngs=rngs,
+                                      dtype=dtype,
+                                      random_init=random_init)
+
+        self.input_layernorm = nnx.LayerNorm(
+            cfg.hidden_size,
+            epsilon=cfg.norm_eps,
+            dtype=dtype,
+            rngs=rngs,
+            scale_init=nnx.with_partitioning(nnx.initializers.ones, P()),
+            bias_init=nnx.with_partitioning(nnx.initializers.zeros, P()))
+        self.post_attention_layernorm = nnx.LayerNorm(
+            cfg.hidden_size,
+            epsilon=cfg.norm_eps,
+            dtype=dtype,
+            rngs=rngs,
+            scale_init=nnx.with_partitioning(nnx.initializers.ones, P()),
+            bias_init=nnx.with_partitioning(nnx.initializers.zeros, P()))
+
+    def __call__(self, hidden_state: jax.Array, freqs_ci_stacked: jax.Array,
+                 **kwargs) -> jax.Array:
+
+        residual = hidden_state
+        hidden_state = self.input_layernorm(hidden_state)
+
+        original_shape = hidden_state.shape
+        B, S, D = original_shape
+
+        hidden_state_2D = hidden_state.reshape(-1, original_shape[-1])
+
+        vision_metadata = AttentionMetadata(input_positions=jnp.array([]))
+        new_kv_cache, attention_output_2D = self.self_attn(
+            x=hidden_state_2D,
+            is_prefill=True,
+            kv_cache=None,  # Vision Encoder does not use KV cache
+            attention_metadata=vision_metadata,
+            freqs_cis=freqs_ci_stacked,
+            use_attention_rope=True,
+            **kwargs)
+        attention_output = attention_output_2D.reshape(original_shape)
+
+        hidden_state = residual + attention_output
+
+        residual = hidden_state
+
+        # MLP
+        hidden_state = self.post_attention_layernorm(hidden_state)
+
+        hidden_state_2D = hidden_state.reshape(B * S, D)
+
+        hidden_state_2D = self.mlp(hidden_state_2D)
+
+        hidden_state = hidden_state_2D.reshape(B, S, D)
+
+        hidden_state = residual + hidden_state
+
+        return hidden_state
+
+
+class JAXLlama4VisionEncoder(nnx.Module):
+
+    def __init__(self,
+                 config: dict,
+                 rngs: nnx.Rngs,
+                 mesh: Mesh,
+                 dtype: jnp.dtype = jnp.bfloat16,
+                 random_init: bool = False):
+        cfg = config
+        num_layers = cfg.num_hidden_layers if 'num_hidden_layers' in cfg else 34
+        self.layers = [
+            JAXLlama4VisionEncoderLayer(cfg,
+                                        rngs=rngs,
+                                        dtype=dtype,
+                                        random_init=random_init,
+                                        mesh=mesh) for _ in range(num_layers)
+        ]
+
+    def __call__(self, hidden_states: jax.Array, freqs_ci_stacked: jax.Array,
+                 **kwargs) -> jax.Array:
+        for encoder_layer in self.layers:
+            hidden_states = encoder_layer(hidden_states, freqs_ci_stacked,
+                                          **kwargs)
+        return hidden_states
+
+
+def jax_pixel_shuffle(input_tensor: jax.Array,
+                      shuffle_ratio: float) -> jax.Array:
+    # input_tensor: [batch_size, num_patches, channels]
+    batch_size, num_patches, channels = input_tensor.shape
+    patch_size = int(math.sqrt(num_patches))
+
+    # Reshape to [batch_size, patch_size, patch_size, channels]
+    input_tensor = input_tensor.reshape(batch_size, patch_size, patch_size, -1)
+    batch_size, height, width, channels = input_tensor.shape
+
+    # Reshape 1: [batch_size, height, width * shuffle_ratio, channels / shuffle_ratio]
+    reshaped_tensor = input_tensor.reshape(batch_size, height,
+                                           int(width * shuffle_ratio),
+                                           int(channels / shuffle_ratio))
+    reshaped_tensor = reshaped_tensor.transpose(0, 2, 1, 3)
+
+    # Reshape 2: [batch_size, height * shuffle_ratio, width * shuffle_ratio, channels / (shuffle_ratio^2)]
+    reshaped_tensor = reshaped_tensor.reshape(
+        batch_size, int(height * shuffle_ratio), int(width * shuffle_ratio),
+        int(channels / (shuffle_ratio**2)))
+    reshaped_tensor = reshaped_tensor.transpose(0, 2, 1, 3)
+
+    # Reshape back to [batch_size, num_new_patches, channels_out]
+    output_tensor = reshaped_tensor.reshape(batch_size, -1,
+                                            reshaped_tensor.shape[-1])
+    return output_tensor
+
+
+class JAXLlama4VisionMLP2(nnx.Module):
+
+    def __init__(self,
+                 config: dict,
+                 rngs: nnx.Rngs,
+                 dtype: jnp.dtype = jnp.bfloat16):
+        cfg = config
+        self.fc1 = nnx.Linear(
+            cfg.intermediate_size,
+            cfg.projector_input_dim,
+            use_bias=False,
+            dtype=dtype,
+            kernel_init=nnx.with_partitioning(
+                nnx.initializers.glorot_uniform(), (None, "model")),
+            rngs=rngs,
+        )
+        self.fc2 = nnx.Linear(
+            cfg.projector_output_dim,
+            cfg.projector_output_dim,
+            use_bias=False,
+            dtype=dtype,
+            kernel_init=nnx.with_partitioning(
+                nnx.initializers.glorot_uniform(), ("model", None)),
+            rngs=rngs,
+        )
+
+        self.dropout_rate = cfg.projector_dropout
+
+        if self.dropout_rate > 0:
+            self.dropout = nnx.Dropout(self.dropout_rate, rngs=rngs)
+        else:
+            self.dropout = nnx.Dropout(0.0)
+
+    def __call__(self,
+                 hidden_states: jax.Array,
+                 deterministic: bool = False) -> jax.Array:
+        # First linear layer with GELU activation
+        hidden_states = self.fc1(hidden_states)
+        hidden_states = gelu_jax(hidden_states)
+
+        # Apply dropout
+        hidden_states = self.dropout(hidden_states,
+                                     deterministic=deterministic)
+
+        # Second linear layer with GELU activation
+        hidden_states = self.fc2(hidden_states)
+        hidden_states = gelu_jax(hidden_states)
+        return hidden_states
+
+
+class JAXLlama4VisionPixelShuffleMLP(nnx.Module):
+
+    def __init__(self,
+                 config: dict,
+                 rngs: nnx.Rngs,
+                 dtype: jnp.dtype = jnp.bfloat16,
+                 random_init: bool = False):
+        cfg = config
+        self.pixel_shuffle_ratio = cfg.pixel_shuffle_ratio
+        self.pixel_shuffle_mlp = JAXLlama4VisionMLP2(cfg,
+                                                     rngs=rngs,
+                                                     dtype=dtype)
+
+    def __call__(self,
+                 encoded_patches: jax.Array,
+                 deterministic: bool = False) -> jax.Array:
+        # Apply pixel shuffle operation
+        encoded_patches = jax_pixel_shuffle(encoded_patches,
+                                            self.pixel_shuffle_ratio)
+
+        # Apply MLP transformation
+        result = self.pixel_shuffle_mlp(encoded_patches,
+                                        deterministic=deterministic)
+        return result
+
+
+class JAXLlama4VisionModel(nnx.Module):
+
+    def __init__(self,
+                 config: dict,
+                 rngs: nnx.Rngs,
+                 mesh: Mesh,
+                 dtype: jnp.dtype = jnp.bfloat16,
+                 random_init: bool = False,
+                 vision_rope: Optional[Llama4VisionRotaryEmbedding] = None):
+        cfg = config
+        self.scale = cfg.hidden_size**-0.5
+        self.image_size = cfg.image_size
+        self.patch_size = cfg.patch_size
+        self.hidden_size = cfg.hidden_size
+        self.norm_eps = cfg.norm_eps
+        self.num_channels = cfg.num_channels
+
+        self.num_patches = (self.image_size // self.patch_size)**2 + 1
+
+        self.patch_embedding = JAXUnfoldConvolution(cfg,
+                                                    rngs=rngs,
+                                                    dtype=dtype,
+                                                    random_init=random_init)
+
+        key_cls = rngs.params()
+        key_pos = rngs.params()
+
+        self.class_embedding = nnx.Param(
+            self.scale *
+            jax.random.normal(key_cls, (self.hidden_size, ), dtype=dtype),
+            sharding=P())
+        self.positional_embedding_vlm = nnx.Param(
+            self.scale * jax.random.normal(
+                key_pos, (self.num_patches, self.hidden_size), dtype=dtype),
+            sharding=P(None, "model"))
+
+        self.layernorm_pre = nnx.LayerNorm(
+            self.hidden_size,
+            epsilon=self.norm_eps,
+            dtype=dtype,
+            rngs=rngs,
+            scale_init=nnx.with_partitioning(nnx.initializers.ones, P()),
+            bias_init=nnx.with_partitioning(nnx.initializers.zeros, P()))
+        self.layernorm_post = nnx.LayerNorm(
+            self.hidden_size,
+            epsilon=self.norm_eps,
+            dtype=dtype,
+            rngs=rngs,
+            scale_init=nnx.with_partitioning(nnx.initializers.ones, P()),
+            bias_init=nnx.with_partitioning(nnx.initializers.zeros, P()))
+
+        self.model = JAXLlama4VisionEncoder(cfg,
+                                            rngs=rngs,
+                                            mesh=mesh,
+                                            dtype=dtype,
+                                            random_init=random_init)
+
+        self.vision_rope = vision_rope
+
+        self.vision_adapter = JAXLlama4VisionPixelShuffleMLP(
+            cfg, rngs=rngs, dtype=dtype, random_init=random_init)
+
+    def __call__(self, pixel_values: jax.Array) -> jax.Array:
+        input_shape = pixel_values.shape
+        # This model expects NCHW format. We handle NHWC and 5D (video) inputs.
+        if len(input_shape) == 5:
+            # (Batch, Time, Channel, Height, Width) -> (B*T, C, H, W)
+            b, t, c, h, w = input_shape
+            pixel_values = pixel_values.reshape(b * t, c, h, w)
+        elif len(input_shape) == 4 and input_shape[-1] == self.num_channels:
+            # (Batch, Height, Width, Channel) -> (B, C, H, W)
+            b, h, w, c = input_shape
+            t = 1
+            pixel_values = jnp.transpose(pixel_values, (0, 3, 1, 2))
+        else:
+            b, c, h, w = input_shape
+            t = 1
+
+        # 1. Unfold convolution (uses our new explicit reshape logic)
+        hidden_states = self.patch_embedding(pixel_values)
+
+        # 2. Add class embedding
+        class_embedding_expanded = self.class_embedding.value[
+            None, None, :].repeat(hidden_states.shape[0], axis=0)
+        hidden_states = jnp.concatenate(
+            [hidden_states, class_embedding_expanded], axis=1)
+
+        # 3. Add positional embedding
+        hidden_states += self.positional_embedding_vlm.value
+
+        # 4. Transformation layers
+        hidden_states = self.layernorm_pre(hidden_states)
+        freqs_ci_stacked = self.vision_rope()
+        hidden_states = self.model(hidden_states, freqs_ci_stacked)
+
+        hidden_states = self.layernorm_post(hidden_states)
+
+        encoder_out_no_cls = hidden_states[:, :-1, :]
+
+        # 5. Remove CLS token
+        hidden_states = encoder_out_no_cls
+
+        # 6. Vision Adapter (Pixel Shuffle MLP)
+        hidden_states = self.vision_adapter(hidden_states)
+
+        # 7. Reshape back to [B, T, N_patches, H_out]
+        _, patch_num, patch_dim = hidden_states.shape
+        hidden_states = jnp.reshape(hidden_states,
+                                    [b, t, patch_num, patch_dim])
+
+        return hidden_states.reshape(b, -1, patch_dim)
+
+
+class JAXLlama4MultiModalProjector(nnx.Module):
+
+    def __init__(self,
+                 config: dict,
+                 rngs: nnx.Rngs,
+                 dtype: jnp.dtype = jnp.bfloat16,
+                 random_init: bool = False):
+        cfg = config
+        self.linear = nnx.Linear(
+            cfg["vision_config"].vision_output_dim,
+            cfg["text_config"].hidden_size,
+            use_bias=False,
+            dtype=dtype,
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(),
+                                              (None, "model")),
+            rngs=rngs,
+        )
+
+    def __call__(self, image_features: jax.Array) -> jax.Array:
+        # image_features: [batch, num_patches, vision_output_dim=4096]
+        hidden_states = self.linear(image_features)
+        return hidden_states  # Output shape: [batch, num_patches, text_hidden_size=5120]
+
+
+# --- END: Vision Classes ---

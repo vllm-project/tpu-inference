@@ -46,7 +46,7 @@ get_kv_cache_shape_hd64 = rpa_hd64.get_kv_cache_shape
 
 def sharded_flash_attention(
     mesh: Mesh,
-    causal: bool = True,
+    causal: bool = False,
     sm_scale: Optional[float] = None,
     vmem_limit_bytes: int | None = None,
 ) -> Callable[..., Any]:

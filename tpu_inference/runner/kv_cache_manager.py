@@ -31,7 +31,6 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 
 from tpu_inference import utils
 from tpu_inference import utils as common_utils
-from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
@@ -83,23 +82,18 @@ class KVCacheManager:
                                          num_kv_heads=num_kv_heads,
                                          head_size=head_size,
                                          dtype=self.runner.kv_cache_dtype,
-                                         sliding_window=sliding_window,
-                                         page_size_padded=page_size_bytes)
+                                         sliding_window=sliding_window)
             else:
                 return FullAttentionSpec(block_size=block_size,
                                          num_kv_heads=num_kv_heads,
                                          head_size=head_size,
-                                         dtype=self.runner.kv_cache_dtype,
-                                         page_size_padded=page_size_bytes)
+                                         dtype=self.runner.kv_cache_dtype)
 
     def get_kv_cache_spec(self):
         # TODO(xiang): this hack tricks engine core to init successfully
         block_size = self.runner.cache_config.block_size
         kv_cache_spec: dict[str, KVCacheSpec] = {}
 
-        tp_axis_name = ShardingAxisName.ATTN_HEAD
-        model_cnt = common_utils.get_mesh_shape_product(
-            self.runner.mesh, tp_axis_name)
         # If use pure jax (MODEL_IMPL_TYPE=flax_nnx), we don't register
         # attention into compilation config.
         # Use FullAttentionSpec for each layer
@@ -120,7 +114,8 @@ class KVCacheManager:
             parallel_config = self.runner.parallel_config
             # Pad num_kv_heads to multiple of TP size.
             num_kv_heads = common_utils.get_padded_num_heads(
-                model_config.get_total_num_kv_heads(), model_cnt)
+                model_config.get_total_num_kv_heads(),
+                self.runner.mesh.shape["model"])
             head_size = common_utils.get_padded_head_dim(
                 model_config.get_head_size())
 
@@ -136,7 +131,8 @@ class KVCacheManager:
                 draft_model_config = self.runner.speculative_config.draft_model_config
                 hf_config = draft_model_config.hf_config
                 num_kv_heads = common_utils.get_padded_num_heads(
-                    hf_config.num_key_value_heads, model_cnt)
+                    hf_config.num_key_value_heads,
+                    self.runner.mesh.shape["model"])
                 head_size = common_utils.get_padded_head_dim(
                     hf_config.hidden_size // hf_config.num_attention_heads)
                 # Eagle3 has only 1 layer
@@ -428,8 +424,8 @@ class KVCacheManager:
         logger.debug(
             f"Transferring kv cache shape {len(kv_cache_slices)} * {kv_cache_slices[0].shape} sharding {kv_cache_slices[0].sharding} size {kv_cache_slices[0].nbytes * len(kv_cache_slices)/1024/1024} Mbytes"
         )
-        sharding = NamedSharding(
-            self.runner.mesh, PartitionSpec(None, ShardingAxisName.ATTN_HEAD))
+        sharding = NamedSharding(self.runner.mesh,
+                                 PartitionSpec(None, "model"))
         if envs.VLLM_TPU_USING_PATHWAYS:
             from pathwaysutils.experimental import \
                 reshard as experimental_reshard
