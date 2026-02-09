@@ -353,14 +353,6 @@ def _kernel(
         """RIGHT direction: compute BOT half of block (my_id - step - 1) % N."""
         return mod(my_id - step - 1, num_devices)
 
-    def get_m_start_for_block_top(block_idx):
-        """Get starting M row for TOP half of a block."""
-        return block_idx * m_block  # TOP starts at block beginning
-
-    def get_m_start_for_block_bot(block_idx):
-        """Get starting M row for BOT half of a block."""
-        return block_idx * m_block + m_half_block  # BOT starts at block midpoint
-
     def compute_matmul_top_half(block_idx, out_slot):
         """Compute matmul for TOP half of specified block.
 
