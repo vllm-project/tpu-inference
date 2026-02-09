@@ -93,10 +93,10 @@ def mesh():
         pytest.skip("No JAX devices available.")
     devices = np.array(jax.local_devices())
     num_devices = len(devices)
-    device_mesh = devices.reshape((num_devices, 1, 1, 1))
+    device_mesh = devices.reshape((num_devices, 1, 1, 1, 1))
     # Simplify axis names for testing
     with Mesh(device_mesh,
-              axis_names=('data', 'attn_dp', 'model', 'expert')) as m:
+              axis_names=('data', 'attn_dp', 'attn_dp_expert', 'model', 'expert')) as m:
         yield m
 
 

@@ -334,10 +334,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         ici_mesh_shape = (
             dp_inner,
             sharding_strategy.attn_dp_size,
+            sharding_strategy.attn_dp_expert_size,
             sharding_strategy.expert_size,
             sharding_strategy.tp_size,
         )
-        dcn_mesh_shape = (num_slices, 1, 1, 1)
+        dcn_mesh_shape = (num_slices, 1, 1, 1, 1)
 
         return mesh_utils.create_hybrid_device_mesh(
             mesh_shape=ici_mesh_shape,
