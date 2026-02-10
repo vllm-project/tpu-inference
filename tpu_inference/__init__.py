@@ -20,11 +20,6 @@ from tpu_inference import envs
 from tpu_inference import tpu_info as ti
 from tpu_inference.logger import init_logger
 
-
-def register_tpu_quantization_configs():
-    import tpu_inference.layers.vllm.quantization  # noqa: F401
-
-
 logger = init_logger(__name__)
 
 if "proxy" in envs.JAX_PLATFORMS:

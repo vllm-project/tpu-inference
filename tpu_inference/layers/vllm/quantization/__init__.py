@@ -31,6 +31,10 @@ from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedConfig
 
 
+def register_tpu_quantization_configs():
+    pass
+
+
 def get_tpu_quantization_config(vllm_config: VllmConfig,
                                 mesh: Mesh) -> QuantizationConfig:
     model_config = copy.deepcopy(vllm_config.model_config)
