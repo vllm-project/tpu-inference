@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from dataclasses import InitVar, dataclass
-from typing import Iterable, Optional
+from typing import Any, Iterable, Iterator, Optional
 
 import jax
 import jax.numpy as jnp
@@ -222,6 +222,16 @@ class JaxMoE(JaxModule):
         self.use_ep = self.num_expert_parallelism > 1
         self.activation = self.hidden_act
         self.scoring_func = self.scoring_func
+
+    def named_parameters(self, *args, **kwargs) -> Iterator[tuple[str, Any]]:
+        for name, param in super().named_parameters(*args, **kwargs):
+            # Weight loader relies on this function to check if all parameters are loaded.
+            # We put router/gating param in JaxMoE because we fuse all kinds of MoE into one.
+            # However, router/gating param does not belong to "experts" but "mlp" in HF checkpoint,
+            # so we skip them in the named_parameters of JaxMoE to avoid confusion for weight loading completeness check.
+            if "router" in name:
+                continue
+            yield name, param
 
     def load_weights(self, weights: Iterable):
         """Used by JaxAutoWeightLoader to load HF weights into the layer.

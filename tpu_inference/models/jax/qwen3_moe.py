@@ -31,7 +31,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
-from transformers import Qwen3Config, modeling_flax_utils
+from transformers import Qwen3Config
 from vllm.config import VllmConfig
 
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
@@ -56,62 +56,6 @@ from tpu_inference.models.jax.utils.weight_utils import LoadableWithIterator
 logger = init_logger(__name__)
 
 init_fn = nnx.initializers.uniform()
-
-
-class Qwen3MoeMLP(JaxModule):
-
-    def __init__(self,
-                 hidden_size: int,
-                 intermediate_size: int,
-                 hidden_act: str,
-                 dtype: jnp.dtype,
-                 rng: nnx.Rngs,
-                 quant_config: QuantizationConfig,
-                 expert_gate: Optional[JaxModule] = None,
-                 prefix: str = ""):
-        self.gate_proj = JaxLinear(
-            hidden_size,
-            intermediate_size,
-            use_bias=False,
-            param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
-            rngs=rng,
-            quant_config=quant_config,
-            prefix=prefix + ".gate_proj",
-        )
-        self.up_proj = JaxLinear(
-            hidden_size,
-            intermediate_size,
-            use_bias=False,
-            param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
-            rngs=rng,
-            quant_config=quant_config,
-            prefix=prefix + ".up_proj",
-        )
-        self.down_proj = JaxLinear(
-            intermediate_size,
-            hidden_size,
-            use_bias=False,
-            param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
-            rngs=rng,
-            quant_config=quant_config,
-            prefix=prefix + ".down_proj",
-        )
-        self.act_fn = modeling_flax_utils.ACT2FN[hidden_act]
-        self.expert_gate = expert_gate
-
-    def __call__(self, x: jax.Array) -> jax.Array:
-        gate = self.act_fn(self.gate_proj(x))
-        up = self.up_proj(x)
-        fuse = gate * up
-        out = self.down_proj(fuse)
-
-        if self.expert_gate is not None:
-            gate_out = nnx.sigmoid(self.expert_gate(x))
-            out = gate_out * out
-        return out
 
 
 class Qwen3MoeSparseMoeBlock(JaxModule):
@@ -147,25 +91,8 @@ class Qwen3MoeSparseMoeBlock(JaxModule):
         shared_expert_intermediate_size = getattr(
             config, "shared_expert_intermediate_size", 0)
         if shared_expert_intermediate_size > 0:
-            self.shared_expert_gate = JaxLinear(
-                config.hidden_size,
-                1,
-                use_bias=False,
-                param_dtype=dtype,
-                kernel_init=nnx.with_partitioning(init_fn, (None, None)),
-                rngs=rng,
-                quant_config=None,
-                prefix=prefix + ".shared_expert_gate",
-            )
-            self.shared_expert = Qwen3MoeMLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=shared_expert_intermediate_size,
-                hidden_act=config.hidden_act,
-                dtype=dtype,
-                rng=rng,
-                quant_config=quant_config,
-                expert_gate=self.shared_expert_gate,
-                prefix=prefix + ".shared_expert",
+            raise NotImplementedError(
+                f"Shared expert is not implemented yet. Found {shared_expert_intermediate_size=} in config."
             )
         else:
             self.shared_expert = None
@@ -250,14 +177,8 @@ class Qwen3MoeDecoderLayer(JaxModule):
                                               mesh=mesh,
                                               prefix=prefix + ".mlp")
         else:
-            self.mlp = Qwen3MoeMLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=config.intermediate_size,
-                hidden_act=config.hidden_act,
-                dtype=dtype,
-                rng=rng,
-                quant_config=quant_config,
-                prefix=prefix + ".mlp",
+            raise NotImplementedError(
+                f"Non-sparse MLP is not implemented yet. Found {mlp_only_layers=}, {config.num_experts=}, and {config.decoder_sparse_step=} in config."
             )
 
     def __call__(
