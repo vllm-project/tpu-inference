@@ -48,7 +48,7 @@ steps:
           "
   - label: "${TPU_VERSION:-tpu7x} Record correctness test result for multi-host"
     key: "${TPU_VERSION:-tpu7x}_record_multi-host_CorrectnessTest"
-    depends_on: "${TPU_VERSION:-tpu7x}_multi-host_CorrectnessTest"
+    depends_on: "${TPU_VERSION:-tpu7x}_record_multi-host_CorrectnessTest"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu7x}"
       CI_TARGET: "multi-host"
