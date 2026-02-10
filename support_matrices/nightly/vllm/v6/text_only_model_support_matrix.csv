@@ -1,7 +1,7 @@
 Model,UnitTest,Accuracy/Correctness,Benchmark
 "moonshotai/Kimi-K2-Thinking",unverified,unverified,unverified
 "Qwen/Qwen3-Coder-480B-A35B-Instruct",❌,N/A,N/A
-"meta-llama/Llama-3.3-70B-Instruct",❌,N/A,N/A
+"meta-llama/Llama-3.3-70B-Instruct",✅,✅,✅
 "Qwen/Qwen3-4B",❌,N/A,N/A
 "google/gemma-3-27b-it",❌,N/A,N/A
 "Qwen/Qwen3-32B",❌,N/A,N/A
