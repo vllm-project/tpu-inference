@@ -419,67 +419,142 @@ def fused_moe_func(
         # hidden_states_local: [num_tokens_local, hidden_size]=[16, 6144]
         # topk_indices_local: [num_tokens_local, topk]=[16, 8]
         num_tokens_local = hidden_states_local.shape[0]
+
         # eg0, if num_tokens_local=2, topk=2, and topk_indices_local=[[2, 0], [1, 0]]
         # Token 0 --> experts [2, 0]
         # Token 1 --> experts [1, 0]
         # topk_indices_flat = [2, 0, 1, 0]  # flatten: 4 (token, expert) pairs
-        # xw32: this is important. topk_argsort_indices = [1, 3, 2, 0]  # sort by expert: expert 0 first, then 1, then 2
         topk_indices_flat = topk_indices_local.flatten()
         # topk_indices_flat: [num_tokens_local * topk]=[128]. eg0, topk_indices_flat=[2, 0, 1, 0]
+        
         topk_argsort_indices = jnp.argsort(topk_indices_flat)
         # topk_argsort_indices: [num_tokens_local * topk]. eg0, topk_argsort_indices=[1, 3, 2, 0]
+        # xw32: this is important. 
+        # **topk_argsort_indices tells you which positions in the flattened token-expert list you need to pick,
+        # in order, to group all tokens by expert.**
+        # Walking through the example in the comments (2 tokens, topk=2):
+        # 1. Start: topk_indices_local = [[2, 0], [1, 0]] — Token 0 goes to experts 2,0; Token 1 goes to
+        # experts 1,0.
+        # 2. Flatten: topk_indices_flat = [2, 0, 1, 0] — each position is a (token, expert) pair:
+        # | Flat index | 0   | 1   | 2   | 3   |
+        # |------------|-----|-----|-----|-----|
+        # | Token      | 0   | 0   | 1   | 1   |
+        # | Expert     | 2   | 0   | 1   | 0   |
+        # 3. Argsort: topk_argsort_indices = [1, 3, 2, 0] — these are the flat indices that would sort
+        # topk_indices_flat by expert ID in ascending order:
+        #   - topk_indices_flat[1] = 0 (expert 0)
+        #   - topk_indices_flat[3] = 0 (expert 0)
+        #   - topk_indices_flat[2] = 1 (expert 1)
+        #   - topk_indices_flat[0] = 2 (expert 2)
+        # After this reordering, experts are grouped: [0, 0, 1, 2].
+        # Why it matters: GMM (Group Matmul) requires tokens to be contiguous by expert — all tokens for expert
+        #  0 together, then expert 1, etc. topk_argsort_indices is the permutation that achieves this grouping.
+        #  It's used on line 467 "token_indices_sorted = token_indices[topk_argsort_indices]" to reorder token_indices and then on line 481 "x = hidden_states_local[token_indices_sorted]" to reorder the actual
+        # hidden_states into expert-grouped order before feeding into GMM.
+
         topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
-        # topk_argsort_revert_indices: [num_tokens_local * topk]. eg0, topk_argsort_revert_indices=[3, 0, 2, 1]
-        # How do I understand `topk_argsort_revert_indices`?
-        # We use it later as "out = out[topk_argsort_revert_indices_local].reshape((-1, topk, n))"
-        # Purpose: Undo the Expert-Sorting
-        # Remember the flow:
-        # 1. Before GMM: Tokens are reordered so same-expert tokens are grouped together
-        # 2. GMM: Experts process their grouped tokens
-        # 3. After GMM: Results need to be unshuffled back to original token order
+        #  topk_argsort_revert_indices is the inverse permutation of topk_argsort_indices. It undoes the
+        #  expert-grouping sort to restore the original token order.
         #
-        # Example Walkthrough
-        # Using the same example (2 tokens, topk=2):
+        #  Using the same example:
         #
-        # After sorting by expert, the output order is:
+        #  1. Before GMM, we sorted tokens by expert using topk_argsort_indices = [1, 3, 2, 0], producing:
         #
-        # Position:	0	1	2	3
-        # Expert:	0	0	1	2
-        # Token: 	0	1	1	0
-        # We need to restore original order (token 0's experts, then token 1's experts):
+        #  | Sorted position | 0   | 1   | 2   | 3   |   ----> notice, it's **Sorted** position.
+        #  |-----------------|-----|-----|-----|-----|
+        #  | Expert          | 0   | 0   | 1   | 2   |
+        #  | Token           | 0   | 1   | 1   | 0   |
         #
-        # Position:	0	1	2	3
-        # Expert:	2	0	1	0
-        # Token: 	0	0	1	1
+        #  2. GMM runs on this expert-grouped order and produces outputs in the same sorted order.
+        #  3. After GMM, we need to put results back in original order (token 0's experts, then token 1's
+        #  experts):
         #
-        # topk_argsort_revert_indices = [3, 0, 2, 1]
-        # out[topk_argsort_revert_indices]  # reorders: position 3→0, 0→1, 2→2, 1→3
+        #  | Original position | 0   | 1   | 2   | 3   |
+        #  |-------------------|-----|-----|-----|-----|
+        #  | Expert            | 2   | 0   | 1   | 0   |
+        #  | Token             | 0   | 0   | 1   | 1   |
+        #
+        #  4. topk_argsort_revert_indices = [3, 0, 2, 1] does exactly this. When you do
+        #  out[topk_argsort_revert_indices]:
+        #    - Position 0 gets out[3] (token 0, expert 2)
+        #    - Position 1 gets out[0] (token 0, expert 0)
+        #    - Position 2 gets out[2] (token 1, expert 1)
+        #    - Position 3 gets out[1] (token 1, expert 0)
+        #
+        #  The key mathematical property: argsort(argsort(x)) gives the inverse permutation. So
+        #  topk_argsort_revert_indices = argsort(topk_argsort_indices) is the permutation that reverses the
+        #  sort.
 
         token_indices = jnp.arange(num_tokens_local,
                                    dtype=jnp.int32).repeat(topk)
-        # token_indices: creates a mapping from flat index to token id and expert id before we sort by expert.
-        # Table:
-        # Flat index:	0	1	2	3
-        # Token ID:	    0	0	1	1
-        # Expert:	    2	0	1	0
+        # token_indices maps each position in the flattened (token, expert) list back to its original token ID.
+        #
+        #  Using the same example (2 tokens, topk=2):
+        #
+        #  token_indices = jnp.arange(num_tokens_local).repeat(topk)
+        #  # arange(2) = [0, 1]
+        #  # repeat(2) = [0, 0, 1, 1]
+        #
+        #  Each token appears topk times because each token is routed to topk experts:
+        #  ┌────────────┬─────┬─────┬─────┬─────┐
+        #  │ Flat index │  0  │  1  │  2  │  3  │
+        #  ├────────────┼─────┼─────┼─────┼─────┤
+        #  │ Token ID   │ 0   │ 0   │ 1   │ 1   │
+        #  ├────────────┼─────┼─────┼─────┼─────┤
+        #  │ Expert     │ 2   │ 0   │ 1   │ 0   │
+        #  └────────────┴─────┴─────┴─────┴─────┘
 
         # token_indices: [num_tokens_local * topk]. eg0, token_indices=[0, 0, 1, 1]
         token_indices_sorted = token_indices[topk_argsort_indices]
-        # token_indices_sorted: After we sort by expert, which token is at each position?
-        # topk_argsort_indices = [1, 3, 2, 0]  # indices that sort experts: 0,0,1,2
+        # token_indices_sorted answers the question: after sorting by expert, which token is at each position?
+        # It's computed on line 467:
         # token_indices_sorted = token_indices[topk_argsort_indices]
-        # [0, 0, 1, 1][[1, 3, 2, 0]] = [0, 1, 1, 0]
-        # Table:
-        # Sorted position:	0	1	2	3
-        # Expert:       	0	0	1	2
-        # Token ID:     	0	1	1	0
+        # This takes token_indices (the token ID for each flat position) and reorders it using the
+        # expert-sorting permutation.
+        # Using the example:
+        # - token_indices = [0, 0, 1, 1] — flat order, grouped by token
+        # - topk_argsort_indices = [1, 3, 2, 0] — the permutation that sorts by expert
+        # - token_indices_sorted = [0, 0, 1, 1][[1, 3, 2, 0]] = [0, 1, 1, 0]
+        # ┌─────────────────┬─────┬─────┬─────┬─────┐
+        # │ Sorted position │  0  │  1  │  2  │  3  │
+        # ├─────────────────┼─────┼─────┼─────┼─────┤
+        # │ Expert          │ 0   │ 0   │ 1   │ 2   │
+        # ├─────────────────┼─────┼─────┼─────┼─────┤
+        # │ Token ID        │ 0   │ 1   │ 1   │ 0   │
+        # └─────────────────┴─────┴─────┴─────┴─────┘
+        # Its sole purpose is line 481:
+        # x = hidden_states_local[token_indices_sorted]
 
         # token_indices_sorted: [num_tokens_local * topk]. eg0, token_indices_sorted=[0, 1, 1, 0]
         group_sizes_local = jnp.bincount(topk_indices_flat,
                                          length=global_num_experts)
+        #   group_sizes_local tells GMM how many tokens each expert needs to process.
+        # 
+        #   It's computed on line 478:
+        # 
+        #   group_sizes_local = jnp.bincount(topk_indices_flat, length=global_num_experts)
+        # 
+        #   bincount counts how many times each expert ID appears in the flattened token-expert assignments.
+        # 
+        #   Using the example:
+        # 
+        #   - topk_indices_flat = [2, 0, 1, 0]
+        #   - global_num_experts = 3
+        #   - group_sizes_local = [2, 1, 1] — expert 0 has 2 tokens, expert 1 has 1 token, expert 2 has 1 token
+
         # group_size_local: (global_num_experts,)
+        # token_indices_sorted = [0, 1, 1, 0]
         x = hidden_states_local[token_indices_sorted]
         # x: [num_tokens_local * topk, hidden_size]
+        # This uses token_indices_sorted as a gather index to build the expert-grouped input tensor for GMM. It
+        #    fetches hidden_states[0], hidden_states[1], hidden_states[1], hidden_states[0] — placing each
+        #   token's hidden state at the position where GMM expects it based on expert grouping.
+        # IOW:
+        # position 0 gets hidden_states_local[0]
+        # position 1 gets hidden_states_local[1]
+        # position 2 gets hidden_states_local[1]
+        # position 3 gets hidden_states_local[0]
+
         return x, group_sizes_local, topk_argsort_revert_indices
 
     # hidden_states: [num_tokens, hidden_size]=[16, 6144], topk_indices: [num_tokens, topk]=[16, 8]
