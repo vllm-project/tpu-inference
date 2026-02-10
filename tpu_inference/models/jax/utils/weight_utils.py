@@ -752,10 +752,14 @@ def load_nnx_param_from_reshaped_torch(
         spec = ()
     mesh = getattr(jax_param, 'mesh', None)
 
-    jax_param.value = shard_put(t2j(torch_weight, use_dlpack=False).astype(
-        jax_param.value.dtype),
-                                spec,
-                                mesh=mesh)
+    try:
+        jax_param.value = shard_put(t2j(torch_weight, use_dlpack=False),
+                                    spec,
+                                    mesh=mesh)
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to load weight '{param_name}' with shape {torch_weight.shape} into param with shape {jax_param.value.shape}"
+        ) from e
 
 
 class JaxAutoWeightsLoader(AutoWeightsLoader):
