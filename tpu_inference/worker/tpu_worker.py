@@ -49,7 +49,11 @@ class PPConfig:
     default_tpu_visible_chips: str = field(init=False)
 
     def __post_init__(self):
-        self.default_tpu_process_bounds = f"1,{self.pp_world_size},1"
+        # In the isolated stage architecture, each pipeline stage operates 
+        # as an independent JAX cluster. 
+        # For single-host PP or multi-host with one host per stage, 
+        # the cluster size for each stage is 1.
+        self.default_tpu_process_bounds = "1,1,1"
         self.default_tpu_chips_per_process_bounds = "1,1,1"
         self.default_tpu_visible_chips = f"{self.rank}"
 
