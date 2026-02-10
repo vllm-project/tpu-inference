@@ -136,6 +136,7 @@ steps:
             echo "    /workspace/tpu_inference/" >> .coveragerc
           - "python3 ./coverage.pex combine .coverage.part1.${TPU_VERSION:-tpu6e} .coverage.part2.${TPU_VERSION:-tpu6e}"
           - "python3 ./coverage.pex report --fail-under=69"
+          - "rm -f .coverage.part* .coveragerc pex coverage.pex .coverage"
            
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests - kernels"
         key: ${TPU_VERSION:-tpu6e}_test_8
