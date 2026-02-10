@@ -29,7 +29,7 @@ fi
 RECORD_ID="$1"
 echo "Record ID: $RECORD_ID"
 
-# Note: Remove the functionality for uploading failure logs, can be viewed directly on the Buildkite interface.
+# Note: Removed the failure log upload feature. These logs are now accessible directly via the Buildkite interface.
 
 if [ -z "$RECORD_ID" ] || [ "$RECORD_ID" == "null" ]; then
   echo "Invalid or missing record_id. Skipping message without ack."
