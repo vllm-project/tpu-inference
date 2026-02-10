@@ -19,6 +19,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from flax.typing import Sharding
+from jax.sharding import NamedSharding, PartitionSpec
 from jax._src.dtypes import TypePromotionError
 from jaxtyping import Float
 
@@ -77,6 +78,7 @@ class Router(nnx.Module):
     ed_sharding: Sharding
     random_init: bool = False
     moe_backend: MoEBackend = MoEBackend.DENSE_MAT
+    mesh: Optional[jax.sharding.Mesh] = None
 
     def __call__(self, x_TD: Float):
         """Routes tokens to experts.
@@ -91,7 +93,8 @@ class Router(nnx.Module):
         """
         x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = jax.lax.with_sharding_constraint(
-            x_TD, PartitionSpec(*self.activation_ffw_td))
+            x_TD,
+            NamedSharding(self.mesh, PartitionSpec(*self.activation_ffw_td)))
         router_act = modeling_flax_utils.ACT2FN[self.router_act]
         router_logits_TE = jnp.einsum('TD,DE -> TE', x_TD,
                                       self.kernel_DE.value)

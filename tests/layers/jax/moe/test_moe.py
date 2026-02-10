@@ -73,7 +73,8 @@ class TestMoE(unittest.TestCase):
                 rngs=nnx.Rngs(self.key),
                 activation_ffw_td=('data', 'model'),
                 ed_sharding=(None, 'model'),
-                moe_backend=backend)
+                moe_backend=backend,
+                mesh=self.mesh)
             num_expert_parallelism = get_expert_parallelism(
                 EXPERT_AXIS_NAME, self.mesh)
             assert num_expert_parallelism == self.device_count

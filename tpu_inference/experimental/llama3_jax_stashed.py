@@ -129,7 +129,8 @@ class LlamaForCausalLM(nnx.Module):
                                            rngs=self.rng,
                                            df_sharding=(None, "model"),
                                            fd_sharding=("model", None),
-                                           random_init=force_random_weights),
+                                           random_init=force_random_weights,
+                                           mesh=self.mesh),
                 ))
         self.layers = nnx.List(layers)
 

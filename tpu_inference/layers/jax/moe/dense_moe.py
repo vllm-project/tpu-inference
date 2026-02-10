@@ -15,7 +15,6 @@ from typing import Tuple
 
 import jax
 import jax.numpy as jnp
-from flax import nnx
 from jax.sharding import Sharding
 from jaxtyping import Float
 

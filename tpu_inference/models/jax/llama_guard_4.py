@@ -262,7 +262,8 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                                      rngs=self.rng,
                                      df_sharding=P(None, 'model'),
                                      fd_sharding=P('model', None),
-                                     activation_ffw_td=P('data', None))
+                                     activation_ffw_td=('data', None),
+                                     mesh = self.mesh)
 
             attn = Llama4Attention(
                 hidden_size=self.hidden_size,

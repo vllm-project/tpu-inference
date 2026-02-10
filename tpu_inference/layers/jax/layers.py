@@ -19,6 +19,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from flax.typing import Sharding
+from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Float, Int
 
@@ -129,6 +130,7 @@ class DenseFFW(nnx.Module):
     fd_sharding: Sharding = ()
     activation_ffw_td: Sharding = ()
     random_init: bool = False
+    mesh: Mesh
 
     rngs: InitVar[nnx.Rngs]
 
@@ -143,8 +145,8 @@ class DenseFFW(nnx.Module):
         """
         # TODO consider to create factories for einsum(?)
         x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = jax.lax.with_sharding_constraint(x_TD,
-                                                P(*self.activation_ffw_td))
+        x_TD = jax.lax.with_sharding_constraint(
+            x_TD, NamedSharding(self.mesh, P(*self.activation_ffw_td)))
         with jax.named_scope("wi_0"):
             gating_TF = jnp.einsum('TD,DF -> TF', x_TD,
                                    self.kernel_gating_DF.value)
