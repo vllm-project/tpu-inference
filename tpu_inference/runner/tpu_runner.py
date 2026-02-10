@@ -1742,12 +1742,21 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         jax_dtype = to_jax_dtype(self.dtype)
         num_padded_tokens = runner_utils.get_padded_token_len(
             self.num_tokens_paddings, num_tokens)
-        sharding = NamedSharding(self.mesh, PartitionSpec())
+        sharding = NamedSharding(self.mesh,
+                                 PartitionSpec(ShardingAxisName.MLP_DATA, None))
         hidden_size = self.model_config.get_hidden_size()
         spec = jax.ShapeDtypeStruct(shape=(num_padded_tokens, hidden_size),
                                     dtype=jax_dtype,
                                     sharding=sharding)
-        tensor_spec = {"hidden_states": spec, "residual": spec}
+
+        tensor_spec = {"hidden_states": spec}
+        # VLLM PyTorch models (via torchax) typically return both hidden_states
+        # and residual. JAX native models in tpu-inference typically only
+        # return hidden_states.
+        if (envs.MODEL_IMPL_TYPE == "vllm"
+                or self.model.__class__.__name__ == "VllmModelWrapper"):
+            tensor_spec["residual"] = spec
+
         return tensor_spec
 
     def get_uuid_for_jax_transfer(self,

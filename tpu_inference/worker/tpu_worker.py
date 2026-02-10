@@ -137,13 +137,9 @@ class TPUWorker:
         # set tpu visible devices for Jax runtime in single host PP.
         multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "").lower()
         if multihost_backend != "ray" and self.parallel_config.pipeline_parallel_size > 1:
-            tpu_ports = [
-                jax_parallel_state.BASE_JAX_PORT + i
-                for i in range(self.pp_config.pp_world_size)
-            ]
-            os.environ["TPU_PROCESS_ADDRESSES"] = ",".join(
-                [f"localhost:{port}" for port in tpu_ports])
-            os.environ["TPU_PROCESS_PORT"] = f"{tpu_ports[self.rank]}"
+            # We skip setting TPU_PROCESS_ADDRESSES for single-host PP to avoid 
+            # deadlocks in collective JIT calls between pipeline stages. 
+            # Each stage will run as an independent JAX cluster and communicate via P2P.
             os.environ["CLOUD_TPU_TASK_ID"] = f"{self.rank}"
 
             # Note: Below is the setting for v6e8 host (8 chips of v6e)
@@ -302,6 +298,10 @@ class TPUWorker:
         # deliberate, temporary compromise for the same reasons outlined in
         # the `get_kv_cache_spec` method.
 
+        if not scheduler_output.total_num_scheduled_tokens:
+            self.step_counter += 1
+            return self.model_runner.execute_model(scheduler_output)
+
         if self.parallel_config.pipeline_parallel_size == 1 or self.rank == 0:
             intermediate_tensors = None
         else:
@@ -315,6 +315,8 @@ class TPUWorker:
                 uuid, tensor_spec)
             intermediate_tensors = JaxIntermediateTensors(
                 intermediate_tensors_dict)
+            # Synchronize after receiving to ensure data is ready on device.
+            intermediate_tensors.block_until_ready()
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
@@ -322,6 +324,8 @@ class TPUWorker:
         if isinstance(output, JaxIntermediateTensors):
             assert self.parallel_config.pipeline_parallel_size > 1
             assert not get_pp_group().is_last_rank
+            # Synchronize before sending to ensure data is ready on device.
+            output.block_until_ready()
             # send intermediate tensors
             uuid = self.model_runner.get_uuid_for_jax_transfer(
                 scheduler_output, self.rank, self.step_counter)
