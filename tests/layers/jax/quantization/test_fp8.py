@@ -89,6 +89,12 @@ def mesh():
 def rngs():
     return nnx.Rngs(42)
 
+@pytest.fixture
+def mesh():
+    # Use a dummy mesh for testing
+    devices = jax.devices()
+    return jax.sharding.Mesh(np.array(devices), ('device', ))
+
 
 class TestLinearOpAdaptInfo:
     """Test QuantLinearConfig.get_adapt_info axis classification."""
@@ -270,54 +276,52 @@ class TestFp8BlockwiseJaxLinear:
 
 class TestFp8TensorwiseJaxLinear:
 
-    def test_fp8_linear_method_create_weights(self, rngs):
-        layer = JaxEinsum("ab,bc->ac", (32, 16), rngs, bias_shape=None)
-        config = QuantLinearConfig(enable_sp=False, output_sizes=[16])
-        method = Fp8TensorwiseLinearMethod(layer, config)
-        method.create_weights_jax(layer, rngs=rngs)
+    def test_fp8_linear_method_create_weights(self, mesh, rngs):
+        with jax.set_mesh(mesh):
+            layer = JaxEinsum("ab,bc->ac", (32, 16), rngs, bias_shape=None)
+            config = QuantLinearConfig(enable_sp=False, output_sizes=[16])
+            method = Fp8TensorwiseLinearMethod(layer, config)
+            method.create_weights_jax(layer, rngs=rngs)
 
-        assert hasattr(layer, 'weight')
-        assert hasattr(layer, 'weight_scale')
-        assert layer.weight.value.dtype == jnp.float8_e4m3fn
-        assert layer.weight_scale.value.dtype == jnp.float32
-        assert layer.weight.value.shape == (16, 32)
-        assert layer.weight_scale.value.shape == (16, )
-        assert hasattr(layer.weight, 'weight_loader')
+            assert hasattr(layer, 'weight')
+            assert hasattr(layer, 'weight_scale')
+            assert layer.weight.value.dtype == jnp.float8_e4m3fn
+            assert layer.weight_scale.value.dtype == jnp.float32
+            assert layer.weight.value.shape == (16, 32)
+            assert layer.weight_scale.value.shape == (16, )
+            assert hasattr(layer.weight, 'weight_loader')
 
-    def test_fp8_loader_prevents_upcast(self, rngs):
-        layer = JaxEinsum("ab,bc->ac", (4, 2), rngs, bias_shape=None)
-        config = QuantLinearConfig(enable_sp=False, output_sizes=[2])
-        method = Fp8TensorwiseLinearMethod(layer, config)
-        method.create_weights_jax(layer, rngs=rngs)
+    def test_fp8_loader_prevents_upcast(self, mesh, rngs):
+        with jax.set_mesh(mesh):
+            layer = JaxEinsum("ab,bc->ac", (4, 2), rngs, bias_shape=None)
+            config = QuantLinearConfig(enable_sp=False, output_sizes=[2])
+            method = Fp8TensorwiseLinearMethod(layer, config)
+            method.create_weights_jax(layer, rngs=rngs)
 
-        torch_fp8 = torch.zeros((2, 4), dtype=torch.float8_e4m3fn)
-        layer.weight.weight_loader(layer.weight, torch_fp8)
+            torch_fp8 = torch.zeros((2, 4), dtype=torch.float8_e4m3fn)
+            layer.weight.weight_loader(layer.weight, torch_fp8)
 
-        assert layer.weight.value.dtype == jnp.float8_e4m3fn
+            assert layer.weight.value.dtype == jnp.float8_e4m3fn
 
     @pytest.mark.parametrize("in_features,out_features", [(128, 64),
                                                           (256, 128)])
     @pytest.mark.parametrize("use_bias", [True, False])
     @pytest.mark.parametrize("batch_size", [1, 4])
     def test_linear_forward_correctness(self, in_features, out_features,
-                                        use_bias, batch_size, rngs):
+                                        use_bias, batch_size, mesh, rngs):
         hf_quant_config = {
             "quant_method": "fp8",
             "activation_scheme": "dynamic",
         }
         quant_config = Fp8Config(hf_quant_config)
-
-        layer = JaxLinear(
-            input_size=in_features,
-            output_size=out_features,
-            rngs=rngs,
-            use_bias=use_bias,
-            quant_config=quant_config,
-        )
-
-        devices = jax.devices()
-        mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
         with jax.set_mesh(mesh):
+            layer = JaxLinear(
+                input_size=in_features,
+                output_size=out_features,
+                rngs=rngs,
+                use_bias=use_bias,
+                quant_config=quant_config,
+            )
             x = jax.random.normal(rngs.params(), (batch_size, in_features))
             output = layer(x)
 

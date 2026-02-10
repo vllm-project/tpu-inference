@@ -143,7 +143,8 @@ def moe_apply(
                     apply_expert_weight_before_computation,
                     activation_ffw_ted=layer.activation_ffw_ted,
                     activation_ffw_td=layer.activation_ffw_td,
-                    hidden_act=layer.hidden_act)
+                    hidden_act=layer.hidden_act,
+                    mesh=mesh)
 
             case MoEBackend.MEGABLX_GMM:
                 # NOTE: circular import avoidance

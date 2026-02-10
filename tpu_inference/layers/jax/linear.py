@@ -47,6 +47,8 @@ class JaxEinsum(nnx.Einsum, JaxModule):
                             kernel_shape=kernel_shape,
                             bias_shape=bias_shape,
                             **kwargs)
+        self.kernel_init = kwargs.get("kernel_init",
+                                      jax.nn.initializers.lecun_normal())
         # For compatibility. HF model use 'weight' as name suffix, we alias `self.kernel` to
         # `self.weight` such that `named_parameters()` can match the names in HF models.
         self.weight = self.kernel

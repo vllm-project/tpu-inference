@@ -156,8 +156,9 @@ class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
                                         sharding=self.weight_sharding)
 
         # Attach custom loader to avoid default upcasting behavior
-        setattr(layer.weight, "weight_loader",
-                functools.partial(load_fp8_weight, param_name="weight"))
+        layer.weight.set_metadata(
+            'weight_loader',
+            functools.partial(load_fp8_weight, param_name="weight"))
 
         # Scale is always per-output-channel (1D).
         scale_sharding = None
@@ -276,7 +277,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             weight_loader=partial(load_nnx_param_from_reshaped_torch,
                                   permute_dims=(0, 1),
                                   param_name="linear_fp8_weight"))
-        layer.weight.sharding = self.weight_sharding
+        layer.weight.set_metadata('sharding', self.weight_sharding)
 
         # Block-wise quantization scale
         block_n, block_k = self.quant_config.weight_block_size[
@@ -293,7 +294,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 permute_dims=(0, 1),
                 param_name="linear_fp8_weight_scale_inv",
             ))
-        layer.weight_scale_inv.sharding = self.weight_sharding
+        layer.weight_scale_inv.set_metadata('sharding', self.weight_sharding)
 
     def process_weights_after_loading(self, layer):
         assert isinstance(layer, JaxEinsum)

@@ -15,6 +15,8 @@ from typing import Tuple
 
 import jax
 import jax.numpy as jnp
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 from jax.sharding import Sharding
 from jaxtyping import Float
 
@@ -25,7 +27,8 @@ from tpu_inference.layers.jax.moe.utils import modeling_flax_utils
 
 def dense_moe_fwd(weights: UnfusedMoEWeights, x_TD: Float,
                   cast_dtype: jnp.dtype, activation_ffw_td: Sharding,
-                  hidden_act: str, full_weights_TE: jax.Array) -> jax.Array:
+                  hidden_act: str, full_weights_TE: jax.Array,
+                  mesh: Mesh) -> jax.Array:
     """Forward pass of the dense Moe layer where we don't pre-apply the weights.
 
     TODO (jacobplatin): we probably want to support quantization at some point.
@@ -42,7 +45,8 @@ def dense_moe_fwd(weights: UnfusedMoEWeights, x_TD: Float,
         The output of the dense Moe layer.
     """
     x_TD = jnp.asarray(x_TD, cast_dtype)
-    x_TD = jax.lax.with_sharding_constraint(x_TD, activation_ffw_td)
+    x_TD = jax.lax.with_sharding_constraint(
+        x_TD, NamedSharding(mesh, P(*activation_ffw_td)))
     with jax.named_scope("gating"):
         gating_TEF = jnp.einsum('TD,EDF -> TEF', x_TD, weights.w1_weight)
         activated_gating_TEF = modeling_flax_utils.ACT2FN[hidden_act](
@@ -58,10 +62,12 @@ def dense_moe_fwd(weights: UnfusedMoEWeights, x_TD: Float,
     return output_TD.astype(cast_dtype)
 
 
-def dense_moe_fwd_preapply_router_weights(
-        weights: UnfusedMoEWeights, x_TD: Float, cast_dtype: jnp.dtype,
-        activation_ffw_ted: Sharding, hidden_act: str,
-        full_weights_TE: jax.Array) -> jax.Array:
+def dense_moe_fwd_preapply_router_weights(weights: UnfusedMoEWeights,
+                                          x_TD: Float, cast_dtype: jnp.dtype,
+                                          activation_ffw_td: Sharding,
+                                          hidden_act: str,
+                                          full_weights_TE: jax.Array,
+                                          mesh: Mesh) -> jax.Array:
     """
     Forward pass of the dense Moe layer where we pre-apply the weights.
 
@@ -82,7 +88,8 @@ def dense_moe_fwd_preapply_router_weights(
     num_experts = full_weights_TE.shape[-1]
     x_TED = jnp.repeat(x_TD[:, None, :], num_experts, 1)
     x_TED = jnp.asarray(x_TED, cast_dtype) * full_weights_TE[..., None]
-    x_TED = jax.lax.with_sharding_constraint(x_TED, activation_ffw_ted)
+    x_TED = jax.lax.with_sharding_constraint(
+        x_TED, NamedSharding(mesh, P(*activation_ffw_td)))
 
     with jax.named_scope("gating"):
         gating_TEF = jnp.einsum('TED,EDF -> TEF', x_TED, weights.w1_weight)
@@ -103,7 +110,7 @@ def dense_moe_func(weights: UnfusedMoEWeights, x_TD: jax.Array,
                    cast_dtype: jnp.dtype, num_local_experts: int,
                    apply_expert_weight_before_computation: bool,
                    activation_ffw_td: Sharding, activation_ffw_ted: Sharding,
-                   hidden_act: str) -> jax.Array:
+                   hidden_act: str, mesh: Mesh) -> jax.Array:
     """
     Forward pass of the dense MoE layer.  This is a naive implementation
     and thus should not be used in production.
@@ -146,11 +153,13 @@ def dense_moe_func(weights: UnfusedMoEWeights, x_TD: jax.Array,
                 cast_dtype=cast_dtype,
                 activation_ffw_ted=activation_ffw_ted,
                 hidden_act=hidden_act,
-                full_weights_TE=full_weights_TE)
+                full_weights_TE=full_weights_TE,
+                mesh=mesh)
     else:
         return dense_moe_fwd(weights=weights,
                              x_TD=x_TD,
                              cast_dtype=cast_dtype,
                              activation_ffw_td=activation_ffw_td,
                              hidden_act=hidden_act,
-                             full_weights_TE=full_weights_TE)
+                             full_weights_TE=full_weights_TE,
+                             mesh=mesh)
