@@ -1139,7 +1139,12 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             spatial_merge_unit = vc.spatial_merge_size**2
             max_num_batched_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
             mm_kwargs = self.vllm_config.model_config.multimodal_config.mm_processor_kwargs or {}
-            limit_pixels = float(mm_kwargs.get("max_pixels", float('inf')))
+            # Use size.longest_edge if provided, otherwise default to inf
+            if "size" in mm_kwargs and "longest_edge" in mm_kwargs.get(
+                    "size", {}):
+                limit_pixels = float(mm_kwargs["size"]["longest_edge"])
+            else:
+                limit_pixels = float('inf')
 
             max_patches = int(
                 min(max_num_batched_tokens * spatial_merge_unit,

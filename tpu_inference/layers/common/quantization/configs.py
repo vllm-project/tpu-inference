@@ -28,9 +28,9 @@ class QuantLinearConfig:
     class LinearOpAdaptInfo:
         # Adapted weight sharding. E.g. for "TD,DNH->TNH", if weight sharding is ('x', None, 'y'), adapted weight sharding will be ('x', 'y') becuase the sharding on N and H axis are fused.
         weight_sharding: tuple
-        # Shape of the output tensor after einsum, excluding batch dimension. E.g. for "TD,DNH->TNH", output_shape will be (N, H). This is used for reshaping right before return from __call__.
-        output_shape: tuple[int, ...]
-        # Contracting axis size. E.g. for "TNH,NHD->TD", in_features will be (N, H).
+        # Non-contracting axis size. E.g. for "TD,DNH->TNH", out_features will be (N, H). This is used for reshaping right before return from __call__.
+        out_features: tuple[int, ...]
+        # Contracting axis size. E.g. for "TNH,NHD->TD", in_features will be (N, H). This is used for reshaping input at the beginning of __call__.
         in_features: tuple[int, ...]
 
     @classmethod
@@ -39,8 +39,8 @@ class QuantLinearConfig:
         # HF model stores weight in 2-D shape. E.g. for "TD,DNH->TNH", weight shape in HF is (NH, D)
         x_axis, w_axis = einsum_str.split("->")[0].split(",")
         contracting_axis = set(x_axis) & set(w_axis)
-        in_features = (weight.value.shape[i] for i, c in enumerate(w_axis)
-                       if c in contracting_axis)
+        in_features = tuple(weight.value.shape[i] for i, c in enumerate(w_axis)
+                            if c in contracting_axis)
 
         # E.g. if weight shape is (NH, D), sharding is ('x', None, 'y'), we need to fuse sharding to ('x', 'y')
         spec = weight.sharding
@@ -59,12 +59,12 @@ class QuantLinearConfig:
 
         weight_sharding = (next(iter(in_sharding),
                                 None), next(iter(out_sharding), None))
-        output_shape = tuple([
+        out_features = tuple([
             weight.value.shape[i] for i, c in enumerate(w_axis)
             if c not in contracting_axis
         ])
         return cls.LinearOpAdaptInfo(weight_sharding=weight_sharding,
-                                     output_shape=output_shape,
+                                     out_features=out_features,
                                      in_features=in_features)
 
     def __init__(self, *, enable_sp: bool, output_sizes: list[int]):

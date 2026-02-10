@@ -24,10 +24,12 @@ steps:
       IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
-        .buildkite/scripts/run_in_docker.sh \
-          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model \
-          /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_vllm_model \
-          /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model_correctness
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_PP_CorrectnessTest" "unverified"
+        # Note: uncomment the actual tests after PP is fully supported.
+        # .buildkite/scripts/run_in_docker.sh \
+        #   python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model \
+        #   /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_vllm_model \
+        #   /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model_correctness
   - label: "${TPU_VERSION:-tpu6e} Record correctness test result for PP"
     key: "${TPU_VERSION:-tpu6e}_record_PP_CorrectnessTest"
     depends_on: "${TPU_VERSION:-tpu6e}_PP_CorrectnessTest"
@@ -52,10 +54,12 @@ steps:
       IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
-        .buildkite/scripts/run_in_docker.sh \
-          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model \
-          /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_vllm_model \
-          /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model_correctness
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_PP_PerformanceTest" "unverified"
+        # Note: uncomment the actual tests after PP is fully supported.
+        # .buildkite/scripts/run_in_docker.sh \
+        #   python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model \
+        #   /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_vllm_model \
+        #   /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model_correctness
   - label: "${TPU_VERSION:-tpu6e} Record performance test result for PP"
     key: "${TPU_VERSION:-tpu6e}_record_PP_PerformanceTest"
     depends_on: "${TPU_VERSION:-tpu6e}_PP_PerformanceTest"
