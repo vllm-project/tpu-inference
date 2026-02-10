@@ -107,8 +107,8 @@ setup(
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
     entry_points={
-        "vllm.general_plugins": [
-            "tpu_quant_configs = tpu_inference:register_tpu_quantization_configs",
+        "vllm.platform_plugins": [
+            "tpu_quant = tpu_inference.vllm_plugin:register_tpu_quantization_configs",
         ],
     },
 )
