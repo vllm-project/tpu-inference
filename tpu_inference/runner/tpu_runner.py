@@ -314,6 +314,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         mesh_shape = (
             sharding_strategy.model_dp_size,
             sharding_strategy.attn_dp_size,
+            sharding_strategy.attn_dp_expert_size,
             sharding_strategy.expert_size,
             sharding_strategy.tp_size,
         )
@@ -332,10 +333,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         ici_mesh_shape = (
             dp_inner,
             sharding_strategy.attn_dp_size,
+            sharding_strategy.attn_dp_expert_size,
             sharding_strategy.expert_size,
             sharding_strategy.tp_size,
         )
-        dcn_mesh_shape = (num_slices, 1, 1, 1)
+        dcn_mesh_shape = (num_slices, 1, 1, 1, 1)
 
         return mesh_utils.create_hybrid_device_mesh(
             mesh_shape=ici_mesh_shape,
@@ -403,12 +405,22 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # The total number of requests is dp_size * max_num_seqs
         self.max_num_reqs = max(self.dp_size * scheduler_config.max_num_seqs,
                                 MIN_NUM_SEQS)
+
+        additional_sizes = self.vllm_config.additional_config.get(
+            "compilation_sizes", [])
         # [16, 32, 64, 128, 256, 512, 1024, 2048]
+        cache_dtype = self.cache_config.cache_dtype
+        if cache_dtype == "auto":
+            cache_dtype = self.dtype
+        kv_cache_dtype = to_jax_dtype(cache_dtype)
+        kv_packing = common_utils.get_dtype_packing(kv_cache_dtype)
         self.num_tokens_paddings = runner_utils.get_token_paddings(
-            min_token_size=max(16, self.dp_size),
+            min_token_size=max(16, self.dp_size * kv_packing),
             max_token_size=scheduler_config.max_num_batched_tokens *
             self.dp_size,
             padding_gap=vllm_envs.VLLM_TPU_BUCKET_PADDING_GAP)
+        self.num_tokens_paddings = sorted(self.num_tokens_paddings +
+                                          additional_sizes)
         self.num_tokens_paddings_per_dp = [
             padding // self.dp_size for padding in self.num_tokens_paddings
         ]
