@@ -19,7 +19,7 @@ steps:
     key: "${TPU_VERSION:-tpu6e}_TP_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_8_queue}"
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     env:
       IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
@@ -45,12 +45,13 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_record_TP_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     env:
       IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_TP_PerformanceTest" "unverified"
+        .buildkite/scripts/run_in_docker.sh \
+          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_tensor_parallel.py'
   - label: "${TPU_VERSION:-tpu6e} Record performance test result for TP"
     key: "${TPU_VERSION:-tpu6e}_record_TP_PerformanceTest"
     depends_on: "${TPU_VERSION:-tpu6e}_TP_PerformanceTest"
