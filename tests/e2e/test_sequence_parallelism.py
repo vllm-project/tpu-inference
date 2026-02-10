@@ -59,7 +59,7 @@ def _run_inference_with_config(model_name: str,
 
     # Create LLM args using parser-based approach similar to offline_inference.py
     compilation_config = CompilationConfig(pass_config={
-        "enable_sequence_parallelism": True,
+        "enable_sp": True,
     }, )
     engine_args = EngineArgs(
         model=model_name,
@@ -68,7 +68,7 @@ def _run_inference_with_config(model_name: str,
         tensor_parallel_size=tensor_parallel_size,
         gpu_memory_utilization=0.98,
         max_num_batched_tokens=128,
-        max_num_seqs=16,
+        max_num_seqs=4,
         enable_prefix_caching=enable_prefix_caching,
         additional_config=additional_config,
         kv_cache_dtype=kv_cache_dtype,
@@ -125,6 +125,13 @@ def test_model_sequence_parallelism(
             sampling_params=sampling_params,
             tensor_parallel_size=8,
             async_scheduling=True,
+            additional_config={
+                "sharding": {
+                    "sharding_strategy": {
+                        "sequence_parallelism": 2
+                    }
+                }
+            },
         )
 
         # Verify we got outputs for all prompts
