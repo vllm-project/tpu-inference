@@ -517,14 +517,18 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
         q_TNA, q_rope_TNH = q_data
         k_SA, k_rope_SH = kv_data
 
-        q_scale = k_scale = v_scale = None
+        q_scale = k_scale = None
         if self.kv_cache_quantized_dtype:
             k_scale = self._k_scale
             # TODO: May need to apply quantization separately for k_c & k_pe
-            k_SA, _ = quantize_kv(self.kv_cache_quantized_dtype, k_SA,
-                                       value=None, k_scale=k_scale)
-            k_rope_SH, _ = quantize_kv(self.kv_cache_quantized_dtype, k_rope_SH,
-                                       value=None, k_scale=k_scale)
+            k_SA, _ = quantize_kv(self.kv_cache_quantized_dtype,
+                                  k_SA,
+                                  value=None,
+                                  k_scale=k_scale)
+            k_rope_SH, _ = quantize_kv(self.kv_cache_quantized_dtype,
+                                       k_rope_SH,
+                                       value=None,
+                                       k_scale=k_scale)
 
         in_specs = (
             self.query_tnh,  # q
@@ -1581,25 +1585,24 @@ class DeepSeekV3(nnx.Module):
                 query_tnh_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
                 keyvalue_skh_spec = P(ShardingAxisName.MLP_TENSOR, None)
                 attn_o_tnh_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
-                anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None)
+                anh_sharding = (None, ShardingAxisName.MLP_TENSOR, None)
             else:
-                query_tnh_spec=P(None, ShardingAxisName.MLP_TENSOR, None)
-                keyvalue_skh_spec=P(None, ShardingAxisName.MLP_TENSOR, None)
-                attn_o_tnh_spec=P(None, ShardingAxisName.MLP_TENSOR, None)
-            rd_sharding=(ShardingAxisName.MLP_TENSOR, None)
-            ap_sharding=(None, ShardingAxisName.MLP_TENSOR)
-            q_da_sharding=(None, ShardingAxisName.MLP_TENSOR)
-            kv_da_sharding=(None, ShardingAxisName.MLP_TENSOR)
-            
-            if self.vllm_config.additional_config.get(
-                "replicate_attn_weights", False):
-                rd_sharding=()
-                ap_sharding=()
-                q_da_sharding=()
-                kv_da_sharding=()
-                if self.use_mla_kernel:
-                    anh_sharding=()
+                query_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
+                keyvalue_skh_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
+                attn_o_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
+            rd_sharding = (ShardingAxisName.MLP_TENSOR, None)
+            ap_sharding = (None, ShardingAxisName.MLP_TENSOR)
+            q_da_sharding = (None, ShardingAxisName.MLP_TENSOR)
+            kv_da_sharding = (None, ShardingAxisName.MLP_TENSOR)
 
+            if self.vllm_config.additional_config.get("replicate_attn_weights",
+                                                      False):
+                rd_sharding = ()
+                ap_sharding = ()
+                q_da_sharding = ()
+                kv_da_sharding = ()
+                if self.use_mla_kernel:
+                    anh_sharding = ()
 
             attn_cls = None
             if self.use_mla_kernel:
