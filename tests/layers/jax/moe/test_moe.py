@@ -173,8 +173,8 @@ class TestMoE(unittest.TestCase):
                                    apply_expert_weight_before_computation=
                                    apply_expert_weight_before_computation)
 
-        with jax.set_mesh(self.mesh):
-            actual_output = moe(self.x)
+            with self.mesh:
+                actual_output = moe(self.x)
 
             expected_output = self._compute_ground_truth(moe, self.x)
 

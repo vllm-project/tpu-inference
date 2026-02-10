@@ -110,7 +110,7 @@ def dense_moe_func(weights: UnfusedMoEWeights, x_TD: jax.Array,
                    cast_dtype: jnp.dtype, num_local_experts: int,
                    apply_expert_weight_before_computation: bool,
                    activation_ffw_td: Sharding, activation_ffw_ted: Sharding,
-                   hidden_act: str, mesh: Mesh) -> jax.Array:
+                   hidden_act: str) -> jax.Array:
     """
     Forward pass of the dense MoE layer.  This is a naive implementation
     and thus should not be used in production.
