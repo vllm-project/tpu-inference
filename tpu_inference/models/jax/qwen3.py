@@ -48,9 +48,14 @@ init_fn = nnx.initializers.uniform()
 
 class Qwen3Attention(JaxModule):
 
-    def __init__(self, config: Qwen3Config, dtype: jnp.dtype, rng: nnx.Rngs,
-                 mesh: Mesh, kv_cache_dtype: str,
-                 quant_config: VllmQuantConfig):
+    def __init__(self,
+                 config: Qwen3Config,
+                 dtype: jnp.dtype,
+                 rng: nnx.Rngs,
+                 mesh: Mesh,
+                 kv_cache_dtype: str,
+                 quant_config: VllmQuantConfig,
+                 prefix: str = ""):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads

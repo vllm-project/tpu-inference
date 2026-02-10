@@ -27,8 +27,12 @@ from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
+from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.utils.weight_utils import (
+    jax_array_from_reshaped_torch, shard_put)
 
 modeling_flax_utils = FlaxUtils()
+logger = init_logger(__name__)
 
 
 @dataclass(kw_only=True)
@@ -159,7 +163,7 @@ class JaxMoE(JaxModule):
 
     # ---- Quantization Specific Attributes ----
     quant_config: Optional[QuantizationConfig] = None
-    quant_prefix: str = ""
+    prefix: str = ""
 
     def __call__(self, x_TD: Float):
         """Performs the forward pass of the MoE layer.
@@ -179,8 +183,7 @@ class JaxMoE(JaxModule):
         if self.quant_config is None:
             self.quant_method = None
         elif (quant_method :=
-              self.quant_config.get_quant_method(self,
-                                                 prefix=self.quant_prefix)):
+              self.quant_config.get_quant_method(self, prefix=self.prefix)):
             assert isinstance(quant_method, QuantizeMethodBase)
             self.quant_method = quant_method
             self.quant_method.create_weights_jax(self)
@@ -221,4 +224,59 @@ class JaxMoE(JaxModule):
         self.scoring_func = self.scoring_func
 
     def load_weights(self, weights: Iterable):
-        ...
+        """Used by JaxAutoWeightLoader to load HF weights into the layer.
+        
+        self.quant_method might override this method if the quantization method has specific logic for loading weights.
+        """
+
+        cnt = 0
+        for param_name, torch_weight in weights:
+            cnt += 1
+            param_name: str = param_name.split(
+                self.prefix)[-1]  # ".0.down_proj.weight" for example
+            names = param_name.split(".")
+            assert len(
+                names
+            ) == 3, f"Expected param name to be .<expert_id>.<param_name>.weight, got {param_name}"
+            expert_id, param_type, _ = names
+            expert_id = int(expert_id)
+            jax_param = None
+            if "up_proj" in param_type:
+                jax_param = self.kernel_up_proj_EDF
+            elif "down_proj" in param_type:
+                jax_param = self.kernel_down_proj_EFD
+            elif "gate_proj" in param_type:
+                jax_param = self.kernel_gating_EDF
+            else:
+                raise ValueError(
+                    f"Unexpected param type in {param_name}, expected up_proj, down_proj, gate_proj"
+                )
+
+            assert isinstance(jax_param, nnx.Param)
+            if isinstance(jax_param.value, jax.ShapeDtypeStruct):
+                jax_param.value = jax.numpy.zeros(jax_param.value.shape,
+                                                  dtype=jax_param.value.dtype)
+                setattr(jax_param, "_cnt_moe_weights_loaded", 0)
+            jax_param._cnt_moe_weights_loaded += 1
+            assert isinstance(
+                jax_param.value,
+                jax.Array), f"Expecting jax.Array, got {type(jax_param.value)}"
+            jax_param.value = jax_param.value.at[expert_id].set(
+                jax_array_from_reshaped_torch(torch_weight))
+
+        logger.debug(f"Loaded {cnt} weights for {self.prefix} MoE layer.")
+
+        loaded_names = set()
+        # This function could be called more than once, if the weights for moe layer is spread
+        # across multiple safetensor files. Here we use counter to track the completion of weight loading, and only perform the fusion and sharding after all weights are loaded.
+        for param_name, param in {
+                "kernel_gating_EDF": self.kernel_gating_EDF,
+                "kernel_up_proj_EDF": self.kernel_up_proj_EDF,
+                "kernel_down_proj_EFD": self.kernel_down_proj_EFD
+        }.items():
+            expected_count = self.num_local_experts
+            if getattr(param, "_cnt_moe_weights_loaded", 0) == expected_count:
+                param.value = shard_put(param.value, param.sharding)
+                loaded_names.add(param_name)
+
+        return loaded_names

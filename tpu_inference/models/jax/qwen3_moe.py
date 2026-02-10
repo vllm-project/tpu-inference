@@ -67,7 +67,8 @@ class Qwen3MoeMLP(JaxModule):
                  dtype: jnp.dtype,
                  rng: nnx.Rngs,
                  quant_config: QuantizationConfig,
-                 expert_gate: Optional[nnx.Module] = None):
+                 expert_gate: Optional[JaxModule] = None,
+                 prefix: str = ""):
         self.gate_proj = JaxLinear(
             hidden_size,
             intermediate_size,
@@ -76,6 +77,7 @@ class Qwen3MoeMLP(JaxModule):
             kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
             quant_config=quant_config,
+            prefix=prefix + ".gate_proj",
         )
         self.up_proj = JaxLinear(
             hidden_size,
@@ -85,6 +87,7 @@ class Qwen3MoeMLP(JaxModule):
             kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
             quant_config=quant_config,
+            prefix=prefix + ".up_proj",
         )
         self.down_proj = JaxLinear(
             intermediate_size,
@@ -94,6 +97,7 @@ class Qwen3MoeMLP(JaxModule):
             kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
             quant_config=quant_config,
+            prefix=prefix + ".down_proj",
         )
         self.act_fn = modeling_flax_utils.ACT2FN[hidden_act]
         self.expert_gate = expert_gate
@@ -112,7 +116,11 @@ class Qwen3MoeMLP(JaxModule):
 
 class Qwen3MoeSparseMoeBlock(JaxModule):
 
-    def __init__(self, vllm_config: VllmConfig, rng: nnx.Rngs, mesh: Mesh):
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 rng: nnx.Rngs,
+                 mesh: Mesh,
+                 prefix: str = ""):
         config = vllm_config.model_config.hf_text_config
         dtype = vllm_config.model_config.dtype
         quant_config = vllm_config.quant_config
@@ -131,6 +139,7 @@ class Qwen3MoeSparseMoeBlock(JaxModule):
             rngs=rng,
             use_bias=False,
             quant_config=quant_config,
+            prefix=prefix + ".gate",
         )
         self.gate.num_experts_per_tok = config.num_experts_per_tok
 
@@ -146,6 +155,7 @@ class Qwen3MoeSparseMoeBlock(JaxModule):
                 kernel_init=nnx.with_partitioning(init_fn, (None, None)),
                 rngs=rng,
                 quant_config=None,
+                prefix=prefix + ".shared_expert_gate",
             )
             self.shared_expert = Qwen3MoeMLP(
                 hidden_size=config.hidden_size,
@@ -155,6 +165,7 @@ class Qwen3MoeSparseMoeBlock(JaxModule):
                 rng=rng,
                 quant_config=quant_config,
                 expert_gate=self.shared_expert_gate,
+                prefix=prefix + ".shared_expert",
             )
         else:
             self.shared_expert = None
@@ -178,7 +189,7 @@ class Qwen3MoeSparseMoeBlock(JaxModule):
             num_expert_parallelism=num_expert_parallelism,
             moe_backend=moe_backend,
             quant_config=quant_config,
-        )
+            prefix=prefix + ".experts")
 
     def __call__(self, x: jax.Array) -> jax.Array:
         out = self.experts(x)
@@ -189,10 +200,16 @@ class Qwen3MoeSparseMoeBlock(JaxModule):
 
 class Qwen3MoeDecoderLayer(JaxModule):
 
-    def __init__(self, config: Qwen3Config, dtype: jnp.dtype, rng: nnx.Rngs,
-                 mesh: Mesh, kv_cache_dtype: str,
-                 quant_config: QuantizationConfig, layer_idx: int,
-                 vllm_config: VllmConfig):
+    def __init__(self,
+                 config: Qwen3Config,
+                 dtype: jnp.dtype,
+                 rng: nnx.Rngs,
+                 mesh: Mesh,
+                 kv_cache_dtype: str,
+                 quant_config: QuantizationConfig,
+                 layer_idx: int,
+                 vllm_config: VllmConfig,
+                 prefix: str = ""):
         rms_norm_eps = config.rms_norm_eps
         hidden_size = config.hidden_size
 
@@ -203,13 +220,17 @@ class Qwen3MoeDecoderLayer(JaxModule):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
             quant_config=quant_config,
+            prefix=prefix + ".input_layernorm",
         )
-        self.self_attn = Qwen3Attention(config=config,
-                                        dtype=dtype,
-                                        rng=rng,
-                                        mesh=mesh,
-                                        kv_cache_dtype=kv_cache_dtype,
-                                        quant_config=quant_config)
+        self.self_attn = Qwen3Attention(
+            config=config,
+            dtype=dtype,
+            rng=rng,
+            mesh=mesh,
+            kv_cache_dtype=kv_cache_dtype,
+            quant_config=quant_config,
+            prefix=prefix + ".self_attn",
+        )
         self.post_attention_layernorm = JaxRmsNorm(
             hidden_size,
             epsilon=rms_norm_eps,
@@ -217,6 +238,7 @@ class Qwen3MoeDecoderLayer(JaxModule):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
             quant_config=quant_config,
+            prefix=prefix + ".post_attention_layernorm",
         )
 
         mlp_only_layers = getattr(config, "mlp_only_layers", [])
@@ -225,7 +247,8 @@ class Qwen3MoeDecoderLayer(JaxModule):
             (layer_idx + 1) % config.decoder_sparse_step == 0):
             self.mlp = Qwen3MoeSparseMoeBlock(vllm_config=vllm_config,
                                               rng=rng,
-                                              mesh=mesh)
+                                              mesh=mesh,
+                                              prefix=prefix + ".mlp")
         else:
             self.mlp = Qwen3MoeMLP(
                 hidden_size=config.hidden_size,
@@ -234,6 +257,7 @@ class Qwen3MoeDecoderLayer(JaxModule):
                 dtype=dtype,
                 rng=rng,
                 quant_config=quant_config,
+                prefix=prefix + ".mlp",
             )
 
     def __call__(
@@ -259,8 +283,11 @@ class Qwen3MoeDecoderLayer(JaxModule):
 
 class Qwen3MoeModel(JaxModule):
 
-    def __init__(self, vllm_config: VllmConfig, rng: nnx.Rngs,
-                 mesh: Mesh) -> None:
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 rng: nnx.Rngs,
+                 mesh: Mesh,
+                 prefix: str = "") -> None:
         model_config = vllm_config.model_config
         hf_config = model_config.hf_config
         vocab_size = model_config.get_vocab_size()
@@ -280,6 +307,7 @@ class Qwen3MoeModel(JaxModule):
                 embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
                 rngs=rng,
                 quant_config=vllm_config.quant_config,
+                prefix=prefix + ".embed_tokens",
             )
         else:
             self.embed_tokens = PPMissingLayer()
@@ -302,6 +330,7 @@ class Qwen3MoeModel(JaxModule):
                         quant_config=vllm_config.quant_config,
                         layer_idx=i,
                         vllm_config=vllm_config,
+                        prefix=f"{prefix}.layers.{i}",
                     ))
             else:
                 self.layers.append(PPMissingLayer())
@@ -314,6 +343,7 @@ class Qwen3MoeModel(JaxModule):
                 scale_init=nnx.with_partitioning(init_fn, (None, )),
                 rngs=rng,
                 quant_config=vllm_config.quant_config,
+                prefix=prefix + ".final_layernorm",
             )
         else:
             self.norm = PPMissingLayer()
@@ -359,6 +389,7 @@ class Qwen3MoeForCausalLM(JaxModule, LoadableWithIterator):
             vllm_config=vllm_config,
             rng=rng,
             mesh=mesh,
+            prefix="model",
         )
         model_config = vllm_config.model_config
         if not model_config.hf_config.tie_word_embeddings:
@@ -371,6 +402,7 @@ class Qwen3MoeForCausalLM(JaxModule, LoadableWithIterator):
                     dtype=model_config.dtype,
                     rngs=rng,
                     quant_config=vllm_config.quant_config,
+                    prefix="lm_head",
                 )
             else:
                 self.lm_head = PPMissingLayer()
