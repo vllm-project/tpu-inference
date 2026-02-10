@@ -20,4 +20,4 @@ FP8 = "fp8"
 
 
 def get_tpu_quant_method(quant_method: str) -> str:
-    return "tpu-" + quant_method
+    return quant_method

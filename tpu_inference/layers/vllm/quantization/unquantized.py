@@ -55,7 +55,6 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
-@register_quantization_config(UNQUANTIZED)
 @register_quantization_config(get_tpu_quant_method(UNQUANTIZED))
 class VllmUnquantizedConfig(QuantizationConfig, VllmQuantConfig):
 
