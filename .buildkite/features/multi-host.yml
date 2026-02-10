@@ -14,21 +14,43 @@
 
 # pipeline-name: multi-host
 # pipeline-type: feature support matrix
-steps:
-  - label: "${TPU_VERSION:-tpu6e} Correctness tests for multi-host"
-    key: "${TPU_VERSION:-tpu6e}_multi-host_CorrectnessTest"
+steps: 
+  - label: "${TPU_VERSION:-tpu7x} Correctness tests for multi-host"
+    key: "${TPU_VERSION:-tpu7x}_multi-host_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: tpu_v7x_16_queue
     env:
       IS_FOR_V7X: "${IS_FOR_V7X}"
+      HEAD_SSH_IP: ""
+      HEAD_INTERNAL_IP: ""
+      WORKER_SSH_IPS: ""
     commands:
-      - echo "placeholder"  # TODO : replace with your correctness test command
-  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for multi-host"
-    key: "${TPU_VERSION:-tpu6e}_record_multi-host_CorrectnessTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_multi-host_CorrectnessTest"
+      # Correctness Test Example:
+      # 1. Start vLLM with specific model and tensor parallel size
+      # 2. Run curl commands against it
+      - |
+        MODEL="gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
+        .buildkite/scripts/run_multihost.sh \
+          "vllm serve \${MODEL} \
+            --port 8000 \
+            --tensor-parallel-size 16 \
+            --trust-remote-code \
+            --max-model-len 1024 \
+            --disable-log-requests \
+            --no-async-scheduling \
+            --load-format=runai_streamer \
+            --no-enable-prefix-caching" \
+          "curl http://localhost:8000/v1/completions \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'
+          "
+  - label: "${TPU_VERSION:-tpu7x} Record correctness test result for multi-host"
+    key: "${TPU_VERSION:-tpu7x}_record_multi-host_CorrectnessTest"
+    depends_on: "${TPU_VERSION:-tpu7x}_multi-host_CorrectnessTest"
     env:
-      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu7x}"
       CI_TARGET: "multi-host"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "feature support matrix"
@@ -36,23 +58,23 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_multi-host_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu7x}_multi-host_CorrectnessTest
 
-  - label: "${TPU_VERSION:-tpu6e} Performance tests for multi-host"
-    key: "${TPU_VERSION:-tpu6e}_multi-host_PerformanceTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_multi-host_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu7x} Performance tests for multi-host"
+    key: "${TPU_VERSION:-tpu7x}_multi-host_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu7x}_record_multi-host_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: tpu_v7x_16_queue
     env:
       IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
-      - echo "placeholder"  # TODO : replace with your performance test command
-  - label: "${TPU_VERSION:-tpu6e} Record performance test result for multi-host"
-    key: "${TPU_VERSION:-tpu6e}_record_multi-host_PerformanceTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_multi-host_PerformanceTest"
+      - buildkite-agent meta-data set "${TPU_VERSION:-tpu7x}_multi-host_PerformanceTest" "unverified"
+  - label: "${TPU_VERSION:-tpu7x} Record performance test result for multi-host"
+    key: "${TPU_VERSION:-tpu7x}_record_multi-host_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu7x}_multi-host_PerformanceTest"
     env:
-      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu7x}"
       CI_TARGET: "multi-host"
       CI_STAGE: "PerformanceTest"
       CI_CATEGORY: "feature support matrix"
@@ -60,4 +82,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_multi-host_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu7x}_multi-host_PerformanceTest
