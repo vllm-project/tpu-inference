@@ -35,7 +35,7 @@ class MockParamLlama4:
     """A mock for a parameter used in the Llama4 model."""
     shape: Tuple[int, ...]
     dtype: jnp.dtype = jnp.bfloat16
-    sharding_spec: Tuple[str | None, ...] | None = None
+    sharding_names: Tuple[str | None, ...] | None = None
     value: Any = field(init=False)
     sharding: Any = field(init=False)
 
@@ -43,11 +43,11 @@ class MockParamLlama4:
         self.shape = shape
         self.value = jnp.zeros(self.shape, dtype=self.dtype)
         # The sharding spec is accessed during weight loading
-        self.sharding = SimpleNamespace(spec=self.sharding_spec)
+        self.sharding = SimpleNamespace(spec=self.sharding_names)
 
     # Allow the mock parameter's value to be updated
     def __setattr__(self, name, value):
-        if name in ['value', 'shape', 'dtype', 'sharding', 'sharding_spec']:
+        if name in ['value', 'shape', 'dtype', 'sharding', 'sharding_names']:
             self.__dict__[name] = value
         else:
             super().__setattr__(name, value)
