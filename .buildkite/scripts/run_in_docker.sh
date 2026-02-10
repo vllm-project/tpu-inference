@@ -25,6 +25,10 @@ if [ "$#" -eq 0 ]; then
   exit 1
 fi
 
+# Default to disabling the embedded vLLM server so tests start clean unless explicitly overridden.
+DISABLE_VLLM_SERVER="${DISABLE_VLLM_SERVER:-true}"
+export DISABLE_VLLM_SERVER
+
 # Environment variables for docker run
 ENV_VARS=(
   -e TEST_MODEL="${TEST_MODEL:-}"
@@ -37,6 +41,7 @@ ENV_VARS=(
   -e MAX_MODEL_LEN="${MAX_MODEL_LEN:-}"
   -e MAX_NUM_SEQS="${MAX_NUM_SEQS:-}"
   -e MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
+  -e DISABLE_VLLM_SERVER="${DISABLE_VLLM_SERVER:-}"
 )
 
 if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
