@@ -150,6 +150,9 @@ def sparse_moe_distributed_fwd(
                             moe_instance.tile_size, moe_instance.moe_backend,
                             moe_instance.dtype,
                             moe_instance.qwix_quantized_weight_dtype)
+        if moe_instance.edf_sharding[1] is not None:
+            gating_TEF = jax.lax.psum(gating_TEF,
+                                      axis_name=moe_instance.edf_sharding[1])
         activated_gating_TEF = modeling_flax_utils.ACT2FN[
             moe_instance.hidden_act](gating_TEF)
 
@@ -158,6 +161,9 @@ def sparse_moe_distributed_fwd(
                              compute_group_sizes, moe_instance.tile_size,
                              moe_instance.moe_backend, moe_instance.dtype,
                              moe_instance.qwix_quantized_weight_dtype)
+        if moe_instance.edf_sharding[1] is not None:
+            up_proj_TEF = jax.lax.psum(up_proj_TEF,
+                                       axis_name=moe_instance.edf_sharding[1])
 
     fuse_TEF = activated_gating_TEF * up_proj_TEF
 
@@ -168,6 +174,9 @@ def sparse_moe_distributed_fwd(
                                      moe_instance.moe_backend,
                                      moe_instance.dtype,
                                      moe_instance.qwix_quantized_weight_dtype)
+        if moe_instance.efd_sharding[1] is not None:
+            intermediate_output = jax.lax.psum(
+                intermediate_output, axis_name=moe_instance.efd_sharding[1])
 
     # 5. Return Results (All-to-All)
     if moe_instance.num_expert_parallelism > 1:
@@ -230,11 +239,9 @@ def sparse_moe_func(weights: UnfusedMoEWeights, x_TD: jax.Array,
     weights_TX, indices_TX = gating_output
     if layer.qwix_quantized_weight_dtype:
         gating_up_proj_spec = (PartitionSpec(*layer.edf_sharding),
-                               PartitionSpec(layer.edf_sharding[0], None,
-                                             layer.edf_sharding[2]))
+                               PartitionSpec(*layer.edf_sharding))
         down_proj_spec = (PartitionSpec(*layer.efd_sharding),
-                          PartitionSpec(layer.efd_sharding[0], None,
-                                        layer.efd_sharding[2]))
+                          PartitionSpec(*layer.efd_sharding))
     else:
         gating_up_proj_spec = PartitionSpec(*layer.edf_sharding)
         down_proj_spec = PartitionSpec(*layer.efd_sharding)
@@ -265,19 +272,19 @@ def sparse_moe_func(weights: UnfusedMoEWeights, x_TD: jax.Array,
         "kernel_gating_EDF",
         layer.kernel_gating_EDF,
         channelwise_axes=[0, 2],
-        tiled_axes={})
+        tiled_axes={1: 128})
     kernel_up_proj_EDF = _process_weight_for_qwix(
         layer.qwix_quantized_weight_dtype,
         "kernel_up_proj_EDF",
         layer.kernel_up_proj_EDF,
         channelwise_axes=[0, 2],
-        tiled_axes={})
+        tiled_axes={1: 128})
     kernel_down_proj_EFD = _process_weight_for_qwix(
         layer.qwix_quantized_weight_dtype,
         "kernel_down_proj_EFD",
         layer.kernel_down_proj_EFD,
         channelwise_axes=[0, 2],
-        tiled_axes={})
+        tiled_axes={1: 128})
 
     weights.w1_weight = kernel_gating_EDF
     weights.w2_weight = kernel_up_proj_EDF
