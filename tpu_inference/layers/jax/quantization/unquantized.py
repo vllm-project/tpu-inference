@@ -20,7 +20,7 @@ from flax import nnx
 
 from tpu_inference.layers.common.moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, UnfusedMoEWeights)
+    FusedMoEWeights, UnfusedMoEWeights, shard_moe_weights)
 from tpu_inference.layers.common.quantization import unquantized as jax_common
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.jax import JaxModule
@@ -72,18 +72,29 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
             layer: The layer to process.
         """
         if layer.moe_backend == MoEBackend.FUSED_MOE:
-            if layer.edf_sharding:
-                e2df_sharding = (layer.edf_sharding[0], None,
-                                 layer.edf_sharding[1], layer.edf_sharding[2])
             # fuse the weights into w13: [Gate, Up]
             w_gate = layer.kernel_gating_EDF.value
             w_up = layer.kernel_up_proj_EDF.value
 
             # stack to create a 4d array
             w13_val = jnp.stack([w_gate, w_up], axis=1)
+            w2_val = layer.kernel_down_proj_EFD.value
 
-            layer.kernel_gating_upproj_E2DF = nnx.Param(w13_val,
-                                                        sharding=e2df_sharding)
+            # TODO (jacobplatin): we should also support bias
+            weights = FusedMoEWeights(w13_weight=w13_val,
+                                      w13_bias=None,
+                                      w2_weight=w2_val,
+                                      w2_bias=None,
+                                      w13_weight_scale=None,
+                                      w2_weight_scale=None)
+
+            # TODO (jacobplatin): do we need to also do `process_unquantized_moe_weights`?
+            weights = shard_moe_weights(weights, layer.moe_backend, layer.mesh)
+
+            layer.kernel_gating_upproj_E2DF = nnx.Param(
+                weights.w13_weight, sharding=weights.w13_weight.sharding)
+            layer.kernel_down_proj_EFD = nnx.Param(
+                weights.w2_weight, sharding=weights.w2_weight.sharding)
 
             del layer.kernel_gating_EDF
             del layer.kernel_up_proj_EDF
@@ -107,11 +118,24 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
             w_up = layer.kernel_up_proj_EDF.value
 
             # Fuse the weights into w13: [Gate, Up]
-            w13_val = jnp.concatenate([w_gate, w_up], axis=-1)
+            w13_val = jnp.concatenate([w_gate, w_up], axis=1)
+            w2_val = layer.kernel_down_proj_EFD.value
 
-            # TODO (jacobplatin): we probably want to make the sharding configurable
+            # TODO (jacobplatin): we should also support bias
+            weights = FusedMoEWeights(w13_weight=w13_val,
+                                      w13_bias=None,
+                                      w2_weight=w2_val,
+                                      w2_bias=None,
+                                      w13_weight_scale=None,
+                                      w2_weight_scale=None)
+
+            # TODO (jacobplatin): do we need to also do `process_unquantized_moe_weights`?
+            weights = shard_moe_weights(weights, layer.moe_backend, layer.mesh)
+
             layer.kernel_gating_upproj_EDF = nnx.Param(
-                w13_val, sharding=layer.edf_sharding)
+                weights.w13_weight, sharding=weights.w13_weight.sharding)
+            layer.kernel_down_proj_EFD = nnx.Param(
+                weights.w2_weight, sharding=weights.w2_weight.sharding)
 
             del layer.kernel_gating_EDF
             del layer.kernel_up_proj_EDF

@@ -31,7 +31,7 @@ from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 # yapf: disable
 from tpu_inference.layers.jax.quantization.fp8 import (
-    Fp8Config, Fp8TensorwiseLinearMethod)
+    Fp8Config, Fp8FusedMoEMethod, Fp8TensorwiseLinearMethod)
 from tpu_inference.models.jax.deepseek_v3 import DeepSeekV3Router
 
 
@@ -346,6 +346,7 @@ class TestFp8FusedMoE:
         layer.kernel_down_proj_EFD.value = w2_weight
 
         layer.quant_method.process_weights_after_loading(layer)
+        assert isinstance(layer.quant_method, Fp8FusedMoEMethod)
 
         # Patch the router since we don't want to use the
         # real router
