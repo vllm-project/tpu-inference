@@ -1,150 +1,217 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import logging
 import os
 import time
-from dataclasses import asdict
+from dataclasses import dataclass, field
+from typing import Optional
 
 import pytest
-from vllm import LLM, EngineArgs, SamplingParams
+from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig
+
+
+# MODEL_IMPL_TYPE=vllm vllm serve Qwen/Qwen2.5-32B  --seed 42  
+#   --disable-log-requests  --tensor-parallel-size 8 --max-model-len 2048 
+#   --gpu-memory-utilization 0.96 --no-enable-prefix-caching --max-num-seqs 256 
+#   --max-num-batched-tokens 4096
+
+# python3 ./benchmarks/benchmark_serving.py 
+#   --model Qwen/Qwen2.5-32B --dataset-name sonnet 
+#   --dataset-path benchmarks/sonnet_4x.txt --sonnet-input-len 1800 
+#   --sonnet-output-len 128 --ignore_eos
+
+@dataclass
+class TestConfig:
+    """Configuration for SP test runs."""
+    max_model_len: int = 2048 
+    max_num_batched_tokens: int = 4096 
+    max_num_seqs: int = 256 
+    num_prompts: int = 16 
+
+    @classmethod
+    def for_correctness(cls) -> "TestConfig":
+        return cls()
+
+    @classmethod
+    def for_performance(cls) -> "TestConfig":
+        return cls()
+
+
+@dataclass
+class InferenceConfig:
+    """Configuration for a single inference run."""
+    model_name: str
+    tensor_parallel_size: int
+    max_model_len: int
+    max_num_batched_tokens: int
+    max_num_seqs: int
+    gpu_memory_utilization: float = 0.96
+    compilation_config: Optional[CompilationConfig] = None
+    async_scheduling: bool = False
+    additional_config: dict = field(default_factory=dict)
+    kv_cache_dtype: str = "auto"
 
 
 @pytest.fixture(autouse=True)
 def setup_new_model_design():
     os.environ['MODEL_IMPL_TYPE'] = 'vllm'
-    os.environ['SKIP_JAX_PRECOMPILE'] = '1'
 
 
-@pytest.fixture
-def test_prompts():
-    """Simple test prompts for data parallelism testing."""
+def generate_test_prompts(num_prompts: int = 256) -> list[str]:
+    base_text = (
+        "The rapid advancement of artificial intelligence has transformed "
+        "numerous industries and continues to reshape our understanding of "
+        "technology's potential ") * 100
     return [
-        # having a long prompt to trigger a edge case.
-        "Three Rings for the Elven-kings under the sky, Seven for the Dwarf-lords in their halls of stone, Nine for Mortal Men doomed to die, One for the Dark Lord on his dark throne In the Land of Mordor where the Shadows lie. One Ring to rule them all, One Ring to find them, One Ring to bring them all and in the darkness bind them In the Land of Mordor where the Shadows lie.",
-        "Hello, my name is",
-        "The capital of France is",
-        "The colors of the rainbow are",
-        "The future of AI is",
-        "The president of the United States is",
-        "How many players are on a standard soccer team?",
-        "In Greek mythology, who is the god of the sea?",
-        "What is the capital of Australia?",
-        "What is the largest planet in our solar system?",
-        "Who developed the theory of general relativity?",
+        f"Prompt {i}: {base_text} What are your thoughts on this topic?"
+        for i in range(num_prompts)
     ]
-
 
 @pytest.fixture
 def sampling_params():
     """Standard sampling parameters for testing."""
     return SamplingParams(
         temperature=0.0,
-        max_tokens=32,
+        max_tokens=128,
         ignore_eos=True,
         logprobs=1,
     )
 
 
-def _run_inference_with_config(model_name: str,
-                               test_prompts: list,
-                               sampling_params: SamplingParams,
-                               tensor_parallel_size: int = 1,
-                               additional_config: dict = {},
-                               kv_cache_dtype: str = "auto",
-                               enable_prefix_caching: bool = False,
-                               async_scheduling: bool = False) -> list:
-    """Helper function to run inference with specified configuration."""
-
-    # Create LLM args using parser-based approach similar to offline_inference.py
-    compilation_config = CompilationConfig(pass_config={
-        "enable_sp": True,
-    }, )
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=128,
-        compilation_config=compilation_config,
-        tensor_parallel_size=tensor_parallel_size,
-        gpu_memory_utilization=0.98,
-        max_num_batched_tokens=128,
-        max_num_seqs=4,
-        enable_prefix_caching=enable_prefix_caching,
-        additional_config=additional_config,
-        kv_cache_dtype=kv_cache_dtype,
-        async_scheduling=async_scheduling,
+def _run_inference(
+    config: InferenceConfig,
+    test_prompts: list[str],
+    sampling_params: SamplingParams,
+) -> tuple[list, float]:
+    """Run inference with the given configuration."""
+    llm = LLM(
+        model=config.model_name,
+        tensor_parallel_size=config.tensor_parallel_size,
+        max_model_len=config.max_model_len,
+        max_num_batched_tokens=config.max_num_batched_tokens,
+        max_num_seqs=config.max_num_seqs,
+        gpu_memory_utilization=config.gpu_memory_utilization,
+        compilation_config=config.compilation_config,
+        async_scheduling=config.async_scheduling,
+        additional_config=config.additional_config,
+        kv_cache_dtype=config.kv_cache_dtype,
     )
 
-    engine_args_dict = asdict(engine_args)
-    llm = LLM(**engine_args_dict)
+    start_time = time.time()
+    outputs = llm.generate(test_prompts, sampling_params)
+    elapsed_time = time.time() - start_time
 
-    try:
-        outputs = llm.generate(test_prompts, sampling_params)
-        return outputs
-    finally:
-        del llm
-        # Wait for TPUs to be released
-        time.sleep(5)
+    del llm
+    time.sleep(10)  # Wait for TPUs to be released
+    return outputs, elapsed_time
 
 
-@pytest.fixture()
-def temporary_enable_log_propagate():
-    import logging
+def _check_correctness(test_name: str, baseline_outputs: list,
+                       sp_outputs: list):
+    """Verify outputs match between baseline and sequence parallel runs."""
+    assert len(baseline_outputs) == len(sp_outputs)
 
-    logger = logging.getLogger("vllm")
-    logger.propagate = True
-    yield
-    logger.propagate = False
+    for i, (baseline, sp_result) in enumerate(zip(baseline_outputs,
+                                                  sp_outputs)):
+        baseline_text = baseline.outputs[0].text.strip()
+        sp_text = sp_result.outputs[0].text.strip()
+
+        assert baseline_text == sp_text, (
+            f"Text mismatch found in prompt {i}:\n"
+            f"  Baseline: {baseline_text}\n"
+            f"  Sequence Parallel: {sp_text}")
+
+    print(f"✓ {test_name} correctness test passed for {len(baseline_outputs)} "
+          "prompts.")
 
 
-@pytest.fixture()
-def caplog_vllm(temporary_enable_log_propagate, caplog):
-    # To capture vllm log, we should enable propagate=True temporarily
-    # because caplog depends on logs propagated to the root logger.
-    yield caplog
-
-
-def test_model_sequence_parallelism(
-    caplog_vllm: pytest.LogCaptureFixture,
-    test_prompts: list,
-    sampling_params: SamplingParams,
+def _check_performance(
+    test_name: str,
+    baseline_time: float,
+    sp_time: float,
+    num_prompts: int,
+    min_speedup: float,
 ):
-    # Use Llama 1B for this test
-    test_model = "Qwen/Qwen2.5-32B"
-    caplog_vllm.clear()
+    """Verify sequence parallelism provides expected speedup."""
+    speedup = baseline_time / sp_time if sp_time > 0 else 0
 
-    # Set the logging level for the test
-    with caplog_vllm.at_level(
-            logging.INFO,
-            logger="vllm.tpu_inference.layers.vllm.quantization.common"):
+    print(f"✓ {test_name} performance test results:")
+    print(f"  Number of prompts: {num_prompts}")
+    print(f"  Baseline time: {baseline_time:.2f}s")
+    print(f"  Sequence parallel time: {sp_time:.2f}s")
+    print(f"  Speedup: {speedup:.2f}x")
+    print(f"  Baseline throughput: {num_prompts/baseline_time:.2f} prompts/s")
+    print(
+        f"  Sequence parallel throughput: {num_prompts/sp_time:.2f} prompts/s")
 
-        # Test with data parallelism enabled
-        outputs = _run_inference_with_config(
-            model_name=test_model,
-            test_prompts=test_prompts,
-            sampling_params=sampling_params,
-            tensor_parallel_size=8,
-            async_scheduling=True,
-            additional_config={
-                "sharding": {
-                    "sharding_strategy": {
-                        "sequence_parallelism": 2
-                    }
-                }
-            },
+    assert speedup >= min_speedup, (
+        f"Sequence parallelism did not provide expected speedup "
+        f"({min_speedup:.2f}x): {speedup:.2f}x")
+
+
+def _test_sequence_parallelism(
+    sampling_params: SamplingParams,
+    check_correctness: bool = True,
+    check_performance: bool = True,
+):
+    """Correctness and performance test for sequence parallelism."""
+    cfg = TestConfig.for_performance(
+    ) if check_performance else TestConfig.for_correctness()
+    test_prompts = generate_test_prompts(cfg.num_prompts)
+
+    tensor_parallel_size = 8
+    model_name = "Qwen/Qwen2.5-32B"
+
+    # Run with sequence parallelism
+    sp_config = InferenceConfig(
+        model_name=model_name,
+        tensor_parallel_size=tensor_parallel_size,
+        max_model_len=cfg.max_model_len,
+        max_num_batched_tokens=cfg.max_num_batched_tokens,
+        max_num_seqs=cfg.max_num_seqs,
+        compilation_config=CompilationConfig(pass_config={"enable_sp": True}),
+    )
+    sp_outputs, sp_time = _run_inference(sp_config, test_prompts,
+                                         sampling_params)
+
+    # Run baseline (no sequence parallelism)
+    baseline_config = InferenceConfig(
+        model_name=model_name,
+        tensor_parallel_size=tensor_parallel_size,
+        max_model_len=cfg.max_model_len,
+        max_num_batched_tokens=cfg.max_num_batched_tokens,
+        max_num_seqs=cfg.max_num_seqs,
+    )
+    baseline_outputs, baseline_time = _run_inference(baseline_config,
+                                                     test_prompts,
+                                                     sampling_params)
+
+    if check_correctness:
+        _check_correctness("Sequence parallelism", baseline_outputs,
+                           sp_outputs)
+
+    if check_performance:
+        _check_performance(
+            "Sequence parallelism",
+            baseline_time,
+            sp_time,
+            len(test_prompts),
+            min_speedup=1.1,
         )
 
-        # Verify we got outputs for all prompts
-        assert len(outputs) == len(test_prompts)
 
-        # Verify each output has generated text
-        for output in outputs:
-            assert len(output.outputs) > 0
-            assert len(output.outputs[0].text.strip()) > 0
-            print(f"Output: {output.outputs[0].text.strip()}")
+def test_sp_correctness(sampling_params: SamplingParams):
+    _test_sequence_parallelism(
+        sampling_params=sampling_params,
+        check_correctness=True,
+        check_performance=False,
+    )
 
-        # caplog.text contains all the captured log output
-        print(f'xw32  {caplog_vllm.records[0].getMessage()}')
-        print(
-            f"✓ Model sequence parallelism test passed with {len(outputs)} outputs"
-        )
+
+def test_sp_performance(sampling_params: SamplingParams):
+    _test_sequence_parallelism(
+        sampling_params=sampling_params,
+        check_correctness=False,
+        check_performance=True,
+    )
