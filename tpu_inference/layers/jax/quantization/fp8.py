@@ -163,7 +163,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             self.in_features = math.prod(adapt_info.in_features)
         else:
             in_features, out_features = kernel_shape
-            self.weight_sharding = layer.weight.sharding
+            self.weight_sharding = getattr(layer.weight, "sharding", (None, ))
             self.in_features = in_features
             self.out_features = (out_features, )
 
