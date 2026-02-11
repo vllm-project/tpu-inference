@@ -175,7 +175,6 @@ class JaxMoE(JaxModule):
 
     def __post_init__(self, rngs: nnx.Rngs):
         """Generates the kernels (weights) for the router and experts (gating, up-projection, and down-projection layers)."""
-        self.use_ep = self.num_expert_parallelism > 1
         if self.quant_config is None:
             self.quant_method = None
         elif (quant_method :=

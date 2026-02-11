@@ -15,7 +15,7 @@
 import functools
 import math
 from functools import partial
-from typing import Optional
+from typing import Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -24,13 +24,17 @@ from flax import nnx
 from jax.sharding import PartitionSpec as P
 from torchax.ops.mappings import t2j
 
+from tpu_inference.layers.common.moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.process_weights.linear_weights import \
     shard_linear_weights
+from tpu_inference.layers.common.process_weights.moe_weights import (
+    FusedMoEWeights, process_fp8_moe_weights)
 from tpu_inference.layers.common.quantization import fp8 as common_fp8
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.linear import JaxEinsum
+from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.logger import init_logger
@@ -38,6 +42,11 @@ from tpu_inference.models.jax.utils.weight_utils import (
     load_nnx_param_from_reshaped_torch, shard_put)
 
 logger = init_logger(__name__)
+
+# TODO (jacobplatin): remove once we support all backends
+FP8_QUANT_METHOD_SUPPORTED_MOE_BACKENDS = [
+    MoEBackend.GMM_EP, MoEBackend.GMM_TP
+]
 
 
 def load_fp8_weight(jax_param: nnx.Param, torch_weight: torch.Tensor,
@@ -247,6 +256,192 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         return out
 
 
+class Fp8FusedMoEMethod(QuantizeMethodBase):
+    """
+    Fp8 method for JAXMoE layer.
+
+    TODO (jacobplatin): support weight loading -- currently, model-dependent.
+    """
+
+    def __init__(self, weight_block_size: Tuple[int, int], *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.extra_backend_kwargs = {}
+        self.weight_block_size = weight_block_size
+        self.block_quant: bool = self.weight_block_size is not None
+        self.weight_scale_name = ("weight_scale_inv"
+                                  if self.block_quant else "weight_scale")
+
+    def create_weights_jax(self, layer: JaxMoE, *weight_args,
+                           **extra_weight_attrs) -> None:
+        """
+        Create the quant method-specific weights.
+
+        Args:
+            layer: The layer to create weights for.
+        """
+
+        num_experts = layer.num_local_experts
+        intermediate_size = layer.intermediate_size_moe
+        hidden_size = layer.hidden_size
+
+        quant_config = layer.quant_config
+        assert isinstance(
+            quant_config,
+            Fp8Config), "Expected fp8 config for Fp8FusedMoEMethod!"
+
+        # TODO (#1681): support other backends
+        if layer.moe_backend in FP8_QUANT_METHOD_SUPPORTED_MOE_BACKENDS:
+            # vLLM reference here:
+            # https://github.com/vllm-project/vllm/blob/9bdb06b/vllm/model_executor/layers/quantization/fp8.py#L763
+            if not self.block_quant:
+                raise NotImplementedError(
+                    "Expected blockwise quantization when using Fp8FusedMoEMethod!"
+                )
+            else:
+                assert len(
+                    self.weight_block_size) == 2, "Expected 2D block size!"
+                block_n, block_k = self.weight_block_size
+                w13_scale_data = jnp.ones(
+                    (
+                        num_experts,
+                        2 * ((intermediate_size + block_k - 1) // block_k),
+                        (hidden_size + block_n - 1) // block_n,
+                    ),
+                    dtype=jnp.float32,
+                )
+                w2_scale_data = jnp.ones(
+                    (num_experts, (hidden_size + block_k - 1) // block_k,
+                     (intermediate_size + block_n - 1) // block_n),
+                    dtype=jnp.float32,
+                )
+                setattr(layer,
+                        f"kernel_gating_upproj_EDF_{self.weight_scale_name}",
+                        nnx.Param(w13_scale_data, dtype=jnp.float32))
+                setattr(layer,
+                        f"kernel_down_proj_EFD_{self.weight_scale_name}",
+                        nnx.Param(w2_scale_data, dtype=jnp.float32))
+        else:
+            raise NotImplementedError(
+                f"Unsupported moe backend: {layer.moe_backend}! Currently supported: {FP8_QUANT_METHOD_SUPPORTED_MOE_BACKENDS}"
+            )
+
+    def process_weights_after_loading(self, layer: JaxMoE) -> None:
+        """
+        Process weights after loading.
+
+        Args:
+            layer: The layer to process.
+        """
+        # TODO (#1681): support other backends
+        if layer.moe_backend in FP8_QUANT_METHOD_SUPPORTED_MOE_BACKENDS:
+            w_gate = layer.kernel_gating_EDF.value
+            w_up = layer.kernel_up_proj_EDF.value
+
+            # Fuse the weights into w13: [Gate, Up]
+            w13_weight = jnp.concatenate([w_gate, w_up], axis=-1)
+            # NOTE: this is needed because the GMM kernels expect the RHS
+            # to be transposed for w13
+            w13_weight = jnp.transpose(w13_weight, (0, 2, 1))
+            # TODO (jacobplatin): make the string retrieval less fragile
+            w13_weight_scale = getattr(
+                layer,
+                f"kernel_gating_upproj_EDF_{self.weight_scale_name}").value
+
+            w2_weight = layer.kernel_down_proj_EFD.value
+            w2_weight_scale = getattr(
+                layer, f"kernel_down_proj_EFD_{self.weight_scale_name}").value
+
+            weight_block_size = None
+            if self.weight_block_size is not None:
+                weight_block_size = tuple(self.weight_block_size)
+
+            # TODO (jacobplatin): we should support bias
+            input_weights = FusedMoEWeights(w13_weight=w13_weight,
+                                            w13_weight_scale=w13_weight_scale,
+                                            w13_bias=None,
+                                            w2_weight=w2_weight,
+                                            w2_weight_scale=w2_weight_scale,
+                                            w2_bias=None)
+
+            weights = process_fp8_moe_weights(
+                input_weights,
+                moe_backend=layer.moe_backend,
+                mesh=layer.mesh,
+                activation=layer.activation,
+                # Convert to tuple so jax jit can hash it
+                weight_block_size=weight_block_size,
+            )
+
+            # TODO (jacobplatin): we probably want to make the sharding configurable
+            layer.kernel_gating_upproj_EDF = nnx.Param(
+                weights.w13_weight, sharding=layer.edf_sharding)
+            layer.kernel_down_proj_EFD = nnx.Param(weights.w2_weight,
+                                                   sharding=layer.efd_sharding)
+            # NOTE: we aren't sharding the weight scales
+            setattr(layer,
+                    f"kernel_gating_upproj_EDF_{self.weight_scale_name}",
+                    nnx.Param(weights.w13_weight_scale))
+            setattr(layer, f"kernel_down_proj_EFD_{self.weight_scale_name}",
+                    nnx.Param(weights.w2_weight_scale))
+
+            del layer.kernel_gating_EDF
+            del layer.kernel_up_proj_EDF
+        else:
+            raise NotImplementedError(
+                f"Unsupported moe backend: {layer.moe_backend}! Currently supported: {FP8_QUANT_METHOD_SUPPORTED_MOE_BACKENDS}"
+            )
+
+    def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
+        """
+        Run the forward pass of the MoE layer.
+
+        Args:
+            layer: The layer to apply the quantization method to.
+            x: The input to the layer.
+
+        Returns:
+            The MoE output.
+        """
+        assert isinstance(layer, JaxMoE)
+
+        x_TD = jnp.asarray(x, layer.dtype)
+        x_TD = nnx.with_sharding_constraint(x_TD, layer.activation_ffw_td)
+
+        router_logits = None
+        # Fused weight backends
+        if layer.moe_backend in FP8_QUANT_METHOD_SUPPORTED_MOE_BACKENDS:
+            # of shape TE -- we don't return the indices
+            router_logits = layer.router(x_TD)
+
+            w13_weight = layer.kernel_gating_upproj_E2DF.value if layer.moe_backend == MoEBackend.FUSED_MOE else layer.kernel_gating_upproj_EDF.value
+            w2_weight = layer.kernel_down_proj_EFD.value
+
+            w13_weight_scale = getattr(
+                layer,
+                f"kernel_gating_upproj_EDF_{self.weight_scale_name}").value
+
+            w2_weight_scale = getattr(
+                layer, f"kernel_down_proj_EFD_{self.weight_scale_name}").value
+
+            # TODO (jacobplatin/bzgoogle): we should support bias
+            weights = FusedMoEWeights(
+                w13_weight=w13_weight,
+                w13_weight_scale=w13_weight_scale,
+                w13_bias=None,
+                w2_weight=w2_weight,
+                w2_weight_scale=w2_weight_scale,
+                w2_bias=None,
+            )
+        else:
+            raise NotImplementedError(
+                f"Unsupported moe backend: {layer.moe_backend}! Currently supported: {FP8_QUANT_METHOD_SUPPORTED_MOE_BACKENDS}"
+            )
+
+        return moe_apply(layer, x_TD, router_logits, weights,
+                         layer.moe_backend, layer.mesh,
+                         self.extra_backend_kwargs)
+
+
 class Fp8Config(QuantizationConfig):
 
     ACTIVATION_SCHEMES = ["dynamic", "static"]
@@ -296,4 +491,6 @@ class Fp8Config(QuantizationConfig):
                 return Fp8BlockwiseLinearMethod(self, layer, linear_config)
             else:
                 return Fp8TensorwiseLinearMethod(layer, linear_config)
+        elif isinstance(layer, JaxMoE):
+            return Fp8FusedMoEMethod(self.weight_block_size)
         return None
