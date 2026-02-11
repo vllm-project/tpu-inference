@@ -58,7 +58,9 @@ class TestMoE(unittest.TestCase):
         self.x = jax.random.normal(self.key, (self.B * self.S, self.D),
                                    dtype=self.dtype)
 
-    def _create_moe(self, backend: MoEBackend):
+    def _create_moe(self,
+                    backend: MoEBackend,
+                    apply_expert_weight_before_computation: bool = False):
         """Helper to instantiate the MoE layer within the mesh context."""
         with self.mesh:
             router = Router(
@@ -93,7 +95,8 @@ class TestMoE(unittest.TestCase):
                 edf_sharding=PartitionSpec('model', None,
                                            None),  # Expert par on axis 0
                 efd_sharding=PartitionSpec('model', None, None),
-                apply_expert_weight_before_computation=False,
+                apply_expert_weight_before_computation=
+                apply_expert_weight_before_computation,
                 moe_backend=backend,
                 num_experts_per_tok=self.K,
                 expert_axis_name='model',
@@ -163,17 +166,23 @@ class TestMoE(unittest.TestCase):
 
     def test_dense_backend_correctness(self):
         """Verifies the DENSE_MAT backend against the sequential ground truth."""
-        moe = self._create_moe(MoEBackend.DENSE_MAT)
+        for apply_expert_weight_before_computation in [False, True]:
+            moe = self._create_moe(MoEBackend.DENSE_MAT,
+                                   apply_expert_weight_before_computation=
+                                   apply_expert_weight_before_computation)
 
-        with self.mesh:
-            actual_output = moe(self.x)
+            with self.mesh:
+                actual_output = moe(self.x)
 
-        expected_output = self._compute_ground_truth(moe, self.x)
+            expected_output = self._compute_ground_truth(moe, self.x)
 
-        # Dense matmul should be very numerically close
-        self.assertTrue(
-            jnp.allclose(actual_output, expected_output, atol=1e-2, rtol=1e-2),
-            "Dense backend output does not match ground truth.")
+            # Dense matmul should be very numerically close
+            self.assertTrue(
+                jnp.allclose(actual_output,
+                             expected_output,
+                             atol=1e-2,
+                             rtol=1e-2),
+                "Dense backend output does not match ground truth.")
 
     def test_sparse_distributed_backend_correctness(self):
         """
