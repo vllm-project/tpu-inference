@@ -38,7 +38,7 @@ from tpu_inference.layers.common.process_weights.linear_weights import (
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_moe_weights, quantize_moe_weights,
     shard_moe_weights)
-from tpu_inference.layers.common.quant_methods import FP8, get_tpu_quant_method
+from tpu_inference.layers.common.quant_methods import FP8
 from tpu_inference.layers.common.quantization import dequantize_tensor
 from tpu_inference.layers.common.quantization import fp8 as common_fp8
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -56,7 +56,7 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
-@register_quantization_config(get_tpu_quant_method(FP8))
+@register_quantization_config(FP8)
 class VllmFp8Config(vllm_fp8.Fp8Config, VllmQuantConfig):
 
     @classmethod
