@@ -44,8 +44,7 @@ from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.moe.utils import (get_expert_parallelism,
                                                 select_moe_backend)
 from tpu_inference.layers.jax.norm import JaxRmsNorm
-from tpu_inference.layers.jax.pp_utils import (PPMissingLayer,
-                                               get_start_end_layer)
+from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
@@ -233,28 +232,19 @@ class Qwen3MoeModel(JaxModule):
         else:
             self.embed_tokens = PPMissingLayer()
 
-        self.start_layer, self.end_layer = get_start_end_layer(
+        self.start_layer, self.end_layer, self.layers = make_layers(
             hf_config.num_hidden_layers,
-            get_pp_group().rank_in_group,
-            get_pp_group().world_size)
-
-        self.layers = []
-        for i in range(hf_config.num_hidden_layers):
-            if self.start_layer <= i < self.end_layer:
-                self.layers.append(
-                    Qwen3MoeDecoderLayer(
-                        config=hf_config,
-                        dtype=dtype,
-                        rng=rng,
-                        mesh=mesh,
-                        kv_cache_dtype=vllm_config.cache_config.cache_dtype,
-                        quant_config=vllm_config.quant_config,
-                        layer_idx=i,
-                        vllm_config=vllm_config,
-                        prefix=f"{prefix}.layers.{i}",
-                    ))
-            else:
-                self.layers.append(PPMissingLayer())
+            lambda layer_index: Qwen3MoeDecoderLayer(
+                config=hf_config,
+                dtype=dtype,
+                rng=rng,
+                mesh=mesh,
+                kv_cache_dtype=vllm_config.cache_config.cache_dtype,
+                quant_config=vllm_config.quant_config,
+                layer_idx=layer_index,
+                vllm_config=vllm_config,
+                prefix=f"{prefix}.layers.{layer_index}",
+            ))
 
         if self.is_last_rank:
             self.norm = JaxRmsNorm(

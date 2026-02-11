@@ -263,7 +263,7 @@ class JaxMoE(JaxModule):
                 )
 
             assert isinstance(jax_param, nnx.Param)
-            if isinstance(jax_param.value, jax.ShapeDtypeStruct):
+            if not hasattr(jax_param, "_cnt_moe_weights_loaded"):
                 jax_param.value = jax.numpy.zeros(jax_param.value.shape,
                                                   dtype=jax_param.value.dtype)
                 setattr(jax_param, "_cnt_moe_weights_loaded", 0)
@@ -284,8 +284,8 @@ class JaxMoE(JaxModule):
                 "kernel_up_proj_EDF": self.kernel_up_proj_EDF,
                 "kernel_down_proj_EFD": self.kernel_down_proj_EFD
         }.items():
-            expected_count = self.num_local_experts
-            if getattr(param, "_cnt_moe_weights_loaded", 0) == expected_count:
+            if getattr(param, "_cnt_moe_weights_loaded",
+                       0) == self.num_local_experts:
                 param.value = shard_put(param.value, param.sharding)
                 loaded_names.add(param_name)
 
