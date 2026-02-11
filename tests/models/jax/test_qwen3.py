@@ -161,7 +161,7 @@ class TestQwen3ForCausalLM:
         layers = model.model.layers
         assert len(layers) == hf_config.num_hidden_layers
 
-        attn = layers[0].self_attn
+        attn = layers[model.model.start_layer].self_attn
         hidden_size = hf_config.hidden_size
         num_heads = hf_config.num_attention_heads
         num_kv_heads = hf_config.num_key_value_heads
@@ -183,7 +183,7 @@ class TestQwen3ForCausalLM:
                                             head_dim)
         assert attn.o_proj.weight.shape == (num_heads, head_dim, hidden_size)
 
-        mlp = layers[0].mlp
+        mlp = layers[model.model.start_layer].mlp
         assert mlp.gate_proj.weight.shape == (hidden_size, intermediate_size)
         assert mlp.up_proj.weight.shape == (hidden_size, intermediate_size)
         assert mlp.down_proj.weight.shape == (intermediate_size, hidden_size)
