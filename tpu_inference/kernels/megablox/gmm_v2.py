@@ -307,10 +307,12 @@ def fill_metadata(
     lhs_group_sizes_ref: jax.Array,
     group_offset_ref: jax.Array,
     metadata_ref: MetadataRef,
+    out_init_hbm_ref: jax.Array,
+    local_dma_sem_ref: jax.Array,
     *,
     dims: Dimensions,
     tiles: TileSizes,
-) -> jax.Array:
+) -> Tuple[jax.Array, jax.Array]:
     """Fills the metadata for the given lhs group sizes and group offset.
 
     Iterates over the lhs group sizes and if the group id is valid, determines
@@ -321,8 +323,10 @@ def fill_metadata(
     Args:
         lhs_group_sizes_ref: The group sizes of lhs.
         group_offset_ref: Offset of the first group to process.
-        metadata_ref: Metadata that is used to determine the group id and m
-            offsets for each gmm tile.
+        metadata_ref: Metadata that is used to determine the group id and m offsets
+        for each gmm tile.
+        out_init_hbm_ref: Reference to out_ref alias.
+        local_dma_sem_ref: Reference to the local dma semaphore.
         dims: Dimensions of arguments.
         tiles: Tile sizes for this kernel.
 
@@ -332,6 +336,39 @@ def fill_metadata(
 
     group_offset = group_offset_ref[0]
     max_num_group = group_offset + dims.size_group
+    out_init_hbm = out_init_hbm_ref.reshape(-1, dims.size_lhs_sublane,
+                                            dims.size_n)
+
+    @jax.named_scope("start_zero_out_out_of_bounds_group")
+    def zero_out_out_of_bounds_group(*, start_m_offset, group_size):
+        size_offset = start_m_offset % dims.size_lhs_sublane
+        aligned_start_m_offset = start_m_offset - (size_offset)
+        aligned_group_size = group_size + size_offset
+        zero_out_vregs = aligned_group_size // dims.size_lhs_sublane
+        aligned_start_m_offset_vreg = (aligned_start_m_offset //
+                                       dims.size_lhs_sublane)
+
+        def zero_out_hbm(mini_zero_buf):
+            mini_zero_buf[...] = jnp.zeros_like(mini_zero_buf)
+            lax.fori_loop(
+                0,
+                zero_out_vregs,
+                lambda vreg_idx, _: pltpu.make_async_copy(
+                    mini_zero_buf,
+                    out_init_hbm.at[aligned_start_m_offset_vreg +
+                                    vreg_idx, :, :],
+                    local_dma_sem_ref.at[0],
+                ).start(),
+                None,
+            )
+
+        pl.run_scoped(
+            zero_out_hbm,
+            pltpu.VMEM((dims.size_lhs_sublane, dims.size_n),
+                       out_init_hbm_ref.dtype),
+        )
+
+        return zero_out_vregs
 
     @jax.named_scope("inner_tm_loop")
     def inner_tm_loop(tm_id, curr_m_offset, *, end_m_offset, group_id, num_gm):
@@ -349,11 +386,18 @@ def fill_metadata(
 
     @jax.named_scope("outer_group_loop")
     def outer_group_loop(lhs_group_id, carry):
-        num_gm, start_m_offset = carry
+        num_gm, start_m_offset, zeroed_out_vregs = carry
 
         group_id = lhs_group_id - group_offset
         group_size = lhs_group_sizes_ref[lhs_group_id]
         end_m_offset = start_m_offset + group_size
+
+        f = functools.partial(
+            zero_out_out_of_bounds_group,
+            start_m_offset=start_m_offset,
+            group_size=group_size,
+        )
+        zeroed_out_vregs += lax.cond(group_id < 0, f, lambda: 0)
 
         # Assume following arguments:
         # - size_lhs_sublane & tile_m = 4
@@ -387,10 +431,11 @@ def fill_metadata(
         )
         lax.fori_loop(0, curr_num_gm, tm_loop_fn, start_m_offset)
 
-        return num_gm + curr_num_gm, end_m_offset
+        return num_gm + curr_num_gm, end_m_offset, zeroed_out_vregs
 
-    num_gm, _ = lax.fori_loop(0, max_num_group, outer_group_loop, (0, 0))
-    return num_gm
+    num_gm, _, zeroed_out_vregs = lax.fori_loop(0, max_num_group,
+                                                outer_group_loop, (0, 0, 0))
+    return num_gm, zeroed_out_vregs
 
 
 def kernel_main(
@@ -400,13 +445,14 @@ def kernel_main(
     # In
     lhs_ref: jax.Array,  # [size_m, size_k]
     rhs_ref: WeightsRef,  # [size_group, size_k, size_n]
-    _: jax.Array,  # [size_m, size_n]
+    out_init_hbm_ref: jax.Array,  # [size_m, size_n]
     # Out
     out_ref: jax.Array,  # [size_m, size_n]
     # Scratch memory
     metadata_ref: MetadataRef,
     partial_out_ref: jax.Array,  # [num_sublanes, tile_n]
     acc_ref: jax.Array,  # [tile_m // num_sublane, num_sublane, tile_n]
+    local_dma_sem_ref: jax.Array,  # [1]
     *,
     tiles: TileSizes,
     dims: Dimensions,
@@ -420,7 +466,7 @@ def kernel_main(
     - g: rhs group dimension
     - m: Batch dimension
     - gm: Batch tiling dimension. Aligned to size_lhs_sublane and has tile size
-      of tile_m. Skips over empty groups and accounts for revisited tiles.
+        of tile_m. Skips over empty groups and accounts for revisited tiles.
     - k: in dimension
     - n: out dimension
 
@@ -429,23 +475,26 @@ def kernel_main(
         group_offset_ref: Reference to the group offset.
         lhs_ref: Reference to the lhs.
         rhs_ref: Reference to the rhs.
-        _: Reference to out_ref alias.
+        out_init_hbm_ref: Reference to out_ref alias.
         out_ref: Reference to the out.
         metadata_ref: Reference to the metadata.
         partial_out_ref: Reference to the partial output.
         acc_ref: Reference to the accumulator.
+        local_dma_sem_ref: Reference to the local dma semaphore.
         tiles: Tile sizes.
         dims: Dimensions.
-  """
+    """
 
     num_k = dims.size_k // tiles.tile_k
     num_n = dims.size_n // tiles.tile_n
 
     # Fill metadata buffer and return number of group & m interations.
-    num_gm = fill_metadata(
+    num_gm, zeroed_out_vregs = fill_metadata(
         lhs_group_sizes_ref,
         group_offset_ref,
         metadata_ref,
+        out_init_hbm_ref,
+        local_dma_sem_ref,
         dims=dims,
         tiles=tiles,
     )
@@ -473,6 +522,23 @@ def kernel_main(
     lhs_in = lhs_ref.reshape(-1, dims.size_lhs_sublane, dims.size_k)
     out_in = out_ref.reshape(-1, dims.size_lhs_sublane, dims.size_n)
     pipeline_fn(lhs_in, rhs_ref, out_in, scratches=[partial_out_ref, acc_ref])
+    out_init_hbm = out_init_hbm_ref.reshape(-1, dims.size_lhs_sublane,
+                                            dims.size_n)
+
+    @jax.named_scope("wait_zero_out_out_of_bounds_group")
+    def wait_zeroed_out_init_hbm():
+        lax.fori_loop(
+            0,
+            zeroed_out_vregs,
+            lambda vreg_idx, _: pltpu.make_async_copy(
+                out_init_hbm.at[vreg_idx, :, :],
+                out_init_hbm.at[vreg_idx, :, :],
+                local_dma_sem_ref.at[0],
+            ).wait(),
+            None,
+        )
+
+    wait_zeroed_out_init_hbm()
 
 
 def calculate_tiling(
@@ -754,12 +820,14 @@ def gmm_v2(
             (m_num_sublane_units, dims.size_lhs_sublane, tiles.tile_n),
             jnp.float32,
         ),
+        # semaphore_ref
+        pltpu.SemaphoreType.DMA((1, )),
     ]
 
     # Prepare inputs.
     # TODO(kyuyeunk, kunjanp): Add support for fusing zero initialization.
-    out_init = jnp.zeros((dims.size_m, dims.size_n),
-                         dtype=preferred_element_type)
+    out_init = pl.empty((dims.size_m, dims.size_n),
+                        dtype=preferred_element_type)
     rhs_weights = WeightsRef(weight=rhs, scale=rhs_scale, bias=rhs_bias)
 
     return pl.pallas_call(
