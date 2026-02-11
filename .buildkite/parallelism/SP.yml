@@ -19,10 +19,11 @@ steps:
     key: "SP_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: tpu_v6e_8_queue
     commands:
       - |
-        buildkite-agent meta-data set "SP_CorrectnessTest" "unverified"
+        .buildkite/scripts/run_in_docker.sh \
+          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_sequence_parallel.py'
   - label: "Record correctness test result for SP"
     key: "record_SP_CorrectnessTest"
     depends_on: "SP_CorrectnessTest"
