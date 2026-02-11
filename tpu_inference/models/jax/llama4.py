@@ -30,7 +30,7 @@ from tpu_inference.layers.jax.attention.llama4_attention import Llama4Attention
 from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
 from tpu_inference.layers.jax.misc import shard_put
-from tpu_inference.layers.jax.moe.moe import MoE, Router
+from tpu_inference.layers.jax.moe.moe import JaxMoE, Router
 from tpu_inference.layers.jax.pp_utils import (PPMissingLayer,
                                                get_start_end_layer)
 from tpu_inference.layers.jax.transformer_block import \
@@ -516,13 +516,15 @@ class Llama4ForCausalLM(nnx.Module):
                             ed_sharding=(None, None),
                             random_init=force_random_weights)
 
-            moe_ffw = MoE(
+            moe_ffw = JaxMoE(
                 dtype=dtype,
                 mesh=self.mesh,
                 num_local_experts=self.num_local_experts,
                 apply_expert_weight_before_computation=True,
                 hidden_size=self.hidden_size,
                 intermediate_size_moe=self.intermediate_size_moe,
+                expert_axis_name=None,
+                num_expert_parallelism=1,
                 hidden_act=self.hidden_act,
                 router=router,
                 rngs=self.rng,
@@ -530,6 +532,7 @@ class Llama4ForCausalLM(nnx.Module):
                 activation_ffw_ted=('data', 'expert', None),
                 edf_sharding=('model', None, None),
                 efd_sharding=('model', None, None),
+                quant_config=vllm_config.quant_config,
                 random_init=force_random_weights) if is_moe_layer else None
 
             dense_ffw = DenseFFW(

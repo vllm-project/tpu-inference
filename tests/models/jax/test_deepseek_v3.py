@@ -30,7 +30,9 @@ from vllm.config import ModelConfig
 import tpu_inference.kernels.mla.v1.kernel as mla
 from tpu_inference.layers.common.attention_interface import get_kv_cache_shape
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.sharding import (ShardingAxisName,
+                                                  ShardingAxisNameBase)
+from tpu_inference.layers.jax.moe.moe import MoEBackend
 from tpu_inference.models.jax.deepseek_v3 import (DeepSeekV3,
                                                   DeepseekV3Attention,
                                                   DeepseekV3MLA,
@@ -112,14 +114,17 @@ class TestDeepSeekV3:
 
     def test_init(self, mock_config, rng, mesh):
         """Tests if the model initializes with the correct hierarchy."""
-        model = DeepSeekV3(mock_config, rng, mesh)
-        assert len(model.layers) == 1
-        assert isinstance(model.embedder, nnx.Module)
-        assert model.vllm_config.model_config.hf_config.num_hidden_layers == 1
+        with patch("tpu_inference.models.jax.deepseek_v3.ShardingAxisName",
+                   ShardingAxisNameBase):
+            model = DeepSeekV3(mock_config, rng, mesh)
+            assert len(model.layers) == 1
+            assert isinstance(model.embedder, nnx.Module)
+            assert model.vllm_config.model_config.hf_config.num_hidden_layers == 1
 
     def test_random_weights(self, mock_config, rng, mesh):
         """Tests that force_random_weights initializes non-zero weights."""
-        with jax.set_mesh(mesh):
+        with patch("tpu_inference.models.jax.deepseek_v3.ShardingAxisName",
+                   ShardingAxisNameBase):
             model = DeepSeekV3(mock_config,
                                rng,
                                mesh,
@@ -137,11 +142,13 @@ class TestDeepSeekV3:
     )
     def test_load_weights_called(self, mock_weights_generator, mock_loader_cls,
                                  mock_config, rng, mesh):
-        model = DeepSeekV3(mock_config, rng, mesh)
+        with patch("tpu_inference.models.jax.deepseek_v3.ShardingAxisName",
+                   ShardingAxisNameBase):
+            model = DeepSeekV3(mock_config, rng, mesh)
 
-        model.load_weights(rng)
+            model.load_weights(rng)
 
-        model.weight_loader.load_weights.assert_called_once_with(model)
+            model.weight_loader.load_weights.assert_called_once_with(model)
 
 
 class TestDeepSeekV3WeightLoader:
@@ -162,12 +169,13 @@ class TestDeepSeekV3WeightLoader:
                                           qk_rope_head_dim=64,
                                           v_head_dim=128,
                                           num_local_experts=256,
+                                          moe_backend=MoEBackend.DENSE_MAT,
                                           model_dtype=jnp.bfloat16)
 
     @pytest.mark.parametrize("loaded_key, expected_mapped", [
         ("model.embed_tokens.weight", "embedder.input_embedding_table_VD"),
         ("model.layers.0.self_attn.q_a_proj.weight",
-         "layers.0.self_attn.kernel_q_down_proj_DA"),
+         "layers.0.self_attn.q_down_proj.weight"),
         ("model.layers.5.mlp.experts.10.gate_proj.weight",
          "layers.5.custom_module.experts.kernel_gating_EDF"),
         ("model.layers.1.mlp.shared_experts.down_proj.weight",
@@ -240,7 +248,7 @@ class TestDeepSeekV3WeightLoader:
 
     def test_load_individual_weight_with_mxfp4(self, loader, mesh):
         """Tests the logic for unpacking MXFP4 weights."""
-        name = "layers.0.self_attn.kernel_q_down_proj_DA"
+        name = "layers.0.self_attn.q_down_proj.weight"
         # Mocking torch tensor as uint8 (packed fp4)
         expected_weight_shape = (128, 128)  # Unpacked
         expected_scale_shape = (128, 1)
@@ -257,8 +265,10 @@ class TestDeepSeekV3WeightLoader:
         mock_params = {
             "layers": {
                 "0": {
-                    "sefl_attn": {
-                        "kernel_q_down_proj_DA": mock_var
+                    "self_attn": {
+                        "q_down_proj": {
+                            "weight": mock_var
+                        }
                     }
                 }
             }
@@ -318,7 +328,7 @@ class TestDeepSeekV3WeightLoader:
         Tests the logic for loading 'unpacked' weights (e.g., standard FP8).
         This verifies the branch that uses DTYPE_VIEW_MAP for raw memory conversion.
         """
-        name = "layers.0.self_attn.kernel_q_down_proj_DA"
+        name = "layers.0.self_attn.q_down_proj.weight"
 
         # 1. Setup a standard 'unpacked' FP8 torch tensor
         # DeepSeek V3 weights are often float8_e4m3fn
@@ -332,7 +342,9 @@ class TestDeepSeekV3WeightLoader:
             "layers": {
                 "0": {
                     "self_attn": {
-                        "kernel_q_down_proj_DA": mock_var
+                        "q_down_proj": {
+                            "weight": mock_var
+                        }
                     }
                 }
             }
@@ -445,6 +457,7 @@ class TestDeepSeekV3NativeFP8:
                                           v_head_dim=32,
                                           num_local_experts=8,
                                           model_dtype=jnp.bfloat16,
+                                          moe_backend=MoEBackend.DENSE_MAT,
                                           use_mla_kernel=True)
 
     def test_native_fp8_initialization(self, fp8_loader):

@@ -557,7 +557,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called "
                                "after execute_model() returns None.")
-        output = self._execute_model(scheduler_output, intermediate_tensors)
+        with jax.set_mesh(self.mesh):
+            output = self._execute_model(scheduler_output,
+                                         intermediate_tensors)
         return output
 
     def sample_tokens(
@@ -998,7 +1000,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logprobs_lists = None
 
         if self.speculative_config:
-            with self.maybe_forbid_compile:
+            with self.maybe_forbid_compile, jax.set_mesh(self.mesh):
                 self.speculative_decoding_manager.propose_draft_token_ids(
                     valid_sampled_token_ids,
                     aux_hidden_states,

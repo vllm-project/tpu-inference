@@ -42,7 +42,7 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     echo "$FILES_CHANGED"
 
     # Filter out files we want to skip builds for.
-    NON_SKIPPABLE_FILES=$(echo "$FILES_CHANGED" | grep -vE "(\.md$|\.ico$|\.png$|^README$|^docs\/)")
+    NON_SKIPPABLE_FILES=$(echo "$FILES_CHANGED" | grep -vE "(\.md$|\.ico$|\.png$|^README$|^docs\/|support_matrices\/.*\.csv$)" || true)
 
     if [ -z "$NON_SKIPPABLE_FILES" ]; then
       echo "Only documentation or icon files changed. Skipping build."
@@ -69,16 +69,16 @@ upload_pipeline() {
       buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
 
       # Upload JAX pipeline for v7
-      export LABEL_PREFIX="TPU7x "
-      export KEY_PREFIX="tpu7x_"
+      export TESTS_GROUP_LABEL="[jax] TPU7x Tests Group"
+      export TPU_VERSION="tpu7x"
       export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
       export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
       export IS_FOR_V7X="true"
       export COV_FAIL_UNDER="67"
       buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
-      unset LABEL_PREFIX KEY_PREFIX TPU_QUEUE_SINGLE TPU_QUEUE_MULTI IS_FOR_V7X COV_FAIL_UNDER
+      unset TPU_VERSION TPU_QUEUE_SINGLE TPU_QUEUE_MULTI IS_FOR_V7X COV_FAIL_UNDER
 
-    # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
+      # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
       buildkite-agent pipeline upload .buildkite/nightly_releases.yml
     fi
 
@@ -90,7 +90,7 @@ echo "--- Starting Buildkite Bootstrap"
 echo "Running in pipeline: $BUILDKITE_PIPELINE_SLUG"
 
 echo "Configure notification"
-ONCALL_EMAIL="ullm-oncall@rotations.google.com"
+ONCALL_EMAIL="ullm-test-notifications-external@google.com"
 NOTIFY_FILE="generated_notification.yml"
 
 # Logic
@@ -132,14 +132,14 @@ if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
     buildkite-agent pipeline upload .buildkite/integration_promote.yml
   
     # Upload JAX pipeline for v7
-    export LABEL_PREFIX="TPU7x "
-    export KEY_PREFIX="tpu7x_"
+    export TESTS_GROUP_LABEL="[jax] TPU7x Tests Group"
+    export TPU_VERSION="tpu7x"
     export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
     export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
     export IS_FOR_V7X="true"
     export COV_FAIL_UNDER="67"
     buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
-    unset LABEL_PREFIX KEY_PREFIX TPU_QUEUE_SINGLE TPU_QUEUE_MULTI IS_FOR_V7X COV_FAIL_UNDER
+    unset TPU_VERSION TPU_QUEUE_SINGLE TPU_QUEUE_MULTI IS_FOR_V7X COV_FAIL_UNDER
 
     # Upload JAX pipeline for v6 (default)
     buildkite-agent pipeline upload .buildkite/pipeline_jax.yml

@@ -145,7 +145,7 @@ class GmmTest(jtu.JaxTestCase):
         num_groups=[16, 32],
         has_bias=[True, False],
         weight_dtype=[jnp.int8, jnp.float8_e5m2, jnp.float4_e2m1fn],
-        block_size=[256, 512],
+        block_size=[64, 128, 256, 512],
     )
     def test_gmm_weight_quantized(
         self,

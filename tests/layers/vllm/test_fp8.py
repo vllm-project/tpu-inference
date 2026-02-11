@@ -36,14 +36,13 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 
+from tests.layers.common import utils as test_utils
+from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
-from tpu_inference.layers.vllm.fused_moe import FusedMoEBackend
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.fp8 import (VllmFp8Config,
                                                         VllmFp8LinearMethod,
                                                         VllmFp8MoEMethod)
-
-from . import utils as test_utils
 
 P = PartitionSpec
 MODELS = [
@@ -483,9 +482,9 @@ def test_fused_moe(use_ep, num_devices, num_tokens, intermediate_size,
     with torchax.default_env(), set_forward_context(None, vllm_config):
         assert isinstance(vllm_fused_moe.quant_method, VllmFp8MoEMethod)
         if use_ep:
-            assert vllm_fused_moe.quant_method.moe_backend == FusedMoEBackend.GMM_EP
+            assert vllm_fused_moe.quant_method.moe_backend == MoEBackend.GMM_EP
         else:
-            assert vllm_fused_moe.quant_method.moe_backend == FusedMoEBackend.GMM_TP
+            assert vllm_fused_moe.quant_method.moe_backend == MoEBackend.GMM_TP
 
         jax_a = a.to('jax')
         jax_score = score.to('jax')
