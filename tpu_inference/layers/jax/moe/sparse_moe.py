@@ -150,6 +150,9 @@ def sparse_moe_distributed_fwd(
                             moe_instance.tile_size, moe_instance.moe_backend,
                             moe_instance.dtype,
                             moe_instance.qwix_quantized_weight_dtype)
+        if moe_instance.edf_sharding[1] is not None:
+            gating_TEF = jax.lax.psum(gating_TEF,
+                                      axis_name=moe_instance.edf_sharding[1])
         activated_gating_TEF = modeling_flax_utils.ACT2FN[
             moe_instance.hidden_act](gating_TEF)
 
@@ -158,6 +161,9 @@ def sparse_moe_distributed_fwd(
                              compute_group_sizes, moe_instance.tile_size,
                              moe_instance.moe_backend, moe_instance.dtype,
                              moe_instance.qwix_quantized_weight_dtype)
+        if moe_instance.edf_sharding[1] is not None:
+            up_proj_TEF = jax.lax.psum(up_proj_TEF,
+                                       axis_name=moe_instance.edf_sharding[1])
 
     fuse_TEF = activated_gating_TEF * up_proj_TEF
 
@@ -168,6 +174,9 @@ def sparse_moe_distributed_fwd(
                                      moe_instance.moe_backend,
                                      moe_instance.dtype,
                                      moe_instance.qwix_quantized_weight_dtype)
+        if moe_instance.efd_sharding[1] is not None:
+            intermediate_output = jax.lax.psum(
+                intermediate_output, axis_name=moe_instance.efd_sharding[1])
 
     # 5. Return Results (All-to-All)
     if moe_instance.num_expert_parallelism > 1:
