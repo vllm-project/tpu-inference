@@ -1000,7 +1000,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logprobs_lists = None
 
         if self.speculative_config:
-            with self.maybe_forbid_compile:
+            with self.maybe_forbid_compile, jax.set_mesh(self.mesh):
                 self.speculative_decoding_manager.propose_draft_token_ids(
                     valid_sampled_token_ids,
                     aux_hidden_states,
