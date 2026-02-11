@@ -350,13 +350,18 @@ class TPUWorker:
         raise NotImplementedError(
             "LoRA is not supported by the JAX worker yet.")
 
-    def profile(self, is_start: bool = True):
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         if is_start:
+            if profile_prefix is not None and self.profile_dir:
+                trace_dir = os.path.join(self.profile_dir, profile_prefix)
+                os.makedirs(trace_dir, exist_ok=True)
+            else:
+                trace_dir = self.profile_dir
             options = jax.profiler.ProfileOptions()
             # default: https://docs.jax.dev/en/latest/profiling.html#general-options
             options.python_tracer_level = envs.PYTHON_TRACER_LEVEL
             options.host_tracer_level = os.getenv("HOST_TRACER_LEVEL", 1)
-            jax.profiler.start_trace(self.profile_dir,
+            jax.profiler.start_trace(trace_dir,
                                      profiler_options=options)
         else:
             jax.profiler.stop_trace()
