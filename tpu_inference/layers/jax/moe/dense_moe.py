@@ -64,7 +64,7 @@ def dense_moe_fwd(weights: UnfusedMoEWeights, x_TD: Float,
 
 def dense_moe_fwd_preapply_router_weights(weights: UnfusedMoEWeights,
                                           x_TD: Float, cast_dtype: jnp.dtype,
-                                          activation_ffw_td: Sharding,
+                                          activation_ffw_ted: Sharding,
                                           hidden_act: str,
                                           full_weights_TE: jax.Array,
                                           mesh: Mesh) -> jax.Array:
@@ -89,7 +89,7 @@ def dense_moe_fwd_preapply_router_weights(weights: UnfusedMoEWeights,
     x_TED = jnp.repeat(x_TD[:, None, :], num_experts, 1)
     x_TED = jnp.asarray(x_TED, cast_dtype) * full_weights_TE[..., None]
     x_TED = jax.lax.with_sharding_constraint(
-        x_TED, NamedSharding(mesh, P(*activation_ffw_td)))
+        x_TED, NamedSharding(mesh, P(*activation_ffw_ted)))
 
     with jax.named_scope("gating"):
         gating_TEF = jnp.einsum('TED,EDF -> TEF', x_TED, weights.w1_weight)
