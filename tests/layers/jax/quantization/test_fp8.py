@@ -32,6 +32,8 @@ from tpu_inference.layers.jax.moe.moe import JaxMoE
 # yapf: disable
 from tpu_inference.layers.jax.quantization.fp8 import (
     Fp8Config, Fp8TensorwiseLinearMethod)
+from tpu_inference.layers.jax.quantization.unquantized import \
+    UnquantizedLinearMethod
 from tpu_inference.models.jax.deepseek_v3 import DeepSeekV3Router
 
 
@@ -355,3 +357,45 @@ class TestFp8FusedMoE:
             actual = layer(a).astype(expected.dtype)
 
         assert jnp.allclose(expected, actual, atol=2.5e-2, rtol=1e-1)
+
+
+class TestFp8Config:
+
+    def test_skip_layers(self, rngs):
+        """Test that if quantization_config has ignored layers, those layers are skipped from quantization."""
+
+        class MLP(nnx.Module):
+
+            def __init__(self,
+                         in_features,
+                         out_features,
+                         rngs,
+                         quant_config,
+                         prefix=''):
+                self.proj1 = JaxLinear(in_features,
+                                       out_features,
+                                       rngs=rngs,
+                                       quant_config=quant_config,
+                                       prefix=prefix + ".proj1")
+                self.proj2 = JaxLinear(in_features,
+                                       out_features,
+                                       rngs=rngs,
+                                       quant_config=quant_config,
+                                       prefix=prefix + ".proj2")
+
+            def __call__(self, x):
+                return self.proj2(self.proj1(x))
+
+        hf_quant_config = {
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+            "ignored_layers": ["mlp.proj1"]
+        }
+        quant_config = Fp8Config(hf_quant_config)
+
+        mlp = MLP(16, 16, rngs, quant_config, prefix="mlp")
+
+        # Check that proj1 is NOT quantized (UnquantizedLinearMethod)
+        assert isinstance(mlp.proj1.quant_method, UnquantizedLinearMethod)
+        # Check that proj2 IS quantized (Fp8TensorwiseLinearMethod)
+        assert isinstance(mlp.proj2.quant_method, Fp8TensorwiseLinearMethod)
