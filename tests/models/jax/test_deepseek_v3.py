@@ -175,7 +175,7 @@ class TestDeepSeekV3WeightLoader:
     @pytest.mark.parametrize("loaded_key, expected_mapped", [
         ("model.embed_tokens.weight", "embedder.input_embedding_table_VD"),
         ("model.layers.0.self_attn.q_a_proj.weight",
-         "layers.0.self_attn.kernel_q_down_proj_DA"),
+         "layers.0.self_attn.q_down_proj.weight"),
         ("model.layers.5.mlp.experts.10.gate_proj.weight",
          "layers.5.custom_module.experts.kernel_gating_EDF"),
         ("model.layers.1.mlp.shared_experts.down_proj.weight",
@@ -248,7 +248,7 @@ class TestDeepSeekV3WeightLoader:
 
     def test_load_individual_weight_with_mxfp4(self, loader, mesh):
         """Tests the logic for unpacking MXFP4 weights."""
-        name = "layers.0.self_attn.kernel_q_down_proj_DA"
+        name = "layers.0.self_attn.q_down_proj.weight"
         # Mocking torch tensor as uint8 (packed fp4)
         expected_weight_shape = (128, 128)  # Unpacked
         expected_scale_shape = (128, 1)
@@ -265,8 +265,10 @@ class TestDeepSeekV3WeightLoader:
         mock_params = {
             "layers": {
                 "0": {
-                    "sefl_attn": {
-                        "kernel_q_down_proj_DA": mock_var
+                    "self_attn": {
+                        "q_down_proj": {
+                            "weight": mock_var
+                        }
                     }
                 }
             }
@@ -326,7 +328,7 @@ class TestDeepSeekV3WeightLoader:
         Tests the logic for loading 'unpacked' weights (e.g., standard FP8).
         This verifies the branch that uses DTYPE_VIEW_MAP for raw memory conversion.
         """
-        name = "layers.0.self_attn.kernel_q_down_proj_DA"
+        name = "layers.0.self_attn.q_down_proj.weight"
 
         # 1. Setup a standard 'unpacked' FP8 torch tensor
         # DeepSeek V3 weights are often float8_e4m3fn
@@ -340,7 +342,9 @@ class TestDeepSeekV3WeightLoader:
             "layers": {
                 "0": {
                     "self_attn": {
-                        "kernel_q_down_proj_DA": mock_var
+                        "q_down_proj": {
+                            "weight": mock_var
+                        }
                     }
                 }
             }

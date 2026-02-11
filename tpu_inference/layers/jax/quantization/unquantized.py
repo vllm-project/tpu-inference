@@ -111,7 +111,7 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
 
             # TODO (jacobplatin): we probably want to make the sharding configurable
             layer.kernel_gating_upproj_EDF = nnx.Param(
-                w13_val, sharding=layer.efd_sharding)
+                w13_val, sharding=layer.edf_sharding)
 
             del layer.kernel_gating_EDF
             del layer.kernel_up_proj_EDF

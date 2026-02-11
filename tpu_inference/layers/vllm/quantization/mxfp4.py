@@ -40,8 +40,7 @@ from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_moe_weights, quantize_moe_weights,
     shard_moe_weights)
-from tpu_inference.layers.common.quant_methods import (MXFP4,
-                                                       get_tpu_quant_method)
+from tpu_inference.layers.common.quant_methods import MXFP4
 from tpu_inference.layers.common.quantization import \
     dequantize_tensor_from_mxfp4_packed
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -60,7 +59,7 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
-@register_quantization_config(get_tpu_quant_method(MXFP4))
+@register_quantization_config(MXFP4)
 class VllmMxfp4Config(Mxfp4Config, VllmQuantConfig):
 
     @classmethod

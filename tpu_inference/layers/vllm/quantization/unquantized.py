@@ -35,8 +35,7 @@ from tpu_inference.layers.common.process_weights.linear_weights import (
     to_parameter_list)
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_moe_weights, shard_moe_weights)
-from tpu_inference.layers.common.quant_methods import (UNQUANTIZED,
-                                                       get_tpu_quant_method)
+from tpu_inference.layers.common.quant_methods import UNQUANTIZED
 from tpu_inference.layers.common.quantization import \
     unquantized as common_unquantized
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -55,7 +54,7 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
-@register_quantization_config(get_tpu_quant_method(UNQUANTIZED))
+@register_quantization_config(UNQUANTIZED)
 class VllmUnquantizedConfig(QuantizationConfig, VllmQuantConfig):
 
     @classmethod
