@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import functools
 from dataclasses import dataclass, fields
 
 import jax
@@ -21,11 +21,12 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.tensor import Tensor
 
 from tpu_inference.layers.common.moe import MoEBackend
-from tpu_inference.layers.common.quantization import quantize_tensor
+from tpu_inference.layers.common.quantization import (dequantize_tensor,
+                                                      quantize_tensor)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import (
     general_device_put, reorder_concatenated_tensor_for_sharding)
-from tpu_inference.utils import align_to
+from tpu_inference.utils import align_to, get_mesh_shape_product
 
 P = PartitionSpec
 
@@ -389,3 +390,54 @@ def shard_moe_weights(
             weight = general_device_put(weight, sharding, layout)
             setattr(weights, key, weight)
     return weights
+
+
+@functools.partial(jax.jit,
+                   static_argnames=(
+                       "moe_backend",
+                       "mesh",
+                       "activation",
+                       "weight_block_size",
+                   ))
+def process_fp8_moe_weights(
+    weights: FusedMoEWeights,
+    moe_backend: MoEBackend,
+    mesh: Mesh,
+    activation: str,
+    weight_block_size: tuple[int, ...] | None = None,
+) -> FusedMoEWeights:
+    w13_weight = weights.w13_weight
+    w13_weight_scale = weights.w13_weight_scale
+    w2_weight = weights.w2_weight
+    w2_weight_scale = weights.w2_weight_scale
+
+    # Dequantize fp8 2d block quantized weights into fp32.
+    w13_weight = dequantize_tensor(w13_weight,
+                                   w13_weight_scale, (1, 2),
+                                   block_size=weight_block_size)
+    w2_weight = dequantize_tensor(w2_weight,
+                                  w2_weight_scale, (1, 2),
+                                  block_size=weight_block_size)
+
+    w13_interleave = activation == "swigluoai"
+    w13_reorder_size = get_mesh_shape_product(mesh,
+                                              ShardingAxisName.MLP_TENSOR)
+
+    weights = quantize_moe_weights(
+        FusedMoEWeights(
+            w13_weight=w13_weight,
+            w13_weight_scale=None,
+            w13_bias=None,
+            w2_weight=w2_weight,
+            w2_weight_scale=None,
+            w2_bias=None,
+        ),
+        jnp.float8_e4m3fn,
+        None,
+    )
+    return process_moe_weights(
+        weights,
+        moe_backend=moe_backend,
+        w13_reorder_size=w13_reorder_size,
+        w13_interleave=w13_interleave,
+    )

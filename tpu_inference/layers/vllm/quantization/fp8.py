@@ -36,12 +36,9 @@ from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.linear_weights import (
     shard_linear_weights, to_parameter_list)
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, process_moe_weights, quantize_moe_weights,
-    shard_moe_weights)
+    FusedMoEWeights, process_fp8_moe_weights, shard_moe_weights)
 from tpu_inference.layers.common.quant_methods import FP8
-from tpu_inference.layers.common.quantization import dequantize_tensor
 from tpu_inference.layers.common.quantization import fp8 as common_fp8
-from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.quantization.configs import (
@@ -49,7 +46,6 @@ from tpu_inference.layers.vllm.quantization.configs import (
 from tpu_inference.layers.vllm.quantization.unquantized import (
     VllmUnquantizedFusedMoEMethod, VllmUnquantizedLinearMethod)
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import get_mesh_shape_product
 
 P = PartitionSpec
 
@@ -233,50 +229,27 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
         w2_weight = t2j(layer.w2_weight, use_dlpack=False)
         w2_weight_scale = t2j(layer.w2_weight_scale_inv, use_dlpack=False)
 
-        @jax.jit
-        def process_fp8_moe_weights(
-            w13_weight: jax.Array,
-            w13_weight_scale: jax.Array,
-            w2_weight: jax.Array,
-            w2_weight_scale: jax.Array,
-        ) -> FusedMoEWeights:
-            # Dequantize fp8 2d block quantized weights into fp32.
-            w13_weight = dequantize_tensor(w13_weight,
-                                           w13_weight_scale, (1, 2),
-                                           block_size=self.weight_block_size)
-            w2_weight = dequantize_tensor(w2_weight,
-                                          w2_weight_scale, (1, 2),
-                                          block_size=self.weight_block_size)
+        # TODO: do we need to support bias?
+        input_weights = FusedMoEWeights(
+            w13_weight=w13_weight,
+            w13_weight_scale=w13_weight_scale,
+            w13_bias=None,
+            w2_weight=w2_weight,
+            w2_weight_scale=w2_weight_scale,
+            w2_bias=None,
+        )
 
-            w13_interleave = layer.activation == "swigluoai"
-            w13_reorder_size = get_mesh_shape_product(
-                self.mesh, ShardingAxisName.MLP_TENSOR)
-
-            weights = quantize_moe_weights(
-                FusedMoEWeights(
-                    w13_weight=w13_weight,
-                    w13_weight_scale=None,
-                    w13_bias=None,
-                    w2_weight=w2_weight,
-                    w2_weight_scale=None,
-                    w2_bias=None,
-                ),
-                jnp.float8_e4m3fn,
-                None,
-            )
-
-            return process_moe_weights(
-                weights,
-                moe_backend=self.moe_backend,
-                w13_reorder_size=w13_reorder_size,
-                w13_interleave=w13_interleave,
-            )
+        weight_block_size = None
+        if self.weight_block_size is not None:
+            weight_block_size = tuple(self.weight_block_size)
 
         weights = process_fp8_moe_weights(
-            w13_weight,
-            w13_weight_scale,
-            w2_weight,
-            w2_weight_scale,
+            input_weights,
+            moe_backend=self.moe_backend,
+            mesh=self.mesh,
+            activation=layer.activation,
+            # Convert to tuple so jax jit can hash it
+            weight_block_size=weight_block_size,
         )
         weights = torch_view(
             shard_moe_weights(weights, self.moe_backend, self.mesh))
