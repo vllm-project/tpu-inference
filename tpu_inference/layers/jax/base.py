@@ -29,8 +29,8 @@ Initializer = Callable[..., jax.Array]
 logger = init_logger(__name__)
 
 # Define singleton initializers to avoid re-compilation.
-_scale_initializer = nnx.initializers.ones
-_sharded_initializer = nnx.initializers.xavier_normal()
+scale_initializer = nnx.initializers.ones
+sharded_initializer = nnx.initializers.xavier_normal()
 _init_fn = nnx.initializers.uniform()
 
 
@@ -153,8 +153,8 @@ def create_param(rngs: nnx.Rngs,
                  random_init=False) -> nnx.Param:
     key = rngs.params()
     if random_init:
-        initializer = _scale_initializer if len(
-            shape) == 1 else _sharded_initializer
+        initializer = scale_initializer if len(
+            shape) == 1 else sharded_initializer
 
         jitted_initializer = jax.jit(initializer,
                                      static_argnames=('shape', 'dtype'),
