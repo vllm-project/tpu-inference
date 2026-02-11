@@ -66,6 +66,7 @@ fi
 upload_pipeline() {
     if [ "${MODEL_IMPL_TYPE:-auto}" == "auto" ]; then
       # Upload JAX pipeline for v6 (default)
+      buildkite-agent pipeline upload .buildkite/features/DCN-Based_P-D_disaggregation.yml
       buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
 
       # Upload JAX pipeline for v7
