@@ -28,7 +28,7 @@ from tpu_inference.layers.common.moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.process_weights.linear_weights import \
     shard_linear_weights
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, process_fp8_moe_weights)
+    FusedMoEWeights, process_fp8_moe_weights, shard_moe_weights)
 from tpu_inference.layers.common.quantization import fp8 as common_fp8
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.jax import JaxModule
@@ -372,17 +372,21 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                 weight_block_size=weight_block_size,
             )
 
-            # TODO (jacobplatin): we probably want to make the sharding configurable
+            weights = shard_moe_weights(weights, layer.moe_backend, layer.mesh)
+
             layer.kernel_gating_upproj_EDF = nnx.Param(
-                weights.w13_weight, sharding=layer.edf_sharding)
-            layer.kernel_down_proj_EFD = nnx.Param(weights.w2_weight,
-                                                   sharding=layer.efd_sharding)
-            # NOTE: we aren't sharding the weight scales
-            setattr(layer,
-                    f"kernel_gating_upproj_EDF_{self.weight_scale_name}",
-                    nnx.Param(weights.w13_weight_scale))
-            setattr(layer, f"kernel_down_proj_EFD_{self.weight_scale_name}",
-                    nnx.Param(weights.w2_weight_scale))
+                weights.w13_weight, sharding=weights.w13_weight.sharding)
+            layer.kernel_down_proj_EFD = nnx.Param(
+                weights.w2_weight, sharding=weights.w2_weight.sharding)
+
+            setattr(
+                layer, f"kernel_gating_upproj_EDF_{self.weight_scale_name}",
+                nnx.Param(weights.w13_weight_scale,
+                          sharding=weights.w13_weight_scale.sharding))
+            setattr(
+                layer, f"kernel_down_proj_EFD_{self.weight_scale_name}",
+                nnx.Param(weights.w2_weight_scale,
+                          sharding=weights.w2_weight_scale.sharding))
 
             del layer.kernel_gating_EDF
             del layer.kernel_up_proj_EDF
