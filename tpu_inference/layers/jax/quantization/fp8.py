@@ -21,6 +21,7 @@ import jax
 import jax.numpy as jnp
 import torch
 from flax import nnx
+from jax._src.dtypes import TypePromotionError
 from jax.sharding import PartitionSpec as P
 from torchax.ops.mappings import t2j
 
