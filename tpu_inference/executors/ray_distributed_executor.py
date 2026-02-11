@@ -16,6 +16,7 @@ import copy
 import os
 from typing import Dict, List, Optional
 
+from tpu_inference.distributed.jax_parallel_state import get_pp_group
 import ray
 import vllm.envs as envs
 from ray.util.placement_group import PlacementGroup
@@ -417,3 +418,6 @@ class RayWorkerWrapper(RayWorkerWrapperV1):
 
     def _is_intermediate_tensors(self, output) -> bool:
         return isinstance(output, JaxIntermediateTensors)
+
+    def _is_last_rank(self) -> bool:
+        return get_pp_group().is_last_rank
