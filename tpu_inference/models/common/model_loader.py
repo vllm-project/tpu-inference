@@ -260,7 +260,7 @@ def get_flax_model(
                       ShardingAxisName.ATTN_HEAD))
     hidden_states_sharding = NamedSharding(mesh,
                                            PartitionSpec(
-                                               ShardingAxisName.MLP_DATA,
+                                               ShardingAxisName.ATTN_DATA,
                                                None))  # (T, D)
 
     # For performance consideration, refer to:
