@@ -75,6 +75,21 @@ def load_fp8_weight(jax_param: nnx.Param, torch_weight: torch.Tensor,
     jax_param.value = shard_put(jax_weight, spec, mesh=mesh)
 
 
+def _to_partition_spec(sharding) -> P:
+    """Convert a sharding value to a PartitionSpec.
+
+    Handles NamedSharding (extracts .spec), raw tuples/lists from
+    nnx.with_partitioning, and passthrough for existing PartitionSpec.
+    """
+    if isinstance(sharding, jax.sharding.NamedSharding):
+        return sharding.spec
+    if isinstance(sharding, P):
+        return sharding
+    if isinstance(sharding, (tuple, list)):
+        return P(*sharding)
+    return P()
+
+
 class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
                                 common_fp8.Fp8LinearMethod):
     """Tensor-wise Fp8 method for JAX Linear layer."""
@@ -95,12 +110,8 @@ class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
             if self.batch_features:
                 # Batched case: keep original weight sharding for the full
                 # 3D weight (matches kernel_shape).
-                self.weight_sharding = layer.weight.sharding
-                if isinstance(self.weight_sharding,
-                              jax.sharding.NamedSharding):
-                    self.weight_sharding = self.weight_sharding.spec
-                if not isinstance(self.weight_sharding, P):
-                    self.weight_sharding = P(*[None] * len(kernel_shape))
+                self.weight_sharding = _to_partition_spec(
+                    layer.weight.sharding)
             else:
                 self.weight_sharding = adapt_info.weight_sharding
         else:
@@ -207,12 +218,8 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             if self.batch_features:
                 # Batched case: keep original weight sharding for the full
                 # 3D weight (matches kernel_shape).
-                self.weight_sharding = layer.weight.sharding
-                if isinstance(self.weight_sharding,
-                              jax.sharding.NamedSharding):
-                    self.weight_sharding = self.weight_sharding.spec
-                if not isinstance(self.weight_sharding, P):
-                    self.weight_sharding = P(*[None] * len(kernel_shape))
+                self.weight_sharding = _to_partition_spec(
+                    layer.weight.sharding)
             else:
                 self.weight_sharding = adapt_info.weight_sharding
         else:

@@ -393,6 +393,59 @@ class TestFp8TensorwiseJaxLinear:
                             atol=1.0,
                             rtol=0.3)
 
+    @pytest.mark.parametrize("einsum_str,kernel_shape", [
+        ('TNH,ANH->TNA', (32, 8, 16)),
+        ('TNA,ANH->TNH', (32, 8, 16)),
+    ])
+    @pytest.mark.parametrize("batch_size", [4])
+    def test_batched_einsum_multi_device_sharded(self, einsum_str,
+                                                  kernel_shape, batch_size,
+                                                  rngs):
+        """Test FP8 batched einsum with N actually sharded across devices.
+
+        Reproduces the MLA k_up_proj / v_up_proj pattern where
+        nnx.with_partitioning produces a raw tuple sharding that must be
+        converted to PartitionSpec for shard_map in the FP8 path.
+        """
+        num_devices = jax.local_device_count()
+        if num_devices < 2:
+            pytest.skip("Requires at least 2 devices")
+
+        quant_config = Fp8Config({
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+        })
+
+        A, N_base, H = kernel_shape
+        # Make N divisible by num_devices to be sharded
+        N = N_base * num_devices
+
+        weight_init = nnx.with_partitioning(nnx.initializers.lecun_normal(),
+                                            (None, 'model', None))
+
+        devices = np.array(jax.devices()).reshape(1, -1)
+        mesh = Mesh(devices, axis_names=('data', 'model'))
+        with jax.set_mesh(mesh):
+            layer = JaxEinsum(
+                einsum_str=einsum_str,
+                kernel_shape=(A, N, H),
+                rngs=rngs,
+                quant_config=quant_config,
+                kernel_init=weight_init,
+            )
+
+            input_dims = einsum_str.split(',')[0]
+            dim_sizes = {'T': batch_size, 'N': N, 'H': H, 'A': A}
+            input_shape = tuple(dim_sizes[d] for d in input_dims)
+
+            x = jax.random.normal(rngs.params(), input_shape,
+                                  dtype=jnp.bfloat16)
+            output = layer(x)
+
+        output_dims = einsum_str.split('->')[1]
+        expected_shape = tuple(dim_sizes[d] for d in output_dims)
+        assert output.shape == expected_shape
+
 
 class TestFp8FusedMoE:
 
