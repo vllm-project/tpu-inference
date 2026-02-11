@@ -19,6 +19,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from flax.typing import Sharding
+from jax._src.dtypes import TypePromotionError
 from jaxtyping import Float
 
 from tpu_inference.layers.common.moe import MoEBackend
@@ -180,16 +181,6 @@ class JaxMoE(JaxModule):
 
     def __post_init__(self, rngs: nnx.Rngs):
         """Generates the kernels (weights) for the router and experts (gating, up-projection, and down-projection layers)."""
-        if self.quant_config is None:
-            self.quant_method = None
-        elif (quant_method :=
-              self.quant_config.get_quant_method(self, prefix=self.prefix)):
-            assert isinstance(quant_method, QuantizeMethodBase)
-            self.quant_method = quant_method
-            self.quant_method.create_weights_jax(self)
-        else:
-            self.quant_method = None
-
         E = self.num_local_experts
         D = self.hidden_size
         F = self.intermediate_size_moe
@@ -223,6 +214,16 @@ class JaxMoE(JaxModule):
         self.activation = self.hidden_act
         self.scoring_func = self.scoring_func
 
+        if self.quant_config is None:
+            self.quant_method = None
+        elif (quant_method :=
+              self.quant_config.get_quant_method(self, prefix=self.prefix)):
+            assert isinstance(quant_method, QuantizeMethodBase)
+            self.quant_method = quant_method
+            self.quant_method.create_weights_jax(self, rngs=rngs)
+        else:
+            self.quant_method = None
+
     def named_parameters(self, *args, **kwargs) -> Iterator[tuple[str, Any]]:
         for name, param in super().named_parameters(*args, **kwargs):
             # Weight loader relies on this function to check if all parameters are loaded.
@@ -234,9 +235,19 @@ class JaxMoE(JaxModule):
             yield name, param
 
     def load_weights(self, weights: Iterable):
-        """Used by JaxAutoWeightLoader to load HF weights into the layer.
-        
-        self.quant_method might override this method if the quantization method has specific logic for loading weights.
+        """Used by JaxAutoWeightLoader to load HF weights into the layer."""
+        if self.quant_method is None:
+            return self._load_weights(weights)
+
+        return self.quant_method.load_weights(
+            layer=self,
+            original_load_weights_fn=self._load_weights,
+            weights=weights)
+
+    def _load_weights(self, weights: Iterable):
+        """Load HF weights into the layer.
+
+        self.quant_method might reuse this method if the quantization method has specific logic for loading weights.
         """
 
         cnt = 0
@@ -251,11 +262,11 @@ class JaxMoE(JaxModule):
             expert_id, param_type, _ = names
             expert_id = int(expert_id)
             jax_param = None
-            if "up_proj" in param_type:
+            if param_type.endswith("up_proj"):
                 jax_param = self.kernel_up_proj_EDF
-            elif "down_proj" in param_type:
+            elif param_type.endswith("down_proj"):
                 jax_param = self.kernel_down_proj_EFD
-            elif "gate_proj" in param_type:
+            elif param_type.endswith("gate_proj"):
                 jax_param = self.kernel_gating_EDF
             else:
                 raise ValueError(
@@ -271,8 +282,15 @@ class JaxMoE(JaxModule):
             assert isinstance(
                 jax_param.value,
                 jax.Array), f"Expecting jax.Array, got {type(jax_param.value)}"
-            jax_param.value = jax_param.value.at[expert_id].set(
-                jax_array_from_reshaped_torch(torch_weight))
+
+            jax_weight = jax_array_from_reshaped_torch(torch_weight)
+            try:
+                jax_param.value = jax_param.value.at[expert_id].set(jax_weight)
+            except TypePromotionError as e:
+                raise TypePromotionError(
+                    f"Error while loading weight for {param_name} with {jax_weight.dtype=} {jax_weight.shape=} "
+                    f"into {jax_param.value.dtype=} {jax_param.value.shape=}"
+                ) from e
 
         logger.debug(f"Loaded {cnt} weights for {self.prefix} MoE layer.")
 
