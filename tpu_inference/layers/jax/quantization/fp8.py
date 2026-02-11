@@ -38,8 +38,8 @@ from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
-from tpu_inference.layers.jax.quantization.unquantized import (
-    UnquantizedFusedMoEMethod, UnquantizedLinearMethod)
+from tpu_inference.layers.jax.quantization.unquantized import \
+    UnquantizedLinearMethod
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
     jax_array_from_reshaped_torch, load_nnx_param_from_reshaped_torch,
