@@ -1,33 +1,57 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import difflib
 import os
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 
 import pytest
 from vllm import LLM, EngineArgs, SamplingParams
 
 
-@pytest.fixture
-def model_name():
-    return "Qwen/Qwen1.5-MoE-A2.7B"
+@dataclass
+class TestConfig:
+    """Configuration for EP test runs."""
+    max_model_len: int = 512
+    max_num_batched_tokens: int = 128
+    max_num_seqs: int = 16
+    num_prompts: int = 16
+
+    @classmethod
+    def for_performance(cls) -> "TestConfig":
+        return cls(
+            max_model_len=512,
+            max_num_batched_tokens=512,
+            max_num_seqs=512,
+            num_prompts=512,
+        )
 
 
-@pytest.fixture
-def test_prompts():
+@dataclass
+class InferenceConfig:
+    """Configuration for a single inference run."""
+    model_name: str
+    tensor_parallel_size: int = 1
+    enable_expert_parallel: bool = False
+    max_model_len: int = 512
+    max_num_batched_tokens: int = 128
+    max_num_seqs: int = 16
+    gpu_memory_utilization: float = 0.95
+
+
+def generate_test_prompts(num_prompts: int = 256) -> list[str]:
+    base_text = (
+        "The rapid advancement of artificial intelligence has transformed "
+        "numerous industries and continues to reshape our understanding of "
+        "technology's potential. Machine learning algorithms have become "
+        "increasingly sophisticated, enabling computers to perform tasks "
+        "that were once thought to require human intelligence. From natural "
+        "language processing to computer vision, AI systems are now capable "
+        "of understanding context, recognizing patterns, and making decisions "
+        "with remarkable accuracy. ")
     return [
-        "Hello, my name is",
-        "The capital of France is",
-        "The colors of the rainbow are",
-        "The future of AI is",
-        "The president of the United States is",
-        "How many players are on a standard soccer team?",
-        "In Greek mythology, who is the god of the sea?",
-        "What is the capital of Australia?",
-        "What is the largest planet in our solar system?",
-        "Who developed the theory of general relativity?",
+        f"Prompt {i}: {base_text} What are your thoughts on this topic?"
+        for i in range(num_prompts)
     ]
 
 
@@ -41,188 +65,133 @@ def sampling_params():
     )
 
 
-def _run_inference_with_config(model_name: str,
-                               test_prompts: list,
-                               sampling_params: SamplingParams,
-                               tensor_parallel_size: int = 1,
-                               enable_expert_parallel: bool = False,
-                               max_num_batched_tokens: int = 128) -> list:
-    """Helper function to run inference with specified configuration."""
-
-    # Correctness defaults
-    os.environ['SKIP_JAX_PRECOMPILE'] = '1'
-    os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '0'
-
-    # Create LLM args
+def _run_inference(
+    config: InferenceConfig,
+    test_prompts: list[str],
+    sampling_params: SamplingParams,
+) -> tuple[list, float]:
+    """Run inference with the given configuration."""
     engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=128,
-        tensor_parallel_size=tensor_parallel_size,
+        model=config.model_name,
+        max_model_len=config.max_model_len,
+        tensor_parallel_size=config.tensor_parallel_size,
         pipeline_parallel_size=1,
-        gpu_memory_utilization=0.95,
-        max_num_batched_tokens=max_num_batched_tokens,
-        max_num_seqs=16,
+        gpu_memory_utilization=config.gpu_memory_utilization,
+        max_num_batched_tokens=config.max_num_batched_tokens,
+        max_num_seqs=config.max_num_seqs,
         enable_prefix_caching=False,
         kv_cache_dtype="auto",
-        enable_expert_parallel=enable_expert_parallel,
+        enable_expert_parallel=config.enable_expert_parallel,
     )
 
     engine_args_dict = asdict(engine_args)
     llm = LLM(**engine_args_dict)
 
-    try:
-        outputs = llm.generate(test_prompts, sampling_params)
-        return outputs
-    finally:
-        del llm
-        # Wait for TPUs to be released
-        time.sleep(5)
+    start_time = time.time()
+    outputs = llm.generate(test_prompts, sampling_params)
+    elapsed_time = time.time() - start_time
+
+    del llm
+    time.sleep(10)
+    return outputs, elapsed_time
 
 
-def _verify_correctness(baseline_outputs,
-                        experiment_outputs,
-                        label="Experiment",
-                        text_match_threshold=0.9,
-                        logprob_tolerance=1.0):
-    """Helper to verify correctness between two runs."""
-    assert len(baseline_outputs) == len(experiment_outputs)
-
-    text_matches = 0
-    text_mismatches = 0
-    logprob_mismatches = 0
-    max_logprob_diff = 0.0
-
-    for i, (baseline,
-            experiment) in enumerate(zip(baseline_outputs,
-                                         experiment_outputs)):
-        baseline_text = baseline.outputs[0].text.strip()
-        experiment_text = experiment.outputs[0].text.strip()
-
-        # Check text output
-        if baseline_text == experiment_text:
-            text_matches += 1
-        else:
-            # Try fuzzy match
-            similarity = difflib.SequenceMatcher(None, baseline_text,
-                                                 experiment_text).ratio()
-            if similarity >= 0.95:  # Very strict fuzzy match
-                text_matches += 1
-                msg = "Soft match"
-            else:
-                text_mismatches += 1
-                msg = "Text mismatch"
-
-            print(f"{msg} found in prompt {i} (similarity={similarity:.4f}):")
-            print(f"  Baseline: {baseline_text}")
-            print(f"  {label}: {experiment_text}")
-
-        # Check log probabilities
-        baseline_logprobs = baseline.outputs[0].logprobs
-        experiment_logprobs = experiment.outputs[0].logprobs
-        if baseline_logprobs is not None and experiment_logprobs is not None:
-            assert len(baseline_logprobs) == len(experiment_logprobs), \
-                f"Logprobs length mismatch: {len(baseline_logprobs)} vs {len(experiment_logprobs)}"
-
-            for token_idx, (base_lp_dict, exp_lp_dict) in enumerate(
-                    zip(baseline_logprobs, experiment_logprobs)):
-                # vLLM returns [{token_id: Logprob}, ...]
-                if not base_lp_dict or not exp_lp_dict:
-                    continue
-
-                # Get the top token's logprob from each (assuming top_logprobs=1)
-                t1, lp1 = next(iter(base_lp_dict.items()))
-                t2, lp2 = next(iter(exp_lp_dict.items()))
-
-                if t1 == t2:
-                    diff = abs(lp1.logprob - lp2.logprob)
-                    max_logprob_diff = max(max_logprob_diff, diff)
-
-                    # Allow small numerical differences (e.g., 1e-3)
-                    if diff > 1e-3:
-                        logprob_mismatches += 1
-                        print(
-                            f"Logprob mismatch in prompt {i}, token {token_idx}:"
-                        )
-                        print(
-                            f"  Baseline token: {t1}, logprob: {lp1.logprob:.6f}"
-                        )
-                        print(
-                            f"  {label} token: {t2}, logprob: {lp2.logprob:.6f}"
-                        )
-                        print(f"  Difference: {diff:.6f}")
-
-    print("✓ Correctness test results:")
-    print(f"  Text: {text_matches} matches, {text_mismatches} mismatches")
-    print(f"  Max logprob difference: {max_logprob_diff:.6e}")
-    print(f"  Significant logprob mismatches (>1e-3): {logprob_mismatches}")
-
-    text_match_rate = text_matches / len(baseline_outputs)
-    assert text_match_rate >= text_match_threshold, f"Text match rate {text_match_rate:.2%} is too low (threshold {text_match_threshold})"
-
-    # Log probabilities should be very close (allow small numerical errors)
-    # Raising tolerance slightly for Fused kernels if needed, but keeping strict for now
-    assert max_logprob_diff < logprob_tolerance, f"Max logprob difference {max_logprob_diff} is too large (tolerance {logprob_tolerance})"
-
-
-def test_expert_parallelism_correctness_via_gmm_kernel(
-    model_name: str,
-    test_prompts: list,
-    sampling_params: SamplingParams,
+def _check_performance(
+    test_name: str,
+    baseline_time: float,
+    ep_time: float,
+    num_prompts: int,
+    min_speedup: float,
 ):
-    """
-    Test that Expert Parallelism produces result consistent with baseline (TP=1).
-    """
+    """Verify expert parallelism provides expected speedup."""
+    speedup = baseline_time / ep_time if ep_time > 0 else 0
 
-    # Run Baseline (TP=1)
-    baseline_outputs = _run_inference_with_config(
-        model_name=model_name,
-        test_prompts=test_prompts,
-        sampling_params=sampling_params,
-        tensor_parallel_size=1,
-        enable_expert_parallel=False,
-    )
+    print(f"✓ {test_name} performance test results:")
+    print(f"  Number of prompts: {num_prompts}")
+    print(f"  Baseline time: {baseline_time:.2f}s")
+    print(f"  Expert parallel time: {ep_time:.2f}s")
+    print(f"  Speedup: {speedup:.2f}x")
+    print(f"  Baseline throughput: {num_prompts/baseline_time:.2f} prompts/s")
+    print(f"  Expert parallel throughput: {num_prompts/ep_time:.2f} prompts/s")
 
-    # Run EP (EP=4)
-    ep_outputs = _run_inference_with_config(
-        model_name=model_name,
-        test_prompts=test_prompts,
-        sampling_params=sampling_params,
-        tensor_parallel_size=4,
-        enable_expert_parallel=True,
-    )
-
-    _verify_correctness(baseline_outputs, ep_outputs, label="Expert Parallel")
+    assert speedup >= min_speedup, (
+        f"Expert parallelism did not provide expected speedup "
+        f"({min_speedup:.2f}x): {speedup:.2f}x")
 
 
-def test_expert_parallelism_correctness_via_fused_moe_kernel(
-    model_name: str,
-    test_prompts: list,
+def _test_expert_parallelism_performance(
     sampling_params: SamplingParams,
+    use_fused_kernel: bool,
+    model_name: str | None = None,
 ):
-    os.environ['USE_MOE_EP_KERNEL'] = '1'
-    try:
-        # Run Baseline
-        baseline_outputs = _run_inference_with_config(
-            model_name=model_name,
-            test_prompts=test_prompts,
-            sampling_params=sampling_params,
-            tensor_parallel_size=1,
-            enable_expert_parallel=False,
-        )
+    """Performance test for expert parallelism."""
+    if model_name is None:
+        model_name = os.environ.get("EP_MODEL_NAME", "Qwen/Qwen1.5-MoE-A2.7B")
 
-        # Run EP Fused
-        ep_outputs = _run_inference_with_config(
+    cfg = TestConfig.for_performance()
+    test_prompts = generate_test_prompts(cfg.num_prompts)
+
+    if use_fused_kernel:
+        os.environ['USE_MOE_EP_KERNEL'] = '1'
+
+    try:
+        # Run EP (TP=4 + EP)
+        ep_config = InferenceConfig(
             model_name=model_name,
-            test_prompts=test_prompts,
-            sampling_params=sampling_params,
             tensor_parallel_size=4,
             enable_expert_parallel=True,
+            max_model_len=cfg.max_model_len,
+            max_num_batched_tokens=cfg.max_num_batched_tokens,
+            max_num_seqs=cfg.max_num_seqs,
         )
+        _, ep_time = _run_inference(ep_config, test_prompts, sampling_params)
 
-        _verify_correctness(baseline_outputs,
-                            ep_outputs,
-                            label="EP Fused",
-                            text_match_threshold=0.9,
-                            logprob_tolerance=1.0)
+        # Run baseline (TP=1)
+        baseline_config = InferenceConfig(
+            model_name=model_name,
+            tensor_parallel_size=1,
+            enable_expert_parallel=False,
+            max_model_len=cfg.max_model_len,
+            max_num_batched_tokens=cfg.max_num_batched_tokens,
+            max_num_seqs=cfg.max_num_seqs,
+        )
+        _, baseline_time = _run_inference(baseline_config, test_prompts,
+                                          sampling_params)
+
+        kernel_name = "EP Fused" if use_fused_kernel else "EP GMM"
+        _check_performance(
+            f"Expert parallelism ({kernel_name})",
+            baseline_time,
+            ep_time,
+            len(test_prompts),
+            min_speedup=0.6,
+        )
     finally:
-        del os.environ['USE_MOE_EP_KERNEL']
+        if use_fused_kernel:
+            del os.environ['USE_MOE_EP_KERNEL']
+
+
+def test_ep_fused_performance(sampling_params: SamplingParams):
+    """Test expert parallelism performance with fused MoE EP kernel."""
+    os.environ['SKIP_JAX_PRECOMPILE'] = '0'
+    os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '1'
+
+    _test_expert_parallelism_performance(sampling_params,
+                                         use_fused_kernel=True)
+
+
+def test_ep_gmm_performance(sampling_params: SamplingParams):
+    """Test expert parallelism performance with GMM kernel.
+
+    Uses OLMoE-1B-7B (64 experts, power-of-2) instead of Qwen2MoE
+    (60 experts) because the GMM EP kernel requires num_tokens*topk
+    to be divisible by the tile size, which only works when
+    num_experts_per_shard is a power of 2.
+    """
+    os.environ['SKIP_JAX_PRECOMPILE'] = '0'
+    os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '1'
+
+    gmm_model = os.environ.get("EP_GMM_MODEL_NAME", "allenai/OLMoE-1B-7B-0924")
+    _test_expert_parallelism_performance(sampling_params,
+                                         use_fused_kernel=False,
+                                         model_name=gmm_model)

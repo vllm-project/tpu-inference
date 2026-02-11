@@ -12,16 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from vllm.config import ModelConfig
+from vllm.model_executor.model_loader import LoadConfig, get_model_loader
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.models.jax.qwen2 import Qwen2ForCausalLM
@@ -89,6 +89,16 @@ def rng() -> PRNGKey:
     return jax.random.PRNGKey(42)
 
 
+@pytest.fixture(autouse=True)
+def mock_get_pp_group():
+    with patch("tpu_inference.models.jax.qwen2.get_pp_group",
+               return_value=MagicMock(is_first_rank=True,
+                                      is_last_rank=True,
+                                      rank_in_group=0,
+                                      world_size=1)):
+        yield
+
+
 class TestQwen2ForCausalLM:
     """Tests for the main Qwen2ForCausalLM model class."""
 
@@ -115,7 +125,6 @@ class TestQwen2ForCausalLM:
 
         layers = model.model.layers
         assert len(layers) == hf_config.num_hidden_layers
-        assert isinstance(model.rng, nnx.Rngs)
 
         attn = layers[0].self_attn
         hidden_size = hf_config.hidden_size
@@ -145,7 +154,9 @@ class TestQwen2ForCausalLM:
         assert mlp.down_proj.weight.shape == (intermediate_size, hidden_size)
 
         # Test model load
-        model.load_weights(rng)
+        with jax.set_mesh(mesh):
+            loader = get_model_loader(LoadConfig(load_format="hf"))
+            loader.load_weights(model, model_config)
 
         # Test model forward
         kv_caches = create_kv_caches(

@@ -1121,10 +1121,13 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         }
 
         loader = self.WeightLoader(self.vllm_config, self.mesh)
+        keep_hf_weight_suffix_when_match = ['model']
+        if not self.vllm_config.model_config.hf_config.tie_word_embeddings:
+            keep_hf_weight_suffix_when_match.append('lm_head')
         loader.load_weights(
             self,
             mappings,
-            keep_hf_weight_suffix_when_match=['model', 'lm_head'])
+            keep_hf_weight_suffix_when_match=keep_hf_weight_suffix_when_match)
 
     def precompile_vision_encoder(
         self,
@@ -1136,7 +1139,12 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             spatial_merge_unit = vc.spatial_merge_size**2
             max_num_batched_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
             mm_kwargs = self.vllm_config.model_config.multimodal_config.mm_processor_kwargs or {}
-            limit_pixels = float(mm_kwargs.get("max_pixels", float('inf')))
+            # Use size.longest_edge if provided, otherwise default to inf
+            if "size" in mm_kwargs and "longest_edge" in mm_kwargs.get(
+                    "size", {}):
+                limit_pixels = float(mm_kwargs["size"]["longest_edge"])
+            else:
+                limit_pixels = float('inf')
 
             max_patches = int(
                 min(max_num_batched_tokens * spatial_merge_unit,

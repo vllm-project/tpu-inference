@@ -21,7 +21,25 @@ from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 
 class QuantizationConfig(ABC):
 
+    def __init__(self, hf_quant_config: dict):
+        pass
+
     @abstractmethod
     def get_quant_method(self, layer: JaxModule,
                          prefix: str) -> Optional[QuantizeMethodBase]:
         raise NotImplementedError
+
+    @classmethod
+    def get_from_keys(cls, config: dict, keys: list, *args):
+        """Get value from config using the first matching key.'
+        
+        Return default value if no key is found and default is provided.
+        Raise KeyError if no key is found and no default is provided.
+        """
+        assert len(args) <= 1, "Only one default value is allowed."
+        for key in keys:
+            if key in config:
+                return config[key]
+        if args:
+            return args[0]
+        raise KeyError(f"None of the keys {keys} found in config.")

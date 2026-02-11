@@ -26,6 +26,7 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from vllm.config import ModelConfig
 
+from tpu_inference.layers.jax.quantization.unquantized import UnquantizedConfig
 from tpu_inference.models.jax.llama4 import (Llama4ForCausalLM,
                                              Llama4WeightLoader)
 
@@ -90,6 +91,9 @@ class MockVllmConfig:
 
         self.model_config.hf_config = hf_config_mock
 
+        # TODO (jacobplatin): we shouldn't hardcode the quant config
+        self.quant_config = UnquantizedConfig({})
+
 
 @pytest.fixture(scope="module")
 def mesh():
@@ -119,6 +123,16 @@ def rng() -> PRNGKey:
 @pytest.fixture
 def mock_vllm_config_llama4() -> MockVllmConfig:
     return MockVllmConfig(model_name="meta-llama/Llama-4-Scout-17B-16E")
+
+
+@pytest.fixture(autouse=True)
+def mock_get_pp_group():
+    with patch("tpu_inference.models.jax.llama4.get_pp_group",
+               return_value=MagicMock(is_first_rank=True,
+                                      is_last_rank=True,
+                                      rank_in_group=0,
+                                      world_size=1)):
+        yield
 
 
 class TestLlama4ForCausalLM:

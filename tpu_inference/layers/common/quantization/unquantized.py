@@ -24,7 +24,7 @@ from tpu_inference.layers.common.utils import \
 
 class UnquantizedLinearMethod:
     """Implements the forward method for unquantized linear layers.
-    
+
     This class will be shared in both vLLM and jax path.
     """
 

@@ -12,14 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 import tempfile
 
 import jax
 import pytest
 import torch
+import torch.nn.functional as F
 import torchax
+from jax._src import test_util as jtu
 from jax.sharding import PartitionSpec
-from torchax.interop import torch_view
+from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import j2t, t2j
 from vllm.config import ParallelConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
@@ -33,8 +36,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 
+from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
-from tpu_inference.layers.vllm.fused_moe import FusedMoEBackend
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.fp8 import (VllmFp8Config,
                                                         VllmFp8LinearMethod,
@@ -74,17 +77,25 @@ def ref_fp8_activation(
 def ref_dequantize_fp8_block_2d(w_q: torch.Tensor, scale_blocks: torch.Tensor,
                                 block_m: int, block_n: int) -> torch.Tensor:
     out, inn = w_q.shape
-    assert scale_blocks.shape == (out // block_m, inn // block_n)
-    scale_e = scale_blocks[:, None, :, None].repeat(1, block_m, 1, block_n)
-    w_deq = (w_q.to(torch.float32).view(out // block_m, block_m,
-                                        inn // block_n, block_n) * scale_e)
-    return w_deq.reshape(out, inn)
+    scale_out, scale_inn = scale_blocks.shape
+    padded_out, padded_inn = scale_out * block_m, scale_inn * block_n
+
+    w_q = F.pad(w_q, (0, padded_inn - inn, 0, padded_out - out))
+
+    w_q = w_q.to(torch.float32).view(scale_out, block_m, scale_inn, block_n)
+    scale_e = scale_blocks[:, None, :, None]
+    w_deq = w_q * scale_e
+
+    w_deq = w_deq.reshape(padded_out, padded_inn)
+    return w_deq[:out, :inn]
 
 
 def return_ref_and_layer_output(layer: torch.nn.Module, batch_size: int = 16):
     assert isinstance(layer, LinearBase)
     quant_method = layer.quant_method
     assert isinstance(quant_method, VllmFp8LinearMethod)
+    quant_method.requant_block_size = None
+    quant_method.requant_weight_dtype = jax.numpy.float8_e4m3fn
 
     input_tensor = torch.rand(
         batch_size, layer.input_size, dtype=torch.bfloat16) / 10
@@ -125,14 +136,19 @@ def ref_quantize_fp8_block_2d(w: torch.Tensor, block_m: int, block_n: int,
     dtype_min = float(dtype_info.min)
 
     out, inn = w.shape
-    assert out % block_m == 0 and inn % block_n == 0
-    w_view = w.view(out // block_m, block_m, inn // block_n, block_n)
+    scale_out, scale_inn = math.ceil(out / block_m), math.ceil(inn / block_n)
+    padded_out, padded_inn = scale_out * block_m, scale_inn * block_n
+
+    w = F.pad(w, (0, padded_inn - inn, 0, padded_out - out))
+    w_view = w.view(scale_out, block_m, scale_inn, block_n)
 
     abs_max = torch.amax(torch.abs(w_view), dim=(1, 3), keepdim=True)
     scale = abs_max / dtype_max
     w_q = torch.clamp(w_view / scale, dtype_min, dtype_max).to(dtype)
 
-    w_q = w_q.reshape(out, inn)
+    w_q = w_q.reshape(padded_out, padded_inn)
+    w_q = w_q[:out, :inn]
+
     scale_blocks = scale.squeeze(1).squeeze(-1).to(torch.float32)
     return w_q, scale_blocks
 
@@ -162,6 +178,8 @@ def quantize_to_fp8_block_3d(weight: torch.Tensor, block_m: int, block_n: int,
 def initialize_layer_weights(layer: torch.nn.Module):
     assert isinstance(layer, LinearBase)
     assert isinstance(layer.quant_method, VllmFp8LinearMethod)
+    layer.quant_method.linear_config.requant_block_size = None
+    layer.quant_method.linear_config.requant_weight_dtype = jax.numpy.float8_e4m3fn
 
     assert hasattr(layer.quant_method, "weight_block_size")
     block_m, block_n = layer.quant_method.weight_block_size
@@ -169,6 +187,7 @@ def initialize_layer_weights(layer: torch.nn.Module):
     w_f32 = (
         torch.rand(layer.output_size, layer.input_size, dtype=torch.float32) /
         10)
+
     w_q, w_scale_blocks = ref_quantize_fp8_block_2d(w_f32, block_m, block_n,
                                                     torch.float8_e4m3fn)
 
@@ -464,9 +483,9 @@ def test_fused_moe(use_ep, num_devices, num_tokens, intermediate_size,
     with torchax.default_env(), set_forward_context(None, vllm_config):
         assert isinstance(vllm_fused_moe.quant_method, VllmFp8MoEMethod)
         if use_ep:
-            assert vllm_fused_moe.quant_method.moe_backend == FusedMoEBackend.GMM_EP
+            assert vllm_fused_moe.quant_method.moe_backend == MoEBackend.GMM_EP
         else:
-            assert vllm_fused_moe.quant_method.moe_backend == FusedMoEBackend.GMM_TP
+            assert vllm_fused_moe.quant_method.moe_backend == MoEBackend.GMM_TP
 
         jax_a = a.to('jax')
         jax_score = score.to('jax')
@@ -480,3 +499,87 @@ def test_fused_moe(use_ep, num_devices, num_tokens, intermediate_size,
                                    check_device=False,
                                    atol=2e-2,
                                    rtol=1e-1)
+
+
+@pytest.mark.parametrize("requant_block_size", (128, 512))
+@pytest.mark.parametrize("requant_weight_dtype",
+                         (jax.numpy.float8_e4m3fn, jax.numpy.float4_e2m1fn))
+def test_blockwise_quant(requant_block_size, requant_weight_dtype):
+    if not jtu.is_device_tpu_at_least(version=7):
+        pytest.skip("Expect TPUv7+")
+    mesh = test_utils.get_spmd_mesh()
+    dtype = torch.bfloat16
+
+    engine_args = EngineArgs(model=MODELS[0],
+                             max_model_len=64,
+                             max_num_batched_tokens=64,
+                             max_num_seqs=4,
+                             trust_remote_code=True)
+    vllm_config = engine_args.create_engine_config()
+
+    vllm_config.model_config.dtype = dtype
+    quant_config = get_tpu_quantization_config(vllm_config, mesh)
+    with set_current_vllm_config(vllm_config):
+        linear_layer = RowParallelLinear(
+            input_size=4096,
+            output_size=5120,
+            bias=False,
+            params_dtype=dtype,
+            return_bias=False,
+            quant_config=quant_config,
+        )
+
+    initialize_layer_weights(linear_layer)
+    quant_method = linear_layer.quant_method
+    quant_method.linear_config.requant_block_size = requant_block_size
+    quant_method.linear_config.requant_weight_dtype = requant_weight_dtype
+    quant_method.linear_config.enable_quantized_matmul_kernel = True
+
+    quant_method.process_weights_after_loading(linear_layer)
+    weight_jax = jax_view(linear_layer.weight)
+    weight_scale_jax = jax_view(linear_layer.weight_scale)
+    assert weight_jax.shape == (5120, 4096)
+    assert weight_scale_jax.shape == (4096 // requant_block_size, 1, 5120)
+    assert weight_jax.dtype == requant_weight_dtype
+
+    # TODO: Check output similarity between quantized and unquantized ones.
+    input_tensor = torch.rand(
+        16, linear_layer.input_size, dtype=torch.bfloat16) / 10
+    input_tensor = input_tensor.to('cpu')
+    jax_input_tensor = torch_view(t2j(input_tensor, use_dlpack=False))
+    quantized_output = linear_layer(jax_input_tensor)
+    assert quantized_output.shape == (16, 5120)
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("input_size,output_size", [
+    (7168, 576),
+])
+def test_unaligned_block_quantization(model, input_size, output_size):
+    mesh = test_utils.get_spmd_mesh(1)
+
+    torch.manual_seed(42)
+    dtype = torch.bfloat16
+
+    engine_args = EngineArgs(model=model,
+                             max_model_len=64,
+                             max_num_batched_tokens=64,
+                             max_num_seqs=4,
+                             trust_remote_code=True)
+    vllm_config = engine_args.create_engine_config()
+
+    vllm_config.model_config.dtype = dtype
+    quant_config = get_tpu_quantization_config(vllm_config, mesh)
+    with set_current_vllm_config(vllm_config):
+        linear_layer = RowParallelLinear(
+            input_size=input_size,
+            output_size=output_size,
+            bias=False,
+            params_dtype=dtype,
+            return_bias=False,
+            quant_config=quant_config,
+        )
+
+    initialize_layer_weights(linear_layer)
+    ref_output, layer_output = return_ref_and_layer_output(linear_layer)
+    torch.testing.assert_close(ref_output, layer_output)

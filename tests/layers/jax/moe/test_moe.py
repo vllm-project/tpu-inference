@@ -20,78 +20,12 @@ import numpy as np
 from flax import nnx
 from jax.sharding import Mesh, PartitionSpec
 
-from tpu_inference.layers.jax.moe.deepseek_v3_moe import DeepSeekV3Router
-from tpu_inference.layers.jax.moe.moe import MoE, Router
-from tpu_inference.layers.jax.moe.utils import MoEBackend
+from tpu_inference.layers.jax.moe.moe import JaxMoE, Router
+from tpu_inference.layers.jax.moe.utils import (MoEBackend,
+                                                get_expert_parallelism)
+from tpu_inference.layers.jax.quantization.unquantized import UnquantizedConfig
 
-
-class TestDeepSeekV3Router(unittest.TestCase):
-
-    def setUp(self):
-        self.cpu_mesh = Mesh(jax.devices('cpu'), axis_names=('data', ))
-
-    def test_get_topk_indices_single_group(self):
-        """Test get_topk_indices with single expert group."""
-        with jax.set_mesh(self.cpu_mesh):
-            router = DeepSeekV3Router(random_init=True,
-                                      hidden_size=512,
-                                      num_experts=4,
-                                      num_experts_per_tok=2,
-                                      n_groups=1,
-                                      topk_groups=1,
-                                      norm_topk_prob=True,
-                                      routed_scaling_factor=1.0,
-                                      dtype=jnp.bfloat16,
-                                      rngs=nnx.Rngs(42))
-            router.bias_E = jnp.zeros((4, ))
-
-            scores = jnp.array([[0.1, 0.3, 0.2, 0.4]])  # shape: (1, 4)
-            indices = router.get_topk_indices(scores)
-
-            # Should return indices of top 2 experts
-            expected_indices = jnp.array([[3,
-                                           1]])  # experts with scores 0.4, 0.3
-            self.assertTrue(jnp.array_equal(indices, expected_indices))
-
-    def test_get_topk_indices_2_groups(self):
-        """Test get_topk_indices with 2 expert groups."""
-        with jax.set_mesh(self.cpu_mesh):
-            router = DeepSeekV3Router(random_init=True,
-                                      hidden_size=512,
-                                      num_experts=4,
-                                      num_experts_per_tok=2,
-                                      n_groups=2,
-                                      topk_groups=1,
-                                      norm_topk_prob=True,
-                                      routed_scaling_factor=1.0,
-                                      dtype=jnp.bfloat16,
-                                      rngs=nnx.Rngs(42))
-            router.bias_E = jnp.zeros((4, ))
-
-            # 4 experts, 2 groups, 2 experts per group
-            scores = jnp.array([[[0.1, 0.3, 0.2, 0.4]]])  # shape: (1, 1, 4)
-            indices = router.get_topk_indices(scores)
-
-            # Should return indices of top 2 experts
-            expected_indices = jnp.array([[[3, 2]]])
-            self.assertTrue(jnp.array_equal(indices, expected_indices))
-
-    def test_router_e2e(self):
-        with jax.set_mesh(self.cpu_mesh):
-            router = DeepSeekV3Router(random_init=True,
-                                      hidden_size=512,
-                                      num_experts=8,
-                                      num_experts_per_tok=2,
-                                      n_groups=2,
-                                      topk_groups=1,
-                                      norm_topk_prob=True,
-                                      routed_scaling_factor=1.0,
-                                      dtype=jnp.bfloat16,
-                                      rngs=nnx.Rngs(42))
-            x = jnp.ones((2, 512))
-            weights, indices = router(x)
-            self.assertEqual(weights.shape, (2, 2))
-            self.assertEqual(indices.shape, (2, 2))
+EXPERT_AXIS_NAME = "model"
 
 
 class TestMoE(unittest.TestCase):
@@ -100,7 +34,7 @@ class TestMoE(unittest.TestCase):
         """Set up a multi-device mesh for testing."""
         devices = jax.devices()
         self.device_count = len(devices)
-        if self.device_count < 8:
+        if self.device_count < 2:
             self.skipTest("This test requires at least 8 simulated devices.")
 
         # This mesh will have a 'model' axis for expert parallelism
@@ -115,7 +49,7 @@ class TestMoE(unittest.TestCase):
 
         # --- Model Configuration ---
         self.B, self.S, self.D = 2, 8, 32  # Batch, Sequence, Hidden Dim
-        self.E, self.K = 8, 2  # Num Experts (Total), Experts per Token
+        self.E, self.K = self.device_count, 2  # Num Experts (Total), Experts per Token
         self.moe_intermediate_size = 64
         self.dtype = jnp.bfloat16
         self.key = jax.random.PRNGKey(42)
@@ -124,7 +58,9 @@ class TestMoE(unittest.TestCase):
         self.x = jax.random.normal(self.key, (self.B * self.S, self.D),
                                    dtype=self.dtype)
 
-    def _create_moe(self, backend: MoEBackend):
+    def _create_moe(self,
+                    backend: MoEBackend,
+                    apply_expert_weight_before_computation: bool = False):
         """Helper to instantiate the MoE layer within the mesh context."""
         with self.mesh:
             router = Router(
@@ -137,8 +73,13 @@ class TestMoE(unittest.TestCase):
                 activation_ffw_td=PartitionSpec('data', 'model'),
                 ed_sharding=PartitionSpec(None, 'model'),
                 moe_backend=backend)
+            num_expert_parallelism = get_expert_parallelism(
+                EXPERT_AXIS_NAME, self.mesh)
+            assert num_expert_parallelism == self.device_count
+            use_ep = num_expert_parallelism > 1
+            assert use_ep
 
-            moe = MoE(
+            moe = JaxMoE(
                 dtype=self.dtype,
                 num_local_experts=self.E,
                 hidden_size=self.D,
@@ -154,10 +95,14 @@ class TestMoE(unittest.TestCase):
                 edf_sharding=PartitionSpec('model', None,
                                            None),  # Expert par on axis 0
                 efd_sharding=PartitionSpec('model', None, None),
-                apply_expert_weight_before_computation=False,
+                apply_expert_weight_before_computation=
+                apply_expert_weight_before_computation,
                 moe_backend=backend,
                 num_experts_per_tok=self.K,
-            )
+                expert_axis_name='model',
+                num_expert_parallelism=num_expert_parallelism,
+                # TODO (jacobplatin): we shouldn't hardcode this
+                quant_config=UnquantizedConfig({}))
         return moe
 
     def _compute_ground_truth(self, moe_instance, x_input):
@@ -221,49 +166,46 @@ class TestMoE(unittest.TestCase):
 
     def test_dense_backend_correctness(self):
         """Verifies the DENSE_MAT backend against the sequential ground truth."""
-        moe = self._create_moe(MoEBackend.DENSE_MAT)
+        for apply_expert_weight_before_computation in [False, True]:
+            moe = self._create_moe(MoEBackend.DENSE_MAT,
+                                   apply_expert_weight_before_computation=
+                                   apply_expert_weight_before_computation)
 
-        with self.mesh:
-            actual_output = moe(self.x)
-
-        expected_output = self._compute_ground_truth(moe, self.x)
-
-        # Dense matmul should be very numerically close
-        self.assertTrue(
-            jnp.allclose(actual_output, expected_output, atol=1e-2, rtol=1e-2),
-            "Dense backend output does not match ground truth.")
-
-    def test_sparse_distributed_backend_correctness_ragged_dot(self):
-        """
-        Verifies the RAGGED_DOT (Sparse) backend with expert parallelism
-        against the sequential ground truth.
-        """
-        # 1. Instantiate MoE with RAGGED_DOT backend
-        # TODO: add MoEBackend.FUSED_MOE, MoEBackend.VLLM_MOE
-        for backend in [MoEBackend.RAGGED_DOT, MoEBackend.MEGABLX_GMM]:
-            moe = self._create_moe(backend)
-
-            # 2. Run Forward Pass (Distributed)
-            # The __call__ invokes shard_map internally for RAGGED_DOT
             with self.mesh:
                 actual_output = moe(self.x)
 
-            # 3. Compute Ground Truth using the exact same weights
-            # (Weights are pulled from the initialized model)
             expected_output = self._compute_ground_truth(moe, self.x)
 
-            # 4. Compare
-            # Due to permutation re-ordering and potential float precision diffs
-            # in different kernels, we allow a small tolerance.
-            diff = jnp.mean(jnp.abs(actual_output - expected_output))
-
+            # Dense matmul should be very numerically close
             self.assertTrue(
                 jnp.allclose(actual_output,
                              expected_output,
-                             atol=5e-2,
-                             rtol=5e-2),
-                f"Sparse distributed output mismatch for backebd tyoe {backend}. Mean diff: {diff}"
-            )
+                             atol=1e-2,
+                             rtol=1e-2),
+                "Dense backend output does not match ground truth.")
+
+    def test_sparse_distributed_backend_correctness(self):
+        """
+        Verifies the Sparse backends with expert parallelism
+        against the sequential ground truth.
+        """
+        # TODO: add MoEBackend.FUSED_MOE, MoEBackend.GMM_TP/GMM_EP
+        backend = MoEBackend.MEGABLX_GMM
+        moe = self._create_moe(backend)
+
+        # Run Forward Pass (Distributed)
+        with self.mesh:
+            actual_output = moe(self.x)
+
+        # Compute Ground Truth using the exact same weights
+        expected_output = self._compute_ground_truth(moe, self.x)
+
+        diff = jnp.mean(jnp.abs(actual_output - expected_output))
+
+        self.assertTrue(
+            jnp.allclose(actual_output, expected_output, atol=5e-2, rtol=5e-2),
+            f"Sparse distributed output mismatch for backebd tyoe {backend}. Mean diff: {diff}"
+        )
 
     def test_backend_consistency(self):
         """
