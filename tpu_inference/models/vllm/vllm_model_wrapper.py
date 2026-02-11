@@ -197,7 +197,7 @@ class VllmModelWrapper:
             out_shardings=(
                 None,  # kv_caches - keep original sharding
                 NamedSharding(self.mesh,
-                              PartitionSpec(ShardingAxisName.MLP_DATA, None)),
+                              PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
                 None,  # empty list
             ),
             compiler_options={
