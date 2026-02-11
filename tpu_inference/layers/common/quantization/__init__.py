@@ -272,8 +272,8 @@ def quantize_kv(
     dtype: jnp.dtype,
     key: jax.Array,
     value: jax.Array | None = None,
-    k_scale: float | None = None,
-    v_scale: float | None = None,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
 ) -> Tuple[jax.Array, jax.Array]:
     """Static quantize key and value tensors."""
     key = static_per_tensor_quantize_tensor(dtype, key, k_scale)
