@@ -31,7 +31,6 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
-from jax.sharding import PartitionSpec as P
 from transformers import Qwen3Config
 from vllm.config import VllmConfig
 
@@ -45,7 +44,8 @@ from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.moe.utils import (get_expert_parallelism,
                                                 select_moe_backend)
 from tpu_inference.layers.jax.norm import JaxRmsNorm
-from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
+from tpu_inference.layers.jax.pp_utils import (PPMissingLayer,
+                                               get_start_end_layer)
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
@@ -107,10 +107,10 @@ class Qwen3MoeSparseMoeBlock(JaxModule):
             rngs=rng,
             router=self.gate,
             mesh=mesh,
-            activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
-            activation_ffw_ted=P(ShardingAxisName.MLP_DATA, None, None),
-            edf_sharding=P(None, ),
-            efd_sharding=P(None, ),
+            activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
+            activation_ffw_ted=(ShardingAxisName.MLP_DATA, None, None),
+            edf_sharding=(None, ),
+            efd_sharding=(None, ),
             apply_expert_weight_before_computation=False,
             expert_axis_name=expert_axis_name,
             num_expert_parallelism=num_expert_parallelism,
@@ -233,6 +233,7 @@ class Qwen3MoeModel(JaxModule):
         else:
             self.embed_tokens = PPMissingLayer()
 
+<<<<<<< HEAD
         self.start_layer, self.end_layer, self.layers = make_layers(
             hf_config.num_hidden_layers,
             lambda layer_index: Qwen3MoeDecoderLayer(
@@ -246,6 +247,30 @@ class Qwen3MoeModel(JaxModule):
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.layers.{layer_index}",
             ))
+=======
+        self.start_layer, self.end_layer = get_start_end_layer(
+            hf_config.num_hidden_layers,
+            get_pp_group().rank_in_group,
+            get_pp_group().world_size)
+
+        self.layers = []
+        for i in range(hf_config.num_hidden_layers):
+            if self.start_layer <= i < self.end_layer:
+                self.layers.append(
+                    Qwen3MoeDecoderLayer(
+                        config=hf_config,
+                        dtype=dtype,
+                        rng=rng,
+                        mesh=mesh,
+                        kv_cache_dtype=vllm_config.cache_config.cache_dtype,
+                        quant_config=vllm_config.quant_config,
+                        layer_idx=i,
+                        vllm_config=vllm_config,
+                        prefix=f"{prefix}.layers.{i}",
+                    ))
+            else:
+                self.layers.append(PPMissingLayer())
+>>>>>>> b72637da ([MoE][Jax] Add weight loading for unquantized MoE layer/method (#1683))
 
         if self.is_last_rank:
             self.norm = JaxRmsNorm(
@@ -293,17 +318,6 @@ class Qwen3MoeForCausalLM(JaxModule, LoadableWithIterator):
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
                  mesh: Mesh) -> None:
-        if getattr(vllm_config.model_config, "quantization", None) == "fp8":
-            # `get_tpu_quantization_config` returns None for "fp8" because
-            # the work in #1623 is not fully merged. So this block overrides
-            # the logic to return Fp8Config when model_config indicates fp8.
-            # TODO(#1623): Remove this block when `get_tpu_quantization_config`
-            # is updated.
-            from tpu_inference.layers.jax.quantization.fp8 import Fp8Config
-            hg_quant_config = getattr(vllm_config.model_config.hf_config,
-                                      "quantization_config", {})
-            vllm_config.quant_config = Fp8Config(hg_quant_config)
-
         self.vllm_config = vllm_config
         rng = nnx.Rngs(rng_key)
         self.mesh = mesh
