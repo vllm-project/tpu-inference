@@ -131,51 +131,51 @@ def _check_correctness(test_name: str, baseline_outputs: list,
     for i, (baseline, sp_result) in enumerate(zip(baseline_outputs,
                                                   sp_outputs)):
         baseline_text = baseline.outputs[0].text.strip()
-        dp_text = dp_resp_resultsult.outputs[0].text.strip()
+        sp_text = sp_result.outputs[0].text.strip()
 
         # Calculate word overlap for fuzzy matching
         baseline_words = set(baseline_text.split())
-        dp_words = set(dp_text.split())
-        overlap = baseline_words & dp_words
+        sp_words = set(sp_text.split())
+        overlap = baseline_words & sp_words
         match_percent = len(overlap) / len(
             baseline_words) if baseline_words else 0
 
         if match_percent >= 0.7:
             text_matches += 1
 
-        if baseline_text != dp_text:
+        if baseline_text != sp_text:
             print(f"Text mismatch found in prompt {i}:")
             print(f"  Baseline:          {baseline_text}")
-            print(f"  Sequence Parallel: {dp_text}")
+            print(f"  Sequence Parallel: {sp_text}")
             print(f"  Match percent: {match_percent:.2%}")
 
         # Compare log probabilities
         baseline_logprobs = baseline.outputs[0].logprobs
-        dp_logprobs = sp_result.outputs[0].logprobs
+        sp_logprobs = sp_result.outputs[0].logprobs
 
-        if baseline_logprobs is None or dp_logprobs is None:
+        if baseline_logprobs is None or sp_logprobs is None:
             continue
 
-        assert len(baseline_logprobs) == len(dp_logprobs), (
-            f"Logprobs length mismatch: {len(baseline_logprobs)} vs {len(dp_logprobs)}"
+        assert len(baseline_logprobs) == len(sp_logprobs), (
+            f"Logprobs length mismatch: {len(baseline_logprobs)} vs {len(sp_logprobs)}"
         )
 
         for token_idx, (base_lp,
                         sp_lp) in enumerate(zip(baseline_logprobs,
-                                                dp_logprobs)):
+                                                sp_logprobs)):
             if not (base_lp and sp_lp):
                 continue
 
             base_top_token = list(base_lp.keys())[0]
-            dp_top_token = list(sp_lp.keys())[0]
+            sp_top_token = list(sp_lp.keys())[0]
 
             # Only compare logprobs if tokens match
-            if base_top_token != dp_top_token:
+            if base_top_token != sp_top_token:
                 continue
 
             base_logprob_val = base_lp[base_top_token].logprob
-            dp_logprob_val = sp_lp[dp_top_token].logprob
-            diff = abs(base_logprob_val - dp_logprob_val)
+            sp_logprob_val = sp_lp[sp_top_token].logprob
+            diff = abs(base_logprob_val - sp_logprob_val)
             max_logprob_diff = max(max_logprob_diff, diff)
             total_compared_logprobs += 1
 
@@ -183,7 +183,7 @@ def _check_correctness(test_name: str, baseline_outputs: list,
                 logprob_matches += 1
             else:
                 print(f"  Logprob mismatch in prompt {i}, token {token_idx}: "
-                      f"Baseline={base_logprob_val}, SP={dp_logprob_val}, "
+                      f"Baseline={base_logprob_val}, SP={sp_logprob_val}, "
                       f"Diff={diff:.6e}")
 
     # Report results
