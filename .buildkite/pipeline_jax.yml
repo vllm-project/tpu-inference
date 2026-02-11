@@ -335,7 +335,25 @@ steps:
             if [[ "$$IS_FOR_V7X" == "true" ]]; then
               .buildkite/scripts/run_in_docker.sh bash -c 'SKIP_JAX_PRECOMPILE=0 USE_MOE_EP_KERNEL=1 VLLM_XLA_CHECK_RECOMPILATION=1  MODEL_IMPL_TYPE=vllm python examples/offline_inference.py --model Qwen/Qwen1.5-MoE-A2.7B  --tensor-parallel-size 4 --enable-expert-parallel --no-async-scheduling --max-model-len 32 --max-num-batched-tokens 32 --max-num-seqs 8'
             fi
-  
+
+      - label: "${TPU_VERSION:-tpu6e} E2E test for DCN-based P/D disaggregation"
+        key: ${TPU_VERSION:-tpu6e}_test_25
+        soft_fail: true
+        env:
+          IS_FOR_V7X: "${IS_FOR_V7X}"
+          MODEL: "Qwen/Qwen3-0.6B"
+          INPUT_LEN: 1024
+          OUTPUT_LEN: 1024
+          NUM_PROMPTS: 5
+          RANDOM_SEED: 10
+          MAX_CONCURRENCY: 1
+          TEST_MODE: 1
+        agents:
+          queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+        commands:
+          - |
+            .buildkite/scripts/run_disagg.sh
+
       # -----------------------------------------------------------------
       # NOTIFICATION STEP
       # -----------------------------------------------------------------
@@ -363,6 +381,7 @@ steps:
           - ${TPU_VERSION:-tpu6e}_test_20
           - ${TPU_VERSION:-tpu6e}_test_21
           - ${TPU_VERSION:-tpu6e}_test_24
+          - ${TPU_VERSION:-tpu6e}_test_25
         agents:
           queue: cpu
         commands:
