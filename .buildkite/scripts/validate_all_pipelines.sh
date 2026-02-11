@@ -19,9 +19,9 @@ set -euo pipefail
 # Assign the first argument to a local variable
 RAW_FILES_TO_CHECK="${1:-}"
 
-# Pre-filter: Only keep .yml or .yaml files from the input list
+# Pre-filter: Keep .yml/.yaml files AND exclude .github/ directory from the input list
 # Using '|| true' to prevent the script from exiting if no matches are found
-YAML_FILES_TO_CHECK=$(echo "$RAW_FILES_TO_CHECK" | grep -E "\.ya?ml$" || true)
+YAML_FILES_TO_CHECK=$(echo "$RAW_FILES_TO_CHECK" | grep -E "\.ya?ml$" | grep -v "^\.github/" || true)
 
 # Early exit: If no YAML files were modified, skip validation
 if [ -z "$YAML_FILES_TO_CHECK" ]; then
