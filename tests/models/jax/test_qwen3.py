@@ -18,7 +18,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
+from flax.typing import PRNGKey
+from jax.sharding import Mesh
 from transformers import AutoModelForCausalLM
+from vllm.config import ModelConfig
 from vllm.model_executor.model_loader import LoadConfig, get_model_loader
 
 from tpu_inference.distributed.jax_parallel_state import \
@@ -31,6 +34,36 @@ from tpu_inference.models.jax.qwen3 import Qwen3ForCausalLM
 from tpu_inference.models.jax.utils.qwix.qwix_utils import \
     apply_qwix_quantization
 from tpu_inference.runner.kv_cache import create_kv_caches
+
+
+class MockVllmConfig:
+
+    def __init__(self, model: str, kv_cache_dtype: str):
+        self.model_config = ModelConfig(model)
+        self.model_config.dtype = jnp.bfloat16
+        self.load_config = MagicMock()
+        self.load_config.download_dir = None
+        self.cache_config = MagicMock(cache_dtype=kv_cache_dtype)
+        self.quant_config = None
+        self.additional_config = {}
+
+
+@pytest.fixture(scope="module")
+def mesh():
+    """
+    Creates a mesh with 1 device.
+    """
+    if not jax.devices():
+        pytest.skip("No JAX devices available for mesh creation.")
+
+    devices = np.array(jax.local_devices()[:1])
+    num_devices = len(devices)
+    assert num_devices == 1
+    device_mesh = devices.reshape((num_devices, 1, 1, 1))
+
+    with Mesh(device_mesh,
+              axis_names=('data', 'attn_dp', 'expert', 'model')) as m:
+        yield m
 
 
 @pytest.fixture
@@ -56,6 +89,12 @@ def mock_model_inputs():
     indices_do_sample = jnp.ones((num_reqs, ), dtype=jnp.int32)
 
     return (input_ids, attention_metadata, indices_do_sample)
+
+
+@pytest.fixture
+def rng() -> PRNGKey:
+    """Provides a reusable JAX PRNGKey."""
+    return jax.random.PRNGKey(42)
 
 
 @pytest.fixture(autouse=True)
@@ -85,7 +124,7 @@ class TestQwen3ForCausalLM:
     def test_qwen3_600M(self, model_name, kv_cache_type, qwix_rules, rng, mesh,
                         mock_model_inputs, pp_rank, pp_world_size, mock_vllm_config):
         """Tests model init and model forward for the 0.6B model variant."""
-        mock_vllm_config = mock_vllm_config(model_name, kv_cache_type)
+        mock_vllm_config = MockVllmConfig(model_name, kv_cache_type)
         if qwix_rules:
             mock_vllm_config.additional_config["quanntization"] = dict(
                 qwix=dict(rules=qwix_rules))
@@ -181,11 +220,11 @@ class TestQwen3ForCausalLM:
                              ["Qwen/Qwen3-0.6B", "Qwen/Qwen3-0.6B-FP8"])
     @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
                                                        (3, 4)])
-    def test_model_loading(self, model_name, pp_rank, pp_world_size, rng, mesh,
-                           mock_vllm_config):
+    def test_model_loading(self, model_name, pp_rank, pp_world_size, rng,
+                           mesh):
         """Tests loading weights from HF model"""
         kv_cache_type = "auto"
-        mock_vllm_config = mock_vllm_config(model_name, kv_cache_type)
+        mock_vllm_config = MockVllmConfig(model_name, kv_cache_type)
         # No need to load full model.
         mock_vllm_config.model_config.hf_config.num_hidden_layers = 4
         mock_vllm_config.load_config.load_format = "skip_layers_model_loader_for_test"
