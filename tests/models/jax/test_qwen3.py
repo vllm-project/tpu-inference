@@ -18,10 +18,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
-from flax.typing import PRNGKey
-from jax.sharding import Mesh
 from transformers import AutoModelForCausalLM
-from vllm.config import ModelConfig
 from vllm.model_executor.model_loader import LoadConfig, get_model_loader
 
 from tpu_inference.distributed.jax_parallel_state import \
@@ -34,36 +31,6 @@ from tpu_inference.models.jax.qwen3 import Qwen3ForCausalLM
 from tpu_inference.models.jax.utils.qwix.qwix_utils import \
     apply_qwix_quantization
 from tpu_inference.runner.kv_cache import create_kv_caches
-
-
-class MockVllmConfig:
-
-    def __init__(self, model: str, kv_cache_dtype: str):
-        self.model_config = ModelConfig(model)
-        self.model_config.dtype = jnp.bfloat16
-        self.load_config = MagicMock()
-        self.load_config.download_dir = None
-        self.cache_config = MagicMock(cache_dtype=kv_cache_dtype)
-        self.quant_config = None
-        self.additional_config = {}
-
-
-@pytest.fixture(scope="module")
-def mesh():
-    """
-    Creates a mesh with 1 device.
-    """
-    if not jax.devices():
-        pytest.skip("No JAX devices available for mesh creation.")
-
-    devices = np.array(jax.local_devices()[:1])
-    num_devices = len(devices)
-    assert num_devices == 1
-    device_mesh = devices.reshape((num_devices, 1, 1, 1))
-
-    with Mesh(device_mesh,
-              axis_names=('data', 'attn_dp', 'expert', 'model')) as m:
-        yield m
 
 
 @pytest.fixture
@@ -89,12 +56,6 @@ def mock_model_inputs():
     indices_do_sample = jnp.ones((num_reqs, ), dtype=jnp.int32)
 
     return (input_ids, attention_metadata, indices_do_sample)
-
-
-@pytest.fixture
-def rng() -> PRNGKey:
-    """Provides a reusable JAX PRNGKey."""
-    return jax.random.PRNGKey(42)
 
 
 @pytest.fixture(autouse=True)
