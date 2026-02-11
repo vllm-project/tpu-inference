@@ -9,6 +9,7 @@ import jax.numpy as jnp
 from jax._src import test_util as jtu
 
 import tpu_inference.kernels.moe_routing.sort as sort
+import tpu_inference.kernels.moe_routing.sort2 as sort2
 
 
 jax.config.parse_flags_with_absl()
@@ -44,7 +45,7 @@ class MoeRoutingTest(jtu.JaxTestCase):
     _, topk_indices_local = jax.lax.top_k(random_logits, k=topk)
     hidden_states = jax.random.uniform(k2, (num_local_tokens, hidden_size))
     expected = ref_impl(topk_indices_local, hidden_states)
-    actual = sort.sort_tokens(
+    actual = sort2.sort_tokens(
         hidden_states, topk_indices_local, num_experts
     )
     for i in range(len(actual)):
