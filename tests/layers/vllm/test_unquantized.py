@@ -37,14 +37,13 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 
+from tests.layers.common import utils as test_utils
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.unquantized import (
     VllmUnquantizedConfig, VllmUnquantizedFusedMoEMethod,
     VllmUnquantizedLinearMethod)
-
-from . import utils as test_utils
 
 P = PartitionSpec
 MODELS = ["Qwen/Qwen2-1.5B-Instruct"]
