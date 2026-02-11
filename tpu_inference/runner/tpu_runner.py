@@ -263,7 +263,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.mm_manager = MultiModalManager(self)
         self.persistent_batch_manager = PersistentBatchManager(
             self.requests, self.input_batch, self.encoder_cache,
-            self.uses_mrope, self.model_config, self.is_last_rank)
+            self.deepstack_cache, self.uses_mrope, self.model_config,
+            self.is_last_rank)
         self.lora_utils = LoraUtils(self)
 
         cache_dtype = self.cache_config.cache_dtype
@@ -420,6 +421,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.requests: dict[str, CachedRequestState] = {}
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, jax.Array] = {}
+        # mm_hash -> DeepStack outputs (per layer)
+        self.deepstack_cache: dict[str, list[jax.Array]] = {}
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -731,7 +734,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # Run the multimodal encoder if any.
             # We have the modality embeds at this time.
             self.mm_manager.execute_mm_encoder(scheduler_output)
-            mm_embeds = self.mm_manager.gather_mm_embeddings(
+            mm_result = self.mm_manager.gather_mm_embeddings(
                 scheduler_output, input_ids.shape[0])
         #TODO: Remove the follow elif statement once Llama Guard 4 Vision portion has been implemented
         elif is_llama_guard_4 and any(
@@ -741,7 +744,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 "Llama Guard 4 (JAX) currently supports only text inputs. "
                 "Multimodal processing not yet implemented.")
         else:
-            mm_embeds = []
+            mm_result = []
+
+        deepstack_embeds = None
+        mm_embeds = mm_result
+        if isinstance(mm_result, tuple):
+            mm_embeds, deepstack_embeds = mm_result
 
         # NOTE(Wenlong): For multi-modal model,
         # it will embed the text tokens and merge with the existing modality embeds
@@ -777,6 +785,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      intermediate_tensors,
                      self.is_first_rank,
                      self.is_last_rank,
+                     deepstack_embeds,
                  )
             if not self.is_last_rank:
                 assert isinstance(hidden_states, JaxIntermediateTensors)
@@ -1682,7 +1691,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 input_ids,
                 mm_embeds,
             )
-            return None, inputs_embeds
+            return input_ids, inputs_embeds
         else:
             return input_ids, None
 

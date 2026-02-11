@@ -210,11 +210,13 @@ class CompilationManager:
             intermediate_tensors,
             is_first_rank,
             is_last_rank,
+            deepstack_embeds,
         ):
             kv_caches, hidden_states, _ = self.runner.model_fn(
                 state, kv_caches, input_ids, attention_metadata, inputs_embeds,
                 positions, layer_name_to_kvcache_index, lora_metadata,
-                intermediate_tensors, is_first_rank, is_last_rank)
+                intermediate_tensors, is_first_rank, is_last_rank,
+                deepstack_embeds)
             self.runner.kv_caches = kv_caches
             return hidden_states
 
@@ -240,6 +242,7 @@ class CompilationManager:
                 intermediate_tensors,
                 is_first_rank,
                 is_last_rank,
+                None,
                 num_tokens=num_tokens,
             )
 
