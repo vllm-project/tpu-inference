@@ -33,7 +33,7 @@ def get_spmd_mesh(num_devices: int = 1, enable_attn_dp: bool = False):
         axis_names = MESH_AXIS_NAMES
         attn_dp_size = 2
         model_size = num_devices // attn_dp_size
-        mesh_shape = (1, attn_dp_size, 1, 1, model_size)
+        mesh_shape = (1, attn_dp_size, 1, model_size)
         return jax.make_mesh(mesh_shape, axis_names, devices=devices)
     else:
         axis_names = MESH_AXIS_NAMES_2D

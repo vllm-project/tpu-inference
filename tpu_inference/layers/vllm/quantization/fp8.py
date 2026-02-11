@@ -36,10 +36,8 @@ from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.linear_weights import (
     shard_linear_weights, to_parameter_list)
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, process_moe_weights, quantize_moe_weights,
-    shard_moe_weights)
+    FusedMoEWeights, process_fp8_moe_weights, shard_moe_weights)
 from tpu_inference.layers.common.quant_methods import FP8
-from tpu_inference.layers.common.quantization import dequantize_tensor
 from tpu_inference.layers.common.quantization import fp8 as common_fp8
 from tpu_inference.layers.vllm.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
@@ -249,7 +247,7 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
             input_weights,
             moe_backend=self.moe_backend,
             mesh=self.mesh,
-            activation=layer.activation.value,
+            activation=layer.activation,
             # Convert to tuple so jax jit can hash it
             weight_block_size=weight_block_size,
         )

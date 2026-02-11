@@ -185,6 +185,17 @@ class JaxMoE(JaxModule):
 
     def __post_init__(self, rngs: nnx.Rngs):
         """Generates the kernels (weights) for the router and experts (gating, up-projection, and down-projection layers)."""
+        if self.quant_config is None:
+            self.quant_method = None
+        elif (quant_method :=
+              self.quant_config.get_quant_method(self,
+                                                 prefix=self.quant_prefix)):
+            assert isinstance(quant_method, QuantizeMethodBase)
+            self.quant_method = quant_method
+            self.quant_method.create_weights_jax(self)
+        else:
+            self.quant_method = None
+
         E = self.num_local_experts
         D = self.hidden_size
         F = self.intermediate_size_moe
