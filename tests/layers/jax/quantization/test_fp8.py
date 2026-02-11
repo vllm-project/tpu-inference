@@ -237,9 +237,8 @@ class TestFp8BlockwiseJaxLinear:
 
     @pytest.mark.parametrize("kernel_shape", [(16, 4, 8), (32, 8, 16)])
     @pytest.mark.parametrize("batch_size", [1, 4])
-    def test_batched_einsum_reverse_direction(self, kernel_shape, batch_size,
-                                              rngs):
-        """Test 3D einsum in the reverse direction (MLA v_up_proj)."""
+    def test_batched_einsum_v_up_proj(self, kernel_shape, batch_size, rngs):
+        """Test blockwise FP8 with MLA v_up_proj pattern (TNA,ANH->TNH)."""
         hf_quant_config = {
             "quant_method": "fp8",
             "activation_scheme": "dynamic",
@@ -349,6 +348,50 @@ class TestFp8TensorwiseJaxLinear:
 
         expected_shape = (batch_size, N, A)
         assert output.shape == expected_shape
+
+    @pytest.mark.parametrize("einsum_str,kernel_shape", [
+        ('TNH,ANH->TNA', (16, 4, 8)),
+        ('TNA,ANH->TNH', (16, 4, 8)),
+    ])
+    @pytest.mark.parametrize("batch_size", [1, 4])
+    def test_batched_einsum_numerical_correctness(self, einsum_str,
+                                                  kernel_shape, batch_size,
+                                                  rngs):
+        """Verify tensorwise FP8 batched einsum matches BF16 reference."""
+        quant_config = Fp8Config({
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+        })
+
+        A, N, H = kernel_shape
+        layer = JaxEinsum(
+            einsum_str=einsum_str,
+            kernel_shape=kernel_shape,
+            rngs=rngs,
+            quant_config=quant_config,
+        )
+
+        # Determine input shape from einsum_str
+        input_dims = einsum_str.split(',')[0]  # e.g. 'TNH' or 'TNA'
+        dim_sizes = {'T': batch_size, 'N': N, 'H': H, 'A': A}
+        input_shape = tuple(dim_sizes[d] for d in input_dims)
+
+        devices = jax.devices()
+        mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
+        with jax.set_mesh(mesh):
+            x = jax.random.normal(rngs.params(), input_shape,
+                                  dtype=jnp.bfloat16)
+            fp8_output = layer(x)
+
+            # BF16 reference using the same weight
+            weight_bf16 = layer.weight.value.astype(jnp.bfloat16)
+            ref_output = jnp.einsum(einsum_str, x, weight_bf16)
+
+        assert fp8_output.shape == ref_output.shape
+        assert jnp.allclose(fp8_output.astype(jnp.float32),
+                            ref_output.astype(jnp.float32),
+                            atol=1.0,
+                            rtol=0.3)
 
 
 class TestFp8FusedMoE:
