@@ -120,9 +120,18 @@ class TestQwen3ForCausalLM:
             "act_qtype": "float8_e4m3fn"
         }]
     ])
+    @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
+                                                       (3, 4)])
     def test_qwen3_600M(self, model_name, kv_cache_type, qwix_rules, rng, mesh,
-                        mock_model_inputs):
+                        mock_model_inputs, pp_rank, pp_world_size):
         """Tests model init and model forward for the 0.6B model variant."""
+        init_pp_distributed_environment(
+            ip="",
+            rank=pp_rank,
+            world_size=pp_world_size,
+            device=jax.devices()[0],
+            need_pp=False,
+        )
         mock_vllm_config = MockVllmConfig(model_name, kv_cache_type)
         if qwix_rules:
             mock_vllm_config.additional_config["quanntization"] = dict(
@@ -251,7 +260,6 @@ class TestQwen3ForCausalLM:
         with jax.set_mesh(mesh):
             model = Qwen3ForCausalLM(mock_vllm_config, rng, mesh)
         # load weights from HF model
-        with jax.set_mesh(mesh):
             loader = get_model_loader(mock_vllm_config.load_config)
             loader.load_weights(model, model_config)
 
