@@ -22,25 +22,40 @@ from transformers import Qwen3Config
 from vllm.config import VllmConfig
 
 from tpu_inference import utils
+from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
+from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.jax.embed import JaxEmbed
+from tpu_inference.layers.jax.linear import JaxEinsum
+from tpu_inference.layers.jax.norm import JaxRmsNorm
+from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.rope_interface import apply_rope
+from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.jax_intermediate_tensor import \
+    JaxIntermediateTensors
 from tpu_inference.models.jax.qwen2 import Qwen2DecoderLayer
 from tpu_inference.models.jax.qwen2 import Qwen2MLP as Qwen3MLP
 from tpu_inference.models.jax.qwen2 import Qwen2Model
-from tpu_inference.models.jax.utils.weight_utils import StandardWeightLoader
+from tpu_inference.models.jax.utils.weight_utils import LoadableWithIterator
 
 logger = init_logger(__name__)
 
 init_fn = nnx.initializers.uniform()
 
 
-class Qwen3Attention(nnx.Module):
+class Qwen3Attention(JaxModule):
 
-    def __init__(self, config: Qwen3Config, dtype: jnp.dtype, rng: nnx.Rngs,
-                 mesh: Mesh, kv_cache_dtype: str):
+    def __init__(self,
+                 config: Qwen3Config,
+                 dtype: jnp.dtype,
+                 rng: nnx.Rngs,
+                 mesh: Mesh,
+                 kv_cache_dtype: str,
+                 quant_config: VllmQuantConfig,
+                 prefix: str = ""):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
@@ -60,47 +75,59 @@ class Qwen3Attention(nnx.Module):
 
         self.mesh = mesh
 
-        self.q_proj = nnx.Einsum(
+        self.q_proj = JaxEinsum(
             "TD,DNH->TNH",
             (self.hidden_size, self.num_heads, self.head_dim),
-            param_dtype=dtype,
+            dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rng,
+            quant_config=quant_config,
+            prefix=prefix + ".q_proj",
         )
-        self.q_norm = nnx.RMSNorm(
+        self.q_norm = JaxRmsNorm(
             self.head_dim,
             epsilon=self.rms_norm_eps,
-            param_dtype=dtype,
+            dtype=dtype,
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
+            quant_config=quant_config,
+            prefix=prefix + ".q_norm",
         )
-        self.k_proj = nnx.Einsum(
+        self.k_proj = JaxEinsum(
             "TD,DKH->TKH",
             (self.hidden_size, self.num_kv_heads, self.head_dim),
-            param_dtype=dtype,
+            dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rng,
+            quant_config=quant_config,
+            prefix=prefix + ".k_proj",
         )
-        self.k_norm = nnx.RMSNorm(
+        self.k_norm = JaxRmsNorm(
             self.head_dim,
             epsilon=self.rms_norm_eps,
-            param_dtype=dtype,
+            dtype=dtype,
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
+            quant_config=quant_config,
+            prefix=prefix + ".k_norm",
         )
-        self.v_proj = nnx.Einsum(
+        self.v_proj = JaxEinsum(
             "TD,DKH->TKH",
             (self.hidden_size, self.num_kv_heads, self.head_dim),
-            param_dtype=dtype,
+            dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rng,
+            quant_config=quant_config,
+            prefix=prefix + ".v_proj",
         )
-        self.o_proj = nnx.Einsum(
+        self.o_proj = JaxEinsum(
             "TNH,NHD->TD",
             (self.num_heads, self.head_dim, self.hidden_size),
-            param_dtype=dtype,
+            dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
             rngs=rng,
+            quant_config=quant_config,
+            prefix=prefix + ".o_proj",
         )
 
         self._q_scale = 1.0
@@ -141,6 +168,7 @@ class Qwen3Attention(nnx.Module):
             v_scale = self._v_scale
             k, v = quantize_kv(self.kv_cache_quantized_dtype, k, v, k_scale,
                                v_scale)
+
         new_kv_cache, outputs = attention(
             kv_cache,
             q,
@@ -160,41 +188,58 @@ class Qwen3Attention(nnx.Module):
 
 class Qwen3DecoderLayer(Qwen2DecoderLayer):
 
-    def __init__(self, config: Qwen3Config, dtype: jnp.dtype, rng: nnx.Rngs,
-                 mesh: Mesh, kv_cache_dtype: str):
+    def __init__(self,
+                 config: Qwen3Config,
+                 dtype: jnp.dtype,
+                 rng: nnx.Rngs,
+                 mesh: Mesh,
+                 kv_cache_dtype: str,
+                 quant_config: VllmQuantConfig,
+                 prefix: str = ""):
         rms_norm_eps = config.rms_norm_eps
         hidden_size = config.hidden_size
 
-        self.input_layernorm = nnx.RMSNorm(
+        self.input_layernorm = JaxRmsNorm(
             hidden_size,
             epsilon=rms_norm_eps,
-            param_dtype=dtype,
+            dtype=dtype,
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
+            quant_config=quant_config,
+            prefix=prefix + ".input_layernorm",
         )
         self.self_attn = Qwen3Attention(config=config,
                                         dtype=dtype,
                                         rng=rng,
                                         mesh=mesh,
-                                        kv_cache_dtype=kv_cache_dtype)
-        self.post_attention_layernorm = nnx.RMSNorm(
+                                        kv_cache_dtype=kv_cache_dtype,
+                                        quant_config=quant_config,
+                                        prefix=prefix + ".self_attn")
+        self.post_attention_layernorm = JaxRmsNorm(
             hidden_size,
             epsilon=rms_norm_eps,
-            param_dtype=dtype,
+            dtype=dtype,
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
+            quant_config=quant_config,
+            prefix=prefix + ".post_attention_layernorm",
         )
         self.mlp = Qwen3MLP(
             config=config,
             dtype=dtype,
             rng=rng,
+            quant_config=quant_config,
+            prefix=prefix + ".mlp",
         )
 
 
 class Qwen3Model(Qwen2Model):
 
-    def __init__(self, vllm_config: VllmConfig, rng: nnx.Rngs,
-                 mesh: Mesh) -> None:
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 rng: nnx.Rngs,
+                 mesh: Mesh,
+                 prefix: str = "model") -> None:
         model_config = vllm_config.model_config
         hf_config = model_config.hf_config
         vocab_size = model_config.get_vocab_size()
@@ -202,113 +247,121 @@ class Qwen3Model(Qwen2Model):
         rms_norm_eps = hf_config.rms_norm_eps
         hidden_size = hf_config.hidden_size
 
-        self.embed = nnx.Embed(
-            num_embeddings=vocab_size,
-            features=hidden_size,
-            param_dtype=dtype,
-            embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
-            rngs=rng,
-        )
-        self.layers = [
-            Qwen3DecoderLayer(
+        self.is_first_rank = get_pp_group().is_first_rank
+        self.is_last_rank = get_pp_group().is_last_rank
+
+        if self.is_first_rank or (hf_config.tie_word_embeddings
+                                  and self.is_last_rank):
+            self.embed_tokens = JaxEmbed(
+                num_embeddings=vocab_size,
+                features=hidden_size,
+                dtype=dtype,
+                embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
+                rngs=rng,
+                quant_config=vllm_config.quant_config,
+                prefix=prefix + ".embed_tokens",
+            )
+        else:
+            self.embed_tokens = PPMissingLayer()
+
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            hf_config.num_hidden_layers,
+            lambda layer_index: Qwen3DecoderLayer(
                 config=hf_config,
                 dtype=dtype,
                 rng=rng,
                 mesh=mesh,
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
-                kv_cache_dtype=vllm_config.cache_config.cache_dtype)
-            for _ in range(hf_config.num_hidden_layers)
-        ]
-        self.norm = nnx.RMSNorm(
-            hidden_size,
-            epsilon=rms_norm_eps,
-            param_dtype=dtype,
-            scale_init=nnx.with_partitioning(init_fn, (None, )),
-            rngs=rng,
-        )
-        if model_config.hf_config.tie_word_embeddings:
-            self.lm_head = self.embed.embedding
-        else:
-            self.lm_head = nnx.Param(
-                init_fn(rng.params(), (hidden_size, vocab_size), dtype),
-                sharding=(None, "model"),
+                kv_cache_dtype=vllm_config.cache_config.cache_dtype,
+                quant_config=vllm_config.quant_config,
+                prefix=f"{prefix}.layers.{layer_index}",
+            ))
+        if self.is_last_rank:
+            self.norm = JaxRmsNorm(
+                hidden_size,
+                epsilon=rms_norm_eps,
+                dtype=dtype,
+                scale_init=nnx.with_partitioning(init_fn, (None, )),
+                rngs=rng,
+                quant_config=vllm_config.quant_config,
+                prefix=prefix + ".norm",
             )
+        else:
+            self.norm = PPMissingLayer()
 
 
-class Qwen3ForCausalLM(nnx.Module):
-    WeightLoader = StandardWeightLoader
+class Qwen3ForCausalLM(JaxModule, LoadableWithIterator):
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
                  mesh: Mesh) -> None:
+        if getattr(vllm_config.model_config, "quantization", None) == "fp8":
+            # `get_tpu_quantization_config` returns None for "fp8" because
+            # the work in #1623 is not fully merged. So this block overrides
+            # the logic to return Fp8Config when model_config indicates fp8.
+            # TODO(#1623): Remove this block when `get_tpu_quantization_config`
+            # is updated.
+            from tpu_inference.layers.jax.quantization.fp8 import Fp8Config
+            hg_quant_config = getattr(vllm_config.model_config.hf_config,
+                                      "quantization_config", {})
+            vllm_config.quant_config = Fp8Config(hg_quant_config)
+
         self.vllm_config = vllm_config
-        self.rng = nnx.Rngs(rng_key)
+        rng = nnx.Rngs(rng_key)
         self.mesh = mesh
 
         self.model = Qwen3Model(
             vllm_config=vllm_config,
-            rng=self.rng,
+            rng=rng,
             mesh=mesh,
+            prefix="model",
         )
+        model_config = vllm_config.model_config
+        if not model_config.hf_config.tie_word_embeddings:
+            if self.model.is_last_rank:
+                vocab_size = model_config.get_vocab_size()
+                hidden_size = model_config.hf_config.hidden_size
+                self.lm_head = JaxEinsum(
+                    einsum_str="TD,DV->TV",
+                    kernel_shape=(hidden_size, vocab_size),
+                    dtype=model_config.dtype,
+                    rngs=rng,
+                    quant_config=vllm_config.quant_config,
+                    prefix="lm_head",
+                )
+            else:
+                self.lm_head = PPMissingLayer()
 
     def __call__(
         self,
         kv_caches: List[jax.Array],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
+        inputs_embeds: Optional[jax.Array] = None,
+        _input_positions=None,
+        _layer_name_to_kv_cache=None,
+        _lora_metadata=None,
+        intermediate_tensors: JaxIntermediateTensors | None = None,
+        is_first_rank: bool = True,
+        is_last_rank: bool = True,
         *args,
-    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
+    ) -> Tuple[List[jax.Array], jax.Array | JaxIntermediateTensors,
+               List[jax.Array]]:
+        if not is_first_rank:
+            assert intermediate_tensors is not None
+            inputs_embeds = intermediate_tensors["hidden_states"]
         kv_caches, x = self.model(
             kv_caches,
             input_ids,
             attention_metadata,
+            inputs_embeds,
         )
+        if not is_last_rank:
+            x = JaxIntermediateTensors(tensors={"hidden_states": x}, )
         return kv_caches, x, []
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        if self.vllm_config.model_config.hf_config.tie_word_embeddings:
-            logits = jnp.dot(hidden_states, self.model.lm_head.value.T)
-        else:
-            logits = jnp.dot(hidden_states, self.model.lm_head.value)
-        return logits
+        if hasattr(self, 'lm_head'):
+            return self.lm_head(hidden_states)
 
-    def load_weights(self, rng_key: jax.Array):
-        # NOTE: Since we are using nnx.eval_shape to init the model,
-        # we have to pass dynamic arrays here for __call__'s usage.
-        self.rng = nnx.Rngs(rng_key)
-
-        # Key: path to a HF layer weight
-        # Value: path to a nnx layer weight
-        mappings = {
-            "model.embed_tokens": "model.embed.embedding",
-            "model.layers.*.input_layernorm":
-            "model.layers.*.input_layernorm.scale",
-            "model.layers.*.mlp.down_proj":
-            "model.layers.*.mlp.down_proj.kernel",
-            "model.layers.*.mlp.gate_proj":
-            "model.layers.*.mlp.gate_proj.kernel",
-            "model.layers.*.mlp.up_proj": "model.layers.*.mlp.up_proj.kernel",
-            "model.layers.*.post_attention_layernorm":
-            "model.layers.*.post_attention_layernorm.scale",
-            "model.layers.*.self_attn.k_norm":
-            "model.layers.*.self_attn.k_norm.scale",
-            "model.layers.*.self_attn.k_proj":
-            "model.layers.*.self_attn.k_proj.kernel",
-            "model.layers.*.self_attn.o_proj":
-            "model.layers.*.self_attn.o_proj.kernel",
-            "model.layers.*.self_attn.q_norm":
-            "model.layers.*.self_attn.q_norm.scale",
-            "model.layers.*.self_attn.q_proj":
-            "model.layers.*.self_attn.q_proj.kernel",
-            "model.layers.*.self_attn.v_proj":
-            "model.layers.*.self_attn.v_proj.kernel",
-            "model.norm": "model.norm.scale",
-        }
-
-        # Add lm_head mapping only if it's not tied to embeddings
-        if not self.vllm_config.model_config.hf_config.tie_word_embeddings:
-            mappings.update({
-                "lm_head": "model.lm_head",
-            })
-
-        loader = self.WeightLoader(self.vllm_config, self.mesh)
-        loader.load_weights(self, mappings)
+        assert isinstance(self.model.embed_tokens, JaxEmbed)
+        return self.model.embed_tokens.decode(hidden_states)

@@ -76,7 +76,7 @@ setup_environment() {
   if [ -z "${BUILDKITE:-}" ]; then
       VLLM_COMMIT_HASH=""
       TPU_INFERENCE_HASH=$(git log -n 1 --pretty="%H")
-  else    
+  else
       VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH" --default "")
       TPU_INFERENCE_HASH="$BUILDKITE_COMMIT"
   fi

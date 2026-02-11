@@ -6,7 +6,6 @@ import jax.numpy as jnp
 import torch
 import vllm.envs as vllm_envs
 from tpu_info import device
-from vllm.inputs import ProcessorInputs, PromptType
 from vllm.platforms.interface import Platform, PlatformEnum
 
 from tpu_inference import envs
@@ -16,6 +15,7 @@ from tpu_inference.logger import init_logger
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.config.cache import BlockSize
+    from vllm.inputs import ProcessorInputs, PromptType
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams, SamplingType
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -28,6 +28,8 @@ else:
     AttentionBackendEnum = None
     SamplingParams = None
     SamplingType = None
+    PromptType = None
+    ProcessorInputs = None
 
 logger = init_logger(__name__)
 
@@ -133,11 +135,6 @@ class TpuPlatform(Platform):
 
         from vllm.config import CompilationMode
 
-        cache_config = vllm_config.cache_config
-        # For v0, the default block size is 16.
-        if cache_config and cache_config.block_size is None:
-            cache_config.block_size = cast(BlockSize, 16)
-
         compilation_config = vllm_config.compilation_config
 
         # TPU only supports DYNAMO_TRACE_ONCE compilation level
@@ -148,20 +145,26 @@ class TpuPlatform(Platform):
         if compilation_config.backend == "":
             compilation_config.backend = "openxla"
 
-        if vllm_config.model_config:
-            from tpu_inference.layers.vllm.attention import \
-                PallasAttentionBackend
-            cache_config.block_size = PallasAttentionBackend.get_page_size(
-                vllm_config)  # type: ignore[assignment]
-            min_page_size = PallasAttentionBackend.get_min_page_size(
-                vllm_config)
-            if min_page_size > cache_config.block_size:
-                logger.warning(
-                    "Increase the page size from %s to %s to avoid SMEM OOM",
-                    cache_config.block_size,
-                    min_page_size,
-                )
-                cache_config.block_size = min_page_size  # type: ignore[assignment]
+        cache_config = vllm_config.cache_config
+        # For v0, the default block size is 16.
+        if cache_config and cache_config.block_size is None:
+            cache_config.block_size = cast(BlockSize, 16)
+            if vllm_config.model_config:
+                from tpu_inference.layers.vllm.attention import \
+                    PallasAttentionBackend
+                cache_config.block_size = PallasAttentionBackend.get_page_size(
+                    vllm_config)  # type: ignore[assignment]
+                min_page_size = PallasAttentionBackend.get_min_page_size(
+                    vllm_config)
+                if min_page_size > cache_config.block_size:
+                    logger.warning(
+                        "Increase the page size from %s to %s to avoid SMEM OOM",
+                        cache_config.block_size,
+                        min_page_size,
+                    )
+                    cache_config.block_size = min_page_size  # type: ignore[assignment]
+            logger.info(
+                f"Using KV cache block size: {cache_config.block_size}")
 
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
