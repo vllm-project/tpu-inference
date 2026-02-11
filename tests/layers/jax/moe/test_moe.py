@@ -18,7 +18,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import nnx
-from jax.sharding import Mesh
+from jax.sharding import Mesh, PartitionSpec
 
 from tpu_inference.layers.jax.moe.moe import JaxMoE, Router
 from tpu_inference.layers.jax.moe.utils import (MoEBackend,
