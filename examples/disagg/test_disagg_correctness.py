@@ -1,14 +1,31 @@
-import requests
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import argparse
 import json
+import logging
 import random
 import string
-import argparse
-import logging
+
+import requests
+
 
 def generate_prompt(num_words):
     """Generates a random prompt with a specified number of words."""
     words = [random.choice(string.ascii_lowercase) for _ in range(num_words)]
     return " ".join(words)
+
 
 def send_request(url, prompt, model_name, output_length):
     """Sends a request to the LLM and returns the response."""
@@ -37,8 +54,10 @@ def main(args):
         logging.info(f"Sending request {i+1}/{args.num_requests}...")
         prompt = generate_prompt(args.input_length)
 
-        baseline_response = send_request(args.baseline_url, prompt, args.model, args.output_length)
-        disagg_response = send_request(args.disagg_url, prompt, args.model, args.output_length)
+        baseline_response = send_request(args.baseline_url, prompt, args.model,
+                                         args.output_length)
+        disagg_response = send_request(args.disagg_url, prompt, args.model,
+                                       args.output_length)
 
         if baseline_response != disagg_response:
             mismatches += 1
@@ -53,25 +72,44 @@ def main(args):
     if mismatches == 0:
         logging.info("All responses matched! The services are consistent.")
     else:
-        logging.info(f"{mismatches}/{args.num_requests} requests had mismatched responses.")
+        logging.info(
+            f"{mismatches}/{args.num_requests} requests had mismatched responses."
+        )
         if mismatches > args.num_requests * 0.5:  # If more than 50% mismatches, raise an exception
-            raise Exception("More than 50% of responses mismatched. There may be a significant issue.")
+            raise Exception(
+                "More than 50% of responses mismatched. There may be a significant issue."
+            )
     logging.info("--------------------")
 
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run a correctness test between two LLM services.")
-    parser.add_argument("--num_requests", type=int, default=20,
+    parser = argparse.ArgumentParser(
+        description="Run a correctness test between two LLM services.")
+    parser.add_argument("--num_requests",
+                        type=int,
+                        default=20,
                         help="Number of requests to send.")
-    parser.add_argument("--input_length", type=int, default=100,
+    parser.add_argument("--input_length",
+                        type=int,
+                        default=100,
                         help="Length of each input prompt in words.")
-    parser.add_argument("--output_length", type=int, default=20,
+    parser.add_argument("--output_length",
+                        type=int,
+                        default=20,
                         help="Length of each output response in words.")
-    parser.add_argument("--baseline_url", type=str, default="http://localhost:9400/v1/completions",
+    parser.add_argument("--baseline_url",
+                        type=str,
+                        default="http://localhost:9400/v1/completions",
                         help="URL of the baseline LLM service.")
-    parser.add_argument("--disagg_url", type=str, default="http://localhost:8000/v1/completions",
+    parser.add_argument("--disagg_url",
+                        type=str,
+                        default="http://localhost:8000/v1/completions",
                         help="URL of the disaggregated LLM service.")
-    parser.add_argument("--model", type=str, default="Qwen/Qwen3-0.6B",
+    parser.add_argument("--model",
+                        type=str,
+                        default="Qwen/Qwen3-0.6B",
                         help="Name of the model to use for the requests.")
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s - %(levelname)s - %(message)s')
     main(args)
