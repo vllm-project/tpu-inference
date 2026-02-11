@@ -88,6 +88,46 @@ def rngs():
     return nnx.Rngs(42)
 
 
+class TestLinearOpAdaptInfo:
+    """Test QuantLinearConfig.get_adapt_info axis classification."""
+
+    def test_simple_2d_linear(self, rngs):
+        """ab,bc->ac: standard 2D linear (JaxLinear pattern)."""
+        layer = JaxEinsum('ab,bc->ac', (32, 16), rngs)
+        info = QuantLinearConfig.get_adapt_info(einsum_str=layer.einsum_str,
+                                                weight=layer.weight)
+        assert info.in_features == (32, )  # b is contracting
+        assert info.out_features == (16, )  # c is free
+        assert info.batch_features == ()  # no batch dims
+
+    def test_2d_weight_3d_output(self, rngs):
+        """TD,DNH->TNH: D is contracting, N and H are output-only."""
+        layer = JaxEinsum('TD,DNH->TNH', (128, 8, 16), rngs)
+        info = QuantLinearConfig.get_adapt_info(einsum_str=layer.einsum_str,
+                                                weight=layer.weight)
+        assert info.in_features == (128, )  # D is contracting
+        assert info.out_features == (8, 16)  # N, H are free
+        assert info.batch_features == ()  # no batch dims
+
+    def test_batched_einsum_tnh_anh_tna(self, rngs):
+        """TNH,ANH->TNA: N is batch dim, H is contracting."""
+        layer = JaxEinsum('TNH,ANH->TNA', (16, 4, 8), rngs)
+        info = QuantLinearConfig.get_adapt_info(einsum_str=layer.einsum_str,
+                                                weight=layer.weight)
+        assert info.in_features == (8, )  # H is contracting
+        assert info.out_features == (16, )  # A is free
+        assert info.batch_features == (4, )  # N is batch
+
+    def test_batched_einsum_tna_anh_tnh(self, rngs):
+        """TNA,ANH->TNH: N is batch dim, A is contracting."""
+        layer = JaxEinsum('TNA,ANH->TNH', (16, 4, 8), rngs)
+        info = QuantLinearConfig.get_adapt_info(einsum_str=layer.einsum_str,
+                                                weight=layer.weight)
+        assert info.in_features == (16, )  # A is contracting
+        assert info.out_features == (8, )  # H is free
+        assert info.batch_features == (4, )  # N is batch
+
+
 class TestFp8BlockwiseJaxLinear:
 
     @pytest.mark.parametrize("in_features,out_features", [(128, 64),
@@ -164,6 +204,68 @@ class TestFp8BlockwiseJaxLinear:
         expected_shape = (batch_size, ) + kernel_shape[1:]
         assert output.shape == expected_shape
 
+    @pytest.mark.parametrize("kernel_shape", [(16, 4, 8), (32, 8, 16)])
+    @pytest.mark.parametrize("batch_size", [1, 4])
+    def test_batched_einsum_forward_correctness(self, kernel_shape, batch_size,
+                                                rngs):
+        """Test 3D einsum with batch dims (e.g. MLA k/v up projections)."""
+        hf_quant_config = {
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+            "weight_block_size": [8, 16],
+        }
+        quant_config = Fp8Config(hf_quant_config)
+
+        A, N, H = kernel_shape
+        layer = JaxEinsum(
+            einsum_str='TNH,ANH->TNA',
+            kernel_shape=kernel_shape,
+            rngs=rngs,
+            quant_config=quant_config,
+        )
+
+        devices = jax.devices()
+        mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
+        with jax.set_mesh(mesh):
+            layer.quant_method.process_weights_after_loading(layer)
+
+            x = jax.random.normal(rngs.params(), (batch_size, N, H))
+            output = layer(x)
+
+        expected_shape = (batch_size, N, A)
+        assert output.shape == expected_shape
+
+    @pytest.mark.parametrize("kernel_shape", [(16, 4, 8), (32, 8, 16)])
+    @pytest.mark.parametrize("batch_size", [1, 4])
+    def test_batched_einsum_reverse_direction(self, kernel_shape, batch_size,
+                                              rngs):
+        """Test 3D einsum in the reverse direction (MLA v_up_proj)."""
+        hf_quant_config = {
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+            "weight_block_size": [8, 16],
+        }
+        quant_config = Fp8Config(hf_quant_config)
+
+        A, N, H = kernel_shape
+        layer = JaxEinsum(
+            einsum_str='TNA,ANH->TNH',
+            kernel_shape=kernel_shape,
+            rngs=rngs,
+            quant_config=quant_config,
+        )
+
+        devices = jax.devices()
+        mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
+        with jax.set_mesh(mesh):
+            layer.quant_method.process_weights_after_loading(layer)
+
+            x = jax.random.normal(rngs.params(), (batch_size, N, A))
+            output = layer(x)
+
+        expected_shape = (batch_size, N, H)
+        assert output.shape == expected_shape
+
 
 class TestFp8TensorwiseJaxLinear:
 
@@ -219,6 +321,34 @@ class TestFp8TensorwiseJaxLinear:
             output = layer(x)
 
         assert output.shape == (batch_size, out_features)
+
+    @pytest.mark.parametrize("kernel_shape", [(16, 4, 8), (32, 8, 16)])
+    @pytest.mark.parametrize("batch_size", [1, 4])
+    def test_batched_einsum_forward_correctness(self, kernel_shape, batch_size,
+                                                rngs):
+        """Test tensorwise FP8 with batched einsum (MLA-style)."""
+        hf_quant_config = {
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+        }
+        quant_config = Fp8Config(hf_quant_config)
+
+        A, N, H = kernel_shape
+        layer = JaxEinsum(
+            einsum_str='TNH,ANH->TNA',
+            kernel_shape=kernel_shape,
+            rngs=rngs,
+            quant_config=quant_config,
+        )
+
+        devices = jax.devices()
+        mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
+        with jax.set_mesh(mesh):
+            x = jax.random.normal(rngs.params(), (batch_size, N, H))
+            output = layer(x)
+
+        expected_shape = (batch_size, N, A)
+        assert output.shape == expected_shape
 
 
 class TestFp8FusedMoE:

@@ -446,18 +446,27 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
     anh_sharding: Sharding = ()
 
     def setup_specific_layers(self, rngs: nnx.Rngs) -> None:
-        # TODO: refactor 3D projections to use JaxEinsum
-        self.kernel_k_up_proj_ANH = create_param(
-            rngs, (self.kv_lora_rank, self.N, self.qk_nope_head_dim),
-            self.anh_sharding,
-            self.dtype,
-            random_init=self.random_init)
+        self.k_up_proj = JaxEinsum(
+            einsum_str="TNH,ANH->TNA",
+            kernel_shape=(self.kv_lora_rank, self.N, self.qk_nope_head_dim),
+            rngs=rngs,
+            quant_config=self.quant_config,
+            param_dtype=self.dtype,
+            kernel_init=nnx.with_partitioning(
+                sharded_initializer if self.random_init else
+                nnx.initializers.uniform(), self.anh_sharding),
+        )
 
-        self.kernel_v_up_proj_ANH = create_param(
-            rngs, (self.kv_lora_rank, self.N, self.v_head_dim),
-            self.anh_sharding,
-            self.dtype,
-            random_init=self.random_init)
+        self.v_up_proj = JaxEinsum(
+            einsum_str="TNA,ANH->TNH",
+            kernel_shape=(self.kv_lora_rank, self.N, self.v_head_dim),
+            rngs=rngs,
+            quant_config=self.quant_config,
+            param_dtype=self.dtype,
+            kernel_init=nnx.with_partitioning(
+                sharded_initializer if self.random_init else
+                nnx.initializers.uniform(), self.anh_sharding),
+        )
 
     def compute_q_projection(
             self, x_q_TD: jax.Array,
@@ -482,8 +491,7 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
         q_rope_TNH = q_TNH[..., self.qk_nope_head_dim:]
         q_rope_TNH = self.rope.apply_rope(input_positions, q_rope_TNH)
 
-        q_TNA = jnp.einsum("TNH,ANH -> TNA", q_nope_TNH,
-                           self.kernel_k_up_proj_ANH.value)
+        q_TNA = self.k_up_proj(q_nope_TNH)
 
         q_TNA = nnx.with_sharding_constraint(q_TNA, self.query_tnh)
         return (q_TNA, q_rope_TNH)
@@ -603,8 +611,7 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
 
         # MLA Specific: Apply V-Up Projection after attention
         # Outputs from MLA kernel are in latent space (TNA), project to TNH
-        outputs_TNH = jnp.einsum("TNA,ANH -> TNH", outputs_TNA,
-                                 self.kernel_v_up_proj_ANH.value)
+        outputs_TNH = self.v_up_proj(outputs_TNA)
         return outputs_TNH
 
 
@@ -967,9 +974,9 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
         if self.use_mla_kernel:
             self._loaded_to_standardized_keys.update({
                 "model.layers.*.self_attn.k_b_proj.weight":
-                "layers.*.self_attn.kernel_k_up_proj_ANH",
+                "layers.*.self_attn.k_up_proj.weight",
                 "model.layers.*.self_attn.v_b_proj.weight":
-                "layers.*.self_attn.kernel_v_up_proj_ANH",
+                "layers.*.self_attn.v_up_proj.weight",
             })
         # TODO (jacobplatin): we should not be hard-coding these
         self.scale_dtype, self.quant_dtype = jnp.bfloat16, jnp.float8_e4m3fn
@@ -1004,8 +1011,8 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                 "self_attn.kv_down_proj.weight": (28, 576),
                 "self_attn.kv_up_proj.weight": (2, 32768),
                 "self_attn.o_proj.weight": (64, 7168),
-                "self_attn.kernel_k_up_proj_ANH": (2, 128, 128),  # MLA
-                "self_attn.kernel_v_up_proj_ANH": (2, 128, 128),  # MLA
+                "self_attn.k_up_proj.weight": (2, 128, 128),  # MLA
+                "self_attn.v_up_proj.weight": (2, 128, 128),  # MLA
             }
 
             # TODO (jacobplatin): remove this check eventually!
