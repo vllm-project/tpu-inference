@@ -595,7 +595,10 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
         assert isinstance(layer, JaxMoE)
 
         x_TD = jnp.asarray(x, layer.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD, layer.activation_ffw_td)
+        x_TD = jax.lax.with_sharding_constraint(
+            x_TD,
+            jax.sharding.NamedSharding(layer.mesh,
+                                       P(*layer.activation_ffw_td)))
 
         router_logits = None
         # Fused weight backends

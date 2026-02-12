@@ -488,54 +488,60 @@ class TestFp8FusedMoE:
 
         dtype = jnp.bfloat16
 
+        activation_ffw_td = (ShardingAxisNameBase.MLP_DATA,
+                                       ShardingAxisNameBase.MOE_TENSOR) if enable_attn_dp else (ShardingAxisNameBase.MLP_DATA,
+                                       ShardingAxisNameBase.MODEL_1)
+        edf_sharding= (None, ShardingAxisNameBase.MOE_TENSOR,
+                                  ShardingAxisNameBase.ATTN_DATA_EXPERT) if enable_attn_dp else (None, ShardingAxisNameBase.MODEL_1, None)
+        efd_sharding=  (None, ShardingAxisNameBase.ATTN_DATA_EXPERT,
+                                  ShardingAxisNameBase.MOE_TENSOR) if enable_attn_dp else (None, None, ShardingAxisNameBase.MODEL_1)
+
         # This won't be used in reality since we are patching
         # the router_logits
-        router = DeepSeekV3Router(
-            hidden_size=hidden_size,
-            num_experts=num_experts,
-            num_experts_per_tok=topk,
-            n_groups=8,
-            topk_groups=4,
-            norm_topk_prob=True,
-            rngs=rngs,
-            routed_scaling_factor=2.5,
-            dtype=dtype,
-            moe_backend=moe_backend,
-            activation_ffw_td=(ShardingAxisNameBase.MLP_DATA, None),
-            ed_sharding=(None, None),
-            e_sharding=(None, ))
+        with jax.set_mesh(mesh):
+            router = DeepSeekV3Router(
+                hidden_size=hidden_size,
+                num_experts=num_experts,
+                num_experts_per_tok=topk,
+                n_groups=8,
+                topk_groups=4,
+                norm_topk_prob=True,
+                rngs=rngs,
+                routed_scaling_factor=2.5,
+                dtype=dtype,
+                moe_backend=moe_backend,
+                activation_ffw_td=(ShardingAxisNameBase.MLP_DATA, None),
+                ed_sharding=(None, None),
+                e_sharding=(None, ))
 
-        layer = JaxMoE(dtype=jnp.float8_e4m3fn,
-                       num_local_experts=num_experts,
-                       apply_expert_weight_before_computation=False,
-                       expert_axis_name=expert_axis_name,
-                       num_expert_parallelism=2 if use_ep else 1,
-                       hidden_size=hidden_size,
-                       intermediate_size_moe=intermediate_size,
-                       num_experts_per_tok=topk,
-                       mesh=mesh,
-                       hidden_act="silu",
-                       rngs=rngs,
-                       quant_config=quant_config,
-                       activation_ffw_td=(ShardingAxisNameBase.MLP_DATA,
-                                          ShardingAxisNameBase.MODEL_1),
-                       activation_ffw_ted=(ShardingAxisNameBase.MLP_DATA, None,
-                                           ShardingAxisNameBase.MODEL_1),
-                       edf_sharding=(None, ShardingAxisNameBase.MODEL_1,
-                                     ShardingAxisNameBase.MODEL_2),
-                       efd_sharding=(None, ShardingAxisNameBase.MODEL_2,
-                                     ShardingAxisNameBase.MODEL_1),
-                       moe_backend=moe_backend,
-                       renormalize=False,
-                       router=router)
+            layer = JaxMoE(dtype=jnp.float8_e4m3fn,
+                        num_local_experts=num_experts,
+                        apply_expert_weight_before_computation=False,
+                        expert_axis_name=expert_axis_name,
+                        num_expert_parallelism=2 if use_ep else 1,
+                        hidden_size=hidden_size,
+                        intermediate_size_moe=intermediate_size,
+                        num_experts_per_tok=topk,
+                        mesh=mesh,
+                        hidden_act="silu",
+                        rngs=rngs,
+                        quant_config=quant_config,
+                        activation_ffw_td=activation_ffw_td,
+                        activation_ffw_ted=(ShardingAxisNameBase.MLP_DATA, None,
+                                            ShardingAxisNameBase.MOE_TENSOR),
+                        edf_sharding=edf_sharding,
+                        efd_sharding=efd_sharding,
+                        moe_backend=moe_backend,
+                        renormalize=False,
+                        router=router)
 
-        assert layer.use_ep == use_ep
+            assert layer.use_ep == use_ep
 
-        k1, k2, k3, k4 = jax.random.split(jax.random.PRNGKey(42), 4)
+            k1, k2, k3, k4 = jax.random.split(jax.random.PRNGKey(42), 4)
 
-        a = jax.random.normal(k1,
-                              (num_tokens, hidden_size), dtype=dtype) / 10.0
-        score = jax.random.normal(k2, (num_tokens, num_experts), dtype=dtype)
+            a = jax.random.normal(k1,
+                                (num_tokens, hidden_size), dtype=dtype) / 10.0
+            score = jax.random.normal(k2, (num_tokens, num_experts), dtype=dtype)
 
         gate_and_up_shape = (num_experts, intermediate_size, hidden_size)
         w2_shape = (num_experts, hidden_size, intermediate_size)
@@ -544,14 +550,14 @@ class TestFp8FusedMoE:
         w13 = jax.numpy.concatenate([gate, up], axis=1)
         w2 = jax.random.normal(k4, w2_shape, dtype=dtype) / 10.0
 
-        expected = test_utils.ref_moe_jax(a, score, w13, w2, None, None,
-                                          layer.top_k, layer.renormalize,
-                                          layer.activation)
+            expected = test_utils.ref_moe_jax(a, score, w13, w2, None, None,
+                                            layer.top_k, layer.renormalize,
+                                            layer.activation)
 
-        if use_ep:
-            assert layer.moe_backend == MoEBackend.GMM_EP
-        else:
-            assert layer.moe_backend == MoEBackend.GMM_TP
+            if use_ep:
+                assert layer.moe_backend == MoEBackend.GMM_EP
+            else:
+                assert layer.moe_backend == MoEBackend.GMM_TP
 
         # Begin mimic loading weights from checkpoint.
         block_m, block_n = quant_config.weight_block_size
@@ -562,7 +568,7 @@ class TestFp8FusedMoE:
         w2_weight, w2_weight_scale = quantize_to_fp8_block_3d(
             jnp.transpose(w2, (0, 2, 1)), block_m, block_n, jnp.float8_e4m3fn)
 
-        scale_suffix = layer.quant_method.weight_scale_name
+            scale_suffix = layer.quant_method.weight_scale_name
 
         getattr(
             layer,
@@ -589,14 +595,14 @@ class TestFp8FusedMoE:
             setattr(param, "_cnt_moe_weights_loaded", layer.num_local_experts)
         # End mimic loading weights from checkpoint.
 
-        layer.quant_method.process_weights_after_loading(layer)
+            layer.quant_method.process_weights_after_loading(layer)
 
-        # Patch the router since we don't want to use the
-        # real router
-        with patch.object(layer, 'router', return_value=score):
-            # Run the actual forward pass and up-cast
-            # to avoid promote error
-            actual = layer(a).astype(expected.dtype)
+            # Patch the router since we don't want to use the
+            # real router
+            with patch.object(layer, 'router', return_value=score):
+                # Run the actual forward pass and up-cast
+                # to avoid promote error
+                actual = layer(a).astype(expected.dtype)
 
         assert jnp.allclose(expected, actual, atol=5e-2, rtol=1e-1)
 
