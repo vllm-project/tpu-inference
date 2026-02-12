@@ -108,14 +108,24 @@ fi
 local_mounts=()
 if [ "$RUN_IN_BUILDKITE" = "false" ]; then
   echo "Running in local mode, mounting local vllm and tpu-inference directories."
+  # Use the directory containing the current script to find the project roots
+  SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+  TPU_INFERENCE_ROOT="$( cd "$SCRIPT_DIR/../.." &> /dev/null && pwd )"
+  VLLM_ROOT="$( cd "$TPU_INFERENCE_ROOT/../vllm" &> /dev/null && pwd )"
+
+  if [ ! -d "$VLLM_ROOT" ]; then
+    echo "Warning: vllm directory not found at $VLLM_ROOT, falling back to $HOME/vllm"
+    VLLM_ROOT="$HOME/vllm"
+  fi
+
   local_mounts=(
-    -v "$HOME/vllm:/workspace/vllm"
-    -v "$HOME/tpu-inference:/workspace/tpu_inference"
+    -v "$VLLM_ROOT:/workspace/vllm"
+    -v "$TPU_INFERENCE_ROOT:/workspace/tpu_inference"
   )
 fi
 
 # General configs
-HOST_HF_HOME="/mnt/disks/data/hf-docker"
+HOST_HF_HOME="/mnt/disks/persist"
 NUM_HOSTS_PER_INSTANCE=4
 COMMON_SIDE_PORT=8900
 
@@ -166,6 +176,7 @@ for ((i=0; i<NUM_HOSTS_PER_INSTANCE; i++)); do
         -e TPU_PROCESS_PORT="${tpu_port}" \
         \
         -e HF_HOME="/root/hf" \
+        -e IS_FOR_V7X=true \
         -v "${HOST_HF_HOME}:/root/hf" \
         -v $LOG_DIR:/root/logs \
         "${local_mounts[@]}" \
@@ -174,6 +185,7 @@ for ((i=0; i<NUM_HOSTS_PER_INSTANCE; i++)); do
     sleep 1
     set +x
 done
+exit 0
 
 # Start vllm on host-0
 
