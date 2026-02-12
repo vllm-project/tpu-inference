@@ -39,10 +39,8 @@ from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.rope import DeepseekScalingRotaryEmbedding
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.jax_intermediate_tensor import \
-    JaxIntermediateTensors
-from tpu_inference.models.jax.utils.weight_utils import (
-    LoadableWithIterator, load_nnx_param_from_reshaped_torch)
+from tpu_inference.models.jax.utils.weight_utils import \
+    load_nnx_param_from_reshaped_torch
 
 logger = init_logger(__name__)
 
@@ -542,85 +540,3 @@ class DeepseekV2Model(JaxModule):
             x = self.norm(x)
 
         return new_kv_caches, x
-
-
-class DeepseekV2ForCausalLM(JaxModule, LoadableWithIterator):
-
-    def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
-                 mesh: Mesh) -> None:
-        self.vllm_config = vllm_config
-        rng = nnx.Rngs(rng_key)
-        self.mesh = mesh
-
-        self.model = DeepseekV2Model(
-            vllm_config=vllm_config,
-            rng=rng,
-            mesh=mesh,
-            prefix="model",
-        )
-
-        model_config = vllm_config.model_config
-        if self.model.is_last_rank:
-            vocab_size = model_config.get_vocab_size()
-            hidden_size = model_config.hf_config.hidden_size
-            self.lm_head = JaxEinsum(
-                einsum_str="TD,DV->TV",
-                kernel_shape=(hidden_size, vocab_size),
-                dtype=model_config.dtype,
-                rngs=rng,
-                quant_config=vllm_config.quant_config,
-                prefix="lm_head",
-            )
-        else:
-            self.lm_head = PPMissingLayer()
-
-    def load_weights(self, weights: Any) -> set[str]:
-        loaded_keys = super().load_weights(weights)
-        self.initialize_cache()
-        return loaded_keys
-
-    def initialize_cache(self):
-        # Initialize RoPE caches after weights are loaded.
-        for layer in self.model.layers:
-            if hasattr(layer, 'self_attn') and hasattr(layer.self_attn,
-                                                       'rope'):
-                if hasattr(layer.self_attn.rope, 'initialize_cache'):
-                    layer.self_attn.rope.initialize_cache(self.mesh)
-
-    def __call__(
-        self,
-        kv_caches: List[jax.Array],
-        input_ids: jax.Array,
-        attention_metadata: AttentionMetadata,
-        inputs_embeds: Optional[jax.Array] = None,
-        _input_positions=None,
-        _layer_name_to_kv_cache=None,
-        _lora_metadata=None,
-        intermediate_tensors: JaxIntermediateTensors | None = None,
-        is_first_rank: bool = True,
-        is_last_rank: bool = True,
-        *args,
-    ) -> Tuple[List[jax.Array], jax.Array | JaxIntermediateTensors,
-               List[jax.Array]]:
-        if not is_first_rank:
-            assert intermediate_tensors is not None
-            inputs_embeds = intermediate_tensors["hidden_states"]
-
-        kv_caches, x = self.model(
-            kv_caches,
-            input_ids,
-            attention_metadata,
-            inputs_embeds,
-        )
-
-        if not is_last_rank:
-            x = JaxIntermediateTensors(tensors={"hidden_states": x}, )
-
-        return kv_caches, x, []
-
-    def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        return self.lm_head(hidden_states)
-
-
-class DeepseekV3ForCausalLM(DeepseekV2ForCausalLM):
-    pass
