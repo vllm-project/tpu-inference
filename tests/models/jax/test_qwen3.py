@@ -178,7 +178,9 @@ class TestQwen3ForCausalLM:
         kv_cache_type = "auto"
         mock_vllm_config = mock_vllm_config(model_name, kv_cache_type)
         # No need to load full model.
-        mock_vllm_config.model_config.hf_overrides = {"num_hidden_layers": 3}
+        mock_vllm_config.model_config.hf_config.num_hidden_layers = 4
+        mock_vllm_config.load_config.load_format = "skip_layers_model_loader_for_test"
+        mock_vllm_config.load_config.num_layers_to_load_for_test = 4
 
         init_pp_distributed_environment(
             ip="",
@@ -202,7 +204,7 @@ class TestQwen3ForCausalLM:
         model = Qwen3ForCausalLM(mock_vllm_config, rng, mesh)
         # load weights from HF model
         with jax.set_mesh(mesh):
-            loader = get_model_loader(LoadConfig(load_format="hf"))
+            loader = get_model_loader(mock_vllm_config.load_config)
             loader.load_weights(model, model_config)
 
         layer_idx = model.model.start_layer
