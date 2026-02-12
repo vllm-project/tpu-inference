@@ -179,7 +179,13 @@ def jax_copy_swap_kv_caches(
         dst_memory_kind = dst_sharding.memory_kind
         result = []
         for kv_cache in src_kv_caches:
-            shards = jax.device_get([shard.data for shard in kv_cache.addressable_shards])
+            shards = [
+                jax.device_put(
+                    shard.data,
+                    jax.sharding.SingleDeviceSharding(
+                        shard.device, memory_kind=dst_memory_kind))
+                for shard in kv_cache.addressable_shards
+            ]
             result.append(shards)
         return result
     else:  # h2d
