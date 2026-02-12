@@ -26,6 +26,7 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from vllm.config import ModelConfig
 
+from tpu_inference.layers.jax.quantization.unquantized import UnquantizedConfig
 from tpu_inference.models.jax.llama4 import (Llama4ForCausalLM,
                                              Llama4WeightLoader)
 
@@ -89,6 +90,9 @@ class MockVllmConfig:
         hf_config_mock.text_config = text_config_mock
 
         self.model_config.hf_config = hf_config_mock
+
+        # TODO (jacobplatin): we shouldn't hardcode the quant config
+        self.quant_config = UnquantizedConfig({})
 
 
 @pytest.fixture(scope="module")

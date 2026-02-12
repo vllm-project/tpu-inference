@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import time
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -74,8 +74,9 @@ class CompilationManager:
                          **kwargs) -> None:
         logger.info(f"Precompile {name} --> {kwargs}")
         start = time.perf_counter()
-        result = fn(*args)
-        jax.tree.map(lambda r: r.block_until_ready(), result)
+        with jax.set_mesh(self.runner.mesh):
+            result = fn(*args)
+            jax.tree.map(lambda r: r.block_until_ready(), result)
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
 
@@ -96,7 +97,10 @@ class CompilationManager:
             if not self.runner.is_last_rank:
                 return
             self._precompile_select_from_array()
-            self._precompile_compute_logits()
+            if not self.runner.is_pooling_model:
+                self._precompile_compute_logits()
+            else:
+                self._precompile_compute_pooling()
             # Skip sampling if already precompiled before KV cache allocation
             if not self._sampling_precompiled:
                 self._precompile_sampling()
@@ -171,17 +175,16 @@ class CompilationManager:
                                             request_distribution,
                                             sharding=dp_sharding)
 
-        attention_metadata_per_layer: Dict[str, AttentionMetadata] = {}
-        uniform_attention_metadata: AttentionMetadata = None
-        for kv_cache_gid, kv_cache_group in enumerate(
-                self.runner.kv_cache_config.kv_cache_groups):
+        def build_block_table(kv_cache_gid: int) -> jax.Array:
             block_tables = self.runner.block_tables_cpu[
                 kv_cache_gid][:self.runner.max_num_reqs]
             block_tables = block_tables.reshape(-1)
             block_tables = device_array(self.runner.mesh,
                                         block_tables,
                                         sharding=dp_sharding)
+            return block_tables
 
+        def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
                 block_tables=block_tables,
@@ -189,13 +192,21 @@ class CompilationManager:
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
             )
-            if not self.runner.use_hybrid_kvcache:
-                # all layers share the same attention metadata
-                uniform_attention_metadata = attention_metadata_gid
-            else:
-                for layer_name in kv_cache_group.layer_names:
-                    attention_metadata_per_layer[
-                        layer_name] = attention_metadata_gid
+            return attention_metadata_gid
+
+        attention_metadata: AttentionMetadata | dict[str, AttentionMetadata]
+        if len(self.runner.kv_cache_config.kv_cache_groups) <= 1:
+            # Pooling model will not using kv cache
+            no_kv_cache = len(self.runner.kv_cache_config.kv_cache_groups) == 0
+            block_tables = build_block_table(0) if not no_kv_cache else None
+            attention_metadata = build_attn(block_tables)
+        else:
+            attention_metadata = {
+                name: build_attn(build_block_table(gid))
+                for gid, kv_cache_group in enumerate(
+                    self.runner.kv_cache_config.kv_cache_groups)
+                for name in kv_cache_group.layer_names
+            }
 
         def model_fn_wrapper(
             state,
@@ -221,10 +232,6 @@ class CompilationManager:
                 self.runner.lora_config, np.array([num_tokens],
                                                   dtype=np.int32)):
             lora_metadata = self.runner.lora_utils.extract_lora_metadata()
-            if self.runner.use_hybrid_kvcache:
-                attention_metadata = attention_metadata_per_layer
-            else:
-                attention_metadata = uniform_attention_metadata
             self._run_compilation(
                 name,
                 model_fn_wrapper,
@@ -484,6 +491,15 @@ class CompilationManager:
                     lora_metadata,
                     num_reqs=num_reqs,
                 )
+
+    def _precompile_compute_pooling(self) -> None:
+        logger.info("Compiling compute_pooling with different input shapes.")
+
+        # vLLM pooling layer design has complex and dynamic logic. There are
+        # interoperate between tensors from host and accelerator.
+        # It's quite hard, if not impossible, to move all tensor to accelerator
+        # and apply JIT on the entire computation.
+        # See PoolingCursor and AllPool, MeanPool ... in vLLM repo for details.
 
     def _precompile_sampling(self) -> None:
         logger.info("Compiling sampling with different input shapes.")

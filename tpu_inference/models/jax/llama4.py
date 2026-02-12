@@ -532,6 +532,7 @@ class Llama4ForCausalLM(nnx.Module):
                 activation_ffw_ted=('data', 'expert', None),
                 edf_sharding=('model', None, None),
                 efd_sharding=('model', None, None),
+                quant_config=vllm_config.quant_config,
                 random_init=force_random_weights) if is_moe_layer else None
 
             dense_ffw = DenseFFW(

@@ -16,13 +16,14 @@ from dataclasses import dataclass, fields
 
 import jax
 import torch
+from jax._src import mesh as meshlib
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn import ParameterList
 from torch.nn.parameter import Parameter
 from torchax.tensor import Tensor
 
-from tpu_inference.layers.common.utils import \
-    reorder_concatenated_tensor_for_sharding
+from tpu_inference.layers.common.utils import (
+    general_device_put, reorder_concatenated_tensor_for_sharding)
 from tpu_inference.logger import init_logger
 
 P = PartitionSpec
@@ -148,7 +149,9 @@ def shard_linear_weights(
     transposed: bool = True,
     per_tensor: bool = False,
 ) -> LinearWeights:
-    mesh = mesh or jax.sharding.get_mesh()
+    # jax==0.8.1 introduces jax.sharding.get_mesh(), but current
+    # v6e test environment uses 0.8.0, so we use jax._src.mesh instead.
+    mesh = mesh or meshlib.get_concrete_mesh()
     if not transposed:
         # By defualt, we use transposed weights. If it is not transposed,
         # we need to transpose the sharding as well.
@@ -184,6 +187,6 @@ def shard_linear_weights(
         key = field.name
         if (weight := getattr(weights, key, None)) is not None:
             sharding = getattr(weight_shardings, key)
-            weight = jax.device_put(weight, sharding)
+            weight = general_device_put(weight, sharding)
             setattr(weights, key, weight)
     return weights

@@ -19,13 +19,16 @@ steps:
     key: "${TPU_VERSION:-tpu6e}_EP_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: "${TPU_QUEUE_SINGLE:-tpu_v7x_8_queue}"
+      queue: "${TPU_QUEUE_MULTI:-tpu_v7x_8_queue}"
     env:
       IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
-          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_expert_parallel.py'
+          bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh  --model_name "Qwen/Qwen1.5-MoE-A2.7B" --use_moe_ep_kernel 1 --tensor_parallel_size 4 --max_model_len 1024 --max_num_batched_tokens 128 --max_gen_toks 128 --enable_expert_parallel 1 --flex_threshold 0.37 --strict_threshold 0.38
+      - |
+        .buildkite/scripts/run_in_docker.sh \
+          bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh  --model_name "Qwen/Qwen1.5-MoE-A2.7B" --use_moe_ep_kernel 0 --tensor_parallel_size 4 --max_model_len 1024 --max_num_batched_tokens 128 --max_gen_toks 128 --enable_expert_parallel 1 --flex_threshold 0.37 --strict_threshold 0.38
   - label: "${TPU_VERSION:-tpu6e} Record correctness test result for EP"
     key: "${TPU_VERSION:-tpu6e}_record_EP_CorrectnessTest"
     depends_on: "${TPU_VERSION:-tpu6e}_EP_CorrectnessTest"
@@ -45,12 +48,13 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_record_EP_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+      queue: "${TPU_QUEUE_MULTI:-tpu_v7x_8_queue}"
     env:
       IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_EP_PerformanceTest" "unverified"
+        .buildkite/scripts/run_in_docker.sh \
+          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_expert_parallel.py'
   - label: "${TPU_VERSION:-tpu6e} Record performance test result for EP"
     key: "${TPU_VERSION:-tpu6e}_record_EP_PerformanceTest"
     depends_on: "${TPU_VERSION:-tpu6e}_EP_PerformanceTest"

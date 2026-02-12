@@ -35,8 +35,7 @@ from tpu_inference.layers.common.process_weights.linear_weights import (
     to_parameter_list)
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_moe_weights, shard_moe_weights)
-from tpu_inference.layers.common.quant_methods import (UNQUANTIZED,
-                                                       get_tpu_quant_method)
+from tpu_inference.layers.common.quant_methods import UNQUANTIZED
 from tpu_inference.layers.common.quantization import \
     unquantized as common_unquantized
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -55,7 +54,7 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
-@register_quantization_config(get_tpu_quant_method(UNQUANTIZED))
+@register_quantization_config(UNQUANTIZED)
 class VllmUnquantizedConfig(QuantizationConfig, VllmQuantConfig):
 
     @classmethod
@@ -112,7 +111,9 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
 
         if len(layer._loaded_weights) == self.linear_config.num_proj * len(
                 dict(layer.named_parameters(recurse=False))):
+            logger.debug(f"Start sharding weights for layer {type(layer)}")
             self.process_weights_after_loading(layer)
+            logger.debug(f"Complete sharding weights for layer {type(layer)}")
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if not _tensor_is_in_cpu(layer.weight):
@@ -156,7 +157,6 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
                 weight_p_spec=self.linear_config.weight_sharding,
                 bias_p_spec=self.linear_config.bias_sharding,
             ))
-
         if self.linear_config.fuse_matmuls:
             layer.weight = Parameter(weights.weight, requires_grad=False)
             if bias is not None:
@@ -238,7 +238,9 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         layer._loaded_weights.add((expert_id, shard_id))
         if len(layer._loaded_weights) == layer.global_num_experts * len(
             ('w1', 'w2', 'w3')):
+            logger.debug(f"Start sharding weights for layer {type(layer)}")
             self.process_weights_after_loading(layer)
+            logger.debug(f"Complete sharding weights for layer {type(layer)}")
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if not _tensor_is_in_cpu(layer.w13_weight):

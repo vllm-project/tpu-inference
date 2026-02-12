@@ -271,7 +271,7 @@ def select_moe_backend(use_ep: bool) -> MoEBackend:
             logger.info_once("[MoE]: Using fused MoE EP kernel")
             return MoEBackend.FUSED_MOE
 
-    if envs.USE_MEGABLOCKS:
+    if envs.USE_UNFUSED_MEGABLOCKS:
         logger.info_once(
             "[MoE]: Mega Blocks is enabled for GMM in Sparse Matmul")
         return MoEBackend.MEGABLX_GMM
@@ -282,6 +282,12 @@ def select_moe_backend(use_ep: bool) -> MoEBackend:
             "enabled. Falling back to gmm implementation.")
         logger.info_once("[MoE]: Using GMM EP kernel")
         return MoEBackend.GMM_EP
+
+    if envs.USE_DENSE_MOE:
+        logger.info_once("[MoE]: Using DENSE_MOE")
+        logger.warning_once(
+            "[MoE]: DENSE_MOE is naive and not intended for production.")
+        return MoEBackend.DENSE_MAT
 
     logger.info_once("[MoE]: Using GMM TP kernel")
     return MoEBackend.GMM_TP

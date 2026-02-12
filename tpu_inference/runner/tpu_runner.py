@@ -59,6 +59,7 @@ from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.logger import init_logger
+from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.common.model_loader import get_model
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
@@ -278,6 +279,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.kv_caches: list[jax.Array] = []
         self.layer_name_to_kvcache_index: dict[str, int] = {}
 
+        self.is_pooling_model: bool = self.model_config.runner_type == "pooling"
+        """Generative model or pooling model select different computations."""
+
     def _init_random(self):
         if self.model_config.seed is None:
             self.model_config.seed = 0
@@ -314,6 +318,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         mesh_shape = (
             sharding_strategy.model_dp_size,
             sharding_strategy.attn_dp_size,
+            sharding_strategy.attn_dp_expert_size,
             sharding_strategy.expert_size,
             sharding_strategy.tp_size,
         )
@@ -332,10 +337,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         ici_mesh_shape = (
             dp_inner,
             sharding_strategy.attn_dp_size,
+            sharding_strategy.attn_dp_expert_size,
             sharding_strategy.expert_size,
             sharding_strategy.tp_size,
         )
-        dcn_mesh_shape = (num_slices, 1, 1, 1)
+        dcn_mesh_shape = (num_slices, 1, 1, 1, 1)
 
         return mesh_utils.create_hybrid_device_mesh(
             mesh_shape=ici_mesh_shape,
@@ -403,12 +409,22 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # The total number of requests is dp_size * max_num_seqs
         self.max_num_reqs = max(self.dp_size * scheduler_config.max_num_seqs,
                                 MIN_NUM_SEQS)
+
+        additional_sizes = self.vllm_config.additional_config.get(
+            "compilation_sizes", [])
         # [16, 32, 64, 128, 256, 512, 1024, 2048]
+        cache_dtype = self.cache_config.cache_dtype
+        if cache_dtype == "auto":
+            cache_dtype = self.dtype
+        kv_cache_dtype = to_jax_dtype(cache_dtype)
+        kv_packing = common_utils.get_dtype_packing(kv_cache_dtype)
         self.num_tokens_paddings = runner_utils.get_token_paddings(
-            min_token_size=max(16, self.dp_size),
+            min_token_size=max(16, self.dp_size * kv_packing),
             max_token_size=scheduler_config.max_num_batched_tokens *
             self.dp_size,
             padding_gap=vllm_envs.VLLM_TPU_BUCKET_PADDING_GAP)
+        self.num_tokens_paddings = sorted(self.num_tokens_paddings +
+                                          additional_sizes)
         self.num_tokens_paddings_per_dp = [
             padding // self.dp_size for padding in self.num_tokens_paddings
         ]
@@ -495,7 +511,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                             dtype=np.int64)
 
     def load_model(self):
-        self.model_fn, self.compute_logits_fn, self.combine_hidden_states_fn, multimodal_fns, self.state, self.lora_manager, self.model = get_model(
+        self.model_fn, self.compute_logits_fn, self.pooler_fn, self.combine_hidden_states_fn, multimodal_fns, self.state, self.lora_manager, self.model = get_model(
             self.vllm_config,
             self.rng_key,
             self.mesh,
@@ -530,7 +546,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-        return ("generate", )
+        runner_type = self.model_config.runner_type
+        if runner_type == "generate":
+            return ("generate", )
+        if runner_type == "pooling":
+            return ("embed", )
+        assert False, f"unsupported runner type: {runner_type}"
 
     def get_kv_cache_spec(self):
         return self.kv_cache_manager.get_kv_cache_spec()
@@ -557,7 +578,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called "
                                "after execute_model() returns None.")
-        output = self._execute_model(scheduler_output, intermediate_tensors)
+        with jax.set_mesh(self.mesh):
+            output = self._execute_model(scheduler_output,
+                                         intermediate_tensors)
         return output
 
     def sample_tokens(
@@ -780,6 +803,27 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 assert isinstance(hidden_states, JaxIntermediateTensors)
                 hidden_states.kv_connector_output = kv_connector_output
                 return hidden_states
+
+            if self.is_pooling_model:
+                seq_lens = self.seq_lens_cpu[:self.input_batch.num_reqs]
+                pooling_metadata = self.input_batch.get_pooling_metadata()
+
+                pooler_fn: PoolerFunc = self.pooler_fn
+                pooler_output = pooler_fn(
+                    hidden_states,
+                    pooling_metadata,
+                    seq_lens,
+                )
+
+                return ModelRunnerOutput(
+                    req_ids=self.input_batch.req_ids,
+                    req_id_to_index=self.input_batch.req_id_to_index,
+                    sampled_token_ids=[],
+                    logprobs=None,
+                    prompt_logprobs_dict={},
+                    pooler_output=pooler_output,
+                )
+
             hidden_states = self._select_from_array_fn(hidden_states,
                                                        logits_indices)
             logits = self.compute_logits_fn(
@@ -998,7 +1042,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logprobs_lists = None
 
         if self.speculative_config:
-            with self.maybe_forbid_compile:
+            with self.maybe_forbid_compile, jax.set_mesh(self.mesh):
                 self.speculative_decoding_manager.propose_draft_token_ids(
                     valid_sampled_token_ids,
                     aux_hidden_states,
@@ -1402,10 +1446,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
              sharding=data_parallel_attn_sharding,
          )
 
-        attention_metadata_per_layer: Dict[str, AttentionMetadata] = {}
-        uniform_attention_metadata: AttentionMetadata = None
-        for kv_cache_gid, kv_cache_group in enumerate(
-                self.kv_cache_config.kv_cache_groups):
+        def build_block_table(kv_cache_gid: int) -> jax.Array:
             block_tables = self.block_tables_cpu[kv_cache_gid][:self.
                                                                max_num_reqs]
             for dp_rank in range(dp_size):
@@ -1423,7 +1464,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 (block_tables),
                 sharding=data_parallel_attn_sharding,
             )
+            return block_tables
 
+        def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
                 block_tables=block_tables,
@@ -1435,13 +1478,21 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # This is for making these cpu buffers hidden during tracing
             attention_metadata_gid.query_start_loc_cpu = query_start_loc_cpu
             attention_metadata_gid.seq_lens_cpu = seq_lens_cpu
+            return attention_metadata_gid
 
-            if not self.use_hybrid_kvcache:
-                uniform_attention_metadata = attention_metadata_gid
-            else:
-                for layer_name in kv_cache_group.layer_names:
-                    attention_metadata_per_layer[
-                        layer_name] = attention_metadata_gid
+        attention_metadata: AttentionMetadata | dict[str, AttentionMetadata]
+        if len(self.kv_cache_config.kv_cache_groups) <= 1:
+            # Pooling model will not using kv cache
+            no_kv_cache = len(self.kv_cache_config.kv_cache_groups) == 0
+            block_tables = build_block_table(0) if not no_kv_cache else None
+            attention_metadata = build_attn(block_tables)
+        else:
+            attention_metadata = {
+                name: build_attn(build_block_table(gid))
+                for gid, kv_cache_group in enumerate(
+                    self.kv_cache_config.kv_cache_groups)
+                for name in kv_cache_group.layer_names
+            }
 
         # Async scheduling: substitute placeholder tokens for DP
         if self.scheduler_config.async_scheduling and self._pre_async_results is not None:
@@ -1471,10 +1522,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 padded_total_num_scheduled_tokens,
             )
 
-        if self.use_hybrid_kvcache:
-            attention_metadata = attention_metadata_per_layer
-        else:
-            attention_metadata = uniform_attention_metadata
         return (
             input_ids,
             positions,
@@ -1620,10 +1667,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
              self.mesh, (input_ids, positions, query_start_loc, seq_lens,
                          logits_indices, request_distribution))
 
-        attention_metadata_per_layer: Dict[str, AttentionMetadata] = {}
-        uniform_attention_metadata: AttentionMetadata = None
-        for kv_cache_gid, kv_cache_group in enumerate(
-                self.kv_cache_config.kv_cache_groups):
+        def build_block_table(kv_cache_gid: int) -> jax.Array:
             block_tables = self.block_tables_cpu[kv_cache_gid][:self.
                                                                max_num_reqs]
             block_tables[:num_reqs] = (
@@ -1632,7 +1676,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # Convert block_tables to 1D on cpu.
             block_tables = block_tables.reshape(-1)
             block_tables = device_array(self.mesh, (block_tables))
+            return block_tables
 
+        def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
                 block_tables=block_tables,
@@ -1642,14 +1688,21 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # This is for making these cpu buffers hidden during tracing
             attention_metadata_gid.query_start_loc_cpu = query_start_loc_cpu
             attention_metadata_gid.seq_lens_cpu = seq_lens_cpu
+            return attention_metadata_gid
 
-            if not self.use_hybrid_kvcache:
-                # all layers share the same attention metadata
-                uniform_attention_metadata = attention_metadata_gid
-            else:
-                for layer_name in kv_cache_group.layer_names:
-                    attention_metadata_per_layer[
-                        layer_name] = attention_metadata_gid
+        attention_metadata: AttentionMetadata | dict[str, AttentionMetadata]
+        if len(self.kv_cache_config.kv_cache_groups) <= 1:
+            # Pooling model will not using kv cache
+            no_kv_cache = len(self.kv_cache_config.kv_cache_groups) == 0
+            block_tables = build_block_table(0) if not no_kv_cache else None
+            attention_metadata = build_attn(block_tables)
+        else:
+            attention_metadata = {
+                name: build_attn(build_block_table(gid))
+                for gid, kv_cache_group in enumerate(
+                    self.kv_cache_config.kv_cache_groups)
+                for name in kv_cache_group.layer_names
+            }
 
         if self.scheduler_config.async_scheduling and len(
                 token_in_tpu_cur_input_indices) > 0:
@@ -1664,10 +1717,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 padded_total_num_scheduled_tokens)
         logits_indices_selector = None
 
-        if self.use_hybrid_kvcache:
-            attention_metadata = attention_metadata_per_layer
-        else:
-            attention_metadata = uniform_attention_metadata
         return (input_ids, positions, attention_metadata, sampling_metadata,
                 logits_indices, spec_decode_metadata, logits_indices_selector,
                 padded_num_reqs)

@@ -36,14 +36,13 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 
+from tests.layers.common import utils as test_utils
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.fp8 import (VllmFp8Config,
                                                         VllmFp8LinearMethod,
                                                         VllmFp8MoEMethod)
-
-from . import utils as test_utils
 
 P = PartitionSpec
 MODELS = [

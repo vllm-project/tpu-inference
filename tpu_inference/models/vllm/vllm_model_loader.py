@@ -12,11 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
+import regex as re
 import torch
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader import register_model_loader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
+from vllm.model_executor.model_loader.runai_streamer_loader import \
+    RunaiModelStreamerLoader
 from vllm.model_executor.model_loader.utils import (
     initialize_model, process_weights_after_loading)
 from vllm.utils.torch_utils import set_default_torch_dtype
@@ -79,6 +84,46 @@ class IncrementalModelLoader(DefaultModelLoader):
     def __init__(self, load_config: LoadConfig):
         load_config.load_format = "auto"
         super().__init__(load_config)
+
+    def load_model(self,
+                   vllm_config: VllmConfig,
+                   model_config: ModelConfig,
+                   prefix: str = "") -> torch.nn.Module:
+        """Load a model with the given configurations."""
+        device_config = vllm_config.device_config
+        load_config = vllm_config.load_config
+        load_device = (device_config.device
+                       if load_config.device is None else load_config.device)
+        target_device = torch.device(load_device)
+        with set_default_torch_dtype(model_config.dtype):
+            with target_device:
+                model = initialize_model(vllm_config=vllm_config,
+                                         model_config=model_config)
+            # Override weight loader logic of each parameter to support incremental loading.
+            attach_incremental_weight_loader(model)
+            # Quantization does not happen in `load_weights` but after it
+            self.load_weights(model, model_config)
+            process_weights_after_loading(model, model_config, target_device)
+
+        return model.eval()
+
+
+@register_model_loader("runai_streamer")
+class RunaiIncrementalModelLoader(RunaiModelStreamerLoader):
+    """Model loader that supports both RunAI streaming and incremental weight sharding."""
+
+    def __init__(self, load_config: LoadConfig):
+        super().__init__(load_config)
+
+    def _prepare_weights(self, model_name_or_path: str,
+                         revision: str | None) -> list[str]:
+        hf_weights_files = super()._prepare_weights(model_name_or_path,
+                                                    revision)
+        hf_weights_files.sort(key=lambda f: [
+            int(s) if s.isdigit() else s
+            for s in re.split(r"(\d+)", os.path.basename(f))
+        ])
+        return hf_weights_files
 
     def load_model(self,
                    vllm_config: VllmConfig,

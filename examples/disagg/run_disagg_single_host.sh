@@ -53,6 +53,10 @@ for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     KV_PORT=$((7100 + i))
     SIDE_PORT=$((6100 + i))
 
+    # os.environ[TPU_CHIPS_PER_PROCESS_BOUNDS] = "1,4,1"
+    # os.environ[TPU_PROCESS_BOUNDS] = "1,1,1"
+    # os.environ[TPU_VISIBLE_CHIPS] = "0,1,2,3"
+
     TPU_CHIPS_PER_PROCESS_BOUNDS=1,1,1 \
     TPU_PROCESS_BOUNDS=1,1,1 \
     TPU_VISIBLE_CHIPS=0 \
@@ -64,6 +68,8 @@ for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     vllm serve $MODEL \
     --port $PORT \
     --gpu-memory-utilization 0.2 \
+    --max-num-batched-tokens 8192 \
+    --block-size 128 \
     --no-enable-prefix-caching \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
     --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_producer\"}" \
@@ -81,6 +87,10 @@ for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     # Same as prefill SIDE_PORT
     SIDE_PORT=$((6100 + i))
 
+    # os.environ[TPU_CHIPS_PER_PROCESS_BOUNDS] = "1,4,1"
+    # os.environ[TPU_PROCESS_BOUNDS] = "1,1,1"
+    # os.environ[TPU_VISIBLE_CHIPS] = "4,5,6,7"
+
     TPU_CHIPS_PER_PROCESS_BOUNDS=1,1,1 \
     TPU_PROCESS_BOUNDS=1,1,1 \
     TPU_VISIBLE_CHIPS=1 \
@@ -91,8 +101,10 @@ for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     \
     vllm serve $MODEL \
     --port $PORT \
-    --gpu-memory-utilization 0.2 \
+    --gpu-memory-utilization 0.6 \
     --no-enable-prefix-caching \
+    --max-num-batched-tokens 8192 \
+    --block-size 128 \
     --tensor-parallel-size $DECODER_TP_SIZE \
     --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\"}" \
     > $HOME/logs/decode_$i.txt 2>&1 &
@@ -133,9 +145,9 @@ vllm bench serve \
 --model=$MODEL \
 --num-warmups=3 \
 --dataset-name=random \
---random-input-len=1024 \
---random-output-len=1024 \
---num-prompts=20 \
+--random-input-len=4096 \
+--random-output-len=128 \
+--num-prompts=30 \
 --ignore-eos \
 --host=localhost \
 --port 8000 \
@@ -148,9 +160,9 @@ vllm bench serve \
 --model=$MODEL \
 --num-warmups=3 \
 --dataset-name=random \
---random-input-len=1024 \
---random-output-len=1024 \
---num-prompts=20 \
+--random-input-len=4096 \
+--random-output-len=128 \
+--num-prompts=30 \
 --ignore-eos \
 --host=localhost \
 --port 9400 \
@@ -166,7 +178,8 @@ The proxy server has been launched on: 127.0.0.1:8000
 curl http://localhost:8000/v1/completions -X POST -H "Content-Type: application/json" -d '{
     "model": "Qwen/Qwen3-0.6B",
     "prompt": "what is your pet name",
-    "max_tokens": 10
+    "max_tokens": 10,
+    "temperature": 0.0
 }'
 
 >> Stop the proxy server and all prefill/decode instances:
