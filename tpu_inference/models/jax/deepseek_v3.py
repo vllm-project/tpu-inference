@@ -23,6 +23,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from flax.typing import Sharding
+from flax.typing import Sharding
 from jax import lax
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
@@ -996,6 +997,7 @@ class DeepSeekV3(JaxModule):
     def __init__(self,
                  vllm_config: VllmConfig,
                  rng: nnx.Rngs,
+                 rng: nnx.Rngs,
                  mesh: Mesh,
                  quant_config,
                  prefix: str = ""):
@@ -1173,6 +1175,7 @@ class DeepSeekV3(JaxModule):
         # hf_config.num_hidden_layers is 61, which ignores the last MTP layer.
         self.start_layer, self.end_layer, self.layers = make_layers(
             hf_config.num_hidden_layers, get_decoder_layer)
+            hf_config.num_hidden_layers, get_decoder_layer)
 
         if self.is_last_rank:
             self.norm = JaxRmsNorm(
@@ -1205,7 +1208,17 @@ class DeepSeekV3(JaxModule):
         self,
         kv_caches: List[jax.Array],
         input_ids: Optional[jax.Array],
+        input_ids: Optional[jax.Array],
         attention_metadata: AttentionMetadata,
+        inputs_embeds: Optional[jax.Array] = None,
+    ) -> Tuple[List[jax.Array], jax.Array]:
+        if inputs_embeds is not None:
+            x = inputs_embeds
+        else:
+            x = self.embed_tokens(input_ids)
+
+        for i, layer in enumerate(
+                islice(self.layers, self.start_layer, self.end_layer)):
         inputs_embeds: Optional[jax.Array] = None,
     ) -> Tuple[List[jax.Array], jax.Array]:
         if inputs_embeds is not None:
