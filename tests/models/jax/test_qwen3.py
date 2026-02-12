@@ -258,8 +258,6 @@ class TestQwen3ForCausalLM:
         input = [[0.01 * i for i in range(model_dim)] for _ in range(seq_len)]
 
         with jax.set_mesh(mesh):
-            model = Qwen3ForCausalLM(mock_vllm_config, rng, mesh)
-            # load weights from HF model
             loader = get_model_loader(mock_vllm_config.load_config)
             loader.load_weights(model, model_config)
 
