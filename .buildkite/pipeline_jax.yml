@@ -94,12 +94,10 @@ steps:
         env:
           IS_FOR_V7X: "${IS_FOR_V7X}"
         artifact_paths: ".coverage.part1.${TPU_VERSION:-tpu6e}"
-        plugins:
-          - shell#v1.1.0:
-              pre-exit: "rm -f .coverage.part1.${TPU_VERSION:-tpu6e}"
         agents:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
         commands:
+          - rm -f .coverage.part1.${TPU_VERSION:-tpu6e}
           - |
             .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/layers/vllm/test_attention.py /workspace/tpu_inference/tests/layers/vllm/test_awq.py /workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_fp8.py /workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_int8.py --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part1.${TPU_VERSION:-tpu6e}; else exit 1; fi"         
           - cp /mnt/disks/persist/models/.coverage.part1.${TPU_VERSION:-tpu6e} ./
@@ -110,12 +108,10 @@ steps:
         env:
           IS_FOR_V7X: "${IS_FOR_V7X}"
         artifact_paths: ".coverage.part2.${TPU_VERSION:-tpu6e}"
-        plugins:
-          - shell#v1.1.0:
-              pre-exit: "rm -f .coverage.part2.${TPU_VERSION:-tpu6e}"
         agents:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
         commands:
+          - rm -f .coverage.part2.${TPU_VERSION:-tpu6e}
           - |
             .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/ --ignore=/workspace/tpu_inference/tests/layers/vllm/test_attention.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_awq.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_fp8.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_int8.py --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part2.${TPU_VERSION:-tpu6e}; else exit 1; fi"
           - cp /mnt/disks/persist/models/.coverage.part2.${TPU_VERSION:-tpu6e} ./
