@@ -19,7 +19,7 @@ from contextlib import nullcontext
 from typing import Any, List, Optional, Tuple
 from unittest.mock import patch
 
-import jax
+import time
 import torch
 import torch.nn
 import torchax
@@ -117,6 +117,7 @@ class VllmModelWrapper:
                     setattr(module, "get_pp_group", jax_get_pp_group)
 
     def load_weights(self):
+        loading_start = time.time()
         # Set up to load the model into CPU first.
         # Cache device slice config since device config cannot be deepcopied
         modified_slice_config = False
@@ -186,6 +187,11 @@ class VllmModelWrapper:
         self.model = _VllmRunner(vllm_model)
         params_and_buffers = shard_model_to_tpu(self.model, self.mesh)
 
+        loading_end = time.time()
+        total_loading_time = loading_end - loading_start
+        logger.info(
+            f"Total time for weight loading from storage to TPU: {total_loading_time:.2f}s"
+        )
         # Returning to the jax land, so we need to wrap it into a JaxValue.
         return jax_view(params_and_buffers), lora_manager
 
