@@ -112,12 +112,14 @@ def gather_kernel(
   )(x_ref, x_sorted_ref)
 
 
-@jax.jit(static_argnames=["num_experts", "debug_mode"])
+@jax.jit(static_argnames=["num_experts", "tile_out", "tile_in", "debug_mode"])
 def sort_tokens(
     x: jax.Array,
     topk_indices: jax.Array,
     num_experts: int,
     *,
+    tile_out: Optional[int] = None,
+    tile_in: Optional[int] = None,
     debug_mode: bool = False,
 ) -> Tuple[jax.Array, jax.Array, jax.Array]:
   vmem_limit_bytes = 100 * 1024 * 1024  # 100 MB
@@ -137,14 +139,19 @@ def sort_tokens(
   sorted_token_indices = token_indices[topk_argsort_indices]
   group_sizes = jnp.bincount(topk_indices_flat, length=num_experts).astype(jnp.int32)
 
+  default_tile_out = 512
+  default_tile_in = 512
   if num_tokens == 64:
-    tile_out = 256
-    tile_in = 64
+    default_tile_out = 256
+    default_tile_in = 64
   elif num_tokens == 8:
-    tile_out = 16
-    tile_in = 8
-  else:
-    tile_out = tile_in = 512
+    default_tile_out = 16
+    default_tile_in = 8
+
+  if tile_out is None:
+    tile_out = default_tile_out
+  if tile_in is None:
+    tile_in = default_tile_in
 
   scope_name = f"sort_tokens-m_{num_tokens}-k_{hidden_size}-topk_{topk}"
   (x_sorted,) = pl.pallas_call(
