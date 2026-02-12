@@ -228,7 +228,7 @@ class DeepseekV3BaseAttention(nnx.Module):
         return outputs_TNH
 
     def __call__(
-            self, x: jax.Array, is_prefill: bool, kv_cache: KVCache,
+            self, x: jax.Array, kv_cache: KVCache,
             attention_metadata: AttentionMetadata
     ) -> Tuple[KVCache, jax.Array]:
         """Performs the forward pass of the attention module.  Expects that the
@@ -237,7 +237,6 @@ class DeepseekV3BaseAttention(nnx.Module):
 
         Args:
             x: The input tensor of shape `(batch_size, seq_len, d_model)`.
-            is_prefill: Whether the operation mode is prefill (otherwise it is generate).
             kv_cache: The key-value cache for storing past attention states.
             attention_metadata: Metadata for attention, such as input positions.
 
@@ -261,7 +260,7 @@ class DeepseekV3BaseAttention(nnx.Module):
 
         with jax.named_scope("attn_op"):
             new_kv_cache, outputs_TNH = self.compute_attention(
-                q_data, kv_data, is_prefill, kv_cache, md)
+                q_data, kv_data, kv_cache, md)
 
             outputs_TNH = self.process_output(outputs_TNH)
 
@@ -364,7 +363,7 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
 
     def compute_attention(self, q_data: jax.Array, kv_data: Tuple[jax.Array,
                                                                   jax.Array],
-                          is_prefill: bool, kv_cache: KVCache,
+                          kv_cache: KVCache,
                           md: AttentionMetadata) -> Tuple[jax.Array, KVCache]:
         """
         Computes self-attention for MHA.
@@ -372,7 +371,6 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
         Args:
             q_data: The query tensor of shape `(tokens_query, num_query_heads, head_dim)`.
             kv_data: Tuple of key-value tensors of shape `(tokens_kv, num_query_heads, d_model)`.
-            is_prefill: Whether the attention is for prefill or not.
             kv_cache: KVCache object.
             md: AttentionMetadata object.
 
@@ -517,8 +515,8 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
         return (kv_SA, k_rope_SH)
 
     def compute_attention(self, q_data: Tuple[jax.Array, jax.Array],
-                          kv_data: Tuple[jax.Array, jax.Array],
-                          is_prefill: bool, kv_cache: KVCache,
+                          kv_data: Tuple[jax.Array,
+                                         jax.Array], kv_cache: KVCache,
                           md: AttentionMetadata) -> Tuple[KVCache, jax.Array]:
         """
         Computes the attention for MLA.
@@ -528,7 +526,6 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
                 rope tensor of shape `(tokens_query, num_query_heads, head_dim)`.
             kv_data: A tuple of key-value tensor of shape `(tokens_kv, q_lora_rank)` and
                 rope tensor of shape `(tokens_kv, head_dim)`.
-            is_prefill: A boolean indicating whether to use prefill or not.
             kv_cache: The key-value cache.
             md: The attention metadata.
 
@@ -720,15 +717,15 @@ class DeepseekV3DecoderLayer(nnx.Module):
     custom_module: nnx.Module | DeepseekV3MoE | DeepseekV3MLP
 
     def __call__(
-        self, x_TD: jax.Array, is_prefill: bool, kv_cache: List[jax.Array],
+        self, x_TD: jax.Array, kv_cache: List[jax.Array],
         attention_metadata: AttentionMetadata
     ) -> Tuple[List[jax.Array], jax.Array]:
 
         # Run Self-Attention
         residual = x_TD
         hidden_states = self.input_layernorm(x_TD)
-        new_cache, attn_output = self.self_attn(hidden_states, is_prefill,
-                                                kv_cache, attention_metadata)
+        new_cache, attn_output = self.self_attn(hidden_states, kv_cache,
+                                                attention_metadata)
         hidden_states = residual + attn_output
 
         # Run MLP/MoE
@@ -1810,12 +1807,10 @@ class DeepSeekV3(nnx.Module):
         attention_metadata: AttentionMetadata,
         *args,
     ) -> Tuple[List[KVCacheType], jax.Array, List[jax.Array]]:
-        is_prefill = False
         x = self.embedder.encode(input_ids)
         for (i, block) in enumerate(self.layers):
             kv_cache = kv_caches[i]
-            new_kv_cache, x = block(x, is_prefill, kv_cache,
-                                    attention_metadata)
+            new_kv_cache, x = block(x, kv_cache, attention_metadata)
             kv_caches[i] = new_kv_cache
 
         final_activation = self.final_norm(x)

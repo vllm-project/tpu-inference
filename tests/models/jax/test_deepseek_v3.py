@@ -693,10 +693,7 @@ class TestDeepseekV3Attention(unittest.TestCase):
             mha_layer.rope.initialize_cache(self.mesh)
 
             new_kv_cache, output = mha_layer(
-                x,
-                is_prefill=True,
-                kv_cache=kv_cache,
-                attention_metadata=attention_metadata)
+                x, kv_cache=kv_cache, attention_metadata=attention_metadata)
 
             self.assertEqual(output.shape, (seq_len, hidden_size))
             self.assertEqual(new_kv_cache.shape, kv_cache.shape)
@@ -785,7 +782,6 @@ class TestDeepseekV3Attention(unittest.TestCase):
             model.rope.initialize_cache(self.mesh)
 
             new_kv_cache, output = model(x,
-                                         is_prefill=True,
                                          kv_cache=kv_cache,
                                          attention_metadata=attention_metadata)
 
