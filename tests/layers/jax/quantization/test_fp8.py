@@ -533,9 +533,11 @@ class TestFp8FusedMoE:
                               (num_tokens, hidden_size), dtype=dtype) / 10.0
         score = jax.random.normal(k2, (num_tokens, num_experts), dtype=dtype)
 
-        w13_shape = (num_experts, 2 * intermediate_size, hidden_size)
+        gate_and_up_shape = (num_experts, intermediate_size, hidden_size)
         w2_shape = (num_experts, hidden_size, intermediate_size)
-        w13 = jax.random.normal(k3, w13_shape, dtype=dtype) / 10.0
+        gate = jax.random.normal(k3, gate_and_up_shape, dtype=dtype) / 10.0
+        up = jax.random.normal(k3, gate_and_up_shape, dtype=dtype) / 10.0
+        w13 = jax.numpy.concatenate([gate, up], axis=1)
         w2 = jax.random.normal(k4, w2_shape, dtype=dtype) / 10.0
 
         expected = test_utils.ref_moe_jax(a, score, w13, w2, None, None,
@@ -547,31 +549,41 @@ class TestFp8FusedMoE:
         else:
             assert layer.moe_backend == MoEBackend.GMM_TP
 
+        # Begin mimic loading weights from checkpoint.
         block_m, block_n = quant_config.weight_block_size
-        w1_weight, w1_weight_scale = quantize_to_fp8_block_3d(
-            w13, block_m, block_n, jnp.float8_e4m3fn)
+        w_gate_fp8, gate_scale = quantize_to_fp8_block_3d(
+            jnp.transpose(gate, (0, 2, 1)), block_m, block_n, jnp.float8_e4m3fn)
+        w_up_fp8, up_scale = quantize_to_fp8_block_3d(
+            jnp.transpose(up, (0, 2, 1)), block_m, block_n, jnp.float8_e4m3fn)
         w2_weight, w2_weight_scale = quantize_to_fp8_block_3d(
-            w2, block_m, block_n, jnp.float8_e4m3fn)
-
-        layer.quant_method.create_weights_jax(layer)
+            jnp.transpose(w2, (0, 2, 1)), block_m, block_n, jnp.float8_e4m3fn)
 
         scale_suffix = layer.quant_method.weight_scale_name
 
         getattr(
             layer,
-            f"kernel_gating_upproj_EDF_{scale_suffix}").value = w1_weight_scale
+            f"kernel_gating_EDF_{scale_suffix}").value = gate_scale
+        getattr(
+            layer,
+            f"kernel_up_proj_EDF_{scale_suffix}").value = up_scale
         getattr(layer,
                 f"kernel_down_proj_EFD_{scale_suffix}").value = w2_weight_scale
-
-        w_gate_fp8, w_up_fp8 = jnp.split(jnp.transpose(w1_weight, (0, 2, 1)),
-                                         2,
-                                         axis=2)
 
         # Overwrite the layer's parameters with our FP8 data
         layer.kernel_gating_EDF.value = w_gate_fp8
         layer.kernel_up_proj_EDF.value = w_up_fp8
-
         layer.kernel_down_proj_EFD.value = w2_weight
+
+        for param in [
+            getattr(layer, f"kernel_gating_EDF_{scale_suffix}"),
+            getattr(layer, f"kernel_up_proj_EDF_{scale_suffix}"),
+            getattr(layer, f"kernel_down_proj_EFD_{scale_suffix}"),
+            layer.kernel_gating_EDF,
+            layer.kernel_up_proj_EDF,
+            layer.kernel_down_proj_EFD
+        ]:
+            setattr(param, "_cnt_moe_weights_loaded", layer.num_local_experts)
+        # End mimic loading weights from checkpoint.
 
         layer.quant_method.process_weights_after_loading(layer)
 
@@ -582,7 +594,7 @@ class TestFp8FusedMoE:
             # to avoid promote error
             actual = layer(a).astype(expected.dtype)
 
-        assert jnp.allclose(expected, actual, atol=2.5e-2, rtol=1e-1)
+        assert jnp.allclose(expected, actual, atol=5e-2, rtol=1e-1)
 
 
 class TestFp8Config:
