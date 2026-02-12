@@ -53,7 +53,6 @@ from tpu_inference.layers.jax.moe.utils import (get_expert_parallelism,
 from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
-from tpu_inference.layers.jax.quantization.unquantized import UnquantizedConfig
 from tpu_inference.layers.jax.rope import DeepseekScalingRotaryEmbedding
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
@@ -1543,9 +1542,8 @@ class DeepSeekV3(JaxModule):
                  vllm_config: VllmConfig,
                  rng: nnx.Rngs,
                  mesh: Mesh,
+                 quant_config,
                  prefix: str = ""):
-        assert mesh is not None
-
         self.vllm_config = vllm_config
 
         self.use_mla_kernel: bool = self.vllm_config.model_config.use_mla
@@ -1584,10 +1582,6 @@ class DeepSeekV3(JaxModule):
         self.use_ep = self.num_expert_parallelism > 1
         self.moe_backend = select_moe_backend(self.use_ep)
 
-        # TODO (jacobplatin): temporary workaround for now before FP8 is fully ready for DeepSeek
-        vllm_config.quant_config = UnquantizedConfig(
-            vllm_config.model_config.hf_config.quantization_config)
-
         # TODO (jacobplatin): we will resolve this issue in a forthcoming PR that will refactor weight loading
         if vllm_config.load_config.load_format == "dummy" and self.moe_backend in MoEBackend.fused_moe_backends(
         ):
@@ -1605,7 +1599,7 @@ class DeepSeekV3(JaxModule):
                 features=hf_config.hidden_size,
                 dtype=dtype,
                 rngs=rng,
-                quant_config=vllm_config.quant_config,
+                quant_config=quant_config,
                 prefix=prefix + ".embed_tokens",
             )
         else:
@@ -1662,7 +1656,7 @@ class DeepSeekV3(JaxModule):
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
                 rngs=rng,
-                quant_config=vllm_config.quant_config,
+                quant_config=quant_config,
                 activation_attention_td=(None, None),
                 activation_q_td=(None, None),
                 query_tnh=query_tnh_spec,
@@ -1684,6 +1678,7 @@ class DeepSeekV3(JaxModule):
                 epsilon=rms_norm_eps,
                 scale_init=nnx.with_partitioning(init_fn, (None, )),
                 dtype=dtype,
+                quant_config=quant_config,
                 rngs=rng,
             )
 
@@ -1692,6 +1687,7 @@ class DeepSeekV3(JaxModule):
                 epsilon=rms_norm_eps,
                 scale_init=nnx.with_partitioning(init_fn, (None, )),
                 dtype=dtype,
+                quant_config=quant_config,
                 rngs=rng,
             )
 
@@ -1714,7 +1710,7 @@ class DeepSeekV3(JaxModule):
                     activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
                     df_sharding=(None, ShardingAxisName.MLP_TENSOR),
                     fd_sharding=(ShardingAxisName.MLP_TENSOR, None),
-                    quant_config=vllm_config.quant_config)
+                    quant_config=quant_config)
             else:
                 # MoE Layer
                 # moe_dtype = jnp.float8_e4m3fn if self.weight_loader.is_native_fp8_model else vllm_config.model_config.hf_config.quantization_config.get(
@@ -1734,7 +1730,7 @@ class DeepSeekV3(JaxModule):
                     activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
                     ed_sharding=(None, None),
                     e_sharding=(None, ),
-                    quant_config=vllm_config.quant_config)
+                    quant_config=quant_config)
 
                 # routed experts
                 custom_module = JaxMoE(
@@ -1749,7 +1745,7 @@ class DeepSeekV3(JaxModule):
                     mesh=self.mesh,
                     hidden_act=hidden_act,
                     rngs=rng,
-                    quant_config=self.vllm_config.quant_config,
+                    quant_config=quant_config,
                     activation_ffw_td=(ShardingAxisName.MLP_DATA,
                                        ShardingAxisName.MOE_TENSOR),
                     activation_ffw_ted=(ShardingAxisName.MLP_DATA, None,
@@ -1773,7 +1769,7 @@ class DeepSeekV3(JaxModule):
                     activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
                     df_sharding=(None, ShardingAxisName.MLP_TENSOR),
                     fd_sharding=(ShardingAxisName.MLP_TENSOR, None),
-                    quant_config=vllm_config.quant_config)
+                    quant_config=quant_config)
 
                 mlp_layer = DeepseekV3MoE(
                     experts=custom_module,
@@ -1799,7 +1795,7 @@ class DeepSeekV3(JaxModule):
                 scale_init=nnx.with_partitioning(nnx.initializers.uniform(),
                                                  (None, )),
                 rngs=rng,
-                quant_config=vllm_config.quant_config,
+                quant_config=quant_config,
                 prefix=prefix + ".norm",
             )
         else:
@@ -1858,14 +1854,27 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
                  mesh: Mesh) -> None:
+        if getattr(vllm_config.model_config, "quantization", None) == "fp8":
+            # `get_tpu_quantization_config` returns None for "fp8" because
+            # the work in #1623 is not fully merged. So this block overrides
+            # the logic to return Fp8Config when model_config indicates fp8.
+            # TODO(#1623): Remove this block when `get_tpu_quantization_config`
+            # is updated.
+            from tpu_inference.layers.jax.quantization.fp8 import Fp8Config
+            hg_quant_config = getattr(vllm_config.model_config.hf_config,
+                                      "quantization_config", {})
+            vllm_config.quant_config = Fp8Config(hg_quant_config)
+
         self.vllm_config = vllm_config
         rng = nnx.Rngs(rng_key)
-        self.mesh = mesh
+        self.mesh = None
+        mesh = None
 
         self.model = DeepSeekV3(
             vllm_config=vllm_config,
             rng=rng,
             mesh=mesh,
+            quant_config=vllm_config.quant_config,
             prefix="model",
         )
 

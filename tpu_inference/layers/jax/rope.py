@@ -100,7 +100,8 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         mscale_val = _yarn_get_mscale(
             self.scaling_factor, self.mscale_value) / _yarn_get_mscale(
                 self.scaling_factor, self.mscale_all_dim)
-        replicated_sharding = NamedSharding(mesh, PartitionSpec())
+        replicated_sharding = NamedSharding(
+            mesh, PartitionSpec()) if mesh else PartitionSpec()
         self.mscale = jax.device_put(mscale_val, replicated_sharding)
         self.sin_cos_cache = self._compute_sin_cos()
 

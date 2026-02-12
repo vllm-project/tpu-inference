@@ -193,17 +193,18 @@ def _get_nnx_model(
         abstract_model_fn = create_abstract_model
         # NOTE: only one of the abstract (this) or or concrete Qwix quantization paths should
         # be taken
-        if should_apply_qwix_on_abstract_model := apply_qwix_on_abstract_model(
-                vllm_config):
-            # NOTE: if Qwix is not configured, this will return `create_abstract_model` and
-            # thus be a no-op
-            abstract_model_fn = apply_qwix_quantization(
-                vllm_config,
-                create_abstract_model,
-                rng,
-                mesh,
-                apply_to_abstract_model=True)
-        model = nnx.eval_shape(abstract_model_fn)
+        with jax.set_mesh(mesh):
+            if should_apply_qwix_on_abstract_model := apply_qwix_on_abstract_model(
+                    vllm_config):
+                # NOTE: if Qwix is not configured, this will return `create_abstract_model` and
+                # thus be a no-op
+                abstract_model_fn = apply_qwix_quantization(
+                    vllm_config,
+                    create_abstract_model,
+                    rng,
+                    mesh,
+                    apply_to_abstract_model=True)
+            model = nnx.eval_shape(abstract_model_fn)
         # Although the created model can already work, we still need to jit
         # the model creation again, otherwise the model forward will have
         # non-trivial overhead in PjitFunction.
