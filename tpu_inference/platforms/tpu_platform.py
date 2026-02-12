@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
 import jax.numpy as jnp
 import torch
 import vllm.envs as vllm_envs
-from tpu_info import device
 from vllm.platforms.interface import Platform, PlatformEnum
 
 from tpu_inference import envs
@@ -81,6 +80,7 @@ class TpuPlatform(Platform):
                 # Causes mutliprocess accessing IFRT when calling jax.devices()
                 return "TPU v6 lite"
             else:
+                from tpu_info import device
                 chip_type, _ = device.get_local_chips()
                 return f"TPU {chip_type.name}"
         except Exception as e:
