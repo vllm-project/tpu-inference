@@ -69,57 +69,24 @@ def inner_kernel(
   )
 
 
-def kernel(
+def gather_kernel(
     # Prefetch
-    topk_indices_ref: jax.Array,
+    sorted_token_indices_ref: jax.Array,
     # In
     x_ref: jax.Array,
     # Out
     x_sorted_ref: jax.Array,
-    group_sizes_ref: jax.Array,
-    topk_argsort_revert_indices_ref: jax.Array,
-    # Scratch
-    group_offset_ref: jax.Array,
-    sorted_token_indices_ref: jax.Array,
     *,
     tile_out: int,
     tile_in: int,
     debug_mode: bool,
 ):
   hidden_size = x_ref.shape[-1]
-  num_tokens, topk = topk_indices_ref.shape
-  num_out_tokens = num_tokens * topk
-  num_experts = group_sizes_ref.shape[0]
-
-  for i in range(num_experts):
-    group_sizes_ref[i] = 0
-
-  for t in range(num_tokens):
-    for k in range(topk):
-      expert_idx = topk_indices_ref[t, k]
-      group_size = group_sizes_ref[expert_idx]
-      group_sizes_ref[expert_idx] = group_size + 1
-
-  curr_offset = 0
-  for e in range(num_experts):
-    group_offset_ref[e] = curr_offset
-    curr_offset += group_sizes_ref[e]
-
-  for t in range(num_tokens):
-    for k in range(topk):
-      expert_idx = topk_indices_ref[t, k]
-      group_offset = group_offset_ref[expert_idx]
-      sorted_token_indices_ref[group_offset] = t
-      topk_argsort_revert_indices_ref[t * topk + k] = group_offset
-      group_offset_ref[expert_idx] = group_offset + 1
+  num_tokens = x_ref.shape[0]
+  num_out_tokens = sorted_token_indices_ref.shape[0]
 
   num_out_tiles = num_out_tokens // tile_out
   num_in_tiles = num_tokens // tile_in
-  # Note: loading the entire array from SMEM is not supported (ValueError: Can only load scalars from SMEM).
-  # We can print a few elements by loading them individually (scalar loads).
-  # for i in range(min(10, num_out_tokens)):
-  #   debug_print(debug_mode, f"=== debug_print === topk_argsort_revert_indices_ref[{i}]={{}}", topk_argsort_revert_indices_ref[i])
-  # debug_print(debug_mode, "=== debug_print === num_out_tiles={},  num_in_tiles={}", num_out_tiles, num_in_tiles)
 
   pltpu.emit_pipeline(
       functools.partial(
@@ -153,7 +120,7 @@ def sort_tokens(
     *,
     debug_mode: bool = False,
 ) -> Tuple[jax.Array, jax.Array, jax.Array]:
-  vmem_limit_bytes = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.8)
+  vmem_limit_bytes = 100 * 1024 * 1024  # 100 MB
   num_tokens, hidden_size = x.shape
   topk = topk_indices.shape[1]
   out_shape = (num_tokens * topk, hidden_size)
@@ -162,6 +129,14 @@ def sort_tokens(
   x = x.astype(jnp.float32)
   x = x.reshape(num_tokens, 1, hidden_size)
 
+  # Compute sorting indices and group sizes in JAX.
+  topk_indices_flat = topk_indices.flatten()
+  topk_argsort_indices = jnp.argsort(topk_indices_flat)
+  topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
+  token_indices = jnp.arange(num_tokens, dtype=jnp.int32).repeat(topk)
+  sorted_token_indices = token_indices[topk_argsort_indices]
+  group_sizes = jnp.bincount(topk_indices_flat, length=num_experts).astype(jnp.int32)
+
   if num_tokens == 64:
     tile_out = 256
     tile_in = 64
@@ -169,29 +144,23 @@ def sort_tokens(
     tile_out = 16
     tile_in = 8
   else:
-    tile_out = tile_in = 2048
+    tile_out = tile_in = 512
 
   scope_name = f"sort_tokens-m_{num_tokens}-k_{hidden_size}-topk_{topk}"
-  return pl.pallas_call(
-      functools.partial(kernel, tile_out=tile_out, tile_in=tile_in, debug_mode=debug_mode),
+  (x_sorted,) = pl.pallas_call(
+      functools.partial(gather_kernel, tile_out=tile_out, tile_in=tile_in, debug_mode=debug_mode),
       out_shape=[
           jax.ShapeDtypeStruct(out_shape, orig_dtype),
-          jax.ShapeDtypeStruct((num_experts,), jnp.int32),
-          jax.ShapeDtypeStruct((topk_indices.size,), jnp.int32),
       ],
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=1,
           in_specs=[pl.BlockSpec(memory_space=pltpu.HBM)],
           out_specs=[
               pl.BlockSpec(memory_space=pltpu.HBM),
-              pl.BlockSpec(memory_space=pltpu.SMEM),
-              pl.BlockSpec(memory_space=pltpu.SMEM),
-          ],
-          scratch_shapes=[
-              pltpu.SMEM((num_experts,), jnp.int32),
-              pltpu.SMEM((topk_indices.size,), jnp.int32),
           ],
       ),
       compiler_params=pltpu.CompilerParams(vmem_limit_bytes=vmem_limit_bytes),
       name=scope_name,
-  )(topk_indices, x)
+  )(sorted_token_indices, x)
+
+  return x_sorted, group_sizes, topk_argsort_revert_indices
