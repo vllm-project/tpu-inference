@@ -30,6 +30,7 @@ class TestQwen3MoeForCausalLM:
 
     @pytest.mark.parametrize("model_name", [
         "Qwen/Qwen3-30B-A3B-Instruct-2507",
+        "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8",
     ])
     @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
                                                        (3, 4)])
