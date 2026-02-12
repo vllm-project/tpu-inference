@@ -62,6 +62,7 @@ from tpu_inference.models.jax.utils.weight_utils import (JaxAutoWeightsLoader,
 KVCache = Tuple[jax.Array, jax.Array]
 
 logger = init_logger(__name__)
+init_fn = nnx.initializers.uniform()
 
 
 def _weight_init(random_init: bool):
