@@ -152,15 +152,15 @@ class DeepseekV3BaseAttention(nnx.Module):
             mscale_all_dim=self.rope_scaling["mscale_all_dim"],
         )
 
+        weight_init = _weight_init(self.random_init)
+
         self.q_down_proj = JaxEinsum(
             einsum_str="TD,DA->TA",
             kernel_shape=(self.D, self.q_lora_rank),
             rngs=rngs,
             quant_config=self.quant_config,
             param_dtype=self.dtype,
-            kernel_init=nnx.with_partitioning(
-                sharded_initializer if self.random_init else
-                nnx.initializers.uniform(), self.q_da_sharding),
+            kernel_init=nnx.with_partitioning(weight_init, self.q_da_sharding),
         )
 
         self.q_up_proj = JaxEinsum(
@@ -169,9 +169,7 @@ class DeepseekV3BaseAttention(nnx.Module):
             rngs=rngs,
             quant_config=self.quant_config,
             param_dtype=self.dtype,
-            kernel_init=nnx.with_partitioning(
-                sharded_initializer if self.random_init else
-                nnx.initializers.uniform(), self.ap_sharding),
+            kernel_init=nnx.with_partitioning(weight_init, self.ap_sharding),
         )
 
         self.kv_down_proj = JaxEinsum(
@@ -180,9 +178,8 @@ class DeepseekV3BaseAttention(nnx.Module):
             rngs=rngs,
             quant_config=self.quant_config,
             param_dtype=self.dtype,
-            kernel_init=nnx.with_partitioning(
-                sharded_initializer if self.random_init else
-                nnx.initializers.uniform(), self.kv_da_sharding),
+            kernel_init=nnx.with_partitioning(weight_init,
+                                              self.kv_da_sharding),
         )
 
         self.o_proj = JaxEinsum(
@@ -191,9 +188,7 @@ class DeepseekV3BaseAttention(nnx.Module):
             rngs=rngs,
             quant_config=self.quant_config,
             param_dtype=self.dtype,
-            kernel_init=nnx.with_partitioning(
-                sharded_initializer if self.random_init else
-                nnx.initializers.uniform(), self.rd_sharding),
+            kernel_init=nnx.with_partitioning(weight_init, self.rd_sharding),
         )
 
         self.q_rms_norm = RMSNorm(dims=self.q_lora_rank,
@@ -285,6 +280,7 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
     """Standard Multi-Head Attention (MHA) for DeepSeek models."""
 
     def setup_specific_layers(self, rngs: nnx.Rngs) -> None:
+        weight_init = _weight_init(self.random_init)
         self.kv_up_proj = JaxEinsum(
             einsum_str="SA,AL->SL",
             kernel_shape=(self.kv_lora_rank,
@@ -292,9 +288,7 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
             rngs=rngs,
             quant_config=self.quant_config,
             param_dtype=self.dtype,
-            kernel_init=nnx.with_partitioning(
-                sharded_initializer if self.random_init else
-                nnx.initializers.uniform(), self.ap_sharding),
+            kernel_init=nnx.with_partitioning(weight_init, self.ap_sharding),
         )
 
     def compute_q_projection(self, x_q_TD: jax.Array,
@@ -447,12 +441,15 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
     anh_sharding: Sharding = ()
 
     def setup_specific_layers(self, rngs: nnx.Rngs) -> None:
-        # TODO: refactor 3D projections to use JaxEinsum
-        self.kernel_k_up_proj_ANH = create_param(
-            rngs, (self.kv_lora_rank, self.N, self.qk_nope_head_dim),
-            self.anh_sharding,
-            self.dtype,
-            random_init=self.random_init)
+        weight_init = _weight_init(self.random_init)
+        self.k_up_proj = JaxEinsum(
+            einsum_str="TNH,ANH->TNA",
+            kernel_shape=(self.kv_lora_rank, self.N, self.qk_nope_head_dim),
+            rngs=rngs,
+            quant_config=self.quant_config,
+            param_dtype=self.dtype,
+            kernel_init=nnx.with_partitioning(weight_init, self.anh_sharding),
+        )
 
         self.v_up_proj = JaxEinsum(
             einsum_str="TNA,ANH->TNH",
@@ -1032,8 +1029,8 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                 "self_attn.kv_down_proj.weight": (28, 576),
                 "self_attn.kv_up_proj.weight": (2, 32768),
                 "self_attn.o_proj.weight": (64, 7168),
-                "self_attn.kernel_k_up_proj_ANH": (2, 128, 128),  # MLA
-                "self_attn.kernel_v_up_proj_ANH": (2, 128, 128),  # MLA
+                "self_attn.k_up_proj.weight": (2, 128, 128),  # MLA
+                "self_attn.v_up_proj.weight": (2, 128, 128),  # MLA
             }
 
             # TODO (jacobplatin): remove this check eventually!

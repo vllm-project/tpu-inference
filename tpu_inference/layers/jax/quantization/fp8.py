@@ -25,6 +25,7 @@ from jax._src.dtypes import TypePromotionError
 from jax.sharding import PartitionSpec as P
 from torchax.ops.mappings import t2j
 
+from tpu_inference.layers.common.linear import sharded_quantized_batched_matmul
 from tpu_inference.layers.common.moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.process_weights.linear_weights import \
     shard_linear_weights
@@ -253,9 +254,8 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 kernel_init(rngs.params(), layer.kernel_shape, param_dtype),
                 weight_loader=partial(load_nnx_param_from_reshaped_torch,
                                       permute_dims=None,
-                                      param_name="linear_fp8_weight"),
-                eager_sharding=False)
-            layer.weight.set_metadata('sharding', self.weight_sharding)
+                                      param_name="linear_fp8_weight"))
+            layer.weight.sharding = self.weight_sharding
 
             # Per-output-channel scale (1D, covers the free weight dim).
             layer.weight_scale_inv = nnx.Param(
@@ -264,9 +264,8 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                     load_nnx_param_from_reshaped_torch,
                     permute_dims=None,
                     param_name="linear_fp8_weight_scale_inv",
-                ),
-                eager_sharding=False)
-            layer.weight_scale_inv.set_metadata('sharding', ())
+                ))
+            layer.weight_scale_inv.sharding = ()
             return
 
         # Follow upstream limitation that only float8_e4m3 is supported.
