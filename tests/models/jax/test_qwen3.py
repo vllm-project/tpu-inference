@@ -122,7 +122,7 @@ class TestQwen3ForCausalLM:
     @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
                                                        (3, 4)])
     def test_qwen3_600M(self, model_name, kv_cache_type, qwix_rules, rng, mesh,
-                        mock_model_inputs, pp_rank, pp_world_size, mock_vllm_config):
+                        mock_model_inputs, pp_rank, pp_world_size):
         """Tests model init and model forward for the 0.6B model variant."""
         mock_vllm_config = MockVllmConfig(model_name, kv_cache_type)
         if qwix_rules:
