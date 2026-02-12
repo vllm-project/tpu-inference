@@ -2,22 +2,11 @@ Feature,CorrectnessTest,PerformanceTest
 "AWQ INT4",N/A,N/A
 "CP",N/A,N/A
 "Chunked Prefill",✅,✅
-"Collective Communication Matmul",N/A,N/A
-"DCN-based P/D disaggregation",N/A,N/A
-"DP",N/A,N/A
-"EP",N/A,N/A
-"FP4 W4A16",N/A,N/A
-"FP8 W8A8",N/A,N/A
-"FP8 W8A16",N/A,N/A
-"INT4 W4A16",N/A,N/A
-"INT8 W8A8",N/A,N/A
-"KV cache host offloading",N/A,N/A
-"LoRA_Torch",N/A,N/A
-"MLA",N/A,N/A
-"MoE",N/A,N/A
-"Multimodal Inputs",N/A,N/A
-"Out-of-tree model support",N/A,N/A
-"PP",N/A,N/A
+"DCN-based P/D disaggregation",❌,❌
+"KV cache host offloading",unverified,unverified
+"LoRA_Torch",❌,N/A
+"Multimodal Inputs",❌,N/A
+"Out-of-tree model support",✅,✅
 "Prefix Caching",✅,✅
 "Quantized Attention",N/A,N/A
 "Quantized KV Cache",N/A,N/A
@@ -28,7 +17,7 @@ Feature,CorrectnessTest,PerformanceTest
 "Speculative Decoding: Eagle3",✅,✅
 "Speculative Decoding: Ngram",✅,✅
 "async scheduler",✅,❌
-"hybrid kv cache",❌,N/A
-"runai_model_streamer_loader",❌,N/A
+"hybrid kv cache",✅,N/A
+"runai_model_streamer_loader",✅,N/A
 "sampling_params",✅,N/A
 "structured_decoding",✅,N/A

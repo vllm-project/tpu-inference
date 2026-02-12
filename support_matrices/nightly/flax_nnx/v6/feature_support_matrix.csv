@@ -2,11 +2,11 @@ Feature,CorrectnessTest,PerformanceTest
 "AWQ INT4",N/A,N/A
 "CP",N/A,N/A
 "Chunked Prefill",✅,✅
-"DCN-based P/D disaggregation",unverified,✅
+"DCN-based P/D disaggregation",✅,✅
 "KV cache host offloading",unverified,unverified
 "LoRA_Torch",❌,N/A
 "Multimodal Inputs",❌,N/A
-"Out-of-tree model support",✅,❌
+"Out-of-tree model support",✅,✅
 "Prefix Caching",✅,✅
 "Quantized Attention",N/A,N/A
 "Quantized KV Cache",N/A,N/A
@@ -16,8 +16,8 @@ Feature,CorrectnessTest,PerformanceTest
 "Single-Host-P-D-disaggregation",✅,N/A
 "Speculative Decoding: Eagle3",✅,✅
 "Speculative Decoding: Ngram",✅,✅
-"async scheduler",✅,✅
-"hybrid kv cache",❌,N/A
+"async scheduler",❌,N/A
+"hybrid kv cache",✅,N/A
 "runai_model_streamer_loader",✅,N/A
 "sampling_params",✅,N/A
 "structured_decoding",✅,N/A
