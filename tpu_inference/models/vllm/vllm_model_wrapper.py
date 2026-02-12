@@ -20,6 +20,7 @@ from typing import Any, List, Optional, Tuple
 from unittest.mock import patch
 
 import jax
+import numpy as np
 import torch
 import torch.nn
 import torchax
@@ -32,9 +33,13 @@ from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
+from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.model_executor.models import supports_lora, supports_multimodal
+from vllm.model_executor.models.interfaces_base import is_pooling_model
 from vllm.sequence import IntermediateTensors
+from vllm.v1.outputs import PoolerOutput
+from vllm.v1.pool.metadata import PoolingMetadata
 
 from tpu_inference.distributed.jax_parallel_state import \
     get_pp_group as jax_get_pp_group
@@ -44,6 +49,7 @@ from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
     shard_model_to_tpu
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.logger import init_logger
+from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.vllm.vllm_model_wrapper_context import (
@@ -58,6 +64,9 @@ class _VllmRunner(torch.nn.Module):
     def __init__(self, vllm_model: torch.nn.Module):
         super().__init__()
         self.vllm_model = vllm_model
+
+        has_pooler = is_pooling_model(vllm_model)
+        self.pooler = vllm_model.pooler if has_pooler else None
 
     def forward(self, **kwargs) -> torch.Tensor:
         if "hidden_state" in kwargs:
@@ -186,6 +195,8 @@ class VllmModelWrapper:
         self.model = _VllmRunner(vllm_model)
         params_and_buffers = shard_model_to_tpu(self.model, self.mesh)
 
+        self._pooler: Pooler | None = self.model.pooler
+
         # Returning to the jax land, so we need to wrap it into a JaxValue.
         return jax_view(params_and_buffers), lora_manager
 
@@ -294,6 +305,31 @@ class VllmModelWrapper:
             return jax_view(logits)
 
         return compute_logits_func
+
+    def build_pooler_func(self) -> PoolerFunc:
+
+        def compute_pooler_output(
+            hidden_states: jax.Array,
+            pooling_metadata: PoolingMetadata,
+            seq_lens: np.ndarray,
+        ) -> PoolerOutput:
+            assert self._pooler is not None, "Model does not support pooling"
+
+            torch_states: torch.Tensor = torch_view(hidden_states)
+            with torchax.default_env():
+                torch_states = torch_states.to('cpu', non_blocking=True)
+                pooling_metadata.build_pooling_cursor(
+                    seq_lens,
+                    torch.tensor(seq_lens),
+                    device=torch_states.device,
+                )
+                outputs: list[torch.Tensor] = self._pooler(
+                    torch_states,
+                    pooling_metadata,
+                )
+                return outputs
+
+        return compute_pooler_output
 
 
 def load_lora_model(model: torch.nn.Module, vllm_config: VllmConfig,
