@@ -1,6 +1,6 @@
 import dataclasses
 import functools
-from typing import Callable, Tuple
+from typing import Callable, Optional, Tuple
 import jax
 from jax import lax
 from jax.experimental import pallas as pl
