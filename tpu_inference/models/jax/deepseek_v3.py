@@ -60,6 +60,11 @@ KVCache = Tuple[jax.Array, jax.Array]
 
 logger = init_logger(__name__)
 
+
+def _weight_init(random_init: bool):
+    return sharded_initializer if random_init else nnx.initializers.uniform()
+
+
 # A map from JAX dtype to the corresponding PyTorch integer dtype for raw memory viewing.
 DTYPE_VIEW_MAP = {
     jnp.dtype(jnp.float8_e4m3fn): torch.uint8,
@@ -147,15 +152,15 @@ class DeepseekV3BaseAttention(nnx.Module):
             mscale_all_dim=self.rope_scaling["mscale_all_dim"],
         )
 
+        weight_init = _weight_init(self.random_init)
+
         self.q_down_proj = JaxEinsum(
             einsum_str="TD,DA->TA",
             kernel_shape=(self.D, self.q_lora_rank),
             rngs=rngs,
             quant_config=self.quant_config,
             param_dtype=self.dtype,
-            kernel_init=nnx.with_partitioning(
-                sharded_initializer if self.random_init else
-                nnx.initializers.uniform(), self.q_da_sharding),
+            kernel_init=nnx.with_partitioning(weight_init, self.q_da_sharding),
         )
 
         self.q_up_proj = JaxEinsum(
@@ -164,9 +169,7 @@ class DeepseekV3BaseAttention(nnx.Module):
             rngs=rngs,
             quant_config=self.quant_config,
             param_dtype=self.dtype,
-            kernel_init=nnx.with_partitioning(
-                sharded_initializer if self.random_init else
-                nnx.initializers.uniform(), self.ap_sharding),
+            kernel_init=nnx.with_partitioning(weight_init, self.ap_sharding),
         )
 
         self.kv_down_proj = JaxEinsum(
@@ -175,9 +178,8 @@ class DeepseekV3BaseAttention(nnx.Module):
             rngs=rngs,
             quant_config=self.quant_config,
             param_dtype=self.dtype,
-            kernel_init=nnx.with_partitioning(
-                sharded_initializer if self.random_init else
-                nnx.initializers.uniform(), self.kv_da_sharding),
+            kernel_init=nnx.with_partitioning(weight_init,
+                                              self.kv_da_sharding),
         )
 
         self.o_proj = JaxEinsum(
@@ -186,9 +188,7 @@ class DeepseekV3BaseAttention(nnx.Module):
             rngs=rngs,
             quant_config=self.quant_config,
             param_dtype=self.dtype,
-            kernel_init=nnx.with_partitioning(
-                sharded_initializer if self.random_init else
-                nnx.initializers.uniform(), self.rd_sharding),
+            kernel_init=nnx.with_partitioning(weight_init, self.rd_sharding),
         )
 
         self.q_rms_norm = RMSNorm(dims=self.q_lora_rank,
@@ -281,6 +281,7 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
     """Standard Multi-Head Attention (MHA) for DeepSeek models."""
 
     def setup_specific_layers(self, rngs: nnx.Rngs) -> None:
+        weight_init = _weight_init(self.random_init)
         self.kv_up_proj = JaxEinsum(
             einsum_str="SA,AL->SL",
             kernel_shape=(self.kv_lora_rank,
@@ -288,9 +289,7 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
             rngs=rngs,
             quant_config=self.quant_config,
             param_dtype=self.dtype,
-            kernel_init=nnx.with_partitioning(
-                sharded_initializer if self.random_init else
-                nnx.initializers.uniform(), self.ap_sharding),
+            kernel_init=nnx.with_partitioning(weight_init, self.ap_sharding),
         )
 
     def compute_q_projection(self, x_q_TD: jax.Array,
@@ -444,18 +443,24 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
     anh_sharding: Sharding = ()
 
     def setup_specific_layers(self, rngs: nnx.Rngs) -> None:
-        # TODO: refactor 3D projections to use JaxEinsum
-        self.kernel_k_up_proj_ANH = create_param(
-            rngs, (self.kv_lora_rank, self.N, self.qk_nope_head_dim),
-            self.anh_sharding,
-            self.dtype,
-            random_init=self.random_init)
+        weight_init = _weight_init(self.random_init)
+        self.k_up_proj = JaxEinsum(
+            einsum_str="TNH,ANH->TNA",
+            kernel_shape=(self.kv_lora_rank, self.N, self.qk_nope_head_dim),
+            rngs=rngs,
+            quant_config=self.quant_config,
+            param_dtype=self.dtype,
+            kernel_init=nnx.with_partitioning(weight_init, self.anh_sharding),
+        )
 
-        self.kernel_v_up_proj_ANH = create_param(
-            rngs, (self.kv_lora_rank, self.N, self.v_head_dim),
-            self.anh_sharding,
-            self.dtype,
-            random_init=self.random_init)
+        self.v_up_proj = JaxEinsum(
+            einsum_str="TNA,ANH->TNH",
+            kernel_shape=(self.kv_lora_rank, self.N, self.v_head_dim),
+            rngs=rngs,
+            quant_config=self.quant_config,
+            param_dtype=self.dtype,
+            kernel_init=nnx.with_partitioning(weight_init, self.anh_sharding),
+        )
 
     def compute_q_projection(
             self, x_q_TD: jax.Array,
@@ -480,8 +485,7 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
         q_rope_TNH = q_TNH[..., self.qk_nope_head_dim:]
         q_rope_TNH = self.rope.apply_rope(input_positions, q_rope_TNH)
 
-        q_TNA = jnp.einsum("TNH,ANH -> TNA", q_nope_TNH,
-                           self.kernel_k_up_proj_ANH.value)
+        q_TNA = self.k_up_proj(q_nope_TNH)
 
         q_TNA = nnx.with_sharding_constraint(q_TNA, self.query_tnh)
         return (q_TNA, q_rope_TNH)
@@ -618,8 +622,7 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
 
         # MLA Specific: Apply V-Up Projection after attention
         # Outputs from MLA kernel are in latent space (TNA), project to TNH
-        outputs_TNH = jnp.einsum("TNA,ANH -> TNH", outputs_TNA,
-                                 self.kernel_v_up_proj_ANH.value)
+        outputs_TNH = self.v_up_proj(outputs_TNA)
         return outputs_TNH
 
 
@@ -642,6 +645,7 @@ class DeepseekV3MLP(nnx.Module):
     fd_sharding: Sharding = ()
     activation_ffw_td: Sharding = ()
     random_init: bool = False
+    quant_config: Optional[QuantizationConfig] = None
 
     rngs: InitVar[nnx.Rngs]
 
@@ -654,44 +658,49 @@ class DeepseekV3MLP(nnx.Module):
         Returns:
             The output tensor of shape `(batch, sequence, d_model)`.
         """
-        # TODO: refactor to use JaxEinsum
         x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
         with jax.named_scope("wi_0"):
-            gating_TF = jnp.einsum('TD,DF -> TF', x_TD,
-                                   self.kernel_gating_DF.value)
+            gating_TF = self.gating_proj(x_TD)
             activated_gating_TF = modeling_flax_utils.ACT2FN[self.hidden_act](
                 gating_TF)
         with jax.named_scope("wi_1"):
-            up_proj_TF = jnp.einsum('TD,DF -> TF', x_TD,
-                                    self.kernel_up_proj_DF.value)
+            up_proj_TF = self.up_proj(x_TD)
         fuse_TF = activated_gating_TF * up_proj_TF
         with jax.named_scope("wo"):
-            output_TD = jnp.einsum('TF,FD -> TD', fuse_TF,
-                                   self.kernel_down_proj_FD.value)
+            output_TD = self.down_proj(fuse_TF)
 
         return output_TD
 
     def __post_init__(self, rngs: nnx.Rngs):
         D = self.hidden_size
         F = self.intermediate_size
+        weight_init = _weight_init(self.random_init)
 
-        # TODO: replace this with JaxEinsums
-        self.kernel_gating_DF = create_param(rngs,
-                                             shape=(D, F),
-                                             dtype=self.dtype,
-                                             sharding=self.df_sharding,
-                                             random_init=self.random_init)
-        self.kernel_up_proj_DF = create_param(rngs,
-                                              shape=(D, F),
-                                              dtype=self.dtype,
-                                              sharding=self.df_sharding,
-                                              random_init=self.random_init)
-        self.kernel_down_proj_FD = create_param(rngs,
-                                                shape=(F, D),
-                                                dtype=self.dtype,
-                                                sharding=self.fd_sharding,
-                                                random_init=self.random_init)
+        self.gating_proj = JaxEinsum(
+            einsum_str="TD,DF->TF",
+            kernel_shape=(D, F),
+            rngs=rngs,
+            quant_config=self.quant_config,
+            param_dtype=self.dtype,
+            kernel_init=nnx.with_partitioning(weight_init, self.df_sharding),
+        )
+        self.up_proj = JaxEinsum(
+            einsum_str="TD,DF->TF",
+            kernel_shape=(D, F),
+            rngs=rngs,
+            quant_config=self.quant_config,
+            param_dtype=self.dtype,
+            kernel_init=nnx.with_partitioning(weight_init, self.df_sharding),
+        )
+        self.down_proj = JaxEinsum(
+            einsum_str="TF,FD->TD",
+            kernel_shape=(F, D),
+            rngs=rngs,
+            quant_config=self.quant_config,
+            param_dtype=self.dtype,
+            kernel_init=nnx.with_partitioning(weight_init, self.fd_sharding),
+        )
 
 
 @dataclass(kw_only=True)
@@ -780,6 +789,7 @@ class DeepSeekV3Router(nnx.Module):
     e_sharding: Sharding = ()
 
     random_init: bool = False
+    quant_config: Optional[QuantizationConfig] = None
 
     router_bias_dtype: jnp.dtype = jnp.float32
 
@@ -829,7 +839,7 @@ class DeepSeekV3Router(nnx.Module):
         x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
 
-        scores_TE = jnp.einsum("TD,DE -> TE", x_TD, self.kernel_DE.value)
+        scores_TE = self.gate_proj(x_TD)
         scores_TE = nnx.sigmoid(scores_TE)
 
         if self.moe_backend in MoEBackend.fused_moe_backends():
@@ -852,12 +862,15 @@ class DeepSeekV3Router(nnx.Module):
         """Generates the router kernel (weights and bias) for routing."""
         D = self.hidden_size
         E = self.num_experts
-        # TODO: replace this with a JaxEinsum
-        self.kernel_DE = create_param(rngs,
-                                      shape=(D, E),
-                                      dtype=self.dtype,
-                                      sharding=self.ed_sharding,
-                                      random_init=self.random_init)
+        weight_init = _weight_init(self.random_init)
+        self.gate_proj = JaxEinsum(
+            einsum_str="TD,DE->TE",
+            kernel_shape=(D, E),
+            rngs=rngs,
+            quant_config=self.quant_config,
+            param_dtype=self.dtype,
+            kernel_init=nnx.with_partitioning(weight_init, self.ed_sharding),
+        )
         self.bias_E = create_param(rngs,
                                    shape=(E, ),
                                    dtype=self.router_bias_dtype,
@@ -952,14 +965,14 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
             "layers.*.self_attn.o_proj.weight",
             # Dense ffw
             "model.layers.*.mlp.gate_proj.weight":
-            "layers.*.custom_module.kernel_gating_DF",
+            "layers.*.custom_module.gating_proj.weight",
             "model.layers.*.mlp.up_proj.weight":
-            "layers.*.custom_module.kernel_up_proj_DF",
+            "layers.*.custom_module.up_proj.weight",
             "model.layers.*.mlp.down_proj.weight":
-            "layers.*.custom_module.kernel_down_proj_FD",
+            "layers.*.custom_module.down_proj.weight",
             # MOE(routed experts) - Nested under .experts now
             "model.layers.*.mlp.gate.weight":
-            "layers.*.custom_module.experts.router.kernel_DE",
+            "layers.*.custom_module.experts.router.gate_proj.weight",
             "model.layers.*.mlp.gate.e_score_correction_bias":
             "layers.*.custom_module.experts.router.bias_E",
             "model.layers.*.mlp.experts.*.gate_proj.weight":
@@ -972,19 +985,19 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
             "layers.*.custom_module.experts.kernel_gating_upproj_E2DF",
             # MOE(shared experts) - Nested under .shared_experts inside custom_module
             "model.layers.*.mlp.shared_experts.down_proj.weight":
-            "layers.*.custom_module.shared_experts.kernel_down_proj_FD",
+            "layers.*.custom_module.shared_experts.down_proj.weight",
             "model.layers.*.mlp.shared_experts.gate_proj.weight":
-            "layers.*.custom_module.shared_experts.kernel_gating_DF",
+            "layers.*.custom_module.shared_experts.gating_proj.weight",
             "model.layers.*.mlp.shared_experts.up_proj.weight":
-            "layers.*.custom_module.shared_experts.kernel_up_proj_DF",
+            "layers.*.custom_module.shared_experts.up_proj.weight",
         }
 
         if self.use_mla_kernel:
             self._loaded_to_standardized_keys.update({
                 "model.layers.*.self_attn.k_b_proj.weight":
-                "layers.*.self_attn.kernel_k_up_proj_ANH",
+                "layers.*.self_attn.k_up_proj.weight",
                 "model.layers.*.self_attn.v_b_proj.weight":
-                "layers.*.self_attn.kernel_v_up_proj_ANH",
+                "layers.*.self_attn.v_up_proj.weight",
             })
         # TODO (jacobplatin): we should not be hard-coding these
         self.scale_dtype, self.quant_dtype = jnp.bfloat16, jnp.float8_e4m3fn
@@ -1006,21 +1019,21 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                 "custom_module.experts.kernel_gating_EDF": (256, 28, 2048),
                 "custom_module.experts.kernel_up_proj_EDF": (256, 28, 2048),
                 # Shared experts (2D)
-                "custom_module.shared_experts.kernel_down_proj_FD": (8, 7168),
-                "custom_module.shared_experts.kernel_gating_DF": (28, 2048),
-                "custom_module.shared_experts.kernel_up_proj_DF": (28, 2048),
+                "custom_module.shared_experts.down_proj.weight": (8, 7168),
+                "custom_module.shared_experts.gating_proj.weight": (28, 2048),
+                "custom_module.shared_experts.up_proj.weight": (28, 2048),
                 # Dense FFW (2D)
-                "custom_module.kernel_gating_DF": (28, 18432),
-                "custom_module.kernel_up_proj_DF": (28, 18432),
-                "custom_module.kernel_down_proj_FD": (72, 7168),
+                "custom_module.gating_proj.weight": (28, 18432),
+                "custom_module.up_proj.weight": (28, 18432),
+                "custom_module.down_proj.weight": (72, 7168),
                 # Attention (3D for MLA, 2D for the rest)
                 "self_attn.q_down_proj.weight": (28, 1536),
                 "self_attn.q_up_proj.weight": (6, 24576),
                 "self_attn.kv_down_proj.weight": (28, 576),
                 "self_attn.kv_up_proj.weight": (2, 32768),
                 "self_attn.o_proj.weight": (64, 7168),
-                "self_attn.kernel_k_up_proj_ANH": (2, 128, 128),  # MLA
-                "self_attn.kernel_v_up_proj_ANH": (2, 128, 128),  # MLA
+                "self_attn.k_up_proj.weight": (2, 128, 128),  # MLA
+                "self_attn.v_up_proj.weight": (2, 128, 128),  # MLA
             }
 
             # TODO (jacobplatin): remove this check eventually!
@@ -1701,7 +1714,8 @@ class DeepSeekV3(nnx.Module):
                     rngs=self.rng,
                     activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
                     df_sharding=(None, ShardingAxisName.MLP_TENSOR),
-                    fd_sharding=(ShardingAxisName.MLP_TENSOR, None))
+                    fd_sharding=(ShardingAxisName.MLP_TENSOR, None),
+                    quant_config=vllm_config.quant_config)
             else:
                 # MoE Layer
                 moe_dtype = jnp.float8_e4m3fn if self.weight_loader.is_native_fp8_model else vllm_config.model_config.hf_config.quantization_config.get(
@@ -1720,7 +1734,8 @@ class DeepSeekV3(nnx.Module):
                     moe_backend=self.moe_backend,
                     activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
                     ed_sharding=(None, None),
-                    e_sharding=(None, ))
+                    e_sharding=(None, ),
+                    quant_config=vllm_config.quant_config)
 
                 # routed experts
                 custom_module = JaxMoE(
@@ -1759,7 +1774,8 @@ class DeepSeekV3(nnx.Module):
                     rngs=self.rng,
                     activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
                     df_sharding=(None, ShardingAxisName.MLP_TENSOR),
-                    fd_sharding=(ShardingAxisName.MLP_TENSOR, None))
+                    fd_sharding=(ShardingAxisName.MLP_TENSOR, None),
+                    quant_config=vllm_config.quant_config)
 
                 mlp_layer = DeepseekV3MoE(
                     experts=custom_module,
