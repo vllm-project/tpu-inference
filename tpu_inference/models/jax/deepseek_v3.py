@@ -43,7 +43,7 @@ from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
 from tpu_inference.layers.jax.base import create_param, sharded_initializer
 from tpu_inference.layers.jax.embed import JaxEmbed
-from tpu_inference.layers.jax.layers import FlaxUtils, RMSNorm
+from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.moe.utils import (get_expert_parallelism,
@@ -140,6 +140,7 @@ class DeepseekV3BaseAttention(JaxModule):
     rngs: InitVar[nnx.Rngs]
 
     quant_config: Optional[QuantizationConfig] = None
+    prefix: str = ''
 
     # Scales for Q/KV quantization (per-tensor)
     _q_scale: float = 1
@@ -174,7 +175,7 @@ class DeepseekV3BaseAttention(JaxModule):
 
         weight_init = _weight_init(self.random_init)
 
-        self.q_down_proj = JaxEinsum(
+        self.q_a_proj = JaxEinsum(
             einsum_str="TD,DA->TA",
             kernel_shape=(self.D, self.q_lora_rank),
             rngs=rngs,
@@ -183,7 +184,7 @@ class DeepseekV3BaseAttention(JaxModule):
             kernel_init=nnx.with_partitioning(weight_init, self.q_da_sharding),
         )
 
-        self.q_up_proj = JaxEinsum(
+        self.q_b_proj = JaxEinsum(
             einsum_str="TA,AP->TP",
             kernel_shape=(self.q_lora_rank, self.N * self.qk_head_dim),
             rngs=rngs,
@@ -192,7 +193,7 @@ class DeepseekV3BaseAttention(JaxModule):
             kernel_init=nnx.with_partitioning(weight_init, self.ap_sharding),
         )
 
-        self.kv_down_proj = JaxEinsum(
+        self.kv_a_proj_with_mqa = JaxEinsum(
             einsum_str="SD,DA -> SA",
             kernel_shape=(self.D, self.kv_lora_rank + self.qk_rope_head_dim),
             rngs=rngs,
@@ -211,19 +212,23 @@ class DeepseekV3BaseAttention(JaxModule):
             kernel_init=nnx.with_partitioning(weight_init, self.rd_sharding),
         )
 
-        self.q_rms_norm = RMSNorm(dims=self.q_lora_rank,
-                                  epsilon=self.rms_norm_eps,
-                                  with_scale=True,
-                                  dtype=self.dtype,
-                                  random_init=self.random_init,
-                                  rngs=rngs)
+        self.q_a_layernorm = JaxRmsNorm(self.q_lora_rank,
+                                        epsilon=self.rms_norm_eps,
+                                        scale_init=nnx.with_partitioning(
+                                            init_fn, (None, )),
+                                        dtype=self.dtype,
+                                        quant_config=self.quant_config,
+                                        prefix=self.prefix + ".q_a_layernorm",
+                                        rngs=rngs)
 
-        self.kv_rms_norm = RMSNorm(dims=self.kv_lora_rank,
-                                   epsilon=self.rms_norm_eps,
-                                   with_scale=True,
-                                   dtype=self.dtype,
-                                   random_init=self.random_init,
-                                   rngs=rngs)
+        self.kv_a_layernorm = JaxRmsNorm(
+            self.kv_lora_rank,
+            epsilon=self.rms_norm_eps,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
+            dtype=self.dtype,
+            quant_config=self.quant_config,
+            prefix=self.prefix + ".kv_a_layernorm",
+            rngs=rngs)
 
         self.kv_cache_quantized_dtype = None
         if self.kv_cache_dtype != "auto":
@@ -301,7 +306,7 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
 
     def setup_specific_layers(self, rngs: nnx.Rngs) -> None:
         weight_init = _weight_init(self.random_init)
-        self.kv_up_proj = JaxEinsum(
+        self.kv_b_proj = JaxEinsum(
             einsum_str="SA,AL->SL",
             kernel_shape=(self.kv_lora_rank,
                           self.N * (self.qk_nope_head_dim + self.v_head_dim)),
@@ -323,9 +328,9 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
         Returns:
             The query tensor of shape `(tokens_query, num_query_heads, head_dim)`.
         """
-        q_TA = self.q_down_proj(x_q_TD)
-        q_TA = self.q_rms_norm(q_TA)
-        q_TP = self.q_up_proj(q_TA)
+        q_TA = self.q_a_proj(x_q_TD)
+        q_TA = self.q_a_layernorm(q_TA)
+        q_TP = self.q_b_proj(q_TA)
         q_TNH = q_TP.reshape(q_TA.shape[0], self.N, self.qk_head_dim)
 
         q_nope_TNH = q_TNH[..., :self.qk_nope_head_dim]
@@ -349,7 +354,7 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
             Tuple of key-value tensors of shape `(tokens_kv, num_query_heads, d_model)`.
         """
 
-        kv_SA = self.kv_down_proj(x_SD)
+        kv_SA = self.kv_a_proj_with_mqa(x_SD)
 
         k_rope_SH = kv_SA[..., self.kv_lora_rank:]
         k_rope_SNH = k_rope_SH[..., None, :]
@@ -360,10 +365,10 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
             k_rope_SNH, (k_rope_SNH.shape[0], self.N, self.qk_rope_head_dim))
 
         kv_SA = kv_SA[..., :self.kv_lora_rank]
-        kv_SA = self.kv_rms_norm(kv_SA)
+        kv_SA = self.kv_a_layernorm(kv_SA)
         kv_SA = nnx.with_sharding_constraint(kv_SA, self.keyvalue_skh)
 
-        kv_SL = self.kv_up_proj(kv_SA)
+        kv_SL = self.kv_b_proj(kv_SA)
         kv_nope_SNH = kv_SL.reshape(kv_SA.shape[0], self.N,
                                     self.qk_nope_head_dim + self.v_head_dim)
 
@@ -494,9 +499,9 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
             A tuple of query tensor of shape `(tokens_query, num_query_heads, q_lora_rank)` and
             rope tensor of shape `(tokens_query, num_query_heads, head_dim)`.
         """
-        q_TA = self.q_down_proj(x_q_TD)
-        q_TA = self.q_rms_norm(q_TA)
-        q_TP = self.q_up_proj(q_TA)
+        q_TA = self.q_a_proj(x_q_TD)
+        q_TA = self.q_a_layernorm(q_TA)
+        q_TP = self.q_b_proj(q_TA)
         q_TNH = q_TP.reshape(q_TA.shape[0], self.N, self.qk_head_dim)
 
         q_nope_TNH = q_TNH[..., :self.qk_nope_head_dim]
@@ -522,7 +527,7 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
             A tuple of key-value tensor of shape `(tokens_kv, q_lora_rank)` and
             rope tensor of shape `(tokens_kv, head_dim)`.
         """
-        kv_SA = self.kv_down_proj(x_SD)
+        kv_SA = self.kv_a_proj_with_mqa(x_SD)
 
         k_rope_SH = kv_SA[..., self.kv_lora_rank:]
         k_rope_SNH = k_rope_SH[..., None, :]
@@ -531,7 +536,7 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
         k_rope_SH = k_rope_SNH[:, 0, :]
 
         kv_SA = kv_SA[..., :self.kv_lora_rank]
-        kv_SA = self.kv_rms_norm(kv_SA)
+        kv_SA = self.kv_a_layernorm(kv_SA)
         kv_SA = nnx.with_sharding_constraint(kv_SA, self.keyvalue_skh)
 
         return (kv_SA, k_rope_SH)
@@ -1121,6 +1126,7 @@ class DeepSeekV3(JaxModule):
                                   ShardingAxisName.MOE_TENSOR),
                     moe_backend=self.moe_backend,
                     qwix_quantized_weight_dtype=None,
+                    prefix=prefix + ".experts",
                     router=router)
 
                 # shared experts
