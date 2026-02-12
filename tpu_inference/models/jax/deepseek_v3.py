@@ -61,6 +61,7 @@ from tpu_inference.models.jax.utils.weight_utils import (JaxAutoWeightsLoader,
 KVCache = Tuple[jax.Array, jax.Array]
 
 logger = init_logger(__name__)
+init_fn = nnx.initializers.uniform()
 
 
 def _weight_init(random_init: bool):
@@ -630,6 +631,7 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
 
 
 @dataclass(kw_only=True)
+class DeepseekV3MLP(JaxModule):
 class DeepseekV3MLP(JaxModule):
     """A Gated Feed-Forward Network (FFN) layer.
 
