@@ -14,7 +14,7 @@ def debug_print(debug_mode, msg, *args):
 
 
 def inner_kernel(
-    tiled_in_ref, tiled_out_ref, *, topk_argsort_revert_indices_ref, debug_mode
+    tiled_in_ref, tiled_out_ref, *, sorted_token_indices_ref, debug_mode
 ):
   tile_in = tiled_in_ref.shape[0]
   tile_out = tiled_out_ref.shape[0]
@@ -42,7 +42,7 @@ def inner_kernel(
 
       vals_list = []
       for i in range(start, end):
-        in_row = topk_argsort_revert_indices_ref[out_offset + i] - in_offset
+        in_row = sorted_token_indices_ref[out_offset + i] - in_offset
         debug_print(debug_mode, "=== debug_print === in_row={}", in_row)
 
         if multiple_in_tiles:
@@ -80,6 +80,7 @@ def kernel(
     topk_argsort_revert_indices_ref: jax.Array,
     # Scratch
     group_offset_ref: jax.Array,
+    sorted_token_indices_ref: jax.Array,
     *,
     tile_out: int,
     tile_in: int,
@@ -101,15 +102,15 @@ def kernel(
 
   curr_offset = 0
   for e in range(num_experts):
-    next_offset = curr_offset + group_sizes_ref[e]
-    group_offset_ref[e] = next_offset
-    curr_offset = next_offset
+    group_offset_ref[e] = curr_offset
+    curr_offset += group_sizes_ref[e]
 
   for t in range(num_tokens):
     for k in range(topk):
       expert_idx = topk_indices_ref[t, k]
       group_offset = group_offset_ref[expert_idx]
-      topk_argsort_revert_indices_ref[group_offset] = t
+      sorted_token_indices_ref[group_offset] = t
+      topk_argsort_revert_indices_ref[t * topk + k] = group_offset
       group_offset_ref[expert_idx] = group_offset + 1
 
   num_out_tiles = num_out_tokens // tile_out
@@ -123,7 +124,7 @@ def kernel(
   pltpu.emit_pipeline(
       functools.partial(
           inner_kernel,
-          topk_argsort_revert_indices_ref=topk_argsort_revert_indices_ref,
+          sorted_token_indices_ref=sorted_token_indices_ref,
           debug_mode=debug_mode,
       ),
       grid=(num_out_tiles, num_in_tiles),
@@ -188,6 +189,7 @@ def sort_tokens(
           ],
           scratch_shapes=[
               pltpu.SMEM((num_experts,), jnp.int32),
+              pltpu.SMEM((topk_indices.size,), jnp.int32),
           ],
       ),
       compiler_params=pltpu.CompilerParams(vmem_limit_bytes=vmem_limit_bytes),
