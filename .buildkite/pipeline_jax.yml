@@ -335,7 +335,27 @@ steps:
             if [[ "$$IS_FOR_V7X" == "true" ]]; then
               .buildkite/scripts/run_in_docker.sh bash -c 'SKIP_JAX_PRECOMPILE=0 USE_MOE_EP_KERNEL=1 VLLM_XLA_CHECK_RECOMPILATION=1  MODEL_IMPL_TYPE=vllm python examples/offline_inference.py --model Qwen/Qwen1.5-MoE-A2.7B  --tensor-parallel-size 4 --enable-expert-parallel --no-async-scheduling --max-model-len 32 --max-num-batched-tokens 32 --max-num-seqs 8'
             fi
-  
+
+      - label: "${TPU_VERSION:-tpu6e} E2E test for DCN-based P/D disaggregation"
+        key: ${TPU_VERSION:-tpu6e}_test_25
+        soft_fail: true
+        env:
+          IS_FOR_V7X: "${IS_FOR_V7X}"
+          MODEL: "Qwen/Qwen3-0.6B"
+          INPUT_LEN: 1024
+          OUTPUT_LEN: 1024
+          NUM_PROMPTS: 5
+          RANDOM_SEED: 10
+          MAX_CONCURRENCY: 1
+          TEST_MODE: 1
+        agents:
+          queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+        commands:
+          - |
+            if [[ "$IS_FOR_V7X" != "true" ]]; then
+              .buildkite/scripts/run_disagg.sh
+            fi
+
       # -----------------------------------------------------------------
       # NOTIFICATION STEP
       # -----------------------------------------------------------------
@@ -363,9 +383,10 @@ steps:
           - ${TPU_VERSION:-tpu6e}_test_20
           - ${TPU_VERSION:-tpu6e}_test_21
           - ${TPU_VERSION:-tpu6e}_test_24
+          - ${TPU_VERSION:-tpu6e}_test_25
         agents:
           queue: cpu
         commands:
           - |
             .buildkite/scripts/check_results.sh \
-              "TPU JAX Tests Failed" ${TPU_VERSION:-tpu6e}_test_0 ${TPU_VERSION:-tpu6e}_test_1 ${TPU_VERSION:-tpu6e}_test_2 ${TPU_VERSION:-tpu6e}_test_3 ${TPU_VERSION:-tpu6e}_test_4 ${TPU_VERSION:-tpu6e}_test_6 ${TPU_VERSION:-tpu6e}_test_7 ${TPU_VERSION:-tpu6e}_test_8 ${TPU_VERSION:-tpu6e}_test_9 ${TPU_VERSION:-tpu6e}_test_10 ${TPU_VERSION:-tpu6e}_test_11 ${TPU_VERSION:-tpu6e}_test_12 ${TPU_VERSION:-tpu6e}_test_13 ${TPU_VERSION:-tpu6e}_test_15 ${TPU_VERSION:-tpu6e}_test_16 ${TPU_VERSION:-tpu6e}_test_17 ${TPU_VERSION:-tpu6e}_test_18 ${TPU_VERSION:-tpu6e}_test_19 ${TPU_VERSION:-tpu6e}_test_20 ${TPU_VERSION:-tpu6e}_test_21 ${TPU_VERSION:-tpu6e}_test_22 ${TPU_VERSION:-tpu6e}_test_23 ${TPU_VERSION:-tpu6e}_test_24
+              "TPU JAX Tests Failed" ${TPU_VERSION:-tpu6e}_test_0 ${TPU_VERSION:-tpu6e}_test_1 ${TPU_VERSION:-tpu6e}_test_2 ${TPU_VERSION:-tpu6e}_test_3 ${TPU_VERSION:-tpu6e}_test_4 ${TPU_VERSION:-tpu6e}_test_6 ${TPU_VERSION:-tpu6e}_test_7 ${TPU_VERSION:-tpu6e}_test_8 ${TPU_VERSION:-tpu6e}_test_9 ${TPU_VERSION:-tpu6e}_test_10 ${TPU_VERSION:-tpu6e}_test_11 ${TPU_VERSION:-tpu6e}_test_12 ${TPU_VERSION:-tpu6e}_test_13 ${TPU_VERSION:-tpu6e}_test_15 ${TPU_VERSION:-tpu6e}_test_16 ${TPU_VERSION:-tpu6e}_test_17 ${TPU_VERSION:-tpu6e}_test_18 ${TPU_VERSION:-tpu6e}_test_19 ${TPU_VERSION:-tpu6e}_test_20 ${TPU_VERSION:-tpu6e}_test_21 ${TPU_VERSION:-tpu6e}_test_22 ${TPU_VERSION:-tpu6e}_test_23 ${TPU_VERSION:-tpu6e}_test_24 ${TPU_VERSION:-tpu6e}_test_25

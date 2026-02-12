@@ -172,8 +172,14 @@ class UnquantizedConfig(QuantizationConfig):
     def get_quant_method(self, layer: JaxModule,
                          prefix: str) -> Optional[QuantizeMethodBase]:
         if isinstance(layer, JaxEinsum):
-            linear_config = QuantLinearConfig(
-                enable_sp=False, output_sizes=[layer.kernel_shape[-1]])
+            # Derive output's last dim from the einsum string.
+            einsum_str = layer.einsum_str.replace(" ", "")
+            _, w_axis = einsum_str.split("->")[0].split(",")
+            last_out_char = einsum_str.split("->")[1][-1]
+            out_size = layer.kernel_shape[w_axis.index(last_out_char)]
+
+            linear_config = QuantLinearConfig(enable_sp=False,
+                                              output_sizes=[out_size])
             return UnquantizedLinearMethod(linear_config)
         if isinstance(layer, JaxMoE):
             return UnquantizedFusedMoEMethod()
