@@ -166,9 +166,6 @@ class TestMoE(unittest.TestCase):
 
         return jnp.array(expected_output, dtype=self.dtype)
 
-    @unittest.skip(
-        "Skipping dense backend correctness test to allow lib versions upgrade."
-    )
     def test_dense_backend_correctness(self):
         """Verifies the DENSE_MAT backend against the sequential ground truth."""
         for apply_expert_weight_before_computation in [False, True]:
@@ -189,9 +186,6 @@ class TestMoE(unittest.TestCase):
                              rtol=1e-2),
                 "Dense backend output does not match ground truth.")
 
-    @unittest.skip(
-        "Skipping dense backend correctness test to allow lib versions upgrade."
-    )
     def test_sparse_distributed_backend_correctness(self):
         """
         Verifies the Sparse backends with expert parallelism
@@ -215,9 +209,6 @@ class TestMoE(unittest.TestCase):
             f"Sparse distributed output mismatch for backebd tyoe {backend}. Mean diff: {diff}"
         )
 
-    @unittest.skip(
-        "Skipping dense backend correctness test to allow lib versions upgrade."
-    )
     def test_backend_consistency(self):
         """
         Ensures that if we initialize two models with identical seeds/weights,
