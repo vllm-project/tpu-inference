@@ -14,6 +14,7 @@
 
 import copy
 import functools
+import time
 from collections.abc import Sequence
 from contextlib import nullcontext
 from typing import Any, List, Optional, Tuple
@@ -126,6 +127,7 @@ class VllmModelWrapper:
                     setattr(module, "get_pp_group", jax_get_pp_group)
 
     def load_weights(self):
+        loading_start = time.time()
         # Set up to load the model into CPU first.
         # Cache device slice config since device config cannot be deepcopied
         modified_slice_config = False
@@ -197,6 +199,11 @@ class VllmModelWrapper:
 
         self._pooler: Pooler | None = self.model.pooler
 
+        loading_end = time.time()
+        total_loading_time = loading_end - loading_start
+        logger.info(
+            f"Total time to load model weights from storage to TPU: {total_loading_time:.2f} seconds."
+        )
         # Returning to the jax land, so we need to wrap it into a JaxValue.
         return jax_view(params_and_buffers), lora_manager
 
