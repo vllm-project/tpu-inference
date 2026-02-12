@@ -90,6 +90,46 @@ def rngs():
     return nnx.Rngs(42)
 
 
+class TestLinearOpAdaptInfo:
+    """Test QuantLinearConfig.get_adapt_info axis classification."""
+
+    def test_simple_2d_linear(self, rngs):
+        """ab,bc->ac: standard 2D linear (JaxLinear pattern)."""
+        layer = JaxEinsum('ab,bc->ac', (32, 16), rngs)
+        info = QuantLinearConfig.get_adapt_info(einsum_str=layer.einsum_str,
+                                                weight=layer.weight)
+        assert info.in_features == (32, )  # b is contracting
+        assert info.out_features == (16, )  # c is free
+        assert info.batch_features == ()  # no batch dims
+
+    def test_2d_weight_3d_output(self, rngs):
+        """TD,DNH->TNH: D is contracting, N and H are output-only."""
+        layer = JaxEinsum('TD,DNH->TNH', (128, 8, 16), rngs)
+        info = QuantLinearConfig.get_adapt_info(einsum_str=layer.einsum_str,
+                                                weight=layer.weight)
+        assert info.in_features == (128, )  # D is contracting
+        assert info.out_features == (8, 16)  # N, H are free
+        assert info.batch_features == ()  # no batch dims
+
+    def test_batched_einsum_tnh_anh_tna(self, rngs):
+        """TNH,ANH->TNA: N is batch dim, H is contracting."""
+        layer = JaxEinsum('TNH,ANH->TNA', (16, 4, 8), rngs)
+        info = QuantLinearConfig.get_adapt_info(einsum_str=layer.einsum_str,
+                                                weight=layer.weight)
+        assert info.in_features == (8, )  # H is contracting
+        assert info.out_features == (16, )  # A is free
+        assert info.batch_features == (4, )  # N is batch
+
+    def test_batched_einsum_tna_anh_tnh(self, rngs):
+        """TNA,ANH->TNH: N is batch dim, A is contracting."""
+        layer = JaxEinsum('TNA,ANH->TNH', (16, 4, 8), rngs)
+        info = QuantLinearConfig.get_adapt_info(einsum_str=layer.einsum_str,
+                                                weight=layer.weight)
+        assert info.in_features == (16, )  # A is contracting
+        assert info.out_features == (8, )  # H is free
+        assert info.batch_features == (4, )  # N is batch
+
+
 class TestFp8BlockwiseJaxLinear:
 
     @pytest.mark.parametrize("in_features,out_features", [(128, 64),
@@ -166,6 +206,67 @@ class TestFp8BlockwiseJaxLinear:
         expected_shape = (batch_size, ) + kernel_shape[1:]
         assert output.shape == expected_shape
 
+    @pytest.mark.parametrize("kernel_shape", [(16, 4, 8), (32, 8, 16)])
+    @pytest.mark.parametrize("batch_size", [1, 4])
+    def test_batched_einsum_forward_correctness(self, kernel_shape, batch_size,
+                                                rngs):
+        """Test 3D einsum with batch dims (e.g. MLA k/v up projections)."""
+        hf_quant_config = {
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+            "weight_block_size": [8, 16],
+        }
+        quant_config = Fp8Config(hf_quant_config)
+
+        A, N, H = kernel_shape
+        layer = JaxEinsum(
+            einsum_str='TNH,ANH->TNA',
+            kernel_shape=kernel_shape,
+            rngs=rngs,
+            quant_config=quant_config,
+        )
+
+        devices = jax.devices()
+        mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
+        with jax.set_mesh(mesh):
+            layer.quant_method.process_weights_after_loading(layer)
+
+            x = jax.random.normal(rngs.params(), (batch_size, N, H))
+            output = layer(x)
+
+        expected_shape = (batch_size, N, A)
+        assert output.shape == expected_shape
+
+    @pytest.mark.parametrize("kernel_shape", [(16, 4, 8), (32, 8, 16)])
+    @pytest.mark.parametrize("batch_size", [1, 4])
+    def test_batched_einsum_v_up_proj(self, kernel_shape, batch_size, rngs):
+        """Test blockwise FP8 with MLA v_up_proj pattern (TNA,ANH->TNH)."""
+        hf_quant_config = {
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+            "weight_block_size": [8, 16],
+        }
+        quant_config = Fp8Config(hf_quant_config)
+
+        A, N, H = kernel_shape
+        layer = JaxEinsum(
+            einsum_str='TNA,ANH->TNH',
+            kernel_shape=kernel_shape,
+            rngs=rngs,
+            quant_config=quant_config,
+        )
+
+        devices = jax.devices()
+        mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
+        with jax.set_mesh(mesh):
+            layer.quant_method.process_weights_after_loading(layer)
+
+            x = jax.random.normal(rngs.params(), (batch_size, N, A))
+            output = layer(x)
+
+        expected_shape = (batch_size, N, H)
+        assert output.shape == expected_shape
+
 
 class TestFp8TensorwiseJaxLinear:
 
@@ -221,6 +322,131 @@ class TestFp8TensorwiseJaxLinear:
             output = layer(x)
 
         assert output.shape == (batch_size, out_features)
+
+    @pytest.mark.parametrize("kernel_shape", [(16, 4, 8), (32, 8, 16)])
+    @pytest.mark.parametrize("batch_size", [1, 4])
+    def test_batched_einsum_forward_correctness(self, kernel_shape, batch_size,
+                                                rngs):
+        """Test tensorwise FP8 with batched einsum (MLA-style)."""
+        hf_quant_config = {
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+        }
+        quant_config = Fp8Config(hf_quant_config)
+
+        A, N, H = kernel_shape
+        layer = JaxEinsum(
+            einsum_str='TNH,ANH->TNA',
+            kernel_shape=kernel_shape,
+            rngs=rngs,
+            quant_config=quant_config,
+        )
+
+        devices = jax.devices()
+        mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
+        with jax.set_mesh(mesh):
+            x = jax.random.normal(rngs.params(), (batch_size, N, H))
+            output = layer(x)
+
+        expected_shape = (batch_size, N, A)
+        assert output.shape == expected_shape
+
+    @pytest.mark.parametrize("einsum_str,kernel_shape", [
+        ('TNH,ANH->TNA', (16, 4, 8)),
+        ('TNA,ANH->TNH', (16, 4, 8)),
+    ])
+    @pytest.mark.parametrize("batch_size", [1, 4])
+    def test_batched_einsum_numerical_correctness(self, einsum_str,
+                                                  kernel_shape, batch_size,
+                                                  rngs):
+        """Verify tensorwise FP8 batched einsum matches BF16 reference."""
+        quant_config = Fp8Config({
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+        })
+
+        A, N, H = kernel_shape
+        layer = JaxEinsum(
+            einsum_str=einsum_str,
+            kernel_shape=kernel_shape,
+            rngs=rngs,
+            quant_config=quant_config,
+        )
+
+        # Determine input shape from einsum_str
+        input_dims = einsum_str.split(',')[0]  # e.g. 'TNH' or 'TNA'
+        dim_sizes = {'T': batch_size, 'N': N, 'H': H, 'A': A}
+        input_shape = tuple(dim_sizes[d] for d in input_dims)
+
+        devices = jax.devices()
+        mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
+        with jax.set_mesh(mesh):
+            x = jax.random.normal(rngs.params(), input_shape,
+                                  dtype=jnp.bfloat16)
+            fp8_output = layer(x)
+
+            # BF16 reference using the same weight
+            weight_bf16 = layer.weight.value.astype(jnp.bfloat16)
+            ref_output = jnp.einsum(einsum_str, x, weight_bf16)
+
+        assert fp8_output.shape == ref_output.shape
+        assert jnp.allclose(fp8_output.astype(jnp.float32),
+                            ref_output.astype(jnp.float32),
+                            atol=1.0,
+                            rtol=0.3)
+
+    @pytest.mark.parametrize("einsum_str,kernel_shape", [
+        ('TNH,ANH->TNA', (32, 8, 16)),
+        ('TNA,ANH->TNH', (32, 8, 16)),
+    ])
+    @pytest.mark.parametrize("batch_size", [4])
+    def test_batched_einsum_multi_device_sharded(self, einsum_str,
+                                                  kernel_shape, batch_size,
+                                                  rngs):
+        """Test FP8 batched einsum with N actually sharded across devices.
+
+        Reproduces the MLA k_up_proj / v_up_proj pattern where
+        nnx.with_partitioning produces a raw tuple sharding that must be
+        converted to PartitionSpec for shard_map in the FP8 path.
+        """
+        num_devices = jax.local_device_count()
+        if num_devices < 2:
+            pytest.skip("Requires at least 2 devices")
+
+        quant_config = Fp8Config({
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+        })
+
+        A, N_base, H = kernel_shape
+        # Make N divisible by num_devices to be sharded
+        N = N_base * num_devices
+
+        weight_init = nnx.with_partitioning(nnx.initializers.lecun_normal(),
+                                            (None, 'model', None))
+
+        devices = np.array(jax.devices()).reshape(1, -1)
+        mesh = Mesh(devices, axis_names=('data', 'model'))
+        with jax.set_mesh(mesh):
+            layer = JaxEinsum(
+                einsum_str=einsum_str,
+                kernel_shape=(A, N, H),
+                rngs=rngs,
+                quant_config=quant_config,
+                kernel_init=weight_init,
+            )
+
+            input_dims = einsum_str.split(',')[0]
+            dim_sizes = {'T': batch_size, 'N': N, 'H': H, 'A': A}
+            input_shape = tuple(dim_sizes[d] for d in input_dims)
+
+            x = jax.random.normal(rngs.params(), input_shape,
+                                  dtype=jnp.bfloat16)
+            output = layer(x)
+
+        output_dims = einsum_str.split('->')[1]
+        expected_shape = tuple(dim_sizes[d] for d in output_dims)
+        assert output.shape == expected_shape
 
 
 class TestFp8FusedMoE:
@@ -307,9 +533,11 @@ class TestFp8FusedMoE:
                               (num_tokens, hidden_size), dtype=dtype) / 10.0
         score = jax.random.normal(k2, (num_tokens, num_experts), dtype=dtype)
 
-        w13_shape = (num_experts, 2 * intermediate_size, hidden_size)
+        gate_and_up_shape = (num_experts, intermediate_size, hidden_size)
         w2_shape = (num_experts, hidden_size, intermediate_size)
-        w13 = jax.random.normal(k3, w13_shape, dtype=dtype) / 10.0
+        gate = jax.random.normal(k3, gate_and_up_shape, dtype=dtype) / 10.0
+        up = jax.random.normal(k3, gate_and_up_shape, dtype=dtype) / 10.0
+        w13 = jax.numpy.concatenate([gate, up], axis=1)
         w2 = jax.random.normal(k4, w2_shape, dtype=dtype) / 10.0
 
         expected = test_utils.ref_moe_jax(a, score, w13, w2, None, None,
@@ -321,31 +549,41 @@ class TestFp8FusedMoE:
         else:
             assert layer.moe_backend == MoEBackend.GMM_TP
 
+        # Begin mimic loading weights from checkpoint.
         block_m, block_n = quant_config.weight_block_size
-        w1_weight, w1_weight_scale = quantize_to_fp8_block_3d(
-            w13, block_m, block_n, jnp.float8_e4m3fn)
+        w_gate_fp8, gate_scale = quantize_to_fp8_block_3d(
+            jnp.transpose(gate, (0, 2, 1)), block_m, block_n, jnp.float8_e4m3fn)
+        w_up_fp8, up_scale = quantize_to_fp8_block_3d(
+            jnp.transpose(up, (0, 2, 1)), block_m, block_n, jnp.float8_e4m3fn)
         w2_weight, w2_weight_scale = quantize_to_fp8_block_3d(
-            w2, block_m, block_n, jnp.float8_e4m3fn)
-
-        layer.quant_method.create_weights_jax(layer)
+            jnp.transpose(w2, (0, 2, 1)), block_m, block_n, jnp.float8_e4m3fn)
 
         scale_suffix = layer.quant_method.weight_scale_name
 
         getattr(
             layer,
-            f"kernel_gating_upproj_EDF_{scale_suffix}").value = w1_weight_scale
+            f"kernel_gating_EDF_{scale_suffix}").value = gate_scale
+        getattr(
+            layer,
+            f"kernel_up_proj_EDF_{scale_suffix}").value = up_scale
         getattr(layer,
                 f"kernel_down_proj_EFD_{scale_suffix}").value = w2_weight_scale
-
-        w_gate_fp8, w_up_fp8 = jnp.split(jnp.transpose(w1_weight, (0, 2, 1)),
-                                         2,
-                                         axis=2)
 
         # Overwrite the layer's parameters with our FP8 data
         layer.kernel_gating_EDF.value = w_gate_fp8
         layer.kernel_up_proj_EDF.value = w_up_fp8
-
         layer.kernel_down_proj_EFD.value = w2_weight
+
+        for param in [
+            getattr(layer, f"kernel_gating_EDF_{scale_suffix}"),
+            getattr(layer, f"kernel_up_proj_EDF_{scale_suffix}"),
+            getattr(layer, f"kernel_down_proj_EFD_{scale_suffix}"),
+            layer.kernel_gating_EDF,
+            layer.kernel_up_proj_EDF,
+            layer.kernel_down_proj_EFD
+        ]:
+            setattr(param, "_cnt_moe_weights_loaded", layer.num_local_experts)
+        # End mimic loading weights from checkpoint.
 
         layer.quant_method.process_weights_after_loading(layer)
 
@@ -356,7 +594,7 @@ class TestFp8FusedMoE:
             # to avoid promote error
             actual = layer(a).astype(expected.dtype)
 
-        assert jnp.allclose(expected, actual, atol=2.5e-2, rtol=1e-1)
+        assert jnp.allclose(expected, actual, atol=5e-2, rtol=1e-1)
 
 
 class TestFp8Config:

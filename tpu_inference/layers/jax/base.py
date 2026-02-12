@@ -160,6 +160,10 @@ def create_param(rngs: nnx.Rngs,
                                      static_argnames=('shape', 'dtype'),
                                      out_shardings=P(*sharding))
         param_data = jitted_initializer(key, shape, dtype)
-        return nnx.Param(param_data, sharding=sharding)
+        return nnx.Param(param_data,
+                         sharding=sharding,
+                         init_fn=jitted_initializer)
     else:
-        return nnx.Param(_init_fn(key, shape, dtype), sharding=sharding)
+        return nnx.Param(_init_fn(key, shape, dtype),
+                         sharding=sharding,
+                         init_fn=_init_fn)

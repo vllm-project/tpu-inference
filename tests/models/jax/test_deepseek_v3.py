@@ -180,7 +180,7 @@ class TestDeepSeekV3WeightLoader:
         ("model.layers.5.mlp.experts.10.gate_proj.weight",
          "layers.5.custom_module.experts.kernel_gating_EDF"),
         ("model.layers.1.mlp.shared_experts.down_proj.weight",
-         "layers.1.custom_module.shared_experts.kernel_down_proj_FD"),
+         "layers.1.custom_module.shared_experts.down_proj.weight"),
         ("model.norm.weight", "final_norm.scale"),
     ])
     def test_key_mapping(self, loader, loaded_key, expected_mapped):
@@ -382,7 +382,7 @@ class TestDeepSeekV3WeightLoader:
         """
         Tests loading an unpacked weight that also has a quantization scale.
         """
-        name = "layers.0.custom_module.kernel_gating_DF"
+        name = "layers.0.custom_module.gating_proj.weight"
         weight_shape = (64, 128)
         scale_shape = (64, 1)
 
@@ -395,7 +395,9 @@ class TestDeepSeekV3WeightLoader:
             "layers": {
                 "0": {
                     "custom_module": {
-                        "kernel_gating_DF": mock_var
+                        "gating_proj": {
+                            "weight": mock_var
+                        }
                     }
                 }
             }
@@ -472,7 +474,7 @@ class TestDeepSeekV3NativeFP8:
         Tests the logic where the scale is repeated when scale dimension matches
         block dimension logic but is smaller than weight dimension.
         """
-        name = "layers.0.custom_module.kernel_gating_DF"
+        name = "layers.0.custom_module.gating_proj.weight"
 
         # Weight Dim 0: 256. Block size: 128. 256 // 128 = 2.
         # Scale Dim 0: 1.
@@ -492,7 +494,9 @@ class TestDeepSeekV3NativeFP8:
             "layers": {
                 "0": {
                     "custom_module": {
-                        "kernel_gating_DF": mock_var
+                        "gating_proj": {
+                            "weight": mock_var
+                        }
                     }
                 }
             }
@@ -694,10 +698,7 @@ class TestDeepseekV3Attention(unittest.TestCase):
             mha_layer.rope.initialize_cache(self.mesh)
 
             new_kv_cache, output = mha_layer(
-                x,
-                is_prefill=True,
-                kv_cache=kv_cache,
-                attention_metadata=attention_metadata)
+                x, kv_cache=kv_cache, attention_metadata=attention_metadata)
 
             self.assertEqual(output.shape, (seq_len, hidden_size))
             self.assertEqual(new_kv_cache.shape, kv_cache.shape)
@@ -786,7 +787,6 @@ class TestDeepseekV3Attention(unittest.TestCase):
             model.rope.initialize_cache(self.mesh)
 
             new_kv_cache, output = model(x,
-                                         is_prefill=True,
                                          kv_cache=kv_cache,
                                          attention_metadata=attention_metadata)
 

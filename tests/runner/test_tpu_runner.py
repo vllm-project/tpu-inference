@@ -236,6 +236,7 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
         return (
             MagicMock(),  # TPUModelRunner.model_fn
             MagicMock(),  # TPUModelRunner.compute_logits_fn
+            MagicMock(),  # TPUModelRunner.pooler_fn
             MagicMock(),  # TPUModelRunner.combine_hidden_states_fn
             mock_multimodal_fns,  # TPUModelRunner.multimodal_fns
             MagicMock(),  # TPUModelRunner.state (model params)
