@@ -31,6 +31,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
 from transformers import Qwen3Config
 from vllm.config import VllmConfig
 
@@ -106,10 +107,10 @@ class Qwen3MoeSparseMoeBlock(JaxModule):
             rngs=rng,
             router=self.gate,
             mesh=mesh,
-            activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
-            activation_ffw_ted=(ShardingAxisName.MLP_DATA, None, None),
-            edf_sharding=(None, ),
-            efd_sharding=(None, ),
+            activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
+            activation_ffw_ted=P(ShardingAxisName.MLP_DATA, None, None),
+            edf_sharding=P(None, ),
+            efd_sharding=P(None, ),
             apply_expert_weight_before_computation=False,
             expert_axis_name=expert_axis_name,
             num_expert_parallelism=num_expert_parallelism,
