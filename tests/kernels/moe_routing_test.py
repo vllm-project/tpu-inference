@@ -35,7 +35,46 @@ def ref_impl(topk_indices_local, hidden_states, global_num_experts):
 @jtu.with_config(jax_numpy_dtype_promotion="standard")
 class MoeRoutingTest(jtu.JaxTestCase):
 
-  def test_sort(self):
+  # blaze test -c opt --test_output=errors  //experimental/users/xiowei/ullm:tests/moe_routing_test_gf --test_filter=test_sort_basic
+  # blaze test -c opt --test_output=errors  //experimental/users/xiowei/ullm:tests/moe_routing_test_gf --test_filter=test_sort_basic --test_arg=--xla_tpu_enable_log_recorder
+  def test_sort_basic(self):
+    num_local_tokens = 8
+    hidden_size = 128
+    num_experts = 16
+    topk = TOPK
+    topk_indices_local = jnp.array(
+        [
+            [0, 1, 2, 3, 4, 5, 6, 7],
+            [1, 2, 3, 4, 5, 6, 7, 8],
+            [2, 3, 4, 5, 6, 7, 8, 9],
+            [3, 4, 5, 6, 7, 8, 9, 10],
+            [4, 5, 6, 7, 8, 9, 10, 11],
+            [5, 6, 7, 8, 9, 10, 11, 12],
+            [6, 7, 8, 9, 10, 11, 12, 13],
+            [7, 8, 9, 10, 11, 12, 13, 14],
+        ],
+        dtype=jnp.int32,
+    )
+    hidden_states = jax.lax.broadcasted_iota(
+        jnp.int32, (num_local_tokens, hidden_size), 0
+    )
+    expected_x, expected_group_sizes, expected_topk_argsort_revert_indices= ref_impl(topk_indices_local, hidden_states, num_experts)
+    actual_x, actual_group_sizes, actual_topk_argsort_revert_indices= sort.sort_tokens(
+        hidden_states, topk_indices_local, num_experts, debug_mode=True
+    )
+
+    self.assertAllClose(expected_group_sizes, actual_group_sizes)
+    # self.assertAllClose(expected_topk_argsort_revert_indices, actual_topk_argsort_revert_indices)
+    print(
+        f"Output max diff {jnp.max(jnp.abs(expected_x - actual_x))}"
+    )
+    print(
+        f"Output mean diff {jnp.mean(jnp.abs(expected_x - actual_x))}"
+    )
+    self.assertAllClose(expected_x, actual_x)
+
+  def test_sort_random(self):
+    num_local_tokens = 64
     num_local_tokens = 64
     hidden_size = 128
     num_experts = 16
@@ -46,7 +85,7 @@ class MoeRoutingTest(jtu.JaxTestCase):
     _, topk_indices_local = jax.lax.top_k(random_logits, k=topk)
     hidden_states = jax.random.uniform(k2, (num_local_tokens, hidden_size))
     expected_x, expected_group_sizes, expected_topk_argsort_revert_indices= ref_impl(topk_indices_local, hidden_states, num_experts)
-    actual_x, actual_group_sizes, actual_topk_argsort_revert_indices= sort2.sort_tokens(
+    actual_x, actual_group_sizes, actual_topk_argsort_revert_indices= sort.sort_tokens(
         hidden_states, topk_indices_local, num_experts
     )
 

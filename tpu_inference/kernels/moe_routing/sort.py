@@ -8,8 +8,13 @@ from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 
 
+def debug_print(debug_mode, msg, *args):
+  if debug_mode:
+    pl.debug_print(msg, *args)
+
+
 def inner_kernel(
-    tiled_in_ref, tiled_out_ref, *, topk_argsort_revert_indices_ref
+    tiled_in_ref, tiled_out_ref, *, topk_argsort_revert_indices_ref, debug_mode
 ):
   tile_in = tiled_in_ref.shape[0]
   tile_out = tiled_out_ref.shape[0]
@@ -20,6 +25,7 @@ def inner_kernel(
 
   num_in_tiles = pl.num_programs(1)
   multiple_in_tiles = num_in_tiles != 1
+  debug_print(debug_mode, "=== debug_print === out_id={}, num_out_tiles={}, in_id={}, num_in_tiles={}", out_id, pl.num_programs(0), in_id, num_in_tiles)
 
   def _main(first_in_tile: bool):
     if first_in_tile and multiple_in_tiles:
@@ -37,6 +43,7 @@ def inner_kernel(
       vals_list = []
       for i in range(start, end):
         in_row = topk_argsort_revert_indices_ref[out_offset + i] - in_offset
+        debug_print(debug_mode, "=== debug_print === in_row={}", in_row)
 
         if multiple_in_tiles:
           mask = jnp.logical_and(0 <= in_row, in_row < tile_in)
@@ -48,6 +55,8 @@ def inner_kernel(
       vals_concat = jnp.concat(vals_list, axis=0).astype(dtype)
 
       if multiple_in_tiles:
+        # Notice that tile_out_ref is a Pallas Ref, so += means scatter-add.
+        # This is not python list which += means concatenation.
         tiled_out_ref[start:end, :] += vals_concat
       else:
         tiled_out_ref[start:end, :] = vals_concat
@@ -74,6 +83,7 @@ def kernel(
     *,
     tile_out: int,
     tile_in: int,
+    debug_mode: bool,
 ):
   hidden_size = x_ref.shape[-1]
   num_tokens, topk = topk_indices_ref.shape
@@ -104,11 +114,17 @@ def kernel(
 
   num_out_tiles = num_out_tokens // tile_out
   num_in_tiles = num_tokens // tile_in
+  # Note: loading the entire array from SMEM is not supported (ValueError: Can only load scalars from SMEM).
+  # We can print a few elements by loading them individually (scalar loads).
+  # for i in range(min(10, num_out_tokens)):
+  #   debug_print(debug_mode, f"=== debug_print === topk_argsort_revert_indices_ref[{i}]={{}}", topk_argsort_revert_indices_ref[i])
+  # debug_print(debug_mode, "=== debug_print === num_out_tiles={},  num_in_tiles={}", num_out_tiles, num_in_tiles)
 
   pltpu.emit_pipeline(
       functools.partial(
           inner_kernel,
           topk_argsort_revert_indices_ref=topk_argsort_revert_indices_ref,
+          debug_mode=debug_mode,
       ),
       grid=(num_out_tiles, num_in_tiles),
       in_specs=[
@@ -128,9 +144,13 @@ def kernel(
   )(x_ref, x_sorted_ref)
 
 
-@jax.jit(static_argnames=["num_experts"])
+@jax.jit(static_argnames=["num_experts", "debug_mode"])
 def sort_tokens(
-    x: jax.Array, topk_indices: jax.Array, num_experts: int
+    x: jax.Array,
+    topk_indices: jax.Array,
+    num_experts: int,
+    *,
+    debug_mode: bool = False,
 ) -> Tuple[jax.Array, jax.Array, jax.Array]:
   vmem_limit_bytes = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.8)
   num_tokens, hidden_size = x.shape
@@ -144,12 +164,15 @@ def sort_tokens(
   if num_tokens == 64:
     tile_out = 256
     tile_in = 64
+  elif num_tokens == 8:
+    tile_out = 16
+    tile_in = 8
   else:
     tile_out = tile_in = 2048
 
   scope_name = f"sort_tokens-m_{num_tokens}-k_{hidden_size}-topk_{topk}"
   return pl.pallas_call(
-      functools.partial(kernel, tile_out=tile_out, tile_in=tile_in),
+      functools.partial(kernel, tile_out=tile_out, tile_in=tile_in, debug_mode=debug_mode),
       out_shape=[
           jax.ShapeDtypeStruct(out_shape, orig_dtype),
           jax.ShapeDtypeStruct((num_experts,), jnp.int32),
