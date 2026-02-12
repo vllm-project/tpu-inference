@@ -151,7 +151,6 @@ class DeepseekV3BaseAttention(JaxModule):
     rngs: InitVar[nnx.Rngs]
 
     quant_config: Optional[QuantizationConfig] = None
-    prefix: str = ''
 
     # Scales for Q/KV quantization (per-tensor)
     _q_scale: float = 1
@@ -230,7 +229,6 @@ class DeepseekV3BaseAttention(JaxModule):
                                         epsilon=self.rms_norm_eps,
                                         scale_init=nnx.with_partitioning(
                                             init_fn, (None, )),
-                                        param_dtype=self.dtype,
                                         dtype=self.dtype,
                                         quant_config=self.quant_config,
                                         prefix=self.prefix + ".q_a_layernorm",
@@ -1179,7 +1177,6 @@ class DeepSeekV3(JaxModule):
         # hf_config.num_hidden_layers is 61, which ignores the last MTP layer.
         self.start_layer, self.end_layer, self.layers = make_layers(
             hf_config.num_hidden_layers, get_decoder_layer)
-            hf_config.num_hidden_layers, get_decoder_layer)
 
         if self.is_last_rank:
             self.norm = JaxRmsNorm(
@@ -1190,7 +1187,6 @@ class DeepSeekV3(JaxModule):
                 scale_init=nnx.with_partitioning(nnx.initializers.uniform(),
                                                  (None, )),
                 rngs=rng,
-                quant_config=quant_config,
                 quant_config=quant_config,
                 prefix=prefix + ".norm",
             )
@@ -1213,17 +1209,7 @@ class DeepSeekV3(JaxModule):
         self,
         kv_caches: List[jax.Array],
         input_ids: Optional[jax.Array],
-        input_ids: Optional[jax.Array],
         attention_metadata: AttentionMetadata,
-        inputs_embeds: Optional[jax.Array] = None,
-    ) -> Tuple[List[jax.Array], jax.Array]:
-        if inputs_embeds is not None:
-            x = inputs_embeds
-        else:
-            x = self.embed_tokens(input_ids)
-
-        for i, layer in enumerate(
-                islice(self.layers, self.start_layer, self.end_layer)):
         inputs_embeds: Optional[jax.Array] = None,
     ) -> Tuple[List[jax.Array], jax.Array]:
         if inputs_embeds is not None:
