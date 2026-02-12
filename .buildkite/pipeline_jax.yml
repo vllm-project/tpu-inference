@@ -94,6 +94,9 @@ steps:
         env:
           IS_FOR_V7X: "${IS_FOR_V7X}"
         artifact_paths: ".coverage.part1.${TPU_VERSION:-tpu6e}"
+        plugins:
+          - shell#v1.1.0:
+              pre-exit: "rm -f .coverage.part1.${TPU_VERSION:-tpu6e}"
         agents:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
         commands:
@@ -107,6 +110,9 @@ steps:
         env:
           IS_FOR_V7X: "${IS_FOR_V7X}"
         artifact_paths: ".coverage.part2.${TPU_VERSION:-tpu6e}"
+        plugins:
+          - shell#v1.1.0:
+              pre-exit: "rm -f .coverage.part2.${TPU_VERSION:-tpu6e}"
         agents:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
         commands:
