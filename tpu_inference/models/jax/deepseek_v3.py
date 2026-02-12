@@ -683,7 +683,7 @@ class DeepseekV3MLP(JaxModule):
         x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
         with jax.named_scope("wi_0"):
-            gating_TF = self.gating_proj(x_TD)
+            gating_TF = self.gate_proj(x_TD)
             activated_gating_TF = modeling_flax_utils.ACT2FN[self.hidden_act](
                 gating_TF)
         with jax.named_scope("wi_1"):
@@ -699,7 +699,7 @@ class DeepseekV3MLP(JaxModule):
         F = self.intermediate_size
         weight_init = _weight_init(self.random_init)
 
-        self.gating_proj = JaxEinsum(
+        self.gate_proj = JaxEinsum(
             einsum_str="TD,DF->TF",
             kernel_shape=(D, F),
             rngs=rngs,
