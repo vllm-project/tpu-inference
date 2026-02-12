@@ -70,6 +70,7 @@ from tpu_inference.models.jax.utils.weight_utils import (BaseWeightLoader,
 KVCache = Tuple[jax.Array, jax.Array]
 
 logger = init_logger(__name__)
+init_fn = nnx.initializers.uniform()
 
 
 def _weight_init(random_init: bool):
@@ -84,6 +85,24 @@ DTYPE_VIEW_MAP = {
 }
 
 modeling_flax_utils = FlaxUtils()
+
+num_local_experts: int = 256
+
+vocab_size: int = 129280
+hidden_size: int = 7168
+# NOTE: this dtype may be implicitly overriden if using to Qwix to load in the quantized weights
+dtype: jnp.dtype = jnp.bfloat16
+num_attention_heads: int = 128
+num_key_value_heads: int = 128
+ffw_intermediate_size: int = 18432
+moe_intermediate_size: int = 2048
+num_experts_per_token: int = 8
+n_group: int = 8
+interleave_moe_layer_step: int = 1  # Deepseek V3 has moe_layer_freq=1 in hf config.
+hidden_act: str = "silu"
+rms_norm_eps: float = 1e-06
+routed_scaling_factor: float = 2.5
+first_k_dense_replace: int = 3  # replace the first few MOE layers to dense layer.
 
 
 @dataclass(kw_only=True)
@@ -644,7 +663,7 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
 
 
 @dataclass(kw_only=True)
-class DeepseekV3MLP(nnx.Module):
+class DeepseekV3MLP(JaxModule):
     """A Gated Feed-Forward Network (FFN) layer.
 
     This module consists of two linear projections (gating and up-projection),
@@ -721,7 +740,7 @@ class DeepseekV3MLP(nnx.Module):
 
 
 @dataclass(kw_only=True)
-class DeepseekV3MoE(nnx.Module):
+class DeepseekV3MoE(JaxModule):
     """
     Corresponds to vLLM's DeepseekV2MoE.
     Handles the routed and shared experts + the relevant forward pass.
@@ -745,20 +764,25 @@ class DeepseekV3MoE(nnx.Module):
         return final_hidden_states
 
 
-@dataclass(kw_only=True)
 class DeepseekV3DecoderLayer(JaxModule):
     """
     Implementats the DecoderLayer for DeepseekV3.
     """
-    layer_idx: int
-    input_layernorm: JaxRmsNorm
-    post_attention_layernorm: JaxRmsNorm
 
-    self_attn: Union[DeepseekV3Attention, DeepseekV3MLA]
+    def __init__(
+            self,
+            input_layernorm: JaxRmsNorm,
+            post_attention_layernorm: JaxRmsNorm,
+            self_attn: Union[DeepseekV3Attention, DeepseekV3MLA],
 
-    # MLP can be either the Dense MLP (for first k layers) or DeepseekV2MoE
-    # TODO: rename to mlp? custom_module seems needlessly confusing
-    mlp: nnx.Module | DeepseekV3MoE | DeepseekV3MLP
+            # MLP can be either the Dense MLP (for first k layers) or DeepseekV2MoE
+            # TODO: rename to mlp? custom_module seems needlessly confusing
+            custom_module: nnx.Module | DeepseekV3MoE | DeepseekV3MLP,
+            prefix: str = ""):
+        self.input_layernorm = input_layernorm
+        self.post_attention_layernorm = post_attention_layernorm
+        self.self_attn = self_attn
+        self.mlp = custom_module
 
     def __call__(
         self, x_TD: jax.Array, kv_cache: List[jax.Array],
@@ -784,7 +808,7 @@ class DeepseekV3DecoderLayer(JaxModule):
 
 
 @dataclass
-class DeepSeekV3Router(nnx.Module):
+class DeepSeekV3Router(JaxModule):
     """Router module for Mixture-of-Experts (MoE) layers.
 
     This module determines which experts each token should be routed to based on the input.
@@ -1536,23 +1560,6 @@ class DeepSeekV3(JaxModule):
 
         self.vllm_config = vllm_config
 
-        num_local_experts: int = 256
-
-        vocab_size: int = 129280
-        hidden_size: int = 7168
-        # NOTE: this dtype may be implicitly overriden if using to Qwix to load in the quantized weights
-        dtype: jnp.dtype = jnp.bfloat16
-        num_attention_heads: int = 128
-        num_key_value_heads: int = 128
-        ffw_intermediate_size: int = 18432
-        moe_intermediate_size: int = 2048
-        num_experts_per_token: int = 8
-        n_group: int = 8
-        interleave_moe_layer_step: int = 1  # Deepseek V3 has moe_layer_freq=1 in hf config.
-        hidden_act: str = "silu"
-        rms_norm_eps: float = 1e-06
-        routed_scaling_factor: float = 2.5
-        first_k_dense_replace: int = 3  # replace the first few MOE layers to dense layer.
         self.use_mla_kernel: bool = self.vllm_config.model_config.use_mla
 
         logger.info(f"Is using MLA kernel in DeepSeek: {self.use_mla_kernel}")
@@ -1792,11 +1799,11 @@ class DeepSeekV3(JaxModule):
                 )
 
             return DeepseekV3DecoderLayer(
-                layer_idx=layer_index,
                 input_layernorm=input_layernorm,
                 post_attention_layernorm=post_attention_layernorm,
                 self_attn=_create_deepseek_attention(),
-                mlp=mlp_layer)
+                custom_module=mlp_layer,
+                prefix=f"{prefix}.{i}")
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             hf_config.num_hidden_layers, get_decoder_layer)
