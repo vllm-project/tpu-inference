@@ -144,6 +144,7 @@ class DeepseekV3BaseAttention(JaxModule):
     rngs: InitVar[nnx.Rngs]
 
     quant_config: Optional[QuantizationConfig] = None
+    prefix: str = ''
 
     # Scales for Q/KV quantization (per-tensor)
     _q_scale: float = 1
@@ -221,19 +222,19 @@ class DeepseekV3BaseAttention(JaxModule):
                                         epsilon=self.rms_norm_eps,
                                         scale_init=nnx.with_partitioning(
                                             init_fn, (None, )),
-                                        param_dtype=self.dtype,
                                         dtype=self.dtype,
-                                        rngs=rngs,
-                                        quant_config=self.quant_config)
+                                        quant_config=self.quant_config,
+                                        prefix=self.prefix + ".q_a_layernorm",
+                                        rngs=rngs)
 
-        self.kv_a_layernorm = JaxRmsNorm(self.kv_lora_rank,
-                                         epsilon=self.rms_norm_eps,
-                                         scale_init=nnx.with_partitioning(
-                                             init_fn, (None, )),
-                                         param_dtype=self.dtype,
-                                         dtype=self.dtype,
-                                         rngs=rngs,
-                                         quant_config=self.quant_config)
+        self.kv_a_layernorm = JaxRmsNorm(
+            self.kv_lora_rank,
+            epsilon=self.rms_norm_eps,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
+            dtype=self.dtype,
+            quant_config=self.quant_config,
+            prefix=self.prefix + ".kv_a_layernorm",
+            rngs=rngs)
 
         self.kv_cache_quantized_dtype = None
         if self.kv_cache_dtype != "auto":
@@ -1137,6 +1138,7 @@ class DeepSeekV3(JaxModule):
                                   ShardingAxisName.MOE_TENSOR),
                     moe_backend=self.moe_backend,
                     qwix_quantized_weight_dtype=None,
+                    prefix=prefix + ".experts",
                     router=router)
 
                 # shared experts
