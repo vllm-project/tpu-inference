@@ -609,7 +609,7 @@ class TestFp8FusedMoE:
 
 class TestFp8Config:
 
-    def test_skip_layers(self, rngs):
+    def test_skip_layers(self, rngs, mesh):
         """Test that if quantization_config has ignored layers, those layers are skipped from quantization."""
 
         class MLP(nnx.Module):
@@ -639,9 +639,10 @@ class TestFp8Config:
             "activation_scheme": "dynamic",
             "ignored_layers": ["mlp.proj1"]
         }
-        quant_config = Fp8Config(hf_quant_config)
+        with jax.set_mesh(mesh):
+            quant_config = Fp8Config(hf_quant_config)
 
-        mlp = MLP(16, 16, rngs, quant_config, prefix="mlp")
+            mlp = MLP(16, 16, rngs, quant_config, prefix="mlp")
 
         # Check that proj1 is NOT quantized (UnquantizedLinearMethod)
         assert isinstance(mlp.proj1.quant_method, UnquantizedLinearMethod)
