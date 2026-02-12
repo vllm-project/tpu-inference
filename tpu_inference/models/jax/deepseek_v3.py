@@ -1124,6 +1124,7 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
             base_model_weight, "array") else base_model_weight.sharding
 
         # Convert weights from torch into numpy
+        print(f"{weight.dtype=} {weight.shape=} {model_weight.value.dtype=}")
         if weight.dtype == torch.uint8 and scale is not None:
             # Assume packed FP4 format when uint8 weights with scale provided
             weight_jax_u8 = jnp.array(weight.cpu().numpy())

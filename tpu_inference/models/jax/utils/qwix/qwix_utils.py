@@ -17,6 +17,9 @@ from jax.sharding import PartitionSpec as P
 from qwix._src.core.qarray import QArray
 from qwix._src.providers import ptq
 
+from tpu_inference.layers.common.moe import MoEBackend
+from tpu_inference.layers.jax.moe.utils import select_moe_backend
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
@@ -479,7 +482,8 @@ def get_default_qwix_quantization_config(
     # more flexible
     # NOTE (jacobplatin): we'll default to mixed FP8 (attention) + FP4 (MoE experts)
     # for DeepSeek
-    if model_type == "deepseek_v3" and quant_method == "fp8":
+    if model_type == "deepseek_v3" and quant_method == "fp8" and select_moe_backend(
+            True) not in (MoEBackend.GMM_TP, MoEBackend.GMM_EP):
         # Dynamically fetch block size from HF config if available
         # Config fmt: 'weight_block_size': [1, 512] -> we want the 2nd dim for tile_size
         # NOTE: if the checkpoint is not 1D subchannel, we will throw an error
