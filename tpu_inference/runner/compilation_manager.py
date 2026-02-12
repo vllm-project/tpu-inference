@@ -196,6 +196,7 @@ class CompilationManager:
             block_tables = device_array(self.runner.mesh,
                                         block_tables,
                                         sharding=dp_sharding)
+            return block_tables
 
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(

@@ -200,11 +200,6 @@ class VllmModelWrapper:
 
         self._pooler: Pooler | None = self.model.pooler
 
-        loading_end = time.time()
-        total_loading_time = loading_end - loading_start
-        logger.info(
-            f"Total time to load model weights from storage to TPU: {total_loading_time:.2f} seconds."
-        )
         # Returning to the jax land, so we need to wrap it into a JaxValue.
         return jax_view(params_and_buffers), lora_manager
 
