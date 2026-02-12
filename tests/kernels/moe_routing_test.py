@@ -9,7 +9,6 @@ import jax.numpy as jnp
 from jax._src import test_util as jtu
 
 import tpu_inference.kernels.moe_routing.sort as sort
-import tpu_inference.kernels.moe_routing.sort2 as sort2
 
 
 jax.config.parse_flags_with_absl()
