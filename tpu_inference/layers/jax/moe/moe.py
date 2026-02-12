@@ -236,7 +236,8 @@ class JaxMoE(JaxModule):
 
     def load_weights(self, weights: Iterable):
         """Used by JaxAutoWeightLoader to load HF weights into the layer."""
-        if self.quant_method is None:
+        if self.quant_method is None or not hasattr(self.quant_method,
+                                                    "load_weights"):
             return self._load_weights(weights)
 
         return self.quant_method.load_weights(
