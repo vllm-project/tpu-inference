@@ -182,6 +182,7 @@ class VllmModelWrapper:
 
         static_forward_context = vllm_config_for_load.compilation_config.static_forward_context
         self.vllm_config.compilation_config.static_forward_context = static_forward_context
+        self.vllm_config.compilation_config.static_all_moe_layers = vllm_config_for_load.compilation_config.static_all_moe_layers
 
         self.model = _VllmRunner(vllm_model)
         params_and_buffers = shard_model_to_tpu(self.model, self.mesh)
