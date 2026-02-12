@@ -99,6 +99,43 @@ class MoeRoutingTest(jtu.JaxTestCase):
     )
     self.assertAllClose(expected_x, actual_x)
 
+  def test_sort_real_workload(self):
+    num_local_tokens = 8192
+    hidden_size = 6144
+    num_experts = 160
+    topk = TOPK
+
+    k1, k2 = jax.random.split(jax.random.key(0))
+    random_logits = jax.random.uniform(k1, (num_local_tokens, num_experts))
+    _, topk_indices_local = jax.lax.top_k(random_logits, k=topk)
+    hidden_states = jax.random.uniform(k2, (num_local_tokens, hidden_size))
+    actual_x, _, _= sort.sort_tokens(
+        hidden_states, topk_indices_local, num_experts
+    )
+    actual_x.block_until_ready()
+    
+
+  def test_sort_perf(self):
+    num_local_tokens = 8192
+    hidden_size = 6144
+    num_experts = 160
+    topk = TOPK
+
+    k1, k2 = jax.random.split(jax.random.key(0))
+    random_logits = jax.random.uniform(k1, (num_local_tokens, num_experts))
+    _, topk_indices_local = jax.lax.top_k(random_logits, k=topk)
+    hidden_states = jax.random.uniform(k2, (num_local_tokens, hidden_size))
+
+    # Warmup
+    sort.sort_tokens(hidden_states, topk_indices_local, num_experts)[0].block_until_ready()
+
+    profile_path = "/tmp/sort_tokens_profile"
+    jax.profiler.start_trace(profile_path)
+    for _ in range(2):
+      sort.sort_tokens(hidden_states, topk_indices_local, num_experts)[0].block_until_ready()
+    jax.profiler.stop_trace()
+    print(f"Profile saved to {profile_path}")
+
 
 if __name__ == "__main__":
   absltest.main(testLoader=jtu.JaxTestLoader())
