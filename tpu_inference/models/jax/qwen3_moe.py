@@ -233,21 +233,6 @@ class Qwen3MoeModel(JaxModule):
         else:
             self.embed_tokens = PPMissingLayer()
 
-<<<<<<< HEAD
-        self.start_layer, self.end_layer, self.layers = make_layers(
-            hf_config.num_hidden_layers,
-            lambda layer_index: Qwen3MoeDecoderLayer(
-                config=hf_config,
-                dtype=dtype,
-                rng=rng,
-                mesh=mesh,
-                kv_cache_dtype=vllm_config.cache_config.cache_dtype,
-                quant_config=vllm_config.quant_config,
-                layer_idx=layer_index,
-                vllm_config=vllm_config,
-                prefix=f"{prefix}.layers.{layer_index}",
-            ))
-=======
         self.start_layer, self.end_layer = get_start_end_layer(
             hf_config.num_hidden_layers,
             get_pp_group().rank_in_group,
@@ -270,7 +255,6 @@ class Qwen3MoeModel(JaxModule):
                     ))
             else:
                 self.layers.append(PPMissingLayer())
->>>>>>> b72637da ([MoE][Jax] Add weight loading for unquantized MoE layer/method (#1683))
 
         if self.is_last_rank:
             self.norm = JaxRmsNorm(
