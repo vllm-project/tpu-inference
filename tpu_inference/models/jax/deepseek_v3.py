@@ -1001,6 +1001,7 @@ class DeepSeekV3(JaxModule):
                  rng: nnx.Rngs,
                  mesh: Mesh,
                  quant_config,
+                 quant_config,
                  prefix: str = ""):
         self.vllm_config = vllm_config
 
@@ -1038,6 +1039,7 @@ class DeepSeekV3(JaxModule):
                 embedding_init=nnx.with_partitioning(
                     init_fn, (ShardingAxisName.MLP_TENSOR, )),
                 rngs=rng,
+                quant_config=quant_config,
                 quant_config=quant_config,
                 prefix=prefix + ".embed_tokens",
             )
@@ -1188,6 +1190,7 @@ class DeepSeekV3(JaxModule):
                                                  (None, )),
                 rngs=rng,
                 quant_config=quant_config,
+                quant_config=quant_config,
                 prefix=prefix + ".norm",
             )
         else:
@@ -1255,14 +1258,27 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
                                       "quantization_config", {})
             vllm_config.quant_config = Fp8Config(hg_quant_config)
 
+        if getattr(vllm_config.model_config, "quantization", None) == "fp8":
+            # `get_tpu_quantization_config` returns None for "fp8" because
+            # the work in #1623 is not fully merged. So this block overrides
+            # the logic to return Fp8Config when model_config indicates fp8.
+            # TODO(#1623): Remove this block when `get_tpu_quantization_config`
+            # is updated.
+            from tpu_inference.layers.jax.quantization.fp8 import Fp8Config
+            hg_quant_config = getattr(vllm_config.model_config.hf_config,
+                                      "quantization_config", {})
+            vllm_config.quant_config = Fp8Config(hg_quant_config)
+
         self.vllm_config = vllm_config
         rng = nnx.Rngs(rng_key)
-        self.mesh = mesh
+        self.mesh = None
+        mesh = None
 
         self.model = DeepSeekV3(
             vllm_config=vllm_config,
             rng=rng,
             mesh=mesh,
+            quant_config=vllm_config.quant_config,
             quant_config=vllm_config.quant_config,
             prefix="model",
         )
