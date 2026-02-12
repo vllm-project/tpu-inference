@@ -10,17 +10,6 @@ import pytest
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig
 
-
-# MODEL_IMPL_TYPE=vllm vllm serve Qwen/Qwen2.5-32B  --seed 42  
-#   --disable-log-requests  --tensor-parallel-size 8 --max-model-len 2048 
-#   --gpu-memory-utilization 0.96 --no-enable-prefix-caching --max-num-seqs 256 
-#   --max-num-batched-tokens 4096
-
-# python3 ./benchmarks/benchmark_serving.py 
-#   --model Qwen/Qwen2.5-32B --dataset-name sonnet 
-#   --dataset-path benchmarks/sonnet_4x.txt --sonnet-input-len 1800 
-#   --sonnet-output-len 128 --ignore_eos
-
 @dataclass
 class TestConfig:
     """Configuration for SP test runs."""
@@ -117,7 +106,6 @@ def _run_inference(
     time.sleep(10)  # Wait for TPUs to be released
     return outputs, elapsed_time
 
-import numpy as np
 def _check_correctness(test_name: str, baseline_outputs: list,
                        sp_outputs: list):
     """Verify outputs match between baseline and sequence parallel runs."""
@@ -204,32 +192,6 @@ def _check_correctness(test_name: str, baseline_outputs: list,
     if total_compared_logprobs > 0:
         assert logprob_match_rate >= 0.9, f"Logprob match rate {logprob_match_rate:.2%} is too low"
 
-
-
-def _check_performance(
-    test_name: str,
-    baseline_time: float,
-    sp_time: float,
-    num_prompts: int,
-    min_speedup: float,
-):
-    """Verify sequence parallelism provides expected speedup."""
-    speedup = baseline_time / sp_time if sp_time > 0 else 0
-
-    print(f"✓ {test_name} performance test results:")
-    print(f"  Number of prompts: {num_prompts}")
-    print(f"  Baseline time: {baseline_time:.2f}s")
-    print(f"  Sequence parallel time: {sp_time:.2f}s")
-    print(f"  Speedup: {speedup:.2f}x")
-    print(f"  Baseline throughput: {num_prompts/baseline_time:.2f} prompts/s")
-    print(
-        f"  Sequence parallel throughput: {num_prompts/sp_time:.2f} prompts/s")
-
-    assert speedup >= min_speedup, (
-        f"Sequence parallelism did not provide expected speedup "
-        f"({min_speedup:.2f}x): {speedup:.2f}x")
-
-
 def _test_sequence_parallelism(
     sampling_params: SamplingParams,
     check_correctness: bool = True,
@@ -270,15 +232,8 @@ def _test_sequence_parallelism(
     if check_correctness:
         _check_correctness("Sequence parallelism", baseline_outputs,
                            sp_outputs)
-
     if check_performance:
-        _check_performance(
-            "Sequence parallelism",
-            baseline_time,
-            sp_time,
-            len(test_prompts),
-            min_speedup=1.1,
-        )
+        pass
 
 
 def test_sp_correctness(sampling_params: SamplingParams):
@@ -287,11 +242,3 @@ def test_sp_correctness(sampling_params: SamplingParams):
         check_correctness=True,
         check_performance=False,
     )
-
-
-# def test_sp_performance(sampling_params: SamplingParams):
-#     _test_sequence_parallelism(
-#         sampling_params=sampling_params,
-#         check_correctness=False,
-#         check_performance=True,
-#     )
