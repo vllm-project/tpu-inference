@@ -10,13 +10,14 @@ import pytest
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig
 
+
 @dataclass
 class TestConfig:
     """Configuration for SP test runs."""
-    max_model_len: int = 2048 
-    max_num_batched_tokens: int = 4096 
-    max_num_seqs: int = 256 
-    num_prompts: int = 16 
+    max_model_len: int = 2048
+    max_num_batched_tokens: int = 4096
+    max_num_seqs: int = 256
+    num_prompts: int = 16
 
     @classmethod
     def for_correctness(cls) -> "TestConfig":
@@ -67,16 +68,15 @@ def generate_test_prompts(num_prompts: int = 256) -> list[str]:
         for i in range(num_prompts)
     ]
 
+
 @pytest.fixture
 def sampling_params():
     """Standard sampling parameters for testing."""
-    return SamplingParams(
-        temperature=0.0,
-        max_tokens=16,
-        ignore_eos=True,
-        logprobs=1,
-        seed=42
-    )
+    return SamplingParams(temperature=0.0,
+                          max_tokens=16,
+                          ignore_eos=True,
+                          logprobs=1,
+                          seed=42)
 
 
 def _run_inference(
@@ -105,6 +105,7 @@ def _run_inference(
     del llm
     time.sleep(10)  # Wait for TPUs to be released
     return outputs, elapsed_time
+
 
 def _check_correctness(test_name: str, baseline_outputs: list,
                        sp_outputs: list):
@@ -191,6 +192,7 @@ def _check_correctness(test_name: str, baseline_outputs: list,
 
     if total_compared_logprobs > 0:
         assert logprob_match_rate >= 0.9, f"Logprob match rate {logprob_match_rate:.2%} is too low"
+
 
 def _test_sequence_parallelism(
     sampling_params: SamplingParams,
