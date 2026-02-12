@@ -1,3 +1,20 @@
+"""
+Idea of sort2.py.
+
+The problem of original Pallas kernel sort.py is that in the `inner_kernel`, we use a 2D grid (num_out_tiles, num_in_tiles):
+for out_tile_id in range(num_out_tiles):
+  for in_tile_id in range(num_in_tiles):
+    # inside the kernel
+    for output_row in range(all_output_rows):
+      # find the source row
+
+For each output_row, it checks all in_tile_id (num_in_tiles times). However, the source row of the output_row can only exist in one of the num_in_tiles, so we are wasting VPU ops.
+
+IOW, for each (out_tile, in_tile) pair, we process all tile_out output rows, even though most rows' source data is NOT in the current input tile.
+
+Idea:
+Calculate metadata before the kernel starts.
+"""
 import functools
 from typing import Optional, Tuple
 
@@ -13,10 +30,7 @@ def debug_print(debug_mode, msg, *args):
     pl.debug_print(msg, *args)
 
 
-# ============================================================
 # Fast path: original kernel for num_in_tiles == 1
-# ============================================================
-
 def inner_kernel(
     tiled_in_ref, tiled_out_ref, *, sorted_token_indices_ref, debug_mode
 ):
@@ -80,15 +94,12 @@ def gather_kernel(
   )(x_ref, x_sorted_ref)
 
 
-# ============================================================
 # Bucketed path: pre-bucketed kernel for num_in_tiles > 1
 #
 # Instead of iterating all tile_out rows per (out_tile, in_tile) and
 # masking irrelevant ones, we pre-classify each output row by its
 # source input tile. The kernel then processes only the rows that
 # belong to the current (out_tile, in_tile) bucket.
-# ============================================================
-
 def inner_kernel_bucketed(
     tiled_in_ref, tiled_out_ref, *,
     bucketed_src_rows_ref,
@@ -187,10 +198,6 @@ def gather_kernel_bucketed(
   )(x_ref, x_sorted_ref)
 
 
-# ============================================================
-# Public API
-# ============================================================
-
 @jax.jit(static_argnames=["num_experts", "tile_out", "tile_in", "debug_mode"])
 def sort_tokens(
     x: jax.Array,
@@ -255,8 +262,7 @@ def sort_tokens(
         name=scope_name,
     )(sorted_token_indices, x_3d)
   else:
-    # ----- Pre-bucketing -----
-    # For each output row, determine which input tile has its source data.
+    #Pre-bucketing For each output row, determine which input tile has its source data.
     num_out_tiles = num_out_tokens // tile_out
     source_tile_id = sorted_token_indices // tile_in
     source_in_row = (sorted_token_indices % tile_in).astype(jnp.int32)

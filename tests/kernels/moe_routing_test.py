@@ -65,7 +65,7 @@ class MoeRoutingTest(jtu.JaxTestCase):
     )
 
     self.assertAllClose(expected_group_sizes, actual_group_sizes)
-    # self.assertAllClose(expected_topk_argsort_revert_indices, actual_topk_argsort_revert_indices)
+    self.assertAllClose(expected_topk_argsort_revert_indices, actual_topk_argsort_revert_indices)
     print(
         f"Output max diff {jnp.max(jnp.abs(expected_x - actual_x))}"
     )
@@ -84,7 +84,7 @@ class MoeRoutingTest(jtu.JaxTestCase):
     k1, k2 = jax.random.split(jax.random.key(0))
     random_logits = jax.random.uniform(k1, (num_local_tokens, num_experts))
     _, topk_indices_local = jax.lax.top_k(random_logits, k=topk)
-    hidden_states = jax.random.uniform(k2, (num_local_tokens, hidden_size))
+    hidden_states = jax.random.uniform(k2, (num_local_tokens, hidden_size), dtype=jnp.bfloat16)
     expected_x, expected_group_sizes, expected_topk_argsort_revert_indices= ref_impl(topk_indices_local, hidden_states, num_experts)
     actual_x, actual_group_sizes, actual_topk_argsort_revert_indices= sort.sort_tokens(
         hidden_states, topk_indices_local, num_experts
@@ -109,7 +109,7 @@ class MoeRoutingTest(jtu.JaxTestCase):
     k1, k2 = jax.random.split(jax.random.key(0))
     random_logits = jax.random.uniform(k1, (num_local_tokens, num_experts))
     _, topk_indices_local = jax.lax.top_k(random_logits, k=topk)
-    hidden_states = jax.random.uniform(k2, (num_local_tokens, hidden_size))
+    hidden_states = jax.random.uniform(k2, (num_local_tokens, hidden_size), dtype=jnp.bfloat16)
     actual_x, _, _= sort.sort_tokens(
         hidden_states, topk_indices_local, num_experts
     )
@@ -125,14 +125,39 @@ class MoeRoutingTest(jtu.JaxTestCase):
     k1, k2 = jax.random.split(jax.random.key(0))
     random_logits = jax.random.uniform(k1, (num_local_tokens, num_experts))
     _, topk_indices_local = jax.lax.top_k(random_logits, k=topk)
-    hidden_states = jax.random.uniform(k2, (num_local_tokens, hidden_size))
+    hidden_states = jax.random.uniform(k2, (num_local_tokens, hidden_size), dtype=jnp.bfloat16)
 
     # Warmup
+    ref_impl(topk_indices_local, hidden_states, num_experts)[0].block_until_ready()
+    sort.sort_tokens(hidden_states, topk_indices_local, num_experts, tile_out=512, tile_in=1024)[0].block_until_ready()
+
+    profile_path = "/tmp/sort_tokens_profile"
+    jax.profiler.start_trace(profile_path)
+    for _ in range(2):
+      ref_impl(topk_indices_local, hidden_states, num_experts)[0].block_until_ready()
+      sort.sort_tokens(hidden_states, topk_indices_local, num_experts, tile_out=512, tile_in=1024)[0].block_until_ready()
+    jax.profiler.stop_trace()
+    print(f"Profile saved to {profile_path}")
+
+  def test_sort_light_workload_perf(self):
+    num_local_tokens = 64
+    hidden_size = 6144
+    num_experts = 160
+    topk = TOPK
+
+    k1, k2 = jax.random.split(jax.random.key(0))
+    random_logits = jax.random.uniform(k1, (num_local_tokens, num_experts))
+    _, topk_indices_local = jax.lax.top_k(random_logits, k=topk)
+    hidden_states = jax.random.uniform(k2, (num_local_tokens, hidden_size), dtype=jnp.bfloat16)
+
+    # Warmup
+    ref_impl(topk_indices_local, hidden_states, num_experts)[0].block_until_ready()
     sort.sort_tokens(hidden_states, topk_indices_local, num_experts)[0].block_until_ready()
 
     profile_path = "/tmp/sort_tokens_profile"
     jax.profiler.start_trace(profile_path)
     for _ in range(2):
+      ref_impl(topk_indices_local, hidden_states, num_experts)[0].block_until_ready()
       sort.sort_tokens(hidden_states, topk_indices_local, num_experts)[0].block_until_ready()
     jax.profiler.stop_trace()
     print(f"Profile saved to {profile_path}")
@@ -184,7 +209,7 @@ class MoeRoutingTest(jtu.JaxTestCase):
     k1, k2 = jax.random.split(jax.random.key(0))
     random_logits = jax.random.uniform(k1, (num_local_tokens, num_experts))
     _, topk_indices_local = jax.lax.top_k(random_logits, k=topk)
-    hidden_states = jax.random.uniform(k2, (num_local_tokens, hidden_size))
+    hidden_states = jax.random.uniform(k2, (num_local_tokens, hidden_size), dtype=jnp.bfloat16)
     expected_x, expected_group_sizes, expected_revert = ref_impl(
         topk_indices_local, hidden_states, num_experts
     )
@@ -208,7 +233,7 @@ class MoeRoutingTest(jtu.JaxTestCase):
     k1, k2 = jax.random.split(jax.random.key(0))
     random_logits = jax.random.uniform(k1, (num_local_tokens, num_experts))
     _, topk_indices_local = jax.lax.top_k(random_logits, k=topk)
-    hidden_states = jax.random.uniform(k2, (num_local_tokens, hidden_size))
+    hidden_states = jax.random.uniform(k2, (num_local_tokens, hidden_size), dtype=jnp.bfloat16)
     expected_x, expected_group_sizes, expected_revert = ref_impl(
         topk_indices_local, hidden_states, num_experts
     )
@@ -232,7 +257,7 @@ class MoeRoutingTest(jtu.JaxTestCase):
     topk = TOPK
 
     k1, k2 = jax.random.split(jax.random.key(0))
-    random_logits = jax.random.uniform(k1, (num_local_tokens, num_experts))
+    random_logits = jax.random.uniform(k1, (num_local_tokens, num_experts), dtype=jnp.bfloat16)
     _, topk_indices_local = jax.lax.top_k(random_logits, k=topk)
     hidden_states = jax.random.uniform(k2, (num_local_tokens, hidden_size))
     actual_x, _, _ = sort2.sort_tokens(
@@ -250,7 +275,7 @@ class MoeRoutingTest(jtu.JaxTestCase):
     k1, k2 = jax.random.split(jax.random.key(0))
     random_logits = jax.random.uniform(k1, (num_local_tokens, num_experts))
     _, topk_indices_local = jax.lax.top_k(random_logits, k=topk)
-    hidden_states = jax.random.uniform(k2, (num_local_tokens, hidden_size))
+    hidden_states = jax.random.uniform(k2, (num_local_tokens, hidden_size), dtype=jnp.bfloat16)
 
     # Warmup
     sort2.sort_tokens(hidden_states, topk_indices_local, num_experts)[0].block_until_ready()
