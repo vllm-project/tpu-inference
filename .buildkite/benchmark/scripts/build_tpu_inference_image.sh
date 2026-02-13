@@ -41,6 +41,7 @@ cleanup_image() {
 VLLM_TARGET_DEVICE=tpu DOCKER_BUILDKIT=1 docker build \
 --build-arg BASE_IMAGE="python:3.12-slim-bookworm" \
 --build-arg VLLM_COMMIT_HASH="$VLLM_COMMIT_HASH" \
+--build-arg IS_FOR_V7X=true \
 --tag $IMAGE_TAG \
 --no-cache -f "docker/Dockerfile" .
 
