@@ -224,7 +224,9 @@ class TestQwen3ForCausalLM:
         logits = model.compute_logits(hidden_states)
         assert logits.shape == (1, hf_config.vocab_size)
 
-    @unittest.skip('TODO: Skip test since this blocking flax/jax version upgrade. Bug created for unskip this test.')
+    @unittest.skip(
+        'TODO: Skip test since this blocking flax/jax version upgrade. Bug created for unskip this test.'
+    )
     @pytest.mark.parametrize("model_name",
                              ["Qwen/Qwen3-0.6B", "Qwen/Qwen3-0.6B-FP8"])
     @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),

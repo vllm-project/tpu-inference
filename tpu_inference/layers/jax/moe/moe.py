@@ -282,8 +282,9 @@ class JaxMoE(JaxModule):
             if not hasattr(jax_param, "_cnt_moe_weights_loaded"):
                 jax_param.value = jax.numpy.zeros(jax_param.value.shape,
                                                   dtype=jax_param.value.dtype)
-                setattr(jax_param, "_cnt_moe_weights_loaded", 0)
-            jax_param._cnt_moe_weights_loaded += 1
+                jax_param.set_metadata("_cnt_moe_weights_loaded", 0)
+            jax_param.set_metadata("_cnt_moe_weights_loaded",
+                                   jax_param._cnt_moe_weights_loaded + 1)
             assert isinstance(
                 jax_param.value,
                 jax.Array), f"Expecting jax.Array, got {type(jax_param.value)}"
