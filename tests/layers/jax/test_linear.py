@@ -156,7 +156,7 @@ class TestJaxLinear(unittest.TestCase):
                 rngs=nnx.Rngs(0),
             )
 
-        self.assertSequenceEqual(jax_linear.weight.sharding.spec,
+        self.assertSequenceEqual(jax_linear.weight.sharding,
                                  (None, "model"))
         self.assertEqual(f"{jax.typeof(jax_linear.weight.value)}",
                          "float32[16,32]")
