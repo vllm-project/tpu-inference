@@ -273,6 +273,14 @@ A huge thank you to everyone who has helped build and improve `vllm-project/tpu-
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/coolkp"><img src="https://avatars.githubusercontent.com/u/22536797?v=4?s=100" width="100px;" alt="coolkp"/><br /><sub><b>coolkp</b></sub></a><br /><a href="https://github.com/coolkp" title="Contributions">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/cychiuak"><img src="https://avatars.githubusercontent.com/u/68217955?v=4?s=100" width="100px;" alt="cychiuak"/><br /><sub><b>cychiuak</b></sub></a><br /><a href="https://github.com/cychiuak" title="Contributions">💻</a></td>
     </tr>
+  </tbody>
+</table>
+<br/>
+<details>
+<summary><b>...and more! Click to view all contributors.</b></summary>
+<br/>
+<table>
+  <tbody>
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/dannikay"><img src="https://avatars.githubusercontent.com/u/48867745?v=4?s=100" width="100px;" alt="dannikay"/><br /><sub><b>dannikay</b></sub></a><br /><a href="https://github.com/dannikay" title="Contributions">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/dennisYehCienet"><img src="https://avatars.githubusercontent.com/u/182058254?v=4?s=100" width="100px;" alt="dennisYehCienet"/><br /><sub><b>dennisYehCienet</b></sub></a><br /><a href="https://github.com/dennisYehCienet" title="Contributions">👀 💻</a></td>
@@ -380,6 +388,7 @@ A huge thank you to everyone who has helped build and improve `vllm-project/tpu-
     </tr>
   </tbody>
 </table>
+</details>
 
 <!-- markdownlint-restore -->
 <!-- prettier-ignore-end -->
