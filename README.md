@@ -219,11 +219,88 @@ We're thrilled you're interested in contributing to the vLLM TPU project! Your h
 
 If you're ready to contribute code, our **[Contributing Guide](https://github.com/vllm-project/tpu-inference/blob/main/CONTRIBUTING.md)** is the best place to start. It covers everything you need to know, including:
 
-*   Setting up your development environment.
-*   Our development workflow, from running tests to debugging.
-*   Guidelines for writing clean and effective code.
-*   How to submit a high-quality Pull Request.
-*   Tips for finding an issue to work on (we recommend starting with our **[good-first issues](link-to-your-mission-board)**!).
+*   **Tips for finding an issue to work on** (we recommend starting with our **[good-first issues](link-to-your-mission-board)**!).
+
+<br>
+
+## 🌟 Contributors Wall
+
+A huge thank you to everyone who has helped build and improve `vllm-project/tpu-inference`!
+
+<!-- START: contributors -->
+<div align="center" style="display: flex; flex-wrap: wrap; justify-content: center; gap: 10px;">
+<a href="https://github.com/xiangxu-google" title="xiangxu-google"><img src="https://avatars.githubusercontent.com/u/117880274?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/buildkite-bot" title="buildkite-bot"><img src="https://avatars.githubusercontent.com/u/103607375?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/kyuyeunk" title="kyuyeunk"><img src="https://avatars.githubusercontent.com/u/62023335?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/py4" title="py4"><img src="https://avatars.githubusercontent.com/u/747819?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/jrplatin" title="jrplatin"><img src="https://avatars.githubusercontent.com/u/31421084?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/fenghuizhang" title="fenghuizhang"><img src="https://avatars.githubusercontent.com/u/159459388?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/sixiang-google" title="sixiang-google"><img src="https://avatars.githubusercontent.com/u/169193309?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/lsy323" title="lsy323"><img src="https://avatars.githubusercontent.com/u/6871543?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/wenxindongwork" title="wenxindongwork"><img src="https://avatars.githubusercontent.com/u/161090399?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/Lumosis" title="Lumosis"><img src="https://avatars.githubusercontent.com/u/30372757?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/vanbasten23" title="vanbasten23"><img src="https://avatars.githubusercontent.com/u/5279639?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/QiliangCui" title="QiliangCui"><img src="https://avatars.githubusercontent.com/u/9204706?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/Chenyaaang" title="Chenyaaang"><img src="https://avatars.githubusercontent.com/u/42742451?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/bzgoogle" title="bzgoogle"><img src="https://avatars.githubusercontent.com/u/198827084?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/yarongmu-google" title="yarongmu-google"><img src="https://avatars.githubusercontent.com/u/150371854?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/yaochengji" title="yaochengji"><img src="https://avatars.githubusercontent.com/u/8017489?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/mrjunwan-lang" title="mrjunwan-lang"><img src="https://avatars.githubusercontent.com/u/227443695?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/wwl2755-google" title="wwl2755-google"><img src="https://avatars.githubusercontent.com/u/214731710?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/lk-chen" title="lk-chen"><img src="https://avatars.githubusercontent.com/u/5988771?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/boe20211" title="boe20211"><img src="https://avatars.githubusercontent.com/u/120631815?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/kwang3939" title="kwang3939"><img src="https://avatars.githubusercontent.com/u/29532482?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/bythew3i" title="bythew3i"><img src="https://avatars.githubusercontent.com/u/21976464?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/gpolovets1" title="gpolovets1"><img src="https://avatars.githubusercontent.com/u/21033602?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/jcyang43" title="jcyang43"><img src="https://avatars.githubusercontent.com/u/24908445?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/pv97" title="pv97"><img src="https://avatars.githubusercontent.com/u/18700335?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/karan" title="karan"><img src="https://avatars.githubusercontent.com/u/3261985?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/dennisYehCienet" title="dennisYehCienet"><img src="https://avatars.githubusercontent.com/u/182058254?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/ica-chao" title="ica-chao"><img src="https://avatars.githubusercontent.com/u/217655063?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/patemotter" title="patemotter"><img src="https://avatars.githubusercontent.com/u/587312?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/richardsliu" title="richardsliu"><img src="https://avatars.githubusercontent.com/u/39319471?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/xingliu14" title="xingliu14"><img src="https://avatars.githubusercontent.com/u/93360308?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/andrewkvuong" title="andrewkvuong"><img src="https://avatars.githubusercontent.com/u/32935673?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/wdhongtw" title="wdhongtw"><img src="https://avatars.githubusercontent.com/u/16065489?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/sierraisland" title="sierraisland"><img src="https://avatars.githubusercontent.com/u/133469784?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/syhuang22" title="syhuang22"><img src="https://avatars.githubusercontent.com/u/92184759?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/RobMulla" title="RobMulla"><img src="https://avatars.githubusercontent.com/u/6800879?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/wang2yn84" title="wang2yn84"><img src="https://avatars.githubusercontent.com/u/13134832?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/JiriesKaileh" title="JiriesKaileh"><img src="https://avatars.githubusercontent.com/u/70413306?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/weiyu0824" title="weiyu0824"><img src="https://avatars.githubusercontent.com/u/62784299?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/ylangtsou" title="ylangtsou"><img src="https://avatars.githubusercontent.com/u/149562838?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/catswe" title="catswe"><img src="https://avatars.githubusercontent.com/u/212922539?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/helloworld1" title="helloworld1"><img src="https://avatars.githubusercontent.com/u/247316?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/rupengliu-meta" title="rupengliu-meta"><img src="https://avatars.githubusercontent.com/u/230299083?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/bvrockwell" title="bvrockwell"><img src="https://avatars.githubusercontent.com/u/24945384?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/BirdsOfAFthr" title="BirdsOfAFthr"><img src="https://avatars.githubusercontent.com/u/29437681?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/amacaskill" title="amacaskill"><img src="https://avatars.githubusercontent.com/u/44151034?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/qihqi" title="qihqi"><img src="https://avatars.githubusercontent.com/u/1719482?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/cychiuak" title="cychiuak"><img src="https://avatars.githubusercontent.com/u/68217955?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/ernie-chang" title="ernie-chang"><img src="https://avatars.githubusercontent.com/u/198010465?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/abhinavclemson" title="abhinavclemson"><img src="https://avatars.githubusercontent.com/u/54861033?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/mailvijayasingh" title="mailvijayasingh"><img src="https://avatars.githubusercontent.com/u/14227112?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/utkarshsharma1" title="utkarshsharma1"><img src="https://avatars.githubusercontent.com/u/28705599?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/CienetStingLin" title="CienetStingLin"><img src="https://avatars.githubusercontent.com/u/126043951?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/helloleah" title="helloleah"><img src="https://avatars.githubusercontent.com/u/6391870?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/coolkp" title="coolkp"><img src="https://avatars.githubusercontent.com/u/22536797?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/hosseinsarshar" title="hosseinsarshar"><img src="https://avatars.githubusercontent.com/u/4457205?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/aman2930" title="aman2930"><img src="https://avatars.githubusercontent.com/u/4409685?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/yuyanpeng-google" title="yuyanpeng-google"><img src="https://avatars.githubusercontent.com/u/193563974?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/vlad-karp" title="vlad-karp"><img src="https://avatars.githubusercontent.com/u/210436218?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/rupeng-liu" title="rupeng-liu"><img src="https://avatars.githubusercontent.com/u/242684140?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/zixi-qi" title="zixi-qi"><img src="https://avatars.githubusercontent.com/u/22851944?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/lepan-google" title="lepan-google"><img src="https://avatars.githubusercontent.com/u/129339828?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/inho9606" title="inho9606"><img src="https://avatars.githubusercontent.com/u/29620436?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/dannikay" title="dannikay"><img src="https://avatars.githubusercontent.com/u/48867745?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/zzzwen" title="zzzwen"><img src="https://avatars.githubusercontent.com/u/1835075?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/kuafou" title="kuafou"><img src="https://avatars.githubusercontent.com/u/41641871?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/kyle-google" title="kyle-google"><img src="https://avatars.githubusercontent.com/u/111800332?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/amishacorns" title="amishacorns"><img src="https://avatars.githubusercontent.com/u/13968559?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/AahilA" title="AahilA"><img src="https://avatars.githubusercontent.com/u/44123487?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+<a href="https://github.com/A9isha" title="A9isha"><img src="https://avatars.githubusercontent.com/u/55637700?v=4" width="60" style="border-radius: 50%; margin: 5px;"/></a>
+</div>
+<!-- END: contributors -->
 
 <br>
 
