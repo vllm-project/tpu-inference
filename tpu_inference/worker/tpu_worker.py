@@ -115,6 +115,11 @@ class TPUWorker:
             )
             os.makedirs(self.profile_dir, exist_ok=True)
 
+        try:
+            os.remove("/tmp/tmp_sentinel.txt")
+        except FileNotFoundError:
+            pass
+
         use_jax_profiler_server = os.getenv("USE_JAX_PROFILER_SERVER", False)
         # Only one instance of profiler is allowed
         if use_jax_profiler_server and self.rank < 1:

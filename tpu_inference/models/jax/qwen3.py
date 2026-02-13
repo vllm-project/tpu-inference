@@ -76,10 +76,10 @@ class Qwen3Attention(JaxModule):
         self.mesh = mesh
 
         self.q_proj = JaxEinsum(
-            "TD,DNH->TNH",
-            (self.hidden_size, self.num_heads, self.head_dim),
+            "TD,NDH->TNH",
+            (self.num_heads, self.hidden_size, self.head_dim),
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
+            kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
             rngs=rng,
             quant_config=quant_config,
             prefix=prefix + ".q_proj",

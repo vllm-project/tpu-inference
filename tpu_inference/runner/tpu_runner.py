@@ -267,6 +267,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.uses_mrope, self.model_config, self.is_last_rank)
         self.lora_utils = LoraUtils(self)
 
+        self.start_time = 0
+        self.has_started_profiling_1 = False
+        self.has_started_profiling_2 = False
+        self.has_started_profiling = False
+        jax.numpy.set_printoptions(threshold=np.inf)
+        np.set_printoptions(threshold=np.inf)
+
         cache_dtype = self.cache_config.cache_dtype
         if cache_dtype == "auto":
             cache_dtype = self.dtype
@@ -575,6 +582,30 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         scheduler_output: "VllmSchedulerOutput",
         intermediate_tensors: Optional[JaxIntermediateTensors] = None,
     ) -> ModelRunnerOutput | JaxIntermediateTensors | None:
+        import os
+        from time import time
+        offset_to_start = 160
+        if os.path.exists("/tmp/tmp_sentinel.txt"):
+            # wait 5 minutes to start profiling
+            if not self.has_started_profiling_1:
+                self.start_time = time()
+                self.has_started_profiling_1 = True
+            else:
+                if time(
+                ) - self.start_time > offset_to_start and self.has_started_profiling_2 is False:
+                    self.has_started_profiling_2 = True
+                    self.start_time = time()
+                    print("Starting profiling...")
+                    options = jax.profiler.ProfileOptions()
+                    options.python_tracer_level = os.getenv(
+                        "PYTHON_TRACER_LEVEL", 0)
+                    jax.profiler.start_trace(f"trace-first-{offset_to_start}")
+                elif time(
+                ) - self.start_time > 30 and self.has_started_profiling_2 is True:
+                    jax.profiler.stop_trace()
+                    print("Stopped profiling after 30s.")
+                    raise ValueError
+
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called "
                                "after execute_model() returns None.")
@@ -771,6 +802,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # leave the mebedding job inside the forward pass
         input_ids, inputs_embeds = self._get_input_ids_embeds(
             input_ids, mm_embeds)
+
+        if self.has_started_profiling_2:
+            print("input_positions:", attn_metadata.input_positions,
+                  "block_tables:", attn_metadata.block_tables, "seq_lens:",
+                  attn_metadata.seq_lens, "query_start_loc:",
+                  attn_metadata.query_start_loc, "request_distribution:",
+                  attn_metadata.request_distribution)
 
         lora_metadata = self.lora_utils.extract_lora_metadata()
         # TODO: make _get_input_ids_embeds within this context
@@ -1619,12 +1657,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
 
         # Please see runner_utils.PhasedBasedProfiler for details
-        if self.phase_based_profiler:
-            batch_composition_stats = runner_utils.get_batch_composition_stats(
-                self.input_batch, total_num_scheduled_tokens, num_reqs,
-                padded_total_num_scheduled_tokens, scheduler_output)
-
-            self.phase_based_profiler.step(batch_composition_stats)
+        # if self.phase_based_profiler:
+        batch_composition_stats = runner_utils.get_batch_composition_stats(
+            self.input_batch, total_num_scheduled_tokens, num_reqs,
+            padded_total_num_scheduled_tokens, scheduler_output)
+        if self.has_started_profiling_2:
+            logger.info(f"Batch composition stats: {batch_composition_stats}")
+        # self.phase_based_profiler.step(batch_composition_stats)
 
         # Inputs
         input_ids = self.input_ids_cpu[:padded_total_num_scheduled_tokens]

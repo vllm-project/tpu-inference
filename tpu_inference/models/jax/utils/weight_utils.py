@@ -261,7 +261,9 @@ def get_default_maps(model_config, mesh: Mesh,
         "gate_proj": (1, 0),
         "up_proj": (1, 0),
         "down_proj": (1, 0),
-        "q_proj": (2, 0, 1),
+        "q_proj": (
+            2, 0, 1
+        ),  # num_heads, head_dim, hidden_size -> hidden_size, num_heads, head_dim
         "k_proj": (2, 0, 1),
         "v_proj": (2, 0, 1),
         "o_proj": (1, 2, 0),
@@ -796,11 +798,24 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                 # beyond standard transformers, please consider setting weight_loader.
                 reshape_dims = None
                 permute_dims = None
-                if any(substr in name for substr in
-                       ["q_proj.weight", "k_proj.weight", "v_proj.weight"]):
+                if any(substr in name
+                       for substr in ["k_proj.weight", "v_proj.weight"]):
                     D, N, H = param.value.shape
                     reshape_dims = (N, H, D)
                     permute_dims = (2, 0, 1)
+                if any(substr in name for substr in ["q_proj.weight"]):
+                    if param.value.shape[0] < param.value.shape[1]:
+                        # New target: (N, D, H)
+                        # HF Source: (N*H, D)
+                        N, D, H = param.value.shape
+                        reshape_dims = (N, H, D)  # Reshape to (N, H, D)
+                        permute_dims = (0, 2, 1)  # Swap H and D -> (N, D, H)
+                    else:
+                        # Old target: (D, N, H)
+                        # HF Source: (N*H, D)
+                        D, N, H = param.value.shape
+                        reshape_dims = (N, H, D)
+                        permute_dims = (2, 0, 1)
                 elif any(substr in name for substr in
                          ["q_proj.bias", "k_proj.bias", "v_proj.bias"]):
                     N, H = param.value.shape
