@@ -227,6 +227,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                                   permute_dims=(0, 1),
                                   param_name=layer.prefix + ".weight"),
             eager_sharding=False)
+        layer.weight.set_metadata('_is_loaded', False)
         layer.weight.set_metadata('sharding', self.weight_sharding)
 
         # Block-wise quantization scale
@@ -245,6 +246,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 param_name=layer.prefix + ".weight_scale_inv",
             ),
             eager_sharding=False)
+        layer.weight_scale_inv.set_metadata('_is_loaded', False)
         layer.weight_scale_inv.set_metadata('sharding', self.weight_sharding)
 
         # Force the parameters to be loaded onto CPU, such that in `process_weights_after_loading`
@@ -262,6 +264,12 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             # Batched case: weight stays in FP8. No blockwise processing
             # needed — the batched matmul uses dot_general with FP8 natively.
             return True
+
+        if getattr(layer.weight, "_is_loaded", False) or getattr(
+                layer.weight_scale_inv, "_is_loaded", False):
+            # Weight and scale could spread across multiple files,
+            # so we only process once both of them are loaded.
+            return
 
         # Do the re-quant process on CPU to avoid OOM on device.
         with cpu_mesh_context():
