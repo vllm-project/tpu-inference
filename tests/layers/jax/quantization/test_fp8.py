@@ -276,7 +276,7 @@ class TestFp8BlockwiseJaxLinear:
 
 class TestFp8TensorwiseJaxLinear:
 
-    def test_fp8_linear_method_create_weights(self, mesh, rngs):
+    def test_fp8_linear_method_create_weights(self, rngs):
         with jax.set_mesh(mesh):
             layer = JaxEinsum("ab,bc->ac", (32, 16), rngs, bias_shape=None)
             config = QuantLinearConfig(enable_sp=False, output_sizes=[16])
@@ -292,16 +292,16 @@ class TestFp8TensorwiseJaxLinear:
             assert hasattr(layer.weight, 'weight_loader')
 
     def test_fp8_loader_prevents_upcast(self, mesh, rngs):
-        with jax.set_mesh(mesh):
-            layer = JaxEinsum("ab,bc->ac", (4, 2), rngs, bias_shape=None)
-            config = QuantLinearConfig(enable_sp=False, output_sizes=[2])
-            method = Fp8TensorwiseLinearMethod(layer, config)
-            method.create_weights_jax(layer, rngs=rngs)
+            with jax.set_mesh(mesh):
+                layer = JaxEinsum("ab,bc->ac", (4, 2), rngs, bias_shape=None)
+                config = QuantLinearConfig(enable_sp=False, output_sizes=[2])
+                method = Fp8TensorwiseLinearMethod(layer, config)
+                method.create_weights_jax(layer, rngs=rngs)
 
-            torch_fp8 = torch.zeros((2, 4), dtype=torch.float8_e4m3fn)
-            layer.weight.weight_loader(layer.weight, torch_fp8)
+                torch_fp8 = torch.zeros((2, 4), dtype=torch.float8_e4m3fn)
+                layer.weight.weight_loader(layer.weight, torch_fp8)
 
-            assert layer.weight.value.dtype == jnp.float8_e4m3fn
+                assert layer.weight.value.dtype == jnp.float8_e4m3fn
 
     @pytest.mark.parametrize("in_features,out_features", [(128, 64),
                                                           (256, 128)])
@@ -488,14 +488,6 @@ class TestFp8FusedMoE:
 
         dtype = jnp.bfloat16
 
-        activation_ffw_td = (ShardingAxisNameBase.MLP_DATA,
-                                       ShardingAxisNameBase.MOE_TENSOR) if enable_attn_dp else (ShardingAxisNameBase.MLP_DATA,
-                                       ShardingAxisNameBase.MODEL_1)
-        edf_sharding= (None, ShardingAxisNameBase.MOE_TENSOR,
-                                  ShardingAxisNameBase.ATTN_DATA_EXPERT) if enable_attn_dp else (None, ShardingAxisNameBase.MODEL_1, None)
-        efd_sharding=  (None, ShardingAxisNameBase.ATTN_DATA_EXPERT,
-                                  ShardingAxisNameBase.MOE_TENSOR) if enable_attn_dp else (None, None, ShardingAxisNameBase.MODEL_1)
-
         # This won't be used in reality since we are patching
         # the router_logits
         with jax.set_mesh(mesh):
@@ -526,11 +518,14 @@ class TestFp8FusedMoE:
                         hidden_act="silu",
                         rngs=rngs,
                         quant_config=quant_config,
-                        activation_ffw_td=activation_ffw_td,
+                        activation_ffw_td=(ShardingAxisNameBase.MLP_DATA,
+                                            ShardingAxisNameBase.MODEL_1),
                         activation_ffw_ted=(ShardingAxisNameBase.MLP_DATA, None,
-                                            ShardingAxisNameBase.MOE_TENSOR),
-                        edf_sharding=edf_sharding,
-                        efd_sharding=efd_sharding,
+                                            ShardingAxisNameBase.MODEL_1),
+                        edf_sharding=(None, ShardingAxisNameBase.MODEL_1,
+                                        ShardingAxisNameBase.MODEL_2),
+                        efd_sharding=(None, ShardingAxisNameBase.MODEL_2,
+                                        ShardingAxisNameBase.MODEL_1),
                         moe_backend=moe_backend,
                         renormalize=False,
                         router=router)
@@ -550,14 +545,14 @@ class TestFp8FusedMoE:
         w13 = jax.numpy.concatenate([gate, up], axis=1)
         w2 = jax.random.normal(k4, w2_shape, dtype=dtype) / 10.0
 
-            expected = test_utils.ref_moe_jax(a, score, w13, w2, None, None,
+        expected = test_utils.ref_moe_jax(a, score, w13, w2, None, None,
                                             layer.top_k, layer.renormalize,
                                             layer.activation)
 
-            if use_ep:
-                assert layer.moe_backend == MoEBackend.GMM_EP
-            else:
-                assert layer.moe_backend == MoEBackend.GMM_TP
+        if use_ep:
+            assert layer.moe_backend == MoEBackend.GMM_EP
+        else:
+            assert layer.moe_backend == MoEBackend.GMM_TP
 
         # Begin mimic loading weights from checkpoint.
         block_m, block_n = quant_config.weight_block_size
@@ -568,7 +563,7 @@ class TestFp8FusedMoE:
         w2_weight, w2_weight_scale = quantize_to_fp8_block_3d(
             jnp.transpose(w2, (0, 2, 1)), block_m, block_n, jnp.float8_e4m3fn)
 
-            scale_suffix = layer.quant_method.weight_scale_name
+        scale_suffix = layer.quant_method.weight_scale_name
 
         getattr(
             layer,
@@ -595,14 +590,14 @@ class TestFp8FusedMoE:
             setattr(param, "_cnt_moe_weights_loaded", layer.num_local_experts)
         # End mimic loading weights from checkpoint.
 
-            layer.quant_method.process_weights_after_loading(layer)
+        layer.quant_method.process_weights_after_loading(layer)
 
-            # Patch the router since we don't want to use the
-            # real router
-            with patch.object(layer, 'router', return_value=score):
-                # Run the actual forward pass and up-cast
-                # to avoid promote error
-                actual = layer(a).astype(expected.dtype)
+        # Patch the router since we don't want to use the
+        # real router
+        with patch.object(layer, 'router', return_value=score):
+            # Run the actual forward pass and up-cast
+            # to avoid promote error
+            actual = layer(a).astype(expected.dtype)
 
         assert jnp.allclose(expected, actual, atol=5e-2, rtol=1e-1)
 
