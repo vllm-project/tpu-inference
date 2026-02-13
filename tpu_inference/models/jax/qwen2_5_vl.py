@@ -28,13 +28,13 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
 from vllm.config import VllmConfig
 
 from tpu_inference import utils as utils
+from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import \
     sharded_flash_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.linear import JaxEinsum
-from tpu_inference.logger import init_logger
-from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer
+from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.jax.qwen2 import Qwen2Model
@@ -763,11 +763,11 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         self.vllm_config = vllm_config
         self.rng = nnx.Rngs(rng_key)
         self.mesh = mesh
+        self.is_first_rank = get_pp_group().is_first_rank
 
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.is_first_rank = get_pp_group().is_first_rank
         self.is_last_rank = get_pp_group().is_last_rank
 
         if self.is_first_rank:

@@ -26,12 +26,12 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import \
     Qwen2_5_VLConfig
 from vllm.config import (CacheConfig, DeviceConfig, MultiModalConfig,
                          ParallelConfig, SchedulerConfig)
-from tpu_inference.models.jax.jax_intermediate_tensor import \
-    JaxIntermediateTensors
-from tpu_inference.layers.jax.pp_utils import PPMissingLayer
+
 from tpu_inference.distributed.jax_parallel_state import \
     init_pp_distributed_environment
-
+from tpu_inference.layers.jax.pp_utils import PPMissingLayer
+from tpu_inference.models.jax.jax_intermediate_tensor import \
+    JaxIntermediateTensors
 # Import the module itself to allow patching
 # Corrected imports for the code under test
 from tpu_inference.models.jax.qwen2_5_vl import (
@@ -616,6 +616,7 @@ class TestQwen2_5_VLForConditionalGeneration:
             kwargs = mock_load_weights.call_args.kwargs
             assert "lm_head" not in kwargs['metadata_map'].name_map
 
+
 class TestQwen2_5_VLPipelineParallel:
 
     @pytest.fixture
@@ -700,19 +701,24 @@ class TestQwen2_5_VLPipelineParallel:
             _, kwargs = model.model.call_args
             assert kwargs['inputs_embeds'] is intermediate["hidden_states"]
 
-    def test_load_weights_pp_missing_layers(self, mock_vllm_config, rng, mesh, mock_pp_group):
+    def test_load_weights_pp_missing_layers(self, mock_vllm_config, rng,
+                                            mesh, mock_pp_group):
         mock_pp_group.return_value.is_first_rank = False
         mock_pp_group.return_value.is_last_rank = False
         model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config, rng, mesh)
 
-        with patch("tpu_inference.models.jax.utils.weight_utils.load_hf_weights") as mock_load:
+        with patch(
+            "tpu_inference.models.jax.utils.weight_utils.load_hf_weights"
+        ) as mock_load:
             model.load_weights(rng)
             mock_load.assert_called_once()
             pp_missing = mock_load.call_args.kwargs['pp_missing_layers']
             assert "visual" in pp_missing
             assert "lm_head" in pp_missing
 
-    def test_precompile_vision_encoder_non_first_rank(self, mock_vllm_config, rng, mesh, mock_pp_group):
+    def test_precompile_vision_encoder_non_first_rank(self, mock_vllm_config, 
+                                                      rng, mesh, 
+                                                      mock_pp_group):
         mock_pp_group.return_value.is_first_rank = False
         model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config, rng, mesh)
         run_compilation_fn = MagicMock()
