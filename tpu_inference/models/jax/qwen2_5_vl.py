@@ -28,11 +28,15 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
 from vllm.config import VllmConfig
 
 from tpu_inference import utils as utils
+from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import \
     sharded_flash_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.linear import JaxEinsum
+from tpu_inference.layers.jax.pp_utils import PPMissingLayer
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.jax_intermediate_tensor import \
+    JaxIntermediateTensors
 from tpu_inference.models.jax.qwen2 import Qwen2Model
 # from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from tpu_inference.models.jax.utils.multi_modal_utils import (
@@ -759,28 +763,38 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         self.vllm_config = vllm_config
         self.rng = nnx.Rngs(rng_key)
         self.mesh = mesh
+        self.is_first_rank = get_pp_group().is_first_rank
 
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.visual = Qwen2_5_VisionTransformer(
-            vllm_config=vllm_config,
-            rngs=self.rng,
-            mesh=mesh,
-            norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-        )
+        self.is_last_rank = get_pp_group().is_last_rank
+
+        if self.is_first_rank:
+            self.visual = Qwen2_5_VisionTransformer(
+                vllm_config=vllm_config,
+                rngs=self.rng,
+                mesh=mesh,
+                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+            )
+        else:
+            self.visual = PPMissingLayer()
+
         self.model = Qwen2Model(vllm_config, self.rng, mesh)
         model_config = vllm_config.model_config
         if not model_config.hf_config.tie_word_embeddings:
-            vocab_size = model_config.get_vocab_size()
-            hidden_size = model_config.hf_config.hidden_size
-            self.lm_head = JaxEinsum(
-                einsum_str="TD,DV->TV",
-                kernel_shape=(hidden_size, vocab_size),
-                dtype=model_config.dtype,
-                rngs=self.rng,
-                quant_config=vllm_config.quant_config,
-            )
+            if self.is_last_rank:
+                vocab_size = model_config.get_vocab_size()
+                hidden_size = model_config.hf_config.hidden_size
+                self.lm_head = JaxEinsum(
+                    einsum_str="TD,DV->TV",
+                    kernel_shape=(hidden_size, vocab_size),
+                    dtype=model_config.dtype,
+                    rngs=self.rng,
+                    quant_config=vllm_config.quant_config,
+                )
+            else:
+                self.lm_head = PPMissingLayer()
 
     def get_mrope_input_positions(
         self,
@@ -1026,6 +1040,9 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
                                                      ...],
                          **kwargs: object) -> MultiModalEmbeddings:
 
+        if not self.is_first_rank:
+            return ()
+
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(
             image_grid_thw, **kwargs)
         if not mm_input_by_modality:
@@ -1052,6 +1069,9 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             self, input_ids: jax.Array,
             multimodal_embeddings: Optional[jax.Array]) -> jax.Array:
 
+        if not self.is_first_rank:
+            return None
+
         inputs_embeds = self.model.embed_tokens(input_ids)
 
 
@@ -1069,16 +1089,31 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         input_ids: Optional[jax.Array],
         attention_metadata: AttentionMetadata,
         inputs_embeds: Optional[jax.Array] = None,
+        _input_positions=None,
+        _layer_name_to_kv_cache=None,
+        _lora_metadata=None,
+        intermediate_tensors: Optional[JaxIntermediateTensors] = None,
+        is_first_rank: bool = True,
+        is_last_rank: bool = True,
         *args,
-    ) -> tuple[list[jax.Array], jax.Array, List[jax.Array]]:
+    ) -> tuple[list[jax.Array], jax.Array | JaxIntermediateTensors,
+               List[jax.Array]]:
         # The logic of choosing between input_ids and inputs_embeds is
         # handled inside self.model.__call__
+        if not is_first_rank:
+            assert intermediate_tensors is not None
+            inputs_embeds = intermediate_tensors["hidden_states"]
+
         kv_caches, x = self.model(
             kv_caches=kv_caches,
             input_ids=input_ids,
             attention_metadata=attention_metadata,
             inputs_embeds=inputs_embeds,
         )
+
+        if not is_last_rank:
+            x = JaxIntermediateTensors(tensors={"hidden_states": x})
+
         return kv_caches, x, []
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
@@ -1091,6 +1126,12 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         self.rng = nnx.Rngs(rng_key)
         # Key: path to a HF layer weight
         # Value: a tuple of (path to a nnx layer weight, nnx weight sharding)
+
+        self.pp_missing_layers = []
+        for path, module in nnx.iter_graph(self):
+            if isinstance(module, PPMissingLayer):
+                layer_name = ".".join([str(s) for s in path])
+                self.pp_missing_layers.append(layer_name)
 
         mappings = {
             "visual.blocks.*.attn.proj.bias": "visual.blocks.*.attn.proj.bias",
@@ -1133,6 +1174,9 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         self,
         run_compilation_fn: Callable,
     ) -> None:
+        if not self.is_first_rank:
+            return
+
         vc = self.vllm_config.model_config.hf_config.vision_config
         patch_input_dim = vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size
         if self.visual.enable_dynamic_image_sizes:
