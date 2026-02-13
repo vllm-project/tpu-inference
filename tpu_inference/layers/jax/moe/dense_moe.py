@@ -36,6 +36,8 @@ def dense_moe_fwd(weights: UnfusedMoEWeights, x_TD: Float,
         x_TD: Input array of shape (sequence_length, d_model).
         cast_dtype: The dtype to cast the input to.
         activation_ffw_td: The sharding of the activation.
+        hidden_act: The activation function to use.
+        full_weights_TE: The full weights of the dense Moe layer.
 
     Returns:
         The output of the dense Moe layer.
@@ -71,6 +73,8 @@ def dense_moe_fwd_preapply_router_weights(
         x_TD: Input array of shape (sequence_length, d_model).
         cast_dtype: The dtype to cast the input to.
         activation_ffw_td: The sharding of the activation.
+        hidden_act: The activation function to use.
+        full_weights_TE: The weights of the router.
 
     Returns:
         The output of the dense Moe layer.
@@ -99,7 +103,8 @@ def dense_moe_func(weights: UnfusedMoEWeights, x_TD: jax.Array,
                    gating_output: Tuple[jax.Array, jax.Array],
                    cast_dtype: jnp.dtype, num_local_experts: int,
                    apply_expert_weight_before_computation: bool,
-                   activation_ffw_td, hidden_act) -> jax.Array:
+                   activation_ffw_td: Sharding, activation_ffw_ted: Sharding,
+                   hidden_act: str) -> jax.Array:
     """
     Forward pass of the dense MoE layer.  This is a naive implementation
     and thus should not be used in production.
@@ -115,6 +120,9 @@ def dense_moe_func(weights: UnfusedMoEWeights, x_TD: jax.Array,
         num_local_experts: The number of local experts.
         apply_expert_weight_before_computation: Whether to apply the expert weights before computing the output.
         activation_ffw_td: The sharding of the activation.
+        activation_ffw_ted: The sharding of the activation, used for the
+            pre-apply weights case.
+        hidden_act: The activation function to use.
 
     Returns:
         The output of the dense Moe layer.
@@ -137,7 +145,7 @@ def dense_moe_func(weights: UnfusedMoEWeights, x_TD: jax.Array,
                 weights=weights,
                 x_TD=x_TD,
                 cast_dtype=cast_dtype,
-                activation_ffw_td=activation_ffw_td,
+                activation_ffw_ted=activation_ffw_ted,
                 hidden_act=hidden_act,
                 full_weights_TE=full_weights_TE)
     else:
