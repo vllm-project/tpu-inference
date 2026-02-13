@@ -11,7 +11,7 @@ Add a collapsible legend above the Contributor Wall, identical in format to the 
 
 ```html
 <details>
-<summary> <b>🚦 <i>Status Legend</i> </b> </summary>
+<summary> <b>🌟 <i>Contribution Type Legend</i> </b> </summary>
 
 > | Emoji | Contribution | Meaning |
 > | :--- | :--- | :--- |

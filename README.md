@@ -228,7 +228,7 @@ If you're ready to contribute code, our **[Contributing Guide](https://github.co
 A huge thank you to everyone who has helped build and improve `vllm-project/tpu-inference`!
 
 <details>
-<summary><b>🚦 <i>Contribution Type Legend</i></b></summary>
+<summary><b>🌟 <i>Contribution Type Legend</i></b></summary>
 
 > | Emoji | Contribution | Meaning |
 > | :---: | :--- | :--- |
