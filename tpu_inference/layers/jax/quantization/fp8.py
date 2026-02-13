@@ -265,7 +265,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                     permute_dims=None,
                     param_name="linear_fp8_weight_scale_inv",
                 ))
-            layer.weight_scale_inv.sharding = ()
+            layer.weight_scale_inv.set_metadata('sharding', ())
             return
 
         # Follow upstream limitation that only float8_e4m3 is supported.

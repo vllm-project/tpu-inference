@@ -78,10 +78,9 @@ def mesh():
     devices = np.array(jax.local_devices()[:1])
     num_devices = len(devices)
     assert num_devices == 1
-    device_mesh = devices.reshape((num_devices, 1, 1, 1))
+    device_mesh = devices.reshape((1,) * len(MESH_AXIS_NAMES))
 
-    with Mesh(device_mesh, axis_names=MESH_AXIS_NAMES) as m:
-        yield m
+    return Mesh(device_mesh, axis_names=MESH_AXIS_NAMES)
 
 @pytest.fixture
 def rngs():
@@ -268,7 +267,7 @@ class TestFp8BlockwiseJaxLinear:
 
 class TestFp8TensorwiseJaxLinear:
 
-    def test_fp8_linear_method_create_weights(self, rngs):
+    def test_fp8_linear_method_create_weights(self, rngs, mesh):
         with jax.set_mesh(mesh):
             layer = JaxEinsum("ab,bc->ac", (32, 16), rngs, bias_shape=None)
             config = QuantLinearConfig(enable_sp=False, output_sizes=[16])
