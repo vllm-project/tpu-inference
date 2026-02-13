@@ -20,6 +20,9 @@ from flax import nnx
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
+from tpu_inference.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class JaxEinsum(nnx.Einsum, JaxModule):
@@ -53,6 +56,11 @@ class JaxEinsum(nnx.Einsum, JaxModule):
         # `self.weight` such that `named_parameters()` can match the names in HF models.
         self.weight = self.kernel
         delattr(self, 'kernel')
+        if hasattr(self.weight, 'out_sharding'):
+            self.weight.set_metadata('sharding', self.weight.out_sharding)
+        logger.info(
+            f'{self.weight.value.shape=} {self.weight.value.dtype=} {self.weight.sharding=}'
+        )
 
         if quant_config is None:
             self.quant_method = None
