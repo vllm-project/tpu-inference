@@ -1258,8 +1258,7 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
 
         self.vllm_config = vllm_config
         rng = nnx.Rngs(rng_key)
-        self.mesh = None
-        mesh = None
+        self.mesh = mesh
 
         self.model = DeepSeekV3(
             vllm_config=vllm_config,
