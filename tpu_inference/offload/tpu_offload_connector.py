@@ -95,7 +95,7 @@ import time
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Optional, get_args
+from typing import TYPE_CHECKING, Any, Literal, Optional, get_args, List, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -125,7 +125,8 @@ from tpu_inference.offload.utils import (CPU_OFFLOADING_SWAP_OP_TYPE,
                                          CpuChunkId, KVCacheSwapFn, ReqId,
                                          _split_per_shard_to_chunks,
                                          get_kv_cache_swap_fn,
-                                         jitted_insert_kv_cache_slices)
+                                         jitted_insert_kv_cache_slices,
+                                         jitted_gather_kv_cache)
 from tpu_inference.runner.kv_cache_manager import KVCacheManager
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
@@ -384,6 +385,26 @@ KV_HIT_WITH_LOAD = Counter(
 # 2. pad: pad to a full block
 # 3. dynamic: keep the partial block as is.
 PARTIAL_BLOCK_SAVE_BEHAVIOR = Literal["drop"]
+
+
+def _split_flat_to_chunks(
+    flat_kv_caches: List[jax.Array],
+    split_size_list: List[int],
+) -> List[List[jax.Array]]:
+    """Split flat layer data into per-block chunks.
+
+    Args:
+        flat_kv_caches: List[jax.Array] — one per layer.
+        split_size_list: sizes to split along axis 0 (one per block).
+
+    Returns:
+        List[List[jax.Array]] — layers × blocks.
+    """
+    def _split_layer(flat_layer_cache):
+        return jax.lax.split(flat_layer_cache, split_size_list, axis=0)
+    return jax.tree.map(_split_layer, flat_kv_caches)
+
+split_flat_to_chunks_cpu = jax.jit(_split_flat_to_chunks, backend="cpu")
 
 
 @dataclass
@@ -1682,6 +1703,7 @@ class TPUOffloadConnectorWorker:
         logger.warning(
             f"TPU_OFFLOAD_NO_OP config: load({self.no_op_load}), gather({self.no_op_gather}), swap_out({self.no_op_swap_out})"
         )
+        self.cpu_device = jax.devices('cpu')[0]
 
     def __del__(self):
         logger.info("TPUOffloadConnectorWorker: Entering __del__")
@@ -1711,6 +1733,11 @@ class TPUOffloadConnectorWorker:
             self.flatten_host_sharding = jax.sharding.NamedSharding(
                 mesh=self.device_sharding.mesh,
                 spec=jax.sharding.PartitionSpec(None, "model"),
+                memory_kind="pinned_host")
+
+            self.host_sharding = jax.sharding.NamedSharding(
+                mesh=self.device_sharding.mesh,
+                spec=jax.sharding.PartitionSpec(None, None, "model"),
                 memory_kind="pinned_host")
 
             self.swap_in_fn, self.swap_out_fn = get_kv_cache_swap_fn(
@@ -1769,7 +1796,7 @@ class TPUOffloadConnectorWorker:
                 dummy_block_ids = jnp.arange(num_blocks)
 
                 # 1. Pre-compile gather (used in save)
-                flat_dummy_kv_caches_tpu = KVCacheManager._jitted_gather_kv_cache(
+                flat_dummy_kv_caches_tpu = jitted_gather_kv_cache(
                     paged_kv_for_compilation, dummy_block_ids)
                 jax.block_until_ready(flat_dummy_kv_caches_tpu)
 
@@ -1826,7 +1853,7 @@ class TPUOffloadConnectorWorker:
             return []
         # return KVCacheManager._jitted_gather_kv_cache(kv_caches, block_ids)
         if num_blocks in BLOCK_SIZE_BUCKETS:
-            return KVCacheManager._jitted_gather_kv_cache(kv_caches, block_ids)
+            return jitted_gather_kv_cache(kv_caches, block_ids)
 
         # 2. Report the latency of decomposed_block_sizes
         with GATHER_DECOMPOSE_LATENCY.time():
@@ -1841,7 +1868,7 @@ class TPUOffloadConnectorWorker:
                 block_slice = jax.lax.dynamic_slice_in_dim(
                     block_ids, block_offset, decomposed_block_size, axis=0)
             with GATHER_CHUNK_LATENCY.time():
-                gathered_chunk = KVCacheManager._jitted_gather_kv_cache(
+                gathered_chunk = jitted_gather_kv_cache(
                     kv_caches, block_slice)
             with GATHER_APPEND_LATENCY.time():
                 gathered_chunks.append(gathered_chunk)
@@ -2071,7 +2098,7 @@ class TPUOffloadConnectorWorker:
                 flat_kv_caches_tpu = self._bucketed_gather_kv_cache(
                     self.runner.kv_caches, blocks_to_save_arr)
             else:
-                flat_kv_caches_tpu = KVCacheManager._jitted_gather_kv_cache(
+                flat_kv_caches_tpu = jitted_gather_kv_cache(
                     self.runner.kv_caches, blocks_to_save_arr)
             jax.block_until_ready(flat_kv_caches_tpu)
         else:
@@ -2101,28 +2128,47 @@ class TPUOffloadConnectorWorker:
         start_time = time.time()
         chunks_on_cpu = None
         if not self.no_op_swap_out:
-            if self.use_bucketed_swap_ops:
-                chunks_on_cpu = self._bucketed_swap_out_fn(flat_kv_caches_tpu)
-            else:
-                flat_kv_caches_cpu = self.swap_out_fn(flat_kv_caches_tpu)
-                if flat_kv_caches_cpu:
-                    jax.block_until_ready(flat_kv_caches_cpu)
-                    # NOTE(jcgu): we keep cpu_chunk_size == block_size
-                    split_size_list = [self.cpu_chunk_size
-                                       ] * num_blocks_to_save
-                    if isinstance(flat_kv_caches_cpu[0], list):
-                        # Per-shard format: List[List[jax.Array]] (layers × shards)
-                        # Split each shard, then regroup by block index.
-                        chunks_on_cpu = _split_per_shard_to_chunks(
-                            flat_kv_caches_cpu, split_size_list)
-                    else:
-                        chunks_on_cpu = jax.tree.map(
-                            lambda flat_layer_cache: jax.lax.split(
-                                flat_layer_cache, split_size_list, axis=0),
-                            flat_kv_caches_cpu)
+            # if self.use_bucketed_swap_ops:
+            #     chunks_on_cpu = self._bucketed_swap_out_fn(flat_kv_caches_tpu)
+            # else:
+            #     flat_kv_caches_cpu = self.swap_out_fn(flat_kv_caches_tpu)
+            #     if flat_kv_caches_cpu:
+            #         jax.block_until_ready(flat_kv_caches_cpu)
+            #         # NOTE(jcgu): we keep cpu_chunk_size == block_size
+            #         split_size_list = [self.cpu_chunk_size
+            #                            ] * num_blocks_to_save
+            #         if isinstance(flat_kv_caches_cpu[0], list):
+            #             # Per-shard format: List[List[jax.Array]] (layers × shards)
+            #             # Split each shard, then regroup by block index.
+            #             chunks_on_cpu = _split_per_shard_to_chunks(
+            #                 flat_kv_caches_cpu, split_size_list)
+            #         else:
+            #             chunks_on_cpu = jax.tree.map(
+            #                 lambda flat_layer_cache: jax.lax.split(
+            #                     flat_layer_cache, split_size_list, axis=0),
+            #                 flat_kv_caches_cpu)
 
-            if chunks_on_cpu and chunks_on_cpu[0]:
-                jax.block_until_ready(chunks_on_cpu)
+            # D2H
+            flat_kv_caches_cpu = []
+            logger.info(f"----jcgu--- gathered tpu kv cache: {flat_kv_caches_tpu[0].shape}, {flat_kv_caches_tpu[0].device}")
+            for i in range(self.num_layers):
+                flat_kv_caches_cpu.append(jax.device_put(flat_kv_caches_tpu[i], self.cpu_device))
+            for kv_cache_cpu in flat_kv_caches_cpu:
+                kv_cache_cpu.block_until_ready()
+            
+            logger.info(f"----jcgu--- gathered kv cache: {flat_kv_caches_cpu[0].shape}, {flat_kv_caches_cpu[0].device}, {flat_kv_caches_cpu[0].sharding}")
+            # split
+            # split_size_list = [self.cpu_chunk_size] * num_blocks_to_save
+            # with jax.default_device(self.cpu_device):
+            #     chunks_on_cpu = _split_flat_to_chunks(flat_kv_caches_cpu, split_size_list)
+            # if chunks_on_cpu and chunks_on_cpu[0]:
+            #     jax.block_until_ready(chunks_on_cpu)
+            # chunks_on_cpu = []
+            # for i in range(self.num_layers):
+            #     chunks_on_cpu.append(jnp.split(flat_kv_caches_cpu[i], indices_or_sections=num_blocks_to_save, axis=0))
+            chunks_on_cpu = flat_kv_caches_cpu
+            jax.block_until_ready(chunks_on_cpu)
+            logger.info(f"----jcgu: {len(chunks_on_cpu)}, {len(chunks_on_cpu[0])}")
         else:
             chunks_on_cpu = [[(j * num_blocks_to_save + i)
                               for i in range(num_blocks_to_save)]
@@ -2132,25 +2178,25 @@ class TPUOffloadConnectorWorker:
         logger.info(f"Successfully saved {len(blocks_to_save)} blocks for "
                     f"request {req_id} to CPU in {duration:.4f} seconds.")
 
-        if not self.no_op_swap_out:
+        # if not self.no_op_swap_out:
 
-            def _chunk_nbytes(chunk):
-                if isinstance(chunk, list):
-                    return sum(s.nbytes for s in chunk)
-                return chunk.nbytes
+        #     def _chunk_nbytes(chunk):
+        #         if isinstance(chunk, list):
+        #             return sum(s.nbytes for s in chunk)
+        #         return chunk.nbytes
 
-            total_size_bytes = sum(
-                sum(_chunk_nbytes(chunk) for chunk in layer_chunks)
-                for layer_chunks in chunks_on_cpu)
-            logger.info(
-                f"Total size of chunks_on_cpu: {total_size_bytes / 1024**2:.2f} MB"
-            )
-            KV_SAVED_BYTES.inc(total_size_bytes)
+        #     total_size_bytes = sum(
+        #         sum(_chunk_nbytes(chunk) for chunk in layer_chunks)
+        #         for layer_chunks in chunks_on_cpu)
+        #     logger.info(
+        #         f"Total size of chunks_on_cpu: {total_size_bytes / 1024**2:.2f} MB"
+        #     )
+        #     KV_SAVED_BYTES.inc(total_size_bytes)
 
-            if duration > 0:
-                bw_gbps = (total_size_bytes / (1024**3)) / duration
-                KV_SAVE_TRANSFER_BW_GBPS.labels(
-                    num_blocks=str(num_blocks_to_save)).observe(bw_gbps)
+        #     if duration > 0:
+        #         bw_gbps = (total_size_bytes / (1024**3)) / duration
+        #         KV_SAVE_TRANSFER_BW_GBPS.labels(
+        #             num_blocks=str(num_blocks_to_save)).observe(bw_gbps)
 
         post_transfer_start_time = time.time()
 
@@ -2159,6 +2205,13 @@ class TPUOffloadConnectorWorker:
             cur_chunk_cross_layers = [
                 chunks_on_cpu[j][i] for j in range(self.num_layers)
             ]
+            # cur_chunk_cross_layers = []
+            # for j in range(self.num_layers):
+            #     data_chunk = chunks_on_cpu[j][i]
+            #     logger.info(f"---jcgu--- {data_chunk.shape} {data_chunk.sharding}")
+            #     cur_chunk_cross_layers.append(chunks_on_cpu[j][i])
+
+
             self.cpu_backend.add(chunk_id, cur_chunk_cross_layers)
             logger.info(f"Request {req_id}: Saving to CPU chunk: "
                         f"chunk_id={chunk_id}, "

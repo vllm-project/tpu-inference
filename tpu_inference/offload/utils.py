@@ -363,3 +363,18 @@ def jitted_insert_kv_cache_slices(
         return cache
 
     return jax.tree.map(_update_layer, kv_caches, kv_cache_slices)
+
+
+@functools.partial(jax.jit)
+def jitted_gather_kv_cache(kv_caches: List[jax.Array],
+                            block_ids: jax.Array) -> List[jax.Array]:
+    """
+    JIT-compiled function to gather KV cache slices for all layers at once.
+    This uses jax.tree.map to apply the operation across all layers.
+    """
+
+    def gather_and_reshape(layer_kv_cache):
+        return layer_kv_cache.at[block_ids].get().reshape(
+            -1, *layer_kv_cache.shape[1:])
+
+    return jax.tree.map(gather_and_reshape, kv_caches)
