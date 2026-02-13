@@ -375,10 +375,10 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
         for torch_name, torch_weight in weights:
             torch_name: str = torch_name.split(
                 layer.prefix)[-1]  # ".0.down_proj.weight" for example
-            names = torch_name.split(".")
+            names = torch_name.split(".")[-3:]
             assert len(
                 names
-            ) == 3, f"Expected param name to be .<expert_id>.<param_name>.weight, got {torch_name}"
+            ) == 3, f"Expected param name to be .<expert_id>.<param_name>.weight, got {torch_name=} {layer.prefix=} {type(layer)=}"
             expert_id, _, _ = names
             expert_id = int(expert_id)
             jax_param_name = ""
