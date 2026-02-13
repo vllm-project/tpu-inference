@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main  # Or your default branch, e.g., master
+      - vllm-tpu-community-contribution-UX-update
     paths:
       - 'support_matrices/**.csv' # Only run this action if a CSV file changes
 
