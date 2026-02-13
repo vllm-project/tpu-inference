@@ -24,7 +24,7 @@ steps:
     soft_fail: true
     commands:
       - |
-        .buildkite/scripts/run_in_docker.sh 
+        .buildkite/scripts/run_in_docker.sh \
           bash -c 'SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 MODEL_IMPL_TYPE=vllm python /workspace/tpu_inference/examples/offline_inference.py --model Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 --tensor-parallel-size 8 --enable-expert-parallel  --max-num-batched-tokens 256 --max-num-seqs 256'
   - label: "${TPU_VERSION:-tpu6e} Record unit test result for Qwen/Qwen3-Coder-480B-A35B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-Coder-480B-A35B-Instruct_UnitTest"
