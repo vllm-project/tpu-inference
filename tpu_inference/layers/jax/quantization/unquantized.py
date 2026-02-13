@@ -68,6 +68,9 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
         """
         Process weights after loading.
 
+        Please see https://github.com/vllm-project/tpu-inference/blob/bb1a88/tpu_inference/layers/common/moe.py#L39
+        for more information on the expected weights per MoE backend.
+
         Args:
             layer: The layer to process.
         """
