@@ -13,7 +13,7 @@ For each output_row, it checks all in_tile_id (num_in_tiles times). However, the
 IOW, for each (out_tile, in_tile) pair, we process all tile_out output rows, even though most rows' source data is NOT in the current input tile.
 
 Idea:
-Calculate metadata before the kernel starts.
+Calculate a bucket metadata before the kernel starts. The bucket records which output rows map to which input tile. Then we pass the bucket metadata to the kernel so that each (out_tile, in_tile) only touches the rows that actually belong. The bucket records which output rows map to which input tile. Then we pass the bucket metadata to the kernel so that each (out_tile, in_tile) only touches the rows that actually belong.
 """
 import functools
 from typing import Optional, Tuple
@@ -262,20 +262,24 @@ def sort_tokens(
         name=scope_name,
     )(sorted_token_indices, x_3d)
   else:
-    #Pre-bucketing For each output row, determine which input tile has its source data.
-    num_out_tiles = num_out_tokens // tile_out
-    source_tile_id = sorted_token_indices // tile_in
-    source_in_row = (sorted_token_indices % tile_in).astype(jnp.int32)
+    #Pre-bucketing
+    num_out_tiles = num_out_tokens // tile_out 
+    source_tile_id = sorted_token_indices // tile_in # [num_tokens*topk] which input tile holds the source.
+    source_in_row = (sorted_token_indices % tile_in).astype(jnp.int32) # [num_tokens*topk] row offset within that input tile.
 
-    out_tile_ids = jnp.arange(num_out_tokens, dtype=jnp.int32) // tile_out
-    position_in_out_tile = (jnp.arange(num_out_tokens, dtype=jnp.int32) % tile_out).astype(jnp.int32)
+    # Map each output row to its output tile
+    out_tile_ids = jnp.arange(num_out_tokens, dtype=jnp.int32) // tile_out # [num_tokens*topk]  which output tile
+    position_in_out_tile = (jnp.arange(num_out_tokens, dtype=jnp.int32) % tile_out).astype(jnp.int32) # [num_tokens*topk] row within output tile
 
-    # Sort within each output tile by source input tile.
-    sort_key = out_tile_ids * num_in_tiles + source_tile_id
-    order = jnp.argsort(sort_key, stable=True)
+    # This creates a composite sort key that groups rows first by output tile, then by source input tile within each output tile. After sorting, all rows belonging to the same (out_tile, in_tile) pair are contiguous
+    sort_key = out_tile_ids * num_in_tiles + source_tile_id # [num_tokens*topk]
+    order = jnp.argsort(sort_key, stable=True) # [num_tokens*topk]
 
-    bucketed_src_rows = source_in_row[order]
-    bucketed_dst_rows = position_in_out_tile[order]
+    # the source_in_row values, reordered so within each output tile, all rows needing input tile 0 come first, then input tile 1, etc.
+    bucketed_src_rows = source_in_row[order] # source row within input tile (for reads)
+    # the original position within the output tile (needed because we reordered, so writes become scattered)
+    bucketed_dst_rows = position_in_out_tile[order] # destination row within output tile (for writes)
+    # These are what the kernel will use: for each work item, read from src_row in the current input tile and write to dst_row in the current output tile.
 
     # Compute bucket boundaries: for each (out_tile, in_tile) pair,
     # the start offset (relative to tile start) and count.
@@ -284,7 +288,9 @@ def sort_tokens(
         combined_idx, length=num_out_tiles * num_in_tiles
     ).astype(jnp.int32)
     # Exclusive prefix sum gives start offsets (global).
+    # for (out_tile o, in_tile t), the relevant work items are at indices [bucket_boundaries[o, t], bucket_boundaries[o, t+1]) relative to the output tile's section.
     bucket_starts_flat = (jnp.cumsum(bucket_sizes_flat) - bucket_sizes_flat).astype(jnp.int32)
+    # bucket_sizes_flat[bucket_idx] tells how many rows belong to that (out_tile, in_tile) pair. bucket_starts_flat gives the global start offset.
 
     # Make starts relative to each output tile's section.
     tile_offsets = jnp.repeat(
@@ -296,7 +302,7 @@ def sort_tokens(
     (x_sorted,) = pl.pallas_call(
         functools.partial(gather_kernel_bucketed, tile_out=tile_out, tile_in=tile_in, debug_mode=debug_mode),
         out_shape=[
-            jax.ShapeDtypeStruct(out_shape, orig_dtype),
+            jax.ShapeDtypeStruct(out_shape, jnp.float32),
         ],
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=4,
@@ -308,5 +314,6 @@ def sort_tokens(
         compiler_params=pltpu.CompilerParams(vmem_limit_bytes=vmem_limit_bytes),
         name=scope_name,
     )(bucketed_src_rows, bucketed_dst_rows, bucket_starts_flat, bucket_sizes_flat, x)
+    x_sorted = x_sorted.astype(orig_dtype)
 
   return x_sorted, group_sizes, topk_argsort_revert_indices

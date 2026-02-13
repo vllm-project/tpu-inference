@@ -257,13 +257,20 @@ class MoeRoutingTest(jtu.JaxTestCase):
     topk = TOPK
 
     k1, k2 = jax.random.split(jax.random.key(0))
-    random_logits = jax.random.uniform(k1, (num_local_tokens, num_experts), dtype=jnp.bfloat16)
+    random_logits = jax.random.uniform(k1, (num_local_tokens, num_experts))
     _, topk_indices_local = jax.lax.top_k(random_logits, k=topk)
-    hidden_states = jax.random.uniform(k2, (num_local_tokens, hidden_size))
-    actual_x, _, _ = sort2.sort_tokens(
+    hidden_states = jax.random.uniform(k2, (num_local_tokens, hidden_size), dtype=jnp.bfloat16)
+    expected_x, expected_group_sizes, expected_revert = ref_impl(
+        topk_indices_local, hidden_states, num_experts
+    )
+    actual_x, actual_group_sizes, actual_revert = sort2.sort_tokens(
         hidden_states, topk_indices_local, num_experts
     )
-    actual_x.block_until_ready()
+    self.assertAllClose(expected_group_sizes, actual_group_sizes)
+    self.assertAllClose(expected_revert, actual_revert)
+    print(f"sort2 bucketed: max diff {jnp.max(jnp.abs(expected_x - actual_x))}")
+    print(f"sort2 bucketed: mean diff {jnp.mean(jnp.abs(expected_x - actual_x))}")
+    self.assertAllClose(expected_x, actual_x)
 
   def test_sort2_perf(self):
     """Perf test for sort2 (bucketed path)."""
@@ -278,12 +285,14 @@ class MoeRoutingTest(jtu.JaxTestCase):
     hidden_states = jax.random.uniform(k2, (num_local_tokens, hidden_size), dtype=jnp.bfloat16)
 
     # Warmup
-    sort2.sort_tokens(hidden_states, topk_indices_local, num_experts)[0].block_until_ready()
+    ref_impl(topk_indices_local, hidden_states, num_experts)[0].block_until_ready()
+    sort2.sort_tokens(hidden_states, topk_indices_local, num_experts, tile_out=512, tile_in=512)[0].block_until_ready()
 
     profile_path = "/tmp/sort2_tokens_profile"
     jax.profiler.start_trace(profile_path)
     for _ in range(2):
-      sort2.sort_tokens(hidden_states, topk_indices_local, num_experts)[0].block_until_ready()
+      ref_impl(topk_indices_local, hidden_states, num_experts)[0].block_until_ready()
+      sort2.sort_tokens(hidden_states, topk_indices_local, num_experts, tile_out=512, tile_in=512)[0].block_until_ready()
     jax.profiler.stop_trace()
     print(f"sort2 profile saved to {profile_path}")
 
