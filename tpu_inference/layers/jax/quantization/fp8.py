@@ -255,7 +255,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 weight_loader=partial(load_nnx_param_from_reshaped_torch,
                                       permute_dims=None,
                                       param_name="linear_fp8_weight"))
-            layer.weight.sharding = self.weight_sharding
+            layer.weight.set_metadata('sharding', self.weight_sharding)
 
             # Per-output-channel scale (1D, covers the free weight dim).
             layer.weight_scale_inv = nnx.Param(
