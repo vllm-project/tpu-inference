@@ -5,8 +5,6 @@ on:
     # Run every Monday at 00:00 UTC
     - cron: '0 0 * * 1'
   workflow_dispatch:  # Allow manual trigger
-  push:
-    branches: [ "auto-mission-board" ] # Temporary: Test on push
 
 jobs:
   create-missions:
