@@ -32,12 +32,12 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
 
+from tpu_inference.layers.common.linear import sharded_quantized_matmul
 from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, process_linear_weights, shard_linear_weights,
     to_parameter_list)
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
-from tpu_inference.layers.vllm.linear import sharded_quantized_matmul
 from tpu_inference.layers.vllm.quantization.configs import \
     VllmQuantLinearConfig
 from tpu_inference.logger import init_logger
@@ -196,8 +196,8 @@ class VllmCompressedTensorsW8A8Int8(CompressedTensorsW8A8Int8):
             x_jax,
             weight_jax,
             weight_scale_jax,
-            self.linear_config.mesh,
             self.linear_config.weight_sharding,
+            mesh=self.linear_config.mesh,
         )
         if bias is not None and not layer.skip_bias_add:
             outs += jax_view(bias)
@@ -222,8 +222,8 @@ class VllmCompressedTensorsW8A8Int8(CompressedTensorsW8A8Int8):
                 x_jax,
                 weight_jax,
                 weight_scale_jax,
-                self.linear_config.mesh,
                 self.linear_config.weight_sharding,
+                mesh=self.linear_config.mesh,
             )
             if bias is not None and not layer.skip_bias_add:
                 out += jax_view(bias[i])

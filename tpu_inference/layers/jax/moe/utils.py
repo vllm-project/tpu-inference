@@ -13,58 +13,24 @@
 # limitations under the License.
 
 import enum
+import math
 
 import jax
 import jax.numpy as jnp
 from jax.experimental import xla_metadata
-from jax.experimental.pallas.ops.tpu.megablox.gmm import gmm as megablox_gmm
-from qwix._src.core.ragged_dot import ragged_dot as qwix_ragged_dot
+from jax.sharding import Mesh
 
 from tpu_inference import envs
+from tpu_inference.kernels.megablox.gmm import gmm as megablox_gmm
 from tpu_inference.layers.common.fused_moe_gmm import \
     round_up_to_multiple_of_128_within_limit
+from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.utils.qwix.qwix_utils import \
-    manually_quantize_qwix_activation
 
 logger = init_logger(__name__)
 modeling_flax_utils = FlaxUtils()
 set_xla_metadata = xla_metadata.set_xla_metadata
-
-
-class MoEBackend(enum.Enum):
-    FUSED_MOE = "fused_moe"
-    VLLM_MOE = "vllm_moe"
-    DENSE_MAT = "dense_mat"
-    MEGABLX_GMM = "megablox_gmm"
-    RAGGED_DOT = "ragged_dot_gmm"
-
-
-def select_moe_backend():
-    # Validation: Ensure mutually exclusive flags aren't set together
-    if envs.USE_MOE_EP_KERNEL and envs.USE_VLLM_MOE_KERNEL:
-        raise ValueError("Cannot enable multiple MoE kernels simultaneously.")
-
-    if envs.USE_MOE_EP_KERNEL:
-        logger.info("[MoE]: Fused MoE kernel is enabled")
-        return MoEBackend.FUSED_MOE
-
-    if envs.USE_VLLM_MOE_KERNEL:
-        logger.info("[MoE]: VLLM MoE kernel is enabled")
-        return MoEBackend.VLLM_MOE
-
-    if envs.USE_MEGABLOCKS:
-        logger.info("[MoE]: Mega Blocks is enabled for GMM in Sparse Matmul")
-        return MoEBackend.MEGABLX_GMM
-
-    if envs.USE_RAGGED_DOT:
-        logger.info("[MoE]: Ragged Dot is enabled for GMM in Sparse Matmul")
-        return MoEBackend.RAGGED_DOT
-
-    # Default case
-    logger.info("[MoE]: Dense Matmul is enabled")
-    return MoEBackend.DENSE_MAT
 
 
 # --- Helper Functions/Class for Sparse MoE ---
@@ -101,7 +67,6 @@ def global_permute_fn(inputs_TD: jax.Array, selected_experts_TX: jax.Array,
         expert_ids,
         repeats=group_sizes_E,
         total_repeat_length=total_assignments)
-
     return (
         sorted_inputs_tD,
         sort_indices_t,
@@ -112,21 +77,20 @@ def global_permute_fn(inputs_TD: jax.Array, selected_experts_TX: jax.Array,
 
 def unpermute_fn(processed_tokens: jax.Array, sort_indices: jax.Array,
                  router_weights_TX: jax.Array, num_experts_per_tok: int,
-                 hidden_size: int, output_dtype):
+                 output_dtype):
     """Stateless global unpermute logic."""
     with jax.named_scope("unpermute"):
         unsorted_tokens_tD = sort_activations_fn(processed_tokens,
                                                  jnp.argsort(sort_indices))
+        local_D = unsorted_tokens_tD.shape[-1]
         reshaped_tokens_TXD = unsorted_tokens_tD.reshape(
-            -1, num_experts_per_tok, hidden_size)
+            -1, num_experts_per_tok, local_D)
 
     with jax.named_scope("combine_weights"):
-        output_TD = jnp.einsum(
-            "TXD,TX -> TD",
-            reshaped_tokens_TXD.astype(jnp.float32),
-            router_weights_TX.astype(jnp.float32),
-            precision='float32',
-        )
+        tokens_f32 = reshaped_tokens_TXD.astype(jnp.float32)
+        weights_f32 = router_weights_TX.astype(jnp.float32)
+        weights_expanded = jnp.expand_dims(weights_f32, axis=-1)
+        output_TD = jnp.sum(tokens_f32 * weights_expanded, axis=1)
 
     return output_TD.astype(output_dtype)
 
@@ -172,7 +136,6 @@ def local_permute_fn(inputs,
     sorted_inputs = sort_activations_fn(inputs, sorted_indices)
     # sorted local expert id from 0 to local expert size
     sorted_experts_ids = expert_indices[sorted_indices]
-
     return (
         sorted_inputs,
         sorted_indices,
@@ -248,31 +211,83 @@ def gmm_fn(inputs, kernel, group_sizes, tile_size, moe_backend, dtype,
         inputs = jnp.pad(inputs, ((0, pad_amount), (0, 0)))
 
     if moe_backend == MoEBackend.MEGABLX_GMM:
+        if quantized_dtype:
+            kernel_qvalue, kernel_scale = kernel
+            kernel_scale = jnp.expand_dims(kernel_scale, 2)
+        else:
+            kernel_qvalue = kernel
+            kernel_scale = None
         m = inputs.shape[0]
-        _, k, n = kernel.shape
+        _, k, n = kernel_qvalue.shape
         tm = round_up_to_multiple_of_128_within_limit(m, 512)
         tk = round_up_to_multiple_of_128_within_limit(k, 2048)
         tn = round_up_to_multiple_of_128_within_limit(n, 2048)
 
+        # TODO (jacobplatin/bzgoogle): replace this with the DS-specific megablox
         output = megablox_gmm(lhs=inputs,
-                              rhs=kernel,
+                              rhs=kernel_qvalue,
+                              rhs_scale=kernel_scale,
                               group_sizes=group_sizes,
                               preferred_element_type=dtype,
                               tiling=(tm, tk, tn))
 
-    elif moe_backend == MoEBackend.RAGGED_DOT:
-        inputs = manually_quantize_qwix_activation(
-            inputs, "ragged_dot", jnp.float8_e4m3fn, [0], {},
-            "absmax") if quantized_dtype else inputs
-        ragged_dot_func = qwix_ragged_dot if quantized_dtype else jax.lax.ragged_dot
-        with set_xla_metadata(ragged_dot_tiling=",".join(
-            [str(t) for t in tile_size]),
-                              mosaic_fusion_group="ragged-dot"):
-            output = ragged_dot_func(lhs=inputs,
-                                     rhs=kernel,
-                                     group_sizes=group_sizes,
-                                     preferred_element_type=dtype)
-
     if pad_amount > 0:
         output = output[:num_rows, :]
     return output
+
+
+def get_expert_parallelism(expert_axis_name: str, mesh: Mesh) -> int:
+    """
+    Returns the expert parallelism number from the mesh.
+
+    Args:
+        expert_axis_name: The expert axis name.
+        mesh: The mesh.
+
+    Returns:
+        The expert parallelism number.
+    """
+    if expert_axis_name is None:
+        return 1
+    else:
+        if isinstance(expert_axis_name, str):
+            return mesh.shape[expert_axis_name]
+        else:
+            return math.prod(mesh.shape[axis] for axis in expert_axis_name)
+
+
+def select_moe_backend(use_ep: bool) -> MoEBackend:
+    """
+    Selects the MoE backend for the JAX path.
+
+    Args:
+        use_ep: Whether to use expert parallelism.
+
+    Returns:
+        The selected MoE backend.
+    """
+    if envs.USE_MOE_EP_KERNEL:
+        if use_ep:
+            logger.info_once("[MoE]: Using fused MoE EP kernel")
+            return MoEBackend.FUSED_MOE
+
+    if envs.USE_UNFUSED_MEGABLOCKS:
+        logger.info_once(
+            "[MoE]: Mega Blocks is enabled for GMM in Sparse Matmul")
+        return MoEBackend.MEGABLX_GMM
+
+    if use_ep:
+        logger.warning_once(
+            "USE_MOE_EP_KERNEL=1 but expert parallelism is not "
+            "enabled. Falling back to gmm implementation.")
+        logger.info_once("[MoE]: Using GMM EP kernel")
+        return MoEBackend.GMM_EP
+
+    if envs.USE_DENSE_MOE:
+        logger.info_once("[MoE]: Using DENSE_MOE")
+        logger.warning_once(
+            "[MoE]: DENSE_MOE is naive and not intended for production.")
+        return MoEBackend.DENSE_MAT
+
+    logger.info_once("[MoE]: Using GMM TP kernel")
+    return MoEBackend.GMM_TP

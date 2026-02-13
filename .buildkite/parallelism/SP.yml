@@ -15,18 +15,22 @@
 # pipeline-name: SP
 # pipeline-type: parallelism support matrix
 steps:
-  - label: "Correctness tests for SP"
-    key: "SP_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Correctness tests for SP"
+    key: "${TPU_VERSION:-tpu6e}_SP_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_MULTI:-tpu_v7x_8_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
-        buildkite-agent meta-data set "SP_CorrectnessTest" "unverified"
-  - label: "Record correctness test result for SP"
-    key: "record_SP_CorrectnessTest"
-    depends_on: "SP_CorrectnessTest"
+        .buildkite/scripts/run_in_docker.sh \
+          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_sequence_parallel.py::test_sp_correctness'
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for SP"
+    key: "${TPU_VERSION:-tpu6e}_record_SP_CorrectnessTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_SP_CorrectnessTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "SP"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "parallelism support matrix"
@@ -34,21 +38,24 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh SP_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_SP_CorrectnessTest
 
-  - label: "Performance tests for SP"
-    key: "SP_PerformanceTest"
-    depends_on: "record_SP_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Performance tests for SP"
+    key: "${TPU_VERSION:-tpu6e}_SP_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_SP_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
-        buildkite-agent meta-data set "SP_PerformanceTest" "unverified"
-  - label: "Record performance test result for SP"
-    key: "record_SP_PerformanceTest"
-    depends_on: "SP_PerformanceTest"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_SP_PerformanceTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for SP"
+    key: "${TPU_VERSION:-tpu6e}_record_SP_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_SP_PerformanceTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "SP"
       CI_STAGE: "PerformanceTest"
       CI_CATEGORY: "parallelism support matrix"
@@ -56,4 +63,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh SP_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_SP_PerformanceTest

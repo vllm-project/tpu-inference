@@ -11,17 +11,32 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# yapf: disable
+from functools import partial
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+
 import jax
 import jax.numpy as jnp
+from flax import nnx
+from jax.sharding import Mesh, PartitionSpec
+from qwix._src.providers import ptq
+from vllm.model_executor.layers.fused_moe import FusedMoE
 
+from tpu_inference.layers.common.process_weights.moe_weights import \
+    UnfusedMoEWeights
+# yapf: disable
 from tpu_inference.layers.jax.moe.utils import (get_all_to_all_params_fn,
                                                 global_permute_fn, gmm_fn,
                                                 local_permute_fn,
                                                 modeling_flax_utils,
                                                 sort_activations_fn,
                                                 unpermute_fn)
+from tpu_inference.models.jax.utils.qwix.qwix_utils import \
+    manually_quantize_qwix_weight
 
+if TYPE_CHECKING:
+    from tpu_inference.layers.jax.moe.moe import JaxMoE
+else:
+    JaxMoE = None
 # yapf: enable
 
 
@@ -49,10 +64,10 @@ def sparse_moe_distributed_fwd(
                           moe_instance.num_experts_per_tok,
                           moe_instance.num_local_experts)
 
-    expert_shard_id = jax.lax.axis_index(moe_instance.expert_axis_name)
-    local_expert_size = moe_instance.num_local_experts // moe_instance.num_expert_parallelism
-
     if moe_instance.num_expert_parallelism > 1:
+        expert_shard_id = jax.lax.axis_index(moe_instance.expert_axis_name)
+        local_expert_size = moe_instance.num_local_experts // moe_instance.num_expert_parallelism
+
         if moe_instance.is_batch_sharded_by_expert:
             # 2a. Send Tokens To Experts (All-to-All)
             all_shards_group_sizes = jax.lax.all_gather(
@@ -133,7 +148,11 @@ def sparse_moe_distributed_fwd(
     with jax.named_scope("gating"):
         gating_TEF = gmm_fn(compute_inputs, kernel_gating, compute_group_sizes,
                             moe_instance.tile_size, moe_instance.moe_backend,
-                            moe_instance.dtype, moe_instance.quantized_dtype)
+                            moe_instance.dtype,
+                            moe_instance.qwix_quantized_weight_dtype)
+        if moe_instance.edf_sharding[1] is not None:
+            gating_TEF = jax.lax.psum(gating_TEF,
+                                      axis_name=moe_instance.edf_sharding[1])
         activated_gating_TEF = modeling_flax_utils.ACT2FN[
             moe_instance.hidden_act](gating_TEF)
 
@@ -141,7 +160,10 @@ def sparse_moe_distributed_fwd(
         up_proj_TEF = gmm_fn(compute_inputs, kernel_up_proj,
                              compute_group_sizes, moe_instance.tile_size,
                              moe_instance.moe_backend, moe_instance.dtype,
-                             moe_instance.quantized_dtype)
+                             moe_instance.qwix_quantized_weight_dtype)
+        if moe_instance.edf_sharding[1] is not None:
+            up_proj_TEF = jax.lax.psum(up_proj_TEF,
+                                       axis_name=moe_instance.edf_sharding[1])
 
     fuse_TEF = activated_gating_TEF * up_proj_TEF
 
@@ -151,7 +173,10 @@ def sparse_moe_distributed_fwd(
                                      moe_instance.tile_size,
                                      moe_instance.moe_backend,
                                      moe_instance.dtype,
-                                     moe_instance.quantized_dtype)
+                                     moe_instance.qwix_quantized_weight_dtype)
+        if moe_instance.efd_sharding[1] is not None:
+            intermediate_output = jax.lax.psum(
+                intermediate_output, axis_name=moe_instance.efd_sharding[1])
 
     # 5. Return Results (All-to-All)
     if moe_instance.num_expert_parallelism > 1:
@@ -201,6 +226,106 @@ def sparse_moe_distributed_fwd(
         output_TD = unpermute_fn(final_intermediate_output,
                                  global_sort_indices, router_weights_TX,
                                  moe_instance.num_experts_per_tok,
-                                 moe_instance.hidden_size, moe_instance.dtype)
+                                 moe_instance.dtype)
 
     return output_TD
+
+
+def sparse_moe_func(weights: UnfusedMoEWeights, x_TD: jax.Array,
+                    gating_output: Tuple[jax.Array, jax.Array],
+                    layer: Union[FusedMoE, JaxMoE], mesh: Mesh) -> jax.Array:
+    assert isinstance(
+        weights, UnfusedMoEWeights), "Expected unfused weights for sparse MoE!"
+    weights_TX, indices_TX = gating_output
+    if layer.qwix_quantized_weight_dtype:
+        gating_up_proj_spec = (PartitionSpec(*layer.edf_sharding),
+                               PartitionSpec(layer.edf_sharding[0], None,
+                                             layer.edf_sharding[2]))
+        down_proj_spec = (PartitionSpec(*layer.efd_sharding),
+                          PartitionSpec(layer.efd_sharding[0], None,
+                                        layer.efd_sharding[2]))
+    else:
+        gating_up_proj_spec = PartitionSpec(*layer.edf_sharding)
+        down_proj_spec = PartitionSpec(*layer.efd_sharding)
+
+    in_specs = (
+        PartitionSpec(),  # replicated MoE instance
+        PartitionSpec(*layer.activation_ffw_td),  # Sharded x_TD
+        PartitionSpec(),  # Replicated router_weights_TX
+        PartitionSpec(),  # Replicated selected_experts_TX
+        gating_up_proj_spec,  # Sharded gating kernel
+        gating_up_proj_spec,  # Sharded up-projection kernel
+        down_proj_spec,  # Sharded down-projection kernel
+    )
+    out_specs = PartitionSpec(*layer.activation_ffw_td)
+
+    mapped_moe_fwd = partial(jax.experimental.shard_map.shard_map,
+                             mesh=mesh,
+                             in_specs=in_specs,
+                             out_specs=out_specs,
+                             check_rep=False)(sparse_moe_distributed_fwd)
+
+    # TODO (jacobplatin): this is needed because of issues with Qwix quantizing the `shard_map` in SpraseMatmul
+    # Basically, during the abstract pass, we need to manually quantize the weights here for Qwix, but we'll
+    # override the actual weight/scale during loading (we just need to make sure Qwix quantizes the weight
+    # in the first place).
+    kernel_gating_EDF = _process_weight_for_qwix(
+        layer.qwix_quantized_weight_dtype,
+        "kernel_gating_EDF",
+        layer.kernel_gating_EDF,
+        channelwise_axes=[0, 2],
+        tiled_axes={})
+    kernel_up_proj_EDF = _process_weight_for_qwix(
+        layer.qwix_quantized_weight_dtype,
+        "kernel_up_proj_EDF",
+        layer.kernel_up_proj_EDF,
+        channelwise_axes=[0, 2],
+        tiled_axes={})
+    kernel_down_proj_EFD = _process_weight_for_qwix(
+        layer.qwix_quantized_weight_dtype,
+        "kernel_down_proj_EFD",
+        layer.kernel_down_proj_EFD,
+        channelwise_axes=[0, 2],
+        tiled_axes={})
+
+    weights.w1_weight = kernel_gating_EDF
+    weights.w2_weight = kernel_up_proj_EDF
+    weights.w3_weight = kernel_down_proj_EFD
+    # TODO (jacobplatin): support quantization
+    return mapped_moe_fwd(layer, x_TD, weights_TX, indices_TX,
+                          weights.w1_weight, weights.w2_weight,
+                          weights.w3_weight)
+
+
+def _process_weight_for_qwix(
+        qwix_quantized_weight_dtype: jnp.dtype,
+        name: str,
+        weight_param: Union[ptq.WithAux, nnx.Param],
+        channelwise_axes: Optional[List[int]] = [],
+        tiled_axes: dict = {}
+) -> Union[jax.Array, Tuple[nnx.Param, nnx.Param]]:
+    """
+    Extracts weight value, applies quantization if needed,
+    and returns the underlying array.
+
+    Args:
+        qwix_quantized_weight_dtype: The dtype to quantize the weights to.
+        name: The name of the weight.
+        weight_param: The weight parameter.
+        channelwise_axes: The axes to quantize.
+        tiled_axes: The axes to tile.
+
+    Returns:
+        The quantized weight.
+    """
+
+    weight = weight_param.value
+
+    if qwix_quantized_weight_dtype:
+        if not isinstance(weight, ptq.WithAux):
+            weight = manually_quantize_qwix_weight(
+                name, weight, qwix_quantized_weight_dtype, channelwise_axes,
+                tiled_axes, "absmax")
+        return (weight.array.qvalue, weight.array.scale)
+
+    return weight

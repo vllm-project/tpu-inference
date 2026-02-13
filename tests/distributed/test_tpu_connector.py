@@ -417,7 +417,7 @@ class TestTPUConnectorWorker(unittest.TestCase):
         worker._maybe_build_kv_connection.assert_called_once_with(load_meta)
         self.all_mocks[
             "ThreadPoolExecutor"].return_value.submit.assert_called_once_with(
-                worker._pull_kv, "conn", load_meta)
+                worker._pull_kv, "req1", "conn", load_meta)
 
     def test_process_send_load_for_consumer_notifying(self):
         """Tests process_send_load for a consumer that needs to notify."""
@@ -425,9 +425,9 @@ class TestTPUConnectorWorker(unittest.TestCase):
         worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
         worker._maybe_build_notif_socket = MagicMock(return_value="socket")
         worker._notify_pull_done = MagicMock()
-
+        uuid = 10
         meta = tpu_connector.TPUConnectorMetadata()
-        load_meta = tpu_connector.LoadMeta(uuid=1,
+        load_meta = tpu_connector.LoadMeta(uuid=uuid,
                                            local_block_ids=None,
                                            remote_block_ids=None,
                                            remote_host="host",
@@ -437,7 +437,8 @@ class TestTPUConnectorWorker(unittest.TestCase):
         worker.process_send_load(meta)
 
         worker._maybe_build_notif_socket.assert_called_once_with(load_meta)
-        worker._notify_pull_done.assert_called_once_with("socket", "req1")
+        worker._notify_pull_done.assert_called_once_with(
+            "socket", "req1", uuid)
 
     def test_get_finished_recving(self):
         """Tests get_finished for a request that has finished pulling."""

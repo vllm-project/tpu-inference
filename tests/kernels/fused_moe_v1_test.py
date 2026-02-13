@@ -113,6 +113,8 @@ class MoEKernelTest(jtu.JaxTestCase):
 
     def setUp(self):
         super().setUp()
+        if not jtu.is_device_tpu_at_least(version=7):
+            self.skipTest("Expect TPUv7+")
         self.mesh_devices = sorted(
             jax.devices(),
             key=lambda x: (
@@ -142,6 +144,7 @@ class MoEKernelTest(jtu.JaxTestCase):
         bd1c,
         bd2c,
         act_fn="silu",
+        scoring_fn="softmax",
         w_dtype=None,
         subc_quant_w1_sz=None,
         subc_quant_w2_sz=None,
@@ -178,6 +181,7 @@ class MoEKernelTest(jtu.JaxTestCase):
             top_k=top_k,
             renormalize_topk_logits=renormalize_topk_logits,
             act_fn=act_fn,
+            scoring_fn=scoring_fn,
             subc_quant_w1_sz=subc_quant_w1_sz,
             subc_quant_w2_sz=subc_quant_w2_sz,
             w1_scale=w1_scale,
@@ -203,6 +207,7 @@ class MoEKernelTest(jtu.JaxTestCase):
             b2=b2,
             renormalize_topk_logits=renormalize_topk_logits,
             act_fn=act_fn,
+            scoring_fn=scoring_fn,
             subc_quant_w1_sz=subc_quant_w1_sz,
             subc_quant_w2_sz=subc_quant_w2_sz,
             w1_scale=w1_scale,
@@ -263,6 +268,36 @@ class MoEKernelTest(jtu.JaxTestCase):
             bfc=256,
             bd1c=256,
             bd2c=256,
+        )
+
+    @parameterized.product(scoring_fn=["softmax", "sigmoid"])
+    def test_scoring_fn(self, scoring_fn):
+        dtype = jnp.bfloat16
+        top_k = 8
+        num_experts = 128
+        hidden_size = 1024
+        intermediate_size = 1024
+        num_tokens = 8 * 32
+        self._test_moe(
+            dtype=dtype,
+            top_k=top_k,
+            num_experts=num_experts,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            num_tokens=num_tokens,
+            seed=1234,
+            renormalize_topk_logits=True,
+            scoring_fn=scoring_fn,
+            bt=32,
+            bf=512,
+            bd1=512,
+            bd2=512,
+            btc=32,
+            bfc=256,
+            bd1c=256,
+            bd2c=256,
+            atol=
+            4e-1,  # loosen tolerance as jax.lax.top_k and get_top_k aren't identical on ties (related: https://github.com/jax-ml/jax/issues/34620)
         )
 
     def test_benchmark_qwen_235(self):

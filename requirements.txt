@@ -9,10 +9,11 @@ jax[tpu]==0.8.0
 jaxlib==0.8.0
 jaxtyping
 flax==0.11.1
-torchax==0.0.10
+torchax==0.0.11
 qwix==0.1.1
 torchvision==0.24.0
 pathwaysutils
 parameterized
 numba==0.62.1
-runai-model-streamer[s3,gcs]==0.15.0
+runai-model-streamer[s3,gcs]==0.15.4
+gcsfs==2026.1.0
