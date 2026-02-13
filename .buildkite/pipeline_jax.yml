@@ -152,7 +152,11 @@ steps:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
         commands:
           - |
-            if [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels|tests/kernels|requirements.txt)'; then
+            echo "--- Fetching changed files from metadata"
+            FILES_CHANGED=$$(buildkite-agent meta-data get "changed_files" --default "" | tr ',' '\n')
+            echo "$${FILES_CHANGED}"
+
+            if [[ "$$NIGHTLY" == "1" ]] || echo "$$FILES_CHANGED" | grep -qE '^(tpu_inference/kernels|tests/kernels|requirements.txt)'; then
               .buildkite/scripts/run_in_docker.sh \
                 python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels \
                 --ignore=/workspace/tpu_inference/tests/kernels/ragged_paged_attention_kernel_v2_test.py \
@@ -172,7 +176,11 @@ steps:
           queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
         commands:
           - |
-            if [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels/collectives|tests/kernels/collectives|requirements.txt)'; then
+            echo "--- Fetching changed files from metadata"
+            FILES_CHANGED=$$(buildkite-agent meta-data get "changed_files" --default "" | tr ',' '\n')
+            echo "$${FILES_CHANGED}"
+
+            if [[ "$$NIGHTLY" == "1" ]] || echo "$$FILES_CHANGED" | grep -qE '^(tpu_inference/kernels/collectives|tests/kernels/collectives|requirements.txt)'; then
               .buildkite/scripts/run_in_docker.sh \
                 python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels/collectives
             else
