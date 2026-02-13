@@ -1120,8 +1120,8 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
         base_model_weight = get_param(model_params, mapped_name)
         model_weight = base_model_weight.array.qvalue if hasattr(
             base_model_weight, "array") else base_model_weight
-        sharding = base_model_weight.array.qvalue.sharding if hasattr(
-            base_model_weight, "array") else base_model_weight.sharding
+        sharding = base_model_weight.array.qvalue.out_sharding if hasattr(
+            base_model_weight, "array") else base_model_weight.out_sharding
 
         # Convert weights from torch into numpy
         if weight.dtype == torch.uint8 and scale is not None:
@@ -1661,11 +1661,11 @@ class DeepSeekV3(nnx.Module):
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
                 rngs=self.rng,
                 quant_config=vllm_config.quant_config,
-                activation_attention_td=(None, None),
-                activation_q_td=(None, None),
+                activation_attention_td=P(None, None),
+                activation_q_td=P(None, None),
                 query_tnh=query_tnh_spec,
                 keyvalue_skh=keyvalue_skh_spec,
-                activation_attention_out_td=(None, None),
+                activation_attention_out_td=P(None, None),
                 attn_o_tnh=attn_o_tnh_spec,
                 q_da_sharding=q_da_sharding,
                 ap_sharding=ap_sharding,
@@ -1709,7 +1709,7 @@ class DeepSeekV3(nnx.Module):
                     hidden_size=hidden_size,
                     intermediate_size=ffw_intermediate_size,
                     rngs=self.rng,
-                    activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
+                    activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
                     df_sharding=(None, ShardingAxisName.MLP_TENSOR),
                     fd_sharding=(ShardingAxisName.MLP_TENSOR, None),
                     quant_config=vllm_config.quant_config)
@@ -1729,7 +1729,7 @@ class DeepSeekV3(nnx.Module):
                     routed_scaling_factor=routed_scaling_factor,
                     dtype=dtype,
                     moe_backend=self.moe_backend,
-                    activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
+                    activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
                     ed_sharding=(None, None),
                     e_sharding=(None, ),
                     quant_config=vllm_config.quant_config)
@@ -1748,10 +1748,10 @@ class DeepSeekV3(nnx.Module):
                     hidden_act=hidden_act,
                     rngs=self.rng,
                     quant_config=self.vllm_config.quant_config,
-                    activation_ffw_td=(ShardingAxisName.MLP_DATA,
-                                       ShardingAxisName.MOE_TENSOR),
-                    activation_ffw_ted=(ShardingAxisName.MLP_DATA, None,
+                    activation_ffw_td=P(ShardingAxisName.MLP_DATA,
                                         ShardingAxisName.MOE_TENSOR),
+                    activation_ffw_ted=P(ShardingAxisName.MLP_DATA, None,
+                                         ShardingAxisName.MOE_TENSOR),
                     edf_sharding=(None, ShardingAxisName.MOE_TENSOR,
                                   ShardingAxisName.ATTN_DATA_EXPERT),
                     efd_sharding=(None, ShardingAxisName.ATTN_DATA_EXPERT,
@@ -1769,7 +1769,7 @@ class DeepSeekV3(nnx.Module):
                     intermediate_size=num_shared_experts *
                     moe_intermediate_size,
                     rngs=self.rng,
-                    activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
+                    activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
                     df_sharding=(None, ShardingAxisName.MLP_TENSOR),
                     fd_sharding=(ShardingAxisName.MLP_TENSOR, None),
                     quant_config=vllm_config.quant_config)
