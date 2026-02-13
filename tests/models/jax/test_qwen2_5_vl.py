@@ -644,7 +644,8 @@ class TestQwen2_5_VLPipelineParallel:
         mock_pp_group.return_value.is_first_rank = True
         mock_pp_group.return_value.is_last_rank = False
         with jax.set_mesh(mesh):
-            model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+            model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config, rng,
+                                                       mesh)
             assert not isinstance(model.visual, PPMissingLayer)
             assert isinstance(model.lm_head, PPMissingLayer)
             assert model.is_first_rank is True
@@ -654,7 +655,8 @@ class TestQwen2_5_VLPipelineParallel:
         mock_pp_group.return_value.is_first_rank = False
         mock_pp_group.return_value.is_last_rank = True
         with jax.set_mesh(mesh):
-            model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+            model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config, rng,
+                                                       mesh)
             assert isinstance(model.visual, PPMissingLayer)
             assert not isinstance(model.lm_head, PPMissingLayer)
             assert model.is_first_rank is False
@@ -665,7 +667,8 @@ class TestQwen2_5_VLPipelineParallel:
         mock_pp_group.return_value.is_first_rank = False
         mock_pp_group.return_value.is_last_rank = False
         with jax.set_mesh(mesh):
-            model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+            model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config, rng,
+                                                       mesh)
             assert isinstance(model.visual, PPMissingLayer)
             assert isinstance(model.lm_head, PPMissingLayer)
             assert model.is_first_rank is False
@@ -726,7 +729,8 @@ class TestQwen2_5_VLPipelineParallel:
         mock_pp_group.return_value.is_first_rank = False
         mock_pp_group.return_value.is_last_rank = False
         with jax.set_mesh(mesh):
-            model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+            model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config, rng,
+                                                       mesh)
 
         with patch(
                 "tpu_inference.models.jax.utils.weight_utils.load_hf_weights"
@@ -742,7 +746,8 @@ class TestQwen2_5_VLPipelineParallel:
                                                       mock_pp_group):
         mock_pp_group.return_value.is_first_rank = False
         with jax.set_mesh(mesh):
-            model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+            model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config, rng,
+                                                       mesh)
         run_compilation_fn = MagicMock()
         model.precompile_vision_encoder(run_compilation_fn)
         run_compilation_fn.assert_not_called()
