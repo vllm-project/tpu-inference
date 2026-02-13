@@ -94,7 +94,23 @@ Below is the live status of our supported models, features, and kernels. Click o
 <summary><b> ✅ Model Support </b></summary>
 
 <!-- START: model_support -->
-<!-- 🤖 The Python script will auto-paste the table here. -->
+| Model | UnitTest | Accuracy/Correctness | Benchmark |
+| --- | --- | --- | --- |
+| moonshotai/Kimi-K2-Thinking | unverified | unverified | unverified |
+| Qwen/Qwen3-Coder-480B-A35B-Instruct | unverified | unverified | unverified |
+| meta-llama/Llama-3.3-70B-Instruct | ✅ | ✅ | ✅ |
+| Qwen/Qwen3-4B | ✅ | ✅ | ✅ |
+| google/gemma-3-27b-it | ✅ | ✅ | ✅ |
+| Qwen/Qwen3-32B | ✅ | ✅ | ✅ |
+| deepseek-ai/DeepSeek-V3.1 | unverified | unverified | unverified |
+| meta-llama/Llama-Guard-4-12B | ✅ | ✅ | ✅ |
+| openai/gpt-oss-120b | unverified | unverified | unverified |
+| meta-llama/Llama-3.1-8B-Instruct | ✅ | ✅ | ✅ |
+| Qwen/Qwen3-30B-A3B | ✅ | ✅ | ✅ |
+| meta-llama/Llama-4-Maverick-17B-128E-Instruct | unverified | unverified | unverified |
+| Qwen/Qwen2.5-VL-7B-Instruct | ✅ | ✅ | ✅ |
+| Qwen/Qwen3-Omni-30B-A3B-Instruct | unverified | unverified | unverified |
+
 <!-- END: model_support -->
 
 </details>
@@ -107,7 +123,25 @@ Below is the live status of our supported models, features, and kernels. Click o
       <summary>Core Features</summary>
 
 <!-- START: core_features -->
-<!-- 🤖 The Python script will auto-paste the table here. -->
+| Feature | CorrectnessTest | PerformanceTest |
+| --- | --- | --- |
+| Chunked Prefill | ✅ | ✅ |
+| DCN-based P/D disaggregation | unverified | ✅ |
+| KV cache host offloading | unverified | unverified |
+| LoRA_Torch | ✅ | ✅ |
+| Multimodal Inputs | ✅ | ✅ |
+| Out-of-tree model support | ✅ | ✅ |
+| Prefix Caching | ✅ | ✅ |
+| Single Program Multi Data | ✅ | ✅ |
+| Single-Host-P-D-disaggregation | N/A | N/A |
+| Speculative Decoding: Eagle3 | ✅ | ✅ |
+| Speculative Decoding: Ngram | ✅ | ✅ |
+| async scheduler | ✅ | ✅ |
+| data_parallelism | ✅ | unverified |
+| runai_model_streamer_loader | ✅ | N/A |
+| sampling_params | ✅ | N/A |
+| structured_decoding | ✅ | N/A |
+
 <!-- END: core_features -->
 
     </details>
@@ -117,7 +151,15 @@ Below is the live status of our supported models, features, and kernels. Click o
       <summary>Parallelism Techniques</summary>
 
 <!-- START: parallelism -->
-<!-- 🤖 The Python script will auto-paste the table here. -->
+| Feature | CorrectnessTest | PerformanceTest |
+| --- | --- | --- |
+| CP | unverified | unverified |
+| DP | ✅ | unverified |
+| EP | ✅ | unverified |
+| PP | ✅ | ✅ |
+| SP | unverified | unverified |
+| TP | ✅ | unverified |
+
 <!-- END: parallelism -->
 
     </details>
@@ -127,7 +169,15 @@ Below is the live status of our supported models, features, and kernels. Click o
       <summary>Quantization Methods</summary>
 
 <!-- START: quantization -->
-<!-- 🤖 The Python script will auto-paste the table here. -->
+| Feature | Recommended TPU Generations | CorrectnessTest | PerformanceTest |
+| --- | --- | --- | --- |
+| AWQ INT4 | v5, v6 | unverified | unverified |
+| FP4 W4A16 | v7 | unverified | unverified |
+| FP8 W8A8 | v7 | unverified | unverified |
+| FP8 W8A16 | v7 | unverified | unverified |
+| INT4 W4A16 | v5, v6 | unverified | unverified |
+| INT8 W8A8 | v5, v6 | unverified | unverified |
+
 <!-- END: quantization -->
 
     </details>
@@ -139,7 +189,16 @@ Below is the live status of our supported models, features, and kernels. Click o
 <summary><b> 🔬 Key Kernel Support (For Experts) </b></summary>
 
 <!-- START: kernel_support -->
-<!-- 🤖 The Python script will auto-paste the table here. -->
+| Feature | CorrectnessTest | PerformanceTest |
+| --- | --- | --- |
+| Collective Communication Matmul | ✅ | unverified |
+| MLA | unverified | unverified |
+| MoE | unverified | unverified |
+| Quantized Attention | unverified | unverified |
+| Quantized KV Cache | unverified | unverified |
+| Quantized Matmul | unverified | unverified |
+| Ragged Paged Attention V3 | ✅ | ✅ |
+
 <!-- END: kernel_support -->
 
 </details>
