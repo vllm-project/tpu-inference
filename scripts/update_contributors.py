@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import time
 import requests
 from collections import defaultdict
 
@@ -100,32 +101,19 @@ def fetch_all_contributors():
 
     return contributors_data
 
-def generate_html_grid(contributors_data):
-    """Generates an HTML grid matching the all-contributors visual style."""
+def build_table_html(users, columns):
     html = [
-        '<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->',
-        '<!-- prettier-ignore-start -->',
-        '<!-- markdownlint-disable -->',
         '<table>',
         '  <tbody>'
     ]
-    
-    # Sort alphabetically by username
-    sorted_users = sorted(contributors_data.items(), key=lambda x: x[0].lower())
-    
-    columns = 7
-    for i in range(0, len(sorted_users), columns):
-        row_users = sorted_users[i:i+columns]
-        
-        # Open row
+    for i in range(0, len(users), columns):
+        row_users = users[i:i+columns]
         html.append('    <tr>')
-        
         for login, data in row_users:
             avatar = data["avatar_url"]
             profile = data["html_url"]
             emojis = " ".join(sorted(list(data["contributions"])))
             
-            # The all-contributors style cell
             cell = (
                 f'      <td align="center" valign="top" width="14.28%">'
                 f'<a href="{profile}"><img src="{avatar}?s=100" width="100px;" alt="{login}"/><br />'
@@ -134,13 +122,46 @@ def generate_html_grid(contributors_data):
                 f'</td>'
             )
             html.append(cell)
-            
-        # Close row
         html.append('    </tr>')
-        
     html.extend([
         '  </tbody>',
-        '</table>',
+        '</table>'
+    ])
+    return html
+
+def generate_html_grid(contributors_data):
+    """Generates an HTML grid matching the all-contributors visual style, truncating after 3 rows."""
+    html = [
+        '<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->',
+        '<!-- prettier-ignore-start -->',
+        '<!-- markdownlint-disable -->'
+    ]
+    
+    # Sort alphabetically by username
+    sorted_users = sorted(contributors_data.items(), key=lambda x: x[0].lower())
+    
+    columns = 7
+    max_visible_rows = 3
+    max_visible_users = columns * max_visible_rows
+    
+    visible_users = sorted_users[:max_visible_users]
+    hidden_users = sorted_users[max_visible_users:]
+    
+    # Render visible users
+    html.extend(build_table_html(visible_users, columns))
+    
+    # Render hidden users inside a details tag
+    if hidden_users:
+        html.extend([
+            '<br/>',
+            '<details>',
+            '<summary><b>...and more! Click to view all contributors.</b></summary>',
+            '<br/>'
+        ])
+        html.extend(build_table_html(hidden_users, columns))
+        html.append('</details>')
+    
+    html.extend([
         '',
         '<!-- markdownlint-restore -->',
         '<!-- prettier-ignore-end -->',
