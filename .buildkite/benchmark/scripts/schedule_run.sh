@@ -14,8 +14,8 @@
 # limitations under the License.
 
 # === Usage ===
-if [ "$#" -ne 5 ]; then
-  echo "Usage: $0 <input.csv|gs://path/to/input.csv> CODE_HASH JOB_REFERENCE RUN_TYPE EXTRA_ENVS"
+if [ "$#" -lt 4 ]; then
+  echo "Usage: $0 <input.csv|gs://path/to/input.csv> CODE_HASH JOB_REFERENCE RUN_TYPE [EXTRA_ENVS]"
   exit 1
 fi
 
@@ -23,7 +23,7 @@ CSV_FILE_ARG="$1"
 CODE_HASH="$2"
 JOB_REFERENCE="$3"
 RUN_TYPE="$4"
-EXTRA_ENVS="$5"
+EXTRA_ENVS="${5:-}"
 
 if [[ "$CSV_FILE_ARG" == gs://* ]]; then
   echo "GCS path detected. Downloading from $CSV_FILE_ARG"
