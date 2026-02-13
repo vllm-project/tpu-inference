@@ -275,7 +275,8 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                         param_dtype),
             weight_loader=partial(load_nnx_param_from_reshaped_torch,
                                   permute_dims=(0, 1),
-                                  param_name="linear_fp8_weight"))
+                                  param_name="linear_fp8_weight"),
+            _is_loaded=False)
         layer.weight.sharding = self.weight_sharding
 
         # Block-wise quantization scale
@@ -292,7 +293,8 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 load_nnx_param_from_reshaped_torch,
                 permute_dims=(0, 1),
                 param_name="linear_fp8_weight_scale_inv",
-            ))
+            ),
+            _is_loaded=False)
         layer.weight_scale_inv.sharding = self.weight_sharding
 
     def process_weights_after_loading(self, layer):
@@ -302,6 +304,12 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         if self.batch_features:
             # Batched case: weight stays in FP8. No blockwise processing
             # needed — the batched matmul uses dot_general with FP8 natively.
+            return
+
+        if getattr(layer.weight, "_is_loaded", False) or getattr(
+                layer.weight_scale_inv, "_is_loaded", False):
+            # Weight and scale could spread across multiple files,
+            # so we only process once both of them are loaded.
             return
 
         weight = layer.weight.value
