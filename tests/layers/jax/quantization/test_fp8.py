@@ -78,14 +78,15 @@ def mesh():
     devices = np.array(jax.local_devices()[:1])
     num_devices = len(devices)
     assert num_devices == 1
-    device_mesh = devices.reshape((1,) * len(MESH_AXIS_NAMES))
+    device_mesh = devices.reshape((1, ) * len(MESH_AXIS_NAMES))
 
-    return Mesh(device_mesh, axis_names=MESH_AXIS_NAMES)
+    with Mesh(device_mesh, axis_names=MESH_AXIS_NAMES) as m:
+        yield m
+
 
 @pytest.fixture
 def rngs():
     return nnx.Rngs(42)
-
 
 class TestLinearOpAdaptInfo:
     """Test QuantLinearConfig.get_adapt_info axis classification."""
@@ -267,7 +268,7 @@ class TestFp8BlockwiseJaxLinear:
 
 class TestFp8TensorwiseJaxLinear:
 
-    def test_fp8_linear_method_create_weights(self, rngs, mesh):
+    def test_fp8_linear_method_create_weights(self, mesh, rngs):
         with jax.set_mesh(mesh):
             layer = JaxEinsum("ab,bc->ac", (32, 16), rngs, bias_shape=None)
             config = QuantLinearConfig(enable_sp=False, output_sizes=[16])
@@ -479,6 +480,14 @@ class TestFp8FusedMoE:
 
         dtype = jnp.bfloat16
 
+        activation_ffw_td = (ShardingAxisNameBase.MLP_DATA,
+                                       ShardingAxisNameBase.MOE_TENSOR) if enable_attn_dp else (ShardingAxisNameBase.MLP_DATA,
+                                       ShardingAxisNameBase.MODEL_1)
+        edf_sharding= (None, ShardingAxisNameBase.MOE_TENSOR,
+                                  ShardingAxisNameBase.ATTN_DATA_EXPERT) if enable_attn_dp else (None, ShardingAxisNameBase.MODEL_1, None)
+        efd_sharding=  (None, ShardingAxisNameBase.ATTN_DATA_EXPERT,
+                                  ShardingAxisNameBase.MOE_TENSOR) if enable_attn_dp else (None, None, ShardingAxisNameBase.MODEL_1)
+
         # This won't be used in reality since we are patching
         # the router_logits
         with jax.set_mesh(mesh):
@@ -509,14 +518,11 @@ class TestFp8FusedMoE:
                         hidden_act="silu",
                         rngs=rngs,
                         quant_config=quant_config,
-                        activation_ffw_td=(ShardingAxisNameBase.MLP_DATA,
-                                            ShardingAxisNameBase.MODEL_1),
+                        activation_ffw_td=activation_ffw_td,
                         activation_ffw_ted=(ShardingAxisNameBase.MLP_DATA, None,
-                                            ShardingAxisNameBase.MODEL_1),
-                        edf_sharding=(None, ShardingAxisNameBase.MODEL_1,
-                                        ShardingAxisNameBase.MODEL_2),
-                        efd_sharding=(None, ShardingAxisNameBase.MODEL_2,
-                                        ShardingAxisNameBase.MODEL_1),
+                                            ShardingAxisNameBase.MOE_TENSOR),
+                        edf_sharding=edf_sharding,
+                        efd_sharding=efd_sharding,
                         moe_backend=moe_backend,
                         renormalize=False,
                         router=router)
@@ -537,8 +543,8 @@ class TestFp8FusedMoE:
         w2 = jax.random.normal(k4, w2_shape, dtype=dtype) / 10.0
 
         expected = test_utils.ref_moe_jax(a, score, w13, w2, None, None,
-                                            layer.top_k, layer.renormalize,
-                                            layer.activation)
+                                        layer.top_k, layer.renormalize,
+                                        layer.activation)
 
         if use_ep:
             assert layer.moe_backend == MoEBackend.GMM_EP
@@ -578,10 +584,11 @@ class TestFp8FusedMoE:
             layer.kernel_up_proj_EDF,
             layer.kernel_down_proj_EFD
         ]:
-            setattr(param, "_cnt_moe_weights_loaded", layer.num_local_experts)
+            param.set_metadata("_cnt_moe_weights_loaded", layer.num_local_experts)
         # End mimic loading weights from checkpoint.
 
-        layer.quant_method.process_weights_after_loading(layer)
+        with jax.set_mesh(mesh):
+            layer.quant_method.process_weights_after_loading(layer)
 
         # Patch the router since we don't want to use the
         # real router
@@ -625,9 +632,9 @@ class TestFp8Config:
             "activation_scheme": "dynamic",
             "ignored_layers": ["mlp.proj1"]
         }
-        with jax.set_mesh(mesh):
-            quant_config = Fp8Config(hf_quant_config)
+        quant_config = Fp8Config(hf_quant_config)
 
+        with jax.set_mesh(mesh):
             mlp = MLP(16, 16, rngs, quant_config, prefix="mlp")
 
         # Check that proj1 is NOT quantized (UnquantizedLinearMethod)

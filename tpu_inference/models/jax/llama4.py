@@ -226,10 +226,9 @@ class Llama4WeightLoader(BaseWeightLoader):
                     f"does not match model shape for {mapped_name}: {mapped_model_weight.value.shape}!"
                 )
 
-            mapped_model_weight.value = shard_put(
-                loaded_weight,
-                mapped_model_weight.sharding_names,
-                mesh=model_for_loading.mesh)
+            mapped_model_weight.value = shard_put(loaded_weight,
+                                                  mapped_model_weight.sharding,
+                                                  mesh=model_for_loading.mesh)
             logger.debug(
                 f"{split_loaded_name}: {loaded_weight.shape}  -->  {mapped_name}: {mapped_model_weight.value.shape}"
             )
@@ -348,7 +347,7 @@ class Llama4WeightLoader(BaseWeightLoader):
                     f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
                 )
                 model_weight.value = shard_put(loaded_weight,
-                                               model_weight.sharding_names,
+                                               model_weight.sharding,
                                                mesh=model_for_loading.mesh)
                 if self.is_verbose:
                     print_param_info(model_weight, loaded_name)
