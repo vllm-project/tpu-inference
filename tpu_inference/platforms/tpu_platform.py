@@ -80,9 +80,9 @@ class TpuPlatform(Platform):
                 # Causes mutliprocess accessing IFRT when calling jax.devices()
                 return "TPU v6 lite"
             else:
-                # The tpu_info package, upon being imported, executes 
-                # _initialize_libtpu_safely(), which attempts to start a new 
-                # process (process.start()). Python's multiprocessing module 
+                # The tpu_info package, upon being imported, executes
+                # _initialize_libtpu_safely(), which attempts to start a new
+                # process (process.start()). Python's multiprocessing module
                 # forbids starting new processes, resulting in error.
                 # So import tpu_info here instead.
                 from tpu_info import device
