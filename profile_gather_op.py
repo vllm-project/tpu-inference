@@ -16,7 +16,7 @@ def gather_xla(indices, x):
 def gather_sparse_pallas(indices, x, vector_mesh):
   num_indices = indices.shape[0]
   value_dim = x.shape[1]
-  gather_window_size = 256
+  gather_window_size = num_indices//2
   indices = indices.reshape((1, num_indices))
   @pl.kernel(out_shape=jax.ShapeDtypeStruct((num_indices, value_dim), x.dtype),
              mesh=vector_mesh)
