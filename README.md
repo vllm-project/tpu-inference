@@ -69,40 +69,33 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 <br>
 
 ## 📊&nbsp; TPU Support Matrix Dashboard
+
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-01-24 10:00 AM UTC*
+*Last Updated: 2026-02-13 11:00 AM UTC*
 
-<!-- <b> Universal Status Legend </b> -->
-<!-- **Legend:** ✅ Passing | ⚠️ Beta | ❌ Failing | 📝 Planned | ❓ Untested  | N/A -->
-<details >
-<summary> <b>🚦 <i>Status Legend definition</i> </b> </summary>
+<details>
+<summary> <b>🚦 <i>Status Legend</i> </b> </summary>
 
-| Emoji | Status | Meaning |
-| :--- | :--- | :--- |
-| ✅ | **Passing** | Tested and works as expected. Ready for use. |
-| ⚠️ | **Beta** | Works, but may be unstable or have known issues. Use with caution. |
-| ❌ | **Failing** | Known to be broken or not functional. Help is wanted to fix this! |
-| 📝 | **Planned** | Not yet implemented, but on the official roadmap. |
-| ❓ | **Untested**| The functionality exists but has not been recently or thoroughly verified. |
-| ⚪️ | **N/A** | Not applicable for this feature. |
+> | Emoji | Status | Meaning |
+> | :--- | :--- | :--- |
+> | ✅ | **Passing** | Tested and works as expected. Ready for use. |
+> | ⚠️ | **Beta** | Works, but may be unstable or have known issues. Use with caution. |
+> | ❌ | **Failing** | Known to be broken or not functional. Help is wanted to fix this! |
+> | 📝 | **Planned** | Not yet implemented, but on the official roadmap. |
+> | ❓ | **Untested**| The functionality exists but has not been recently or thoroughly verified. |
+> | ⚪️ | **N/A** | Not applicable for this feature. |
 
 </details>
+
 <br>
 
 <details open>
 <summary><b> ✅ Model Support </b></summary>
 
-| Model | Type | Load Test | Correctness Test | Benchmark |
-| :--- | :--- | :--- | :--- | :--- |
-| `Qwen/Qwen2.5-VL-7B-Instruct` | Multimodal | ✅ Passing | ❌ Failing | ⚪️ N/A |
-| `meta-llama/Llama-4-Maverick-17B-128E-Instruct` | Multimodal | ✅ Passing | ❌ Failing | ⚪️ N/A |
-| `Qwen/Qwen3-Omni-30B-A3B-Instruct` | Multimodal | ✅ Passing | ❌ Failing | ⚪️ N/A |
-| `meta-llama/Llama-3.1-8B-Instruct` | Text | ✅ Passing | ✅ Passing | ✅ Passing |
-| `meta-llama/Llama-3.3-70B-Instruct` | Text | ✅ Passing | ✅ Passing | ✅ Passing |
-| `meta-llama/Llama-Guard-4-12B` | Text | ✅ Passing | ❌ Failing | ⚪️ N/A |
-| `Qwen/Qwen3-Coder-480B-A35B-Instruct`| Text | ❌ Failing | ⚪️ N/A | ⚪️ N/A |
-| `moonshotai/Kimi-K2-Thinking` | Text | ❓ Untested | ❓ Untested | ❓ Untested |
+<!-- START: model_support -->
+<!-- 🤖 The Python script will auto-paste the table here. -->
+<!-- END: model_support -->
 
 </details>
 
@@ -113,38 +106,31 @@ Below is the live status of our supported models, features, and kernels. Click o
     <details>
       <summary>Core Features</summary>
 
-| Feature | Correctness Test | Performance Test |
-| :--- | :--- | :--- |
-| Chunked Prefill | ✅ Passing | ✅ Passing |
-| LoRA_Torch | ✅ Passing | ✅ Passing |
-| Prefix Caching | ✅ Passing | ✅ Passing |
-| Multimodal Inputs | ❌ Failing | ⚪️ N/A |
-| DCN-based P/D disaggregation | ❓ Untested | ❌ Failing |
+<!-- START: core_features -->
+<!-- 🤖 The Python script will auto-paste the table here. -->
+<!-- END: core_features -->
 
+    </details>
   </li>
   <li>
     <details>
       <summary>Parallelism Techniques</summary>
 
-| Technique (Abbreviation) | Correctness Test | Performance Test |
-| :--- | :--- | :--- |
-| Data Parallelism (DP) | ✅ Passing | ✅ Passing |
-| Pipeline Parallelism (PP) | ✅ Passing | ✅ Passing |
-| Expert Parallelism (EP) | ❌ Failing | ⚪️ N/A |
-| Tensor Parallelism (TP) | ❌ Failing | ⚪️ N/A |
-| Context Parallelism (CP) | ❓ Untested | ❓ Untested |
+<!-- START: parallelism -->
+<!-- 🤖 The Python script will auto-paste the table here. -->
+<!-- END: parallelism -->
 
+    </details>
   </li>
   <li>
     <details>
       <summary>Quantization Methods</summary>
 
-| Method / Precision | Technique | Recommended TPU | Correctness Test | Performance Test |
-| :--- | :--- | :--- | :--- | :--- |
-| INT8 W8A8 | compressed-tensor | v5, v6 | ❓ Untested | ❓ Untested |
-| INT4 W4A16 | awq | v5, v6 | ❓ Untested | ❓ Untested |
-| FP8 W8A8 | compressed-tensor | v7 | ❓ Untested | ❓ Untested |
+<!-- START: quantization -->
+<!-- 🤖 The Python script will auto-paste the table here. -->
+<!-- END: quantization -->
 
+    </details>
   </li>
 </ul>
 </details>
@@ -152,14 +138,12 @@ Below is the live status of our supported models, features, and kernels. Click o
 <details>
 <summary><b> 🔬 Key Kernel Support (For Experts) </b></summary>
 
-| Kernel | Correctness Test | Performance Test |
-| :--- | :--- | :--- |
-| Ragged Paged Attention V3 | ✅ Passing | ✅ Passing |
-| Collective Communication Matmul | ✅ Passing | ❓ Untested |
-| Quantized Matmul | ❓ Untested | ❓ Untested |
-| MoE | ❓ Untested | ❓ Untested |
+<!-- START: kernel_support -->
+<!-- 🤖 The Python script will auto-paste the table here. -->
+<!-- END: kernel_support -->
 
 </details>
+
 <br>
 
 ## 🤝 Contribute
