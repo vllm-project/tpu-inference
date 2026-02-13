@@ -19,8 +19,8 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from flax.typing import Sharding
-from jax.sharding import NamedSharding, PartitionSpec
 from jax._src.dtypes import TypePromotionError
+from jax.sharding import NamedSharding, PartitionSpec
 from jaxtyping import Float
 
 from tpu_inference.layers.common.moe import MoEBackend

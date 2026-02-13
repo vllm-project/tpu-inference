@@ -83,17 +83,9 @@ def mesh():
     with Mesh(device_mesh, axis_names=MESH_AXIS_NAMES) as m:
         yield m
 
-
-
 @pytest.fixture
 def rngs():
     return nnx.Rngs(42)
-
-@pytest.fixture
-def mesh():
-    # Use a dummy mesh for testing
-    devices = jax.devices()
-    return jax.sharding.Mesh(np.array(devices), ('device', ))
 
 
 class TestLinearOpAdaptInfo:
@@ -292,16 +284,16 @@ class TestFp8TensorwiseJaxLinear:
             assert hasattr(layer.weight, 'weight_loader')
 
     def test_fp8_loader_prevents_upcast(self, mesh, rngs):
-            with jax.set_mesh(mesh):
-                layer = JaxEinsum("ab,bc->ac", (4, 2), rngs, bias_shape=None)
-                config = QuantLinearConfig(enable_sp=False, output_sizes=[2])
-                method = Fp8TensorwiseLinearMethod(layer, config)
-                method.create_weights_jax(layer, rngs=rngs)
+        with jax.set_mesh(mesh):
+            layer = JaxEinsum("ab,bc->ac", (4, 2), rngs, bias_shape=None)
+            config = QuantLinearConfig(enable_sp=False, output_sizes=[2])
+            method = Fp8TensorwiseLinearMethod(layer, config)
+            method.create_weights_jax(layer, rngs=rngs)
 
-                torch_fp8 = torch.zeros((2, 4), dtype=torch.float8_e4m3fn)
-                layer.weight.weight_loader(layer.weight, torch_fp8)
+            torch_fp8 = torch.zeros((2, 4), dtype=torch.float8_e4m3fn)
+            layer.weight.weight_loader(layer.weight, torch_fp8)
 
-                assert layer.weight.value.dtype == jnp.float8_e4m3fn
+            assert layer.weight.value.dtype == jnp.float8_e4m3fn
 
     @pytest.mark.parametrize("in_features,out_features", [(128, 64),
                                                           (256, 128)])
