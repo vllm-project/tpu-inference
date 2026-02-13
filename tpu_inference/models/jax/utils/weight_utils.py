@@ -270,7 +270,9 @@ def get_default_maps(model_config, mesh: Mesh,
         "gate_proj": (1, 0),
         "up_proj": (1, 0),
         "down_proj": (1, 0),
-        "q_proj": (2, 0, 1),
+        "q_proj": (
+            2, 0, 1
+        ),  # num_heads, head_dim, hidden_size -> hidden_size, num_heads, head_dim
         "k_proj": (2, 0, 1),
         "v_proj": (2, 0, 1),
         "o_proj": (1, 2, 0),
