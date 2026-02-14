@@ -228,13 +228,17 @@ If you're ready to contribute code, our **[Contributing Guide](https://github.co
 A huge thank you to everyone who has helped build and improve `vllm-project/tpu-inference`!
 
 <details>
-<summary><b>🌟 <i>Contribution Type Legend</i></b></summary>
+<summary><b>🌟 <i>Contribution Type Legend & Ranking</i></b></summary>
 
 > | Emoji | Contribution | Meaning |
 > | :---: | :--- | :--- |
 > | 💻 | **Code** | Submitted merged pull requests or code changes. |
 > | 🐛 | **Issues** | Opened valid issues or bug reports. |
 > | 👀 | **Reviews** | Reviewed pull requests and provided feedback. |
+
+<br>
+
+**🏆 Ranking:** Contributors are sorted from highest to lowest based on their total effort score (`Total Commits + Unique Issues Opened + PRs Reviewed`). If there is a tie, contributors are displayed alphabetically.
 
 </details>
 
