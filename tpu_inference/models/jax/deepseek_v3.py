@@ -147,7 +147,7 @@ class DeepseekV3BaseAttention(JaxModule):
     # Sharding
     rd_sharding: Sharding = ()
     q_da_sharding: Sharding = ()
-    ap_sharding: Sharding = ()
+    pa_sharding: Sharding = ()
     kv_da_sharding: Sharding = ()
     activation_attention_td: Sharding = ()
     activation_q_td: Sharding = ()
@@ -214,7 +214,7 @@ class DeepseekV3BaseAttention(JaxModule):
             rngs=rngs,
             quant_config=self.quant_config,
             param_dtype=self.dtype,
-            kernel_init=nnx.with_partitioning(weight_init, self.ap_sharding),
+            kernel_init=nnx.with_partitioning(weight_init, self.pa_sharding),
         )
 
         self.kv_a_proj_with_mqa = JaxEinsum(
@@ -337,7 +337,7 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
             rngs=rngs,
             quant_config=self.quant_config,
             param_dtype=self.dtype,
-            kernel_init=nnx.with_partitioning(weight_init, self.ap_sharding),
+            kernel_init=nnx.with_partitioning(weight_init, self.pa_sharding),
         )
 
     def compute_q_projection(self, x_q_TD: jax.Array,
@@ -729,7 +729,8 @@ class DeepseekV3MLP(JaxModule):
             rngs=rngs,
             quant_config=self.quant_config,
             param_dtype=self.dtype,
-            kernel_init=nnx.with_partitioning(weight_init, self.df_sharding),
+            # kernel_init=nnx.with_partitioning(weight_init, self.df_sharding),
+            kernel_init=nnx.with_partitioning(weight_init, self.fd_sharding),
         )
         self.up_proj = JaxEinsum(
             einsum_str="TD,DF->TF",
@@ -737,7 +738,8 @@ class DeepseekV3MLP(JaxModule):
             rngs=rngs,
             quant_config=self.quant_config,
             param_dtype=self.dtype,
-            kernel_init=nnx.with_partitioning(weight_init, self.df_sharding),
+            # kernel_init=nnx.with_partitioning(weight_init, self.df_sharding),
+            kernel_init=nnx.with_partitioning(weight_init, self.fd_sharding),
         )
         self.down_proj = JaxEinsum(
             einsum_str="TF,FD->TD",
@@ -745,7 +747,8 @@ class DeepseekV3MLP(JaxModule):
             rngs=rngs,
             quant_config=self.quant_config,
             param_dtype=self.dtype,
-            kernel_init=nnx.with_partitioning(weight_init, self.fd_sharding),
+            # kernel_init=nnx.with_partitioning(weight_init, self.fd_sharding),
+            kernel_init=nnx.with_partitioning(weight_init, self.df_sharding),
         )
 
 
@@ -1074,14 +1077,14 @@ class DeepSeekV3(JaxModule):
                 keyvalue_skh_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
                 attn_o_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
             rd_sharding = (ShardingAxisName.MLP_TENSOR, None)
-            ap_sharding = (None, ShardingAxisName.MLP_TENSOR)
+            pa_sharding = (ShardingAxisName.MLP_TENSOR, None)
             q_da_sharding = (None, ShardingAxisName.MLP_TENSOR)
             kv_da_sharding = (None, ShardingAxisName.MLP_TENSOR)
 
             if self.vllm_config.additional_config.get("replicate_attn_weights",
                                                       False):
                 rd_sharding = ()
-                ap_sharding = ()
+                pa_sharding = ()
                 q_da_sharding = ()
                 kv_da_sharding = ()
                 if self.use_mla_kernel:
@@ -1121,7 +1124,7 @@ class DeepSeekV3(JaxModule):
                 activation_attention_out_td=(None, None),
                 attn_o_tnh=attn_o_tnh_spec,
                 q_da_sharding=q_da_sharding,
-                ap_sharding=ap_sharding,
+                pa_sharding=pa_sharding,
                 kv_da_sharding=kv_da_sharding,
                 rd_sharding=rd_sharding)
             if self.use_mla_kernel:

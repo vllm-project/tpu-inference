@@ -822,7 +822,12 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                                       reshape_dims=reshape_dims,
                                       permute_dims=permute_dims,
                                       param_name=name))
-
+        for name, param in model.named_parameters():
+            if hasattr(param, "weight_loader") and isinstance(param.weight_loader, functools.partial):
+                # Update the param_name keyword argument in the partial function
+                new_keywords = dict(param.weight_loader.keywords)
+                new_keywords['param_name'] = name
+                param.weight_loader = functools.partial(param.weight_loader.func, **new_keywords)
         super().__init__(model, **kwargs)
 
     def _load_module(self, base_prefix: str, module: JaxModule,
