@@ -118,6 +118,14 @@ echo "bench_serving commit: $(git -C bench_serving rev-parse HEAD)"
 
 vllm serve --seed=42 --model="$model" --max-model-len=10240 --max-num-batched-tokens=8192 --max-num-seqs=512 --no-enable-prefix-caching --disable-log-requests --tensor-parallel-size="$tp" --kv-cache-dtype=fp8 --gpu-memory-utilization=0.95 --async-scheduling --enable-expert-parallel   2>&1 | tee vllm_server_out.txt &
 
+# Trap registers the cleanup as a handler for the EXIT. Whenever the shell exits, it runs `cleanup` before terminating.
+# The trap does not affect the exit status. When an EXIT trap fires, the script's exit status is whatever it was before the trap was triggered.
+cleanup() {
+  echo "Cleaning up: killing the server..."
+  kill %1 2>/dev/null || true
+}
+trap cleanup EXIT
+
 # Need to put the nc command in a condition.
 # If we assign it to a variable, the nc command is supposed to fail at first because it takes some time for the server to be ready. But the "set -e" will cause the script to exit immediately so the while loop will not run.
 TIMEOUT_SECONDS=$((40 * 60))  # 40 minutes
@@ -190,8 +198,7 @@ check_metrics "$benchmark_output" "$req_tput_limit" "$output_token_tput_limit" "
 end_time=$(date +%s)
 echo "Elapsed time: $((end_time - start_time)) seconds"
 
-echo "All done. Killing the server..."
-kill %1
+echo "All done."
 
 echo "perf_regressed: $perf_regressed"
 if [ "$perf_regressed" -eq 1 ]; then
