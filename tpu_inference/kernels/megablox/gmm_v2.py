@@ -14,7 +14,7 @@
 
 import dataclasses
 import functools
-from typing import Callable, Tuple
+from typing import Any, Callable, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -35,9 +35,9 @@ class MetadataRef:
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
 class WeightsRef:
-    weight: pl.BlockSpec | jax.Array
-    scale: pl.BlockSpec | jax.Array | None
-    bias: pl.BlockSpec | jax.Array | None
+    weight: Any
+    scale: Any | None
+    bias: Any | None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -57,6 +57,29 @@ class Dimensions:
     size_lhs_sublane: int
 
 
+@dataclasses.dataclass(frozen=True)
+class QuantizationConfig:
+    q_dtype: jnp.dtype
+    block_size: int
+
+
+@dataclasses.dataclass(frozen=True)
+class PipelineConfig:
+    pipeline_lhs_quant: bool
+    rhs_buffer_count: int
+
+
+@dataclasses.dataclass(frozen=True)
+class GmmConfigs:
+    tiles: TileSizes
+    dims: Dimensions
+    pipeline: PipelineConfig
+    lhs_q: QuantizationConfig | None
+    rhs_q: QuantizationConfig | None
+    out_dtype: jnp.dtype
+    acc_dtype: jnp.dtype
+
+
 TileFn = Callable[[jnp.dtype, jnp.dtype, Dimensions, int], TileSizes]
 
 
@@ -66,19 +89,17 @@ class IndexMaps:
     def __init__(
         self,
         metadata_ref: MetadataRef,
-        tiles: TileSizes,
-        dims: Dimensions,
+        cfgs: GmmConfigs,
     ):
         self.metadata_ref = metadata_ref
-        self.tiles = tiles
-        self.dims = dims
+        self.cfgs = cfgs
 
     def _get_sublane_start_and_size(self, gm_id: jax.Array):
         m_start = self.metadata_ref.gm_id_to_m_offset[gm_id]
         m_end = self.metadata_ref.gm_id_to_m_offset[gm_id + 1]
 
-        sublane_start = m_start // self.dims.size_lhs_sublane
-        sublane_end = pl.cdiv(m_end, self.dims.size_lhs_sublane)
+        sublane_start = m_start // self.cfgs.dims.size_lhs_sublane
+        sublane_end = pl.cdiv(m_end, self.cfgs.dims.size_lhs_sublane)
         sublane_size = sublane_end - sublane_start
 
         return sublane_start, sublane_size
@@ -113,8 +134,7 @@ def generate_block_specs(
     out_ref: jax.Array,  # [size_m, size_n]
     metadata_ref: MetadataRef,
     *,
-    tiles: TileSizes,
-    dims: Dimensions,
+    cfgs: GmmConfigs,
 ) -> Tuple[Tuple[pl.BlockSpec, WeightsRef], pl.BlockSpec]:
     """Generates block specs for the given lhs, rhs, and out refs."""
 
@@ -122,28 +142,29 @@ def generate_block_specs(
     # But we keep them as arguments for future extensions.
     del lhs_ref, out_ref
 
-    index_map = IndexMaps(metadata_ref, tiles, dims)
-    bounded_slice_gm = pl.BoundedSlice(tiles.tile_m // dims.size_lhs_sublane)
+    index_map = IndexMaps(metadata_ref, cfgs)
+    bounded_slice_gm = pl.BoundedSlice(cfgs.tiles.tile_m //
+                                       cfgs.dims.size_lhs_sublane)
 
     lhs_block_spec = pl.BlockSpec(
-        (bounded_slice_gm, dims.size_lhs_sublane, tiles.tile_k),
+        (bounded_slice_gm, cfgs.dims.size_lhs_sublane, cfgs.tiles.tile_k),
         index_map.lhs_index_map,
     )
 
     rhs_weight_spec = pl.BlockSpec(
-        (None, tiles.tile_k, tiles.tile_n),
+        (None, cfgs.tiles.tile_k, cfgs.tiles.tile_n),
         index_map.rhs_weight_index_map,
         pipeline_mode=pl.Buffered(buffer_count=3),
     )
     rhs_scale_block_spec = rhs_bias_block_spec = None
     if rhs_ref.bias is not None:
         rhs_bias_block_spec = pl.BlockSpec(
-            (1, 1, tiles.tile_n),
+            (None, 1, cfgs.tiles.tile_n),
             index_map.rhs_bias_index_map,
         )
     if rhs_ref.scale is not None:
         rhs_scale_block_spec = pl.BlockSpec(
-            (None, 1, 1, tiles.tile_n),
+            (None, None, 1, cfgs.tiles.tile_n),
             index_map.rhs_scale_index_map,
         )
 
@@ -154,7 +175,7 @@ def generate_block_specs(
     )
 
     out_block_spec = pl.BlockSpec(
-        (bounded_slice_gm, dims.size_lhs_sublane, tiles.tile_n),
+        (bounded_slice_gm, cfgs.dims.size_lhs_sublane, cfgs.tiles.tile_n),
         index_map.out_index_map,
     )
 
@@ -178,8 +199,7 @@ def inner_kernel(
     # [tile_m // size_lhs_sublane, size_lhs_sublane, tile_n]
     metadata_ref: MetadataRef,
     *,
-    tiles: TileSizes,
-    dims: Dimensions,
+    cfgs: GmmConfigs,
 ):
     """Inner kernel invoked by emit_pipeline to perform matmul.
 
@@ -216,17 +236,44 @@ def inner_kernel(
     m_start = metadata_ref.gm_id_to_m_offset[gm_id]
     m_end = metadata_ref.gm_id_to_m_offset[gm_id + 1]
 
-    m_offset = (m_start // dims.size_lhs_sublane) * dims.size_lhs_sublane
+    m_offset = m_start - m_start % cfgs.dims.size_lhs_sublane
 
     m_start_local = m_start - m_offset
     m_end_local = m_end - m_offset
 
     def _matmul(is_first_k_step: bool, is_last_k_step: bool):
-        acc = jnp.matmul(
-            tiled_lhs_ref[...],
-            tiled_rhs_ref.weight[...],
-            preferred_element_type=jnp.float32,
-        )
+        tiled_lhs = tiled_lhs_ref.reshape(-1, cfgs.tiles.tile_k)[...]
+        if cfgs.lhs_q is None:
+            acc = jnp.matmul(
+                tiled_lhs,
+                tiled_rhs_ref.weight[...],
+                preferred_element_type=jnp.float32,
+            ).astype(acc_ref.dtype)
+        else:
+            lhs_q_dtype = cfgs.lhs_q.q_dtype
+            block_size = cfgs.lhs_q.block_size
+
+            acc = jnp.zeros_like(acc_ref)
+            for start in range(0, cfgs.dims.size_k, block_size):
+                end = start + block_size
+
+                block_lhs = tiled_lhs[:, start:end]
+                block_rhs = tiled_rhs_ref.weight[start:end, :]
+
+                dtype_max = float(jnp.finfo(lhs_q_dtype).max)
+                block_abs_max = jnp.max(jnp.abs(block_lhs),
+                                        axis=1,
+                                        keepdims=True)
+                block_scale = block_abs_max / dtype_max
+                block_scale_inv = jnp.nan_to_num(1.0 / block_scale)
+                block_lhs_q = (block_lhs * block_scale_inv).astype(lhs_q_dtype)
+
+                block_acc = jnp.matmul(
+                    block_lhs_q,
+                    block_rhs,
+                    preferred_element_type=jnp.float32,
+                ).astype(acc_ref.dtype)
+                acc += block_acc * block_scale.astype(acc_ref.dtype)
 
         if not is_first_k_step:
             acc += acc_ref[...]
@@ -238,11 +285,11 @@ def inner_kernel(
                 acc += tiled_rhs_ref.bias[...]
 
             # Mask out values that does not belong to the current group.
-            iota_mask = lax.broadcasted_iota(jnp.int32,
-                                             (tiles.tile_m, tiles.tile_n), 0)
+            iota_mask = lax.broadcasted_iota(
+                jnp.int32, (cfgs.tiles.tile_m, cfgs.tiles.tile_n), 0)
             mask = jnp.logical_and(m_start_local <= iota_mask, iota_mask
-                                   < m_end_local).reshape(acc.shape)
-            acc_masked = jnp.where(mask, acc, 0)
+                                   < m_end_local)
+            acc_masked = jnp.where(mask, acc, 0).reshape(tiled_out_ref.shape)
 
             # Write the final output to the output ref.
             tiled_out_ref[...] = acc_masked.astype(tiled_out_ref.dtype)
@@ -260,9 +307,9 @@ def inner_kernel(
             # read them and accumulate to them.  Additionally, for group id of 2,
             # since it completely fills the size_lhs_sublane rows, we need to
             # initialize the partial_out_ref to zeros.
-            last_row = m_end_local // dims.size_lhs_sublane
+            last_row = m_end_local // cfgs.dims.size_lhs_sublane
             partial_out_ref[...] = jnp.where(
-                m_end_local % dims.size_lhs_sublane == 0,
+                m_end_local % cfgs.dims.size_lhs_sublane == 0,
                 jnp.zeros_like(partial_out_ref),
                 tiled_out_ref[last_row],
             )
@@ -311,8 +358,7 @@ def fill_metadata(
     group_offset_ref: jax.Array,  # int32[1]
     metadata_ref: MetadataRef,
     *,
-    dims: Dimensions,
-    tiles: TileSizes,
+    cfgs: GmmConfigs,
 ) -> jax.Array:
     """Fills the metadata for the given lhs group sizes and group offset.
 
@@ -334,12 +380,12 @@ def fill_metadata(
     """
 
     group_offset = group_offset_ref[0]
-    max_num_group = group_offset + dims.size_group
+    max_num_group = group_offset + cfgs.dims.size_group
 
     @jax.named_scope("inner_tm_loop")
     def inner_tm_loop(tm_id, curr_m_offset, *, end_m_offset, group_id, num_gm):
-        local_offset = curr_m_offset % dims.size_lhs_sublane
-        tm_size = jnp.minimum(tiles.tile_m - local_offset,
+        local_offset = curr_m_offset % cfgs.dims.size_lhs_sublane
+        tm_size = jnp.minimum(cfgs.tiles.tile_m - local_offset,
                               end_m_offset - curr_m_offset)
 
         metadata_ref.gm_id_to_group_id[num_gm + tm_id] = group_id
@@ -372,9 +418,9 @@ def fill_metadata(
         # In this example, we see that we require processing 2 m tiles.
         # But, performing a naive cdiv(group_size, tile_m) will return 1.
         # Instead, adding local_offset will give us the correct value.
-        local_offset = start_m_offset % dims.size_lhs_sublane
+        local_offset = start_m_offset % cfgs.dims.size_lhs_sublane
         aligned_group_size = group_size + local_offset
-        curr_num_gm = pl.cdiv(aligned_group_size, tiles.tile_m)
+        curr_num_gm = pl.cdiv(aligned_group_size, cfgs.tiles.tile_m)
 
         # We need to handle cases where we should not process the group.
         # 1. Even if group_size is 0, if local_offset is not 0, cdiv will return 1.
@@ -412,8 +458,7 @@ def kernel_main(
     # [tile_m // size_lhs_sublane, size_lhs_sublane, tile_n]
     metadata_ref: MetadataRef,
     *,
-    tiles: TileSizes,
-    dims: Dimensions,
+    cfgs: GmmConfigs,
 ):
     """Entry point for GMM kernel.
 
@@ -442,28 +487,26 @@ def kernel_main(
         dims: Dimensions.
   """
 
-    num_k = dims.size_k // tiles.tile_k
-    num_n = dims.size_n // tiles.tile_n
+    num_k = cfgs.dims.size_k // cfgs.tiles.tile_k
+    num_n = cfgs.dims.size_n // cfgs.tiles.tile_n
 
     # Fill metadata buffer and return number of group & m interations.
     num_gm = fill_metadata(
         lhs_group_sizes_ref,
         group_offset_ref,
         metadata_ref,
-        dims=dims,
-        tiles=tiles,
+        cfgs=cfgs,
     )
 
     in_block_specs, out_block_specs = generate_block_specs(lhs_ref,
                                                            rhs_ref,
                                                            out_ref,
                                                            metadata_ref,
-                                                           tiles=tiles,
-                                                           dims=dims)
+                                                           cfgs=cfgs)
 
     # Execute the inner kernel.
     pipeline_fn = pltpu.emit_pipeline(
-        functools.partial(inner_kernel, tiles=tiles, dims=dims),
+        functools.partial(inner_kernel, cfgs=cfgs),
         grid=(num_n, num_gm, num_k),
         in_specs=in_block_specs,
         out_specs=out_block_specs,
@@ -471,8 +514,8 @@ def kernel_main(
 
     # Bounded slice requires second last dim to be aligned to the sublane size.
     # rhs_ref uses static tiling thus reshape is not needed.
-    lhs_in = lhs_ref.reshape(-1, dims.size_lhs_sublane, dims.size_k)
-    out_in = out_ref.reshape(-1, dims.size_lhs_sublane, dims.size_n)
+    lhs_in = lhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, cfgs.dims.size_k)
+    out_in = out_ref.reshape(-1, cfgs.dims.size_lhs_sublane, cfgs.dims.size_n)
     scratches = [partial_out_ref, acc_ref, metadata_ref]
     pipeline_fn(lhs_in, rhs_ref, out_in, scratches=scratches)
 
@@ -662,6 +705,69 @@ def get_scope_name(dims: Dimensions, tiles: TileSizes) -> str:
     )
 
 
+def make_gmm_configs(
+    lhs: jax.Array,
+    rhs: jax.Array,
+    rhs_scale: jax.Array | None,
+    rhs_bias: jax.Array | None,
+    group_sizes: jax.Array,
+    group_offset: jax.Array,
+    *,
+    tile_info: TileSizes | TileFn = calculate_tiling,
+    vmem_limit_bytes: int | None = None,
+    out_dtype: jnp.dtype | None = None,
+    lhs_q_dtype: jnp.dtype | None = None,
+    acc_dtype: jnp.dtype | None = None,
+):
+    """Fills the GMM config for the GMM kernel."""
+
+    dims = validate_inputs(lhs, rhs, rhs_scale, rhs_bias, group_sizes,
+                           group_offset)
+
+    if isinstance(tile_info, TileSizes):
+        tiles = tile_info
+    else:
+        lhs_dtype = lhs_q_dtype if lhs_q_dtype is not None else lhs.dtype
+        tiles = tile_info(lhs_dtype, rhs.dtype, dims, vmem_limit_bytes)
+
+    validate_tiles(tiles, dims)
+
+    if lhs_q_dtype is None:
+        lhs_quant_config = None
+    else:
+        lhs_quant_config = QuantizationConfig(
+            q_dtype=lhs_q_dtype,
+            block_size=512,
+        )
+    if rhs_scale is None:
+        rhs_quant_config = None
+    else:
+        rhs_quant_config = QuantizationConfig(q_dtype=rhs.dtype,
+                                              block_size=dims.size_k //
+                                              rhs_scale.shape[1])
+
+    pipeline_config = PipelineConfig(
+        pipeline_lhs_quant=(lhs_quant_config is not None),
+        rhs_buffer_count=3,
+    )
+
+    if out_dtype is None:
+        out_dtype = lhs.dtype
+
+    if acc_dtype is None:
+        acc_dtype = jnp.bfloat16
+
+    return GmmConfigs(
+        dims=dims,
+        tiles=tiles,
+        pipeline=pipeline_config,
+        lhs_q=lhs_quant_config,
+        rhs_q=rhs_quant_config,
+        out_dtype=out_dtype,
+        acc_dtype=acc_dtype,
+    )
+
+
 @jax.jit(static_argnames=[
     "tile_info",
     "vmem_limit_bytes",
@@ -680,6 +786,8 @@ def gmm_v2(
     vmem_limit_bytes: int | None = None,
     precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
     preferred_element_type: jnp.dtype | None = None,
+    lhs_q_dtype: jnp.dtype | None = None,
+    acc_dtype: jnp.dtype | None = None,
 ) -> jax.Array:
     """GMM kernel implemented with emit_pipeline.
 
@@ -711,46 +819,46 @@ def gmm_v2(
         if jnp.isscalar(group_offset):
             group_offset = group_offset[None]
 
-    if preferred_element_type is None:
-        preferred_element_type = lhs.dtype
-
     if vmem_limit_bytes is None:
-        vmem_limit_bytes = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.8)
+        vmem_limit_bytes = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.9)
 
-    dims = validate_inputs(lhs, rhs, rhs_scale, rhs_bias, group_sizes,
-                           group_offset)
-
-    if isinstance(tile_info, TileSizes):
-        tiles = tile_info
-    else:
-        tiles = tile_info(lhs.dtype, rhs.dtype, dims, vmem_limit_bytes)
-    validate_tiles(tiles, dims)
+    lhs_q_dtype = jnp.float8_e4m3fn
+    cfgs = make_gmm_configs(
+        lhs,
+        rhs,
+        rhs_scale,
+        rhs_bias,
+        group_sizes,
+        group_offset,
+        tile_info=tile_info,
+        vmem_limit_bytes=vmem_limit_bytes,
+        out_dtype=preferred_element_type,
+        lhs_q_dtype=lhs_q_dtype,
+        acc_dtype=acc_dtype,
+    )
+    dims = cfgs.dims
+    tiles = cfgs.tiles
 
     # Prepare block specs and input aliases.
     input_aliases = 4
     rhs_scale_spec = rhs_bias_spec = None
     if rhs_scale is not None:
         input_aliases += 1
-        rhs_scale = rhs_scale.astype(jnp.float32)
+        rhs_scale = rhs_scale.astype(acc_dtype)
         rhs_scale_spec = pl.BlockSpec(memory_space=pltpu.HBM)
     if rhs_bias is not None:
         input_aliases += 1
-        rhs_bias = rhs_bias.astype(jnp.float32)
+        rhs_bias = rhs_bias.astype(acc_dtype)
         rhs_bias_spec = pl.BlockSpec(memory_space=pltpu.HBM)
 
     # Initialize scratch shapes.
     max_num_gm = dims.size_group + dims.size_m // tiles.tile_m - 1
-    m_num_sublane_units = tiles.tile_m // dims.size_lhs_sublane
 
     scratch_shapes = [
         # partial_out_ref
-        pltpu.VMEM((dims.size_lhs_sublane, tiles.tile_n),
-                   preferred_element_type),
+        pltpu.VMEM((dims.size_lhs_sublane, tiles.tile_n), cfgs.out_dtype),
         # acc_ref
-        pltpu.VMEM(
-            (m_num_sublane_units, dims.size_lhs_sublane, tiles.tile_n),
-            jnp.float32,
-        ),
+        pltpu.VMEM((tiles.tile_m, tiles.tile_n), cfgs.acc_dtype),
         # metadata_ref
         MetadataRef(
             gm_id_to_group_id=pltpu.SMEM((max_num_gm, ), jnp.int32),
@@ -760,12 +868,11 @@ def gmm_v2(
 
     # Prepare inputs.
     # TODO(kyuyeunk, kunjanp): Add support for fusing zero initialization.
-    out_init = jnp.zeros((dims.size_m, dims.size_n),
-                         dtype=preferred_element_type)
+    out_init = jnp.zeros((dims.size_m, dims.size_n), dtype=cfgs.out_dtype)
     rhs_weights = WeightsRef(weight=rhs, scale=rhs_scale, bias=rhs_bias)
 
     return pl.pallas_call(
-        functools.partial(kernel_main, tiles=tiles, dims=dims),
+        functools.partial(kernel_main, cfgs=cfgs),
         out_shape=out_init,
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=2,
