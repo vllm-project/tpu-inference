@@ -4,9 +4,9 @@ Model,UnitTest,Accuracy/Correctness,Benchmark
 "meta-llama/Llama-3.3-70B-Instruct",✅,✅,✅
 "Qwen/Qwen3-4B",✅,✅,✅
 "google/gemma-3-27b-it",✅,✅,✅
-"Qwen/Qwen3-32B",❌,N/A,N/A
+"Qwen/Qwen3-32B",✅,✅,✅
 "deepseek-ai/DeepSeek-V3.1",unverified,unverified,unverified
 "meta-llama/Llama-Guard-4-12B",✅,✅,❌
 "openai/gpt-oss-120b",unverified,unverified,unverified
-"meta-llama/Llama-3.1-8B-Instruct",❌,N/A,N/A
+"meta-llama/Llama-3.1-8B-Instruct",✅,✅,✅
 "Qwen/Qwen3-30B-A3B",✅,✅,❌
