@@ -12,9 +12,12 @@
 - [x] **Implementation** <!-- id: 7 -->
     - [x] Enhance `scripts/update_contributors.py` to fetch Issues and Reviews <!-- id: 9 -->
     - [x] Update HTML generation to include contribution emojis <!-- id: 10 -->
-- [ ] **Verification** <!-- id: 11 -->
-    - [ ] Test python script locally to confirm non-code contributors are found <!-- id: 12 -->
-    - [ ] Verify GitHub Action runs with updated script <!-- id: 13 -->
+- [x] **Verification** <!-- id: 11 -->
+    - [x] Test python script locally to confirm non-code contributors are found <!-- id: 12 -->
+    - [x] Verify GitHub Action runs with updated script <!-- id: 13 -->
 - [x] **Add Collapsible Legend**
     - [x] Update `implementation_plan.md` to propose the legend structure
     - [x] Add `<details>` legend to `README.md` above the Contributor Wall
+- [x] **UI & Algorithm Enhancements**
+    - [x] Use strict CSS `max-width: 100px` for bulletproof uniform avatar sizing across platforms.
+    - [x] Implement Effort-Based Ranking (Commit Count + Issue Count + Review Count).
