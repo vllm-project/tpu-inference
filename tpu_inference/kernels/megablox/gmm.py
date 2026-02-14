@@ -27,6 +27,7 @@ from jax.experimental.pallas import tpu as pltpu
 from tpu_inference.kernels.megablox import common
 from tpu_inference.kernels.megablox.tuned_block_sizes import \
     get_tuned_block_sizes
+from tpu_inference.utils import align_to
 
 partial = functools.partial
 
@@ -409,6 +410,10 @@ def gmm(
 
     tm, tk, tn = tiling
 
+    original_m = m
+    m = align_to(m, tm)
+    lhs = jnp.pad(lhs, ((0, m - original_m), (0, 0)))
+
     if rhs_scale is not None:
         assert isinstance(rhs_scale, jax.Array)
         assert rhs_scale.shape[0] == num_current_groups
@@ -646,4 +651,4 @@ def gmm(
             num_nonzero_groups=rhs.shape[0],
             group_metadata=group_metadata,
         )
-    return out
+    return out[:original_m]
