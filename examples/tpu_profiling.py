@@ -31,7 +31,11 @@ def main(args: argparse.Namespace):
     # Profile
     profile_dir = args.profile_result_dir
     print(f"Profiling (results will be saved to '{profile_dir}')...")
-    os.environ["VLLM_TORCH_PROFILER_DIR"] = profile_dir
+
+    profiler_config = args.profiler_config
+    profiler_config.profiler = "torch"
+    profiler_config.torch_profiler_dir = profile_dir
+    args.profiler_config = profiler_config
 
     engine_args = EngineArgs.from_cli_args(args)
     llm = LLM(**dataclasses.asdict(engine_args))

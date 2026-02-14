@@ -20,7 +20,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from flax.typing import PRNGKey
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
 
@@ -30,7 +30,7 @@ from tpu_inference.layers.jax.attention.llama4_attention import Llama4Attention
 from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
 from tpu_inference.layers.jax.misc import shard_put
-from tpu_inference.layers.jax.moe.moe import MoE, Router
+from tpu_inference.layers.jax.moe.moe import JaxMoE, Router
 from tpu_inference.layers.jax.pp_utils import (PPMissingLayer,
                                                get_start_end_layer)
 from tpu_inference.layers.jax.transformer_block import \
@@ -489,13 +489,13 @@ class Llama4ForCausalLM(nnx.Module):
         else:
             self.embedder = PPMissingLayer()
 
-        self.layers = []
+        layers = []
         self.start_layer, self.end_layer = get_start_end_layer(
             self.num_layers,
             get_pp_group().rank_in_group,
             get_pp_group().world_size)
         for i in range(self.start_layer):
-            self.layers.append(PPMissingLayer())
+            layers.append(PPMissingLayer())
 
         for i in range(self.start_layer, self.end_layer):
             # For Llama4-Scout, all layers are MoE layers.
@@ -514,34 +514,38 @@ class Llama4ForCausalLM(nnx.Module):
                             rngs=self.rng,
                             activation_ffw_td=('data', None),
                             ed_sharding=(None, None),
-                            random_init=force_random_weights)
+                            random_init=force_random_weights,
+                            mesh=self.mesh)
 
-            moe_ffw = MoE(
+            moe_ffw = JaxMoE(
                 dtype=dtype,
                 mesh=self.mesh,
                 num_local_experts=self.num_local_experts,
                 apply_expert_weight_before_computation=True,
                 hidden_size=self.hidden_size,
                 intermediate_size_moe=self.intermediate_size_moe,
+                expert_axis_name=None,
+                num_expert_parallelism=1,
                 hidden_act=self.hidden_act,
                 router=router,
                 rngs=self.rng,
                 activation_ffw_td=('data', None),
-                activation_ffw_ted=('data', 'expert', None),
+                activation_ffw_ted=P('data', 'expert', None),
                 edf_sharding=('model', None, None),
                 efd_sharding=('model', None, None),
+                quant_config=vllm_config.quant_config,
                 random_init=force_random_weights) if is_moe_layer else None
 
-            dense_ffw = DenseFFW(
-                dtype=dtype,
-                hidden_act=self.hidden_act,
-                hidden_size=self.hidden_size,
-                intermediate_size=self.intermediate_size_mlp,
-                random_init=force_random_weights,
-                rngs=self.rng,
-                df_sharding=(None, 'model'),
-                fd_sharding=('model', None),
-                activation_ffw_td=('data', None)) if not is_moe_layer else None
+            dense_ffw = DenseFFW(dtype=dtype,
+                                 hidden_act=self.hidden_act,
+                                 hidden_size=self.hidden_size,
+                                 intermediate_size=self.intermediate_size_mlp,
+                                 random_init=force_random_weights,
+                                 rngs=self.rng,
+                                 df_sharding=(None, 'model'),
+                                 fd_sharding=('model', None),
+                                 activation_ffw_td=('data', None),
+                                 mesh=self.mesh) if not is_moe_layer else None
 
             attn = Llama4Attention(
                 hidden_size=self.hidden_size,
@@ -562,11 +566,13 @@ class Llama4ForCausalLM(nnx.Module):
                 attention_chunk_size=None if use_attention_rope else 8192,
                 mesh=self.mesh,
                 random_init=force_random_weights,
-                activation_attention_td=('data', 'model'),
-                activation_q_td=('data', 'model'),
+                activation_attention_td=NamedSharding(self.mesh,
+                                                      P('data', 'model')),
+                activation_q_td=NamedSharding(self.mesh, P('data', 'model')),
                 query_tnh=P('data', 'model', None),
                 keyvalue_skh=P('data', 'model', None),
-                activation_attention_out_td=('data', 'model'),
+                activation_attention_out_td=NamedSharding(
+                    self.mesh, P('data', 'model')),
                 attn_o_tnh=P('data', 'model', None),
                 dnh_sharding=(None, 'model', None),
                 dkh_sharding=(None, 'model', None),
@@ -583,7 +589,8 @@ class Llama4ForCausalLM(nnx.Module):
                 random_init=force_random_weights,
                 df_sharding=(None, 'model'),
                 fd_sharding=('model', None),
-                activation_ffw_td=('data', None)) if is_moe_layer else None
+                activation_ffw_td=('data', None),
+                mesh=self.mesh) if is_moe_layer else None
 
             pre_attention_norm = RMSNorm(
                 dims=self.hidden_size,
@@ -592,7 +599,7 @@ class Llama4ForCausalLM(nnx.Module):
                 rngs=self.rng,
                 with_scale=True,
                 dtype=dtype,
-                activation_ffw_td=('data', None),
+                activation_ffw_td=NamedSharding(self.mesh, P('data', None)),
             )
 
             pre_mlp_norm = RMSNorm(
@@ -602,7 +609,7 @@ class Llama4ForCausalLM(nnx.Module):
                 with_scale=True,
                 dtype=dtype,
                 random_init=force_random_weights,
-                activation_ffw_td=('data', None),
+                activation_ffw_td=NamedSharding(self.mesh, P('data', None)),
             )
 
             block = SharedExpertsTransformerBlock(
@@ -613,11 +620,12 @@ class Llama4ForCausalLM(nnx.Module):
                 pre_attention_norm=pre_attention_norm,
                 pre_mlp_norm=pre_mlp_norm,
                 use_attention_rope=use_attention_rope)
-            self.layers.append(block)
+            layers.append(block)
 
         for i in range(self.end_layer, self.num_layers):
-            self.layers.append(PPMissingLayer())
+            layers.append(PPMissingLayer())
 
+        self.layers = nnx.List(layers)
         if self.is_last_rank:
             self.final_norm = RMSNorm(
                 dims=self.hidden_size,
@@ -626,6 +634,7 @@ class Llama4ForCausalLM(nnx.Module):
                 with_scale=True,
                 dtype=dtype,
                 random_init=force_random_weights,
+                activation_ffw_td=NamedSharding(self.mesh, P()),
             )
             self.lm_head = LMhead(vocab_size=self.vocab_size,
                                   hidden_size=self.hidden_size,

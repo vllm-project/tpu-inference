@@ -15,18 +15,27 @@
 # pipeline-name: DCN-based P/D disaggregation
 # pipeline-type: feature support matrix
 steps:
-  - label: "Correctness tests for DCN-based P/D disaggregation"
-    key: "DCN_based_P-D_disaggregation_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Correctness tests for DCN-based P/D disaggregation"
+    key: "${TPU_VERSION:-tpu6e}_DCN_based_P-D_disaggregation_CorrectnessTest"
     soft_fail: true
+    env:
+      IS_FOR_V7X: "${IS_FOR_V7X}"
+      MODEL: "Qwen/Qwen3-0.6B"
+      INPUT_LEN: 100
+      OUTPUT_LEN: 20
+      NUM_PROMPTS: 20
+      TEST_MODE: 2 # only run correctness test
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "DCN_based_P-D_disaggregation_CorrectnessTest" "unverified"
-  - label: "Record correctness test result for DCN-based P/D disaggregation"
-    key: "record_DCN_based_P-D_disaggregation_CorrectnessTest"
-    depends_on: "DCN_based_P-D_disaggregation_CorrectnessTest"
+        .buildkite/scripts/run_disagg.sh
+
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for DCN-based P/D disaggregation"
+    key: "${TPU_VERSION:-tpu6e}_record_DCN_based_P-D_disaggregation_CorrectnessTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_DCN_based_P-D_disaggregation_CorrectnessTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "DCN-based P/D disaggregation"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "feature support matrix"
@@ -34,28 +43,31 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh DCN_based_P-D_disaggregation_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_DCN_based_P-D_disaggregation_CorrectnessTest
 
-  - label: "Performance tests for DCN-based P/D disaggregation"
-    key: "DCN_based_P-D_disaggregation_PerformanceTest"
+  - label: "${TPU_VERSION:-tpu6e} Performance tests for DCN-based P/D disaggregation"
+    key: "${TPU_VERSION:-tpu6e}_DCN_based_P-D_disaggregation_PerformanceTest"
     soft_fail: true
     env:
-      MODEL:"Qwen/Qwen3-0.6B"
-      INPUT_LEN:1024
-      OUTPUT_LEN:1024
-      NUM_PROMPTS:20
-      RANDOM_SEED:10
-      MAX_CONCURRENCY:1
+      IS_FOR_V7X: "${IS_FOR_V7X}"
+      MODEL: "Qwen/Qwen3-0.6B"
+      INPUT_LEN: 1024
+      OUTPUT_LEN: 1024
+      NUM_PROMPTS: 20
+      RANDOM_SEED: 10
+      MAX_CONCURRENCY: 1
+      TEST_MODE: 1 # only run performance test
     agents:
-      queue: tpu_v6e_8_queue
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     commands:
       - |
         .buildkite/scripts/run_disagg.sh
 
-  - label: "Record performance test result for DCN-based P/D disaggregation"
-    key: "record_DCN_based_P-D_disaggregation_PerformanceTest"
-    depends_on: "DCN_based_P-D_disaggregation_PerformanceTest"
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for DCN-based P/D disaggregation"
+    key: "${TPU_VERSION:-tpu6e}_record_DCN_based_P-D_disaggregation_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_DCN_based_P-D_disaggregation_PerformanceTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "DCN-based P/D disaggregation"
       CI_STAGE: "PerformanceTest"
       CI_CATEGORY: "feature support matrix"
@@ -63,4 +75,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh DCN_based_P-D_disaggregation_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_DCN_based_P-D_disaggregation_PerformanceTest

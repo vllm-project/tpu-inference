@@ -272,15 +272,16 @@ class LlamaModel(nnx.Module):
         else:
             self.embed = PPMissingLayer()
 
-        self.start_layer, self.end_layer, self.layers = make_layers(
+        self.start_layer, self.end_layer, layers = make_layers(
             hf_config.num_hidden_layers,
-            lambda: LlamaDecoderLayer(
+            lambda _: LlamaDecoderLayer(
                 config=hf_config,
                 dtype=dtype,
                 rng=rng,
                 mesh=mesh,
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype))
+        self.layers = nnx.List(layers)
         if self.is_last_rank:
             self.norm = nnx.RMSNorm(
                 hidden_size,

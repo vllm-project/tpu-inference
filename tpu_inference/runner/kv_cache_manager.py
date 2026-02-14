@@ -230,6 +230,9 @@ class KVCacheManager:
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         self.maybe_reinitialize_input_batch(kv_cache_config)
 
+        # There will be no KV cache for pooling models.
+        if not kv_cache_config.kv_cache_groups:
+            return
         # uniform page size.
         representative_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
         page_size_bytes = representative_spec.page_size_bytes

@@ -78,7 +78,13 @@ def get_version():
     # TODO: Temporary workaround. The v7x requirements will be consolidated, and this block will be removed,
     # once the JAX package fix is released, since v6e/v7x differentiation will no longer be required.
     if os.getenv("IS_FOR_V7X", "true").lower() == "false":
-        version = f"{version}.post6"
+        if "dev" in version:
+            # nightly release: 0.13.2.dev20260211 -> 0.13.2.post6.dev20260211 (fit PEP 440)
+            version = version.replace(".dev", ".post6.dev")
+        else:
+            # formal release: 0.13.2 -> 0.13.2.post6
+            # rc release: 0.13.2rc4 -> 0.13.2rc4.post6
+            version = f"{version}.post6"
 
     return version
 
@@ -106,4 +112,9 @@ setup(
         "Programming Language :: Python :: 3.12",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
+    entry_points={
+        "vllm.general_plugins": [
+            "tpu_quantization_configs = tpu_inference.layers.vllm.quantization:register_tpu_quantization_configs",
+        ],
+    },
 )

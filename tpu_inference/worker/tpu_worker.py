@@ -8,7 +8,6 @@ from typing import Callable, Dict, Optional, Tuple
 import jax
 import jaxlib
 import jaxtyping
-import vllm.envs as vllm_envs
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
                                           has_kv_transfer_group)
@@ -50,7 +49,11 @@ class PPConfig:
     default_tpu_visible_chips: str = field(init=False)
 
     def __post_init__(self):
-        self.default_tpu_process_bounds = f"1,{self.pp_world_size},1"
+        # In the isolated stage architecture, each pipeline stage operates
+        # as an independent JAX cluster.
+        # For single-host PP or multi-host with one host per stage,
+        # the cluster size for each stage is 1.
+        self.default_tpu_process_bounds = "1,1,1"
         self.default_tpu_chips_per_process_bounds = "1,1,1"
         self.default_tpu_visible_chips = f"{self.rank}"
 
@@ -94,18 +97,20 @@ class TPUWorker:
         # TPU Worker is initialized. The profiler server needs to start after
         # MP runtime is initialized.
         self.profile_dir = None
-        if vllm_envs.VLLM_TORCH_PROFILER_DIR and self.rank < 1 and self.pp_config.pp_world_size == 1:
+        self.vllm_config.profiler_config
+        profiler_config = self.vllm_config.profiler_config
+        if profiler_config.profiler == "torch" and self.rank < 1 and self.pp_config.pp_world_size == 1:
             if not self.devices or 0 in self.device_ranks:
                 # For TPU, we can only have 1 active profiler session for 1 profiler
                 # server. So we only profile on rank0.
-                self.profile_dir = vllm_envs.VLLM_TORCH_PROFILER_DIR
+                self.profile_dir = profiler_config.torch_profiler_dir
                 logger.info("Profiling enabled. Traces will be saved to: %s",
                             self.profile_dir)
 
         # For PP, we use MPMD so we want to profile every worker.
-        if self.pp_config.pp_world_size > 1 and vllm_envs.VLLM_TORCH_PROFILER_DIR:
+        if self.pp_config.pp_world_size > 1 and profiler_config.profiler == "torch":
             self.profile_dir = os.path.join(
-                vllm_envs.VLLM_TORCH_PROFILER_DIR,
+                profiler_config.torch_profiler_dir,
                 f"pprank_{self.rank}_ppworldsize_{self.pp_config.pp_world_size}"
             )
             os.makedirs(self.profile_dir, exist_ok=True)

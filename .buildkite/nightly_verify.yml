@@ -15,14 +15,8 @@
 x-run-condition: &run-on-nightly-or-tag
   if: build.env("NIGHTLY") == "1" || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/
 
-notify:
-  - email: "ullm-test-notifications-external@google.com"
-    if: build.state == "failed" && build.branch == "main"
-  - slack: "vllm#tpu-ci-notifications"
-    if: build.state == "failed" && build.branch == "main"
-
 steps:
-   - label: "Upload Tests for Models & Features"
+   - label: "Upload Tests for Models & Features (${MODEL_IMPL_TYPE:-auto})"
      <<: *run-on-nightly-or-tag
      agents:
        queue: cpu
@@ -32,19 +26,40 @@ steps:
    - wait: ~
      continue_on_failure: true  # ensure we still generate support matrices even if some tests fail
 
-   - label: "Generate support matrices"
+   - label: "v6 Generate support matrices"
      <<: *run-on-nightly-or-tag
-     key: generate_support_matrices
-     agents:
-       queue: cpu
-     soft_fail: true
-     commands:
-       - bash .buildkite/scripts/generate_support_matrices.sh
+     key: "v6_generate_matrices"
+     allow_dependency_failure: true 
+     agents: { queue: cpu }
+     env:
+       TPU_VERSION: "v6"
+     command: |
+      if [ "$(buildkite-agent meta-data get run_v6_matrix --default 'false')" = "true" ]; then
+          bash .buildkite/scripts/generate_support_matrices.sh
+        else
+          echo "--- Skipping v6 matrix generation (No v6 test data found)"
+        fi
 
+   - label: "v7 Generate support matrices"
+     <<: *run-on-nightly-or-tag
+     key: "v7_generate_matrices"
+     allow_dependency_failure: true 
+     agents: { queue: cpu }
+     env:
+      TPU_VERSION: "v7"
+     command: |
+      if [ "$(buildkite-agent meta-data get run_v7_matrix --default 'false')" = "true" ]; then
+        bash .buildkite/scripts/generate_support_matrices.sh
+      else
+        echo "--- Skipping v7 matrix generation (No v7 test data found)"
+      fi
+  
    - label: "Commit support matrices if is nightly build or release tag specified"
      <<: *run-on-nightly-or-tag
      key: commit_support_matrices
-     depends_on: generate_support_matrices
+     depends_on:
+       - "v6_generate_matrices"
+       - "v7_generate_matrices"
      agents:
        queue: cpu
      secrets:
@@ -66,7 +81,8 @@ steps:
      key: record_verified_commit_hashes
      depends_on:
        - notify_test_results
-       - tpu_test_notification
+       - tpu6e_tpu_test_notification
+       - tpu7x_tpu_test_notification
      agents:
        queue: cpu
      secrets:

@@ -16,8 +16,6 @@ import os
 import unittest
 from dataclasses import dataclass, field
 
-import chex
-
 os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=8'
 
 import jax
@@ -124,11 +122,12 @@ class Llama4AttentionTest(unittest.TestCase):
                 dtype=jnp.bfloat16)
             output = llama4_attention.apply_temperature_tuning(
                 attention_metadata, input_arr_TNH)
-            chex.assert_shape(output, (seq_len, num_attention_heads, head_dim))
+            self.assertEqual(output.shape,
+                             (seq_len, num_attention_heads, head_dim))
 
             expected_output = jnp.ones_like(
                 input_arr_TNH) * expected_scales[:, None, None]
-            chex.assert_trees_all_close(output, expected_output, atol=1e-3)
+            self.assertTrue(jnp.allclose(output, expected_output, atol=1e-3))
 
 
 if __name__ == "__main__":

@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
 import jax.numpy as jnp
 import torch
 import vllm.envs as vllm_envs
-from tpu_info import device
 from vllm.platforms.interface import Platform, PlatformEnum
 
 from tpu_inference import envs
@@ -48,9 +47,15 @@ class TpuPlatform(Platform):
     ]
 
     additional_env_vars: list[str] = [
-        "PHASED_PROFILING_DIR", "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS",
-        "TPU_MULTIHOST_BACKEND", "VLLM_MLA_DISABLE", "TPU_BACKEND_TYPE",
-        "NEW_MODEL_DESIGN"
+        "PHASED_PROFILING_DIR",
+        "TPU_CHIPS_PER_HOST_BOUNDS",
+        "TPU_HOST_BOUNDS",
+        "TPU_MULTIHOST_BACKEND",
+        "VLLM_MLA_DISABLE",
+        "TPU_BACKEND_TYPE",
+        "NEW_MODEL_DESIGN",
+        "MODEL_IMPL_TYPE",
+        "VLLM_DISABLE_SHARED_EXPERTS_STREAM",
     ]
 
     @classmethod
@@ -75,6 +80,12 @@ class TpuPlatform(Platform):
                 # Causes mutliprocess accessing IFRT when calling jax.devices()
                 return "TPU v6 lite"
             else:
+                # The tpu_info package, upon being imported, executes
+                # _initialize_libtpu_safely(), which attempts to start a new
+                # process (process.start()). Python's multiprocessing module
+                # forbids starting new processes, resulting in error.
+                # So import tpu_info here instead.
+                from tpu_info import device
                 chip_type, _ = device.get_local_chips()
                 return f"TPU {chip_type.name}"
         except Exception as e:
@@ -135,11 +146,6 @@ class TpuPlatform(Platform):
 
         from vllm.config import CompilationMode
 
-        cache_config = vllm_config.cache_config
-        # For v0, the default block size is 16.
-        if cache_config and cache_config.block_size is None:
-            cache_config.block_size = cast(BlockSize, 16)
-
         compilation_config = vllm_config.compilation_config
 
         # TPU only supports DYNAMO_TRACE_ONCE compilation level
@@ -150,20 +156,26 @@ class TpuPlatform(Platform):
         if compilation_config.backend == "":
             compilation_config.backend = "openxla"
 
-        if vllm_config.model_config:
-            from tpu_inference.layers.vllm.attention import \
-                PallasAttentionBackend
-            cache_config.block_size = PallasAttentionBackend.get_page_size(
-                vllm_config)  # type: ignore[assignment]
-            min_page_size = PallasAttentionBackend.get_min_page_size(
-                vllm_config)
-            if min_page_size > cache_config.block_size:
-                logger.warning(
-                    "Increase the page size from %s to %s to avoid SMEM OOM",
-                    cache_config.block_size,
-                    min_page_size,
-                )
-                cache_config.block_size = min_page_size  # type: ignore[assignment]
+        cache_config = vllm_config.cache_config
+        # For v0, the default block size is 16.
+        if cache_config and cache_config.block_size is None:
+            cache_config.block_size = cast(BlockSize, 16)
+            if vllm_config.model_config:
+                from tpu_inference.layers.vllm.attention import \
+                    PallasAttentionBackend
+                cache_config.block_size = PallasAttentionBackend.get_page_size(
+                    vllm_config)  # type: ignore[assignment]
+                min_page_size = PallasAttentionBackend.get_min_page_size(
+                    vllm_config)
+                if min_page_size > cache_config.block_size:
+                    logger.warning(
+                        "Increase the page size from %s to %s to avoid SMEM OOM",
+                        cache_config.block_size,
+                        min_page_size,
+                    )
+                    cache_config.block_size = min_page_size  # type: ignore[assignment]
+            logger.info(
+                f"Using KV cache block size: {cache_config.block_size}")
 
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config

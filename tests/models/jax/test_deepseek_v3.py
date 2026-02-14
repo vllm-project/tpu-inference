@@ -30,7 +30,9 @@ from vllm.config import ModelConfig
 import tpu_inference.kernels.mla.v1.kernel as mla
 from tpu_inference.layers.common.attention_interface import get_kv_cache_shape
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.sharding import (ShardingAxisName,
+                                                  ShardingAxisNameBase)
+from tpu_inference.layers.jax.moe.moe import MoEBackend
 from tpu_inference.models.jax.deepseek_v3 import (DeepSeekV3,
                                                   DeepseekV3Attention,
                                                   DeepseekV3MLA,
@@ -91,10 +93,11 @@ def mesh():
         pytest.skip("No JAX devices available.")
     devices = np.array(jax.local_devices())
     num_devices = len(devices)
-    device_mesh = devices.reshape((num_devices, 1, 1, 1))
+    device_mesh = devices.reshape((num_devices, 1, 1, 1, 1))
     # Simplify axis names for testing
     with Mesh(device_mesh,
-              axis_names=('data', 'attn_dp', 'model', 'expert')) as m:
+              axis_names=('data', 'attn_dp', 'attn_dp_expert', 'model',
+                          'expert')) as m:
         yield m
 
 
@@ -112,14 +115,17 @@ class TestDeepSeekV3:
 
     def test_init(self, mock_config, rng, mesh):
         """Tests if the model initializes with the correct hierarchy."""
-        model = DeepSeekV3(mock_config, rng, mesh)
-        assert len(model.layers) == 1
-        assert isinstance(model.embedder, nnx.Module)
-        assert model.vllm_config.model_config.hf_config.num_hidden_layers == 1
+        with patch("tpu_inference.models.jax.deepseek_v3.ShardingAxisName",
+                   ShardingAxisNameBase), jax.set_mesh(mesh):
+            model = DeepSeekV3(mock_config, rng, mesh)
+            assert len(model.layers) == 1
+            assert isinstance(model.embedder, nnx.Module)
+            assert model.vllm_config.model_config.hf_config.num_hidden_layers == 1
 
     def test_random_weights(self, mock_config, rng, mesh):
         """Tests that force_random_weights initializes non-zero weights."""
-        with jax.set_mesh(mesh):
+        with patch("tpu_inference.models.jax.deepseek_v3.ShardingAxisName",
+                   ShardingAxisNameBase), jax.set_mesh(mesh):
             model = DeepSeekV3(mock_config,
                                rng,
                                mesh,
@@ -137,11 +143,13 @@ class TestDeepSeekV3:
     )
     def test_load_weights_called(self, mock_weights_generator, mock_loader_cls,
                                  mock_config, rng, mesh):
-        model = DeepSeekV3(mock_config, rng, mesh)
+        with patch("tpu_inference.models.jax.deepseek_v3.ShardingAxisName",
+                   ShardingAxisNameBase), jax.set_mesh(mesh):
+            model = DeepSeekV3(mock_config, rng, mesh)
 
-        model.load_weights(rng)
+            model.load_weights(rng)
 
-        model.weight_loader.load_weights.assert_called_once_with(model)
+            model.weight_loader.load_weights.assert_called_once_with(model)
 
 
 class TestDeepSeekV3WeightLoader:
@@ -162,16 +170,17 @@ class TestDeepSeekV3WeightLoader:
                                           qk_rope_head_dim=64,
                                           v_head_dim=128,
                                           num_local_experts=256,
+                                          moe_backend=MoEBackend.DENSE_MAT,
                                           model_dtype=jnp.bfloat16)
 
     @pytest.mark.parametrize("loaded_key, expected_mapped", [
         ("model.embed_tokens.weight", "embedder.input_embedding_table_VD"),
         ("model.layers.0.self_attn.q_a_proj.weight",
-         "layers.0.self_attn.kernel_q_down_proj_DA"),
+         "layers.0.self_attn.q_down_proj.weight"),
         ("model.layers.5.mlp.experts.10.gate_proj.weight",
          "layers.5.custom_module.experts.kernel_gating_EDF"),
         ("model.layers.1.mlp.shared_experts.down_proj.weight",
-         "layers.1.custom_module.shared_experts.kernel_down_proj_FD"),
+         "layers.1.custom_module.shared_experts.down_proj.weight"),
         ("model.norm.weight", "final_norm.scale"),
     ])
     def test_key_mapping(self, loader, loaded_key, expected_mapped):
@@ -240,7 +249,7 @@ class TestDeepSeekV3WeightLoader:
 
     def test_load_individual_weight_with_mxfp4(self, loader, mesh):
         """Tests the logic for unpacking MXFP4 weights."""
-        name = "layers.0.self_attn.kernel_q_down_proj_DA"
+        name = "layers.0.self_attn.q_down_proj.weight"
         # Mocking torch tensor as uint8 (packed fp4)
         expected_weight_shape = (128, 128)  # Unpacked
         expected_scale_shape = (128, 1)
@@ -257,8 +266,10 @@ class TestDeepSeekV3WeightLoader:
         mock_params = {
             "layers": {
                 "0": {
-                    "sefl_attn": {
-                        "kernel_q_down_proj_DA": mock_var
+                    "self_attn": {
+                        "q_down_proj": {
+                            "weight": mock_var
+                        }
                     }
                 }
             }
@@ -318,7 +329,7 @@ class TestDeepSeekV3WeightLoader:
         Tests the logic for loading 'unpacked' weights (e.g., standard FP8).
         This verifies the branch that uses DTYPE_VIEW_MAP for raw memory conversion.
         """
-        name = "layers.0.self_attn.kernel_q_down_proj_DA"
+        name = "layers.0.self_attn.q_down_proj.weight"
 
         # 1. Setup a standard 'unpacked' FP8 torch tensor
         # DeepSeek V3 weights are often float8_e4m3fn
@@ -332,7 +343,9 @@ class TestDeepSeekV3WeightLoader:
             "layers": {
                 "0": {
                     "self_attn": {
-                        "kernel_q_down_proj_DA": mock_var
+                        "q_down_proj": {
+                            "weight": mock_var
+                        }
                     }
                 }
             }
@@ -369,7 +382,7 @@ class TestDeepSeekV3WeightLoader:
         """
         Tests loading an unpacked weight that also has a quantization scale.
         """
-        name = "layers.0.custom_module.kernel_gating_DF"
+        name = "layers.0.custom_module.gating_proj.weight"
         weight_shape = (64, 128)
         scale_shape = (64, 1)
 
@@ -382,7 +395,9 @@ class TestDeepSeekV3WeightLoader:
             "layers": {
                 "0": {
                     "custom_module": {
-                        "kernel_gating_DF": mock_var
+                        "gating_proj": {
+                            "weight": mock_var
+                        }
                     }
                 }
             }
@@ -445,6 +460,7 @@ class TestDeepSeekV3NativeFP8:
                                           v_head_dim=32,
                                           num_local_experts=8,
                                           model_dtype=jnp.bfloat16,
+                                          moe_backend=MoEBackend.DENSE_MAT,
                                           use_mla_kernel=True)
 
     def test_native_fp8_initialization(self, fp8_loader):
@@ -458,7 +474,7 @@ class TestDeepSeekV3NativeFP8:
         Tests the logic where the scale is repeated when scale dimension matches
         block dimension logic but is smaller than weight dimension.
         """
-        name = "layers.0.custom_module.kernel_gating_DF"
+        name = "layers.0.custom_module.gating_proj.weight"
 
         # Weight Dim 0: 256. Block size: 128. 256 // 128 = 2.
         # Scale Dim 0: 1.
@@ -478,7 +494,9 @@ class TestDeepSeekV3NativeFP8:
             "layers": {
                 "0": {
                     "custom_module": {
-                        "kernel_gating_DF": mock_var
+                        "gating_proj": {
+                            "weight": mock_var
+                        }
                     }
                 }
             }
@@ -615,9 +633,10 @@ class TestDeepseekV3Attention(unittest.TestCase):
         with jax.set_mesh(self.mesh):
             query_tnh_spec = PartitionSpec(None, ShardingAxisName.MLP_TENSOR,
                                            None)
-            keyvalue_skh_spec = PartitionSpec(None,
-                                              ShardingAxisName.MLP_TENSOR,
-                                              None)
+            keyvalue_skh_spec = PartitionSpec(
+                None,
+                ShardingAxisName.MLP_TENSOR,
+            )
             attn_o_tnh_spec = PartitionSpec(None, ShardingAxisName.MLP_TENSOR,
                                             None)
 
@@ -651,10 +670,10 @@ class TestDeepseekV3Attention(unittest.TestCase):
                 query_tnh=query_tnh_spec,
                 keyvalue_skh=keyvalue_skh_spec,
                 attn_o_tnh=attn_o_tnh_spec,
-                q_da_sharding=(None, ShardingAxisName.VOCAB),
-                ap_sharding=(None, ShardingAxisName.MLP_TENSOR),
-                kv_da_sharding=(None, ShardingAxisName.VOCAB),
-                rd_sharding=(ShardingAxisName.MLP_TENSOR, None),
+                q_da_sharding=PartitionSpec(None, ShardingAxisName.VOCAB),
+                ap_sharding=PartitionSpec(None, ShardingAxisName.MLP_TENSOR),
+                kv_da_sharding=PartitionSpec(None, ShardingAxisName.VOCAB),
+                rd_sharding=PartitionSpec(ShardingAxisName.MLP_TENSOR, None),
             )
 
             seq_len = 32
@@ -680,10 +699,7 @@ class TestDeepseekV3Attention(unittest.TestCase):
             mha_layer.rope.initialize_cache(self.mesh)
 
             new_kv_cache, output = mha_layer(
-                x,
-                is_prefill=True,
-                kv_cache=kv_cache,
-                attention_metadata=attention_metadata)
+                x, kv_cache=kv_cache, attention_metadata=attention_metadata)
 
             self.assertEqual(output.shape, (seq_len, hidden_size))
             self.assertEqual(new_kv_cache.shape, kv_cache.shape)
@@ -772,7 +788,6 @@ class TestDeepseekV3Attention(unittest.TestCase):
             model.rope.initialize_cache(self.mesh)
 
             new_kv_cache, output = model(x,
-                                         is_prefill=True,
                                          kv_cache=kv_cache,
                                          attention_metadata=attention_metadata)
 

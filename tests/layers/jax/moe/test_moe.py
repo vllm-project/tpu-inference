@@ -20,8 +20,12 @@ import numpy as np
 from flax import nnx
 from jax.sharding import Mesh, PartitionSpec
 
-from tpu_inference.layers.jax.moe.moe import MoE, Router
-from tpu_inference.layers.jax.moe.utils import MoEBackend
+from tpu_inference.layers.jax.moe.moe import JaxMoE, Router
+from tpu_inference.layers.jax.moe.utils import (MoEBackend,
+                                                get_expert_parallelism)
+from tpu_inference.layers.jax.quantization.unquantized import UnquantizedConfig
+
+EXPERT_AXIS_NAME = "model"
 
 
 class TestMoE(unittest.TestCase):
@@ -30,7 +34,7 @@ class TestMoE(unittest.TestCase):
         """Set up a multi-device mesh for testing."""
         devices = jax.devices()
         self.device_count = len(devices)
-        if self.device_count < 8:
+        if self.device_count < 2:
             self.skipTest("This test requires at least 8 simulated devices.")
 
         # This mesh will have a 'model' axis for expert parallelism
@@ -45,18 +49,21 @@ class TestMoE(unittest.TestCase):
 
         # --- Model Configuration ---
         self.B, self.S, self.D = 2, 8, 32  # Batch, Sequence, Hidden Dim
-        self.E, self.K = 8, 2  # Num Experts (Total), Experts per Token
+        self.E, self.K = self.device_count, 2  # Num Experts (Total), Experts per Token
         self.moe_intermediate_size = 64
         self.dtype = jnp.bfloat16
         self.key = jax.random.PRNGKey(42)
 
         # Input data
-        self.x = jax.random.normal(self.key, (self.B * self.S, self.D),
-                                   dtype=self.dtype)
+        with jax.set_mesh(self.mesh):
+            self.x = jax.random.normal(self.key, (self.B * self.S, self.D),
+                                       dtype=self.dtype)
 
-    def _create_moe(self, backend: MoEBackend):
+    def _create_moe(self,
+                    backend: MoEBackend,
+                    apply_expert_weight_before_computation: bool = False):
         """Helper to instantiate the MoE layer within the mesh context."""
-        with self.mesh:
+        with jax.set_mesh(self.mesh):
             router = Router(
                 dtype=self.dtype,
                 hidden_size=self.D,
@@ -64,11 +71,17 @@ class TestMoE(unittest.TestCase):
                 num_experts_per_tok=self.K,
                 router_act="softmax",  # Standard softmax routing
                 rngs=nnx.Rngs(self.key),
-                activation_ffw_td=PartitionSpec('data', 'model'),
-                ed_sharding=PartitionSpec(None, 'model'),
-                moe_backend=backend)
+                activation_ffw_td=('data', 'model'),
+                ed_sharding=(None, 'model'),
+                moe_backend=backend,
+                mesh=self.mesh)
+            num_expert_parallelism = get_expert_parallelism(
+                EXPERT_AXIS_NAME, self.mesh)
+            assert num_expert_parallelism == self.device_count
+            use_ep = num_expert_parallelism > 1
+            assert use_ep
 
-            moe = MoE(
+            moe = JaxMoE(
                 dtype=self.dtype,
                 num_local_experts=self.E,
                 hidden_size=self.D,
@@ -84,10 +97,14 @@ class TestMoE(unittest.TestCase):
                 edf_sharding=PartitionSpec('model', None,
                                            None),  # Expert par on axis 0
                 efd_sharding=PartitionSpec('model', None, None),
-                apply_expert_weight_before_computation=False,
+                apply_expert_weight_before_computation=
+                apply_expert_weight_before_computation,
                 moe_backend=backend,
                 num_experts_per_tok=self.K,
-            )
+                expert_axis_name='model',
+                num_expert_parallelism=num_expert_parallelism,
+                # TODO (jacobplatin): we shouldn't hardcode this
+                quant_config=UnquantizedConfig({}))
         return moe
 
     def _compute_ground_truth(self, moe_instance, x_input):
@@ -151,49 +168,46 @@ class TestMoE(unittest.TestCase):
 
     def test_dense_backend_correctness(self):
         """Verifies the DENSE_MAT backend against the sequential ground truth."""
-        moe = self._create_moe(MoEBackend.DENSE_MAT)
+        for apply_expert_weight_before_computation in [False, True]:
+            moe = self._create_moe(MoEBackend.DENSE_MAT,
+                                   apply_expert_weight_before_computation=
+                                   apply_expert_weight_before_computation)
 
-        with self.mesh:
+        with jax.set_mesh(self.mesh):
             actual_output = moe(self.x)
 
-        expected_output = self._compute_ground_truth(moe, self.x)
-
-        # Dense matmul should be very numerically close
-        self.assertTrue(
-            jnp.allclose(actual_output, expected_output, atol=1e-2, rtol=1e-2),
-            "Dense backend output does not match ground truth.")
-
-    def test_sparse_distributed_backend_correctness_ragged_dot(self):
-        """
-        Verifies the RAGGED_DOT (Sparse) backend with expert parallelism
-        against the sequential ground truth.
-        """
-        # 1. Instantiate MoE with RAGGED_DOT backend
-        # TODO: add MoEBackend.FUSED_MOE, MoEBackend.VLLM_MOE
-        for backend in [MoEBackend.RAGGED_DOT, MoEBackend.MEGABLX_GMM]:
-            moe = self._create_moe(backend)
-
-            # 2. Run Forward Pass (Distributed)
-            # The __call__ invokes shard_map internally for RAGGED_DOT
-            with self.mesh:
-                actual_output = moe(self.x)
-
-            # 3. Compute Ground Truth using the exact same weights
-            # (Weights are pulled from the initialized model)
             expected_output = self._compute_ground_truth(moe, self.x)
 
-            # 4. Compare
-            # Due to permutation re-ordering and potential float precision diffs
-            # in different kernels, we allow a small tolerance.
-            diff = jnp.mean(jnp.abs(actual_output - expected_output))
-
+            # Dense matmul should be very numerically close
             self.assertTrue(
                 jnp.allclose(actual_output,
                              expected_output,
-                             atol=5e-2,
-                             rtol=5e-2),
-                f"Sparse distributed output mismatch for backebd tyoe {backend}. Mean diff: {diff}"
-            )
+                             atol=1e-2,
+                             rtol=1e-2),
+                "Dense backend output does not match ground truth.")
+
+    def test_sparse_distributed_backend_correctness(self):
+        """
+        Verifies the Sparse backends with expert parallelism
+        against the sequential ground truth.
+        """
+        # TODO: add MoEBackend.FUSED_MOE, MoEBackend.GMM_TP/GMM_EP
+        backend = MoEBackend.MEGABLX_GMM
+        moe = self._create_moe(backend)
+
+        # Run Forward Pass (Distributed)
+        with jax.set_mesh(self.mesh):
+            actual_output = moe(self.x)
+
+        # Compute Ground Truth using the exact same weights
+        expected_output = self._compute_ground_truth(moe, self.x)
+
+        diff = jnp.mean(jnp.abs(actual_output - expected_output))
+
+        self.assertTrue(
+            jnp.allclose(actual_output, expected_output, atol=5e-2, rtol=5e-2),
+            f"Sparse distributed output mismatch for backebd tyoe {backend}. Mean diff: {diff}"
+        )
 
     def test_backend_consistency(self):
         """
@@ -205,13 +219,13 @@ class TestMoE(unittest.TestCase):
 
         # 1. Run Dense
         moe_dense = self._create_moe(MoEBackend.DENSE_MAT)
-        with self.mesh:
+        with jax.set_mesh(self.mesh):
             out_dense = moe_dense(self.x)
 
         # 2. Run Sparse
         # We must re-init with same key to get same weights
         moe_sparse = self._create_moe(MoEBackend.MEGABLX_GMM)
-        with self.mesh:
+        with jax.set_mesh(self.mesh):
             out_sparse = moe_sparse(self.x)
 
         self.assertTrue(

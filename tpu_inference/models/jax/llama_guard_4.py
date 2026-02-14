@@ -242,14 +242,14 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         else:
             self.embedder = PPMissingLayer()
 
-        self.layers = []
+        layers = []
         self.start_layer, self.end_layer = get_start_end_layer(
             self.num_layers,
             get_pp_group().rank_in_group,
             get_pp_group().world_size)
 
         for i in range(self.start_layer):
-            self.layers.append(PPMissingLayer())
+            layers.append(PPMissingLayer())
 
         for i in range(self.start_layer, self.end_layer):
             use_attention_rope = True
@@ -262,7 +262,8 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                                      rngs=self.rng,
                                      df_sharding=P(None, 'model'),
                                      fd_sharding=P('model', None),
-                                     activation_ffw_td=P('data', None))
+                                     activation_ffw_td=('data', None),
+                                     mesh = self.mesh)
 
             attn = Llama4Attention(
                 hidden_size=self.hidden_size,
@@ -292,11 +293,11 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                 attention_chunk_size=None if use_attention_rope else 8192,
                 mesh=self.mesh,
                 random_init=force_random_weights,
-                activation_attention_td=('data', 'model'),
-                activation_q_td=('data', 'model'),
+                activation_attention_td=P('data', 'model'),
+                activation_q_td=P('data', 'model'),
                 query_tnh=P('data', 'model', None),
                 keyvalue_skh=P('data', 'model', None),
-                activation_attention_out_td=('data', 'model'),
+                activation_attention_out_td=P('data', 'model'),
                 attn_o_tnh=P('data', 'model', None),
                 dnh_sharding=(None, 'model', None),
                 dkh_sharding=(None, 'model', None),
@@ -308,14 +309,14 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                 random_init=force_random_weights,
                 epsilon=rms_norm_eps,
                 rngs=self.rng,
-                activation_ffw_td=('data', None),
+                activation_ffw_td=P('data', None),
                 with_scale=True,
                 dtype=self.dtype,
             )
 
             pre_mlp_norm = RMSNorm(
                 dims=self.hidden_size,
-                activation_ffw_td=('data', None),
+                activation_ffw_td=P('data', None),
                 epsilon=rms_norm_eps,
                 rngs=self.rng,
                 with_scale=True,
@@ -328,10 +329,12 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                                      pre_attention_norm=pre_attention_norm,
                                      pre_mlp_norm=pre_mlp_norm,
                                      use_attention_rope=use_attention_rope)
-            self.layers.append(block)
+            layers.append(block)
 
         for i in range(self.end_layer, self.num_layers):
-            self.layers.append(PPMissingLayer())
+            layers.append(PPMissingLayer())
+
+        self.layers = nnx.List(layers)
 
         if self.is_last_rank:
             self.final_norm = RMSNorm(

@@ -35,6 +35,7 @@ DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS = 512
 DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS = 256
 DEFAULT_MAX_NUM_BLOCKS_PER_REQ = 16
 
+# TODO (#1680): remove once FP8 linear support lands
 DEFAULT_DEEPSEEK_FP8_CONFIG = {
     "qwix": {
         "use_abstract_model":
@@ -55,6 +56,7 @@ DEFAULT_DEEPSEEK_FP8_CONFIG = {
     }
 }
 
+# TODO (#1680): remove once FP8 linear support lands
 DEFAULT_DEEPSEEK_FP4_MLP_MOE_FP8_ATTN_CONFIG = {
     "qwix": {
         "use_abstract_model":
@@ -614,8 +616,10 @@ def get_random_sharded_array(key: PRNGKey, mesh: Mesh, param: nnx.Param,
         return weight[index]
 
     try:
+        # new flax version use eager sharding which makes param.sharding a NamedSharding rather than a PartitionSpec
         sharded_array = jax.make_array_from_callback(
-            param_shape, NamedSharding(mesh, P(*param.sharding)), get_slice)
+            param_shape, NamedSharding(mesh, P(*param.sharding.spec)),
+            get_slice)
     except (ValueError, TypeError):
         logger.warning(
             f"Could not create sharded scale for {param_name} with shape {param_shape} and sharding {param.sharding}, skipping sharding..."
