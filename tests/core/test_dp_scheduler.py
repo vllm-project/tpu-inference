@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from vllm.config import VllmConfig
+from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -90,8 +91,8 @@ class TestDPScheduler:
                 assert len(scheduler.processes) == 2
                 assert len(scheduler.input_queues) == 2
                 # output_queues is a dict with (rank, command) tuple keys
-                # 2 ranks × 15 commands (SchedulerCommand enum)
-                assert len(scheduler.output_queues) == 30
+                # 2 ranks × 17 commands (SchedulerCommand enum)
+                assert len(scheduler.output_queues) == 34
                 assert scheduler.log_stats is True
                 assert len(scheduler.per_rank_kv_cache_configs) == 2
 
@@ -701,6 +702,138 @@ class TestDPScheduler:
                     (SchedulerCommand.RESET_ENCODER_CACHE, None))
                 scheduler.input_queues[1].put.assert_called_with(
                     (SchedulerCommand.RESET_ENCODER_CACHE, None))
+
+    def test_set_pause_state(self, mock_vllm_config, mock_kv_cache_config,
+                             mock_structured_output_manager):
+        """Test set_pause_state sends SET_PAUSE_STATE command to all workers."""
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
+            with patch('multiprocessing.get_context'):
+                scheduler = DPScheduler(
+                    vllm_config=mock_vllm_config,
+                    kv_cache_config=mock_kv_cache_config,
+                    structured_output_manager=mock_structured_output_manager,
+                    block_size=16,
+                )
+
+                scheduler.input_queues = [MagicMock(), MagicMock()]
+
+                mock_queue_0 = MagicMock()
+                mock_queue_0.get.return_value = None
+                mock_queue_1 = MagicMock()
+                mock_queue_1.get.return_value = None
+
+                scheduler.output_queues = {
+                    (0, "set_pause_state"): mock_queue_0,
+                    (1, "set_pause_state"): mock_queue_1,
+                }
+
+                scheduler.set_pause_state(PauseState.PAUSED_ALL)
+
+                # Verify SET_PAUSE_STATE commands were sent to all ranks
+                scheduler.input_queues[0].put.assert_called_with(
+                    (SchedulerCommand.SET_PAUSE_STATE, PauseState.PAUSED_ALL))
+                scheduler.input_queues[1].put.assert_called_with(
+                    (SchedulerCommand.SET_PAUSE_STATE, PauseState.PAUSED_ALL))
+
+                # Verify we waited for completion from both ranks
+                mock_queue_0.get.assert_called_once()
+                mock_queue_1.get.assert_called_once()
+
+    def test_set_pause_state_paused_new(self, mock_vllm_config,
+                                        mock_kv_cache_config,
+                                        mock_structured_output_manager):
+        """Test set_pause_state with PAUSED_NEW state."""
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
+            with patch('multiprocessing.get_context'):
+                scheduler = DPScheduler(
+                    vllm_config=mock_vllm_config,
+                    kv_cache_config=mock_kv_cache_config,
+                    structured_output_manager=mock_structured_output_manager,
+                    block_size=16,
+                )
+
+                scheduler.input_queues = [MagicMock(), MagicMock()]
+
+                mock_queue_0 = MagicMock()
+                mock_queue_0.get.return_value = None
+                mock_queue_1 = MagicMock()
+                mock_queue_1.get.return_value = None
+
+                scheduler.output_queues = {
+                    (0, "set_pause_state"): mock_queue_0,
+                    (1, "set_pause_state"): mock_queue_1,
+                }
+
+                scheduler.set_pause_state(PauseState.PAUSED_NEW)
+
+                scheduler.input_queues[0].put.assert_called_with(
+                    (SchedulerCommand.SET_PAUSE_STATE, PauseState.PAUSED_NEW))
+                scheduler.input_queues[1].put.assert_called_with(
+                    (SchedulerCommand.SET_PAUSE_STATE, PauseState.PAUSED_NEW))
+
+    def test_pause_state_property(self, mock_vllm_config, mock_kv_cache_config,
+                                  mock_structured_output_manager):
+        """Test pause_state property queries rank 0 and returns the state."""
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
+            with patch('multiprocessing.get_context'):
+                scheduler = DPScheduler(
+                    vllm_config=mock_vllm_config,
+                    kv_cache_config=mock_kv_cache_config,
+                    structured_output_manager=mock_structured_output_manager,
+                    block_size=16,
+                )
+
+                scheduler.input_queues = [MagicMock(), MagicMock()]
+
+                mock_queue_0 = MagicMock()
+                mock_queue_0.get.return_value = PauseState.PAUSED_ALL
+
+                scheduler.output_queues = {
+                    (0, "get_pause_state"): mock_queue_0,
+                }
+
+                result = scheduler.pause_state
+
+                # Verify GET_PAUSE_STATE command was sent only to rank 0
+                scheduler.input_queues[0].put.assert_called_with(
+                    (SchedulerCommand.GET_PAUSE_STATE, None))
+                # Verify rank 1 was NOT queried
+                scheduler.input_queues[1].put.assert_not_called()
+
+                assert result == PauseState.PAUSED_ALL
+
+    def test_pause_state_unpaused(self, mock_vllm_config, mock_kv_cache_config,
+                                  mock_structured_output_manager):
+        """Test pause_state property returns UNPAUSED state."""
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
+            with patch('multiprocessing.get_context'):
+                scheduler = DPScheduler(
+                    vllm_config=mock_vllm_config,
+                    kv_cache_config=mock_kv_cache_config,
+                    structured_output_manager=mock_structured_output_manager,
+                    block_size=16,
+                )
+
+                scheduler.input_queues = [MagicMock(), MagicMock()]
+
+                mock_queue_0 = MagicMock()
+                mock_queue_0.get.return_value = PauseState.UNPAUSED
+
+                scheduler.output_queues = {
+                    (0, "get_pause_state"): mock_queue_0,
+                }
+
+                result = scheduler.pause_state
+
+                assert result == PauseState.UNPAUSED
 
     def test_make_stats_aggregates_from_workers(
             self, mock_vllm_config, mock_kv_cache_config,
