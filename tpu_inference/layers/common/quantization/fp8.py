@@ -88,7 +88,11 @@ def process_blockwise_fp8_linear_weights(
     weights = []
     weight_scales = []
     original_block_size = weight_block_size[0]
-    requant_block_size = linear_config.requant_block_size
+    if linear_config.enable_quantized_matmul_kernel:
+        if linear_config.requant_block_size:
+            requant_block_size = linear_config.requant_block_size
+        else:
+            requant_block_size = weight.shape[1]
     start = 0
     for output_size in linear_config.output_sizes:
         end = start + output_size

@@ -100,10 +100,10 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
     ):
         super().__init__(quant_config)
         self.linear_config = linear_config
-        if self.linear_config.enable_quantized_matmul_kernel and not self.linear_config.requant_block_size:
-            raise ValueError(
-                "You should set REQUANTIZE_BLOCK_SIZE to enable quantized matmul kernel. Please set the value or disable the quantized matmul kernel."
-            )
+        #if self.linear_config.enable_quantized_matmul_kernel and not self.linear_config.requant_block_size:
+            #raise ValueError(
+                #"You should set REQUANTIZE_BLOCK_SIZE to enable quantized matmul kernel. Please set the value or disable the quantized matmul kernel."
+            #)
         if not self.linear_config.enable_quantized_matmul_kernel and self.linear_config.requant_block_size:
             raise ValueError(
                 "Blockwise quantization is supported by quantized matmul kernel. Please enable quantized_matmul_kernel or unset the quantize block size to trigger XLA per-channel quantization."
