@@ -418,16 +418,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             cache_dtype = self.dtype
         kv_cache_dtype = to_jax_dtype(cache_dtype)
         kv_packing = common_utils.get_dtype_packing(kv_cache_dtype)
-
-        ##### test #####
-        _raw_val = self.dp_size * kv_packing
-        _p2_val = runner_utils.next_power_of_two(_raw_val)
-        _final_min = max(16, _p2_val)
-        logger.info(f"[DEBUG_DP_FIX] DP_SIZE: {self.dp_size}, KV_PACKING: {kv_packing}")
-        logger.info(f"[DEBUG_DP_FIX] Raw Product: {_raw_val} -> P2 Aligned: {_p2_val}")
-        logger.info(f"[DEBUG_DP_FIX] Final min_token_size: {_final_min}")
-        ##### test #####
-
         self.num_tokens_paddings = runner_utils.get_token_paddings(
             # min_token_size=max(16, self.dp_size * kv_packing),
             min_token_size=max(16, runner_utils.next_power_of_two(self.dp_size * kv_packing)),
