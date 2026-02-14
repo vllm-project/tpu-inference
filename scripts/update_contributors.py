@@ -117,8 +117,8 @@ def build_table_html(users, columns):
             separator = "&" if "?" in avatar else "?"
             
             cell = (
-                f'      <td align="center" valign="top" width="12.5%">'
-                f'<a href="{profile}"><img src="{avatar}{separator}s=100" width="100" style="max-width: 100px; width: 100%; border-radius: 20px;" alt="{login}"/><br />'
+                f'      <td align="center" valign="top" width="14.28%">'
+                f'<a href="{profile}"><img src="{avatar}{separator}s=100" width="100px;" style="border-radius: 20px;" alt="{login}"/><br />'
                 f'<sub><b>{login}</b></sub></a><br />'
                 f'<a href="{profile}" title="Contributions">{emojis}</a>'
                 f'</td>'
@@ -142,7 +142,7 @@ def generate_html_grid(contributors_data):
     # Sort alphabetically by username
     sorted_users = sorted(contributors_data.items(), key=lambda x: x[0].lower())
     
-    columns = 8
+    columns = 7
     max_visible_rows = 3
     max_visible_users = columns * max_visible_rows
     
