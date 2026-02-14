@@ -123,6 +123,7 @@ vllm serve --seed=42 --model="$model" --max-model-len=10240 --max-num-batched-to
 cleanup() {
   echo "Cleaning up: killing the server..."
   kill %1 2>/dev/null || true
+  sleep 15
 }
 trap cleanup EXIT
 
