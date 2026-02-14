@@ -118,7 +118,7 @@ def build_table_html(users, columns):
             
             cell = (
                 f'      <td align="center" valign="top" width="12.5%">'
-                f'<a href="{profile}"><img src="{avatar}{separator}s=100" width="100px;" style="border-radius: 20px;" alt="{login}"/><br />'
+                f'<a href="{profile}"><img src="{avatar}{separator}s=100" width="100" style="max-width: 100px; width: 100%; border-radius: 20px;" alt="{login}"/><br />'
                 f'<sub><b>{login}</b></sub></a><br />'
                 f'<a href="{profile}" title="Contributions">{emojis}</a>'
                 f'</td>'
