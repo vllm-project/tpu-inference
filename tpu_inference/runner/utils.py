@@ -42,6 +42,10 @@ class InferencePhase(Enum):
     DECODE_HEAVY = 1
     BALANCED = 2
     AMBIGUOUS = 3
+    
+
+def next_power_of_two(n: int) -> int:
+    return 1 if n <= 0 else 1 << (n - 1).bit_length()
 
 
 def get_padded_num_reqs_with_upper_limit(x: int, upper_limit: int) -> int:
