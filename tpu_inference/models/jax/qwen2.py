@@ -319,7 +319,7 @@ class Qwen2Model(JaxModule):
         else:
             self.embed_tokens = PPMissingLayer()
 
-        self.start_layer, self.end_layer, self.layers = make_layers(
+        self.start_layer, self.end_layer, layers = make_layers(
             hf_config.num_hidden_layers,
             lambda layer_index: Qwen2DecoderLayer(
                 config=hf_config,
@@ -332,6 +332,7 @@ class Qwen2Model(JaxModule):
                 prefix=f"{prefix}.layers.{layer_index}",
             ),
         )
+        self.layers = nnx.List(layers)
         if self.is_last_rank:
             self.norm = JaxRmsNorm(
                 hidden_size,
