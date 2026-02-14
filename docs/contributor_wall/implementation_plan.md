@@ -30,7 +30,8 @@ We will significantly enhance this script to become an **Automated Auto-Discover
 2.  **Issues/Bugs (🐛)**: Fetch `/repos/{owner}/{repo}/issues` to find authors of opened issues (excluding PRs).
 3.  **Reviews (👀)**: Fetch `/repos/{owner}/{repo}/pulls` and their `/reviews` to find people who have actively reviewed code.
 4.  **Aggregation**: Combine these into a single dictionary per user, collecting a list of their contribution types.
-5.  **Rendering**: Update the HTML grid to exactly match the `all-contributors` visual style:
+5.  **Ranking Algorithm**: Calculate a `Total Effort Score = Commits + Issues Opened + PRs Reviewed` for each user. Rank contributors from highest score to lowest (ties broken alphabetically) to promote the most active maintainers to the top.
+6.  **Rendering**: Update the HTML grid to exactly match the `all-contributors` visual style:
     - Center-aligned avatar.
     - Username linked to profile.
     - Emoji list below the name indicating what they did (e.g., `💻 🐛 👀`).

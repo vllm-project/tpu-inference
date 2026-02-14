@@ -46,7 +46,7 @@ def fetch_all_contributors():
     Fetches Code, Issue, and Review contributors.
     Returns a dict: { login: { "avatar_url": url, "html_url": url, "contributions": set() } }
     """
-    contributors_data = defaultdict(lambda: {"contributions": set()})
+    contributors_data = defaultdict(lambda: {"contributions": set(), "effort": 0})
 
     # 1. Fetch Code Contributors (💻)
     print("Fetching code contributors...")
@@ -57,6 +57,7 @@ def fetch_all_contributors():
         contributors_data[login]["avatar_url"] = user["avatar_url"]
         contributors_data[login]["html_url"] = user["html_url"]
         contributors_data[login]["contributions"].add("💻")
+        contributors_data[login]["effort"] += user.get("contributions", 1)
 
     # 2. Fetch Issue Authors (🐛)
     # We use the search API to find issues created in this repo (excludes PRs)
@@ -74,6 +75,7 @@ def fetch_all_contributors():
                     contributors_data[login]["avatar_url"] = user["avatar_url"]
                     contributors_data[login]["html_url"] = user["html_url"]
                     contributors_data[login]["contributions"].add("🐛")
+                    contributors_data[login]["effort"] += 1
     except Exception as e:
         print(f"Warning fetching issues: {e}")
 
@@ -96,6 +98,7 @@ def fetch_all_contributors():
                             contributors_data[login]["avatar_url"] = user["avatar_url"]
                             contributors_data[login]["html_url"] = user["html_url"]
                             contributors_data[login]["contributions"].add("👀")
+                            contributors_data[login]["effort"] += 1
     except Exception as e:
         print(f"Warning fetching reviews: {e}")
 
@@ -139,8 +142,8 @@ def generate_html_grid(contributors_data):
         '<!-- markdownlint-disable -->'
     ]
     
-    # Sort alphabetically by username
-    sorted_users = sorted(contributors_data.items(), key=lambda x: x[0].lower())
+    # Sort by effort (descending) first, then alphabetically by username
+    sorted_users = sorted(contributors_data.items(), key=lambda x: (-x[1]["effort"], x[0].lower()))
     
     columns = 7
     max_visible_rows = 3
