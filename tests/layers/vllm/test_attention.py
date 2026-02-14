@@ -361,3 +361,31 @@ class TestPallasAttentionBackendImpl:
                 "Attention sink support is only available when head_dim==64"):
             assert impl.sinks is not None
             impl.forward(layer, query, key, value, torch.tensor([]), metadata)
+
+    def test_forward_with_3d_qkv(self, mesh):
+    """Regression test: models like deepseek-v2-lite may pass 3D (tokens, heads, dim) tensors."""
+    impl = PallasAttentionBackendImpl(
+        num_heads=NUM_HEADS,
+        head_size=HEAD_DIM,
+        scale=0.088,
+        num_kv_heads=NUM_KV_HEADS,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="auto",
+        attn_type=AttentionType.DECODER,
+    )
+    layer = MagicMock()
+    layer.layer_name = "0"
+
+    query, key, value, kv_cache, metadata = create_inputs(mesh)
+
+    # Reshape to 3D — the shape some models emit directly
+    query = query.reshape(TOTAL_TOKENS, NUM_HEADS, HEAD_DIM)
+    key = key.reshape(TOTAL_TOKENS, NUM_KV_HEADS, HEAD_DIM)
+    value = value.reshape(TOTAL_TOKENS, NUM_KV_HEADS, HEAD_DIM)
+
+    with torchax.default_env(), set_vllm_model_wrapper_context(
+            kv_caches=[kv_cache],
+            mesh=mesh,
+            layer_name_to_kvcache_index={'0': 0}):
+        impl.forward(layer, query, key, value, torch.tensor([]), metadata)
