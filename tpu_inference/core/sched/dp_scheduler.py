@@ -26,7 +26,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
-from vllm.v1.core.sched.interface import SchedulerInterface
+from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (CachedRequestData, GrammarOutput,
                                        SchedulerOutput)
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -295,6 +295,7 @@ class DPScheduler(SchedulerInterface):
         self.assigned_dp_rank: Dict[str, int] = {}  # req_id -> dp_rank
         self.cached_schedulers_output = deque()
         self._create_per_rank_configs(kv_cache_config)
+        self._pause_state: PauseState = PauseState.UNPAUSED
 
         # Initialize NONE_HASH global before forking worker processes
         # This ensures all workers inherit the initialized value
@@ -760,6 +761,16 @@ class DPScheduler(SchedulerInterface):
         for rank in range(self.dp_size):
             self._get_result_from_queue(rank,
                                         SchedulerCommand.RESET_ENCODER_CACHE)
+
+    @property
+    def pause_state(self) -> PauseState:
+        return self._pause_state
+
+    def set_pause_state(self, pause_state: PauseState) -> None:
+        del pause_state
+        # TODO: set pause state
+        # self._pause_state = pause_state
+        pass
 
     def make_stats(self,
                    spec_decoding_stats=None,

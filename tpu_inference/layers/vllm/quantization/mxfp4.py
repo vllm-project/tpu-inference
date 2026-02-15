@@ -23,6 +23,7 @@ from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig, FusedMoEQuantConfig, mxfp4_w4a16_moe_quant_config)
 from vllm.model_executor.layers.linear import LinearBase
@@ -152,8 +153,7 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
                 w13_weight, w13_weight_scale, 2)
             w2_weight = dequantize_tensor_from_mxfp4_packed(
                 w2_weight, w2_weight_scale, 2)
-
-            w13_interleave = layer.activation == "swigluoai"
+            w13_interleave = layer.activation == MoEActivation.SWIGLUOAI
             w13_reorder_size = get_mesh_shape_product(
                 self.mesh, ShardingAxisName.MLP_TENSOR)
 

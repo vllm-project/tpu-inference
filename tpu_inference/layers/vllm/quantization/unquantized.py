@@ -24,6 +24,7 @@ from vllm.model_executor.layers import linear as vllm_linear
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
                                                   UnquantizedFusedMoEMethod)
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import (
@@ -273,8 +274,7 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
             w2_weight: jax.Array,
             w2_bias: jax.Array | None,
         ) -> FusedMoEWeights:
-
-            w13_interleave = layer.activation == "swigluoai"
+            w13_interleave = layer.activation == MoEActivation.SWIGLUOAI
             w13_reorder_size = get_mesh_shape_product(
                 self.mesh, ShardingAxisName.MLP_TENSOR)
 
