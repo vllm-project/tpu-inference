@@ -31,7 +31,7 @@ There are three ways to install `tpu-inference`:
 
     ```shell
     # v6e and prior
-    pip install vllm-tpu --version=0.13.2.post6
+    pip install vllm-tpu==0.13.2.post6
 
     # v7x
     pip install vllm-tpu
