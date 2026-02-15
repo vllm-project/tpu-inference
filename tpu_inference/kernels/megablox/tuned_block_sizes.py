@@ -235,11 +235,19 @@ TUNED_BLOCK_SIZES = {
 
 def get_default_gmm_block_sizes(m: int, k: int, n: int):
     """
-    Heuristic-based defaults for GMM tiling. 
+    Heuristic-based defaults for GMM tiling.
     """
-    # TODO (Qiliang Cui): when update to v2, use the v2 default tiling.
-    del k, n  # Currently not using input dimensions for heuristics
-    return (min(m, 128), 128, 128)
+    del k, n
+    tm = min(m, 128)
+    if m % tm != 0:
+        # tm=128 doesn't divide m. This happens when m = num_tokens * topk
+        # and topk is not a power of 2 (e.g. topk=6, m=192).
+        # Find the largest divisor of m that is <= 128.
+        for candidate in range(128, 0, -1):
+            if m % candidate == 0:
+                tm = candidate
+                break
+    return (tm, 128, 128)
 
 
 def get_tuned_block_sizes(
