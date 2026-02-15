@@ -239,7 +239,14 @@ def get_default_gmm_block_sizes(m: int, k: int, n: int):
     """
     # TODO (Qiliang Cui): when update to v2, use the v2 default tiling.
     del k, n  # Currently not using input dimensions for heuristics
-    return (min(m, 128), 128, 128)
+
+    tm = min(m, 128)
+    if m % tm != 0:
+        for candidate in range(128, 0, -1):
+            if m % candidate == 0:
+                tm = candidate
+                break
+    return (tm, 128, 128)
 
 
 def get_tuned_block_sizes(
