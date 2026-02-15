@@ -323,15 +323,14 @@ def fused_moe_func(
         num_tokens_local = hidden_states_local.shape[0]
         topk_indices_flat = topk_indices_local.flatten()
         topk_argsort_indices = jnp.argsort(topk_indices_flat)
-        topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
         token_indices = jnp.arange(num_tokens_local,
                                    dtype=jnp.int32).repeat(topk)
         token_indices_sorted = token_indices[topk_argsort_indices]
-        group_sizes_local = jnp.bincount(topk_indices_flat,
-                                         length=global_num_experts)
-        # group_sizes_local = jax.nn.one_hot(topk_indices_flat, global_num_experts, dtype=jnp.int32).sum(axis=0)
-
         x = hidden_states_local[token_indices_sorted]
+        group_sizes_local = jax.nn.one_hot(topk_indices_flat,
+                                           global_num_experts,
+                                           dtype=jnp.int32).sum(axis=0)
+        topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
 
         return x, group_sizes_local, topk_argsort_revert_indices
 
