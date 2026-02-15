@@ -25,6 +25,10 @@ if [ "$#" -eq 0 ]; then
   exit 1
 fi
 
+# Default to disabling the embedded vLLM server so tests start clean unless explicitly overridden.
+DISABLE_VLLM_SERVER="${DISABLE_VLLM_SERVER:-true}"
+export DISABLE_VLLM_SERVER
+
 # Environment variables for docker run
 ENV_VARS=(
   -e TEST_MODEL="${TEST_MODEL:-}"
@@ -37,6 +41,7 @@ ENV_VARS=(
   -e MAX_MODEL_LEN="${MAX_MODEL_LEN:-}"
   -e MAX_NUM_SEQS="${MAX_NUM_SEQS:-}"
   -e MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
+  -e DISABLE_VLLM_SERVER="${DISABLE_VLLM_SERVER:-}"
 )
 
 if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
@@ -75,6 +80,26 @@ fi
 
 # Some test scripts set tp=2 on IS_FOR_V7X=true to mitigate test failures.
 # TODO (Qiliang Cui) Investigate why tensor-parallel-size=1 breaks in tpu7x.
+
+# Debug: Show processes currently holding TPU devices before starting the container.
+echo "=== [DEBUG] TPU device status before docker run ==="
+echo "--- Processes using /dev/accel* (TPU devices) ---"
+if ls /dev/accel* &>/dev/null; then
+  fuser -v /dev/accel* 2>&1 || echo "(no processes using /dev/accel*)"
+else
+  echo "(no /dev/accel* devices found on host)"
+fi
+echo "--- Processes using /dev/vfio/* (TPU vfio devices) ---"
+if ls /dev/vfio/* &>/dev/null; then
+  fuser -v /dev/vfio/* 2>&1 || echo "(no processes using /dev/vfio/*)"
+else
+  echo "(no /dev/vfio/* devices found on host)"
+fi
+echo "--- Running docker containers ---"
+docker ps --format "table {{.ID}}\t{{.Image}}\t{{.Status}}\t{{.Names}}" 2>/dev/null || true
+echo "--- Processes matching python/vllm/jax ---"
+ps aux | grep -E 'python|vllm|jax' | grep -v grep || echo "(none found)"
+echo "=== [DEBUG] End TPU device status ==="
 
 exec docker run \
   --privileged \
