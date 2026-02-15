@@ -200,9 +200,6 @@ class TpuPlatform(Platform):
             parallel_config.distributed_executor_backend = RayDistributedExecutor
             logger.info(
                 "Force using RayDistributedExecutor for JAX on multihost.")
-            if parallel_config.pipeline_parallel_size > 1:
-                raise ValueError(
-                    "PP on Ray is disabled due to a pending change on vLLM.")
         else:
             logger.warning(
                 f"Unknown TPU multihost backend: {multihost_backend}. "
