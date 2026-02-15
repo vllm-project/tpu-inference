@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -30,6 +30,38 @@ from tpu_inference.kernels.megablox.tuned_block_sizes import \
 
 partial = functools.partial
 
+# ---------------------------------------------------------------------------
+# AWQ tile-level unpacking inside Pallas
+# ---------------------------------------------------------------------------
+# AWQ packs 8 × uint4 values into one uint32 in the following logical order:
+#   index 0 → bits  0: 3    index 1 → bits 16:19
+#   index 2 → bits  4: 7    index 3 → bits 20:23
+#   index 4 → bits  8:11    index 5 → bits 24:27
+#   index 6 → bits 12:15    index 7 → bits 28:31
+# The tuple below maps physical bit-positions so that the unpacked elements
+# come out in ascending logical order (0, 1, 2, 3, 4, 5, 6, 7).
+_AWQ_SHIFTS = (0, 16, 4, 20, 8, 24, 12, 28)
+_AWQ_PACK_FACTOR = 8  # 8 × uint4 per uint32
+
+
+def _awq_unpack_tile(packed_tile: jnp.ndarray) -> jnp.ndarray:
+    """Unpack a (..., N_packed) uint32 tile → (..., N_packed*8) int8 tile.
+
+    This implementation uses only bit-shift and mask ops that are legal inside
+    Pallas TPU kernels (no ``bitcast_convert_type``).
+    """
+    mask = jnp.uint32(0xF)
+    parts = []
+    for s in _AWQ_SHIFTS:
+        # Use int32 instead of int8 to avoid illegal minor-dim insertion on TPU
+        parts.append(((packed_tile >> jnp.uint32(s)) & mask).astype(jnp.int32))
+    stacked = jnp.stack(parts,
+                        axis=-1)  # (..., N_packed, 8) — int32, legal on TPU
+    return stacked.reshape(stacked.shape[:-2] + (-1, )).astype(jnp.int8)
+
+
+# ---------------------------------------------------------------------------
+
 
 def _validate_args(
     *,
@@ -38,8 +70,11 @@ def _validate_args(
     group_sizes: jnp.ndarray,
     rhs_scale: jnp.ndarray | None = None,
     rhs_bias: jnp.ndarray | None = None,
+    rhs_zeros: jnp.ndarray | None = None,
+    awq_pack_factor: int = 0,
 ):
     """Validates the arguments for the gmm function."""
+
     # Validate 'lhs'.
     if lhs.ndim != 2:
         raise ValueError(f"Expected 2-tensor for 'lhs' but got {lhs.ndim=}.")
@@ -48,12 +83,26 @@ def _validate_args(
     # Validate 'rhs'.
     if rhs.ndim != 3:
         raise ValueError(f"Expected 3-tensor for 'rhs' but got {rhs.ndim=}.")
-    common.assert_is_supported_dtype(rhs.dtype)
 
-    if lhs.shape[1] != rhs.shape[1]:
-        raise ValueError(
-            "Expected 'lhs' and 'rhs' to have the same number of input features."
-            f" But instead got {lhs.shape[1]=} and {rhs.shape[1]=}")
+    if awq_pack_factor > 0:
+        # When AWQ packed, rhs is uint32 and output dim is packed.
+        if rhs.dtype != jnp.uint32:
+            raise ValueError(f"AWQ packed rhs must be uint32, got {rhs.dtype}")
+        if rhs_zeros is None:
+            raise ValueError("rhs_zeros is required when awq_pack_factor > 0")
+        if rhs_scale is None:
+            raise ValueError("rhs_scale is required when awq_pack_factor > 0")
+        # k dimension is NOT packed; only the n (output) dimension is packed.
+        if lhs.shape[1] != rhs.shape[1]:
+            raise ValueError(
+                "Expected 'lhs' and 'rhs' to have the same contracting dim. "
+                f"But got {lhs.shape[1]=} and {rhs.shape[1]=}")
+    else:
+        common.assert_is_supported_dtype(rhs.dtype)
+        if lhs.shape[1] != rhs.shape[1]:
+            raise ValueError(
+                "Expected 'lhs' and 'rhs' to have the same number of input "
+                f"features. But got {lhs.shape[1]=} and {rhs.shape[1]=}")
 
     # Validate 'group_sizes'.
     if group_sizes.dtype != jnp.int32:
@@ -61,7 +110,11 @@ def _validate_args(
             f"Expected 32-bit integer 'group_sizes' but got {group_sizes.dtype=}."
         )
 
-    num_groups, in_size, out_size = rhs.shape
+    num_groups = rhs.shape[0]
+    if awq_pack_factor > 0:
+        out_size = rhs.shape[2] * awq_pack_factor
+    else:
+        out_size = rhs.shape[2]
 
     if rhs_scale is not None:
         # Validate 'rhs_scale'.
@@ -86,6 +139,16 @@ def _validate_args(
             raise ValueError(
                 "Expected 'rhs_bias' to have the shape of"
                 f" {expected_rhs_bias_shape} but got {rhs_bias.shape=}.")
+
+    if rhs_zeros is not None:
+        # Accept either 3D (E, blocks, n_packed) or 4D (E, blocks, 1, n_packed).
+        if rhs_zeros.ndim not in (3, 4):
+            raise ValueError(
+                f"Expected 3- or 4-tensor for 'rhs_zeros' but got "
+                f"{rhs_zeros.ndim=}.")
+        if rhs_zeros.dtype != jnp.uint32:
+            raise ValueError(
+                f"Expected uint32 'rhs_zeros' but got {rhs_zeros.dtype=}.")
 
 
 def _calculate_num_tiles(x: int, tx: int) -> int:
@@ -150,74 +213,24 @@ def make_group_metadata(
     num_groups = group_sizes.shape[0]
     end_group = start_group + num_nonzero_groups - 1
 
-    # Calculate the offset of each group, starting at zero. This metadata is
-    # similar to row offsets in a CSR matrix. The following properties hold:
-    #
-    # group_offsets.shape = [num_groups + 1]
-    # group_offsets[0] = 0
-    # group_offsets[num_groups] = m
-    #
-    # The row at which group 'i' starts is group_offsets[i].
     group_ends = jnp.cumsum(group_sizes)
     group_offsets = jnp.concatenate(
         [jnp.zeros(1, dtype=jnp.int32), group_ends])
 
-    # Assign a group id to each grid index.
-    #
-    # If a group starts somewhere other than the start of a tile or ends somewhere
-    # other than the end of a tile we need to compute that full tile. Calculate
-    # the number of tiles for each group by rounding their end up to the nearest
-    # 'tm' and their start down to the nearest 'tm'.
-
-    # (1) Round the group_ends up to the nearest multiple of 'tm'.
-    #
-    # NOTE: This does not change group_offsets[num_groups], which is m
-    # (because we enforce m is divisible by tm).
     rounded_group_ends = ((group_ends + tm - 1) // tm * tm).astype(jnp.int32)
 
-    # (2) Round the group_starts down to the nearest multiple of 'tm'.
     group_starts = jnp.concatenate(
         [jnp.zeros(1, dtype=jnp.int32), group_ends[:-1]])
     rounded_group_starts = group_starts // tm * tm
 
-    # (3) Calculate the number of rows in each group.
-    #
-    # NOTE: Handle zero-sized groups as a special case. If the start for a
-    # zero-sized group is not divisible by 'tm' its start will be rounded down and
-    # its end will be rounded up such that its size will become 1 tile here.
     rounded_group_sizes = rounded_group_ends - rounded_group_starts
     rounded_group_sizes = jnp.where(group_sizes == 0, 0, rounded_group_sizes)
 
-    # (4) Convert the group sizes from units of rows to unit of 'tm' sized tiles.
-    #
-    # An m-dimension tile is 'owned' by group 'i' if the first row of the tile
-    # belongs to group 'i'. In addition to owned tiles, each group can have 0 or 1
-    # initial partial tiles if it's first row does not occur in the first row of a
-    # tile. The '0-th' group never has a partial tile because it always starts at
-    # the 0-th row.
-    #
-    # If no group has a partial tile, the total number of tiles is equal to
-    # 'm // tm'. If every group has a partial except the 0-th group, the total
-    # number of tiles is equal to 'm // tm + num_groups - 1'. Thus we know that
-    #
-    # tiles_m <= group_tiles.sum() <= tiles_m + num_groups - 1
-    #
-    # Where tiles_m = m // tm.
-    #
-    # NOTE: All group sizes are divisible by 'tm' because of the rounding in steps
-    # (1) and (2) so this division is exact.
     group_tiles = rounded_group_sizes // tm
 
     if visit_empty_groups:
-        # Insert one tile for empty groups.
         group_tiles = jnp.where(group_sizes == 0, 1, group_tiles)
 
-    # Create the group ids for each grid index based on the tile counts for each
-    # group.
-    #
-    # NOTE: This repeat(...) will pad group_ids with the final group id if
-    # group_tiles.sum() < tiles_m + num_groups - 1. The kernel grid will be sized
-    # such that we only execute the necessary number of tiles.
     tiles_m = _calculate_num_tiles(m, tm)
     group_ids = jnp.repeat(
         jnp.arange(num_groups, dtype=jnp.int32),
@@ -225,30 +238,8 @@ def make_group_metadata(
         total_repeat_length=tiles_m + num_groups - 1,
     )
 
-    # Assign an m-dimension tile id to each grid index.
-    #
-    # NOTE: Output tiles can only be re-visited consecutively. The following
-    # procedure guarantees that m-dimension tile indices respect this.
-
-    # (1) Calculate how many times each m-dimension tile will be visited.
-    #
-    # Each tile is guaranteed to be visited once by the group that owns the tile.
-    # The remaining possible visits occur when a group starts inside of a tile at
-    # a position other than the first row. We can calculate which m-dimension tile
-    # each group starts in by floor-dividing its offset with `tm` and then count
-    # tile visits with a histogram.
-    #
-    # To avoid double counting tile visits from the group that owns the tile,
-    # filter these out by assigning their tile id to `tile_m` (one beyond the max)
-    # such that they're ignored by the subsequent histogram. Also filter out any
-    # group which is empty.
-    #
-    # TODO(tgale): Invert the 'partial_tile_mask' predicates to be more clear.
     partial_tile_mask = jnp.logical_or((group_offsets[:-1] % tm) == 0,
                                        group_sizes == 0)
-
-    # Explicitly enable tiles for zero sized groups, if specified. This covers
-    # zero sized groups that start on a tile-aligned row and those that do not.
     if visit_empty_groups:
         partial_tile_mask = jnp.where(group_sizes == 0, 0, partial_tile_mask)
 
@@ -258,31 +249,21 @@ def make_group_metadata(
     tile_visits = (jnp.histogram(
         partial_tile_ids, bins=tiles_m, range=(0, tiles_m - 1))[0] + 1)
 
-    # Create the m-dimension tile ids for each grid index based on the visit
-    # counts for each tile.
     m_tile_ids = jnp.repeat(
         jnp.arange(tiles_m, dtype=jnp.int32),
         tile_visits.astype(jnp.int32),
         total_repeat_length=tiles_m + num_groups - 1,
     )
 
-    # Account for sharding.
-    #
-    # Find the start of the groups owned by our shard and shift the group_ids and
-    # m_tile_ids s.t. the metadata for our tiles are at the front of the arrays.
-    #
-    # TODO(tgale): Move this offset into the kernel to avoid these rolls.
     first_tile_in_shard = (group_ids < start_group).sum()
     group_ids = jnp.roll(group_ids, shift=-first_tile_in_shard, axis=0)
     m_tile_ids = jnp.roll(m_tile_ids, shift=-first_tile_in_shard, axis=0)
 
-    # Calculate the number of tiles we need to compute for our shard.
-    #
-    # Remove tile visits that belong to a group not in our shard.
     iota = jnp.arange(num_groups, dtype=jnp.int32)
     active_group_mask = jnp.logical_and(iota <= end_group, iota >= start_group)
     group_tiles = jnp.where(active_group_mask, group_tiles, 0)
     num_tiles = group_tiles.sum()
+
     return GroupMetadata(group_offsets, group_ids, m_tile_ids), num_tiles
 
 
@@ -298,6 +279,7 @@ def _get_store_mask(
     group_start = group_metadata.group_offsets[group_id]
     group_end = group_metadata.group_offsets[group_id + 1]
     m_id = group_metadata.m_tile_ids[grid_id] * tm
+
     iota = jax.lax.broadcasted_iota(jnp.int32, (tm, tn), 0) + m_id
     return jnp.logical_and(iota >= group_start, iota < group_end)
 
@@ -326,6 +308,7 @@ LutFn = Callable[[int, int, int], Optional[tuple[int, int, int]]]
         "preferred_element_type",
         "tiling",
         "interpret",
+        "awq_pack_factor",
     ],
 )
 def gmm(
@@ -339,12 +322,15 @@ def gmm(
     group_offset: jnp.ndarray | None = None,
     existing_out: jnp.ndarray | None = None,
     interpret: bool = False,
+    rhs_zeros: jnp.ndarray | None = None,
+    awq_pack_factor: int = 0,
 ) -> jnp.ndarray:
     """Compute lhs[sizes[i-1]:sizes[i], :] @ rhs for each group 'i'.
 
   Args:
     lhs: A 2d, jnp.ndarray with shape [m, k].
     rhs: A 3d, jnp.ndarray with shape [num_groups, k, n].
+        When awq_pack_factor > 0: [num_groups, k, n // awq_pack_factor] uint32.
     group_sizes: A 1d, jnp.ndarray with shape [num_groups] and jnp.int32 dtype.
     preferred_element_type: jnp.dtype, the element type for the output matrix.
     rhs_scale: A 4d, jnp.ndarray with shape [num_groups, num_blocks, 1, n].
@@ -355,17 +341,23 @@ def gmm(
     existing_out: Existing output to write to.
     interpret: Whether or not to run the kernel in interpret mode, helpful for
       testing and debugging.
+    rhs_zeros: AWQ packed zero-points. Either 3D
+        [num_groups, num_blocks, n // awq_pack_factor] or 4D
+        [num_groups, num_blocks, 1, n // awq_pack_factor] uint32.
+        Required when awq_pack_factor > 0.
+    awq_pack_factor: Number of uint4 values packed per uint32 element (8 for
+        AWQ 4-bit). 0 means AWQ unpacking is disabled.
 
   Returns:
     A 2d, jnp.ndarray with shape [m, n].
   """
-
     if existing_out is not None:
         assert isinstance(existing_out, jax.Array)
         expected_dtype = existing_out.dtype
         if expected_dtype != preferred_element_type:
             raise ValueError(
                 "Existing output dtype must match preferred_element_type.")
+
     if group_offset is None:
         group_offset = jnp.array([0], dtype=jnp.int32)
     else:
@@ -374,18 +366,40 @@ def gmm(
                 f"group_offset must be a ()-shaped array. Got: {group_offset.shape}."
             )
         group_offset = group_offset[None]
+
     num_current_groups = rhs.shape[0]
     num_total_groups = group_sizes.shape[0]
+
     _validate_args(
         lhs=lhs,
         rhs=rhs,
         group_sizes=group_sizes,
         rhs_scale=rhs_scale,
         rhs_bias=rhs_bias,
+        rhs_zeros=rhs_zeros,
+        awq_pack_factor=awq_pack_factor,
     )
 
+    # ---- Canonicalize rhs_zeros to 4D ----
+    # Pallas TPU lowering requires the last two block-shape dimensions to be
+    # divisible by 8 and 128 respectively (or equal to the array dimension).
+    # A 3D rhs_zeros (E, num_blocks, n_packed) with block dim
+    # num_quant_blocks_per_tk (often 1) in the second-to-last position
+    # violates the "divisible by 8" rule.  Reshaping to 4D
+    # (E, num_blocks, 1, n_packed) moves the problematic dimension to the
+    # third position and makes the last-two dims (1, n_packed) which satisfy
+    # the rule because 1 == array_dim and tn_packed % 128 == 0.
+    if rhs_zeros is not None and rhs_zeros.ndim == 3:
+        rhs_zeros = jnp.expand_dims(rhs_zeros, 2)
+
     # Gather shape information.
-    m, k, n = (lhs.shape[0], lhs.shape[1], rhs.shape[-1])
+    m, k = lhs.shape[0], lhs.shape[1]
+    if awq_pack_factor > 0:
+        n = rhs.shape[-1] * awq_pack_factor
+        n_packed = rhs.shape[-1]
+    else:
+        n = rhs.shape[-1]
+        n_packed = n
 
     # If tiling is callable, look up the problem dimensions in the LUT. If no
     # tuned tile dimensions are available throw an error.
@@ -409,12 +423,28 @@ def gmm(
 
     tm, tk, tn = tiling
 
+    # Validate tn alignment for AWQ packed path.
+    # The Pallas TPU lowering requires the last dimension of every block shape
+    # to be divisible by 128 (or equal to the full array dimension).  Because
+    # packed rhs / rhs_zeros tiles have last-dim size  tn_packed = tn / pack,
+    # we must ensure  tn >= 128 * awq_pack_factor  so that tn_packed >= 128.
+    if awq_pack_factor > 0:
+        min_tn = 128 * awq_pack_factor  # 1024 for 4-bit AWQ
+        if tn < min_tn:
+            tn = min_tn
+        assert tn % awq_pack_factor == 0, (
+            f"tn={tn} must be divisible by awq_pack_factor={awq_pack_factor}")
+        tn_packed = tn // awq_pack_factor
+    else:
+        tn_packed = tn
+
     if rhs_scale is not None:
         assert isinstance(rhs_scale, jax.Array)
         assert rhs_scale.shape[0] == num_current_groups
         num_quant_blocks = rhs_scale.shape[1]
     else:
         num_quant_blocks = 1
+
     quant_block_size = k // num_quant_blocks
 
     if tk % quant_block_size != 0 and quant_block_size % tk != 0:
@@ -423,10 +453,11 @@ def gmm(
     tiles_k, k_rem = _calculate_irregular_num_tiles(k, tk)
     tiles_n, n_rem = _calculate_irregular_num_tiles(n, tn)
     del n_rem
+
     num_quant_blocks_per_tk = pl.cdiv(tk, quant_block_size)
 
     # Create the metadata we need for computation.
-    group_metadata, num_active_tiles = make_group_metadata(  # pylint: disable=unbalanced-tuple-unpacking
+    group_metadata, num_active_tiles = make_group_metadata(
         group_sizes=group_sizes,
         m=m,
         tm=tm,
@@ -435,6 +466,11 @@ def gmm(
         visit_empty_groups=False,
     )
 
+    # ----- build the Pallas kernel closure -----
+    # Capture awq_pack_factor as a Python-level constant so that the if/else
+    # branches are resolved at trace time (no runtime overhead when disabled).
+    _is_awq = awq_pack_factor > 0
+
     def kernel(
         group_metadata,
         group_offset,
@@ -442,6 +478,7 @@ def gmm(
         rhs,
         rhs_scale,
         rhs_bias,
+        rhs_zeros,
         existing_out,
         out,
         acc_scratch,
@@ -455,7 +492,6 @@ def gmm(
         @pl.when(k_i == 0)
         def _zero_acc():
             acc_scratch[...] = jnp.zeros_like(acc_scratch)
-
             if existing_out is not None:
                 prev_grid_id = jnp.where(grid_id > 0, grid_id - 1, 0)
                 is_first_processed_group = grid_id == 0
@@ -471,7 +507,6 @@ def gmm(
         def mask_k_rem(x, *, dim):
             if k_rem == 0:
                 return x
-
             orig_dtype = x.dtype
             iota = lax.broadcasted_iota(jnp.int32, x.shape, dim)
             x = x.astype(jnp.float32)
@@ -490,17 +525,44 @@ def gmm(
                 mask_k_rem_rhs = _wrapper
 
             loaded_lhs = mask_k_rem_lhs(lhs[...])
-            loaded_rhs = mask_k_rem_rhs(rhs[...])
+            loaded_rhs_raw = mask_k_rem_rhs(rhs[...])
+
+            # ---- AWQ on-the-fly unpack ----
+            if _is_awq:
+                # loaded_rhs_raw: (tk, tn_packed) uint32
+                # Unpack to (tk, tn) int8
+                loaded_rhs = _awq_unpack_tile(loaded_rhs_raw)
+
+                # rhs_zeros is 4D: loaded tile is
+                # (num_quant_blocks_per_tk, 1, tn_packed) uint32.
+                # Squeeze out the unit dim, then unpack.
+                loaded_zeros_4d = rhs_zeros[...]
+                loaded_zeros_raw = loaded_zeros_4d.reshape(
+                    num_quant_blocks_per_tk, tn_packed)
+                loaded_zeros = _awq_unpack_tile(
+                    loaded_zeros_raw)  # (num_qb_per_tk, tn) int8
+            else:
+                loaded_rhs = loaded_rhs_raw
 
             acc = acc_scratch[...]
+
             for b_i in range(num_quant_blocks_per_tk):
+                rhs_slice = loaded_rhs[b_i * quant_block_size:(b_i + 1) *
+                                       quant_block_size, ...]
+                lhs_slice = loaded_lhs[..., b_i * quant_block_size:(b_i + 1) *
+                                       quant_block_size]
+
+                # Subtract AWQ zero-point before the dot product.
+                if _is_awq:
+                    zeros_row = loaded_zeros[b_i:b_i + 1, :]  # (1, tn) int8
+                    rhs_slice = (rhs_slice - zeros_row).astype(jnp.bfloat16)
+
                 partial_result = jnp.dot(
-                    loaded_lhs[..., b_i * quant_block_size:(b_i + 1) *
-                               quant_block_size],
-                    loaded_rhs[b_i * quant_block_size:(b_i + 1) *
-                               quant_block_size, ...],
+                    lhs_slice,
+                    rhs_slice,
                     preferred_element_type=jnp.float32,
                 )
+
                 if rhs_scale is not None:
                     partial_result *= jnp.broadcast_to(rhs_scale[b_i],
                                                        partial_result.shape)
@@ -508,6 +570,7 @@ def gmm(
 
             if is_last_k_tile:
                 loaded_out = out[...].astype(jnp.float32)
+
                 if rhs_bias is not None:
                     acc += rhs_bias[...].astype(jnp.float32)
 
@@ -523,27 +586,21 @@ def gmm(
                 acc_scratch[...] = acc
 
         is_last_k_tile = k_i == (tiles_k - 1)
-
         lax.cond(
             is_last_k_tile,
             partial(_accum, True),
             partial(_accum, False),
         )
 
+    # ----- index transforms -----
+
     def lhs_transform_indices(n_i, grid_id, k_i, group_metadata, group_offset):
-        # lhs is (m, k). Load the [tm, tk] matrix for this m-tile.
         m_tile_ids = group_metadata.m_tile_ids
         del n_i, group_offset
         return m_tile_ids[grid_id], k_i
 
     def rhs_transform_indices(n_i, grid_id, k_i, group_metadata, group_offset):
-        # rhs is (num_groups, k, n). Load the [tk, tn] matrix based on the group id
-        # for this m-tile.
         group_ids = group_metadata.group_ids
-
-        # NOTE: If we're working on only a shard of the rhs we need to adjust the
-        # group index we load from to account for this. The group_ids are in the
-        # "unsharded" domain.
         return group_ids[grid_id] - group_offset[0], k_i, n_i
 
     def rhs_scale_transform_indices(n_i, grid_id, k_i, group_metadata,
@@ -559,22 +616,32 @@ def gmm(
         del k_i
         return group_ids[grid_id] - group_offset[0], 0, n_i
 
+    def rhs_zeros_transform_indices(n_i, grid_id, k_i, group_metadata,
+                                    group_offset):
+        """Index into 4D rhs_zeros: (E, num_blocks, 1, n_packed)."""
+        group_ids = group_metadata.group_ids
+        b_i = (k_i * tk) // quant_block_size
+        b_tile_i = b_i // num_quant_blocks_per_tk
+        return group_ids[grid_id] - group_offset[0], b_tile_i, 0, n_i
+
     def out_transform_indices(n_i, grid_id, k_i, group_metadata, group_offset):
-        # out is (m, n). Load the [tm, tn] matrix for this m-tile.
         m_tile_ids = group_metadata.m_tile_ids
         del k_i, group_offset
         return m_tile_ids[grid_id], n_i
 
     out_block_spec = pl.BlockSpec((tm, tn), out_transform_indices)
+
     if existing_out is None:
         in_out_block_spec: Any = None
         input_output_aliases = {}
     else:
         in_out_block_spec = out_block_spec
-        input_output_aliases = {7: 0}
+        input_output_aliases = {8: 0}  # existing_out → out
 
     lhs_block_spec = pl.BlockSpec((tm, tk), lhs_transform_indices)
-    rhs_block_spec = pl.BlockSpec((None, tk, tn), rhs_transform_indices)
+
+    # rhs block spec uses tn_packed for AWQ path.
+    rhs_block_spec = pl.BlockSpec((None, tk, tn_packed), rhs_transform_indices)
 
     if rhs_scale is None:
         rhs_scale_block_spec = None
@@ -589,13 +656,29 @@ def gmm(
         rhs_bias_block_spec = pl.BlockSpec((None, 1, tn),
                                            rhs_bias_transform_indices)
 
+    # rhs_zeros is 4D: (E, num_blocks, 1, n_packed).
+    # Block spec mirrors rhs_scale layout so last-two dims are (1, tn_packed)
+    # which satisfies Pallas TPU requirement: 1 == array_dim and
+    # tn_packed % 128 == 0.
+    if rhs_zeros is None:
+        rhs_zeros_block_spec = None
+    else:
+        rhs_zeros_block_spec = pl.BlockSpec(
+            (None, num_quant_blocks_per_tk, 1, tn_packed),
+            rhs_zeros_transform_indices)
+
+    # ----- cost estimate -----
+
     lhs_bytes = lhs.size * lhs.itemsize
-    rhs_bytes = (k * n) * rhs.itemsize  # We don't read all of rhs
+    rhs_bytes = (k * n_packed) * rhs.itemsize
     if rhs_scale is not None:
         rhs_bytes += (num_quant_blocks * n) * rhs_scale.itemsize
     if rhs_bias is not None:
         rhs_bytes += n * rhs_bias.itemsize
+    if rhs_zeros is not None:
+        rhs_bytes += (num_quant_blocks * n_packed) * rhs_zeros.itemsize
     out_bytes = (m * n) * jnp.dtype(preferred_element_type).itemsize
+
     max_active_tiles = group_metadata.group_ids.size
     bytes_accessed = ((lhs_bytes * tiles_n) + (rhs_bytes * max_active_tiles) +
                       out_bytes)
@@ -603,6 +686,7 @@ def gmm(
     cost_estimate = pl.CostEstimate(flops=flops,
                                     bytes_accessed=bytes_accessed,
                                     transcendentals=0)
+
     call_gmm = pl.pallas_call(
         kernel,
         out_shape=jax.ShapeDtypeStruct((m, n), preferred_element_type),
@@ -613,6 +697,7 @@ def gmm(
                 rhs_block_spec,
                 rhs_scale_block_spec,
                 rhs_bias_block_spec,
+                rhs_zeros_block_spec,
                 in_out_block_spec,
             ],
             out_specs=out_block_spec,
@@ -637,8 +722,10 @@ def gmm(
         rhs,
         rhs_scale,
         rhs_bias,
+        rhs_zeros,
         existing_out,
     )
+
     if existing_out is None and num_current_groups < num_total_groups:
         out = _zero_uninitialized_memory(
             out,
