@@ -254,7 +254,8 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 kernel_init(rngs.params(), layer.kernel_shape, param_dtype),
                 weight_loader=partial(load_nnx_param_from_reshaped_torch,
                                       permute_dims=None,
-                                      param_name="linear_fp8_weight"))
+                                      param_name="linear_fp8_weight"),
+                eager_sharding=False)
             layer.weight.set_metadata('sharding', self.weight_sharding)
 
             # Per-output-channel scale (1D, covers the free weight dim).
@@ -264,7 +265,8 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                     load_nnx_param_from_reshaped_torch,
                     permute_dims=None,
                     param_name="linear_fp8_weight_scale_inv",
-                ))
+                ),
+                eager_sharding=False)
             layer.weight_scale_inv.set_metadata('sharding', ())
             return
 
@@ -276,7 +278,8 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                         param_dtype),
             weight_loader=partial(load_nnx_param_from_reshaped_torch,
                                   permute_dims=(0, 1),
-                                  param_name="linear_fp8_weight"))
+                                  param_name="linear_fp8_weight"),
+            eager_sharding=False)
         layer.weight.set_metadata('sharding', self.weight_sharding)
 
         # Block-wise quantization scale
@@ -293,7 +296,8 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 load_nnx_param_from_reshaped_torch,
                 permute_dims=(0, 1),
                 param_name="linear_fp8_weight_scale_inv",
-            ))
+            ),
+            eager_sharding=False)
         layer.weight_scale_inv.set_metadata('sharding', self.weight_sharding)
 
     def process_weights_after_loading(self, layer):

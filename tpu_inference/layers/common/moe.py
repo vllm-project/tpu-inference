@@ -67,6 +67,8 @@ def moe_apply(
 ) -> jax.Array:
 
     with jax.named_scope(layer._get_name()):
+        activation = layer.activation if isinstance(
+            layer.activation, str) else layer.activation.value
         match moe_backend:
             case MoEBackend.FUSED_MOE:
                 subc_quant_w1_sz = None
@@ -96,7 +98,7 @@ def moe_apply(
                     gating_output=gating_output,
                     top_k=layer.top_k,
                     renormalize_topk_logits=layer.renormalize,
-                    act_fn=layer.activation,
+                    act_fn=activation,
                     scoring_fn=layer.scoring_func,
                     subc_quant_w1_sz=subc_quant_w1_sz,
                     subc_quant_w2_sz=subc_quant_w2_sz,
@@ -120,7 +122,7 @@ def moe_apply(
                     renormalize=layer.renormalize,
                     mesh=mesh,
                     use_ep=layer.use_ep,
-                    activation=layer.activation,
+                    activation=activation,
                     scoring_fn=layer.scoring_func,
                 )
             case MoEBackend.DENSE_MAT:
