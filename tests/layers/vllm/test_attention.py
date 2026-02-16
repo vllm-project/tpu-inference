@@ -212,14 +212,14 @@ class TestPallasAttentionBackendImpl:
 
         query, key, value, kv_cache, metadata = create_inputs(mesh)
 
-        query = query.reshape(TOTAL_TOKENS, NUM_HEADS, HEAD_DIM)
-        key = key.reshape(TOTAL_TOKENS, NUM_KV_HEADS, HEAD_DIM)
-        value = value.reshape(TOTAL_TOKENS, NUM_KV_HEADS, HEAD_DIM)
-
         with torchax.default_env(), set_vllm_model_wrapper_context(
                 kv_caches=[kv_cache],
                 mesh=mesh,
                 layer_name_to_kvcache_index={'0': 0}):
+            query = query.reshape(TOTAL_TOKENS, NUM_HEADS, HEAD_DIM)
+            key = key.reshape(TOTAL_TOKENS, NUM_KV_HEADS, HEAD_DIM)
+            value = value.reshape(TOTAL_TOKENS, NUM_KV_HEADS, HEAD_DIM)
+
             impl.forward(layer, query, key, value, torch.tensor([]), metadata)
 
     def test_forward_with_fp8_kv_cache(self, mesh):
