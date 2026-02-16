@@ -251,6 +251,7 @@ def get_default_gmm_block_sizes(m: int, k: int, n: int):
     # already do, as this divisor-search approach may produce suboptimal
     # tile sizes (e.g., num_tokens=64 and topk=5 (m=num_tokens*topk=320)
     # will result in tm=80 and 4 tiles, instead of tm=128 and 3 tiles).
+    # or consider padding the tensor so m is always multiple of 128.
     for tm in range(127, 0, -1):
         if m % tm == 0:
             return (tm, 128, 128)
