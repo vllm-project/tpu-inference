@@ -4,7 +4,7 @@ Feature,CorrectnessTest,PerformanceTest
 "KV cache host offloading",unverified,unverified
 "LoRA_Torch",❌,N/A
 "Multimodal Inputs",❌,N/A
-"Out-of-tree model support",✅,❌
+"Out-of-tree model support",✅,✅
 "Prefix Caching",✅,✅
 "Single Program Multi Data",✅,✅
 "Single-Host-P-D-disaggregation",✅,N/A
