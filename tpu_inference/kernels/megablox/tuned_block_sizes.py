@@ -240,13 +240,20 @@ def get_default_gmm_block_sizes(m: int, k: int, n: int):
     # TODO (Qiliang Cui): when update to v2, use the v2 default tiling.
     del k, n  # Currently not using input dimensions for heuristics
 
-    tm = min(m, 128)
-    if m % tm != 0:
-        for candidate in range(128, 0, -1):
-            if m % candidate == 0:
-                tm = candidate
-                break
-    return (tm, 128, 128)
+    if m < 128:
+        return (m, 128, 128)
+    if m % 128 == 0:
+        return (128, 128, 128)
+
+    # TODO(catswe): consider replacing _calculate_num_tiles(m, tm) with
+    # _calculate_irregular_num_tiles(m, tm) in make_group_metadata. this
+    # would allow using tm=128 with a partial final tile, like k and n
+    # already do, as this divisor-search approach may produce suboptimal
+    # tile sizes (e.g., num_tokens=64 and topk=5 will result in tm=80
+    # and 4 tiles, instead of tm=128 and 3 tiles).
+    for tm in range(127, 0, -1):
+        if m % tm == 0:
+            return (tm, 128, 128)
 
 
 def get_tuned_block_sizes(
