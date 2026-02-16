@@ -306,13 +306,110 @@ def inner_kernel(
     )
 
 
+def wait_zero_out(
+    hbm_buf: jax.Array,
+    start_chunk_idx: jax.Array,
+    end_chunk_idx: jax.Array,
+    sem_ref: jax.Array,
+    *,
+    namescope: str = "zero_out_wait",
+    unroll: bool = True,
+):
+    """Waits for the given hbm buffer, with chunking on 2nd minor dimension."""
+    with jax.named_scope(namescope):
+        lax.fori_loop(
+            start_chunk_idx,
+            end_chunk_idx,
+            lambda i, _: pltpu.make_async_copy(hbm_buf, hbm_buf.at[i, :, :],
+                                               sem_ref.at[0]).wait(),
+            None,
+            unroll=unroll,
+        )
+
+
+def zero_out(
+    hbm_buf: jax.Array,
+    zero_buf: jax.Array,
+    start_chunk_idx: jax.Array,
+    end_chunk_idx: jax.Array,
+    sem_ref: jax.Array,
+    *,
+    namescope: str = "zero_out_start",
+    dma_priority: int = 1,
+    unroll: bool = True,
+):
+    """Zeroes out the given hbm buffer, with chunking on 2nd minor dimension."""
+    with jax.named_scope(namescope):
+        lax.fori_loop(
+            start_chunk_idx,
+            end_chunk_idx,
+            lambda i, _: pltpu.make_async_copy(
+                zero_buf,
+                hbm_buf.at[i, :, :],
+                sem_ref.at[0],
+            ).start(dma_priority),
+            None,
+            unroll=unroll,
+        )
+
+
+def zero_out_vregs(
+    hbm_buf: jax.Array,
+    zero_buf: jax.Array,
+    start_vreg_idx: jax.Array,
+    end_vreg_idx: jax.Array,
+    sem_ref: jax.Array,
+    *,
+    namescope: str = "zero_out_vregs",
+    dma_priority: int = 1,
+):
+    """Zeroes out the given hbm buffer, with vreg alignment."""
+    with jax.named_scope(namescope):
+        num_vregs = end_vreg_idx - start_vreg_idx
+
+        @pl.when(num_vregs > 0)
+        def _():
+            src_slice = zero_buf.at[pl.ds(0, num_vregs), :, :]
+            dst_slice = hbm_buf.at[pl.ds(start_vreg_idx, num_vregs), :, :]
+            pltpu.make_async_copy(
+                src_slice,
+                dst_slice,
+                sem_ref.at[0],
+            ).start(dma_priority)
+
+
+def wait_zero_out_vregs(
+    hbm_buf: jax.Array,
+    start_vreg_idx: jax.Array,
+    end_vreg_idx: jax.Array,
+    sem_ref: jax.Array,
+    *,
+    namescope: str = "zero_out_wait_vregs",
+):
+    """Waits for the given hbm buffer, with vreg alignment."""
+    with jax.named_scope(namescope):
+        num_vregs = end_vreg_idx - start_vreg_idx
+
+        @pl.when(num_vregs > 0)
+        def _():
+            pltpu.make_async_copy(
+                hbm_buf.at[pl.ds(start_vreg_idx, num_vregs), :, :],
+                hbm_buf.at[pl.ds(start_vreg_idx, num_vregs), :, :],
+                sem_ref.at[0],
+            ).wait()
+
+
 def fill_metadata(
     lhs_group_sizes_ref: jax.Array,  # int32[size_lhs_group]
     group_offset_ref: jax.Array,  # int32[1]
     metadata_ref: MetadataRef,
+    out_init_hbm_ref: jax.Array,
+    local_dma_sem_ref: jax.Array,
+    mini_zero_buf: jax.Array,
     *,
     dims: Dimensions,
     tiles: TileSizes,
+    chunk_m: int,
 ) -> jax.Array:
     """Fills the metadata for the given lhs group sizes and group offset.
 
@@ -322,15 +419,19 @@ def fill_metadata(
     (gm_id_to_group_id) for each gm tile.
 
     Args:
-        lhs_group_sizes_ref: The group sizes of lhs.
-        group_offset_ref: Offset of the first group to process.
-        metadata_ref: Metadata that is used to determine the group id and m
-            offsets for each gmm tile.
-        dims: Dimensions of arguments.
-        tiles: Tile sizes for this kernel.
+      lhs_group_sizes_ref: The group sizes of lhs.
+      group_offset_ref: Offset of the first group to process.
+      metadata_ref: Metadata that is used to determine the group id and m offsets
+        for each gmm tile.
+      out_init_hbm_ref: Reference to out_ref alias.
+      local_dma_sem_ref: Reference to the local dma semaphore.
+      mini_zero_buf: A small buffer used for zeroing out.
+      dims: Dimensions of arguments.
+      tiles: Tile sizes for this kernel.
+      chunk_m: Number of m tiles in a zero out dma chunk.
 
     Returns:
-        The number of gm tiles to process lhs with given group offset.
+      The number of gm tiles to process lhs with given group offset.
     """
 
     group_offset = group_offset_ref[0]
@@ -352,11 +453,59 @@ def fill_metadata(
 
     @jax.named_scope("outer_group_loop")
     def outer_group_loop(lhs_group_id, carry):
-        num_gm, start_m_offset = carry
+        num_gm, start_m_offset, zeroed_end_chunk_idx, remainder_m = carry
 
         group_id = lhs_group_id - group_offset
         group_size = lhs_group_sizes_ref[lhs_group_id]
         end_m_offset = start_m_offset + group_size
+
+        ## Head zeroing out logic.
+        ## Given facts:
+        # - chunk_m is multiple of lhs_sublane_size
+        ## Global constraints:
+        # - zero vregs from 0 to (start_valid_m_offset//lhs_sublane_size)
+        #   exclusive
+        #   - last vreg if shared is handled by inner loop
+        #   - this ensures that head zeroing's start chunk_m and end chunk_m are
+        #     vreg aligned
+        #
+        ## Per group(iteration of outer group loop) constraints:
+        # State:
+        # - zeroed_end_chunk_idx (chunk index of last zeroed chunk)
+        # - remainder_m leftover rows to be zeroed out from previous group
+        # Per iteration
+        # - Check cond to zero group_id < 0 -> group's row should be zeroed out,
+        #   change carry
+        #     - group_id >= 0 -> no zeroing no carry change
+        # - head_zero_acc += groupsize
+        # - curent chunks to zero out = cumsum // chunk_m
+        # - start_cur_zero_chunk_idx = zeroed_end_chunk_idx
+        # - end_cur_zero_chunk_idx =
+        #   start_cur_zero_chunk_idx + current chunks to zero out
+        # - zeroed_end_chunk_idx = end_cur_zero_chunk_idx
+        # - zero_out(out_init_hbm_ref, mini_zero_buf, start_cur_zero_chunk_idx,
+        #            end_cur_zero_chunk_idx, local_dma_sem_ref)
+
+        def zero_out_group():
+            acc = remainder_m + group_size
+            num_chunks_to_zero_out = acc // chunk_m
+            start_cur_zero_chunk_idx = zeroed_end_chunk_idx
+            end_cur_zero_chunk_idx = (start_cur_zero_chunk_idx +
+                                      num_chunks_to_zero_out)
+            zero_out(
+                out_init_hbm_ref,
+                mini_zero_buf,
+                start_cur_zero_chunk_idx,
+                end_cur_zero_chunk_idx,
+                local_dma_sem_ref,
+            )
+            return end_cur_zero_chunk_idx, acc % chunk_m
+
+        zeroed_end_chunk_idx, remainder_m = lax.cond(
+            group_id < 0,
+            zero_out_group,
+            lambda: (zeroed_end_chunk_idx, remainder_m),
+        )
 
         # Assume following arguments:
         # - size_lhs_sublane & tile_m = 4
@@ -390,10 +539,18 @@ def fill_metadata(
         )
         lax.fori_loop(0, curr_num_gm, tm_loop_fn, start_m_offset)
 
-        return num_gm + curr_num_gm, end_m_offset
+        return (
+            num_gm + curr_num_gm,
+            end_m_offset,
+            zeroed_end_chunk_idx,
+            remainder_m,
+        )
 
-    num_gm, _ = lax.fori_loop(0, max_num_group, outer_group_loop, (0, 0))
-    return num_gm
+    num_gm, end_m_offset, zeroed_end_chunk_idx, remainder_m = lax.fori_loop(
+        0, max_num_group, outer_group_loop, (0, 0, 0, 0))
+    remainder_chunk_vregs = remainder_m // dims.size_lhs_sublane
+
+    return num_gm, end_m_offset, zeroed_end_chunk_idx, remainder_chunk_vregs
 
 
 def kernel_main(
@@ -403,17 +560,20 @@ def kernel_main(
     # In
     lhs_ref: jax.Array,  # [size_m, size_k]
     rhs_ref: WeightsRef,  # [size_group, size_k, size_n]
-    _: jax.Array,  # [size_m, size_n]
+    out_init_hbm_ref: jax.Array,  # [size_m, size_n]
     # Out
     out_ref: jax.Array,  # [size_m, size_n]
     # Scratch memory
     partial_out_ref: jax.Array,  # [size_lhs_sublane, tile_n]
-    acc_ref: jax.Array,
-    # [tile_m // size_lhs_sublane, size_lhs_sublane, tile_n]
+    acc_ref: jax.
+    Array,  # [tile_m // size_lhs_sublane, size_lhs_sublane, tile_n]
     metadata_ref: MetadataRef,
+    local_dma_sem_ref: jax.Array,  # [1]
+    mini_zero_buf: jax.Array,  # [size_lhs_sublane, size_n]
     *,
     tiles: TileSizes,
     dims: Dimensions,
+    chunk_m: int = 32,
 ):
     """Entry point for GMM kernel.
 
@@ -444,14 +604,67 @@ def kernel_main(
 
     num_k = dims.size_k // tiles.tile_k
     num_n = dims.size_n // tiles.tile_n
+    mini_zero_buf[...] = jnp.zeros_like(mini_zero_buf)
+    out_init_hbm_ref = out_init_hbm_ref.reshape(
+        -1, chunk_m, dims.size_n)  # shape (num_chunks, chunk_m, size_n)
 
     # Fill metadata buffer and return number of group & m interations.
-    num_gm = fill_metadata(
+    num_gm, end_m_offset, zeroed_end_chunk_idx, remainder_chunk_vregs = fill_metadata(
         lhs_group_sizes_ref,
         group_offset_ref,
         metadata_ref,
+        out_init_hbm_ref,
+        local_dma_sem_ref,
+        mini_zero_buf,
         dims=dims,
         tiles=tiles,
+        chunk_m=chunk_m,
+    )
+
+    # Zero out Head remainder vregs, excluding the last vreg if it is shared.
+    out_vreg_view = out_init_hbm_ref.reshape(-1, dims.size_lhs_sublane,
+                                             dims.size_n)
+    mini_zero_vreg_view = mini_zero_buf.reshape(-1, dims.size_lhs_sublane,
+                                                dims.size_n)
+    head_rem_start_vreg_idx = (zeroed_end_chunk_idx * chunk_m //
+                               dims.size_lhs_sublane)
+    head_end_vreg_idx = head_rem_start_vreg_idx + remainder_chunk_vregs
+    zero_out_vregs(
+        out_vreg_view,
+        mini_zero_vreg_view,
+        head_rem_start_vreg_idx,
+        head_end_vreg_idx,
+        local_dma_sem_ref,
+    )
+
+    # Zero out Tail m rows after end_m_offset.
+    out_init_hbm_ref = out_init_hbm_ref.reshape(
+        -1, chunk_m, dims.size_n)  # shape (num_chunks, chunk_m, size_n)
+    mini_zero_buf = mini_zero_buf.reshape(chunk_m, dims.size_n)
+    # zero out chunks after end_m_offset, starting from first chunk after
+    # end_m_offset
+    tail_start = (pl.cdiv(end_m_offset, dims.size_lhs_sublane) *
+                  dims.size_lhs_sublane)
+    tail_chunk_start = pl.cdiv(tail_start, chunk_m)
+    tail_chunk_end = jnp.array(dims.size_m // chunk_m)
+    zero_out(
+        out_init_hbm_ref,
+        mini_zero_buf,
+        tail_chunk_start,
+        tail_chunk_end,
+        local_dma_sem_ref,
+    )
+    # Zero out Tail remainder vregs starting from first vreg after end_m_offset
+    # till first chunk.
+    chunk_m_vregs = chunk_m // dims.size_lhs_sublane
+    tail_rem_start_vreg_idx = tail_start // dims.size_lhs_sublane
+    tail_rem_end_vreg_idx = tail_chunk_start * chunk_m_vregs
+    zero_out_vregs(
+        out_vreg_view,
+        mini_zero_vreg_view,
+        tail_rem_start_vreg_idx,
+        tail_rem_end_vreg_idx,
+        local_dma_sem_ref,
     )
 
     in_block_specs, out_block_specs = generate_block_specs(lhs_ref,
@@ -475,6 +688,32 @@ def kernel_main(
     out_in = out_ref.reshape(-1, dims.size_lhs_sublane, dims.size_n)
     scratches = [partial_out_ref, acc_ref, metadata_ref]
     pipeline_fn(lhs_in, rhs_ref, out_in, scratches=scratches)
+
+    # Wait for Head zeroing out DMA to complete.
+    out_init_hbm_ref = out_init_hbm_ref.reshape(-1, chunk_m, dims.size_n)
+    zero_index = jnp.array(0, dtype=jnp.int32)
+    wait_zero_out(out_init_hbm_ref, zero_index, zeroed_end_chunk_idx,
+                  local_dma_sem_ref)
+    wait_zero_out_vregs(
+        out_vreg_view,
+        head_rem_start_vreg_idx,
+        head_end_vreg_idx,
+        local_dma_sem_ref,
+    )
+
+    # Wait for Tail zeroing out DMA to complete.
+    wait_zero_out(
+        out_init_hbm_ref,
+        tail_chunk_start,
+        tail_chunk_end,
+        local_dma_sem_ref,
+    )
+    wait_zero_out_vregs(
+        out_vreg_view,
+        tail_rem_start_vreg_idx,
+        tail_rem_end_vreg_idx,
+        local_dma_sem_ref,
+    )
 
 
 def calculate_tiling(
@@ -662,6 +901,31 @@ def get_scope_name(dims: Dimensions, tiles: TileSizes) -> str:
     )
 
 
+def calculated_dma_chunk_m_size(size_lhs_sublane: int, size_m: int,
+                                size_n: int, dtype: jnp.dtype):
+    """Calculates the DMA chunk m size for the GMM kernel.
+  Conditions
+    - dma_size >= 4194304 bytes (4 MiB)
+    - dma_size % size_lhs_sublane == 0
+  Args:
+    size_lhs_sublane: The size of the LHS sublane dimension.
+    size_n: The size of the output dimension.
+    dtype: The data type of the elements.
+
+  Returns:
+    The DMA chunk m size.
+  """
+    optimal_dma_bytes = 4194304
+    dtype_bytes = jnp.dtype(dtype).itemsize
+    min_chunk_m = pl.cdiv(optimal_dma_bytes, size_n * dtype_bytes)
+    chunk_m = max(min_chunk_m, size_lhs_sublane)
+    chunk_m = 1 << (chunk_m - 1).bit_length()
+    max_pow2_factor = size_m & -size_m
+    if chunk_m > max_pow2_factor:
+        return size_lhs_sublane
+    return chunk_m
+
+
 @jax.jit(static_argnames=[
     "tile_info",
     "vmem_limit_bytes",
@@ -715,7 +979,7 @@ def gmm_v2(
         preferred_element_type = lhs.dtype
 
     if vmem_limit_bytes is None:
-        vmem_limit_bytes = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.8)
+        vmem_limit_bytes = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.9)
 
     dims = validate_inputs(lhs, rhs, rhs_scale, rhs_bias, group_sizes,
                            group_offset)
@@ -725,6 +989,9 @@ def gmm_v2(
     else:
         tiles = tile_info(lhs.dtype, rhs.dtype, dims, vmem_limit_bytes)
     validate_tiles(tiles, dims)
+
+    chunk_m = calculated_dma_chunk_m_size(dims.size_lhs_sublane, dims.size_m,
+                                          dims.size_n, preferred_element_type)
 
     # Prepare block specs and input aliases.
     input_aliases = 4
@@ -756,16 +1023,23 @@ def gmm_v2(
             gm_id_to_group_id=pltpu.SMEM((max_num_gm, ), jnp.int32),
             gm_id_to_m_offset=pltpu.SMEM((max_num_gm + 1, ), jnp.int32),
         ),
+        # semaphore_ref
+        pltpu.SemaphoreType.DMA((1, )),
+        # mini_zero_buf
+        pltpu.VMEM((chunk_m, dims.size_n), preferred_element_type),
     ]
 
     # Prepare inputs.
     # TODO(kyuyeunk, kunjanp): Add support for fusing zero initialization.
-    out_init = jnp.zeros((dims.size_m, dims.size_n),
-                         dtype=preferred_element_type)
+    # out_init = jnp.zeros((dims.size_m, dims.size_n),
+    #                      dtype=preferred_element_type)
+    out_init = pl.empty((dims.size_m, dims.size_n),
+                        dtype=preferred_element_type)
     rhs_weights = WeightsRef(weight=rhs, scale=rhs_scale, bias=rhs_bias)
 
     return pl.pallas_call(
-        functools.partial(kernel_main, tiles=tiles, dims=dims),
+        functools.partial(kernel_main, tiles=tiles, dims=dims,
+                          chunk_m=chunk_m),
         out_shape=out_init,
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=2,
