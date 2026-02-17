@@ -305,16 +305,7 @@ class TPUWorker:
         # violates the pure abstract contract of the base class. This is a
         # deliberate, temporary compromise for the same reasons outlined in
         # the `get_kv_cache_spec` method.
-        try:
-            return self._execute_model(scheduler_output)
-        except Exception as e:
-            logger.error(f"Error executing model: {e}")
-            raise e
 
-    def _execute_model(
-        self,
-        scheduler_output: SchedulerOutput,
-    ) -> Optional[ModelRunnerOutput]:
         if self.parallel_config.pipeline_parallel_size == 1 or self.rank == 0:
             intermediate_tensors = None
         else:
@@ -351,11 +342,7 @@ class TPUWorker:
 
     def sample_tokens(self,
                       grammar_output: GrammarOutput) -> ModelRunnerOutput:
-        try:
-            return self.model_runner.sample_tokens(grammar_output)
-        except Exception as e:
-            logger.error(f"Error sampling tokens: {e}")
-            raise e
+        return self.model_runner.sample_tokens(grammar_output)
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         return self.model_runner.take_draft_token_ids()
