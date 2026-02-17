@@ -163,8 +163,6 @@ class ForbidCompile:
         def wrapper(*args, **kwargs):
             # Get cache statistics before the call
             info_before = original_cached_func.cache_info()
-            keys_before = set(
-                str(key) for key in original_cached_func.cache_keys())
             misses_before = info_before.misses
 
             # Execute the original cached function
@@ -172,13 +170,10 @@ class ForbidCompile:
 
             # Get cache statistics after the call
             info_after = original_cached_func.cache_info()
-            keys_after = set(
-                str(key) for key in original_cached_func.cache_keys())
             misses_after = info_after.misses
 
             # Check if a cache miss occurred
             if misses_after > misses_before:
-                print(f"clkbp {keys_after - keys_before}")
                 raise RuntimeError(self.message).with_traceback(tb)
 
             return result
