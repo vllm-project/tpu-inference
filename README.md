@@ -23,7 +23,7 @@ _Latest News_ 🔥
 
 - [2025/10] [vLLM TPU: A New Unified Backend Supporting PyTorch and JAX on TPU](https://blog.vllm.ai/2025/10/16/vllm-tpu.html)
 
-<details>
+<details markdown="1">
 <summary><i>Previous News</i> 🔥</summary>
 
 </details>
@@ -74,7 +74,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 *Last Updated: 2026-02-13 11:00 AM UTC*
 
-<details>
+<details markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
 
 > | Emoji | Status | Meaning |
@@ -115,11 +115,11 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 </details>
 
-<details>
+<details markdown="1">
 <summary><b> 🚀&nbsp; Advanced Capabilities </b></summary>
 <ul>
   <li>
-    <details>
+<details markdown="1">
       <summary>Core Features</summary>
 
 <!-- START: core_features -->
@@ -147,7 +147,7 @@ Below is the live status of our supported models, features, and kernels. Click o
     </details>
   </li>
   <li>
-    <details>
+<details markdown="1">
       <summary>Parallelism Techniques</summary>
 
 <!-- START: parallelism -->
@@ -165,7 +165,7 @@ Below is the live status of our supported models, features, and kernels. Click o
     </details>
   </li>
   <li>
-    <details>
+<details markdown="1">
       <summary>Quantization Methods</summary>
 
 <!-- START: quantization -->
@@ -185,7 +185,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 </ul>
 </details>
 
-<details>
+<details markdown="1">
 <summary><b> 🔬 Key Kernel Support (For Experts) </b></summary>
 
 <!-- START: kernel_support -->
@@ -227,7 +227,7 @@ If you're ready to contribute code, our **[Contributing Guide](https://github.co
 
 A huge thank you to everyone who has helped build and improve `vllm-project/tpu-inference`!
 
-<details>
+<details markdown="1">
 <summary><b>🌟 <i>Contribution Type Legend & Ranking</i></b></summary>
 
 > | Emoji | Contribution | Meaning |
@@ -280,7 +280,7 @@ A huge thank you to everyone who has helped build and improve `vllm-project/tpu-
   </tbody>
 </table>
 <br/>
-<details>
+<details markdown="1">
 <summary><b>...and more! Click to view all contributors.</b></summary>
 <br/>
 <table>
