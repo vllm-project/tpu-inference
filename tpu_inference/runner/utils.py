@@ -44,10 +44,6 @@ class InferencePhase(Enum):
     AMBIGUOUS = 3
 
 
-def next_power_of_two(n: int) -> int:
-    return 1 if n <= 0 else 1 << (n - 1).bit_length()
-
-
 def get_padded_num_reqs_with_upper_limit(x: int, upper_limit: int) -> int:
     res = MIN_NUM_SEQS if x <= MIN_NUM_SEQS else 1 << (x - 1).bit_length()
     return min(res, upper_limit)

@@ -9,29 +9,14 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from jax._src.interpreters import pxla
+from jax._src.pallas.utils import next_power_of_2
 
 from tpu_inference.runner.utils import (
     PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR, ForbidCompile, InferencePhase,
     LatencyTracker, PhasedBasedProfiler,
     determine_phase_from_batch_composition_stats, get_batch_composition_stats,
     get_padded_num_reqs_with_upper_limit, get_padded_token_len,
-    get_req_paddings, get_token_paddings, next_power_of_two)
-
-
-def test_next_power_of_two():
-    """Tests the next_power_of_two function."""
-
-    assert next_power_of_two(1) == 1
-    assert next_power_of_two(2) == 2
-    assert next_power_of_two(4) == 4
-    assert next_power_of_two(8) == 8
-    assert next_power_of_two(1024) == 1024
-    assert next_power_of_two(3) == 4
-    assert next_power_of_two(5) == 8
-    assert next_power_of_two(7) == 8
-    assert next_power_of_two(9) == 16
-    assert next_power_of_two(31) == 32
-    assert next_power_of_two(100) == 128
+    get_req_paddings, get_token_paddings)
 
 
 def test_min_token_size_alignment():
@@ -42,7 +27,7 @@ def test_min_token_size_alignment():
     # Scenario 1: dp_size=5, kv_packing=1
     dp_size = 5
     kv_packing = 1
-    min_token_size = max(16, next_power_of_two(dp_size * kv_packing))
+    min_token_size = max(16, next_power_of_2(dp_size * kv_packing))
     assert min_token_size == 16
     # Ensure it satisfies the downstream power-of-two assertion
     assert (min_token_size & (min_token_size - 1) == 0)
@@ -51,7 +36,7 @@ def test_min_token_size_alignment():
     dp_size = 5
     kv_packing = 8
     # raw_val = 5 * 8 = 40 -> next_p2 is 64 -> max(16, 64) = 64
-    min_token_size = max(16, next_power_of_two(dp_size * kv_packing))
+    min_token_size = max(16, next_power_of_2(dp_size * kv_packing))
 
     assert min_token_size == 64
     assert (min_token_size & (min_token_size - 1) == 0)
