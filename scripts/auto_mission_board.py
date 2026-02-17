@@ -115,7 +115,7 @@ def main():
                     metric_name = headers[col_idx]
 
                     # Criteria for creating an issue
-                    if status.lower() in ["unverified", "x", "❌", "untested"]:
+                    if status.lower() in ["unverified", "x", "❌", "untested", "❓ untested", "❌ failing"]:
                         if issues_created >= MAX_ISSUES_PER_RUN:
                             print(f"🛑 Reached max issues limit ({MAX_ISSUES_PER_RUN}). Stopping.")
                             return
