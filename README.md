@@ -90,7 +90,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 <br>
 
-<details open>
+<details open markdown="1">
 <summary><b> ✅ Model Support </b></summary>
 
 <!-- START: model_support -->
