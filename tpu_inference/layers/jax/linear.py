@@ -51,6 +51,7 @@ class JaxEinsum(nnx.Einsum, JaxModule):
         # `self.weight` such that `named_parameters()` can match the names in HF models.
         self.weight = self.kernel
         delattr(self, 'kernel')
+        self.prefix = prefix
 
         if quant_config is None:
             self.quant_method = None

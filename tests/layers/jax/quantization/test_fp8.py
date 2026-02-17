@@ -93,14 +93,25 @@ def rngs():
 class TestLinearOpAdaptInfo:
     """Test QuantLinearConfig.get_adapt_info axis classification."""
 
-    def test_simple_2d_linear(self, rngs):
+    @pytest.mark.parametrize("einsum_str,weight_shape,weight_sharding", [
+        ("ab,bc->ac", (32, 16), (None, 'out')),
+        ("ab,cb->ac", (16, 32), ('out', None)),
+        ("ab,cb->ac", (16, 32), ('out',)),
+    ])
+    @pytest.mark.parametrize("kernel_init_with_sharding", [True, False])
+    def test_simple_2d_linear(self, einsum_str, weight_shape, weight_sharding, kernel_init_with_sharding, rngs):
         """ab,bc->ac: standard 2D linear (JaxLinear pattern)."""
-        layer = JaxEinsum('ab,bc->ac', (32, 16), rngs)
+        if kernel_init_with_sharding:
+            layer = JaxEinsum(einsum_str, weight_shape, rngs, kernel_init=nnx.with_partitioning(nnx.initializers.uniform(), weight_sharding))
+        else:
+            layer = JaxEinsum(einsum_str, weight_shape, rngs)
         info = QuantLinearConfig.get_adapt_info(einsum_str=layer.einsum_str,
                                                 weight=layer.weight)
         assert info.in_features == (32, )  # b is contracting
         assert info.out_features == (16, )  # c is free
         assert info.batch_features == ()  # no batch dims
+        if kernel_init_with_sharding:
+            assert info.out_features_sharding == ("out", )
 
     def test_2d_weight_3d_output(self, rngs):
         """TD,DNH->TNH: D is contracting, N and H are output-only."""
@@ -266,6 +277,25 @@ class TestFp8BlockwiseJaxLinear:
 
         expected_shape = (batch_size, N, H)
         assert output.shape == expected_shape
+
+
+    @pytest.mark.parametrize("einsum_str,weight_shape,weight_sharding", [
+        ("ab,bc->ac", (32, 16), (None, 'out')),
+        ("ab,bc->ac", (32, 16), ('in', 'out')),
+        ("ab,bc->ac", (32, 16), ('in', None)),
+    ])
+    def test_put_sharding_correctness(self, rngs, einsum_str, weight_shape, weight_sharding):
+        """Test that the weight sharding from the original weight is preserved."""
+        hf_quant_config = {
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+            "weight_block_size": [8, 16],
+        }
+        quant_config = Fp8Config(hf_quant_config)
+
+        layer = JaxEinsum(einsum_str, weight_shape, rngs, quant_config=quant_config, kernel_init=nnx.with_partitioning(nnx.initializers.uniform(), weight_sharding))
+        assert layer.weight.shape == (16, 32)
+        assert layer.weight.sharding in [('out', None), ('out', 'in'), (None, 'in')]
 
 
 class TestFp8TensorwiseJaxLinear:
