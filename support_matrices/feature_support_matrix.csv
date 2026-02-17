@@ -1,17 +1,17 @@
 Feature,CorrectnessTest,PerformanceTest
-Chunked Prefill,✅ Passing,✅ Passing
-DCN-based P/D disaggregation,❓ Untested,✅ Passing
-KV cache host offloading,❓ Untested,❓ Untested
-LoRA_Torch,✅ Passing,✅ Passing
-Multimodal Inputs,✅ Passing,✅ Passing
-Out-of-tree model support,✅ Passing,✅ Passing
-Prefix Caching,✅ Passing,✅ Passing
-Single Program Multi Data,✅ Passing,✅ Passing
-Single-Host-P-D-disaggregation,⚪ N/A,⚪ N/A
-Speculative Decoding: Eagle3,✅ Passing,✅ Passing
-Speculative Decoding: Ngram,✅ Passing,✅ Passing
-async scheduler,✅ Passing,✅ Passing
-data_parallelism,✅ Passing,❓ Untested
-runai_model_streamer_loader,✅ Passing,⚪ N/A
-sampling_params,✅ Passing,⚪ N/A
-structured_decoding,✅ Passing,⚪ N/A
+Chunked Prefill,✅&nbsp;Passing,✅&nbsp;Passing
+DCN-based P/D disaggregation,❓&nbsp;Untested,✅&nbsp;Passing
+KV cache host offloading,❓&nbsp;Untested,❓&nbsp;Untested
+LoRA_Torch,✅&nbsp;Passing,✅&nbsp;Passing
+Multimodal Inputs,✅&nbsp;Passing,✅&nbsp;Passing
+Out-of-tree model support,✅&nbsp;Passing,✅&nbsp;Passing
+Prefix Caching,✅&nbsp;Passing,✅&nbsp;Passing
+Single Program Multi Data,✅&nbsp;Passing,✅&nbsp;Passing
+Single-Host-P-D-disaggregation,⚪&nbsp;N/A,⚪&nbsp;N/A
+Speculative Decoding: Eagle3,✅&nbsp;Passing,✅&nbsp;Passing
+Speculative Decoding: Ngram,✅&nbsp;Passing,✅&nbsp;Passing
+async scheduler,✅&nbsp;Passing,✅&nbsp;Passing
+data_parallelism,✅&nbsp;Passing,❓&nbsp;Untested
+runai_model_streamer_loader,✅&nbsp;Passing,⚪&nbsp;N/A
+sampling_params,✅&nbsp;Passing,⚪&nbsp;N/A
+structured_decoding,✅&nbsp;Passing,⚪&nbsp;N/A

@@ -96,20 +96,20 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- START: model_support -->
 | Model | Type | Load Test | Correctness Test | Benchmark |
 | --- | --- | --- | --- | --- |
-| `meta-llama/Llama-4-Maverick-17B-128E-Instruct` | Multimodal | ❓ Untested | ❓ Untested | ❓ Untested |
-| `Qwen/Qwen2.5-VL-7B-Instruct` | Multimodal | ✅ Passing | ✅ Passing | ✅ Passing |
-| `Qwen/Qwen3-Omni-30B-A3B-Instruct` | Multimodal | ❓ Untested | ❓ Untested | ❓ Untested |
-| `moonshotai/Kimi-K2-Thinking` | Text | ❓ Untested | ❓ Untested | ❓ Untested |
-| `Qwen/Qwen3-Coder-480B-A35B-Instruct` | Text | ❓ Untested | ❓ Untested | ❓ Untested |
-| `meta-llama/Llama-3.3-70B-Instruct` | Text | ✅ Passing | ✅ Passing | ✅ Passing |
-| `Qwen/Qwen3-4B` | Text | ✅ Passing | ✅ Passing | ✅ Passing |
-| `google/gemma-3-27b-it` | Text | ✅ Passing | ✅ Passing | ✅ Passing |
-| `Qwen/Qwen3-32B` | Text | ✅ Passing | ✅ Passing | ✅ Passing |
-| `deepseek-ai/DeepSeek-V3.1` | Text | ❓ Untested | ❓ Untested | ❓ Untested |
-| `meta-llama/Llama-Guard-4-12B` | Text | ✅ Passing | ✅ Passing | ✅ Passing |
-| `openai/gpt-oss-120b` | Text | ❓ Untested | ❓ Untested | ❓ Untested |
-| `meta-llama/Llama-3.1-8B-Instruct` | Text | ✅ Passing | ✅ Passing | ✅ Passing |
-| `Qwen/Qwen3-30B-A3B` | Text | ✅ Passing | ✅ Passing | ✅ Passing |
+| `meta-llama/Llama-4-Maverick-17B-128E-Instruct` | Multimodal | ❓&nbsp;Untested | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| `Qwen/Qwen2.5-VL-7B-Instruct` | Multimodal | ✅&nbsp;Passing | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| `Qwen/Qwen3-Omni-30B-A3B-Instruct` | Multimodal | ❓&nbsp;Untested | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| `moonshotai/Kimi-K2-Thinking` | Text | ❓&nbsp;Untested | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| `Qwen/Qwen3-Coder-480B-A35B-Instruct` | Text | ❓&nbsp;Untested | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| `meta-llama/Llama-3.3-70B-Instruct` | Text | ✅&nbsp;Passing | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| `Qwen/Qwen3-4B` | Text | ✅&nbsp;Passing | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| `google/gemma-3-27b-it` | Text | ✅&nbsp;Passing | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| `Qwen/Qwen3-32B` | Text | ✅&nbsp;Passing | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| `deepseek-ai/DeepSeek-V3.1` | Text | ❓&nbsp;Untested | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| `meta-llama/Llama-Guard-4-12B` | Text | ✅&nbsp;Passing | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| `openai/gpt-oss-120b` | Text | ❓&nbsp;Untested | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| `meta-llama/Llama-3.1-8B-Instruct` | Text | ✅&nbsp;Passing | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| `Qwen/Qwen3-30B-A3B` | Text | ✅&nbsp;Passing | ✅&nbsp;Passing | ✅&nbsp;Passing |
 
 <!-- END: model_support -->
 
@@ -125,22 +125,22 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- START: core_features -->
 | Feature | CorrectnessTest | PerformanceTest |
 | --- | --- | --- |
-| Chunked Prefill | ✅ Passing | ✅ Passing |
-| DCN-based P/D disaggregation | ❓ Untested | ✅ Passing |
-| KV cache host offloading | ❓ Untested | ❓ Untested |
-| LoRA_Torch | ✅ Passing | ✅ Passing |
-| Multimodal Inputs | ✅ Passing | ✅ Passing |
-| Out-of-tree model support | ✅ Passing | ✅ Passing |
-| Prefix Caching | ✅ Passing | ✅ Passing |
-| Single Program Multi Data | ✅ Passing | ✅ Passing |
-| Single-Host-P-D-disaggregation | ⚪ N/A | ⚪ N/A |
-| Speculative Decoding: Eagle3 | ✅ Passing | ✅ Passing |
-| Speculative Decoding: Ngram | ✅ Passing | ✅ Passing |
-| async scheduler | ✅ Passing | ✅ Passing |
-| data_parallelism | ✅ Passing | ❓ Untested |
-| runai_model_streamer_loader | ✅ Passing | ⚪ N/A |
-| sampling_params | ✅ Passing | ⚪ N/A |
-| structured_decoding | ✅ Passing | ⚪ N/A |
+| Chunked Prefill | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| DCN-based P/D disaggregation | ❓&nbsp;Untested | ✅&nbsp;Passing |
+| KV cache host offloading | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| LoRA_Torch | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| Multimodal Inputs | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| Out-of-tree model support | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| Prefix Caching | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| Single Program Multi Data | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| Single-Host-P-D-disaggregation | ⚪&nbsp;N/A | ⚪&nbsp;N/A |
+| Speculative Decoding: Eagle3 | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| Speculative Decoding: Ngram | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| async scheduler | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| data_parallelism | ✅&nbsp;Passing | ❓&nbsp;Untested |
+| runai_model_streamer_loader | ✅&nbsp;Passing | ⚪&nbsp;N/A |
+| sampling_params | ✅&nbsp;Passing | ⚪&nbsp;N/A |
+| structured_decoding | ✅&nbsp;Passing | ⚪&nbsp;N/A |
 
 <!-- END: core_features -->
 
@@ -153,12 +153,12 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- START: parallelism -->
 | Feature | CorrectnessTest | PerformanceTest |
 | --- | --- | --- |
-| CP | ❓ Untested | ❓ Untested |
-| DP | ✅ Passing | ❓ Untested |
-| EP | ✅ Passing | ❓ Untested |
-| PP | ✅ Passing | ✅ Passing |
-| SP | ❓ Untested | ❓ Untested |
-| TP | ✅ Passing | ❓ Untested |
+| CP | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| DP | ✅&nbsp;Passing | ❓&nbsp;Untested |
+| EP | ✅&nbsp;Passing | ❓&nbsp;Untested |
+| PP | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| SP | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| TP | ✅&nbsp;Passing | ❓&nbsp;Untested |
 
 <!-- END: parallelism -->
 
@@ -171,12 +171,12 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- START: quantization -->
 | Feature | Recommended TPU Generations | CorrectnessTest | PerformanceTest |
 | --- | --- | --- | --- |
-| AWQ INT4 | v5, v6 | ❓ Untested | ❓ Untested |
-| FP4 W4A16 | v7 | ❓ Untested | ❓ Untested |
-| FP8 W8A8 | v7 | ❓ Untested | ❓ Untested |
-| FP8 W8A16 | v7 | ❓ Untested | ❓ Untested |
-| INT4 W4A16 | v5, v6 | ❓ Untested | ❓ Untested |
-| INT8 W8A8 | v5, v6 | ❓ Untested | ❓ Untested |
+| AWQ INT4 | v5, v6 | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| FP4 W4A16 | v7 | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| FP8 W8A8 | v7 | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| FP8 W8A16 | v7 | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| INT4 W4A16 | v5, v6 | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| INT8 W8A8 | v5, v6 | ❓&nbsp;Untested | ❓&nbsp;Untested |
 
 <!-- END: quantization -->
 
@@ -191,13 +191,13 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- START: kernel_support -->
 | Feature | CorrectnessTest | PerformanceTest |
 | --- | --- | --- |
-| Collective Communication Matmul | ✅ Passing | ❓ Untested |
-| MLA | ❓ Untested | ❓ Untested |
-| MoE | ❓ Untested | ❓ Untested |
-| Quantized Attention | ❓ Untested | ❓ Untested |
-| Quantized KV Cache | ❓ Untested | ❓ Untested |
-| Quantized Matmul | ❓ Untested | ❓ Untested |
-| Ragged Paged Attention V3 | ✅ Passing | ✅ Passing |
+| Collective Communication Matmul | ✅&nbsp;Passing | ❓&nbsp;Untested |
+| MLA | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| MoE | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| Quantized Attention | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| Quantized KV Cache | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| Quantized Matmul | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| Ragged Paged Attention V3 | ✅&nbsp;Passing | ✅&nbsp;Passing |
 
 <!-- END: kernel_support -->
 

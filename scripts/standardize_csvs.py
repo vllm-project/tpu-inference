@@ -8,31 +8,31 @@ COMBINED_FILE = "combined_model_support_matrix.csv"
 # Mapping from older representations to new Standardized Legend
 STATUS_MAP = {
     # Passing variants
-    "✅": "✅ Passing",
-    "passing": "✅ Passing",
+    "✅": "✅&nbsp;Passing",
+    "passing": "✅&nbsp;Passing",
     
     # Failing variants
-    "❌": "❌ Failing",
-    "x": "❌ Failing",
-    "failing": "❌ Failing",
+    "❌": "❌&nbsp;Failing",
+    "x": "❌&nbsp;Failing",
+    "failing": "❌&nbsp;Failing",
     
     # Untested variants
-    "❓": "❓ Untested",
-    "unverified": "❓ Untested",
-    "untested": "❓ Untested",
+    "❓": "❓&nbsp;Untested",
+    "unverified": "❓&nbsp;Untested",
+    "untested": "❓&nbsp;Untested",
     
     # Beta variants
-    "⚠️": "⚠️ Beta",
-    "beta": "⚠️ Beta",
+    "⚠️": "⚠️&nbsp;Beta",
+    "beta": "⚠️&nbsp;Beta",
     
     # Planned variants
-    "📝": "📝 Planned",
-    "planned": "📝 Planned",
+    "📝": "📝&nbsp;Planned",
+    "planned": "📝&nbsp;Planned",
     
     # N/A variants
-    "⚪": "⚪ N/A",
-    "n/a": "⚪ N/A",
-    "": "⚪ N/A",
+    "⚪": "⚪&nbsp;N/A",
+    "n/a": "⚪&nbsp;N/A",
+    "": "⚪&nbsp;N/A",
 }
 
 def standardize_cell(val):
