@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import math
 from unittest.mock import patch
 
 import jax
@@ -65,6 +66,18 @@ def quantize_to_fp8_block_3d(weight: jax.Array,
     scale_blocks = jnp.squeeze(scale, axis=(2, 4)).astype(jnp.float32)
 
     return w_q, scale_blocks
+
+
+def sharding_to_tuple(sharding):
+    if sharding is None:
+        return None
+    if isinstance(sharding, tuple):
+        return sharding
+    if isinstance(sharding, jax.sharding.NamedSharding):
+        return tuple(s for s in sharding.spec)
+    if isinstance(sharding, jax.sharding.PartitionSpec):
+        return tuple(s for s in sharding)
+    raise ValueError(f"Unsupported sharding type: {type(sharding)}")
 
 
 @pytest.fixture(scope="module")
@@ -145,8 +158,9 @@ class TestFp8BlockwiseJaxLinear:
                                                           (256, 128)])
     @pytest.mark.parametrize("use_bias", [True, False])
     @pytest.mark.parametrize("batch_size", [1, 4])
+    @pytest.mark.parametrize("weight_sharding", [(None,), ('in', None), (None, 'out'), ('in', 'out')])
     def test_linear_forward_correctness(self, in_features, out_features,
-                                        use_bias, batch_size, rngs):
+                                        use_bias, batch_size, weight_sharding, rngs):
         hf_quant_config = {
             "quant_method": "fp8",
             "activation_scheme": "dynamic",
@@ -161,6 +175,7 @@ class TestFp8BlockwiseJaxLinear:
             rngs=rngs,
             use_bias=use_bias,
             quant_config=quant_config,
+            kernel_init=nnx.with_partitioning(nnx.initializers.uniform(), weight_sharding)
         )
 
         # Use a dummy mesh for testing
@@ -177,12 +192,18 @@ class TestFp8BlockwiseJaxLinear:
             output = layer(x)
 
         assert output.shape == (batch_size, out_features)
+        assert layer.weight.shape == (out_features, in_features)
+        assert sharding_to_tuple(layer.weight.sharding) in [(None, None), ('out', None), (None, 'in'), ('out', 'in')]
+        if use_bias:
+            assert layer.bias.shape == (out_features, )
+            assert sharding_to_tuple(layer.bias.sharding) in [(None,), ('out',)]
 
     @pytest.mark.parametrize("kernel_shape", [(128, 8, 16), (256, 32, 32)])
     @pytest.mark.parametrize("use_bias", [True, False])
     @pytest.mark.parametrize("batch_size", [1, 4])
+    @pytest.mark.parametrize("weight_sharding", [(None,), ('in', None), (None, 'out'), ('in', None, 'out'), (None, None, 'out')])
     def test_einsum_forward_correctness(self, kernel_shape, use_bias,
-                                        batch_size, rngs):
+                                        batch_size, weight_sharding, rngs):
         hf_quant_config = {
             "quant_method": "fp8",
             "activation_scheme": "dynamic",
@@ -196,6 +217,7 @@ class TestFp8BlockwiseJaxLinear:
             rngs=rngs,
             bias_shape=kernel_shape[1:] if use_bias else None,
             quant_config=quant_config,
+            kernel_init=nnx.with_partitioning(nnx.initializers.uniform(), weight_sharding)
         )
 
         # Use a dummy mesh for testing
@@ -214,6 +236,11 @@ class TestFp8BlockwiseJaxLinear:
         # Output shape should be (B, N, H)
         expected_shape = (batch_size, ) + kernel_shape[1:]
         assert output.shape == expected_shape
+        assert layer.weight.shape == (math.prod(kernel_shape[1:]), kernel_shape[0])
+        assert sharding_to_tuple(layer.weight.sharding) in [(None, None), ('out', None), (None, 'in'), ('out', 'in')]
+        if use_bias:
+            assert layer.bias.shape == (math.prod(kernel_shape[1:]),)
+            assert sharding_to_tuple(layer.bias.sharding) in [(None,), ('out',)]
 
     @pytest.mark.parametrize("kernel_shape", [(16, 4, 8), (32, 8, 16)])
     @pytest.mark.parametrize("batch_size", [1, 4])
@@ -275,25 +302,6 @@ class TestFp8BlockwiseJaxLinear:
 
         expected_shape = (batch_size, N, H)
         assert output.shape == expected_shape
-
-
-    @pytest.mark.parametrize("einsum_str,weight_shape,weight_sharding", [
-        ("ab,bc->ac", (32, 16), (None, 'out')),
-        ("ab,bc->ac", (32, 16), ('in', 'out')),
-        ("ab,bc->ac", (32, 16), ('in', None)),
-    ])
-    def test_put_sharding_correctness(self, rngs, einsum_str, weight_shape, weight_sharding):
-        """Test that the weight sharding from the original weight is preserved."""
-        hf_quant_config = {
-            "quant_method": "fp8",
-            "activation_scheme": "dynamic",
-            "weight_block_size": [8, 16],
-        }
-        quant_config = Fp8Config(hf_quant_config)
-
-        layer = JaxEinsum(einsum_str, weight_shape, rngs, quant_config=quant_config, kernel_init=nnx.with_partitioning(nnx.initializers.uniform(), weight_sharding))
-        assert layer.weight.shape == (16, 32)
-        assert layer.weight.sharding in [('out', None), ('out', 'in'), (None, 'in')]
 
 
 class TestFp8TensorwiseJaxLinear:

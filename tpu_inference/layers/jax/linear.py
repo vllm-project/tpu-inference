@@ -43,12 +43,20 @@ class JaxEinsum(nnx.Einsum, JaxModule):
                  bias_shape: Optional[tuple[int, ...]] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = "",
+                 kernel_metadata={},
+                 bias_metadata={},
                  **kwargs):
+        if "eager_sharding" not in kernel_metadata:
+            kernel_metadata["eager_sharding"] = False
+        if "eager_sharding" not in bias_metadata:
+            bias_metadata["eager_sharding"] = False
         nnx.Einsum.__init__(self,
                             rngs=rngs,
                             einsum_str=einsum_str,
                             kernel_shape=kernel_shape,
                             bias_shape=bias_shape,
+                            kernel_metadata=kernel_metadata,
+                            bias_metadata=bias_metadata,
                             **kwargs)
         self.kernel_init = kwargs.get("kernel_init",
                                       jax.nn.initializers.lecun_normal())
