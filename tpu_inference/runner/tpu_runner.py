@@ -324,11 +324,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             sharding_strategy.tp_size,
         )
 
-        return mesh_utils.create_device_mesh(
-            mesh_shape,
-            self.devices,
-            allow_split_physical_axes=True,
-        )
+        try:
+            return mesh_utils.create_device_mesh(
+                mesh_shape,
+                self.devices,
+                allow_split_physical_axes=True,
+            )
+        except (AssertionError, ValueError, RuntimeError) as e:
+            logger.warning(
+                "Physical mesh creation failed (shape=%s, devices=%d). "
+                "Falling back to logical reshape. Error: %s", mesh_shape,
+                len(self.devices), e)
+            return np.array(self.devices).reshape(mesh_shape)
 
     def _create_multi_slice_mesh(self, num_slices: int) -> jax.Array:
         sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config

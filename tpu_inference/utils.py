@@ -262,7 +262,14 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
                 logger.info("Use customized mesh: %s", mesh)
                 return mesh
 
-    return jax.make_mesh(axis_shapes, axis_names, devices=devices)
+    try:
+        return jax.make_mesh(axis_shapes, axis_names, devices=devices)
+    except (AssertionError, ValueError, RuntimeError) as e:
+        logger.warning(
+            "jax.make_mesh failed due to topology constraints. Falling back to manual mesh: %s",
+            e)
+        ordered_devices = np.array(devices).reshape(axis_shapes)
+        return mesh_lib.Mesh(ordered_devices, axis_names)
 
 
 def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:
