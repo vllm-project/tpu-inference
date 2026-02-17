@@ -26,19 +26,24 @@ class QuantLinearConfig:
 
     @dataclass
     class LinearOpAdaptInfo:
-        # Adapted weight sharding for the 2D (contracting, free) dims.
-        # E.g. for "TD,DNH->TNH", if weight sharding is ('x', None, 'y'),
-        # adapted weight sharding will be ('x', 'y') because the sharding on
-        # N and H axis are fused.
-        weight_sharding: tuple
         # Non-contracting, non-batch axis sizes from the weight.
         # E.g. for "TD,DNH->TNH", out_features = (N, H).
         # Used for reshaping right before return from __call__.
         out_features: tuple[int, ...]
+        # Sharding for out_features, extracted from weight sharding.
+        # E.g. for "TD,DNH->TNH", if weight sharding is ('x', None, 'y'),
+        # adapted out_features_sharding will be ('y', ) because the sharding on
+        # N and H axis are fused.
+        out_features_sharding: tuple
         # Contracting axis sizes from the weight (axes shared between both
         # operands but NOT in the output).
         # E.g. for "TD,DNH->TNH", in_features = (D,).
         in_features: tuple[int, ...]
+        # Sharding for in_features, extracted from weight sharding.
+        # E.g. for "TNH,NHD->TD", if weight sharding is ('x', None, 'y'),
+        # adapted in_features_sharding will be ('x', ) because the sharding on
+        # N and H axis are fused.
+        in_features_sharding: tuple
         # Batch axis sizes from the weight (axes shared between both operands
         # AND present in the output). E.g. for "TNH,ANH->TNA", batch_features
         # = (N,). Empty tuple means no batch dims (standard 2D matmul).
@@ -64,26 +69,23 @@ class QuantLinearConfig:
                             if c in contracting_axes)
 
         # Extract and fuse sharding per axis category.
-        spec = weight.sharding
-        if isinstance(weight.sharding, jax.NamedSharding):
-            spec = weight.sharding.spec
-        elif isinstance(weight.sharding, jax.sharding.SingleDeviceSharding):
+        spec = getattr(weight, "sharding", ())
+        if isinstance(spec, jax.NamedSharding):
+            spec = spec.spec
+        elif isinstance(spec, jax.sharding.SingleDeviceSharding):
             spec = ()
         sharding = spec + (None, ) * (len(weight.value.shape) - len(spec))
 
         in_sharding = set(s for i, s in enumerate(sharding)
                           if w_axis[i] in contracting_axes and s is not None)
         out_sharding = set(s for i, s in enumerate(sharding)
-                           if w_axis[i] not in contracting_axes
-                           and w_axis[i] not in batch_axes and s is not None)
+                           if w_axis[i] not in (contracting_axes | batch_axes) and s is not None)
         batch_sharding_set = set(s for i, s in enumerate(sharding)
                                  if w_axis[i] in batch_axes and s is not None)
 
         assert len(in_sharding) <= 1 and len(out_sharding) <= 1, \
-            f"Cannot fuse sharding {weight.sharding} into 2D weight sharding for {einsum_str}"
+            f"Cannot fuse sharding {getattr(weight, "sharding", ())=} into 2D weight sharding for {einsum_str}"
 
-        weight_sharding = (next(iter(in_sharding),
-                                None), next(iter(out_sharding), None))
         out_features = tuple(
             weight.value.shape[i] for i, c in enumerate(w_axis)
             if c not in contracting_axes and c not in batch_axes)
@@ -93,9 +95,10 @@ class QuantLinearConfig:
         batch_sharding_tuple = tuple(batch_sharding_set)
 
         return cls.LinearOpAdaptInfo(
-            weight_sharding=weight_sharding,
             out_features=out_features,
+            out_features_sharding=(next(iter(out_sharding), None), ),
             in_features=in_features,
+            in_features_sharding=(next(iter(in_sharding), None), ),
             batch_features=batch_features,
             batch_sharding=batch_sharding_tuple,
         )

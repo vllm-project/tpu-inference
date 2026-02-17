@@ -58,6 +58,7 @@ class JaxEinsum(nnx.Einsum, JaxModule):
         delattr(self, 'kernel')
         if hasattr(self.weight, 'out_sharding'):
             self.weight.set_metadata('sharding', self.weight.out_sharding)
+        self.prefix = prefix
 
         if quant_config is None:
             self.quant_method = None
