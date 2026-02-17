@@ -30,26 +30,23 @@ def update_readme_badges(good_first_count, docs_count, blocked_count):
         readme_content = f.read()
 
     # Good First Issue Badge
-    # Example: ![good first issue](https://img.shields.io/github/issues/vllm-project/tpu-inference/good%20first%20issue.svg?label=good%20first%20issue&color=green&style=flat-square)
     readme_content = re.sub(
-        r'(\[!\[good first issue\]\(https://img\.shields\.io/github/issues/[^/]+/[^/]+/good%20first%20issue\.svg\?label=)[^&]+(&color=)',
-        rf'\g<1>{good_first_count}%20open\g<2>',
+        r'\[!\[good first issue\]\(https://img\.shields\.io/[^\)]+\)\]',
+        rf'[![good first issue](https://img.shields.io/badge/good%20first%20issue-{good_first_count}%20open-green?style=flat-square)]',
         readme_content
     )
 
     # Documentation Bugs Badge
-    # Example: ![documentation bugs](https://img.shields.io/github/issues-search/vllm-project/tpu-inference?query=is%3Aopen%20is%3Aissue%20label%3Adocumentation%20label%3Abug&label=documentation%20bugs&color=orange&style=flat-square)
     readme_content = re.sub(
-        r'(\[!\[documentation bugs\]\(https://img\.shields\.io/github/issues-search/[^?]+\?query=[^&]+&label=)[^&]+(&color=)',
-        rf'\g<1>{docs_count}%20open\g<2>',
+        r'\[!\[documentation bugs\]\(https://img\.shields\.io/[^\)]+\)\]',
+        rf'[![documentation bugs](https://img.shields.io/badge/documentation%20bugs-{docs_count}%20open-orange?style=flat-square)]',
         readme_content
     )
 
     # Blocked Issues Badge 
-    # Example: ![blocked issues](https://img.shields.io/github/issues/vllm-project/tpu-inference/blocked.svg?label=🛑%20Blocked&color=brightred&style=flat-square)
     readme_content = re.sub(
-        r'(\[!\[blocked issues\]\(https://img\.shields\.io/github/issues/[^/]+/[^/]+/blocked\.svg\?label=🛑%20Blocked)[^&]*(&color=)',
-        rf'\g<1>%20%7C%20{blocked_count}%20open\g<2>',
+        r'\[!\[blocked issues\]\(https://img\.shields\.io/[^\)]+\)\]',
+        rf'[![blocked issues](https://img.shields.io/badge/🛑%20Blocked-{blocked_count}%20open-brightred?style=flat-square)]',
         readme_content
     )
 
