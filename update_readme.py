@@ -7,8 +7,7 @@ import re
 # This MUST match your file structure exactly.
 CSV_MAP = {
     "model_support": [
-        "support_matrices/text_only_model_support_matrix.csv",
-        "support_matrices/multimodal_model_support_matrix.csv"
+        "support_matrices/combined_model_support_matrix.csv"
     ],
     "core_features": "support_matrices/feature_support_matrix.csv",
     "parallelism": "support_matrices/parallelism_support_matrix.csv",

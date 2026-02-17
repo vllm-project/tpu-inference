@@ -94,22 +94,22 @@ Below is the live status of our supported models, features, and kernels. Click o
 <summary><b> ✅ Model Support </b></summary>
 
 <!-- START: model_support -->
-| Model | UnitTest | Accuracy/Correctness | Benchmark |
-| --- | --- | --- | --- |
-| moonshotai/Kimi-K2-Thinking | unverified | unverified | unverified |
-| Qwen/Qwen3-Coder-480B-A35B-Instruct | unverified | unverified | unverified |
-| meta-llama/Llama-3.3-70B-Instruct | ✅ | ✅ | ✅ |
-| Qwen/Qwen3-4B | ✅ | ✅ | ✅ |
-| google/gemma-3-27b-it | ✅ | ✅ | ✅ |
-| Qwen/Qwen3-32B | ✅ | ✅ | ✅ |
-| deepseek-ai/DeepSeek-V3.1 | unverified | unverified | unverified |
-| meta-llama/Llama-Guard-4-12B | ✅ | ✅ | ✅ |
-| openai/gpt-oss-120b | unverified | unverified | unverified |
-| meta-llama/Llama-3.1-8B-Instruct | ✅ | ✅ | ✅ |
-| Qwen/Qwen3-30B-A3B | ✅ | ✅ | ✅ |
-| meta-llama/Llama-4-Maverick-17B-128E-Instruct | unverified | unverified | unverified |
-| Qwen/Qwen2.5-VL-7B-Instruct | ✅ | ✅ | ✅ |
-| Qwen/Qwen3-Omni-30B-A3B-Instruct | unverified | unverified | unverified |
+| Model | Type | Load Test | Correctness Test | Benchmark |
+| --- | --- | --- | --- | --- |
+| `meta-llama/Llama-4-Maverick-17B-128E-Instruct` | Multimodal | ❓ Untested | ❓ Untested | ❓ Untested |
+| `Qwen/Qwen2.5-VL-7B-Instruct` | Multimodal | ✅ Passing | ✅ Passing | ✅ Passing |
+| `Qwen/Qwen3-Omni-30B-A3B-Instruct` | Multimodal | ❓ Untested | ❓ Untested | ❓ Untested |
+| `moonshotai/Kimi-K2-Thinking` | Text | ❓ Untested | ❓ Untested | ❓ Untested |
+| `Qwen/Qwen3-Coder-480B-A35B-Instruct` | Text | ❓ Untested | ❓ Untested | ❓ Untested |
+| `meta-llama/Llama-3.3-70B-Instruct` | Text | ✅ Passing | ✅ Passing | ✅ Passing |
+| `Qwen/Qwen3-4B` | Text | ✅ Passing | ✅ Passing | ✅ Passing |
+| `google/gemma-3-27b-it` | Text | ✅ Passing | ✅ Passing | ✅ Passing |
+| `Qwen/Qwen3-32B` | Text | ✅ Passing | ✅ Passing | ✅ Passing |
+| `deepseek-ai/DeepSeek-V3.1` | Text | ❓ Untested | ❓ Untested | ❓ Untested |
+| `meta-llama/Llama-Guard-4-12B` | Text | ✅ Passing | ✅ Passing | ✅ Passing |
+| `openai/gpt-oss-120b` | Text | ❓ Untested | ❓ Untested | ❓ Untested |
+| `meta-llama/Llama-3.1-8B-Instruct` | Text | ✅ Passing | ✅ Passing | ✅ Passing |
+| `Qwen/Qwen3-30B-A3B` | Text | ✅ Passing | ✅ Passing | ✅ Passing |
 
 <!-- END: model_support -->
 
