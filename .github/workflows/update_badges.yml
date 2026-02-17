@@ -1,0 +1,46 @@
+name: Sync Readme Badges
+
+on:
+  schedule:
+    - cron: '0 0,12 * * *' # Run twice daily
+  issues:
+    types: [opened, closed, labeled, unlabeled, deleted, transferred] # Run when issues change
+  workflow_dispatch: # Allow manual runs
+
+permissions:
+  contents: write
+
+jobs:
+  update-badges:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v3
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: pip install requests
+
+      - name: Run Update Badges Script
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python scripts/update_badges.py
+
+      - name: Commit and Push Changes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          
+          # Only commit if there are changes
+          if ! git diff-index --quiet HEAD; then
+            git commit -m "docs: auto-sync issue badges [skip ci]"
+            git push
+          else
+            echo "No changes to badges. Skipping commit."
+          fi
