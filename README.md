@@ -11,7 +11,7 @@
 
 ---
 
-[![good first issue](https://img.shields.io/badge/good%20first%20issue-8%20open-green?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)  [![documentation bugs](https://img.shields.io/badge/documentation%20bugs-0%20open-orange?style=flat-square)](https://github.com/vllm-project/tpo-inference/issues?q=is%3Aissue+is%3Aopen+label%3Adocumentation+label%3Abug) [![blocked issues](https://img.shields.io/badge/🛑%20Blocked-0%20open-brightred?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3Ablocked)
+[![good first issue](https://img.shields.io/badge/good%20first%20issue-8%20open-green?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)  [![documentation bugs](https://img.shields.io/badge/documentation%20bugs-2%20open-orange?style=flat-square)](https://github.com/vllm-project/tpo-inference/issues?q=is%3Aissue+is%3Aopen+label%3Adocumentation+label%3Abug) [![blocked issues](https://img.shields.io/badge/🛑%20Blocked-0%20open-brightred?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3Ablocked)
 
 
 
@@ -207,7 +207,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 ## 🤝 Contribute
 
-[![good first issue](https://img.shields.io/badge/good%20first%20issue-8%20open-green?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)  [![documentation bugs](https://img.shields.io/badge/documentation%20bugs-0%20open-orange?style=flat-square)](https://github.com/vllm-project/tpo-inference/issues?q=is%3Aissue+is%3Aopen+label%3Adocumentation+label%3Abug) [![blocked issues](https://img.shields.io/badge/🛑%20Blocked-0%20open-brightred?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3Ablocked)
+[![good first issue](https://img.shields.io/badge/good%20first%20issue-8%20open-green?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)  [![documentation bugs](https://img.shields.io/badge/documentation%20bugs-2%20open-orange?style=flat-square)](https://github.com/vllm-project/tpo-inference/issues?q=is%3Aissue+is%3Aopen+label%3Adocumentation+label%3Abug) [![blocked issues](https://img.shields.io/badge/🛑%20Blocked-0%20open-brightred?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3Ablocked)
 
 We're thrilled you're interested in contributing to the vLLM TPU project! Your help is essential for making our tools better for everyone. There are many ways to get involved, even if you're not ready to write code.
 

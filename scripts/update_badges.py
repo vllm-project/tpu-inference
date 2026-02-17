@@ -57,7 +57,7 @@ def main():
     print(f"Fetching issue counts for {REPO}...")
     
     count_good_first = get_issue_count('is:issue is:open label:"good first issue"')
-    count_docs = get_issue_count('is:issue is:open label:documentation label:bug')
+    count_docs = get_issue_count('is:issue is:open label:documentation')
     count_blocked = get_issue_count('is:issue is:open label:blocked')
 
     if None in (count_good_first, count_docs, count_blocked):
