@@ -450,6 +450,9 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
         """
         Create the quant method-specific weights.
 
+        Please see https://github.com/vllm-project/tpu-inference/blob/bb1a88/tpu_inference/layers/common/moe.py#L39
+        for more information on the expected weights per MoE backend.
+
         Args:
             layer: The layer to create weights for.
         """
@@ -500,6 +503,9 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
     def process_weights_after_loading(self, layer: JaxMoE) -> None:
         """
         Process weights after loading.
+
+        Please see https://github.com/vllm-project/tpu-inference/blob/bb1a88/tpu_inference/layers/common/moe.py#L39
+        for more information on the expected weights per MoE backend.
 
         Args:
             layer: The layer to process.
