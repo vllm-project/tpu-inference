@@ -519,7 +519,7 @@ def test_fused_moe(use_ep, num_devices, num_tokens, intermediate_size,
     expected = test_utils.ref_moe(a, score, w1, w2, w1_bias, w2_bias,
                                   vllm_fused_moe.top_k,
                                   vllm_fused_moe.renormalize,
-                                  vllm_fused_moe.activation)
+                                  vllm_fused_moe.activation.value)
 
     with torchax.default_env(), set_forward_context(None, vllm_config):
         assert isinstance(vllm_fused_moe.quant_method,
@@ -642,7 +642,7 @@ def test_fused_moe_use_kernel(num_devices, num_tokens, intermediate_size,
     expected = test_utils.ref_moe(a, score, w1, w2, w1_bias, w2_bias,
                                   vllm_fused_moe.top_k,
                                   vllm_fused_moe.renormalize,
-                                  vllm_fused_moe.activation)
+                                  vllm_fused_moe.activation.value)
 
     with torchax.default_env(), set_forward_context(None, vllm_config):
         assert isinstance(vllm_fused_moe.quant_method,

@@ -247,7 +247,7 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
             input_weights,
             moe_backend=self.moe_backend,
             mesh=self.mesh,
-            activation=layer.activation,
+            activation=layer.activation.value,
             # Convert to tuple so jax jit can hash it
             weight_block_size=weight_block_size,
         )

@@ -23,6 +23,7 @@ import jax.numpy as jnp
 import torch
 from flax import nnx
 from flax.typing import PRNGKey, Sharding
+from jax import lax
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Float
@@ -101,17 +102,16 @@ class DeepseekV3BaseAttention(nnx.Module):
     rms_norm_eps: float
 
     # Sharding
-    rd_sharding: Sharding = ()
-    q_da_sharding: Sharding = ()
-    ap_sharding: Sharding = ()
-    kv_da_sharding: Sharding = ()
-    activation_attention_td: Sharding = ()
-    activation_q_td: Sharding = ()
+    rd_sharding: P = P()
+    q_da_sharding: P = P()
+    ap_sharding: P = P()
+    kv_da_sharding: P = P()
+    activation_attention_td: P = P()
+    activation_q_td: P = P()
     query_tnh: P = P()
     keyvalue_skh: P = P()
     attn_o_tnh: P = P()
-    activation_attention_out_td: Sharding = ()
-
+    activation_attention_out_td: P = P()
     # Weight initialization
     random_init: bool = False
     rope_mscale_all_dim: float = 1.0
@@ -249,8 +249,8 @@ class DeepseekV3BaseAttention(nnx.Module):
 
         md = attention_metadata
         x = jnp.asarray(x, self.dtype)
-        x_SD = nnx.with_sharding_constraint(x, self.activation_attention_td)
-        x_q_TD = nnx.with_sharding_constraint(x, self.activation_q_td)
+        x_SD = lax.with_sharding_constraint(x, self.activation_attention_td)
+        x_q_TD = lax.with_sharding_constraint(x, self.activation_q_td)
 
         with jax.named_scope("q_proj"):
             q_data = self.compute_q_projection(x_q_TD, md.input_positions)
@@ -313,7 +313,7 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
         q_rope_TNH = self.rope.apply_rope(input_positions, q_rope_TNH)
         q_TNH = jnp.concatenate([q_nope_TNH, q_rope_TNH], axis=-1)
 
-        return nnx.with_sharding_constraint(q_TNH, self.query_tnh)
+        return lax.with_sharding_constraint(q_TNH, self.query_tnh)
 
     def compute_kv_projection(
             self, x_SD: jax.Array,
@@ -341,7 +341,7 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
 
         kv_SA = kv_SA[..., :self.kv_lora_rank]
         kv_SA = self.kv_rms_norm(kv_SA)
-        kv_SA = nnx.with_sharding_constraint(kv_SA, self.keyvalue_skh)
+        kv_SA = lax.with_sharding_constraint(kv_SA, self.keyvalue_skh)
 
         kv_SL = self.kv_up_proj(kv_SA)
         kv_nope_SNH = kv_SL.reshape(kv_SA.shape[0], self.N,
@@ -353,8 +353,8 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
         k_SNH = jnp.concatenate([k_nope_SNH, k_rope_SNH], axis=-1)
 
         # Shard
-        k_SNH = nnx.with_sharding_constraint(k_SNH, self.keyvalue_skh)
-        v_SNH = nnx.with_sharding_constraint(v_SNH, self.keyvalue_skh)
+        k_SNH = lax.with_sharding_constraint(k_SNH, self.keyvalue_skh)
+        v_SNH = lax.with_sharding_constraint(v_SNH, self.keyvalue_skh)
 
         return (k_SNH, v_SNH)
 
@@ -485,7 +485,7 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
 
         q_TNA = self.k_up_proj(q_nope_TNH)
 
-        q_TNA = nnx.with_sharding_constraint(q_TNA, self.query_tnh)
+        q_TNA = lax.with_sharding_constraint(q_TNA, self.query_tnh)
         return (q_TNA, q_rope_TNH)
 
     def compute_kv_projection(
@@ -512,7 +512,7 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
 
         kv_SA = kv_SA[..., :self.kv_lora_rank]
         kv_SA = self.kv_rms_norm(kv_SA)
-        kv_SA = nnx.with_sharding_constraint(kv_SA, self.keyvalue_skh)
+        kv_SA = lax.with_sharding_constraint(kv_SA, self.keyvalue_skh)
 
         return (kv_SA, k_rope_SH)
 
@@ -656,7 +656,7 @@ class DeepseekV3MLP(nnx.Module):
             The output tensor of shape `(batch, sequence, d_model)`.
         """
         x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
+        x_TD = lax.with_sharding_constraint(x_TD, self.activation_ffw_td)
         with jax.named_scope("wi_0"):
             gating_TF = self.gating_proj(x_TD)
             activated_gating_TF = modeling_flax_utils.ACT2FN[self.hidden_act](
@@ -781,7 +781,7 @@ class DeepSeekV3Router(nnx.Module):
     rngs: InitVar[nnx.Rngs]
 
     # Sharding Attributes
-    activation_ffw_td: Sharding = ()
+    activation_ffw_td: Sharding = P()
     ed_sharding: Sharding = ()
     e_sharding: Sharding = ()
 
@@ -834,7 +834,7 @@ class DeepSeekV3Router(nnx.Module):
                 - indices: Indices of selected experts, shape (sequence, num_experts_per_tok).
         """
         x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
+        x_TD = lax.with_sharding_constraint(x_TD, self.activation_ffw_td)
 
         scores_TE = self.gate_proj(x_TD)
         scores_TE = nnx.sigmoid(scores_TE)
@@ -1120,8 +1120,8 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
         base_model_weight = get_param(model_params, mapped_name)
         model_weight = base_model_weight.array.qvalue if hasattr(
             base_model_weight, "array") else base_model_weight
-        sharding = base_model_weight.array.qvalue.sharding if hasattr(
-            base_model_weight, "array") else base_model_weight.sharding
+        sharding = base_model_weight.array.qvalue.out_sharding if hasattr(
+            base_model_weight, "array") else base_model_weight.out_sharding
 
         # Convert weights from torch into numpy
         if weight.dtype == torch.uint8 and scale is not None:
@@ -1607,7 +1607,7 @@ class DeepSeekV3(nnx.Module):
                                  vd_sharding=(ShardingAxisName.MLP_TENSOR,
                                               None))
 
-        self.layers = []
+        layers = []
 
         def _create_deepseek_attention(
         ) -> Union[DeepseekV3MLA, DeepseekV3Attention]:
@@ -1661,11 +1661,11 @@ class DeepSeekV3(nnx.Module):
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
                 rngs=self.rng,
                 quant_config=vllm_config.quant_config,
-                activation_attention_td=(None, None),
-                activation_q_td=(None, None),
+                activation_attention_td=P(None, None),
+                activation_q_td=P(None, None),
                 query_tnh=query_tnh_spec,
                 keyvalue_skh=keyvalue_skh_spec,
-                activation_attention_out_td=(None, None),
+                activation_attention_out_td=P(None, None),
                 attn_o_tnh=attn_o_tnh_spec,
                 q_da_sharding=q_da_sharding,
                 ap_sharding=ap_sharding,
@@ -1709,7 +1709,7 @@ class DeepSeekV3(nnx.Module):
                     hidden_size=hidden_size,
                     intermediate_size=ffw_intermediate_size,
                     rngs=self.rng,
-                    activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
+                    activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
                     df_sharding=(None, ShardingAxisName.MLP_TENSOR),
                     fd_sharding=(ShardingAxisName.MLP_TENSOR, None),
                     quant_config=vllm_config.quant_config)
@@ -1729,7 +1729,7 @@ class DeepSeekV3(nnx.Module):
                     routed_scaling_factor=routed_scaling_factor,
                     dtype=dtype,
                     moe_backend=self.moe_backend,
-                    activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
+                    activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
                     ed_sharding=(None, None),
                     e_sharding=(None, ),
                     quant_config=vllm_config.quant_config)
@@ -1748,10 +1748,10 @@ class DeepSeekV3(nnx.Module):
                     hidden_act=hidden_act,
                     rngs=self.rng,
                     quant_config=self.vllm_config.quant_config,
-                    activation_ffw_td=(ShardingAxisName.MLP_DATA,
-                                       ShardingAxisName.MOE_TENSOR),
-                    activation_ffw_ted=(ShardingAxisName.MLP_DATA, None,
+                    activation_ffw_td=P(ShardingAxisName.MLP_DATA,
                                         ShardingAxisName.MOE_TENSOR),
+                    activation_ffw_ted=P(ShardingAxisName.MLP_DATA, None,
+                                         ShardingAxisName.MOE_TENSOR),
                     edf_sharding=(None, ShardingAxisName.MOE_TENSOR,
                                   ShardingAxisName.ATTN_DATA_EXPERT),
                     efd_sharding=(None, ShardingAxisName.ATTN_DATA_EXPERT,
@@ -1769,7 +1769,7 @@ class DeepSeekV3(nnx.Module):
                     intermediate_size=num_shared_experts *
                     moe_intermediate_size,
                     rngs=self.rng,
-                    activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
+                    activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
                     df_sharding=(None, ShardingAxisName.MLP_TENSOR),
                     fd_sharding=(ShardingAxisName.MLP_TENSOR, None),
                     quant_config=vllm_config.quant_config)
@@ -1787,7 +1787,9 @@ class DeepSeekV3(nnx.Module):
                 self_attn=_create_deepseek_attention(),
                 custom_module=mlp_layer)
 
-            self.layers.append(block)
+            layers.append(block)
+
+        self.layers = nnx.List(layers)
 
         self.final_norm = RMSNorm(
             dims=hidden_size,

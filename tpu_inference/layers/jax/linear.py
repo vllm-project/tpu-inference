@@ -20,6 +20,9 @@ from flax import nnx
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
+from tpu_inference.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class JaxEinsum(nnx.Einsum, JaxModule):
@@ -47,10 +50,14 @@ class JaxEinsum(nnx.Einsum, JaxModule):
                             kernel_shape=kernel_shape,
                             bias_shape=bias_shape,
                             **kwargs)
+        self.kernel_init = kwargs.get("kernel_init",
+                                      jax.nn.initializers.lecun_normal())
         # For compatibility. HF model use 'weight' as name suffix, we alias `self.kernel` to
         # `self.weight` such that `named_parameters()` can match the names in HF models.
         self.weight = self.kernel
         delattr(self, 'kernel')
+        if hasattr(self.weight, 'out_sharding'):
+            self.weight.set_metadata('sharding', self.weight.out_sharding)
 
         if quant_config is None:
             self.quant_method = None
