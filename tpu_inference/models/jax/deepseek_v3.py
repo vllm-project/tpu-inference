@@ -1058,8 +1058,8 @@ class DeepSeekV3(JaxModule):
                 attn_o_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR)
             rd_sharding = (ShardingAxisName.MLP_TENSOR, None)
             ap_sharding = (None, ShardingAxisName.MLP_TENSOR)
-            q_da_sharding = (None, ShardingAxisName.MLP_TENSOR)
-            kv_da_sharding = (None, ShardingAxisName.MLP_TENSOR)
+            q_da_sharding = (ShardingAxisName.MLP_TENSOR, None)
+            kv_da_sharding = (ShardingAxisName.MLP_TENSOR, None)
 
             if self.vllm_config.additional_config.get("replicate_attn_weights",
                                                       False):
