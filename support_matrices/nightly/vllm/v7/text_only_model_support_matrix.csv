@@ -6,7 +6,7 @@ Model,UnitTest,Accuracy/Correctness,Benchmark
 "google/gemma-3-27b-it",✅,✅,✅
 "Qwen/Qwen3-32B",✅,✅,✅
 "deepseek-ai/DeepSeek-V3.1",unverified,unverified,unverified
-"meta-llama/Llama-Guard-4-12B",✅,❌,N/A
+"meta-llama/Llama-Guard-4-12B",✅,✅,❌
 "openai/gpt-oss-120b",unverified,unverified,unverified
 "meta-llama/Llama-3.1-8B-Instruct",✅,✅,✅
 "Qwen/Qwen3-30B-A3B",✅,✅,❌
