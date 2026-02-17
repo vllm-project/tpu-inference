@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Iterable, List, Protocol
+from typing import Iterable, Protocol
 
 from flax import nnx
 from vllm.distributed.utils import get_pp_indices
@@ -53,7 +53,7 @@ def get_start_end_layer(num_hidden_layers: int, rank: int,
 def make_layers(
     num_hidden_layers: int,
     layer_fn: LayerFn,
-) -> tuple[int, int, List[nnx.Module]]:
+) -> tuple[int, int, nnx.List]:
     start_layer, end_layer = get_start_end_layer(num_hidden_layers,
                                                  get_pp_group().rank_in_group,
                                                  get_pp_group().world_size)
@@ -62,4 +62,4 @@ def make_layers(
         + [layer_fn(i) for i in range(start_layer, end_layer)] \
         + [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)]
 
-    return start_layer, end_layer, layers
+    return start_layer, end_layer, nnx.List(layers)
