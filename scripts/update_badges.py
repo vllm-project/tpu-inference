@@ -36,10 +36,10 @@ def update_readme_badges(good_first_count, docs_count, blocked_count):
         readme_content
     )
 
-    # Documentation Bugs Badge
+    # Documentation Badge
     readme_content = re.sub(
-        r'\[!\[documentation bugs\]\(https://img\.shields\.io/[^\)]+\)\]',
-        rf'[![documentation bugs](https://img.shields.io/badge/documentation%20bugs-{docs_count}%20open-orange?style=flat-square)]',
+        r'\[!\[documentation\]\(https://img\.shields\.io/[^\)]+\)\]',
+        rf'[![documentation](https://img.shields.io/badge/documentation-{docs_count}%20open-orange?style=flat-square)]',
         readme_content
     )
 
@@ -65,7 +65,7 @@ def main():
         return
 
     print(f"Good First Issues: {count_good_first}")
-    print(f"Documentation Bugs: {count_docs}")
+    print(f"Documentation Issues: {count_docs}")
     print(f"Blocked Issues: {count_blocked}")
 
     print("Updating README.md...")

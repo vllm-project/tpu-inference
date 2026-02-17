@@ -11,7 +11,7 @@
 
 ---
 
-[![good first issue](https://img.shields.io/badge/good%20first%20issue-8%20open-green?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)  [![documentation bugs](https://img.shields.io/badge/documentation%20bugs-2%20open-orange?style=flat-square)](https://github.com/vllm-project/tpo-inference/issues?q=is%3Aissue+is%3Aopen+label%3Adocumentation+label%3Abug) [![blocked issues](https://img.shields.io/badge/🛑%20Blocked-0%20open-brightred?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3Ablocked)
+[![good first issue](https://img.shields.io/badge/good%20first%20issue-8%20open-green?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)  [![documentation](https://img.shields.io/badge/documentation-2%20open-orange?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3Adocumentation) [![blocked issues](https://img.shields.io/badge/🛑%20Blocked-0%20open-brightred?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3Ablocked)
 
 
 
