@@ -1529,6 +1529,7 @@ class DeepSeekV3(JaxModule):
 
         self.vllm_config = vllm_config
         self.rng = nnx.Rngs(rng)
+        self.prefix = prefix
 
         # NOTE: the default is 61
         num_layers: int = vllm_config.model_config.hf_config.num_hidden_layers
@@ -1624,7 +1625,7 @@ class DeepSeekV3(JaxModule):
         )
 
         def _create_deepseek_attention(
-                i: int) -> Union[DeepseekV3MLA, DeepseekV3Attention]:
+                layer_index: int) -> Union[DeepseekV3MLA, DeepseekV3Attention]:
             if self.use_mla_kernel:
                 query_tnh_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
                 keyvalue_skh_spec = P(ShardingAxisName.MLP_TENSOR, None)
@@ -1636,8 +1637,8 @@ class DeepSeekV3(JaxModule):
                 attn_o_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
             rd_sharding = (ShardingAxisName.MLP_TENSOR, None)
             ap_sharding = (None, ShardingAxisName.MLP_TENSOR)
-            q_da_sharding = (ShardingAxisName.MLP_TENSOR, None)
-            kv_da_sharding = (ShardingAxisName.MLP_TENSOR, None)
+            q_da_sharding = (None, ShardingAxisName.MLP_TENSOR)
+            kv_da_sharding = (None, ShardingAxisName.MLP_TENSOR)
 
             if self.vllm_config.additional_config.get("replicate_attn_weights",
                                                       False):
@@ -1685,7 +1686,7 @@ class DeepSeekV3(JaxModule):
                 ap_sharding=ap_sharding,
                 kv_da_sharding=kv_da_sharding,
                 rd_sharding=rd_sharding,
-                prefix=f"{prefix}.layers.{i}.self_attn",
+                prefix=f"{self.prefix}.layers.{layer_index}.self_attn",
             )
             if self.use_mla_kernel:
                 kwargs.update(anh_sharding=anh_sharding)
@@ -1805,7 +1806,7 @@ class DeepSeekV3(JaxModule):
                 layer_idx=layer_index,
                 input_layernorm=input_layernorm,
                 post_attention_layernorm=post_attention_layernorm,
-                self_attn=_create_deepseek_attention(),
+                self_attn=_create_deepseek_attention(layer_index),
                 mlp=mlp_layer)
 
         self.start_layer, self.end_layer, self.layers = make_layers(
