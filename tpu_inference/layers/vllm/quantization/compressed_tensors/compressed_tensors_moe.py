@@ -20,6 +20,7 @@ from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
     CompressedTensorsMoEMethod, CompressedTensorsW8A8Fp8MoEMethod)
 
@@ -148,7 +149,7 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
             w2_weight_scale: jax.Array,
             w2_bias: jax.Array | None,
         ) -> FusedMoEWeights:
-            w13_interleave = layer.activation == "swigluoai"
+            w13_interleave = layer.activation == MoEActivation.SWIGLUOAI
             w13_reorder_size = get_mesh_shape_product(
                 self.mesh, ShardingAxisName.MLP_TENSOR)
 

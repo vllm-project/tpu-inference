@@ -110,7 +110,8 @@ class TestQwen2ForCausalLM:
         """Tests model init and model forward for the 8B model variant."""
 
         # Test model init
-        model = Qwen2ForCausalLM(mock_vllm_config, rng, mesh)
+        with jax.set_mesh(mesh):
+            model = Qwen2ForCausalLM(mock_vllm_config, rng, mesh)
         assert "1.5b" in model.vllm_config.model_config.model.lower()
 
         model_config = mock_vllm_config.model_config

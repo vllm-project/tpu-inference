@@ -156,8 +156,9 @@ class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
                                         sharding=self.weight_sharding)
 
         # Attach custom loader to avoid default upcasting behavior
-        setattr(layer.weight, "weight_loader",
-                functools.partial(load_fp8_weight, param_name="weight"))
+        layer.weight.set_metadata(
+            'weight_loader',
+            functools.partial(load_fp8_weight, param_name="weight"))
 
         # Scale is always per-output-channel (1D).
         scale_sharding = None
@@ -253,8 +254,9 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 kernel_init(rngs.params(), layer.kernel_shape, param_dtype),
                 weight_loader=partial(load_nnx_param_from_reshaped_torch,
                                       permute_dims=None,
-                                      param_name="linear_fp8_weight"))
-            layer.weight.sharding = self.weight_sharding
+                                      param_name="linear_fp8_weight"),
+                eager_sharding=False)
+            layer.weight.set_metadata('sharding', self.weight_sharding)
 
             # Per-output-channel scale (1D, covers the free weight dim).
             layer.weight_scale_inv = nnx.Param(
@@ -263,8 +265,9 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                     load_nnx_param_from_reshaped_torch,
                     permute_dims=None,
                     param_name="linear_fp8_weight_scale_inv",
-                ))
-            layer.weight_scale_inv.sharding = ()
+                ),
+                eager_sharding=False)
+            layer.weight_scale_inv.set_metadata('sharding', ())
             return
 
         # Follow upstream limitation that only float8_e4m3 is supported.
@@ -275,8 +278,9 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                         param_dtype),
             weight_loader=partial(load_nnx_param_from_reshaped_torch,
                                   permute_dims=(0, 1),
-                                  param_name="linear_fp8_weight"))
-        layer.weight.sharding = self.weight_sharding
+                                  param_name="linear_fp8_weight"),
+            eager_sharding=False)
+        layer.weight.set_metadata('sharding', self.weight_sharding)
 
         # Block-wise quantization scale
         block_n, block_k = self.quant_config.weight_block_size[
@@ -292,8 +296,9 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 load_nnx_param_from_reshaped_torch,
                 permute_dims=(0, 1),
                 param_name="linear_fp8_weight_scale_inv",
-            ))
-        layer.weight_scale_inv.sharding = self.weight_sharding
+            ),
+            eager_sharding=False)
+        layer.weight_scale_inv.set_metadata('sharding', self.weight_sharding)
 
     def process_weights_after_loading(self, layer):
         assert isinstance(layer, JaxEinsum)
@@ -594,7 +599,10 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
         assert isinstance(layer, JaxMoE)
 
         x_TD = jnp.asarray(x, layer.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD, layer.activation_ffw_td)
+        x_TD = jax.lax.with_sharding_constraint(
+            x_TD,
+            jax.sharding.NamedSharding(layer.mesh,
+                                       P(*layer.activation_ffw_td)))
 
         router_logits = None
         # Fused weight backends
