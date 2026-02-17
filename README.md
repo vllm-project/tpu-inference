@@ -125,22 +125,22 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- START: core_features -->
 | Feature | CorrectnessTest | PerformanceTest |
 | --- | --- | --- |
-| Chunked Prefill | ✅ | ✅ |
-| DCN-based P/D disaggregation | unverified | ✅ |
-| KV cache host offloading | unverified | unverified |
-| LoRA_Torch | ✅ | ✅ |
-| Multimodal Inputs | ✅ | ✅ |
-| Out-of-tree model support | ✅ | ✅ |
-| Prefix Caching | ✅ | ✅ |
-| Single Program Multi Data | ✅ | ✅ |
-| Single-Host-P-D-disaggregation | N/A | N/A |
-| Speculative Decoding: Eagle3 | ✅ | ✅ |
-| Speculative Decoding: Ngram | ✅ | ✅ |
-| async scheduler | ✅ | ✅ |
-| data_parallelism | ✅ | unverified |
-| runai_model_streamer_loader | ✅ | N/A |
-| sampling_params | ✅ | N/A |
-| structured_decoding | ✅ | N/A |
+| Chunked Prefill | ✅ Passing | ✅ Passing |
+| DCN-based P/D disaggregation | ❓ Untested | ✅ Passing |
+| KV cache host offloading | ❓ Untested | ❓ Untested |
+| LoRA_Torch | ✅ Passing | ✅ Passing |
+| Multimodal Inputs | ✅ Passing | ✅ Passing |
+| Out-of-tree model support | ✅ Passing | ✅ Passing |
+| Prefix Caching | ✅ Passing | ✅ Passing |
+| Single Program Multi Data | ✅ Passing | ✅ Passing |
+| Single-Host-P-D-disaggregation | ⚪ N/A | ⚪ N/A |
+| Speculative Decoding: Eagle3 | ✅ Passing | ✅ Passing |
+| Speculative Decoding: Ngram | ✅ Passing | ✅ Passing |
+| async scheduler | ✅ Passing | ✅ Passing |
+| data_parallelism | ✅ Passing | ❓ Untested |
+| runai_model_streamer_loader | ✅ Passing | ⚪ N/A |
+| sampling_params | ✅ Passing | ⚪ N/A |
+| structured_decoding | ✅ Passing | ⚪ N/A |
 
 <!-- END: core_features -->
 
@@ -153,12 +153,12 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- START: parallelism -->
 | Feature | CorrectnessTest | PerformanceTest |
 | --- | --- | --- |
-| CP | unverified | unverified |
-| DP | ✅ | unverified |
-| EP | ✅ | unverified |
-| PP | ✅ | ✅ |
-| SP | unverified | unverified |
-| TP | ✅ | unverified |
+| CP | ❓ Untested | ❓ Untested |
+| DP | ✅ Passing | ❓ Untested |
+| EP | ✅ Passing | ❓ Untested |
+| PP | ✅ Passing | ✅ Passing |
+| SP | ❓ Untested | ❓ Untested |
+| TP | ✅ Passing | ❓ Untested |
 
 <!-- END: parallelism -->
 
@@ -171,12 +171,12 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- START: quantization -->
 | Feature | Recommended TPU Generations | CorrectnessTest | PerformanceTest |
 | --- | --- | --- | --- |
-| AWQ INT4 | v5, v6 | unverified | unverified |
-| FP4 W4A16 | v7 | unverified | unverified |
-| FP8 W8A8 | v7 | unverified | unverified |
-| FP8 W8A16 | v7 | unverified | unverified |
-| INT4 W4A16 | v5, v6 | unverified | unverified |
-| INT8 W8A8 | v5, v6 | unverified | unverified |
+| AWQ INT4 | v5, v6 | ❓ Untested | ❓ Untested |
+| FP4 W4A16 | v7 | ❓ Untested | ❓ Untested |
+| FP8 W8A8 | v7 | ❓ Untested | ❓ Untested |
+| FP8 W8A16 | v7 | ❓ Untested | ❓ Untested |
+| INT4 W4A16 | v5, v6 | ❓ Untested | ❓ Untested |
+| INT8 W8A8 | v5, v6 | ❓ Untested | ❓ Untested |
 
 <!-- END: quantization -->
 
@@ -191,13 +191,13 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- START: kernel_support -->
 | Feature | CorrectnessTest | PerformanceTest |
 | --- | --- | --- |
-| Collective Communication Matmul | ✅ | unverified |
-| MLA | unverified | unverified |
-| MoE | unverified | unverified |
-| Quantized Attention | unverified | unverified |
-| Quantized KV Cache | unverified | unverified |
-| Quantized Matmul | unverified | unverified |
-| Ragged Paged Attention V3 | ✅ | ✅ |
+| Collective Communication Matmul | ✅ Passing | ❓ Untested |
+| MLA | ❓ Untested | ❓ Untested |
+| MoE | ❓ Untested | ❓ Untested |
+| Quantized Attention | ❓ Untested | ❓ Untested |
+| Quantized KV Cache | ❓ Untested | ❓ Untested |
+| Quantized Matmul | ❓ Untested | ❓ Untested |
+| Ragged Paged Attention V3 | ✅ Passing | ✅ Passing |
 
 <!-- END: kernel_support -->
 
