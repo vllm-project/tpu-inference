@@ -24,12 +24,12 @@ from vllm.config import ModelConfig
 from vllm.model_executor.model_loader import LoadConfig, get_model_loader
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.models.jax.ministral3 import Ministral3ForCausalLM
+from tpu_inference.models.jax.mistral import MistralForCausalLM
 from tpu_inference.runner.kv_cache import create_kv_caches
 
 
 class MockVllmConfig:
-    """A mock VllmConfig sufficient for testing the Ministral3 model."""
+    """A mock VllmConfig sufficient for testing the Mistral model."""
 
     def __init__(self, model: str, kv_cache_dtype: str):
         self.model_config = ModelConfig(model)
@@ -97,15 +97,15 @@ def mock_get_pp_group():
                         is_last_rank=True,
                         rank_in_group=0,
                         world_size=1)
-    with patch("tpu_inference.models.jax.ministral3.get_pp_group",
+    with patch("tpu_inference.models.jax.mistral.get_pp_group",
                return_value=mock_pp), \
          patch("tpu_inference.layers.jax.pp_utils.get_pp_group",
                return_value=mock_pp):
         yield
 
 
-class TestMinistral3ForCausalLM:
-    """Tests for the Ministral3ForCausalLM model class."""
+class TestMistralForCausalLM:
+    """Tests for the MistralForCausalLM model class."""
 
     @pytest.mark.parametrize("mock_vllm_config", [
         MockVllmConfig("mistralai/Mistral-7B-v0.1", "auto"),
@@ -113,15 +113,12 @@ class TestMinistral3ForCausalLM:
     ])
     def test_mistral_7b(self, mock_vllm_config, rng, mesh, mock_model_inputs):
         """
-        Tests model init and forward pass for Mistral 7B.
-
-        This uses Mistral-7B-v0.1 as a proxy for testing the Ministral3 architecture,
-        since both share the same transformer structure (without YaRN RoPE).
+        Tests model init, weight loading, and forward pass for Mistral 7B.
         """
 
         # Test model init
         with jax.set_mesh(mesh):
-            model = Ministral3ForCausalLM(mock_vllm_config, rng, mesh)
+            model = MistralForCausalLM(mock_vllm_config, rng, mesh)
         assert "mistral" in model.vllm_config.model_config.model.lower()
 
         model_config = mock_vllm_config.model_config
@@ -161,7 +158,7 @@ class TestMinistral3ForCausalLM:
                                             head_dim)
         assert attn.o_proj.weight.shape == (num_heads, head_dim, hidden_size)
 
-        # Verify Ministral3 has no bias in attention (unlike Qwen2)
+        # Verify Mistral has no bias in attention (unlike Qwen2)
         # JaxEinsum always has bias attribute, but it should be None
         assert attn.q_proj.bias is None
         assert attn.k_proj.bias is None
@@ -213,15 +210,13 @@ class TestMinistral3ForCausalLM:
     @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
     def test_kv_cache_quantization(self, rng, mesh, kv_cache_dtype):
         """
-        Test that KV cache quantization works correctly.
-
-        Devstral-2 supports FP8 KV cache for memory efficiency with long contexts.
+        Test that KV cache quantization is configured correctly.
         """
         mock_vllm_config = MockVllmConfig("mistralai/Mistral-7B-v0.1",
                                           kv_cache_dtype)
 
         with jax.set_mesh(mesh):
-            model = Ministral3ForCausalLM(mock_vllm_config, rng, mesh)
+            model = MistralForCausalLM(mock_vllm_config, rng, mesh)
 
         attn = model.model.layers[0].self_attn
 

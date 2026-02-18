@@ -45,9 +45,9 @@ logger = init_logger(__name__)
 init_fn = nnx.initializers.uniform()
 
 
-class Ministral3MLP(JaxModule):
-    """
-    MLP module for Ministral3/Devstral-2 architecture.
+class MistralMLP(JaxModule):
+    """MLP module for the Mistral architecture.
+
     Uses SwiGLU activation (gate_proj + up_proj with SiLU activation).
     """
 
@@ -101,15 +101,10 @@ class Ministral3MLP(JaxModule):
         return result
 
 
-class Ministral3Attention(JaxModule):
-    """
-    Multi-head attention module for Ministral3/Devstral-2 architecture.
-    Supports Grouped Query Attention (GQA) with YaRN RoPE scaling.
+class MistralAttention(JaxModule):
+    """Multi-head attention module for the Mistral architecture.
 
-    Devstral-2 uses:
-    - 96 query heads
-    - 8 key-value heads (12:1 GQA ratio)
-    - YaRN RoPE with factor=64.0, theta=1M for 256k context window
+    Supports Grouped Query Attention (GQA) and optional YaRN RoPE scaling.
     """
 
     def __init__(self,
@@ -124,16 +119,11 @@ class Ministral3Attention(JaxModule):
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
 
-        config_dict = config.to_dict()
-        rope_params = config_dict.get("rope_parameters", {})
-        self.rope_theta = rope_params.get("rope_theta", 1000000.0)
-        self.rope_scaling = rope_params if rope_params.get(
-            "type") == "yarn" else None
+        self.rope_theta = getattr(config, "rope_theta", 1000000.0)
 
-        # YaRN RoPE scaling configuration
+        # YaRN RoPE scaling configuration (if present)
         rope_scaling = getattr(config, "rope_scaling", None)
         if rope_scaling and rope_scaling.get("type") == "yarn":
-            # Ministral3/Devstral-2 uses YaRN RoPE scaling
             self.rope_scaling = rope_scaling
         else:
             self.rope_scaling = None
@@ -151,7 +141,7 @@ class Ministral3Attention(JaxModule):
 
         self.mesh = mesh
 
-        # Ministral3 has no bias in attention projections
+        # Mistral has no bias in attention projections
         self.q_proj = JaxEinsum(
             "TD,DNH->TNH",
             (self.hidden_size, self.num_heads, self.head_dim),
@@ -240,10 +230,11 @@ class Ministral3Attention(JaxModule):
         return new_kv_cache, o
 
 
-class Ministral3DecoderLayer(JaxModule):
-    """
-    Transformer decoder layer for Ministral3/Devstral-2 architecture.
-    Consists of self-attention and MLP with pre-normalization and residual connections.
+class MistralDecoderLayer(JaxModule):
+    """Transformer decoder layer for the Mistral architecture.
+
+    Consists of self-attention and MLP with pre-normalization and residual
+    connections.
     """
 
     def __init__(self,
@@ -266,13 +257,13 @@ class Ministral3DecoderLayer(JaxModule):
             quant_config=quant_config,
             prefix=prefix + ".input_layernorm",
         )
-        self.self_attn = Ministral3Attention(config=config,
-                                             dtype=dtype,
-                                             rng=rng,
-                                             mesh=mesh,
-                                             kv_cache_dtype=kv_cache_dtype,
-                                             quant_config=quant_config,
-                                             prefix=prefix + ".self_attn")
+        self.self_attn = MistralAttention(config=config,
+                                          dtype=dtype,
+                                          rng=rng,
+                                          mesh=mesh,
+                                          kv_cache_dtype=kv_cache_dtype,
+                                          quant_config=quant_config,
+                                          prefix=prefix + ".self_attn")
         self.post_attention_layernorm = JaxRmsNorm(
             hidden_size,
             epsilon=rms_norm_eps,
@@ -282,7 +273,7 @@ class Ministral3DecoderLayer(JaxModule):
             quant_config=quant_config,
             prefix=prefix + ".post_attention_layernorm",
         )
-        self.mlp = Ministral3MLP(
+        self.mlp = MistralMLP(
             config=config,
             dtype=dtype,
             rng=rng,
@@ -311,17 +302,8 @@ class Ministral3DecoderLayer(JaxModule):
         return kv_cache, outputs
 
 
-class Ministral3Model(JaxModule):
-    """
-    The bare Ministral3/Devstral-2 model outputting raw hidden states without any specific head.
-
-    This is the text-only language model component of Mistral3 architecture.
-    Devstral-2-123B uses:
-    - 88 decoder layers
-    - 131,072 vocab size
-    - 12,288 hidden size
-    - 256k context window with YaRN RoPE scaling
-    """
+class MistralModel(JaxModule):
+    """The bare Mistral model outputting raw hidden states without a head."""
 
     def __init__(self,
                  vllm_config: VllmConfig,
@@ -354,7 +336,7 @@ class Ministral3Model(JaxModule):
 
         self.start_layer, self.end_layer, layers = make_layers(
             hf_config.num_hidden_layers,
-            lambda layer_index: Ministral3DecoderLayer(
+            lambda layer_index: MistralDecoderLayer(
                 config=hf_config,
                 dtype=dtype,
                 rng=rng,
@@ -403,18 +385,8 @@ class Ministral3Model(JaxModule):
         return kv_caches, x
 
 
-class Ministral3ForCausalLM(JaxModule, LoadableWithIterator):
-    """
-    Ministral3/Devstral-2 model with a language modeling head.
-
-    This is the complete causal language model ready for text generation.
-    Note: Devstral-2 uses tie_word_embeddings=False, so lm_head is always separate.
-
-    Example:
-        >>> from vllm.config import VllmConfig
-        >>> vllm_config = VllmConfig(model="mistralai/Devstral-2-123B-Instruct-2512")
-        >>> model = Ministral3ForCausalLM(vllm_config, rng_key, mesh)
-    """
+class MistralForCausalLM(JaxModule, LoadableWithIterator):
+    """Mistral model with a language modeling head for causal generation."""
 
     WeightLoader = StandardWeightLoader
 
@@ -424,7 +396,7 @@ class Ministral3ForCausalLM(JaxModule, LoadableWithIterator):
         rng = nnx.Rngs(rng_key)
         self.mesh = mesh
 
-        self.model = Ministral3Model(
+        self.model = MistralModel(
             vllm_config=vllm_config,
             rng=rng,
             mesh=mesh,
@@ -432,8 +404,7 @@ class Ministral3ForCausalLM(JaxModule, LoadableWithIterator):
         )
 
         model_config = vllm_config.model_config
-        # Ministral3/Devstral-2 uses tie_word_embeddings=False
-        # So we always create a separate lm_head
+        # Create a separate lm_head when embeddings are not tied
         if not model_config.hf_config.tie_word_embeddings:
             vocab_size = model_config.get_vocab_size()
             hidden_size = model_config.hf_config.hidden_size
@@ -475,13 +446,6 @@ class Ministral3ForCausalLM(JaxModule, LoadableWithIterator):
         return kv_caches, x, []
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        """
-        Compute logits from hidden states.
-
-        Note: Devstral-2 always uses a separate lm_head (not tied to embeddings),
-        so we always use self.lm_head for logits computation.
-        """
         if hasattr(self, 'lm_head'):
             return self.lm_head(hidden_states)
-        # Fallback for tied embeddings (though Devstral-2 doesn't use this)
         return self.model.embed_tokens.decode(hidden_states)
