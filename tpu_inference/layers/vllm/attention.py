@@ -252,15 +252,12 @@ def _jax_attn_func(
 
     # Get shapes from vllm
     q_len = q.shape[0]
-    q_compute_dim = num_heads * head_size
+    k_len = k.shape[0]
 
-    # Convert the shapes from vLLM's convetion to what the attention function expects
-    if q.ndim == 2:
-        q = q.reshape(-1, num_heads, head_size)
-    if k.ndim == 2:
-        k = k.reshape(-1, num_kv_heads, head_size)
-    if v.ndim == 2:
-        v = v.reshape(-1, num_kv_heads, head_size)
+    # Convert the shapes from vLLM's convention to what the attention function expects
+    q = q.reshape(q_len, num_heads, head_size)
+    k = k.reshape(k_len, num_kv_heads, head_size)
+    v = v.reshape(k_len, num_kv_heads, head_size)
 
     new_kv_cache, outputs = attention(
         kv_cache,
@@ -280,6 +277,6 @@ def _jax_attn_func(
     assert outputs.shape[0] == q_len
     assert outputs.shape[1] == num_heads
     assert outputs.shape[2] == head_size
-    outputs = outputs.reshape(q_len, q_compute_dim)
+    outputs = outputs.reshape(q_len, num_heads * head_size)
 
     return new_kv_cache, outputs
