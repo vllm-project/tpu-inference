@@ -93,14 +93,10 @@ class RMSNorm(nnx.Module):
         x_TD = jax.lax.with_sharding_constraint(x_TD, self.activation_ffw_td)
 
         with jax.named_scope("rms_norm_variance"):
-<<<<<<< HEAD
-            var_T1 = jnp.mean(jnp.square(x_TD), axis=-1, keepdims=True)
-=======
             squared_x = jnp.square(x_TD)
 
             var_T1 = jnp.mean(squared_x, axis=-1, keepdims=True)
 
->>>>>>> 20c6512e (Removed logging)
         with jax.named_scope("rms_norm_rsqrt"):
             normed_x_TD = x_TD * jax.lax.rsqrt(var_T1 + self.epsilon)
 

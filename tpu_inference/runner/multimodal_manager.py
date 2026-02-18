@@ -163,25 +163,7 @@ class MultiModalManager:
                 mm_hashes_pos,
                 encoder_outputs,
         ):
-
-            if isinstance(
-                    output, (jax.Array, jnp.ndarray)
-            ) and not image_grid_thw:  #Non-video multimodal model logic (image_grid_thw is specific to MM models that take video as input)
-                # JAX specific scatter logic (avoids .new_full and torch-specific indexing)
-                mask = jnp.array(pos_info.is_embed.cpu().numpy())
-                num_placeholders = mask.shape[0]
-                embed_dim = output.shape[-1]
-
-                # Create base filled with NaN to match vLLM standard behavior
-                placeholders = jnp.full((num_placeholders, embed_dim),
-                                        jnp.nan,
-                                        dtype=output.dtype)
-
-                # JAX arrays are immutable, use .at[...].set(...)
-                self.runner.encoder_cache[mm_hash] = placeholders.at[mask].set(
-                    output)
-            else:
-                self.runner.encoder_cache[mm_hash] = output
+            self.runner.encoder_cache[mm_hash] = output
 
     def gather_mm_embeddings(self, scheduler_output: "VllmSchedulerOutput",
                              target_pad_len: int) -> list[jax.Array]:
