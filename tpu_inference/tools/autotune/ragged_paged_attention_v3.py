@@ -58,7 +58,7 @@ def get_qkv_lens_example(max_num_tokens, max_model_len, actual_num_seqs):
     assert max_num_tokens >= actual_num_seqs
     decode_end = actual_num_seqs - 1
     cu_q_lens = list(range(actual_num_seqs + 1))
-    cu_q_lens[-1] = min(max_num_tokens, max_model_len)
+    cu_q_lens[-1] = max_num_tokens
     kv_lens = [max_model_len for _ in range(actual_num_seqs)]
     return cu_q_lens, kv_lens, decode_end
 
