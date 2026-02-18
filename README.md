@@ -120,7 +120,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 <ul>
   <li>
 <details markdown="1">
-      <summary>Core Features</summary>
+<summary>Core Features</summary>
 
 <!-- START: core_features -->
 | Feature | CorrectnessTest | PerformanceTest |
@@ -144,11 +144,11 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 <!-- END: core_features -->
 
-    </details>
+</details>
   </li>
   <li>
 <details markdown="1">
-      <summary>Parallelism Techniques</summary>
+<summary>Parallelism Techniques</summary>
 
 <!-- START: parallelism -->
 | Feature | CorrectnessTest | PerformanceTest |
@@ -162,11 +162,11 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 <!-- END: parallelism -->
 
-    </details>
+</details>
   </li>
   <li>
 <details markdown="1">
-      <summary>Quantization Methods</summary>
+<summary>Quantization Methods</summary>
 
 <!-- START: quantization -->
 | Feature | Recommended&nbsp;TPU&nbsp;Generations | CorrectnessTest | PerformanceTest |
@@ -180,7 +180,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 <!-- END: quantization -->
 
-    </details>
+</details>
   </li>
 </ul>
 </details>
