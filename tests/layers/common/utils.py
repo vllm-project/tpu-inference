@@ -35,11 +35,17 @@ def get_spmd_mesh(num_devices: int = 1, enable_attn_dp: bool = False):
         attn_dp_size = 2
         model_size = num_devices // attn_dp_size
         mesh_shape = (1, attn_dp_size, 1, 1, model_size)
-        return jax.make_mesh(mesh_shape, axis_names, axis_types=(AxisType.Auto,) * len(axis_names), devices=devices)
+        return jax.make_mesh(mesh_shape,
+                             axis_names,
+                             axis_types=(AxisType.Auto, ) * len(axis_names),
+                             devices=devices)
     else:
         axis_names = MESH_AXIS_NAMES_2D
         mesh_shape = (1, len(devices))
-        return jax.make_mesh(mesh_shape, axis_names, axis_types=(AxisType.Auto,) * len(axis_names), devices=devices)
+        return jax.make_mesh(mesh_shape,
+                             axis_names,
+                             axis_types=(AxisType.Auto, ) * len(axis_names),
+                             devices=devices)
 
 
 def find_all_layer_type(module: torch.nn.Module, layer_type: torch.nn.Module):
