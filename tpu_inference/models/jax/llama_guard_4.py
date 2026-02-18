@@ -652,7 +652,10 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             self,
             input_ids: jax.Array,
             multimodal_embeddings: Optional[jax.Array] = None) -> jax.Array:
+
+
         inputs_embeds = self.embedder.encode(input_ids)
+
 
         if multimodal_embeddings is not None and multimodal_embeddings.shape[
                 0] > 0:

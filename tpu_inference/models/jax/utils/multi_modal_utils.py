@@ -102,10 +102,17 @@ def _merge_multimodal_embeddings(
     Note:
         This returns a new array with the updated values.
     """
+<<<<<<< HEAD
     # The check for matching number of tokens is removed as it is not
     # JIT-compatible. If the shapes mismatch, JAX will raise an error
     # during execution anyway. The user-friendly error message is
     # sacrificed for JIT compatibility.
+=======
+    # REMOVED: jax.lax.dynamic_slice block.
+    # We rely on the fact that multimodal_embeddings is padded with zeros (or valid data)
+    # and that `gather_indices` derived from `is_multimodal` will only access
+    # the valid portion of multimodal_embeddings when is_multimodal is True.
+>>>>>>> 20c6512e (Removed logging)
 
     # JIT-compatible implementation using jnp.where to avoid
     # NonConcreteBooleanIndexError.
