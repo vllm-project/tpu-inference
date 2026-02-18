@@ -29,14 +29,21 @@ def read_csv_data(file_path):
 def generate_markdown_table(headers, data):
     """Generates a Markdown table string."""
     if not headers: return ""
-    header_line = "| " + " | ".join(headers) + " |\n"
+    
+    # helper to replace spaces with &nbsp; for consistent markdown sizing
+    def _nbsp(text):
+        if not text: return text
+        return text.replace(" ", "&nbsp;")
+
+    header_line = "| " + " | ".join([_nbsp(h) for h in headers]) + " |\n"
     separator_line = "| " + " | ".join(["---"] * len(headers)) + " |\n"
     data_lines = ""
     for row in data:
         if len(row) < len(headers):
             row += [""] * (len(headers) - len(row))
-        data_lines += "| " + " | ".join(row) + " |\n"
+        data_lines += "| " + " | ".join([_nbsp(c) for c in row]) + " |\n"
     return header_line + separator_line + data_lines
+
 
 def update_readme():
     """Finds markers in README.md and replaces content with fresh tables."""

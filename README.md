@@ -94,7 +94,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 <summary><b> ✅ Model Support </b></summary>
 
 <!-- START: model_support -->
-| Model | Type | Load Test | Correctness Test | Benchmark |
+| Model | Type | Load&nbsp;Test | Correctness&nbsp;Test | Benchmark |
 | --- | --- | --- | --- | --- |
 | `meta-llama/Llama-4-Maverick-17B-128E-Instruct` | Multimodal | ❓&nbsp;Untested | ❓&nbsp;Untested | ❓&nbsp;Untested |
 | `Qwen/Qwen2.5-VL-7B-Instruct` | Multimodal | ✅&nbsp;Passing | ✅&nbsp;Passing | ✅&nbsp;Passing |
@@ -125,18 +125,18 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- START: core_features -->
 | Feature | CorrectnessTest | PerformanceTest |
 | --- | --- | --- |
-| Chunked Prefill | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| DCN-based P/D disaggregation | ❓&nbsp;Untested | ✅&nbsp;Passing |
-| KV cache host offloading | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| Chunked&nbsp;Prefill | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| DCN-based&nbsp;P/D&nbsp;disaggregation | ❓&nbsp;Untested | ✅&nbsp;Passing |
+| KV&nbsp;cache&nbsp;host&nbsp;offloading | ❓&nbsp;Untested | ❓&nbsp;Untested |
 | LoRA_Torch | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| Multimodal Inputs | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| Out-of-tree model support | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| Prefix Caching | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| Single Program Multi Data | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| Multimodal&nbsp;Inputs | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| Out-of-tree&nbsp;model&nbsp;support | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| Prefix&nbsp;Caching | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| Single&nbsp;Program&nbsp;Multi&nbsp;Data | ✅&nbsp;Passing | ✅&nbsp;Passing |
 | Single-Host-P-D-disaggregation | ⚪&nbsp;N/A | ⚪&nbsp;N/A |
-| Speculative Decoding: Eagle3 | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| Speculative Decoding: Ngram | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| async scheduler | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| Speculative&nbsp;Decoding:&nbsp;Eagle3 | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| Speculative&nbsp;Decoding:&nbsp;Ngram | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| async&nbsp;scheduler | ✅&nbsp;Passing | ✅&nbsp;Passing |
 | data_parallelism | ✅&nbsp;Passing | ❓&nbsp;Untested |
 | runai_model_streamer_loader | ✅&nbsp;Passing | ⚪&nbsp;N/A |
 | sampling_params | ✅&nbsp;Passing | ⚪&nbsp;N/A |
@@ -169,14 +169,14 @@ Below is the live status of our supported models, features, and kernels. Click o
       <summary>Quantization Methods</summary>
 
 <!-- START: quantization -->
-| Feature | Recommended TPU Generations | CorrectnessTest | PerformanceTest |
+| Feature | Recommended&nbsp;TPU&nbsp;Generations | CorrectnessTest | PerformanceTest |
 | --- | --- | --- | --- |
-| AWQ INT4 | v5, v6 | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| FP4 W4A16 | v7 | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| FP8 W8A8 | v7 | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| FP8 W8A16 | v7 | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| INT4 W4A16 | v5, v6 | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| INT8 W8A8 | v5, v6 | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| AWQ&nbsp;INT4 | v5,&nbsp;v6 | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| FP4&nbsp;W4A16 | v7 | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| FP8&nbsp;W8A8 | v7 | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| FP8&nbsp;W8A16 | v7 | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| INT4&nbsp;W4A16 | v5,&nbsp;v6 | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| INT8&nbsp;W8A8 | v5,&nbsp;v6 | ❓&nbsp;Untested | ❓&nbsp;Untested |
 
 <!-- END: quantization -->
 
@@ -191,13 +191,13 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- START: kernel_support -->
 | Feature | CorrectnessTest | PerformanceTest |
 | --- | --- | --- |
-| Collective Communication Matmul | ✅&nbsp;Passing | ❓&nbsp;Untested |
+| Collective&nbsp;Communication&nbsp;Matmul | ✅&nbsp;Passing | ❓&nbsp;Untested |
 | MLA | ❓&nbsp;Untested | ❓&nbsp;Untested |
 | MoE | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| Quantized Attention | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| Quantized KV Cache | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| Quantized Matmul | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| Ragged Paged Attention V3 | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| Quantized&nbsp;Attention | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| Quantized&nbsp;KV&nbsp;Cache | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| Quantized&nbsp;Matmul | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| Ragged&nbsp;Paged&nbsp;Attention&nbsp;V3 | ✅&nbsp;Passing | ✅&nbsp;Passing |
 
 <!-- END: kernel_support -->
 

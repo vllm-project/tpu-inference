@@ -17,13 +17,13 @@ COLUMN_MAPPING = {
 def format_value(val):
     val = val.strip()
     if val == "✅":
-        return "✅&nbsp;Passing"
+        return "✅ Passing"
     elif val.lower() == "unverified":
-        return "❓&nbsp;Untested"
+        return "❓ Untested"
     elif val == "❌":
-        return "❌&nbsp;Failing"
+        return "❌ Failing"
     elif val.lower() == "n/a" or val == "":
-        return "⚪&nbsp;N/A"
+        return "⚪ N/A"
     return val
 
 def read_and_format_csv(file_path, model_type):
