@@ -486,7 +486,9 @@ def calculate_tiling(
     """Calculate optimal tile sizes for GMM kernel."""
 
     lhs_bits = jax.dtypes.itemsize_bits(lhs_dtype)
-    rhs_bits = jax.dtypes.itemsize_bits(rhs_dtype)
+    # Other run into: https://paste.googleplex.com/4725244972630016
+    rhs_bits_factor = 2 if rhs_dtype == jnp.float4_e2m1fn else 1
+    rhs_bits = jax.dtypes.itemsize_bits(rhs_dtype) * rhs_bits_factor
 
     # When using bf16 for lhs and rhs, 128 is the largest tile_m value that is
     # safe to use for most scenarios. But if are using lower bitwidth, we need
