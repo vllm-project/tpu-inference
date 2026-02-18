@@ -262,6 +262,9 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
                 logger.info("Use customized mesh: %s", mesh)
                 return mesh
 
+    # Try to create a physically optimized mesh. Fall back to a logical layout
+    # for non-power-of-two device counts (e.g., DP=6) to bypass strict
+    # hardware topology constraints that would otherwise cause an AssertionError.
     try:
         return jax.make_mesh(axis_shapes, axis_names, devices=devices)
     except (AssertionError, ValueError, RuntimeError) as e:

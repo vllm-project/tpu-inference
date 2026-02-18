@@ -324,6 +324,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             sharding_strategy.tp_size,
         )
 
+        # Attempt to create a physically optimized mesh. Fall back to a simple
+        # logical reshape for non-power-of-two device counts (e.g., DP=6) to
+        # bypass strict physical topology constraints.
         try:
             return mesh_utils.create_device_mesh(
                 mesh_shape,
@@ -351,6 +354,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         )
         dcn_mesh_shape = (num_slices, 1, 1, 1, 1)
 
+        # Attempt to create a physically optimized hybrid mesh (ICI + DCN).
+        # Fall back to a logical reshape for non-power-of-two device counts
+        # to bypass strict hardware topology constraints across slices.
         try:
             return mesh_utils.create_hybrid_device_mesh(
                 mesh_shape=ici_mesh_shape,
