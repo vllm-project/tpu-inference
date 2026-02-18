@@ -103,8 +103,8 @@ class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
 
         self.einsum_str = layer.einsum_str
 
-        adapt_info = linear_config.get_adapt_info(
-            einsum_str=layer.einsum_str, weight=layer.weight)
+        adapt_info = linear_config.get_adapt_info(einsum_str=layer.einsum_str,
+                                                  weight=layer.weight)
         self.output_shape = adapt_info.out_features
         self.batch_features = adapt_info.batch_features
         self.batch_sharding = adapt_info.batch_sharding
@@ -113,8 +113,7 @@ class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
         if self.batch_features:
             # Batched case: keep original weight sharding for the full
             # 3D weight (matches kernel_shape).
-            self.weight_sharding = _to_partition_spec(
-                layer.weight.sharding)
+            self.weight_sharding = _to_partition_spec(layer.weight.sharding)
             self.kernel_shape = layer.kernel_shape
         else:
             self.weight_sharding = adapt_info.out_features_sharding + adapt_info.in_features_sharding
@@ -191,8 +190,8 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         self.quant_config = quant_config
         self.einsum_str = layer.einsum_str
 
-        adapt_info = linear_config.get_adapt_info(
-            einsum_str=layer.einsum_str, weight=layer.weight)
+        adapt_info = linear_config.get_adapt_info(einsum_str=layer.einsum_str,
+                                                  weight=layer.weight)
         self.out_features = adapt_info.out_features
         self.in_features = math.prod(adapt_info.in_features)
         self.batch_features = adapt_info.batch_features
@@ -200,12 +199,13 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         if self.batch_features:
             # Batched case: keep original weight sharding for the full
             # 3D weight (matches kernel_shape).
-            self.weight_sharding = _to_partition_spec(
-                layer.weight.sharding)
+            self.weight_sharding = _to_partition_spec(layer.weight.sharding)
             self.kernel_shape = layer.kernel_shape
         else:
-            self.weight_sharding = (adapt_info.out_features_sharding + adapt_info.in_features_sharding)
-            self.kernel_shape = (math.prod(self.out_features), self.in_features)
+            self.weight_sharding = (adapt_info.out_features_sharding +
+                                    adapt_info.in_features_sharding)
+            self.kernel_shape = (math.prod(self.out_features),
+                                 self.in_features)
 
         # Storing list of output sizes (instead of self.out_features) for compatibility.
         self.linear_config.output_sizes = [math.prod(self.out_features)]
@@ -246,8 +246,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         # https://github.com/vllm-project/vllm/blob/2a99c5a6c86daef8c766ba2dbf05c385b192c64b/vllm/model_executor/layers/quantization/fp8.py#L283-L284
         param_dtype = jnp.float8_e4m3
         layer.weight = nnx.Param(
-            kernel_init(rngs.params(), self.kernel_shape,
-                        param_dtype),
+            kernel_init(rngs.params(), self.kernel_shape, param_dtype),
             weight_loader=partial(load_nnx_param_from_reshaped_torch,
                                   permute_dims=(0, 1),
                                   param_name=layer.prefix + ".weight"),
