@@ -39,6 +39,7 @@ def setup_vllm(num_loras: int, tp: int = 1) -> vllm.LLM:
                     tensor_parallel_size=tp,
                     enable_lora=True,
                     max_loras=num_loras,
+                    async_scheduling=0,
                     max_lora_rank=8)
 
 
