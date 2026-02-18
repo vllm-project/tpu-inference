@@ -21,7 +21,6 @@ import jax
 import jax.numpy as jnp
 import torch
 from flax import nnx
-from jax._src.dtypes import TypePromotionError
 from jax.sharding import PartitionSpec as P
 from torchax.ops.mappings import t2j
 
@@ -386,18 +385,11 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
             jax_param = getattr(layer, jax_param_name, None)
 
             assert isinstance(jax_param, nnx.Param)
-            jax_param._cnt_moe_weights_loaded += 1
-            if not isinstance(jax_param.value, jax.Array):
-                jax_param.value = jnp.zeros_like(jax_param.value)
 
-            jax_weight = jax_array_from_reshaped_torch(torch_weight)
-            try:
-                jax_param.value = jax_param.value.at[expert_id].set(jax_weight)
-            except TypePromotionError as e:
-                raise TypePromotionError(
-                    f"Error while loading weight for {torch_name} with {jax_weight.dtype=} {jax_weight.shape=} "
-                    f"into {jax_param.value.dtype=} {jax_param.value.shape=}"
-                ) from e
+            jax_weight = jax_array_from_reshaped_torch(
+                torch_weight, reshape_dims=(1, ) +
+                torch_weight.shape)  # add expert dim for concatenation later
+            jax_param._weights_to_load[expert_id] = jax_weight
 
         logger.debug(
             f"Loaded {cnt} weight scales for {layer.prefix} MoE layer.")
@@ -409,9 +401,7 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                 "kernel_down_proj_EFD_" + self.weight_scale_name,
         }:
             param = getattr(layer, param_name)
-            if getattr(param, "_cnt_moe_weights_loaded",
-                       0) == layer.num_local_experts:
-                param.value = shard_put(param.value, param.sharding)
+            if all(w is not None for w in param._weights_to_load):
                 loaded_names.add(param_name)
 
         return loaded_names
@@ -463,9 +453,12 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                     param.value = value
 
                     scale_value = jnp.zeros((E, (K + block_k - 1) // block_k,
-                                             (N + block_n - 1) // block_n))
-                    setattr(layer, f"{param_name}_{self.weight_scale_name}",
-                            nnx.Param(scale_value, _cnt_moe_weights_loaded=0))
+                                             (N + block_n - 1) // block_n),
+                                            device=jax.devices('cpu')[0])
+                    setattr(
+                        layer, f"{param_name}_{self.weight_scale_name}",
+                        nnx.Param(scale_value,
+                                  _weights_to_load=[None for _ in range(E)]))
         else:
             raise NotImplementedError(
                 f"Unsupported moe backend: {layer.moe_backend}! Currently supported: {FP8_QUANT_METHOD_SUPPORTED_MOE_BACKENDS}"
@@ -487,22 +480,35 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
             up_scale_name = f"kernel_up_proj_EDF_{self.weight_scale_name}"
             down_scale_name = f"kernel_down_proj_EFD_{self.weight_scale_name}"
 
-            if any(param._cnt_moe_weights_loaded != layer.num_local_experts
-                   for param in [
-                       getattr(layer, gating_scale_name),
-                       getattr(layer, up_scale_name),
-                       getattr(layer,
-                               down_scale_name), layer.kernel_gating_EDF,
-                       layer.kernel_up_proj_EDF, layer.kernel_down_proj_EFD
-                   ]):
+            if any(
+                    any(w is None for w in param._weights_to_load) for param in
+                [
+                    getattr(layer, gating_scale_name),
+                    getattr(layer, up_scale_name),
+                    getattr(layer, down_scale_name), layer.kernel_gating_EDF,
+                    layer.kernel_up_proj_EDF, layer.kernel_down_proj_EFD
+                ]):
                 # If weights for a module is spread across multiple files, this function may be called
                 # more than once. We only want to process the weights once all of them are loaded.
                 return
 
-            w_gate = layer.kernel_gating_EDF.value
-            w_up = layer.kernel_up_proj_EDF.value
-            s_gate = getattr(layer, gating_scale_name).value
-            s_up = getattr(layer, up_scale_name).value
+            with jax.set_mesh(
+                    jax.make_mesh((1, ), ('x', ), devices=jax.devices('cpu'))):
+                w_gate = jnp.concatenate(
+                    layer.kernel_gating_EDF._weights_to_load, axis=0)
+                w_up = jnp.concatenate(
+                    layer.kernel_up_proj_EDF._weights_to_load, axis=0)
+                s_gate = jnp.concatenate(getattr(
+                    layer, gating_scale_name)._weights_to_load,
+                                         axis=0)
+                s_up = jnp.concatenate(getattr(layer,
+                                               up_scale_name)._weights_to_load,
+                                       axis=0)
+                w2_weight = jnp.concatenate(
+                    layer.kernel_down_proj_EFD._weights_to_load, axis=0)
+                w2_weight_scale = jnp.concatenate(getattr(
+                    layer, down_scale_name)._weights_to_load,
+                                                  axis=0)
 
             # Fuse the weights into w13: [Gate, Up]
             w13_weight = jnp.concatenate([w_gate, w_up], axis=-1)
@@ -515,8 +521,6 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
             w13_weight_scale = jnp.concatenate([s_gate, s_up], axis=-1)
             w13_weight_scale = jnp.transpose(w13_weight_scale, (0, 2, 1))
 
-            w2_weight = layer.kernel_down_proj_EFD.value
-            w2_weight_scale = getattr(layer, down_scale_name).value
             w2_weight = jnp.transpose(w2_weight, (0, 2, 1))
             w2_weight_scale = jnp.transpose(w2_weight_scale, (0, 2, 1))
 
