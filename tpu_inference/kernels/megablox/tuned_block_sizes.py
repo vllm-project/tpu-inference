@@ -291,16 +291,15 @@ def get_default_gmm_block_sizes(m: int, k: int, n: int,
     # 512.
     tm = round_up_to_multiple_of_128_within_limit(2 * m // g, 512)
     # NOTE(catswe): this divisor-search approach may produce suboptimal tile
-    # sizes (e.g., num_tokens=64 and topk=5, giving m=num_tokens*topk=320, will
+    # sizes (e.g., num_tokens=64 and topk=5, so m=num_tokens*topk=320, will
     # result in tm=80 and 4 tiles, instead of tm=128 and 3 tiles), though it's
     # unclear if such a case currently exists in practice. one solution is to
     # replace _calculate_num_tiles(m, tm) with
     # _calculate_irregular_num_tiles(m, tm) in make_group_metadata. this would
     # allow using tm=128 with a partial final tile, like k and n already do.
     # another solution is to pad the tensor so m is always a multiple of 128.
-    tm = min(tm, m)  # there's a requirement that m % tm == 0
     for candidate in range(tm, 0, -1):
-        if m % candidate == 0:
+        if m % candidate == 0:  # there's a requirement that m % tm == 0
             tm = candidate
             break
     # k/n correspond to n_input_features/n_output_features in the matmul so they
