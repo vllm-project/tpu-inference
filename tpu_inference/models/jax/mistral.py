@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections.abc import Iterable
 from itertools import islice
 from typing import List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+import torch
 from flax import nnx
 from jax.sharding import Mesh
 from transformers import MistralConfig, modeling_flax_utils
@@ -390,6 +392,27 @@ class MistralForCausalLM(JaxModule, LoadableWithIterator):
 
     WeightLoader = StandardWeightLoader
 
+    # Mapping from Mistral consolidated checkpoint names to HF names.
+    # Mistral models can be loaded from consolidated.safetensors checkpoints
+    # which use different naming conventions.
+    mistral_mapping = {
+        "layers": "model.layers",
+        "attention": "self_attn",
+        "wq": "q_proj",
+        "wk": "k_proj",
+        "wv": "v_proj",
+        "wo": "o_proj",
+        "attention_norm": "input_layernorm",
+        "feed_forward": "mlp",
+        "w1": "gate_proj",
+        "w2": "down_proj",
+        "w3": "up_proj",
+        "ffn_norm": "post_attention_layernorm",
+        "tok_embeddings": "model.embed_tokens",
+        "output": "lm_head",
+        "norm": "model.norm",
+    }
+
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
                  mesh: Mesh) -> None:
         self.vllm_config = vllm_config
@@ -416,6 +439,69 @@ class MistralForCausalLM(JaxModule, LoadableWithIterator):
                 quant_config=vllm_config.quant_config,
                 prefix="lm_head",
             )
+
+    def maybe_remap_mistral(
+        self,
+        name: str,
+        loaded_weight: torch.Tensor,
+    ) -> tuple[str, torch.Tensor]:
+        """Remap weight names and permute q/k weights from Mistral's
+        consolidated checkpoint format to HuggingFace format.
+
+        Consolidated checkpoints use names like 'layers.0.attention.wq.weight'
+        while HF format uses 'model.layers.0.self_attn.q_proj.weight'.
+        Additionally, wq/wk weights need permutation to un-interleave the
+        rotary embedding format.
+        """
+        config = self.vllm_config.model_config.hf_config
+
+        def permute(w: torch.Tensor, n_heads: int, attn_out: int):
+            attn_in = config.head_dim * n_heads
+            return (w.view(n_heads, attn_in // n_heads // 2, 2,
+                           attn_out).transpose(1,
+                                               2).reshape(attn_in, attn_out))
+
+        mapping = self.mistral_mapping
+        modules = name.split(".")
+
+        # Permute wq/wk weights to un-interleave rotary embeddings
+        if "wk" in modules and modules[-1] == "weight":
+            loaded_weight = permute(loaded_weight, config.num_key_value_heads,
+                                    config.hidden_size)
+        elif "wq" in modules and modules[-1] == "weight":
+            loaded_weight = permute(loaded_weight, config.num_attention_heads,
+                                    config.hidden_size)
+
+        # Remap consolidated names to HF names
+        num_modules = len(modules)
+        for i in range(num_modules):
+            item = modules[i]
+            next_item = modules[i + 1] if i < num_modules - 1 else None
+            combined_item = (f"{item}.{next_item}"
+                             if next_item is not None else None)
+
+            if combined_item in mapping:
+                name = name.replace(combined_item, mapping[combined_item])
+            elif item in mapping and mapping[item] not in name:
+                name = name.replace(item, mapping[item])
+
+        return name, loaded_weight
+
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        """Load weights with support for Mistral consolidated format."""
+        if not isinstance(weights, Iterable):
+            return super().load_weights(weights)
+
+        from tpu_inference.models.jax.utils.weight_utils import \
+            JaxAutoWeightsLoader
+        loader = JaxAutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head"]
+                           if not hasattr(self, 'lm_head') else None))
+        return loader.load_weights(
+            self.maybe_remap_mistral(name, loaded_weight)
+            for name, loaded_weight in weights)
 
     def __call__(
         self,
