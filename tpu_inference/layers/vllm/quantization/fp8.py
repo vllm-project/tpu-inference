@@ -250,7 +250,7 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
             activation=layer.activation.value,
             # Convert to tuple so jax jit can hash it
             weight_block_size=weight_block_size,
-        )
+            desired_quant_dtype=jnp.float4_e2m1fn)
         weights = torch_view(
             shard_moe_weights(weights, self.moe_backend, self.mesh))
 
