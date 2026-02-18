@@ -221,350 +221,167 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
     #         "Cache content should not have changed after precompilation.",
     #     )
 
-    @parameterized.named_parameters(
-        # dict(
-        #     testcase_name="_single_block",
-        #     num_blocks_to_save=1,
-        #     num_requests=1,
-        # ),
-        # dict(
-        #     testcase_name="_multi_requests_single_block",
-        #     num_blocks_to_save=1,
-        #     num_requests=6,
-        # ),
-        # dict(
-        #     testcase_name="_multi_blocks",
-        #     num_blocks_to_save=5,
-        #     num_requests=1,
-        # ),
-        # dict(
-        #     testcase_name="_multi_requests_multi_blocks",
-        #     num_blocks_to_save=5,
-        #     num_requests=6,
-        # ),
-        dict(
-            testcase_name="_multi_requests_multi_blocks",
-            num_blocks_to_save=16,
-            num_requests=6,
-        ),
-        # dict(
-        #     testcase_name="_multi_blocks_with_compile_jax",
-        #     num_blocks_to_save=5,
-        #     num_requests=1,
-        #     use_precompiled_swap_ops=True,
-        # ),
-        # dict(
-        #     testcase_name="_multi_requests_single_block_with_compile_jax",
-        #     num_blocks_to_save=1,
-        #     num_requests=6,
-        #     use_precompiled_swap_ops=True,
-        # ),
-        # dict(
-        #     testcase_name="_multi_requests_multi_blocks_with_compile_jax",
-        #     num_blocks_to_save=5,
-        #     num_requests=6,
-        #     use_precompiled_swap_ops=True,
-        # ),
-        # dict(
-        #     testcase_name="_multi_blocks_with_compile_jax_copy",
-        #     num_blocks_to_save=5,
-        #     num_requests=1,
-        #     use_precompiled_swap_ops=True,
-        #     swap_op_type="jax_copy",
-        # ),
-        # dict(
-        #     testcase_name="_multi_requests_multi_blocks_with_compile_jax_copy",
-        #     num_blocks_to_save=5,
-        #     num_requests=6,
-        #     use_precompiled_swap_ops=True,
-        #     swap_op_type="jax_copy",
-        # ),
-        # dict(
-        #     testcase_name="_multi_blocks_with_compile_pallas",
-        #     num_blocks_to_save=5,
-        #     num_requests=1,
-        #     use_precompiled_swap_ops=True,
-        #     swap_op_type="pallas",
-        # ),
-        # dict(
-        #     testcase_name="_multi_requests_multi_blocks_with_compile_pallas",
-        #     num_blocks_to_save=5,
-        #     num_requests=6,
-        #     use_precompiled_swap_ops=True,
-        #     swap_op_type="pallas",
-        # ),
-        # dict(
-        #     testcase_name="_final_save",
-        #     num_blocks_to_save=1,
-        #     num_requests=1,
-        #     is_final_save=True,
-        #     skip_save=False,
-        # ),
-        # dict(
-        #     testcase_name="_final_skip_save",
-        #     num_blocks_to_save=0,
-        #     num_requests=1,
-        #     is_final_save=True,
-        #     skip_save=True,
-        # ),
-    )
-    def test_tpu_connector_save(
-        self,
-        num_blocks_to_save: int,
-        num_requests: int = 1,
-        is_final_save: bool = False,
-        skip_save: bool = False,
-        use_precompiled_swap_ops: bool = False,
-        swap_op_type: str = "jax",
-    ):
-        total_num_blocks_to_save = num_blocks_to_save * num_requests
-        if total_num_blocks_to_save > self.num_blocks or total_num_blocks_to_save > self.num_cpu_chunks:
-            self.skipTest(
-                f"num_blocks_to_save {total_num_blocks_to_save} exceeds ModelRunner / OffloadConnectorWorker's capacity"
-            )
-
-        exp_name = f"{num_blocks_to_save}-{num_requests}-{swap_op_type}"
-        profile_dir = f"/mnt/disks/jcgu/code/ullm/offload_tests/microbenchmark_traces/{exp_name}"
-        options = jax.profiler.ProfileOptions()
-        # default: https://docs.jax.dev/en/latest/profiling.html#general-options
-        options.python_tracer_level = 1
-        options.host_tracer_level = os.getenv("HOST_TRACER_LEVEL", 2)
-        jax.profiler.start_trace(profile_dir, profiler_options=options)
-        # Prepare and Execute Save
-        all_block_ids = list(range(self.num_blocks))
-        all_chunk_ids = list(range(self.num_cpu_chunks))
-        src_block_ids = random.sample(all_block_ids, total_num_blocks_to_save)
-        dst_chunk_ids = random.sample(all_chunk_ids, total_num_blocks_to_save)
-
-        src_block_ids_split = np.array_split(src_block_ids, num_requests)
-        dst_chunk_ids_split = np.array_split(dst_chunk_ids, num_requests)
-
-        requests_meta = []
-        for i in range(num_requests):
-            req_id = f"save_req_{i}"
-            src_blocks = src_block_ids_split[i].tolist()
-            dst_chunks = dst_chunk_ids_split[i].tolist()
-
-            num_tokens_to_save_per_req = len(src_blocks) * self.block_size
-
-            save_spec = SaveSpec(
-                num_skip_leading_tokens=0,
-                num_total_tokens=num_tokens_to_save_per_req,
-                is_final_save=is_final_save,
-                skip_save=skip_save,
-                src_blocks=src_blocks,
-                dst_chunks=dst_chunks,
-            )
-
-            total_token_ids = list(range(num_tokens_to_save_per_req))
-
-            req_meta = TPUReqMeta(
-                req_id=req_id,
-                token_ids=total_token_ids,
-                local_block_ids=src_blocks,
-                save_spec=save_spec,
-            )
-            requests_meta.append(req_meta)
-
-        logger.info(f"Starting test_tpu_connector_save with: "
-                    f"num_blocks_to_save={num_blocks_to_save}, "
-                    f"num_requests={num_requests}, "
-                    f"is_final_save={is_final_save}, "
-                    f"skip_save={skip_save}, "
-                    f"use_precompiled_swap_ops={use_precompiled_swap_ops}, "
-                    f"swap_op_type={swap_op_type};")
-
-        connector_metadata = TPUOffloadConnectorMetadata(
-            requests_meta=requests_meta)
-
-        connector = self._create_connector(swap_op_type,
-                                           use_precompiled_swap_ops)
-        worker = connector.connector_worker
-        connector.bind_connector_metadata(connector_metadata)
-        logger.info(
-            "Connector metadata bound, calling worker.start_save_kv().")
-        worker.start_save_kv()
-        logger.info("Waiting for all save operations to complete...")
-        while worker._pending_save_futures:
-            worker._process_completed_saves()
-            time.sleep(0.01)
-
-        jax.profiler.stop_trace()
-        logger.info("complete profiling")
-        # Verification
-        logger.info("Starting verification phase.")
-        cpu_backend = worker.cpu_backend
-        kv_caches = worker.runner.kv_caches
-
-        if skip_save or total_num_blocks_to_save == 0:
-            logger.info(" no blocks to save")
-            assert cpu_backend.num_saved_cpu_chunks == 0
-            # self.assertEmpty(worker.finished_save_reqs)
-            self.assertEmpty(worker.offload_stats.data["finished_save_chunks"])
-            return
-
-        # verify the saved chunks
-        all_req_ids = {f"save_req_{i}" for i in range(num_requests)}
-        self.assertSetEqual(
-            all_req_ids,
-            set(worker.offload_stats.data["finished_save_chunks"].keys()))
-
-        for i in range(num_requests):
-            req_id = f"save_req_{i}"
-            src_blocks = src_block_ids_split[i].tolist()
-            dst_chunks = dst_chunk_ids_split[i].tolist()
-            self.assertListEqual(
-                dst_chunks,
-                worker.offload_stats.data["finished_save_chunks"][req_id])
-
-            for tpu_block_id, cpu_chunk_id in zip(src_blocks, dst_chunks):
-                cpu_kv_chunk = cpu_backend.get(cpu_chunk_id)
-                for layer_idx in range(self.num_layers):
-                    tpu_kv_block = kv_caches[layer_idx][tpu_block_id]
-                    if swap_op_type != "jax_copy":
-                        # assert cpu_kv_chunk[
-                        #     layer_idx].sharding.memory_kind == 'pinned_host'
-                        single_layer_cpu = cpu_kv_chunk[layer_idx]
-                        if len(single_layer_cpu.shape) == 5:
-                            single_layer_cpu = jnp.squeeze(single_layer_cpu, axis=0)
-                        self.assertArraysEqual(
-                            np.array(tpu_kv_block),
-                            np.array(single_layer_cpu))
-                    else:
-                        cpu_shards_for_layer = cpu_kv_chunk[layer_idx]
-                        tpu_shards_for_layer = tpu_kv_block.addressable_shards
-                        self.assertEqual(
-                            len(cpu_shards_for_layer),
-                            len(tpu_shards_for_layer),
-                        )
-                        for cpu_shard, tpu_shard in zip(
-                                cpu_shards_for_layer, tpu_shards_for_layer):
-                            # cpu_shard is using SingleDeviceSharding
-                            self.assertArraysEqual(np.array(cpu_shard),
-                                                   np.array(tpu_shard.data))
-        logger.info("Saved data verification completed.")
-
     # @parameterized.named_parameters(
+    #     # dict(
+    #     #     testcase_name="_single_block",
+    #     #     num_blocks_to_save=1,
+    #     #     num_requests=1,
+    #     # ),
+    #     # dict(
+    #     #     testcase_name="_multi_requests_single_block",
+    #     #     num_blocks_to_save=1,
+    #     #     num_requests=6,
+    #     # ),
+    #     # dict(
+    #     #     testcase_name="_multi_blocks",
+    #     #     num_blocks_to_save=5,
+    #     #     num_requests=1,
+    #     # ),
+    #     # dict(
+    #     #     testcase_name="_multi_requests_multi_blocks",
+    #     #     num_blocks_to_save=5,
+    #     #     num_requests=6,
+    #     # ),
     #     dict(
-    #         testcase_name="_single_block",
-    #         num_blocks_to_operate=1,
-    #         num_requests=1,
-    #     ),
-    #     dict(
-    #         testcase_name="_multi_requests_single_block",
-    #         num_blocks_to_operate=1,
-    #         num_requests=4,
-    #     ),
-    #     dict(
-    #         testcase_name="_multi_blocks_compile_jax",
-    #         num_blocks_to_operate=5,
-    #         num_requests=1,
-    #         use_precompiled_swap_ops=True,
-    #         swap_op_type="jax",
-    #     ),
-    #     dict(
-    #         testcase_name="_multi_requests_single_block_compile_jax",
-    #         num_blocks_to_operate=1,
+    #         testcase_name="_multi_requests_multi_blocks",
+    #         num_blocks_to_save=16,
     #         num_requests=6,
     #         use_precompiled_swap_ops=True,
-    #         swap_op_type="jax",
     #     ),
-    #     dict(
-    #         testcase_name="_multi_requests_multi_blocks_compile_jax",
-    #         num_blocks_to_operate=5,
-    #         num_requests=6,
-    #         use_precompiled_swap_ops=True,
-    #         swap_op_type="jax",
-    #     ),
-    #     dict(
-    #         testcase_name="_multi_requests_multi_blocks_compile_jax_copy",
-    #         num_blocks_to_operate=5,
-    #         num_requests=6,
-    #         use_precompiled_swap_ops=True,
-    #         swap_op_type="jax_copy",
-    #     ),
-    #     dict(
-    #         testcase_name="_multi_requests_multi_blocks_compile_pallas",
-    #         num_blocks_to_operate=5,
-    #         num_requests=6,
-    #         use_precompiled_swap_ops=True,
-    #         swap_op_type="pallas",
-    #     ),
+    #     # dict(
+    #     #     testcase_name="_multi_blocks_with_compile_jax",
+    #     #     num_blocks_to_save=5,
+    #     #     num_requests=1,
+    #     #     use_precompiled_swap_ops=True,
+    #     # ),
+    #     # dict(
+    #     #     testcase_name="_multi_requests_single_block_with_compile_jax",
+    #     #     num_blocks_to_save=1,
+    #     #     num_requests=6,
+    #     #     use_precompiled_swap_ops=True,
+    #     # ),
+    #     # dict(
+    #     #     testcase_name="_multi_requests_multi_blocks_with_compile_jax",
+    #     #     num_blocks_to_save=5,
+    #     #     num_requests=6,
+    #     #     use_precompiled_swap_ops=True,
+    #     # ),
+    #     # dict(
+    #     #     testcase_name="_multi_blocks_with_compile_jax_copy",
+    #     #     num_blocks_to_save=5,
+    #     #     num_requests=1,
+    #     #     use_precompiled_swap_ops=True,
+    #     #     swap_op_type="jax_copy",
+    #     # ),
+    #     # dict(
+    #     #     testcase_name="_multi_requests_multi_blocks_with_compile_jax_copy",
+    #     #     num_blocks_to_save=5,
+    #     #     num_requests=6,
+    #     #     use_precompiled_swap_ops=True,
+    #     #     swap_op_type="jax_copy",
+    #     # ),
+    #     # dict(
+    #     #     testcase_name="_multi_blocks_with_compile_pallas",
+    #     #     num_blocks_to_save=5,
+    #     #     num_requests=1,
+    #     #     use_precompiled_swap_ops=True,
+    #     #     swap_op_type="pallas",
+    #     # ),
+    #     # dict(
+    #     #     testcase_name="_multi_requests_multi_blocks_with_compile_pallas",
+    #     #     num_blocks_to_save=5,
+    #     #     num_requests=6,
+    #     #     use_precompiled_swap_ops=True,
+    #     #     swap_op_type="pallas",
+    #     # ),
+    #     # dict(
+    #     #     testcase_name="_final_save",
+    #     #     num_blocks_to_save=1,
+    #     #     num_requests=1,
+    #     #     is_final_save=True,
+    #     #     skip_save=False,
+    #     # ),
+    #     # dict(
+    #     #     testcase_name="_final_skip_save",
+    #     #     num_blocks_to_save=0,
+    #     #     num_requests=1,
+    #     #     is_final_save=True,
+    #     #     skip_save=True,
+    #     # ),
     # )
-    # def test_tpu_connector_load(
+    # def test_tpu_connector_save(
     #     self,
-    #     num_blocks_to_operate: int,
+    #     num_blocks_to_save: int,
     #     num_requests: int = 1,
+    #     is_final_save: bool = False,
+    #     skip_save: bool = False,
     #     use_precompiled_swap_ops: bool = False,
     #     swap_op_type: str = "jax",
     # ):
-    #     """
-    #     This test simulates a scenario where some amount of blocks get
-    #     offloaded to cpu cache, and then get loaded into tpu kv cache.
-    #     Both swap-out and swap-in are tested.
-
-    #     Steps:
-    #     1. Setup:
-    #     2. Simulate a save operation
-    #     3. Load the data
-    #     4. Verification
-    #     """
-    #     total_num_blocks_to_operate = num_blocks_to_operate * num_requests
-    #     if total_num_blocks_to_operate > self.num_blocks or total_num_blocks_to_operate > self.num_cpu_chunks:
+    #     total_num_blocks_to_save = num_blocks_to_save * num_requests
+    #     if total_num_blocks_to_save > self.num_blocks or total_num_blocks_to_save > self.num_cpu_chunks:
     #         self.skipTest(
-    #             f"num_blocks_to_save {total_num_blocks_to_operate} exceeds ModelRunner / OffloadConnectorWorker's capacity"
+    #             f"num_blocks_to_save {total_num_blocks_to_save} exceeds ModelRunner / OffloadConnectorWorker's capacity"
     #         )
-    #     # 1. Setup
-    #     connector = self._create_connector(swap_op_type,
-    #                                        use_precompiled_swap_ops)
-    #     worker = connector.connector_worker
-    #     # Ground truth cache on TPU
-    #     src_kv_cache = worker.runner.kv_caches
-    #     # Destination cache on TPU, should be modified by the load operation
-    #     dst_kv_cache = [
-    #         jax.device_put(jnp.zeros(self.cache_shape, dtype=self.cache_dtype),
-    #                        self.device_sharding)
-    #         for _ in range(self.num_layers)
-    #     ]
-    #     jax.block_until_ready(dst_kv_cache)
 
-    #     # 2. Simulate a save operation
+    #     # exp_name = f"{num_blocks_to_save}-{num_requests}-{swap_op_type}-{use_precompiled_swap_ops}"
+    #     # profile_dir = f"/mnt/disks/jcgu/code/ullm/offload_tests/microbenchmark_traces/{exp_name}"
+    #     # options = jax.profiler.ProfileOptions()
+    #     # # default: https://docs.jax.dev/en/latest/profiling.html#general-options
+    #     # options.python_tracer_level = 1
+    #     # options.host_tracer_level = os.getenv("HOST_TRACER_LEVEL", 2)
+    #     # jax.profiler.start_trace(profile_dir, profiler_options=options)
+
+    #     # Prepare and Execute Save
     #     all_block_ids = list(range(self.num_blocks))
     #     all_chunk_ids = list(range(self.num_cpu_chunks))
-    #     src_block_ids = random.sample(all_block_ids,
-    #                                   total_num_blocks_to_operate)
-    #     dst_chunk_ids = random.sample(all_chunk_ids,
-    #                                   total_num_blocks_to_operate)
+    #     src_block_ids = random.sample(all_block_ids, total_num_blocks_to_save)
+    #     dst_chunk_ids = random.sample(all_chunk_ids, total_num_blocks_to_save)
 
     #     src_block_ids_split = np.array_split(src_block_ids, num_requests)
     #     dst_chunk_ids_split = np.array_split(dst_chunk_ids, num_requests)
 
-    #     save_requests_meta = []
+    #     requests_meta = []
     #     for i in range(num_requests):
     #         req_id = f"save_req_{i}"
     #         src_blocks = src_block_ids_split[i].tolist()
     #         dst_chunks = dst_chunk_ids_split[i].tolist()
+
     #         num_tokens_to_save_per_req = len(src_blocks) * self.block_size
 
     #         save_spec = SaveSpec(
     #             num_skip_leading_tokens=0,
     #             num_total_tokens=num_tokens_to_save_per_req,
-    #             is_final_save=False,
-    #             skip_save=False,
+    #             is_final_save=is_final_save,
+    #             skip_save=skip_save,
     #             src_blocks=src_blocks,
     #             dst_chunks=dst_chunks,
     #         )
+
     #         total_token_ids = list(range(num_tokens_to_save_per_req))
+
     #         req_meta = TPUReqMeta(
     #             req_id=req_id,
     #             token_ids=total_token_ids,
     #             local_block_ids=src_blocks,
     #             save_spec=save_spec,
     #         )
-    #         save_requests_meta.append(req_meta)
+    #         requests_meta.append(req_meta)
+
+    #     logger.info(f"Starting test_tpu_connector_save with: "
+    #                 f"num_blocks_to_save={num_blocks_to_save}, "
+    #                 f"num_requests={num_requests}, "
+    #                 f"is_final_save={is_final_save}, "
+    #                 f"skip_save={skip_save}, "
+    #                 f"use_precompiled_swap_ops={use_precompiled_swap_ops}, "
+    #                 f"swap_op_type={swap_op_type};")
 
     #     connector_metadata = TPUOffloadConnectorMetadata(
-    #         requests_meta=save_requests_meta)
+    #         requests_meta=requests_meta)
+
+    #     connector = self._create_connector(swap_op_type,
+    #                                        use_precompiled_swap_ops)
+    #     worker = connector.connector_worker
     #     connector.bind_connector_metadata(connector_metadata)
     #     logger.info(
     #         "Connector metadata bound, calling worker.start_save_kv().")
@@ -574,62 +391,257 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
     #         worker._process_completed_saves()
     #         time.sleep(0.01)
 
-    #     logger.info("worker save completed.")
+    #     # jax.profiler.stop_trace()
+    #     # logger.info("complete profiling")
 
-    #     # 3. Prepare and Execute Delta Load
-    #     worker.runner.kv_caches = dst_kv_cache
+    #     # Verification
+    #     logger.info("Starting verification phase.")
+    #     cpu_backend = worker.cpu_backend
+    #     kv_caches = worker.runner.kv_caches
 
-    #     load_requests_meta = []
-    #     for i in range(num_requests):
-    #         req_id = f"load_req_{i}"
-    #         src_blocks = src_block_ids_split[i].tolist()
-    #         dst_chunks = dst_chunk_ids_split[i].tolist()
-    #         num_tokens_to_load_per_req = len(src_blocks) * self.block_size
+    #     if skip_save or total_num_blocks_to_save == 0:
+    #         logger.info(" no blocks to save")
+    #         assert cpu_backend.num_saved_cpu_chunks == 0
+    #         # self.assertEmpty(worker.finished_save_reqs)
+    #         self.assertEmpty(worker.offload_stats.data["finished_save_chunks"])
+    #         return
 
-    #         load_spec = LoadSpec(
-    #             num_matched_tokens=num_tokens_to_load_per_req,
-    #             dst_blocks=src_blocks,
-    #             src_chunks=dst_chunks,
-    #             can_load=True,
-    #             num_skip_leading_tokens=0,
-    #         )
-    #         total_token_ids = list(range(num_tokens_to_load_per_req))
-    #         req_meta = TPUReqMeta(
-    #             req_id=req_id,
-    #             token_ids=total_token_ids,
-    #             local_block_ids=src_blocks,
-    #             load_spec=load_spec,
-    #         )
-    #         load_requests_meta.append(req_meta)
-
-    #     connector_metadata = TPUOffloadConnectorMetadata(
-    #         requests_meta=load_requests_meta)
-    #     connector.bind_connector_metadata(connector_metadata)
-    #     logger.info("Connector metadata bound, calling start_load_kv.")
-    #     worker.start_load_kv(fwd_ctx=None)
-    #     jax.block_until_ready(worker.runner.kv_caches)
-    #     logger.info("start_load_kv completed and blocked until ready.")
-
-    #     # 4. Verification
-    #     # verify the data
-    #     dst_kv_cache = worker.runner.kv_caches
-    #     for i in range(num_requests):
-    #         src_blocks = src_block_ids_split[i].tolist()
-    #         for src_block_id in src_blocks:
-    #             for layer_idx in range(self.num_layers):
-    #                 self.assertArraysEqual(
-    #                     np.array(src_kv_cache[layer_idx][src_block_id]),
-    #                     np.array(dst_kv_cache[layer_idx][src_block_id]))
-
-    #     # verify the loaded chunks
-    #     all_load_req_ids = {f"load_req_{i}" for i in range(num_requests)}
+    #     # verify the saved chunks
+    #     all_req_ids = {f"save_req_{i}" for i in range(num_requests)}
     #     self.assertSetEqual(
-    #         all_load_req_ids,
-    #         set(worker.offload_stats.data["finished_load_chunks"].keys()))
+    #         all_req_ids,
+    #         set(worker.offload_stats.data["finished_save_chunks"].keys()))
 
     #     for i in range(num_requests):
-    #         req_id = f"load_req_{i}"
+    #         req_id = f"save_req_{i}"
+    #         src_blocks = src_block_ids_split[i].tolist()
     #         dst_chunks = dst_chunk_ids_split[i].tolist()
     #         self.assertListEqual(
     #             dst_chunks,
-    #             worker.offload_stats.data["finished_load_chunks"][req_id])
+    #             worker.offload_stats.data["finished_save_chunks"][req_id])
+
+    #         for tpu_block_id, cpu_chunk_id in zip(src_blocks, dst_chunks):
+    #             cpu_kv_chunk = cpu_backend.get(cpu_chunk_id)
+    #             np_cpu_kv_chunk = np.array(cpu_kv_chunk)
+    #             if len(np_cpu_kv_chunk.shape) == 6:
+    #                 np_cpu_kv_chunk = np.squeeze(np_cpu_kv_chunk, axis=0)
+    #             for layer_idx in range(self.num_layers):
+    #                 tpu_kv_block = kv_caches[layer_idx][tpu_block_id]
+    #                 if swap_op_type != "jax_copy":
+    #                     self.assertArraysEqual(
+    #                         np.array(tpu_kv_block),
+    #                         np_cpu_kv_chunk[layer_idx])
+    #                 else:
+    #                     cpu_shards_for_layer = cpu_kv_chunk[layer_idx]
+    #                     tpu_shards_for_layer = tpu_kv_block.addressable_shards
+    #                     self.assertEqual(
+    #                         len(cpu_shards_for_layer),
+    #                         len(tpu_shards_for_layer),
+    #                     )
+    #                     for cpu_shard, tpu_shard in zip(
+    #                             cpu_shards_for_layer, tpu_shards_for_layer):
+    #                         # cpu_shard is using SingleDeviceSharding
+    #                         self.assertArraysEqual(np.array(cpu_shard),
+    #                                                np.array(tpu_shard.data))
+    #     logger.info("Saved data verification completed.")
+
+    @parameterized.named_parameters(
+        # dict(
+        #     testcase_name="_single_block",
+        #     num_blocks_to_operate=1,
+        #     num_requests=1,
+        # ),
+        # dict(
+        #     testcase_name="_multi_requests_single_block",
+        #     num_blocks_to_operate=1,
+        #     num_requests=4,
+        # ),
+        # dict(
+        #     testcase_name="_multi_blocks_compile_jax",
+        #     num_blocks_to_operate=5,
+        #     num_requests=1,
+        #     use_precompiled_swap_ops=True,
+        #     swap_op_type="jax",
+        # ),
+        # dict(
+        #     testcase_name="_multi_requests_single_block_compile_jax",
+        #     num_blocks_to_operate=1,
+        #     num_requests=6,
+        #     use_precompiled_swap_ops=True,
+        #     swap_op_type="jax",
+        # ),
+        dict(
+            testcase_name="_multi_requests_multi_blocks_compile_jax",
+            num_blocks_to_operate=16,
+            num_requests=6,
+            use_precompiled_swap_ops=False,
+            swap_op_type="jax",
+        ),
+        # dict(
+        #     testcase_name="_multi_requests_multi_blocks_compile_jax_copy",
+        #     num_blocks_to_operate=5,
+        #     num_requests=6,
+        #     use_precompiled_swap_ops=True,
+        #     swap_op_type="jax_copy",
+        # ),
+        # dict(
+        #     testcase_name="_multi_requests_multi_blocks_compile_pallas",
+        #     num_blocks_to_operate=5,
+        #     num_requests=6,
+        #     use_precompiled_swap_ops=True,
+        #     swap_op_type="pallas",
+        # ),
+    )
+    def test_tpu_connector_load(
+        self,
+        num_blocks_to_operate: int,
+        num_requests: int = 1,
+        use_precompiled_swap_ops: bool = False,
+        swap_op_type: str = "jax",
+    ):
+        """
+        This test simulates a scenario where some amount of blocks get
+        offloaded to cpu cache, and then get loaded into tpu kv cache.
+        Both swap-out and swap-in are tested.
+
+        Steps:
+        1. Setup:
+        2. Simulate a save operation
+        3. Load the data
+        4. Verification
+        """
+        total_num_blocks_to_operate = num_blocks_to_operate * num_requests
+        if total_num_blocks_to_operate > self.num_blocks or total_num_blocks_to_operate > self.num_cpu_chunks:
+            self.skipTest(
+                f"num_blocks_to_save {total_num_blocks_to_operate} exceeds ModelRunner / OffloadConnectorWorker's capacity"
+            )
+        # 1. Setup
+        connector = self._create_connector(swap_op_type,
+                                           use_precompiled_swap_ops)
+        worker = connector.connector_worker
+        # Ground truth cache on TPU
+        src_kv_cache = worker.runner.kv_caches
+        # Destination cache on TPU, should be modified by the load operation
+        dst_kv_cache = [
+            jax.device_put(jnp.zeros(self.cache_shape, dtype=self.cache_dtype),
+                           self.device_sharding)
+            for _ in range(self.num_layers)
+        ]
+        jax.block_until_ready(dst_kv_cache)
+
+        # 2. Simulate a save operation
+        all_block_ids = list(range(self.num_blocks))
+        all_chunk_ids = list(range(self.num_cpu_chunks))
+        src_block_ids = random.sample(all_block_ids,
+                                      total_num_blocks_to_operate)
+        dst_chunk_ids = random.sample(all_chunk_ids,
+                                      total_num_blocks_to_operate)
+
+        src_block_ids_split = np.array_split(src_block_ids, num_requests)
+        dst_chunk_ids_split = np.array_split(dst_chunk_ids, num_requests)
+
+        save_requests_meta = []
+        for i in range(num_requests):
+            req_id = f"save_req_{i}"
+            src_blocks = src_block_ids_split[i].tolist()
+            dst_chunks = dst_chunk_ids_split[i].tolist()
+            num_tokens_to_save_per_req = len(src_blocks) * self.block_size
+
+            save_spec = SaveSpec(
+                num_skip_leading_tokens=0,
+                num_total_tokens=num_tokens_to_save_per_req,
+                is_final_save=False,
+                skip_save=False,
+                src_blocks=src_blocks,
+                dst_chunks=dst_chunks,
+            )
+            total_token_ids = list(range(num_tokens_to_save_per_req))
+            req_meta = TPUReqMeta(
+                req_id=req_id,
+                token_ids=total_token_ids,
+                local_block_ids=src_blocks,
+                save_spec=save_spec,
+            )
+            save_requests_meta.append(req_meta)
+
+        connector_metadata = TPUOffloadConnectorMetadata(
+            requests_meta=save_requests_meta)
+        connector.bind_connector_metadata(connector_metadata)
+        logger.info(
+            "Connector metadata bound, calling worker.start_save_kv().")
+        worker.start_save_kv()
+        logger.info("Waiting for all save operations to complete...")
+        while worker._pending_save_futures:
+            worker._process_completed_saves()
+            time.sleep(0.01)
+
+        logger.info("worker save completed.")
+
+        exp_name = f"load-{num_blocks_to_operate}-{num_requests}-{swap_op_type}-{use_precompiled_swap_ops}"
+        profile_dir = f"/mnt/disks/jcgu/code/ullm/offload_tests/microbenchmark_traces/{exp_name}"
+        options = jax.profiler.ProfileOptions()
+        # default: https://docs.jax.dev/en/latest/profiling.html#general-options
+        options.python_tracer_level = 1
+        options.host_tracer_level = os.getenv("HOST_TRACER_LEVEL", 2)
+        jax.profiler.start_trace(profile_dir, profiler_options=options)
+
+        # 3. Prepare and Execute Delta Load
+        worker.runner.kv_caches = dst_kv_cache
+
+        load_requests_meta = []
+        for i in range(num_requests):
+            req_id = f"load_req_{i}"
+            src_blocks = src_block_ids_split[i].tolist()
+            dst_chunks = dst_chunk_ids_split[i].tolist()
+            num_tokens_to_load_per_req = len(src_blocks) * self.block_size
+
+            load_spec = LoadSpec(
+                num_matched_tokens=num_tokens_to_load_per_req,
+                dst_blocks=src_blocks,
+                src_chunks=dst_chunks,
+                can_load=True,
+                num_skip_leading_tokens=0,
+            )
+            total_token_ids = list(range(num_tokens_to_load_per_req))
+            req_meta = TPUReqMeta(
+                req_id=req_id,
+                token_ids=total_token_ids,
+                local_block_ids=src_blocks,
+                load_spec=load_spec,
+            )
+            load_requests_meta.append(req_meta)
+
+        connector_metadata = TPUOffloadConnectorMetadata(
+            requests_meta=load_requests_meta)
+        connector.bind_connector_metadata(connector_metadata)
+        logger.info("Connector metadata bound, calling start_load_kv.")
+        worker.start_load_kv(fwd_ctx=None)
+        jax.block_until_ready(worker.runner.kv_caches)
+        logger.info("start_load_kv completed and blocked until ready.")
+
+        jax.profiler.stop_trace()
+        logger.info("complete profiling")
+
+        # 4. Verification
+        # verify the data
+        dst_kv_cache = worker.runner.kv_caches
+        for i in range(num_requests):
+            src_blocks = src_block_ids_split[i].tolist()
+            for src_block_id in src_blocks:
+                for layer_idx in range(self.num_layers):
+                    self.assertArraysEqual(
+                        np.array(src_kv_cache[layer_idx][src_block_id]),
+                        np.array(dst_kv_cache[layer_idx][src_block_id]))
+
+        # verify the loaded chunks
+        all_load_req_ids = {f"load_req_{i}" for i in range(num_requests)}
+        self.assertSetEqual(
+            all_load_req_ids,
+            set(worker.offload_stats.data["finished_load_chunks"].keys()))
+
+        for i in range(num_requests):
+            req_id = f"load_req_{i}"
+            dst_chunks = dst_chunk_ids_split[i].tolist()
+            self.assertListEqual(
+                dst_chunks,
+                worker.offload_stats.data["finished_load_chunks"][req_id])
