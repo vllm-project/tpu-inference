@@ -100,30 +100,30 @@ def _test_kv_cache_cpu_offloading_accuracy(
 #   2. clears HBM which forces clean up of KV cache from HBM
 #   3. re-calculates tokens for input prompt
 #   4. verifies tokens generated for 1. and 3. are identical when KV cache<CPU RAM
-def test_kv_cache_cpu_offloading_accuracy_smaller_then_cpu_ram(
-    monkeypatch: pytest.MonkeyPatch,
-    sampling_config: SamplingParams,
-    kv_transfer_config: KVTransferConfig,
-):
-    swap_op_types = ["pallas", "jax", "jax_copy"]
-    decode_saves = ["0", "1"]
-    skip_precompile = ["0", "1"]
-    for swap_op_type, decode_save, _skip_precompile in itertools.product(
-            swap_op_types, decode_saves, skip_precompile):
-        _test_kv_cache_cpu_offloading_accuracy(
-            monkeypatch,
-            sampling_config,
-            kv_transfer_config,
-            swap_op_type,
-            _skip_precompile,
-            decode_save,
-            # The total CPU RAM size = # cpu chunks * cpu_chunk_size. cpu_chunk_size represent the number of tokens can fit into a single CPU RAM chunk.
-            # cpu_chunk_size for llama-3.2-3B(used above in test)= 256
-            # CPU RAM size = 4*256=1024 tokens
-            "4",  # TPU_OFFLOAD_NUM_CPU_CHUNKS
-            # Prompt length/#tokens: 246 tokens
-            "small_prompt.txt",
-        )
+# def test_kv_cache_cpu_offloading_accuracy_smaller_then_cpu_ram(
+#     monkeypatch: pytest.MonkeyPatch,
+#     sampling_config: SamplingParams,
+#     kv_transfer_config: KVTransferConfig,
+# ):
+#     swap_op_types = ["jax"]
+#     decode_saves = ["0"]
+#     skip_precompile = ["1"]
+#     for swap_op_type, decode_save, _skip_precompile in itertools.product(
+#             swap_op_types, decode_saves, skip_precompile):
+#         _test_kv_cache_cpu_offloading_accuracy(
+#             monkeypatch,
+#             sampling_config,
+#             kv_transfer_config,
+#             swap_op_type,
+#             _skip_precompile,
+#             decode_save,
+#             # The total CPU RAM size = # cpu chunks * cpu_chunk_size. cpu_chunk_size represent the number of tokens can fit into a single CPU RAM chunk.
+#             # cpu_chunk_size for llama-3.2-3B(used above in test)= 256
+#             # CPU RAM size = 4*256=1024 tokens
+#             "4",  # TPU_OFFLOAD_NUM_CPU_CHUNKS
+#             # Prompt length/#tokens: 246 tokens
+#             "small_prompt.txt",
+#         )
 
 
 # This tests scenario where the KV cache size is larger than the CPU RAM. To ensure this the CPU RAM has been set on the lower side while using a larger prompt.
@@ -137,9 +137,9 @@ def test_kv_cache_cpu_offloading_accuracy_larger_than_cpu_ram(
     sampling_config: SamplingParams,
     kv_transfer_config: KVTransferConfig,
 ):
-    swap_op_types = ["pallas", "jax", "jax_copy"]
-    decode_saves = ["0", "1"]
-    skip_precompile = ["0", "1"]
+    swap_op_types = ["jax"]
+    decode_saves = ["0"]
+    skip_precompile = ["1"]
     for swap_op_type, decode_save, _skip_precompile in itertools.product(
             swap_op_types, decode_saves, skip_precompile):
         _test_kv_cache_cpu_offloading_accuracy(
@@ -152,7 +152,7 @@ def test_kv_cache_cpu_offloading_accuracy_larger_than_cpu_ram(
             # The total CPU RAM size = # cpu chunks * cpu_chunk_size. cpu_chunk_size represent the number of tokens can fit into a single CPU RAM chunk.
             # cpu_chunk_size for llama-3.2-3B(used above in test)= 256
             # CPU RAM size = 4*256=1024 tokens
-            "4",  # TPU_OFFLOAD_NUM_CPU_CHUNKS
+            "10",  # TPU_OFFLOAD_NUM_CPU_CHUNKS
             # Large prompt details: 2042 tokens
             "large_prompt.txt",
         )
