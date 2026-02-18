@@ -281,6 +281,71 @@ class KVCacheManager:
             f"dtype={kv_caches[0].dtype} | "
             f"hbm={utils.hbm_usage_gb(self.runner.mesh.devices.flatten())}Gb")
 
+    def reset_kv_cache(self) -> None:
+        """Delete KV cache JAX arrays to free HBM.
+
+        This explicitly deletes all KV cache JAX arrays, clearing the HBM
+        they occupy. 
+        
+        1. Avoid serving stale KV cache values from a previous model version
+           (since prefix cache keys remain constant but values become invalid
+           after weight updates).
+        2. Free HBM to reduce memory fragmentation during the HBM-heavy
+           resharding operation, allowing higher --gpu-memory-utilization
+           settings.
+
+        After calling this method, ``reinitialize_kv_cache`` must be called
+        to reallocate the KV cache before the next inference step.
+        """
+        kv_caches = self.runner.kv_caches
+        if not kv_caches:
+            logger.info("reset_kv_cache: No KV cache to reset.")
+            return
+
+        num_layers = len(kv_caches)
+        logger.info(
+            f"Resetting kv-cache | "
+            f"num_layers={num_layers} | "
+            f"hbm_before="
+            f"{utils.hbm_usage_gb(self.runner.mesh.devices.flatten())}Gb")
+
+        # Explicitly delete each JAX array to release HBM.
+        for kv_cache in kv_caches:
+            kv_cache.delete()
+        self.runner.kv_caches.clear()
+        self.runner.layer_name_to_kvcache_index.clear()
+
+        logger.info(
+            f"KV cache reset complete | "
+            f"hbm_after="
+            f"{utils.hbm_usage_gb(self.runner.mesh.devices.flatten())}Gb")
+
+    def reinitialize_kv_cache(self) -> None:
+        """Reinitialize KV cache from the stored configuration.
+
+        This reallocates fresh (empty) KV cache arrays using the
+        ``KVCacheConfig`` that was saved during the initial
+        ``initialize_kv_cache`` call.  It is intended to be called after
+        ``reset_kv_cache`` (and typically after a weight-sync / resharding
+        step) so that inference can resume with a clean cache.
+
+        Raises:
+            RuntimeError: If ``initialize_kv_cache`` was never called (i.e.
+                there is no stored ``kv_cache_config``).
+        """
+        kv_cache_config = getattr(self.runner, 'kv_cache_config', None)
+        if kv_cache_config is None:
+            raise RuntimeError(
+                "Cannot reinitialize KV cache: no kv_cache_config found. "
+                "initialize_kv_cache must be called first.")
+
+        logger.info(
+            f"Reinitializing kv-cache | "
+            f"hbm_before="
+            f"{utils.hbm_usage_gb(self.runner.mesh.devices.flatten())}Gb")
+
+        self.initialize_kv_cache(kv_cache_config)
+
     @staticmethod
     @functools.partial(jax.jit)
     def _jitted_gather_kv_cache(kv_caches: List[jax.Array],
