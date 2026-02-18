@@ -1,17 +1,78 @@
 Feature,CorrectnessTest,PerformanceTest
+"AWQ INT4",N/A,N/A
+"CP",N/A,N/A
 "Chunked Prefill",✅,✅
-"DCN-based P/D disaggregation",❌,❌
-"KV cache host offloading",unverified,unverified
-"LoRA_Torch",❌,N/A
-"Multimodal Inputs",❌,N/A
-"Out-of-tree model support",✅,❌
+"Collective Communication Matmul",N/A,N/A
+"DCN-based P/D disaggregation",N/A,N/A
+"DP",N/A,N/A
+"EP",N/A,N/A
+"FP4 W4A16",N/A,N/A
+"FP8 W8A8",N/A,N/A
+"FP8 W8A16",N/A,N/A
+"INT4 W4A16",N/A,N/A
+"INT8 W8A8",N/A,N/A
+"KV cache host offloading",N/A,N/A
+"LoRA_Torch",N/A,N/A
+"MLA",N/A,N/A
+"MoE",N/A,N/A
+"Multimodal Inputs",N/A,N/A
+"Out-of-tree model support",N/A,N/A
+"PP",N/A,N/A
 "Prefix Caching",✅,✅
+"Quantized Attention",N/A,N/A
+"Quantized KV Cache",N/A,N/A
+"Quantized Matmul",N/A,N/A
+"SP",N/A,N/A
 "Single Program Multi Data",✅,✅
-"Single-Host-P-D-disaggregation",✅,N/A
-"Speculative Decoding: Eagle3",✅,✅
-"Speculative Decoding: Ngram",❌,N/A
-"async scheduler",❌,N/A
-"hybrid kv cache",✅,N/A
-"runai_model_streamer_loader",✅,N/A
-"sampling_params",❌,N/A
-"structured_decoding",✅,N/A
+"Single-Host-P-D-disaggregation",N/A,N/A
+"Speculative Decoding: Eagle3",N/A,N/A
+"Speculative Decoding: Ngram",N/A,N/A
+"TP",N/A,N/A
+"all-gather-matmul-w4a4",N/A,N/A
+"all-gather-matmul-w4a8",N/A,N/A
+"all-gather-matmul-w4a16",N/A,N/A
+"all-gather-matmul-w8a8",N/A,N/A
+"all-gather-matmul-w8a16",N/A,N/A
+"all-gather-matmul-w16a16",N/A,N/A
+"async scheduler",N/A,N/A
+"attention_kernels-w4a4",N/A,N/A
+"attention_kernels-w4a8",N/A,N/A
+"attention_kernels-w4a16",N/A,N/A
+"attention_kernels-w8a8",N/A,N/A
+"attention_kernels-w8a16",N/A,N/A
+"attention_kernels-w16a16",N/A,N/A
+"fused moe-w4a4",N/A,N/A
+"fused moe-w4a8",N/A,N/A
+"fused moe-w4a16",N/A,N/A
+"fused moe-w8a8",N/A,N/A
+"fused moe-w8a16",N/A,N/A
+"fused moe-w16a16",N/A,N/A
+"generic ragged paged attention v3-w4a4",N/A,N/A
+"generic ragged paged attention v3-w4a8",N/A,N/A
+"generic ragged paged attention v3-w4a16",N/A,N/A
+"generic ragged paged attention v3-w8a8",N/A,N/A
+"generic ragged paged attention v3-w8a16",N/A,N/A
+"generic ragged paged attention v3-w16a16",N/A,N/A
+"gmm-w4a4",N/A,N/A
+"gmm-w4a8",N/A,N/A
+"gmm-w4a16",N/A,N/A
+"gmm-w8a8",N/A,N/A
+"gmm-w8a16",N/A,N/A
+"gmm-w16a16",N/A,N/A
+"hybrid kv cache",N/A,N/A
+"mla-w4a4",N/A,N/A
+"mla-w4a8",N/A,N/A
+"mla-w4a16",N/A,N/A
+"mla-w8a8",N/A,N/A
+"mla-w8a16",N/A,N/A
+"mla-w16a16",N/A,N/A
+"multi-host",N/A,N/A
+"ragged paged attention v3 head_dim 64-w4a4",N/A,N/A
+"ragged paged attention v3 head_dim 64-w4a8",N/A,N/A
+"ragged paged attention v3 head_dim 64-w4a16",N/A,N/A
+"ragged paged attention v3 head_dim 64-w8a8",N/A,N/A
+"ragged paged attention v3 head_dim 64-w8a16",N/A,N/A
+"ragged paged attention v3 head_dim 64-w16a16",N/A,N/A
+"runai_model_streamer_loader",N/A,N/A
+"sampling_params",N/A,N/A
+"structured_decoding",N/A,N/A

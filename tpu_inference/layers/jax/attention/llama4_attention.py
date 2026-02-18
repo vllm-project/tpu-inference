@@ -17,7 +17,8 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from jax.sharding import Sharding
+from jax import lax
+from jax.sharding import NamedSharding, Sharding
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
@@ -83,8 +84,8 @@ class Llama4Attention(Attention):
         """
         md = attention_metadata
         x = jnp.asarray(x, self.dtype)
-        x_SD = nnx.with_sharding_constraint(x, self.activation_attention_td)
-        x_q_TD = nnx.with_sharding_constraint(x, self.activation_q_td)
+        x_SD = lax.with_sharding_constraint(x, self.activation_attention_td)
+        x_q_TD = lax.with_sharding_constraint(x, self.activation_q_td)
         rope_scaling = self.rope_scaling
         rope_theta = self.rope_theta
         H = self.head_dim
@@ -104,7 +105,8 @@ class Llama4Attention(Attention):
                 if self.temperature_tuning:
                     q_TNH = self.apply_temperature_tuning(md, q_TNH)
 
-            q_TNH = nnx.with_sharding_constraint(q_TNH, self.query_tnh)
+            q_TNH = lax.with_sharding_constraint(
+                q_TNH, NamedSharding(self.mesh, self.query_tnh))
         with jax.named_scope("k_proj"):
             k_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
                                self.kernel_k_proj_DKH.value)
@@ -115,12 +117,14 @@ class Llama4Attention(Attention):
                 # Apply normaliation after RoPE
                 if self.use_qk_norm:
                     k_SKH = l2_norm(k_SKH)
-            k_SKH = nnx.with_sharding_constraint(k_SKH, self.keyvalue_skh)
+            k_SKH = lax.with_sharding_constraint(
+                k_SKH, NamedSharding(self.mesh, self.keyvalue_skh))
 
         with jax.named_scope("v_proj"):
             v_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
                                self.kernel_v_proj_DKH.value)
-            v_SKH = nnx.with_sharding_constraint(v_SKH, self.keyvalue_skh)
+            v_SKH = lax.with_sharding_constraint(
+                v_SKH, NamedSharding(self.mesh, self.keyvalue_skh))
 
         q_scale = k_scale = v_scale = None
         if self.kv_cache_quantized_dtype:
@@ -148,7 +152,7 @@ class Llama4Attention(Attention):
         with jax.named_scope("o_proj"):
             o_TD = jnp.einsum('TNH,NHD -> TD', outputs_TNH,
                               self.kernel_o_proj_NHD.value)
-            o_TD = nnx.with_sharding_constraint(
+            o_TD = lax.with_sharding_constraint(
                 o_TD, self.activation_attention_out_td)
         return new_kv_cache, o_TD
 

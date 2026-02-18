@@ -22,7 +22,7 @@ from jax.sharding import Mesh
 
 from tpu_inference import envs
 from tpu_inference.kernels.megablox.gmm import gmm as megablox_gmm
-from tpu_inference.layers.common.fused_moe_gmm import \
+from tpu_inference.kernels.megablox.tuned_block_sizes import \
     round_up_to_multiple_of_128_within_limit
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.jax.layers import FlaxUtils

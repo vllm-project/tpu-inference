@@ -74,9 +74,8 @@ class CompilationManager:
                          **kwargs) -> None:
         logger.info(f"Precompile {name} --> {kwargs}")
         start = time.perf_counter()
-        with jax.set_mesh(self.runner.mesh):
-            result = fn(*args)
-            jax.tree.map(lambda r: r.block_until_ready(), result)
+        result = fn(*args)
+        jax.tree.map(lambda r: r.block_until_ready(), result)
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
 
@@ -85,7 +84,8 @@ class CompilationManager:
             return
         logger.info("Precompile all the subgraphs with possible input shapes.")
 
-        with self.runner.maybe_setup_dummy_loras(self.runner.lora_config):
+        with self.runner.maybe_setup_dummy_loras(
+                self.runner.lora_config), jax.set_mesh(self.runner.mesh):
             self._precompile_backbone_text_only()
             if self.runner.is_multimodal_model:
                 self.runner.precompile_vision_encoder_fn(

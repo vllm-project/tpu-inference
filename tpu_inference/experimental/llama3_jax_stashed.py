@@ -81,10 +81,10 @@ class LlamaForCausalLM(nnx.Module):
                                  random_init=force_random_weights,
                                  vd_sharding=("model", None))
 
-        self.layers = []
+        layers = []
         kv_cache_dtype = self.vllm_config.cache_config.cache_dtype
         for _ in range(num_layers):
-            self.layers.append(
+            layers.append(
                 TransformerBlock(
                     pre_attention_norm=RMSNorm(
                         dims=self.hidden_size,
@@ -129,8 +129,10 @@ class LlamaForCausalLM(nnx.Module):
                                            rngs=self.rng,
                                            df_sharding=(None, "model"),
                                            fd_sharding=("model", None),
-                                           random_init=force_random_weights),
+                                           random_init=force_random_weights,
+                                           mesh=self.mesh),
                 ))
+        self.layers = nnx.List(layers)
 
         self.final_norm = RMSNorm(
             dims=self.hidden_size,

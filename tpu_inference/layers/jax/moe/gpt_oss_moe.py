@@ -18,6 +18,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from flax.typing import Sharding
+from jax import lax
 from jaxtyping import Float
 
 from tpu_inference.layers.jax.base import create_param
@@ -53,7 +54,7 @@ class GptOssRouter(Router):
         Overrides the parent's forward pass to include the bias.
         """
         x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
+        x_TD = lax.with_sharding_constraint(x_TD, self.activation_ffw_td)
 
         router_logits_TE = jnp.einsum('TD,DE -> TE', x_TD,
                                       self.kernel_DE.value)
@@ -135,7 +136,7 @@ class GptOssMoE(nnx.Module):
     def __call__(self, x_TD: Float) -> Float:
         """Performs the forward pass for the GPT-OSS MoE layer."""
         x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
+        x_TD = lax.with_sharding_constraint(x_TD, self.activation_ffw_td)
 
         weights_TX, indices_TX = self.router(x_TD)
 
