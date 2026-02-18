@@ -386,6 +386,7 @@ def fused_moe_func(
                                    dtype=jnp.int32).repeat(topk)
         token_indices_sorted = token_indices[topk_argsort_indices]
         x = hidden_states_local[token_indices_sorted]
+        # Below one_hot is equivalent to jnp.bincount(topk_indices_flat, length=global_num_experts) but is more performant.
         group_sizes_local = jax.nn.one_hot(topk_indices_flat,
                                            global_num_experts,
                                            dtype=jnp.int32).sum(axis=0)
