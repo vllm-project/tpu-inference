@@ -740,7 +740,8 @@ def jax_array_from_reshaped_torch(
     if permute_dims is not None:
         torch_weight = torch_weight.permute(*permute_dims)
 
-    return t2j(torch_weight, use_dlpack=False)
+    with jax.default_device(jax.devices("cpu")[0]):
+        return t2j(torch_weight, use_dlpack=False)
 
 
 def load_nnx_param_from_reshaped_torch(

@@ -103,8 +103,8 @@ class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
 
         self.einsum_str = layer.einsum_str
 
-        adapt_info = linear_config.get_adapt_info(
-            einsum_str=layer.einsum_str, weight=layer.weight)
+        adapt_info = linear_config.get_adapt_info(einsum_str=layer.einsum_str,
+                                                  weight=layer.weight)
         self.output_shape = adapt_info.out_features
         self.batch_features = adapt_info.batch_features
         self.batch_sharding = adapt_info.batch_sharding
@@ -113,8 +113,7 @@ class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
         if self.batch_features:
             # Batched case: keep original weight sharding for the full
             # 3D weight (matches kernel_shape).
-            self.weight_sharding = _to_partition_spec(
-                layer.weight.sharding)
+            self.weight_sharding = _to_partition_spec(layer.weight.sharding)
             self.kernel_shape = layer.kernel_shape
         else:
             self.weight_sharding = adapt_info.out_features_sharding + adapt_info.in_features_sharding
@@ -135,8 +134,10 @@ class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
                                     sharding=self.weight_sharding)
 
         # Attach custom loader to avoid default upcasting behavior
-        setattr(layer.weight, "weight_loader",
-                functools.partial(load_fp8_weight, param_name=layer.prefix + ".weight"))
+        setattr(
+            layer.weight, "weight_loader",
+            functools.partial(load_fp8_weight,
+                              param_name=layer.prefix + ".weight"))
 
         # Scale is always per-output-channel (1D).
         scale_sharding = None
@@ -190,8 +191,8 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         self.quant_config = quant_config
         self.einsum_str = layer.einsum_str
 
-        adapt_info = linear_config.get_adapt_info(
-            einsum_str=layer.einsum_str, weight=layer.weight)
+        adapt_info = linear_config.get_adapt_info(einsum_str=layer.einsum_str,
+                                                  weight=layer.weight)
         self.out_features = adapt_info.out_features
         self.in_features = math.prod(adapt_info.in_features)
         self.batch_features = adapt_info.batch_features
@@ -199,12 +200,13 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         if self.batch_features:
             # Batched case: keep original weight sharding for the full
             # 3D weight (matches kernel_shape).
-            self.weight_sharding = _to_partition_spec(
-                layer.weight.sharding)
+            self.weight_sharding = _to_partition_spec(layer.weight.sharding)
             self.kernel_shape = layer.kernel_shape
         else:
-            self.weight_sharding = (adapt_info.out_features_sharding + adapt_info.in_features_sharding)
-            self.kernel_shape = (math.prod(self.out_features), self.in_features)
+            self.weight_sharding = (adapt_info.out_features_sharding +
+                                    adapt_info.in_features_sharding)
+            self.kernel_shape = (math.prod(self.out_features),
+                                 self.in_features)
 
         # Storing list of output sizes (instead of self.out_features) for compatibility.
         self.linear_config.output_sizes = [math.prod(self.out_features)]
@@ -243,8 +245,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         # https://github.com/vllm-project/vllm/blob/2a99c5a6c86daef8c766ba2dbf05c385b192c64b/vllm/model_executor/layers/quantization/fp8.py#L283-L284
         param_dtype = jnp.float8_e4m3
         layer.weight = nnx.Param(
-            kernel_init(rngs.params(), self.kernel_shape,
-                        param_dtype),
+            kernel_init(rngs.params(), self.kernel_shape, param_dtype),
             weight_loader=partial(load_nnx_param_from_reshaped_torch,
                                   permute_dims=(0, 1),
                                   param_name=layer.prefix + ".weight"),
@@ -464,7 +465,8 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                     param.value = value
 
                     scale_value = jnp.zeros((E, (K + block_k - 1) // block_k,
-                                             (N + block_n - 1) // block_n))
+                                             (N + block_n - 1) // block_n),
+                                            device=jax.devices('cpu')[0])
                     setattr(layer, f"{param_name}_{self.weight_scale_name}",
                             nnx.Param(scale_value, _cnt_moe_weights_loaded=0))
         else:
@@ -497,38 +499,40 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                 # more than once. We only want to process the weights once all of them are loaded.
                 return
 
-            w_gate = layer.kernel_gating_EDF.value
-            w_up = layer.kernel_up_proj_EDF.value
-            s_gate = getattr(layer, gating_scale_name).value
-            s_up = getattr(layer, up_scale_name).value
+            with jax.default_device(jax.devices("cpu")[0]):
+                w_gate = layer.kernel_gating_EDF.value
+                w_up = layer.kernel_up_proj_EDF.value
+                s_gate = getattr(layer, gating_scale_name).value
+                s_up = getattr(layer, up_scale_name).value
 
-            # Fuse the weights into w13: [Gate, Up]
-            w13_weight = jnp.concatenate([w_gate, w_up], axis=-1)
-            # NOTE: this is needed because the GMM kernels expect the RHS
-            # to be transposed for w13. Specifically, w2 is expected to be
-            # (num_experts, hidden_size, intermediate_size), w13 is expected to
-            # be (num_experts, 2 * hidden_size, intermediate_size)
-            w13_weight = jnp.transpose(w13_weight, (0, 2, 1))
-            # TODO (jacobplatin): make the string retrieval less fragile
-            w13_weight_scale = jnp.concatenate([s_gate, s_up], axis=-1)
-            w13_weight_scale = jnp.transpose(w13_weight_scale, (0, 2, 1))
+                # Fuse the weights into w13: [Gate, Up]
+                w13_weight = jnp.concatenate([w_gate, w_up], axis=-1)
+                # NOTE: this is needed because the GMM kernels expect the RHS
+                # to be transposed for w13. Specifically, w2 is expected to be
+                # (num_experts, hidden_size, intermediate_size), w13 is expected to
+                # be (num_experts, 2 * hidden_size, intermediate_size)
+                w13_weight = jnp.transpose(w13_weight, (0, 2, 1))
+                # TODO (jacobplatin): make the string retrieval less fragile
+                w13_weight_scale = jnp.concatenate([s_gate, s_up], axis=-1)
+                w13_weight_scale = jnp.transpose(w13_weight_scale, (0, 2, 1))
 
-            w2_weight = layer.kernel_down_proj_EFD.value
-            w2_weight_scale = getattr(layer, down_scale_name).value
-            w2_weight = jnp.transpose(w2_weight, (0, 2, 1))
-            w2_weight_scale = jnp.transpose(w2_weight_scale, (0, 2, 1))
+                w2_weight = layer.kernel_down_proj_EFD.value
+                w2_weight_scale = getattr(layer, down_scale_name).value
+                w2_weight = jnp.transpose(w2_weight, (0, 2, 1))
+                w2_weight_scale = jnp.transpose(w2_weight_scale, (0, 2, 1))
 
-            weight_block_size = None
-            if self.weight_block_size is not None:
-                weight_block_size = tuple(self.weight_block_size)
+                weight_block_size = None
+                if self.weight_block_size is not None:
+                    weight_block_size = tuple(self.weight_block_size)
 
-            # TODO (jacobplatin): we should support bias
-            input_weights = FusedMoEWeights(w13_weight=w13_weight,
-                                            w13_weight_scale=w13_weight_scale,
-                                            w13_bias=None,
-                                            w2_weight=w2_weight,
-                                            w2_weight_scale=w2_weight_scale,
-                                            w2_bias=None)
+                # TODO (jacobplatin): we should support bias
+                input_weights = FusedMoEWeights(
+                    w13_weight=w13_weight,
+                    w13_weight_scale=w13_weight_scale,
+                    w13_bias=None,
+                    w2_weight=w2_weight,
+                    w2_weight_scale=w2_weight_scale,
+                    w2_bias=None)
 
             weights = process_fp8_moe_weights(
                 input_weights,
