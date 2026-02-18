@@ -559,6 +559,11 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                     weight_block_size=weight_block_size,
                 )
 
+            del layer.kernel_gating_EDF
+            del layer.kernel_up_proj_EDF
+            delattr(layer, gating_scale_name)
+            delattr(layer, up_scale_name)
+
             # TODO (jacobplatin): we probably want to make the sharding configurable
             layer.kernel_gating_upproj_EDF = nnx.Param(
                 shard_put(weights.w13_weight, shardings=layer.edf_sharding))
