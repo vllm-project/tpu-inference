@@ -30,24 +30,29 @@ class QuantLinearConfig:
         # E.g. for "TD,DNH->TNH", out_features = (N, H).
         # Used for reshaping right before return from __call__.
         out_features: tuple[int, ...]
+
         # Sharding for out_features, extracted from weight sharding.
         # E.g. for "TD,DNH->TNH", if weight sharding is ('x', None, 'y'),
         # adapted out_features_sharding will be ('y', ) because the sharding on
         # N and H axis are fused.
         out_features_sharding: tuple
+
         # Contracting axis sizes from the weight (axes shared between both
         # operands but NOT in the output).
         # E.g. for "TD,DNH->TNH", in_features = (D,).
         in_features: tuple[int, ...]
+
         # Sharding for in_features, extracted from weight sharding.
         # E.g. for "TNH,NHD->TD", if weight sharding is ('x', None, 'y'),
         # adapted in_features_sharding will be ('x', ) because the sharding on
         # N and H axis are fused.
         in_features_sharding: tuple
+
         # Batch axis sizes from the weight (axes shared between both operands
         # AND present in the output). E.g. for "TNH,ANH->TNA", batch_features
         # = (N,). Empty tuple means no batch dims (standard 2D matmul).
         batch_features: tuple[int, ...] = ()
+
         # Sharding for batch dims, extracted from weight sharding.
         batch_sharding: tuple = ()
 
