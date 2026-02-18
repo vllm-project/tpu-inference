@@ -351,12 +351,20 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         )
         dcn_mesh_shape = (num_slices, 1, 1, 1, 1)
 
-        return mesh_utils.create_hybrid_device_mesh(
-            mesh_shape=ici_mesh_shape,
-            dcn_mesh_shape=dcn_mesh_shape,
-            devices=self.devices,
-            allow_split_physical_axes=True,
-        )
+        try:
+            return mesh_utils.create_hybrid_device_mesh(
+                mesh_shape=ici_mesh_shape,
+                dcn_mesh_shape=dcn_mesh_shape,
+                devices=self.devices,
+                allow_split_physical_axes=True,
+            )
+        except (AssertionError, ValueError, RuntimeError) as e:
+            logger.warning(
+                "Hybrid physical mesh creation failed. Falling back to logical reshape. "
+                "ICI shape: %s, DCN shape: %s, Error: %s", ici_mesh_shape,
+                dcn_mesh_shape, e)
+            return np.array(self.devices).reshape(
+                tuple(i * d for i, d in zip(ici_mesh_shape, dcn_mesh_shape)))
 
     def _create_2d_mesh(self) -> jax.sharding.Mesh:
 
