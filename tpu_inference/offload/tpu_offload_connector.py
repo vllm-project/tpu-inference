@@ -2484,52 +2484,55 @@ class TPUOffloadConnectorWorker:
                         self.finished_save_reqs.add(meta.req_id)
                     continue
 
-            # 1. SYNC BLOCKING: Gather from TPU
-            # We wrap this in a try/except to catch validation errors immediately.
-            try:
-                gather_result = self._gather_tpu_blocks(
-                    meta.req_id, meta.local_block_ids, meta.token_ids,
-                    meta.save_spec)
-                if len(meta.save_spec.src_blocks) > 0:
-                    self.offload_stats.record_gather(
-                        req=meta.req_id,
-                        gathered_block_ids=meta.save_spec.src_blocks)
-            except Exception as e:
-                logger.error(
-                    f"Error gathering blocks for request {meta.req_id}: {e}",
-                    exc_info=True)
-                continue
-
-            if gather_result is None:
-                continue
-
-            # Unpack results from the sync step
-            (flat_kv_caches_tpu, num_blocks_to_save, dst_chunks,
-             blocks_to_save) = gather_result
-
-            # Create a single-item manifest for the unified transfer function
-            info = SaveReqInfo(req_id=meta.req_id,
-                               num_blocks=num_blocks_to_save,
-                               dst_chunks=dst_chunks,
-                               is_final_save=meta.save_spec.is_final_save)
-
-            # Define a safe wrapper for the async part to ensure logging
-            def _async_transfer_task(req_id, *args):
+                # 1. SYNC BLOCKING: Gather from TPU
+                # We wrap this in a try/except to catch validation errors immediately.
                 try:
-                    self._transfer_and_register_cpu_chunks(*args)
+                    gather_result = self._gather_tpu_blocks(
+                        meta.req_id, meta.local_block_ids, meta.token_ids,
+                        meta.save_spec)
+                    if len(meta.save_spec.src_blocks) > 0:
+                        self.offload_stats.record_gather(
+                            req=meta.req_id,
+                            gathered_block_ids=meta.save_spec.src_blocks)
                 except Exception as e:
-                    raise ValueError(
-                        f"Error transferring blocks for request {req_id}: {e}")
-                return req_id
+                    logger.error(
+                        f"Error gathering blocks for request {meta.req_id}: {e}",
+                        exc_info=True)
+                    continue
 
-            # 2. ASYNC NON-BLOCKING: Transfer to CPU and Register
-            logger.info(f"Submitting transfer task for request {meta.req_id}")
-            future = self.save_executor.submit(_async_transfer_task,
-                                               meta.req_id, flat_kv_caches_tpu,
-                                               num_blocks_to_save, [info],
-                                               False)
+                if gather_result is None:
+                    continue
 
-            self._pending_save_futures.append((future, [info]))
+                # Unpack results from the sync step
+                (flat_kv_caches_tpu, num_blocks_to_save, dst_chunks,
+                 blocks_to_save) = gather_result
+
+                # Create a single-item manifest for the unified transfer function
+                info = SaveReqInfo(req_id=meta.req_id,
+                                   num_blocks=num_blocks_to_save,
+                                   dst_chunks=dst_chunks,
+                                   is_final_save=meta.save_spec.is_final_save)
+
+                # Define a safe wrapper for the async part to ensure logging
+                def _async_transfer_task(req_id, *args):
+                    try:
+                        self._transfer_and_register_cpu_chunks(*args)
+                    except Exception as e:
+                        raise ValueError(
+                            f"Error transferring blocks for request {req_id}: {e}"
+                        )
+                    return req_id
+
+                # 2. ASYNC NON-BLOCKING: Transfer to CPU and Register
+                logger.info(
+                    f"Submitting transfer task for request {meta.req_id}")
+                future = self.save_executor.submit(_async_transfer_task,
+                                                   meta.req_id,
+                                                   flat_kv_caches_tpu,
+                                                   num_blocks_to_save, [info],
+                                                   False)
+
+                self._pending_save_futures.append((future, [info]))
 
         self._processed_save_for_step = True
         SAVE_BATCH_SIZE.observe(len(self._pending_save_futures))
