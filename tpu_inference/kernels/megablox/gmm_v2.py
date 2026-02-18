@@ -59,8 +59,7 @@ class Dimensions:
 
 @dataclasses.dataclass(frozen=True)
 class InputConfigs:
-    online_quant_dtype: jnp.dtype | None
-    offline_quant_dtype: jnp.dtype | None
+    quant_dtype: jnp.dtype | None
     block_size: int | None
     has_bias: bool = False
     has_scale: bool = False
@@ -189,82 +188,96 @@ def inner_kernel(
 ):
     """Inner kernel invoked by emit_pipeline to perform matmul.
 
-    tiled_lhs_ref and tiled_out_ref points to rows [m_start:m_end] of lhs and out.
-    Additionally, m_start and m_end does not have to align with tile boundaries
-    [m_offset:m_offset+tile_m]. Therefore, rows [m_offset:m_start] and
-    [m_end:m_offset+tile_m] of tiled_lhs_ref and tiled_out_ref will contain
-    invalid data and needs to be masked out.
+  tiled_lhs_ref and tiled_out_ref points to rows [m_start:m_end] of lhs and out.
+  Additionally, m_start and m_end does not have to align with tile boundaries
+  [m_offset:m_offset+tile_m]. Therefore, rows [m_offset:m_start] and
+  [m_end:m_offset+tile_m] of tiled_lhs_ref and tiled_out_ref will contain
+  invalid data and needs to be masked out.
 
-    Args:
-        tiled_lhs_ref: Contains value lhs[m_start:m_end, k_start:k_end]
-        tiled_rhs_ref: Contains value rhs[g_id, k_start:k_end, n_start:n_end].
-            where g_id is the group associated with lhs[m_start:m_end, :]
-        tiled_out_ref: Contains value out[m_start:m_end, n_start:n_end]
-        partial_out_ref: Contains last size_lhs_sublane rows of the previous
-            output.  If this is the first tile for grid[n_id, :, :], it will be
-            initialized to zeros.
-        acc_ref: Reference to the accumulator.
-        metadata_ref: Reference to the metadata.
-        tiles: Tile sizes.
-        dims: Dimensions.
-    """
-
-    gm_id = pl.program_id(1)
-    k_id = pl.program_id(2)
-
-    # If this is the first tile for grid[n_id, :, :], we initialize the partial
-    # out to zeros. Otherwise, partial out from last tile of grid[n_id-1, :, :]
-    # can be used and cause numeric issues.
-    @pl.when(gm_id + k_id == 0)
-    def _():
-        partial_out_ref[...] = jnp.zeros_like(partial_out_ref)
+  Args:
+    tiled_lhs_ref: Contains value lhs[m_start:m_end, k_start:k_end]
+    tiled_rhs_ref: Contains value rhs[g_id, k_start:k_end, n_start:n_end]. where
+      g_id is the group associated with lhs[m_start:m_end, :]
+    tiled_out_ref: Contains value out[m_start:m_end, n_start:n_end]
+    partial_out_ref: Contains last size_lhs_sublane rows of the previous output.
+      If this is the first tile for grid[n_id, :, :], it will be initialized to
+      zeros.
+    acc_ref: Reference to the accumulator.
+    metadata_ref: Reference to the metadata.
+    cfgs: GmmConfigs.
+  """
 
     def _matmul(is_first_k_step: bool, is_last_k_step: bool):
-        m_start = metadata_ref.gm_id_to_m_offset[gm_id]
-        m_end = metadata_ref.gm_id_to_m_offset[gm_id + 1]
-
-        m_offset = m_start - m_start % cfgs.dims.size_lhs_sublane
-
-        m_start_local = m_start - m_offset
-        m_end_local = m_end - m_offset
-
         tiled_lhs = tiled_lhs_ref.reshape(-1, cfgs.tiles.tile_k)[...]
-        if cfgs.lhs_cfgs.online_quant_dtype is None:
+
+        if cfgs.lhs_cfgs.quant_dtype is None:
+            # Unquantized input path.
             acc = jnp.matmul(
                 tiled_lhs,
                 tiled_rhs_ref.weight[...],
                 preferred_element_type=jnp.float32,
             ).astype(acc_ref.dtype)
         else:
-            lhs_q_dtype = cfgs.lhs_cfgs.online_quant_dtype
+            # Quantized input path.
+            lhs_q_dtype = cfgs.lhs_cfgs.quant_dtype
             block_size = cfgs.lhs_cfgs.block_size
 
-            acc = jnp.zeros_like(acc_ref)
-            for start in range(0, cfgs.dims.size_k, block_size):
-                end = start + block_size
+            if jnp.issubdtype(lhs_q_dtype, jnp.floating):
+                dtype_max = float(jnp.finfo(lhs_q_dtype).max)
+                preferred_element_type = jnp.float32
+            else:
+                dtype_max = float(jnp.iinfo(lhs_q_dtype).max)
+                preferred_element_type = jnp.int32
 
-                block_lhs = tiled_lhs[:, start:end]
-                block_rhs = tiled_rhs_ref.weight[start:end, :]
+            acc_list = []
+            block_lhs_q_list = []
+            block_scale_list = []
 
-                block_abs_max = jnp.max(jnp.abs(block_lhs),
-                                        axis=1,
-                                        keepdims=True)
-                if jnp.issubdtype(lhs_q_dtype, jnp.floating):
-                    dinfo = jnp.finfo(lhs_q_dtype)
-                    block_abs_max += float(dinfo.smallest_subnormal)
-                else:
-                    dinfo = jnp.iinfo(lhs_q_dtype)
-                dtype_max = float(dinfo.max)
+            mxu_size = pltpu.get_tpu_info().mxu_column_size
+            for start_n in range(0, cfgs.tiles.tile_n, mxu_size):
+                end_n = start_n + mxu_size
+                acc_n = jnp.zeros((cfgs.tiles.tile_m, mxu_size),
+                                  dtype=acc_ref.dtype)
+                for start_k in range(0, cfgs.tiles.tile_k, block_size):
+                    block_k = start_k // block_size
+                    end_k = start_k + block_size
 
-                block_scale = block_abs_max / dtype_max
-                block_lhs_q = (block_lhs / block_scale).astype(lhs_q_dtype)
+                    block_rhs = tiled_rhs_ref.weight[start_k:end_k,
+                                                     start_n:end_n]
 
-                block_acc = jnp.matmul(
-                    block_lhs_q,
-                    block_rhs,
-                    preferred_element_type=jnp.float32,
-                ).astype(acc_ref.dtype)
-                acc += block_acc * block_scale.astype(acc_ref.dtype)
+                    if len(block_lhs_q_list) > block_k:
+                        block_lhs_q = block_lhs_q_list[block_k]
+                        block_scale = block_scale_list[block_k]
+                    else:
+                        block_lhs = tiled_lhs[:, start_k:end_k]
+                        # Compute quantization scale for lhs.
+                        block_abs_max = jnp.max(jnp.abs(block_lhs),
+                                                axis=1,
+                                                keepdims=True)
+
+                        # If block_abs_max=0, it will cause division by zero and return NaNs
+                        # during quantization. To avoid this, we add smallest representable
+                        # value to avoid block_abs_max being zero.
+                        block_abs_max += jnp.finfo(
+                            block_abs_max.dtype).smallest_subnormal
+                        block_scale = block_abs_max / dtype_max
+                        # Perform lhs quantization.
+                        block_lhs_q = (block_lhs /
+                                       block_scale).astype(lhs_q_dtype)
+
+                        block_lhs_q_list.append(block_lhs_q)
+                        block_scale_list.append(block_scale)
+
+                    block_acc = jnp.matmul(
+                        block_lhs_q,
+                        block_rhs,
+                        preferred_element_type=preferred_element_type,
+                    ).astype(acc_ref.dtype)
+
+                    acc_n += block_acc * block_scale.astype(acc_ref.dtype)
+
+                acc_list.append(acc_n)
+            acc = jnp.concatenate(acc_list, axis=1)
 
         if not is_first_k_step:
             acc += acc_ref[...]
@@ -275,18 +288,32 @@ def inner_kernel(
             if cfgs.rhs_cfgs.has_bias:
                 acc += tiled_rhs_ref.bias[...].astype(acc.dtype)
 
-            # Mask out values that does not belong to the current group.
-            iota_mask = lax.broadcasted_iota(
-                jnp.int32, (cfgs.tiles.tile_m, cfgs.tiles.tile_n), 0)
-            mask = jnp.logical_and(m_start_local <= iota_mask, iota_mask
-                                   < m_end_local)
+            gm_id = pl.program_id(1)
+
+            # Mask out rows that does not belong to the current group.
+            m_start = metadata_ref.gm_id_to_m_offset[gm_id]
+            m_end = metadata_ref.gm_id_to_m_offset[gm_id + 1]
+
+            m_offset = m_start - m_start % cfgs.dims.size_lhs_sublane
+
+            m_start_local = m_start - m_offset
+            m_end_local = m_end - m_offset
+
+            iota = lax.broadcasted_iota(jnp.int32, acc.shape, 0)
+            mask = jnp.logical_and(m_start_local <= iota, iota < m_end_local)
             acc_masked = jnp.where(mask, acc, 0).reshape(tiled_out_ref.shape)
 
             # Write the final output to the output ref.
             tiled_out_ref[...] = acc_masked.astype(tiled_out_ref.dtype)
 
+            # If this is the first tile for grid[n_id, :, :], we initialize the
+            # partial out to zeros. Otherwise, partial out from last tile of
+            # grid[n_id-1, :, :] can be used and cause numeric issues.
+            partial_out_zeros = jnp.zeros_like(partial_out_ref)
+
             # Accumulate the partial output from the previous step.
-            tiled_out_ref[0] += partial_out_ref[...]
+            tiled_out_ref[0] += jnp.where(gm_id == 0, partial_out_zeros,
+                                          partial_out_ref[...])
 
             # Consider following case where size_lhs_sublane = 4, number denotes group
             # id and | denotes boundaries between sublanes:
@@ -326,6 +353,8 @@ def inner_kernel(
 
     # Select and execute matmul function based on the current step.
     num_k = pl.num_programs(2)
+    k_id = pl.program_id(2)
+
     is_first_k_step = k_id == 0
     is_last_k_step = k_id == num_k - 1
 
@@ -353,22 +382,21 @@ def fill_metadata(
 ) -> jax.Array:
     """Fills the metadata for the given lhs group sizes and group offset.
 
-    Iterates over the lhs group sizes and if the group id is valid, determines
-    the number of gm tiles that are needed to process the current group. Then,
-    it fills starting and ending offset (gm_id_to_m_offset), and the group id
-    (gm_id_to_group_id) for each gm tile.
+  Iterates over the lhs group sizes and if the group id is valid, determines
+  the number of gm tiles that are needed to process the current group. Then,
+  it fills starting and ending offset (gm_id_to_m_offset), and the group id
+  (gm_id_to_group_id) for each gm tile.
 
-    Args:
-        lhs_group_sizes_ref: The group sizes of lhs.
-        group_offset_ref: Offset of the first group to process.
-        metadata_ref: Metadata that is used to determine the group id and m
-            offsets for each gmm tile.
-        dims: Dimensions of arguments.
-        tiles: Tile sizes for this kernel.
+  Args:
+    lhs_group_sizes_ref: The group sizes of lhs.
+    group_offset_ref: Offset of the first group to process.
+    metadata_ref: Metadata that is used to determine the group id and m offsets
+      for each gmm tile.
+    cfgs: GmmConfigs.
 
-    Returns:
-        The number of gm tiles to process lhs with given group offset.
-    """
+  Returns:
+    The number of gm tiles to process lhs with given group offset.
+  """
 
     group_offset = group_offset_ref[0]
     max_num_group = group_offset + cfgs.dims.size_group
@@ -452,29 +480,28 @@ def kernel_main(
 ):
     """Entry point for GMM kernel.
 
-    Computes metadata to determine which rows of lhs needs processing and how
-    they will be tiled. And then, invoke inner kernel using metadata.
+  Computes metadata to determine which rows of lhs needs processing and how
+  they will be tiled. And then, invoke inner kernel using metadata.
 
-    Uses the following notation:
-    - g: rhs group dimension
-    - m: Batch dimension
-    - gm: Batch tiling dimension. Aligned to size_lhs_sublane and has tile size
-      of tile_m. Skips over empty groups and accounts for revisited tiles.
-    - k: in dimension
-    - n: out dimension
+  Uses the following notation:
+  - g: rhs group dimension
+  - m: Batch dimension
+  - gm: Batch tiling dimension. Aligned to size_lhs_sublane and has tile size
+    of tile_m. Skips over empty groups and accounts for revisited tiles.
+  - k: in dimension
+  - n: out dimension
 
-    Args:
-        lhs_group_sizes_ref: Reference to the group sizes of lhs.
-        group_offset_ref: Reference to the group offset.
-        lhs_ref: Reference to the lhs.
-        rhs_ref: Reference to the rhs.
-        _: Reference to out_ref alias.
-        out_ref: Reference to the out.
-        metadata_ref: Reference to the metadata.
-        partial_out_ref: Reference to the partial output.
-        acc_ref: Reference to the accumulator.
-        tiles: Tile sizes.
-        dims: Dimensions.
+  Args:
+    lhs_group_sizes_ref: Reference to the group sizes of lhs.
+    group_offset_ref: Reference to the group offset.
+    lhs_ref: Reference to the lhs.
+    rhs_ref: Reference to the rhs.
+    _: Reference to out_ref alias.
+    out_ref: Reference to the out.
+    partial_out_ref: Reference to the partial output.
+    acc_ref: Reference to the accumulator.
+    metadata_ref: Reference to the metadata.
+    cfgs: GmmConfigs.
   """
 
     num_k = cfgs.dims.size_k // cfgs.tiles.tile_k
@@ -699,11 +726,11 @@ def make_gmm_configs(
     group_sizes: jax.Array,
     group_offset: jax.Array,
     *,
-    tile_info: TileSizes | TileFn = calculate_tiling,
-    vmem_limit_bytes: int | None = None,
-    out_dtype: jnp.dtype | None = None,
-    lhs_q_dtype: jnp.dtype | None = None,
-    acc_dtype: jnp.dtype | None = None,
+    tile_info: TileSizes | TileFn,
+    vmem_limit_bytes: int | None,
+    out_dtype: jnp.dtype | None,
+    acc_dtype: jnp.dtype | None,
+    maybe_quantize_lhs: bool,
 ):
     """Fills the GMM config for the GMM kernel."""
 
@@ -712,32 +739,37 @@ def make_gmm_configs(
 
     if rhs_scale is not None:
         has_scale = True
-        offline_quant_dtype = rhs.dtype
+        rhs_quant_dtype = rhs.dtype
         num_blocks = rhs_scale.shape[1]
         block_size = dims.size_k // num_blocks
     else:
         has_scale = False
-        offline_quant_dtype = None
+        rhs_quant_dtype = None
         block_size = None
 
     rhs_cfgs = InputConfigs(
-        offline_quant_dtype=offline_quant_dtype,
-        online_quant_dtype=offline_quant_dtype,
+        quant_dtype=rhs_quant_dtype,
         block_size=block_size,
         has_bias=rhs_bias is not None,
         has_scale=has_scale,
     )
 
-    if lhs_q_dtype is None and rhs_cfgs.offline_quant_dtype is not None:
+    if maybe_quantize_lhs and rhs_cfgs.quant_dtype is not None:
+        # Choose lhs quantization dtype based on TPU hardware support.
         match pltpu.get_tpu_info().generation:
             case 7:
                 lhs_q_dtype = jnp.float8_e4m3fn
             case _:
                 lhs_q_dtype = jnp.int8
+    else:
+        lhs_q_dtype = None
 
     lhs_cfgs = InputConfigs(
-        offline_quant_dtype=None,
-        online_quant_dtype=lhs_q_dtype,
+        quant_dtype=lhs_q_dtype,
+        # Input quantization involves reading all elements in a block to compute
+        # scale value. Since this operation is very memory intensive, we use a
+        # block size that is small enough to minimize memory overhead but large
+        # enough to minimize compute overhead of quantization.
         block_size=512,
     )
 
@@ -745,16 +777,19 @@ def make_gmm_configs(
         out_dtype = lhs.dtype
 
     if acc_dtype is None:
-        if lhs_cfgs.online_quant_dtype is None:
+        if lhs_cfgs.quant_dtype is None:
             acc_dtype = jnp.float32
         else:
+            # Input quantization requires elementwise ops which can put pressure on
+            # VPUs. Using faster bf16 hardware during accumulation can help offset the
+            # pressure.
             acc_dtype = jnp.bfloat16
 
     if isinstance(tile_info, TileSizes):
         tiles = tile_info
     else:
-        lhs_dtype = lhs_q_dtype if lhs_q_dtype is not None else lhs.dtype
-        tiles = tile_info(lhs_dtype, rhs.dtype, dims, vmem_limit_bytes)
+        lhs_q_dtype = lhs_q_dtype if lhs_q_dtype is not None else lhs.dtype
+        tiles = tile_info(lhs_q_dtype, rhs.dtype, dims, vmem_limit_bytes)
 
     validate_tiles(tiles, dims)
 
@@ -773,8 +808,8 @@ def make_gmm_configs(
     "vmem_limit_bytes",
     "precision",
     "preferred_element_type",
-    "lhs_q_dtype",
     "acc_dtype",
+    "maybe_quantize_lhs",
 ])
 def gmm_v2(
     lhs: jax.Array,  # [size_m, size_k]
@@ -788,29 +823,31 @@ def gmm_v2(
     vmem_limit_bytes: int | None = None,
     precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
     preferred_element_type: jnp.dtype | None = None,
-    lhs_q_dtype: jnp.dtype | None = None,
     acc_dtype: jnp.dtype | None = None,
+    maybe_quantize_lhs: bool = True,
 ) -> jax.Array:
     """GMM kernel implemented with emit_pipeline.
 
-    Dynamically calculate offset lhs/out tiles to reduce redundant computations.
-    Additionally, adjusting dma size based on number of valid rows and utilize
-    triple buffering on weights to better utilize memory.
+  Dynamically calculate offset lhs/out tiles to reduce redundant computations.
+  Additionally, adjusting dma size based on number of valid rows and utilize
+  triple buffering on weights to better utilize memory.
 
-    Args:
-        lhs: lhs with shape [size_m, size_k].
-        rhs: rhs with shape [size_group, size_k, size_n].
-        group_sizes: The group sizes of lhs rows of shape [size_lhs_group,].
-        rhs_scale: The rhs scale of shape [size_group, 1, 1, out_size].
-        rhs_bias: The rhs bias of shape [size_group, 1, out_size].
-        group_offset: Optional. The group offset of shape [1,].
-        tile_info: The tile sizes or tile function to use.
-        vmem_limit_bytes: Optional vmem limit in bytes.
-        precision: Unused. Exists for compatibility reasons.
-        preferred_element_type: Optional jnp.dtype for the output matrix.
+  Args:
+    lhs: lhs with shape [size_m, size_k].
+    rhs: rhs with shape [size_group, size_k, size_n].
+    group_sizes: The group sizes of lhs rows of shape [size_lhs_group,].
+    rhs_scale: The rhs scale of shape [size_group, 1, 1, out_size].
+    rhs_bias: The rhs bias of shape [size_group, 1, out_size].
+    group_offset: Optional. The group offset of shape [1,].
+    tile_info: The tile sizes or tile function to use.
+    vmem_limit_bytes: Optional vmem limit in bytes.
+    precision: Unused. Exists for compatibility reasons.
+    preferred_element_type: Optional jnp.dtype for the output matrix.
+    acc_dtype: Optional jnp.dtype for the accumulator.
+    maybe_quantize_lhs: Quantize lhs if set to True and rhs is quantized.
 
   Returns:
-        Output of shape [size_m, size_n].
+    Output of shape [size_m, size_n].
   """
 
     del precision
@@ -834,8 +871,8 @@ def gmm_v2(
         tile_info=tile_info,
         vmem_limit_bytes=vmem_limit_bytes,
         out_dtype=preferred_element_type,
-        lhs_q_dtype=lhs_q_dtype,
         acc_dtype=acc_dtype,
+        maybe_quantize_lhs=maybe_quantize_lhs,
     )
     dims = cfgs.dims
     tiles = cfgs.tiles
