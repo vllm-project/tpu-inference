@@ -120,7 +120,7 @@ def benchmark_kernel(
     num_repeats=5,
     benchmarking_method: benchmarks.BenchmarkMethod = benchmarks.
     BenchmarkMethod.AMORTIZED,
-    vmem_limit_bytes=1024 * 1024 * 1024,
+    vmem_limit_bytes=60 * 1024 * 1024,
     smem_limit_bytes=0.9 * 1024 * 1024,
     dry_run=False,
     num_sequences=35,
