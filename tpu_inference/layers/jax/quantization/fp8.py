@@ -416,7 +416,6 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
             param = getattr(layer, param_name)
             if getattr(param, "_cnt_moe_weights_loaded",
                        0) == layer.num_local_experts:
-                param.value = shard_put(param.value, param.sharding)
                 loaded_names.add(param_name)
 
         return loaded_names
@@ -475,6 +474,11 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
             )
 
     def process_weights_after_loading(self, layer: JaxMoE) -> None:
+        # only to make mem profiler show clear trace paths
+        # TODO: remove this
+        return self.process_moe_after_loading(layer)
+
+    def process_moe_after_loading(self, layer: JaxMoE) -> None:
         """
         Process weights after loading.
 
@@ -499,11 +503,16 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                 # more than once. We only want to process the weights once all of them are loaded.
                 return
 
-            with jax.default_device(jax.devices("cpu")[0]):
-                w_gate = layer.kernel_gating_EDF.value
-                w_up = layer.kernel_up_proj_EDF.value
-                s_gate = getattr(layer, gating_scale_name).value
-                s_up = getattr(layer, up_scale_name).value
+            with jax.set_mesh(
+                    jax.make_mesh((1, ), ('x', ), devices=jax.devices('cpu'))):
+                w_gate = layer.kernel_gating_EDF.value.to_device(
+                    jax.devices('cpu')[0])
+                w_up = layer.kernel_up_proj_EDF.value.to_device(
+                    jax.devices('cpu')[0])
+                s_gate = getattr(layer, gating_scale_name).value.to_device(
+                    jax.devices('cpu')[0])
+                s_up = getattr(layer, up_scale_name).value.to_device(
+                    jax.devices('cpu')[0])
 
                 # Fuse the weights into w13: [Gate, Up]
                 w13_weight = jnp.concatenate([w_gate, w_up], axis=-1)
@@ -516,8 +525,11 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                 w13_weight_scale = jnp.concatenate([s_gate, s_up], axis=-1)
                 w13_weight_scale = jnp.transpose(w13_weight_scale, (0, 2, 1))
 
-                w2_weight = layer.kernel_down_proj_EFD.value
-                w2_weight_scale = getattr(layer, down_scale_name).value
+                w2_weight = layer.kernel_down_proj_EFD.value.to_device(
+                    jax.devices('cpu')[0])
+                w2_weight_scale = getattr(layer,
+                                          down_scale_name).value.to_device(
+                                              jax.devices('cpu')[0])
                 w2_weight = jnp.transpose(w2_weight, (0, 2, 1))
                 w2_weight_scale = jnp.transpose(w2_weight_scale, (0, 2, 1))
 
@@ -534,31 +546,31 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                     w2_weight_scale=w2_weight_scale,
                     w2_bias=None)
 
-            weights = process_fp8_moe_weights(
-                input_weights,
-                moe_backend=layer.moe_backend,
-                mesh=layer.mesh,
-                activation=layer.activation,
-                # Convert to tuple so jax jit can hash it
-                weight_block_size=weight_block_size,
-            )
+                weights = process_fp8_moe_weights(
+                    input_weights,
+                    moe_backend=layer.moe_backend,
+                    mesh=layer.mesh,
+                    activation=layer.activation,
+                    # Convert to tuple so jax jit can hash it
+                    weight_block_size=weight_block_size,
+                )
+
+            del layer.kernel_gating_EDF
+            del layer.kernel_up_proj_EDF
+            delattr(layer, gating_scale_name)
+            delattr(layer, up_scale_name)
 
             # TODO (jacobplatin): we probably want to make the sharding configurable
             layer.kernel_gating_upproj_EDF = nnx.Param(
-                weights.w13_weight, sharding=layer.edf_sharding)
-            layer.kernel_down_proj_EFD = nnx.Param(weights.w2_weight,
-                                                   sharding=layer.efd_sharding)
+                shard_put(weights.w13_weight, shardings=layer.edf_sharding))
+            layer.kernel_down_proj_EFD = nnx.Param(
+                shard_put(weights.w2_weight, shardings=layer.efd_sharding))
             # NOTE: we aren't sharding the weight scales
             setattr(layer,
                     f"kernel_gating_upproj_EDF_{self.weight_scale_name}",
                     nnx.Param(weights.w13_weight_scale))
             setattr(layer, f"kernel_down_proj_EFD_{self.weight_scale_name}",
                     nnx.Param(weights.w2_weight_scale))
-
-            del layer.kernel_gating_EDF
-            del layer.kernel_up_proj_EDF
-            delattr(layer, gating_scale_name)
-            delattr(layer, up_scale_name)
         else:
             raise NotImplementedError(
                 f"Unsupported moe backend: {layer.moe_backend}! Currently supported: {FP8_QUANT_METHOD_SUPPORTED_MOE_BACKENDS}"
