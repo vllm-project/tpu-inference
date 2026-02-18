@@ -30,8 +30,9 @@ class TestTPUJaxRunner:
         self.mock_devices = [MagicMock(coords=i) for i in range(1)]
         self.mock_rng_key = MagicMock()
         device_array = np.array(jax.devices()[:1]).reshape(1, 1, 1, -1)
-        self.mock_mesh = jax.make_mesh(device_array.shape,
-                                       ('data', 'attn_dp', 'expert', 'model'))
+        self.mock_mesh = jax.make_mesh(
+            device_array.shape, ('data', 'attn_dp', 'expert', 'model'),
+            axis_types=(jax.sharding.AxisType.Auto, ) * 4)
         with patch('jax.devices', return_value=self.mock_devices), \
              patch('jax.make_mesh', return_value=self.mock_mesh), \
              patch('jax.random.key', return_value=self.mock_rng_key), \
@@ -182,8 +183,9 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
         self.mock_devices = [MagicMock(coords=i) for i in range(4)]
         self.mock_rng_key = MagicMock()
         device_array = np.array(jax.devices()[:1]).reshape(1, 1, 1, -1)
-        self.mock_mesh = jax.make_mesh(device_array.shape,
-                                       ('data', 'attn_dp', 'expert', 'model'))
+        self.mock_mesh = jax.make_mesh(
+            device_array.shape, ('data', 'attn_dp', 'expert', 'model'),
+            axis_types=(jax.sharding.AxisType.Auto, ) * 4)
         # Setup the runner with the model_config.is_multimodal_model set to True but get_model returning None for embed_multimodal_fn and embed_input_ids_fn.
         with patch('jax.devices', return_value=self.mock_devices), \
              patch('jax.make_mesh', return_value=self.mock_mesh), \

@@ -48,8 +48,10 @@ class TestKVCacheManager:
         devices = np.asarray(jax.devices()[:1])
         axis_names = ('data', 'attn_dp', 'model', 'expert')
         mesh_shape = (1, 1, 1, 1)
-        self.mock_mesh = jax.sharding.Mesh(devices.reshape(mesh_shape),
-                                           axis_names)
+        self.mock_mesh = jax.sharding.Mesh(
+            devices.reshape(mesh_shape),
+            axis_names,
+            axis_types=(jax.sharding.AxisType.Auto, ) * len(axis_names))
 
         with patch('jax.devices', return_value=self.mock_devices), \
              patch('jax.make_mesh', return_value=self.mock_mesh), \
