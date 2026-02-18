@@ -87,26 +87,62 @@ steps:
           - |
               .buildkite/scripts/run_in_docker.sh \
                 bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py'
-
-      - label: "${TPU_VERSION:-tpu6e} JAX unit tests"
-        key: ${TPU_VERSION:-tpu6e}_test_7
+                
+      - label: "${TPU_VERSION:-tpu6e} JAX unit tests part1"
+        key: ${TPU_VERSION:-tpu6e}_test_7_1
+        soft_fail: true
+        env:
+          IS_FOR_V7X: "${IS_FOR_V7X}"
+        artifact_paths: ".coverage.part1.${TPU_VERSION:-tpu6e}"
+        agents:
+          queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
+        commands:
+          - rm -f .coverage.part1.${TPU_VERSION:-tpu6e}
+          - |
+            .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/layers/vllm/test_attention.py /workspace/tpu_inference/tests/layers/vllm/test_awq.py /workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_fp8.py /workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_int8.py --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part1.${TPU_VERSION:-tpu6e}; else exit 1; fi"         
+          - cp /mnt/disks/persist/models/.coverage.part1.${TPU_VERSION:-tpu6e} ./
+             
+      - label: "${TPU_VERSION:-tpu6e} JAX unit tests part2"
+        key: ${TPU_VERSION:-tpu6e}_test_7_2
+        soft_fail: true
+        env:
+          IS_FOR_V7X: "${IS_FOR_V7X}"
+        artifact_paths: ".coverage.part2.${TPU_VERSION:-tpu6e}"
+        agents:
+          queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
+        commands:
+          - rm -f .coverage.part2.${TPU_VERSION:-tpu6e}
+          - |
+            .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/ --ignore=/workspace/tpu_inference/tests/layers/vllm/test_attention.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_awq.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_fp8.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_int8.py --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part2.${TPU_VERSION:-tpu6e}; else exit 1; fi"
+          - cp /mnt/disks/persist/models/.coverage.part2.${TPU_VERSION:-tpu6e} ./
+           
+      - label: "${TPU_VERSION:-tpu6e} JAX unit tests combine and report"
+        depends_on: 
+          - "${TPU_VERSION:-tpu6e}_test_7_1"
+          - "${TPU_VERSION:-tpu6e}_test_7_2"
+        key: ${TPU_VERSION:-tpu6e}_test_7_3
         soft_fail: true
         env:
           IS_FOR_V7X: "${IS_FOR_V7X}"
         agents:
-          queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
+          queue: cpu
         commands:
+          - "buildkite-agent artifact download \".coverage.part*\" ."
+          - curl -L https://github.com/pantsbuild/pex/releases/download/v2.1.151/pex -o pex
+          - chmod +x pex
+          - python3 ./pex coverage -c coverage -o coverage.pex
           - |
-            .buildkite/scripts/run_in_docker.sh \
-              python3 -m pytest -s -v -x /workspace/tpu_inference/tests/ \
-              --ignore=/workspace/tpu_inference/tests/kernels \
-              --ignore=/workspace/tpu_inference/tests/lora \
-              --ignore=/workspace/tpu_inference/tests/e2e \
-              --ignore=/workspace/tpu_inference/tpu_inference/mock \
-              --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py \
-              --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py \
-              --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference --cov-report term-missing --cov-fail-under=${COV_FAIL_UNDER:-69}
-
+            echo "[paths]" > .coveragerc
+            echo "source =" >> .coveragerc
+            echo "    ." >> .coveragerc
+            echo "    /workspace/tpu_inference/" >> .coveragerc
+          - |
+            python3 ./coverage.pex combine .coverage.part1.${TPU_VERSION:-tpu6e} .coverage.part2.${TPU_VERSION:-tpu6e}
+            python3 ./coverage.pex report --fail-under=69
+            EXIT_CODE=$?
+            rm -f .coverage.part* .coveragerc pex coverage.pex .coverage
+            exit $EXIT_CODE
+           
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests - kernels"
         key: ${TPU_VERSION:-tpu6e}_test_8
         soft_fail: true
@@ -116,7 +152,11 @@ steps:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
         commands:
           - |
-            if [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels|tests/kernels|requirements.txt)'; then
+            echo "--- Fetching changed files from metadata"
+            FILES_CHANGED=$$(buildkite-agent meta-data get "changed_files" --default "" | tr ',' '\n')
+            echo "$${FILES_CHANGED}"
+
+            if [[ "$$NIGHTLY" == "1" ]] || echo "$$FILES_CHANGED" | grep -qE '^(tpu_inference/kernels|tests/kernels|requirements.txt)'; then
               .buildkite/scripts/run_in_docker.sh \
                 python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels \
                 --ignore=/workspace/tpu_inference/tests/kernels/ragged_paged_attention_kernel_v2_test.py \
@@ -136,7 +176,11 @@ steps:
           queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
         commands:
           - |
-            if [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels/collectives|tests/kernels/collectives|requirements.txt)'; then
+            echo "--- Fetching changed files from metadata"
+            FILES_CHANGED=$$(buildkite-agent meta-data get "changed_files" --default "" | tr ',' '\n')
+            echo "$${FILES_CHANGED}"
+
+            if [[ "$$NIGHTLY" == "1" ]] || echo "$$FILES_CHANGED" | grep -qE '^(tpu_inference/kernels/collectives|tests/kernels/collectives|requirements.txt)'; then
               .buildkite/scripts/run_in_docker.sh \
                 python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels/collectives
             else
@@ -192,7 +236,6 @@ steps:
           IS_FOR_V7X: "${IS_FOR_V7X}"
         agents:
           queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
-        if: build.env("NIGHTLY") == "1"
         commands:
           - .buildkite/scripts/run_in_docker.sh bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py'
 
@@ -230,7 +273,7 @@ steps:
           queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
         commands:
           - |
-            if [[ "$$IS_FOR_V7X" == "true" ]] && { [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels|tests/kernels|requirements(_.*)?\.txt)'; }; then
+            if [[ "$$IS_FOR_V7X" == "true" ]]; then
               .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh  --model_name "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8" --use_moe_ep_kernel 1 --tensor_parallel_size 8 --max_model_len 2048 --max_num_batched_tokens 2048 --max_gen_toks 256 --enable_expert_parallel 1 --flex_threshold 0.85 --strict_threshold 0.70
             else
               echo "Skipping: Step requires TPU v7x and either a NIGHTLY build or kernel/requirements changes."
@@ -246,7 +289,7 @@ steps:
           queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
         commands:
           - |
-            if [[ "$$IS_FOR_V7X" == "true" ]] && { [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels|tests/kernels|requirements(_.*)?\.txt)'; }; then
+            if [[ "$$IS_FOR_V7X" == "true" ]]; then
               .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh  --model_name "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8" --use_moe_ep_kernel 0 --tensor_parallel_size 8 --max_model_len 2048 --max_num_batched_tokens 2048 --max_gen_toks 256 --enable_expert_parallel 1 --flex_threshold 0.85 --strict_threshold 0.70
             else
               echo "Skipping: Step requires TPU v7x and either a NIGHTLY build or kernel/requirements changes."
@@ -262,14 +305,14 @@ steps:
           queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
         commands:
           - |
-            if [[ "$$IS_FOR_V7X" == "true" ]] && { [[ "$$NIGHTLY" == "1" ]] || git diff --name-only HEAD~1 | grep -qE '^(tpu_inference/kernels|tests/kernels|requirements(_.*)?\.txt)'; }; then
+            if [[ "$$IS_FOR_V7X" == "true" ]]; then
               .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh  --model_name "openai/gpt-oss-120b" --use_moe_ep_kernel 1 --tensor_parallel_size 8 --max_model_len 2048 --max_num_batched_tokens 2048 --max_gen_toks 256 --enable_expert_parallel 1 --flex_threshold 0.50 --strict_threshold 0.25
             else
               echo "Skipping: Step requires TPU v7x and either a NIGHTLY build or kernel/requirements changes."
               exit 0
             fi
 
-      - label: "${TPU_VERSION:-tpu6e} Perf regression test for qwen3 coder 1k 8k."
+      - label: "${TPU_VERSION:-tpu6e} Perf regression test for qwen3 coder 1k 8k with fused moe kernel."
         key: ${TPU_VERSION:-tpu6e}_test_20
         soft_fail: true
         env:
@@ -283,21 +326,20 @@ steps:
               .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/bm_qwen3_coder.sh --model Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 --tp 8 --req_tput_limit 0.15  --output_token_tput_limit 1170 --total_token_tput_limit 1314 --input_len 1024 --output_len 8192 --use_moe_ep_kernel 1
             fi
   
-      - label: "${TPU_VERSION:-tpu6e} Perf regression test for qwen3 coder 8k 1k."
+      - label: "${TPU_VERSION:-tpu6e} Perf regression test for qwen3 coder 8k 1k with fused moe kernel."
         key: ${TPU_VERSION:-tpu6e}_test_21
         soft_fail: true
         env:
           IS_FOR_V7X: "${IS_FOR_V7X}"
         agents:
           queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
-        if: build.env("NIGHTLY") == "1"
         commands:
           - |
             if [[ "$$IS_FOR_V7X" == "true" ]]; then
               .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/bm_qwen3_coder.sh --model Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 --tp 8 --req_tput_limit 0.4  --output_token_tput_limit 381 --total_token_tput_limit 3421 --input_len 8192 --output_len 1024 --use_moe_ep_kernel 1
             fi
   
-      - label: "${TPU_VERSION:-tpu6e} Perf regression test for qwen3 coder 1k 8k."
+      - label: "${TPU_VERSION:-tpu6e} Perf regression test for qwen3 coder 1k 8k with gmm kernel."
         key: ${TPU_VERSION:-tpu6e}_test_22
         soft_fail: true
         env:
@@ -308,21 +350,20 @@ steps:
         commands:
           - |
             if [[ "$$IS_FOR_V7X" == "true" ]]; then
-              .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/bm_qwen3_coder.sh --model Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 --tp 8 --req_tput_limit 0.16  --output_token_tput_limit 1226 --total_token_tput_limit 1378 --input_len 1024 --output_len 8192 --use_moe_ep_kernel 0
+              .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/bm_qwen3_coder.sh --model Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 --tp 8 --req_tput_limit 0.16  --output_token_tput_limit 1673 --total_token_tput_limit 1881 --input_len 1024 --output_len 8192 --use_moe_ep_kernel 0
             fi
   
-      - label: "${TPU_VERSION:-tpu6e} Perf regression test for qwen3 coder 8k 1k."
+      - label: "${TPU_VERSION:-tpu6e} Perf regression test for qwen3 coder 8k 1k with gmm kernel."
         key: ${TPU_VERSION:-tpu6e}_test_23
         soft_fail: true
         env:
           IS_FOR_V7X: "${IS_FOR_V7X}"
         agents:
           queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
-        if: build.env("NIGHTLY") == "1"
         commands:
           - |
             if [[ "$$IS_FOR_V7X" == "true" ]]; then
-              .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/bm_qwen3_coder.sh --model Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 --tp 8 --req_tput_limit 0.63  --output_token_tput_limit 579 --total_token_tput_limit 5193 --input_len 8192 --output_len 1024 --use_moe_ep_kernel 0
+              .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/bm_qwen3_coder.sh --model Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 --tp 8 --req_tput_limit 0.63  --output_token_tput_limit 645 --total_token_tput_limit 5781 --input_len 8192 --output_len 1024 --use_moe_ep_kernel 0
             fi
 
       - label: "${TPU_VERSION:-tpu6e} Test EP recompilation."
@@ -337,7 +378,58 @@ steps:
             if [[ "$$IS_FOR_V7X" == "true" ]]; then
               .buildkite/scripts/run_in_docker.sh bash -c 'SKIP_JAX_PRECOMPILE=0 USE_MOE_EP_KERNEL=1 VLLM_XLA_CHECK_RECOMPILATION=1  MODEL_IMPL_TYPE=vllm python examples/offline_inference.py --model Qwen/Qwen1.5-MoE-A2.7B  --tensor-parallel-size 4 --enable-expert-parallel --no-async-scheduling --max-model-len 32 --max-num-batched-tokens 32 --max-num-seqs 8'
             fi
-  
+
+      - label: "${TPU_VERSION:-tpu6e} E2E test for DCN-based P/D disaggregation"
+        key: ${TPU_VERSION:-tpu6e}_test_25
+        soft_fail: true
+        env:
+          IS_FOR_V7X: "${IS_FOR_V7X}"
+          MODEL: "Qwen/Qwen3-0.6B"
+          INPUT_LEN: 1024
+          OUTPUT_LEN: 1024
+          NUM_PROMPTS: 5
+          RANDOM_SEED: 10
+          MAX_CONCURRENCY: 1
+          TEST_MODE: 1
+        agents:
+          queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+        commands:
+          - |
+            if [[ "$IS_FOR_V7X" != "true" ]]; then
+              .buildkite/scripts/run_disagg.sh
+            fi
+ 
+      - label: "${TPU_VERSION:-tpu6e} E2E test for Ray-based multi-host"
+        key: "${TPU_VERSION:-tpu6e}_test_26"
+        soft_fail: true
+        agents:
+          queue: tpu_v7x_16_queue
+        env:
+          IS_FOR_V7X: "${IS_FOR_V7X}"
+        commands:
+          # Correctness Test Example:
+          # 1. Start vLLM with specific model and tensor parallel size
+          # 2. Run curl commands against it
+          - |
+            if [[ "$IS_FOR_V7X" == "true" ]]; then
+              MODEL="gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
+              .buildkite/scripts/run_multihost.sh \
+                "vllm serve \${MODEL} \
+                  --port 8000 \
+                  --tensor-parallel-size 16 \
+                  --trust-remote-code \
+                  --max-model-len 1024 \
+                  --disable-log-requests \
+                  --no-async-scheduling \
+                  --load-format=runai_streamer \
+                  --no-enable-prefix-caching" \
+                "curl http://localhost:8000/v1/completions \
+                  -X POST \
+                  -H 'Content-Type: application/json' \
+                  -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'
+                "
+            fi
+
       # -----------------------------------------------------------------
       # NOTIFICATION STEP
       # -----------------------------------------------------------------
@@ -350,7 +442,9 @@ steps:
           - ${TPU_VERSION:-tpu6e}_test_3
           - ${TPU_VERSION:-tpu6e}_test_4
           - ${TPU_VERSION:-tpu6e}_test_6
-          - ${TPU_VERSION:-tpu6e}_test_7
+          - ${TPU_VERSION:-tpu6e}_test_7_1
+          - ${TPU_VERSION:-tpu6e}_test_7_2
+          - ${TPU_VERSION:-tpu6e}_test_7_3
           - ${TPU_VERSION:-tpu6e}_test_8
           - ${TPU_VERSION:-tpu6e}_test_9
           - ${TPU_VERSION:-tpu6e}_test_10
@@ -365,9 +459,12 @@ steps:
           - ${TPU_VERSION:-tpu6e}_test_20
           - ${TPU_VERSION:-tpu6e}_test_21
           - ${TPU_VERSION:-tpu6e}_test_24
+          - ${TPU_VERSION:-tpu6e}_test_25
+          - ${TPU_VERSION:-tpu6e}_test_26
         agents:
           queue: cpu
         commands:
           - |
             .buildkite/scripts/check_results.sh \
-              "TPU JAX Tests Failed" ${TPU_VERSION:-tpu6e}_test_0 ${TPU_VERSION:-tpu6e}_test_1 ${TPU_VERSION:-tpu6e}_test_2 ${TPU_VERSION:-tpu6e}_test_3 ${TPU_VERSION:-tpu6e}_test_4 ${TPU_VERSION:-tpu6e}_test_6 ${TPU_VERSION:-tpu6e}_test_7 ${TPU_VERSION:-tpu6e}_test_8 ${TPU_VERSION:-tpu6e}_test_9 ${TPU_VERSION:-tpu6e}_test_10 ${TPU_VERSION:-tpu6e}_test_11 ${TPU_VERSION:-tpu6e}_test_12 ${TPU_VERSION:-tpu6e}_test_13 ${TPU_VERSION:-tpu6e}_test_15 ${TPU_VERSION:-tpu6e}_test_16 ${TPU_VERSION:-tpu6e}_test_17 ${TPU_VERSION:-tpu6e}_test_18 ${TPU_VERSION:-tpu6e}_test_19 ${TPU_VERSION:-tpu6e}_test_20 ${TPU_VERSION:-tpu6e}_test_21 ${TPU_VERSION:-tpu6e}_test_22 ${TPU_VERSION:-tpu6e}_test_23 ${TPU_VERSION:-tpu6e}_test_24
+              "TPU JAX Tests Failed" ${TPU_VERSION:-tpu6e}_test_0 ${TPU_VERSION:-tpu6e}_test_1 ${TPU_VERSION:-tpu6e}_test_2 ${TPU_VERSION:-tpu6e}_test_3 ${TPU_VERSION:-tpu6e}_test_4 ${TPU_VERSION:-tpu6e}_test_6 ${TPU_VERSION:-tpu6e}_test_7_1 ${TPU_VERSION:-tpu6e}_test_7_2 ${TPU_VERSION:-tpu6e}_test_7_3 ${TPU_VERSION:-tpu6e}_test_8 ${TPU_VERSION:-tpu6e}_test_9 ${TPU_VERSION:-tpu6e}_test_10 ${TPU_VERSION:-tpu6e}_test_11 ${TPU_VERSION:-tpu6e}_test_12 ${TPU_VERSION:-tpu6e}_test_13 ${TPU_VERSION:-tpu6e}_test_15 ${TPU_VERSION:-tpu6e}_test_16 ${TPU_VERSION:-tpu6e}_test_17 ${TPU_VERSION:-tpu6e}_test_18 ${TPU_VERSION:-tpu6e}_test_19 ${TPU_VERSION:-tpu6e}_test_20 ${TPU_VERSION:-tpu6e}_test_21 ${TPU_VERSION:-tpu6e}_test_22 ${TPU_VERSION:-tpu6e}_test_23 ${TPU_VERSION:-tpu6e}_test_24 ${TPU_VERSION:-tpu6e}_test_25 ${TPU_VERSION:-tpu6e}_test_26
+

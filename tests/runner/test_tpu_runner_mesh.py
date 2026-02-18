@@ -30,6 +30,7 @@ class TestTPUModelRunnerMeshInit:
         config.sharding_config = Mock()
         config.sharding_config.model_dp_size = 4
         config.sharding_config.attn_dp_size = 2
+        config.sharding_config.attn_dp_expert_size = 1
         config.sharding_config.expert_size = 1
         config.sharding_config.tp_size = 8
         config.sharding_config.device_indexes = None
@@ -132,14 +133,15 @@ class TestTPUModelRunnerMeshInit:
             mock_mesh_utils.create_device_mesh.assert_called_once()
             call_args = mock_mesh_utils.create_device_mesh.call_args
 
-            # Verify mesh_shape: (model_dp_size, attn_dp_size, expert_size, tp_size)
-            assert call_args[0][0] == (4, 2, 1, 8)
+            # Verify mesh_shape: (model_dp_size, attn_dp_size, attn_dp_expert_size, expert_size, tp_size)
+            assert call_args[0][0] == (4, 2, 1, 1, 8)
             assert call_args[0][1] == runner_instance.devices
             assert call_args[1]['allow_split_physical_axes'] is True
 
             # Verify Mesh was created with correct axis names
             mock_jax_mesh.assert_called_once_with(
-                mock_devices_array, ("data", "attn_dp", "expert", "model"))
+                mock_devices_array,
+                ("data", "attn_dp", "attn_dp_expert", "expert", "model"))
 
             assert runner_instance.mesh == mock_mesh
 
@@ -163,17 +165,18 @@ class TestTPUModelRunnerMeshInit:
             mock_mesh_utils.create_hybrid_device_mesh.assert_called_once()
             call_args = mock_mesh_utils.create_hybrid_device_mesh.call_args
 
-            # Verify intra_node_shape: (dp_inner, attn_dp_size, expert_size, tp_size)
+            # Verify intra_node_shape: (dp_inner, attn_dp_size, attn_dp_expert_size, expert_size, tp_size)
             # dp_inner = model_dp_size // num_slices = 4 // 2 = 2
-            assert call_args[1]['mesh_shape'] == (2, 2, 1, 8)
-            # Verify outer_node_shape: (num_slices, 1, 1, 1)
-            assert call_args[1]['dcn_mesh_shape'] == (2, 1, 1, 1)
+            assert call_args[1]['mesh_shape'] == (2, 2, 1, 1, 8)
+            # Verify outer_node_shape: (num_slices, 1, 1, 1, 1)
+            assert call_args[1]['dcn_mesh_shape'] == (2, 1, 1, 1, 1)
             assert call_args[1]['devices'] == runner_instance.devices
             assert call_args[1]['allow_split_physical_axes'] is True
 
             # Verify Mesh was created with correct axis names
             mock_jax_mesh.assert_called_once_with(
-                mock_devices_array, ("data", "attn_dp", "expert", "model"))
+                mock_devices_array,
+                ("data", "attn_dp", "attn_dp_expert", "expert", "model"))
 
             assert runner_instance.mesh == mock_mesh
 

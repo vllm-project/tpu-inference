@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import jax
 import jax.numpy as jnp
@@ -89,6 +89,16 @@ def rng() -> PRNGKey:
     return jax.random.PRNGKey(42)
 
 
+@pytest.fixture(autouse=True)
+def mock_get_pp_group():
+    with patch("tpu_inference.models.jax.qwen2.get_pp_group",
+               return_value=MagicMock(is_first_rank=True,
+                                      is_last_rank=True,
+                                      rank_in_group=0,
+                                      world_size=1)):
+        yield
+
+
 class TestQwen2ForCausalLM:
     """Tests for the main Qwen2ForCausalLM model class."""
 
@@ -100,7 +110,8 @@ class TestQwen2ForCausalLM:
         """Tests model init and model forward for the 8B model variant."""
 
         # Test model init
-        model = Qwen2ForCausalLM(mock_vllm_config, rng, mesh)
+        with jax.set_mesh(mesh):
+            model = Qwen2ForCausalLM(mock_vllm_config, rng, mesh)
         assert "1.5b" in model.vllm_config.model_config.model.lower()
 
         model_config = mock_vllm_config.model_config

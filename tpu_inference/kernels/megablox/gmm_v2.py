@@ -108,9 +108,9 @@ class IndexMaps:
 
 
 def generate_block_specs(
-    lhs_ref: jax.Array,
-    rhs_ref: WeightsRef,
-    out_ref: jax.Array,
+    lhs_ref: jax.Array,  # [size_m, size_k]
+    rhs_ref: WeightsRef,  # [size_group, size_k, size_n]
+    out_ref: jax.Array,  # [size_m, size_n]
     metadata_ref: MetadataRef,
     *,
     tiles: TileSizes,
@@ -166,15 +166,18 @@ def generate_block_specs(
 
 def inner_kernel(
     # In
-    tiled_lhs_ref: jax.Array,  # [tile_m // num_sublanes, num_sublanes, tile_k]
+    tiled_lhs_ref: jax.Array,
+    # [tile_m // size_lhs_sublane, size_lhs_sublane, tile_k]
     tiled_rhs_ref: WeightsRef,  # [tile_k, tile_n]
     # Out
-    tiled_out_ref: jax.Array,  # [tile_m // num_sublanes, num_sublanes, tile_n]
+    tiled_out_ref: jax.Array,
+    # [tile_m // size_lhs_sublane, size_lhs_sublane, tile_n]
     # Scratch
-    partial_out_ref: jax.Array,  # [num_sublanes, tile_n]
-    acc_ref: jax.Array,  # [tile_m // num_sublanes, num_sublanes, tile_n]
-    *,
+    partial_out_ref: jax.Array,  # [size_lhs_sublane, tile_n]
+    acc_ref: jax.Array,
+    # [tile_m // size_lhs_sublane, size_lhs_sublane, tile_n]
     metadata_ref: MetadataRef,
+    *,
     tiles: TileSizes,
     dims: Dimensions,
 ):
@@ -247,16 +250,16 @@ def inner_kernel(
             # Accumulate the partial output from the previous step.
             tiled_out_ref[0] += partial_out_ref[...]
 
-            # Consider following case where size_lhs_sublane = 4, number denotes
-            # group id and | denotes boundaries between sublanes:
+            # Consider following case where size_lhs_sublane = 4, number denotes group
+            # id and | denotes boundaries between sublanes:
             # | 0 0 1 2 | 2 2 2 2 | 3 3 4 4 |
             #
-            # Assuming group id of current step is 1, current step will not
-            # completely fill size_lhs_sublane rows and will be revisited at the
-            # next step. By storing the partial rows into the partial_out_ref,
-            # the next step can read them and accumulate to them.  Additionally,
-            # for group id of 2, since it completely fills the size_lhs_sublane
-            # rows, we need to initialize the partial_out_ref to zeros.
+            # Assuming group id of current step is 1, current step will not completely
+            # fill size_lhs_sublane rows and will be revisited at the next step. By
+            # storing the partial rows into the partial_out_ref, the next step can
+            # read them and accumulate to them.  Additionally, for group id of 2,
+            # since it completely fills the size_lhs_sublane rows, we need to
+            # initialize the partial_out_ref to zeros.
             last_row = m_end_local // dims.size_lhs_sublane
             partial_out_ref[...] = jnp.where(
                 m_end_local % dims.size_lhs_sublane == 0,
@@ -304,8 +307,8 @@ def inner_kernel(
 
 
 def fill_metadata(
-    lhs_group_sizes_ref: jax.Array,
-    group_offset_ref: jax.Array,
+    lhs_group_sizes_ref: jax.Array,  # int32[size_lhs_group]
+    group_offset_ref: jax.Array,  # int32[1]
     metadata_ref: MetadataRef,
     *,
     dims: Dimensions,
@@ -395,8 +398,8 @@ def fill_metadata(
 
 def kernel_main(
     # Scalar prefetch
-    lhs_group_sizes_ref: jax.Array,  # [size_lhs_group]
-    group_offset_ref: jax.Array,  # [1]
+    lhs_group_sizes_ref: jax.Array,  # int32[size_lhs_group]
+    group_offset_ref: jax.Array,  # int32[1]
     # In
     lhs_ref: jax.Array,  # [size_m, size_k]
     rhs_ref: WeightsRef,  # [size_group, size_k, size_n]
@@ -404,9 +407,10 @@ def kernel_main(
     # Out
     out_ref: jax.Array,  # [size_m, size_n]
     # Scratch memory
+    partial_out_ref: jax.Array,  # [size_lhs_sublane, tile_n]
+    acc_ref: jax.Array,
+    # [tile_m // size_lhs_sublane, size_lhs_sublane, tile_n]
     metadata_ref: MetadataRef,
-    partial_out_ref: jax.Array,  # [num_sublanes, tile_n]
-    acc_ref: jax.Array,  # [tile_m // num_sublane, num_sublane, tile_n]
     *,
     tiles: TileSizes,
     dims: Dimensions,
@@ -459,10 +463,7 @@ def kernel_main(
 
     # Execute the inner kernel.
     pipeline_fn = pltpu.emit_pipeline(
-        functools.partial(inner_kernel,
-                          metadata_ref=metadata_ref,
-                          tiles=tiles,
-                          dims=dims),
+        functools.partial(inner_kernel, tiles=tiles, dims=dims),
         grid=(num_n, num_gm, num_k),
         in_specs=in_block_specs,
         out_specs=out_block_specs,
@@ -472,7 +473,8 @@ def kernel_main(
     # rhs_ref uses static tiling thus reshape is not needed.
     lhs_in = lhs_ref.reshape(-1, dims.size_lhs_sublane, dims.size_k)
     out_in = out_ref.reshape(-1, dims.size_lhs_sublane, dims.size_n)
-    pipeline_fn(lhs_in, rhs_ref, out_in, scratches=[partial_out_ref, acc_ref])
+    scratches = [partial_out_ref, acc_ref, metadata_ref]
+    pipeline_fn(lhs_in, rhs_ref, out_in, scratches=scratches)
 
 
 def calculate_tiling(
@@ -491,8 +493,8 @@ def calculate_tiling(
     # to tweak tile_m to account for using faster hardware unit.
     # TODO(kyuyeunk): Account for different TPU hardware specs.
     bf16_bf16_tile_m = 128
-    lhs_mod = max(pl.cdiv(16, lhs_bits), 2)
-    rhs_mod = max(pl.cdiv(16, rhs_bits), 2)
+    lhs_mod = min(pl.cdiv(16, lhs_bits), 2)
+    rhs_mod = min(pl.cdiv(16, rhs_bits), 2)
     tile_m = bf16_bf16_tile_m * lhs_mod // rhs_mod
 
     # Calculate vmem limit for a single rhs buffer when using triple buffers.
@@ -616,7 +618,7 @@ def validate_tiles(tiles: TileSizes, dims: Dimensions):
             raise ValueError(
                 f"tile_{name}={tx} is larger than size_{name}={x}.")
 
-    _validate(dims.size_m, tiles.tile_m, "m")
+    _validate(dims.size_m, pltpu.get_tpu_info().num_sublanes, "m")
     _validate(dims.size_k, tiles.tile_k, "k")
     _validate(dims.size_n, tiles.tile_n, "n")
 
@@ -655,27 +657,24 @@ def get_cost_estimate(
 
 def get_scope_name(dims: Dimensions, tiles: TileSizes) -> str:
     return (
-        f"gmm-g_{dims.size_group}-m_{dims.size_m}-k_{dims.size_k}"
+        f"gmm_v2-g_{dims.size_group}-m_{dims.size_m}-k_{dims.size_k}"
         f"-n_{dims.size_n}-tm_{tiles.tile_m}-tk_{tiles.tile_k}-tn_{tiles.tile_n}"
     )
 
 
-@functools.partial(
-    jax.jit,
-    static_argnames=[
-        "tile_info",
-        "vmem_limit_bytes",
-        "precision",
-        "preferred_element_type",
-    ],
-)
+@jax.jit(static_argnames=[
+    "tile_info",
+    "vmem_limit_bytes",
+    "precision",
+    "preferred_element_type",
+])
 def gmm_v2(
     lhs: jax.Array,  # [size_m, size_k]
     rhs: jax.Array,  # [size_group, size_k, size_n]
-    group_sizes: jax.Array,  # [size_lhs_group]
+    group_sizes: jax.Array,  # int32[size_lhs_group]
     rhs_scale: jax.Array | None = None,  # [size_group, 1, 1, out_size]
     rhs_bias: jax.Array | None = None,  # [size_group, 1, out_size]
-    group_offset: jax.Array | None = None,  # [1]
+    group_offset: jax.Array | None = None,  # int32[1]
     *,
     tile_info: TileSizes | TileFn = calculate_tiling,
     vmem_limit_bytes: int | None = None,
@@ -744,11 +743,6 @@ def gmm_v2(
     m_num_sublane_units = tiles.tile_m // dims.size_lhs_sublane
 
     scratch_shapes = [
-        # metadata_ref
-        MetadataRef(
-            gm_id_to_group_id=pltpu.SMEM((max_num_gm, ), jnp.int32),
-            gm_id_to_m_offset=pltpu.SMEM((max_num_gm + 1, ), jnp.int32),
-        ),
         # partial_out_ref
         pltpu.VMEM((dims.size_lhs_sublane, tiles.tile_n),
                    preferred_element_type),
@@ -756,6 +750,11 @@ def gmm_v2(
         pltpu.VMEM(
             (m_num_sublane_units, dims.size_lhs_sublane, tiles.tile_n),
             jnp.float32,
+        ),
+        # metadata_ref
+        MetadataRef(
+            gm_id_to_group_id=pltpu.SMEM((max_num_gm, ), jnp.int32),
+            gm_id_to_m_offset=pltpu.SMEM((max_num_gm + 1, ), jnp.int32),
         ),
     ]
 
@@ -799,5 +798,11 @@ def is_supported_by_gmm_v2(lhs: jax.Array, rhs: jax.Array,
     # gmm_v2 does not support implicit padding along lane dimension.
     num_lanes = pltpu.get_tpu_info().num_lanes
     if lhs.shape[-1] % num_lanes != 0 or rhs.shape[-1] % num_lanes != 0:
+        return False
+    # gmm_v2 does not support when lhs is not multiple of sublane size.
+    if lhs.shape[0] % pltpu.get_tpu_info().num_sublanes:
+        return False
+    # Handle weird edge cases where inputs are already quantized.
+    if lhs.dtype not in [jnp.bfloat16, jnp.float32]:
         return False
     return True

@@ -23,6 +23,7 @@ from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig, FusedMoEQuantConfig, mxfp4_w4a16_moe_quant_config)
 from vllm.model_executor.layers.linear import LinearBase
@@ -40,8 +41,7 @@ from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_moe_weights, quantize_moe_weights,
     shard_moe_weights)
-from tpu_inference.layers.common.quant_methods import (MXFP4,
-                                                       get_tpu_quant_method)
+from tpu_inference.layers.common.quant_methods import MXFP4
 from tpu_inference.layers.common.quantization import \
     dequantize_tensor_from_mxfp4_packed
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -60,7 +60,7 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
-@register_quantization_config(get_tpu_quant_method(MXFP4))
+@register_quantization_config(MXFP4)
 class VllmMxfp4Config(Mxfp4Config, VllmQuantConfig):
 
     @classmethod
@@ -153,8 +153,7 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
                 w13_weight, w13_weight_scale, 2)
             w2_weight = dequantize_tensor_from_mxfp4_packed(
                 w2_weight, w2_weight_scale, 2)
-
-            w13_interleave = layer.activation == "swigluoai"
+            w13_interleave = layer.activation == MoEActivation.SWIGLUOAI
             w13_reorder_size = get_mesh_shape_product(
                 self.mesh, ShardingAxisName.MLP_TENSOR)
 

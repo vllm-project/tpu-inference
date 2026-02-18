@@ -20,6 +20,10 @@ from google3.experimental.users.kyuyeunk.vllm.kernels.megablox.gmm_v2 import (
     gmm_v2, is_supported_by_gmm_v2)
 from jax._src import test_util as jtu
 
+from tpu_inference.kernels.megablox.gmm import gmm
+from tpu_inference.kernels.megablox.gmm_v2 import (gmm_v2,
+                                                   is_supported_by_gmm_v2)
+
 jax.config.parse_flags_with_absl()
 
 
