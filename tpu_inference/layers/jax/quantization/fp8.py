@@ -513,19 +513,11 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                     layer, down_scale_name)._weights_to_load,
                                                   axis=0)
 
-                # Fuse the weights into w13: [Gate, Up]
-                w13_weight = jnp.concatenate([w_gate, w_up], axis=-1)
-                # NOTE: this is needed because the GMM kernels expect the RHS
-                # to be transposed for w13. Specifically, w2 is expected to be
+                # Fuse the weights into w13: [Gate, Up]. w2 is expected to be
                 # (num_experts, hidden_size, intermediate_size), w13 is expected to
-                # be (num_experts, 2 * hidden_size, intermediate_size)
-                w13_weight = jnp.transpose(w13_weight, (0, 2, 1))
-                # TODO (jacobplatin): make the string retrieval less fragile
-                w13_weight_scale = jnp.concatenate([s_gate, s_up], axis=-1)
-                w13_weight_scale = jnp.transpose(w13_weight_scale, (0, 2, 1))
-
-                w2_weight = jnp.transpose(w2_weight, (0, 2, 1))
-                w2_weight_scale = jnp.transpose(w2_weight_scale, (0, 2, 1))
+                # be (num_experts, 2 * intermediate_size, hidden_size,)
+                w13_weight = jnp.concatenate([w_gate, w_up], axis=1)
+                w13_weight_scale = jnp.concatenate([s_gate, s_up], axis=1)
 
                 weight_block_size = None
                 if self.weight_block_size is not None:
@@ -600,7 +592,6 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
 
             w13_weight = layer.kernel_gating_upproj_E2DF.value if layer.moe_backend == MoEBackend.FUSED_MOE else layer.kernel_gating_upproj_EDF.value
             w2_weight = layer.kernel_down_proj_EFD.value
-
             w13_weight_scale = getattr(
                 layer,
                 f"kernel_gating_upproj_EDF_{self.weight_scale_name}").value
