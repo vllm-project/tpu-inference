@@ -62,6 +62,7 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.jax.utils.weight_utils import (BaseWeightLoader,
+                                                         LoadableWithIterator,
                                                          _is_pp_missing_layer,
                                                          get_param,
                                                          print_param_info)
