@@ -30,6 +30,7 @@ from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
+from tpu_inference.models.jax.utils.weight_utils import shard_put
 
 
 class UnquantizedLinearMethod(QuantizeMethodBase,
@@ -87,8 +88,8 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
             # stack to create a 4d array
             w13_val = jnp.stack([w_gate, w_up], axis=1)
 
-            layer.kernel_gating_upproj_E2DF = nnx.Param(w13_val,
-                                                        sharding=e2df_sharding)
+            layer.kernel_gating_upproj_E2DF = nnx.Param(
+                shard_put(w13_val, shardings=e2df_sharding))
 
             del layer.kernel_gating_EDF
             del layer.kernel_up_proj_EDF
@@ -120,7 +121,7 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
 
             # TODO (jacobplatin): we probably want to make the sharding configurable
             layer.kernel_gating_upproj_EDF = nnx.Param(
-                w13_val, sharding=layer.edf_sharding)
+                shard_put(w13_val, shardings=layer.edf_sharding))
 
             del layer.kernel_gating_EDF
             del layer.kernel_up_proj_EDF
