@@ -209,14 +209,15 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   -e MODEL_IMPL_TYPE=vllm \
   -e VLLM_DISABLE_SHARED_EXPERTS_STREAM=1 &
 
-sleep 5
+sleep 20
 
 # 2. Distribute run_cluster.sh to workers and start them
 IFS=',' read -r -a WORKER_IPS_ARRAY <<< "${WORKER_IPS}"
 for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
     echo "--- Distributing and starting Ray Worker on ${worker_ip}"
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "mkdir -p ~/tpu-inference/scripts/multihost" || true
-    scp "${SSH_OPTS[@]}" "${TOP_DIR}/scripts/multihost/run_cluster.sh" "${SSH_USER}@${worker_ip}:~/tpu-inference/scripts/multihost/run_cluster.sh"
+    # shellcheck disable=SC2002
+    cat "${TOP_DIR}/scripts/multihost/run_cluster.sh" | ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "cat > ~/tpu-inference/scripts/multihost/run_cluster.sh"
     
     REMOTE_CMD="bash ~/tpu-inference/scripts/multihost/run_cluster.sh \
       '${DOCKER_IMAGE}' \
