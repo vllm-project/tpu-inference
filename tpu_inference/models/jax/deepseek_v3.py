@@ -1539,7 +1539,6 @@ class DeepSeekV3(JaxModule):
                  vllm_config: VllmConfig,
                  rng: jax.Array,
                  mesh: Mesh,
-                 quant_config,
                  force_random_weights: bool = False,
                  prefix: str = ""):
         assert mesh is not None
