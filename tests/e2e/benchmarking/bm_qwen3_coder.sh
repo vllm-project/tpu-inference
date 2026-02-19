@@ -31,7 +31,7 @@ set -ex
 
 
 OPTIONS=""
-LONGOPTS=model:,tp:,req_tput_limit:,output_token_tput_limit:,total_token_tput_limit:,input_len:,output_len:,use_moe_ep_kernel:
+LONGOPTS=model:,tp:,req_tput_limit:,output_token_tput_limit:,total_token_tput_limit:,input_len:,output_len:,use_moe_ep_kernel:,profile
 
 # Parse arguments
 if ! PARSED=$(getopt --options="$OPTIONS" --longoptions=$LONGOPTS --name "$0" -- "$@"); then
@@ -39,6 +39,7 @@ if ! PARSED=$(getopt --options="$OPTIONS" --longoptions=$LONGOPTS --name "$0" --
 fi
 eval set -- "$PARSED"
 # Option parsing
+profile_enabled=0
 while true; do
   case "$1" in
     --model)
@@ -72,6 +73,10 @@ while true; do
     --use_moe_ep_kernel)
       use_moe_ep_kernel=$2
       shift 2
+      ;;
+    --profile)
+      profile_enabled=1
+      shift
       ;;
 
     --)
@@ -115,6 +120,11 @@ export USE_MOE_EP_KERNEL=${use_moe_ep_kernel}
 export MODEL_IMPL_TYPE=vllm
 
 echo "bench_serving commit: $(git -C bench_serving rev-parse HEAD)"
+
+if [ "$profile_enabled" -eq 1 ]; then
+  rm -rfv /tmp/tpu-phased-profile/ && mkdir /tmp/tpu-phased-profile/
+  export PHASED_PROFILING_DIR=/tmp/tpu-phased-profile/
+fi
 
 vllm serve --seed=42 --model="$model" --max-model-len=10240 --max-num-batched-tokens=8192 --max-num-seqs=512 --no-enable-prefix-caching --disable-log-requests --tensor-parallel-size="$tp" --kv-cache-dtype=fp8 --gpu-memory-utilization=0.95 --async-scheduling --enable-expert-parallel   2>&1 | tee vllm_server_out.txt &
 
@@ -170,6 +180,11 @@ check_metrics() {
 echo "----------------------------------------------------------------"
 echo "Running benchmark with input_len=$input_len and output_len=$output_len"
 echo "----------------------------------------------------------------"
+profile_arg=""
+if [ "$profile_enabled" -eq 1 ]; then
+  profile_arg="--profile"
+fi
+
 benchmark_output=$(python3 bench_serving/benchmark_serving.py \
   --model="$model" \
   --backend=vllm \
@@ -182,7 +197,7 @@ benchmark_output=$(python3 bench_serving/benchmark_serving.py \
   --num-prompts=320 \
   --max-concurrency=64 \
   --request-rate=inf \
-  --ignore-eos 2>&1 | tee vllm_benchmark_out.txt)
+  --ignore-eos ${profile_arg} 2>&1 | tee vllm_benchmark_out.txt)
 echo "benchmark_output: $benchmark_output"
 check_metrics "$benchmark_output" "$req_tput_limit" "$output_token_tput_limit" "$total_token_tput_limit" "1k_1k"
 
