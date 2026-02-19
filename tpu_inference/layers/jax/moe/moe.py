@@ -193,13 +193,15 @@ class JaxMoE(JaxModule):
                                               dtype=self.dtype,
                                               sharding=self.edf_sharding,
                                               random_init=self.random_init)
-        self.kernel_gating_EDF._weights_to_load = [None for _ in range(E)]
+        self.kernel_gating_EDF.set_metadata(
+            _weights_to_load=[None for _ in range(E)])
         self.kernel_up_proj_EDF = create_param(rngs,
                                                shape=(E, D, F),
                                                dtype=self.dtype,
                                                sharding=self.edf_sharding,
                                                random_init=self.random_init)
-        self.kernel_up_proj_EDF._weights_to_load = [None for _ in range(E)]
+        self.kernel_up_proj_EDF.set_metadata(
+            _weights_to_load=[None for _ in range(E)])
         self.kernel_down_proj_EFD = create_param(
             rngs,
             shape=(E, F, D),
@@ -207,7 +209,8 @@ class JaxMoE(JaxModule):
             sharding=self.efd_sharding if self.moe_backend
             not in MoEBackend.fused_moe_backends() else self.edf_sharding,
             random_init=self.random_init)
-        self.kernel_down_proj_EFD._weights_to_load = [None for _ in range(E)]
+        self.kernel_down_proj_EFD.set_metadata(
+            _weights_to_load=[None for _ in range(E)])
 
         # Derive if data is sharded by expert
         self.data_axis_name = self.activation_ffw_td[0]
