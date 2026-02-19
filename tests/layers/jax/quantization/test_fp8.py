@@ -554,37 +554,27 @@ class TestFp8FusedMoE:
         # Begin mimic loading weights from checkpoint.
         block_m, block_n = quant_config.weight_block_size
         w_gate_fp8, gate_scale = quantize_to_fp8_block_3d(
-            jnp.transpose(gate, (0, 2, 1)), block_m, block_n, jnp.float8_e4m3fn)
+            jnp.transpose(gate.to_device(jax.devices('cpu')[0]), (0, 2, 1)), block_m, block_n, jnp.float8_e4m3fn)
         w_up_fp8, up_scale = quantize_to_fp8_block_3d(
-            jnp.transpose(up, (0, 2, 1)), block_m, block_n, jnp.float8_e4m3fn)
+            jnp.transpose(up.to_device(jax.devices('cpu')[0]), (0, 2, 1)), block_m, block_n, jnp.float8_e4m3fn)
         w2_weight, w2_weight_scale = quantize_to_fp8_block_3d(
-            jnp.transpose(w2, (0, 2, 1)), block_m, block_n, jnp.float8_e4m3fn)
+            jnp.transpose(w2.to_device(jax.devices('cpu')[0]), (0, 2, 1)), block_m, block_n, jnp.float8_e4m3fn)
 
         scale_suffix = layer.quant_method.weight_scale_name
 
         getattr(
             layer,
-            f"kernel_gating_EDF_{scale_suffix}").value = gate_scale
+            f"kernel_gating_EDF_{scale_suffix}").set_metadata(_weights_to_load = jnp.vsplit(gate_scale, num_experts))
         getattr(
             layer,
-            f"kernel_up_proj_EDF_{scale_suffix}").value = up_scale
+            f"kernel_up_proj_EDF_{scale_suffix}").set_metadata(_weights_to_load = jnp.vsplit(up_scale, num_experts))
         getattr(layer,
-                f"kernel_down_proj_EFD_{scale_suffix}").value = w2_weight_scale
+                f"kernel_down_proj_EFD_{scale_suffix}").set_metadata(_weights_to_load = jnp.vsplit(w2_weight_scale, num_experts))
 
         # Overwrite the layer's parameters with our FP8 data
-        layer.kernel_gating_EDF.value = w_gate_fp8
-        layer.kernel_up_proj_EDF.value = w_up_fp8
-        layer.kernel_down_proj_EFD.value = w2_weight
-
-        for param in [
-            getattr(layer, f"kernel_gating_EDF_{scale_suffix}"),
-            getattr(layer, f"kernel_up_proj_EDF_{scale_suffix}"),
-            getattr(layer, f"kernel_down_proj_EFD_{scale_suffix}"),
-            layer.kernel_gating_EDF,
-            layer.kernel_up_proj_EDF,
-            layer.kernel_down_proj_EFD
-        ]:
-            param.set_metadata("_cnt_moe_weights_loaded", layer.num_local_experts)
+        layer.kernel_gating_EDF.set_metadata(_weights_to_load = jnp.vsplit( w_gate_fp8, num_experts))
+        layer.kernel_up_proj_EDF.set_metadata(_weights_to_load = jnp.vsplit( w_up_fp8, num_experts))
+        layer.kernel_down_proj_EFD.set_metadata(_weights_to_load = jnp.vsplit( w2_weight, num_experts))
         # End mimic loading weights from checkpoint.
 
         with jax.set_mesh(mesh):
