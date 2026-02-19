@@ -397,12 +397,6 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
                     rank = (pp_rank * num_tp_workers) + tp_rank
                     assert len(self.pp_tp_workers[pp_rank]) == tp_rank
                     assert pp_rank < len(self.pp_tp_workers)
-                    logger.info(
-                        f"self.workers={self.workers} | "
-                        f"Assigning worker with rank {rank} to pp_rank {pp_rank} "
-                        f"and tp_rank {tp_rank}. This worker is on node with IP "
-                        f"{num_tp_workers=}, {num_tpu_per_worker=}, {self.parallel_config.tensor_parallel_size=}"
-                    )
                     self.pp_tp_workers[pp_rank].append(self.workers[rank])
 
     # Ray executor do not need handshake metadata
