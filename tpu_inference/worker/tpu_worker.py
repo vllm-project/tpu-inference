@@ -60,6 +60,12 @@ class PPConfig:
         self.default_tpu_visible_chips = f"{self.rank}"
 
         if self.pp_world_size > 1:
+            # When Pipeline Parallelism (PP) is enabled on a single host, we must partition 
+            # the local TPU chips so that each pipeline stage process is isolated.
+            # We dynamically calculate the physical chip range for each stage by 
+            # mapping logical JAX devices (cores) to physical hardware. This is 
+            # critical for multi-core TPUs (e.g., v7 has 2 cores per chip) to ensure 
+            # the driver's topology check matches the visible devices.
             from tpu_inference import tpu_info
             cores_per_chip = tpu_info.get_num_cores_per_chip()
             sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
