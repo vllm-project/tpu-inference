@@ -796,11 +796,20 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                 # beyond standard transformers, please consider setting weight_loader.
                 reshape_dims = None
                 permute_dims = None
-                if any(substr in name for substr in
-                       ["q_proj.weight", "k_proj.weight", "v_proj.weight"]):
+                if any(substr in name
+                       for substr in ["k_proj.weight", "v_proj.weight"]):
                     D, N, H = param.value.shape
                     reshape_dims = (N, H, D)
                     permute_dims = (2, 0, 1)
+                if any(substr in name for substr in ["q_proj.weight"]):
+                    if envs.LAYOUT_Q_PROJ_AS_NDH:
+                        N, D, H = param.value.shape
+                        reshape_dims = (N, H, D)
+                        permute_dims = (0, 2, 1)
+                    else:
+                        D, N, H = param.value.shape
+                        reshape_dims = (N, H, D)
+                        permute_dims = (2, 0, 1)
                 elif any(substr in name for substr in
                          ["q_proj.bias", "k_proj.bias", "v_proj.bias"]):
                     N, H = param.value.shape
