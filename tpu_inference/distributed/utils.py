@@ -87,6 +87,9 @@ def get_device_topology_order_id(local_devices, global_devices) -> int:
     if not global_devices:
         raise ValueError("global_devices cannot be empty")
 
+    if not all(hasattr(d, "coords") for d in local_devices):
+        logger.error(f"Expect TPU device but got {[type(d) for d in local_devices]}")
+
     # 1. Find the 'anchor' (minimum coordinate) for the local devices.
     #    This represents the physical top-left corner of the local machine.
     local_anchor = min(d.coords for d in local_devices)
