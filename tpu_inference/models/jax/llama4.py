@@ -834,15 +834,21 @@ class JAXLlama4VisionEncoderLayer(nnx.Module):
                  random_init: bool = False):
         cfg = config
         self.hidden_size = cfg.hidden_size
+        num_attention_heads = getattr(cfg, "num_attention_heads", 16)
+        num_key_value_heads = getattr(
+            cfg,
+            "num_key_value_heads",  #cfg doesn't have this value
+            num_attention_heads)
+        rope_theta = getattr(cfg, "rope_theta", 10000.0)
 
         self.self_attn = Llama4VisionAttention(
             hidden_size=cfg.hidden_size,
             dtype=dtype,
-            num_attention_heads=cfg.num_attention_heads,
-            num_key_value_heads=cfg.num_attention_heads,
+            num_attention_heads=num_attention_heads,
+            num_key_value_heads=num_key_value_heads,
             # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
-            head_dim=cfg.hidden_size // cfg.num_attention_heads,
-            rope_theta=10000.0,  # From vision_config
+            head_dim=cfg.hidden_size // num_attention_heads,
+            rope_theta=rope_theta,
             rope_scaling=None,
             rngs=rngs,
             rope_input_ordering="interleaved",
@@ -896,6 +902,7 @@ class JAXLlama4VisionEncoderLayer(nnx.Module):
             freqs_cis=freqs_ci_stacked,
             use_attention_rope=True,
             **kwargs)
+
         attention_output = attention_output_2D.reshape(original_shape)
 
         hidden_state = residual + attention_output
@@ -944,6 +951,22 @@ class JAXLlama4VisionEncoder(nnx.Module):
 
 def jax_pixel_shuffle(input_tensor: jax.Array,
                       shuffle_ratio: float) -> jax.Array:
+    """
+    Rearranges elements in a tensor of shape [B, L, C] according to a shuffle ratio.
+
+    This operation reshapes the sequence of patches into a 2D grid and then redistributes
+    elements between the spatial dimensions and the channel dimension. It is commonly
+    used in vision models for spatial downsampling (ratio < 1) or upsampling (ratio > 1)
+    while preserving information in the channel dimension.
+
+    Args:
+        input_tensor: Input tensor of shape [batch_size, num_patches, channels].
+            Assumes num_patches is a perfect square.
+        shuffle_ratio: The ratio used to scale the spatial dimensions (Height and Width).
+
+    Returns:
+        The shuffled tensor of shape [batch_size, new_num_patches, new_channels].
+    """
     # input_tensor: [batch_size, num_patches, channels]
     batch_size, num_patches, channels = input_tensor.shape
     patch_size = int(math.sqrt(num_patches))
@@ -1052,9 +1075,9 @@ class JAXLlama4VisionModel(nnx.Module):
                  config: dict,
                  rngs: nnx.Rngs,
                  mesh: Mesh,
+                 vision_rope: Llama4VisionRotaryEmbedding,
                  dtype: jnp.dtype = jnp.bfloat16,
-                 random_init: bool = False,
-                 vision_rope: Optional[Llama4VisionRotaryEmbedding] = None):
+                 random_init: bool = False):
         cfg = config
         self.scale = cfg.hidden_size**-0.5
         self.image_size = cfg.image_size
@@ -1063,6 +1086,7 @@ class JAXLlama4VisionModel(nnx.Module):
         self.norm_eps = cfg.norm_eps
         self.num_channels = cfg.num_channels
 
+        # Number of patches = (grid_size**2) + 1 for the [CLS] token
         self.num_patches = (self.image_size // self.patch_size)**2 + 1
 
         self.patch_embedding = JAXUnfoldConvolution(cfg,
@@ -1124,7 +1148,7 @@ class JAXLlama4VisionModel(nnx.Module):
             b, c, h, w = input_shape
             t = 1
 
-        # 1. Unfold convolution (uses our new explicit reshape logic)
+        # 1. Unfold convolution
         hidden_states = self.patch_embedding(pixel_values)
 
         # 2. Add class embedding
@@ -1151,11 +1175,8 @@ class JAXLlama4VisionModel(nnx.Module):
         # 6. Vision Adapter (Pixel Shuffle MLP)
         hidden_states = self.vision_adapter(hidden_states)
 
-        # 7. Reshape back to [B, T, N_patches, H_out]
-        _, patch_num, patch_dim = hidden_states.shape
-        hidden_states = jnp.reshape(hidden_states,
-                                    [b, t, patch_num, patch_dim])
-
+        # 7. Reshape back to [B, T * N_patches, H_out]
+        _, _, patch_dim = hidden_states.shape
         return hidden_states.reshape(b, -1, patch_dim)
 
 

@@ -50,11 +50,7 @@ from tpu_inference.models.jax.utils.weight_utils import (
     BaseWeightLoader, _is_pp_missing_layer, get_param, print_param_info,
     reshape_params, transpose_params)
 
-# Add torchax import if strictly needed for runai_streamer env
-try:
-    import torchax
-except ImportError:
-    torchax = None
+import torchax
 
 logger = init_logger(__name__)
 
@@ -272,7 +268,6 @@ class LlamaGuard4WeightLoader(BaseWeightLoader):
                 mapped_name = self.map_loaded_to_standardized_name(loaded_name)
 
                 if _is_pp_missing_layer(mapped_name, self.pp_missing_layers):
-                    print("pp_missing happened with this name: ", mapped_name)
                     continue
 
                 try:
@@ -281,7 +276,6 @@ class LlamaGuard4WeightLoader(BaseWeightLoader):
                     # Optional debug logging for skipped weights
                     if self.is_verbose:
                         print(f"Skipping {loaded_name}")
-                    raise KeyError(f"Critical weight {mapped_name} not found in model state")
                     continue
 
                 # --- Vision Model Bias Reshaping ---
@@ -366,8 +360,8 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         }
 
         self.mesh = mesh
-        self.is_verbose = True # getattr(self.vllm_config.additional_config,
-        #                           "is_verbose", False)
+        self.is_verbose = getattr(self.vllm_config.additional_config,
+                                   "is_verbose", False)
 
         self.use_qk_norm = getattr(self.text_config, "use_qk_norm", True)
 
@@ -480,6 +474,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                 },
                 rngs=self.rng,
                 rope_input_ordering="interleaved",
+                # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
                 temperature_tuning=True,
                 temperature_tuning_scale=0.1,
