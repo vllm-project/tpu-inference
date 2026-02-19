@@ -83,13 +83,15 @@ class QuantLinearConfig:
 
         in_sharding = set(s for i, s in enumerate(sharding)
                           if w_axis[i] in contracting_axes and s is not None)
-        out_sharding = set(s for i, s in enumerate(sharding)
-                           if w_axis[i] not in (contracting_axes | batch_axes) and s is not None)
+        out_sharding = set(
+            s for i, s in enumerate(sharding)
+            if w_axis[i] not in (contracting_axes
+                                 | batch_axes) and s is not None)
         batch_sharding_set = set(s for i, s in enumerate(sharding)
                                  if w_axis[i] in batch_axes and s is not None)
 
         assert len(in_sharding) <= 1 and len(out_sharding) <= 1, \
-            f"Cannot fuse sharding {getattr(weight, "sharding", ())=} into 2D weight sharding for {einsum_str}"
+            f"Cannot fuse sharding {getattr(weight, 'sharding', ())=} into 2D weight sharding for {einsum_str}"
 
         out_features = tuple(
             weight.value.shape[i] for i, c in enumerate(w_axis)
