@@ -43,12 +43,13 @@ from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
 from tpu_inference.layers.jax.base import create_param, sharded_initializer
 from tpu_inference.layers.jax.constants import KVCacheType
-from tpu_inference.layers.jax.layers import (Embedder, FlaxUtils, LMhead,
-                                             RMSNorm)
+from tpu_inference.layers.jax.embed import JaxEmbed
+from tpu_inference.layers.jax.layers import FlaxUtils, LMhead
 from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.moe.utils import (get_expert_parallelism,
                                                 select_moe_backend)
+from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.layers.jax.quantization.unquantized import UnquantizedConfig
 from tpu_inference.layers.jax.rope import DeepseekScalingRotaryEmbedding
@@ -77,7 +78,7 @@ modeling_flax_utils = FlaxUtils()
 
 
 @dataclass(kw_only=True)
-class DeepseekV3BaseAttention(nnx.Module):
+class DeepseekV3BaseAttention(JaxModule):
     """
     Base class containing shared logic for DeepSeek Attention mechanisms.
     Handles initialization of common layers and defines skeleton forward pass.
@@ -154,7 +155,7 @@ class DeepseekV3BaseAttention(nnx.Module):
 
         weight_init = _weight_init(self.random_init)
 
-        self.q_down_proj = JaxEinsum(
+        self.q_a_proj = JaxEinsum(
             einsum_str="TD,DA->TA",
             kernel_shape=(self.D, self.q_lora_rank),
             rngs=rngs,
@@ -163,7 +164,7 @@ class DeepseekV3BaseAttention(nnx.Module):
             kernel_init=nnx.with_partitioning(weight_init, self.q_da_sharding),
         )
 
-        self.q_up_proj = JaxEinsum(
+        self.q_b_proj = JaxEinsum(
             einsum_str="TA,AP->TP",
             kernel_shape=(self.q_lora_rank, self.N * self.qk_head_dim),
             rngs=rngs,
@@ -191,19 +192,21 @@ class DeepseekV3BaseAttention(nnx.Module):
             kernel_init=nnx.with_partitioning(weight_init, self.rd_sharding),
         )
 
-        self.q_rms_norm = RMSNorm(dims=self.q_lora_rank,
-                                  epsilon=self.rms_norm_eps,
-                                  with_scale=True,
-                                  dtype=self.dtype,
-                                  random_init=self.random_init,
-                                  rngs=rngs)
+        self.q_a_layernorm = JaxRmsNorm(self.q_lora_rank,
+                                        epsilon=self.rms_norm_eps,
+                                        scale_init=nnx.with_partitioning(
+                                            init_fn, (None, )),
+                                        dtype=self.dtype,
+                                        random_init=self.random_init,
+                                        rngs=rngs)
 
-        self.kv_rms_norm = RMSNorm(dims=self.kv_lora_rank,
-                                   epsilon=self.rms_norm_eps,
-                                   with_scale=True,
-                                   dtype=self.dtype,
-                                   random_init=self.random_init,
-                                   rngs=rngs)
+        self.kv_a_layernorm = JaxRmsNorm(self.kv_lora_rank,
+                                         epsilon=self.rms_norm_eps,
+                                         scale_init=nnx.with_partitioning(
+                                             init_fn, (None, )),
+                                         dtype=self.dtype,
+                                         random_init=self.random_init,
+                                         rngs=rngs)
 
         self.kv_cache_quantized_dtype = None
         if self.kv_cache_dtype != "auto":
@@ -303,9 +306,9 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
         Returns:
             The query tensor of shape `(tokens_query, num_query_heads, head_dim)`.
         """
-        q_TA = self.q_down_proj(x_q_TD)
-        q_TA = self.q_rms_norm(q_TA)
-        q_TP = self.q_up_proj(q_TA)
+        q_TA = self.q_a_proj(x_q_TD)
+        q_TA = self.q_a_layernorm(q_TA)
+        q_TP = self.q_b_proj(q_TA)
         q_TNH = q_TP.reshape(q_TA.shape[0], self.N, self.qk_head_dim)
 
         q_nope_TNH = q_TNH[..., :self.qk_nope_head_dim]
@@ -340,7 +343,7 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
             k_rope_SNH, (k_rope_SNH.shape[0], self.N, self.qk_rope_head_dim))
 
         kv_SA = kv_SA[..., :self.kv_lora_rank]
-        kv_SA = self.kv_rms_norm(kv_SA)
+        kv_SA = self.kv_a_layernorm(kv_SA)
         kv_SA = lax.with_sharding_constraint(kv_SA, self.keyvalue_skh)
 
         kv_SL = self.kv_up_proj(kv_SA)
@@ -474,9 +477,9 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
             A tuple of query tensor of shape `(tokens_query, num_query_heads, q_lora_rank)` and
             rope tensor of shape `(tokens_query, num_query_heads, head_dim)`.
         """
-        q_TA = self.q_down_proj(x_q_TD)
-        q_TA = self.q_rms_norm(q_TA)
-        q_TP = self.q_up_proj(q_TA)
+        q_TA = self.q_a_proj(x_q_TD)
+        q_TA = self.q_a_layernorm(q_TA)
+        q_TP = self.q_b_proj(q_TA)
         q_TNH = q_TP.reshape(q_TA.shape[0], self.N, self.qk_head_dim)
 
         q_nope_TNH = q_TNH[..., :self.qk_nope_head_dim]
@@ -511,7 +514,7 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
         k_rope_SH = k_rope_SNH[:, 0, :]
 
         kv_SA = kv_SA[..., :self.kv_lora_rank]
-        kv_SA = self.kv_rms_norm(kv_SA)
+        kv_SA = self.kv_a_layernorm(kv_SA)
         kv_SA = lax.with_sharding_constraint(kv_SA, self.keyvalue_skh)
 
         return (kv_SA, k_rope_SH)
@@ -731,8 +734,8 @@ class DeepseekV3DecoderLayer(nnx.Module):
     Implementats the DecoderLayer for DeepseekV3.
     """
     layer_idx: int
-    input_layernorm: RMSNorm
-    post_attention_layernorm: RMSNorm
+    input_layernorm: JaxRmsNorm
+    post_attention_layernorm: JaxRmsNorm
 
     self_attn: Union[DeepseekV3Attention, DeepseekV3MLA]
 
@@ -934,7 +937,7 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
         self._loaded_to_standardized_keys = {
             # encode & decode
             "model.embed_tokens.weight":
-            "embedder.input_embedding_table_VD",
+            "embed_tokens.input_embedding_table_VD",
             "lm_head.weight":
             "lm_head.input_embedding_table_DV",
             # final norm
@@ -947,13 +950,13 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
             "layers.*.post_attention_layernorm.scale",
             # attention (MLA)
             "model.layers.*.self_attn.q_a_layernorm.weight":
-            "layers.*.self_attn.q_rms_norm.scale",
+            "layers.*.self_attn.q_a_layernorm.weight",
             "model.layers.*.self_attn.kv_a_layernorm.weight":
-            "layers.*.self_attn.kv_rms_norm.scale",
+            "layers.*.self_attn.kv_a_layernorm.weight",
             "model.layers.*.self_attn.q_a_proj.weight":
-            "layers.*.self_attn.q_down_proj.weight",
+            "layers.*.self_attn.q_a_proj.weight",
             "model.layers.*.self_attn.q_b_proj.weight":
-            "layers.*.self_attn.q_up_proj.weight",
+            "layers.*.self_attn.q_b_proj.weight",
             "model.layers.*.self_attn.kv_a_proj_with_mqa.weight":
             "layers.*.self_attn.kv_down_proj.weight",
             "model.layers.*.self_attn.kv_b_proj.weight":
@@ -962,31 +965,31 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
             "layers.*.self_attn.o_proj.weight",
             # Dense ffw
             "model.layers.*.mlp.gate_proj.weight":
-            "layers.*.custom_module.gating_proj.weight",
+            "layers.*.mlp.gating_proj.weight",
             "model.layers.*.mlp.up_proj.weight":
-            "layers.*.custom_module.up_proj.weight",
+            "layers.*.mlp.up_proj.weight",
             "model.layers.*.mlp.down_proj.weight":
-            "layers.*.custom_module.down_proj.weight",
+            "layers.*.mlp.down_proj.weight",
             # MOE(routed experts) - Nested under .experts now
             "model.layers.*.mlp.gate.weight":
-            "layers.*.custom_module.experts.router.gate_proj.weight",
+            "layers.*.mlp.experts.router.gate_proj.weight",
             "model.layers.*.mlp.gate.e_score_correction_bias":
-            "layers.*.custom_module.experts.router.bias_E",
+            "layers.*.mlp.experts.router.bias_E",
             "model.layers.*.mlp.experts.*.gate_proj.weight":
-            "layers.*.custom_module.experts.kernel_gating_EDF",
+            "layers.*.mlp.experts.kernel_gating_EDF",
             "model.layers.*.mlp.experts.*.down_proj.weight":
-            "layers.*.custom_module.experts.kernel_down_proj_EFD",
+            "layers.*.mlp.experts.kernel_down_proj_EFD",
             "model.layers.*.mlp.experts.*.up_proj.weight":
-            "layers.*.custom_module.experts.kernel_up_proj_EDF",
+            "layers.*.mlp.experts.kernel_up_proj_EDF",
             "model.layers.*.mlp.experts.*.gate_upproj_fused.weight":
-            "layers.*.custom_module.experts.kernel_gating_upproj_E2DF",
+            "layers.*.mlp.experts.kernel_gating_upproj_E2DF",
             # MOE(shared experts) - Nested under .shared_experts inside custom_module
             "model.layers.*.mlp.shared_experts.down_proj.weight":
-            "layers.*.custom_module.shared_experts.down_proj.weight",
+            "layers.*.mlp.shared_experts.down_proj.weight",
             "model.layers.*.mlp.shared_experts.gate_proj.weight":
-            "layers.*.custom_module.shared_experts.gating_proj.weight",
+            "layers.*.mlp.shared_experts.gating_proj.weight",
             "model.layers.*.mlp.shared_experts.up_proj.weight":
-            "layers.*.custom_module.shared_experts.up_proj.weight",
+            "layers.*.mlp.shared_experts.up_proj.weight",
         }
 
         if self.use_mla_kernel:
@@ -1024,8 +1027,8 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                 "custom_module.up_proj.weight": (28, 18432),
                 "custom_module.down_proj.weight": (72, 7168),
                 # Attention (3D for MLA, 2D for the rest)
-                "self_attn.q_down_proj.weight": (28, 1536),
-                "self_attn.q_up_proj.weight": (6, 24576),
+                "self_attn.q_a_proj.weight": (28, 1536),
+                "self_attn.q_b_proj.weight": (6, 24576),
                 "self_attn.kv_down_proj.weight": (28, 576),
                 "self_attn.kv_up_proj.weight": (2, 32768),
                 "self_attn.o_proj.weight": (64, 7168),
@@ -1506,14 +1509,16 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
 
 
 @dataclass
-class DeepSeekV3(nnx.Module):
+class DeepSeekV3(JaxModule):
     WeightLoader = DeepSeekV3WeightLoader
 
     def __init__(self,
                  vllm_config: VllmConfig,
                  rng: jax.Array,
                  mesh: Mesh,
-                 force_random_weights: bool = False):
+                 quant_config,
+                 force_random_weights: bool = False,
+                 prefix: str = ""):
         assert mesh is not None
 
         self.vllm_config = vllm_config
@@ -1600,14 +1605,16 @@ class DeepSeekV3(nnx.Module):
             moe_backend=self.moe_backend,
             use_mla_kernel=self.use_mla_kernel)
 
-        self.embedder = Embedder(vocab_size=vocab_size,
-                                 hidden_size=hidden_size,
-                                 dtype=dtype,
-                                 rngs=self.rng,
-                                 vd_sharding=(ShardingAxisName.MLP_TENSOR,
-                                              None))
-
-        layers = []
+        self.embed_tokens = JaxEmbed(
+            num_embeddings=vocab_size,
+            features=hidden_size,
+            dtype=dtype,
+            embedding_init=nnx.with_partitioning(
+                init_fn, (ShardingAxisName.MLP_TENSOR, None)),
+            rngs=self.rng,
+            quant_config=quant_config,
+            prefix=prefix + ".embed_tokens",
+        )
 
         def _create_deepseek_attention(
         ) -> Union[DeepseekV3MLA, DeepseekV3Attention]:
@@ -1676,19 +1683,19 @@ class DeepSeekV3(nnx.Module):
 
             return attn_cls(**kwargs)
 
-        for i in range(num_layers):
-            input_layernorm = RMSNorm(
-                dims=hidden_size,
+        def get_decoder_layer(layer_index: int):
+            input_layernorm = JaxRmsNorm(
+                hidden_size,
                 epsilon=rms_norm_eps,
-                with_scale=True,
+                scale_init=nnx.with_partitioning(init_fn, (None, )),
                 dtype=dtype,
                 rngs=self.rng,
             )
 
-            post_attention_layernorm = RMSNorm(
-                dims=hidden_size,
+            post_attention_layernorm = JaxRmsNorm(
+                hidden_size,
                 epsilon=rms_norm_eps,
-                with_scale=True,
+                scale_init=nnx.with_partitioning(init_fn, (None, )),
                 dtype=dtype,
                 rngs=self.rng,
             )
@@ -1780,22 +1787,21 @@ class DeepSeekV3(nnx.Module):
                     routed_scaling_factor=routed_scaling_factor,
                 )
 
-            block = DeepseekV3DecoderLayer(
+            return DeepseekV3DecoderLayer(
                 layer_idx=i,
                 input_layernorm=input_layernorm,
                 post_attention_layernorm=post_attention_layernorm,
                 self_attn=_create_deepseek_attention(),
                 custom_module=mlp_layer)
 
-            layers.append(block)
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            num_layers, get_decoder_layer)
 
-        self.layers = nnx.List(layers)
-
-        self.final_norm = RMSNorm(
-            dims=hidden_size,
+        self.final_norm = JaxRmsNorm(
+            hidden_size,
             rngs=self.rng,
             epsilon=rms_norm_eps,
-            with_scale=True,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
             dtype=dtype,
         )
 
@@ -1813,7 +1819,7 @@ class DeepSeekV3(nnx.Module):
         num_display_layers = 5
 
         logger.debug("### Embedding ###")
-        nnx.display(self.embedder)
+        nnx.display(self.embed_tokens)
 
         logger.debug(f"\n### First {num_display_layers} Layers ###")
         # Loop through the slice and display each layer
@@ -1852,7 +1858,7 @@ class DeepSeekV3(nnx.Module):
         attention_metadata: AttentionMetadata,
         *args,
     ) -> Tuple[List[KVCacheType], jax.Array, List[jax.Array]]:
-        x = self.embedder.encode(input_ids)
+        x = self.embed_tokens.encode(input_ids)
         for (i, block) in enumerate(self.layers):
             kv_cache = kv_caches[i]
             new_kv_cache, x = block(x, kv_cache, attention_metadata)
