@@ -42,7 +42,6 @@ from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.quantization import (quantize_kv,
                                                       u8_unpack_e2m1)
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
 from tpu_inference.layers.jax.base import _init_fn as init_fn
 from tpu_inference.layers.jax.base import create_param, sharded_initializer
@@ -62,7 +61,6 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.jax.utils.weight_utils import (BaseWeightLoader,
-                                                         LoadableWithIterator,
                                                          _is_pp_missing_layer,
                                                          get_param,
                                                          print_param_info)
@@ -1537,7 +1535,7 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
 
 
 @dataclass
-class DeepSeekV3(JaxModule, LoadableWithIterator):
+class DeepSeekV3(nnx.Module):
     WeightLoader = DeepSeekV3WeightLoader
 
     def __init__(self,
@@ -1921,8 +1919,14 @@ class DeepSeekV3(JaxModule, LoadableWithIterator):
         if self.is_first_rank:
             x = self.embed_tokens(input_ids)
         else:
-            assert intermediate_tensors is not None
-            x = intermediate_tensors["hidden_states"]
+            if intermediate_tensors is not None:
+                x = intermediate_tensors["hidden_states"]
+            else:
+                # This path is mainly for abstract evaluation (e.g. Qwix)
+                # where intermediate_tensors is not provided.
+                hidden_size = self.vllm_config.model_config.get_hidden_size()
+                x = jnp.zeros((input_ids.shape[0], hidden_size),
+                              dtype=self.vllm_config.model_config.dtype)
 
         for (i, block) in enumerate(
                 islice(self.layers, self.start_layer, self.end_layer)):
