@@ -577,11 +577,6 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                 layer, f"kernel_down_proj_EFD_{self.weight_scale_name}",
                 nnx.Param(
                     shard_put(weights.w2_weight_scale, shardings=(None, ))))
-
-            del layer.kernel_gating_EDF
-            del layer.kernel_up_proj_EDF
-            delattr(layer, gating_scale_name)
-            delattr(layer, up_scale_name)
         else:
             raise NotImplementedError(
                 f"Unsupported moe backend: {layer.moe_backend}! Currently supported: {FP8_QUANT_METHOD_SUPPORTED_MOE_BACKENDS}"
