@@ -657,6 +657,12 @@ def transfer_state_with_mappings(src_state,
     return tgt_state
 
 
+def cpu_mesh_context():
+    """A context to enforce using CPU mesh, used for loading weights on CPU."""
+    return jax.set_mesh(
+        jax.make_mesh((1, ), ('x', ), devices=jax.devices('cpu')))
+
+
 class BaseWeightLoader:
 
     def __init__(self, vllm_config: VllmConfig, **kwargs):

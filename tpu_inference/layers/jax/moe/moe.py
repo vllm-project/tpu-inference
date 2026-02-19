@@ -30,7 +30,7 @@ from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
-    jax_array_from_reshaped_torch, shard_put)
+    cpu_mesh_context, jax_array_from_reshaped_torch, shard_put)
 
 modeling_flax_utils = FlaxUtils()
 logger = init_logger(__name__)
@@ -299,9 +299,7 @@ class JaxMoE(JaxModule):
         }.items():
             weights_to_load = param._weights_to_load
             if all(w is not None for w in weights_to_load):
-                with jax.set_mesh(
-                        jax.make_mesh((1, ), ('x', ),
-                                      devices=jax.devices('cpu'))):
+                with cpu_mesh_context():
                     weights = jnp.concatenate(param._weights_to_load, axis=0)
                 try:
                     param.value = shard_put(weights, param.sharding)
