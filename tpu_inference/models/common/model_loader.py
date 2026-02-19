@@ -125,13 +125,13 @@ def _get_nnx_model(
         """
         state = nnx.state(model)
         nnx.update(model, state)
-        if not use_qwix_on_abstract_model:
-            # NOTE: if Qwix is not configured, this will be a no-op
-            model = apply_qwix_quantization(vllm_config,
-                                            model,
-                                            rng,
-                                            mesh,
-                                            apply_to_abstract_model=False)
+        # if not use_qwix_on_abstract_model:
+        #     # NOTE: if Qwix is not configured, this will be a no-op
+        #     model = apply_qwix_quantization(vllm_config,
+        #                                     model,
+        #                                     rng,
+        #                                     mesh,
+        #                                     apply_to_abstract_model=False)
         return model
 
     if vllm_config.load_config.load_format == "dummy":
