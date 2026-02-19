@@ -16,7 +16,7 @@ import math
 import os
 from dataclasses import InitVar, dataclass
 from itertools import islice
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, Iterable, List, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -55,7 +55,8 @@ from tpu_inference.layers.jax.rope import DeepseekScalingRotaryEmbedding
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
-from tpu_inference.models.jax.utils.weight_utils import LoadableWithIterator
+from tpu_inference.models.jax.utils.weight_utils import (JaxAutoWeightsLoader,
+                                                         LoadableWithIterator)
 
 KVCache = Tuple[jax.Array, jax.Array]
 
@@ -1191,6 +1192,7 @@ class DeepSeekV3(JaxModule):
                 custom_module=mlp_layer,
                 prefix=f"{prefix}.layers.{i}")
 
+        # hf_config.num_hidden_layers is 61, which ignores the last MTP layer.
         self.start_layer, self.end_layer, self.layers = make_layers(
             hf_config.num_hidden_layers, get_decoder_layer)
 
@@ -1340,6 +1342,20 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         return self.lm_head(hidden_states)
+
+    def load_weights(self, weights: Iterable) -> set[str]:
+        if not isinstance(weights, Iterable):
+            # Use next parent class in MRO.
+            return super().load_weights(weights)
+
+        loader = JaxAutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head"]
+                           if not hasattr(self, 'lm_head') else []),
+            skip_substrs=["layers.61"
+                          ],  # last layer is MTP, we ignore it for now
+        )
+        return loader.load_weights(weights)
 
 
 def weights_dequant_cpu(x: torch.Tensor,
