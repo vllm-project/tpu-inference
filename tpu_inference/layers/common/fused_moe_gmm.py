@@ -24,8 +24,6 @@ from tpu_inference.kernels.megablox.gmm import gmm
 from tpu_inference.kernels.megablox.gmm_v2 import (gmm_v2,
                                                    is_supported_by_gmm_v2)
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.common.utils import \
-    slice_sharded_tensor_for_concatenation
 from tpu_inference.utils import get_mesh_shape_product
 
 
