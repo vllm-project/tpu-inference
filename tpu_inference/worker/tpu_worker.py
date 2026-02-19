@@ -354,7 +354,9 @@ class TPUWorker:
         raise NotImplementedError(
             "LoRA is not supported by the JAX worker yet.")
 
-    def profile(self, is_start: bool = True):
+    def profile(self,
+                is_start: bool = True,
+                profile_prefix: str | None = None):
         if is_start:
             options = jax.profiler.ProfileOptions()
             # default: https://docs.jax.dev/en/latest/profiling.html#general-options
