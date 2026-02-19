@@ -1058,6 +1058,7 @@ class DeepSeekV3(JaxModule):
                 num_embeddings=vocab_size,
                 features=hf_config.hidden_size,
                 dtype=dtype,
+                embedding_init=nnx.with_partitioning(init_fn, (None, )),
                 rngs=rng,
                 quant_config=quant_config,
                 prefix=prefix + ".embed_tokens",
@@ -1295,7 +1296,10 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
                 kernel_shape=(hidden_size, vocab_size),
                 dtype=model_config.dtype,
                 rngs=rng,
-                quant_config=vllm_config.quant_config,
+                kernel_init=nnx.with_partitioning(init_fn, (None, )),
+                # Same as https://github.com/vllm-project/tpu-inference/issues/1684
+                # DS-V3 doesn't quantize lm_head.
+                quant_config=None,
                 prefix="lm_head",
             )
         else:

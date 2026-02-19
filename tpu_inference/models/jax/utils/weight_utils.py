@@ -30,7 +30,7 @@ import torchax
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from jax.sharding import SingleDeviceSharding
+from jax.sharding import SingleDeviceSharding, get_mesh
 from safetensors import safe_open
 from torchax.ops.mappings import t2j
 from vllm.config import VllmConfig
@@ -775,6 +775,8 @@ def load_nnx_param_from_reshaped_torch(
     elif isinstance(jax_param.sharding, SingleDeviceSharding):
         spec = ()
     mesh = getattr(jax_param, 'mesh', None)
+    if mesh is None:
+        mesh = get_mesh()
 
     try:
         jax_param.value = shard_put(jax_weight, spec, mesh=mesh)
