@@ -215,6 +215,11 @@ def _get_nnx_model(
             if isinstance(model, LoadableWithIterator):
                 assert isinstance(model, JaxModule)
                 loader.load_weights(model, vllm_config.model_config)
+                for name, param in model.named_parameters():
+                    if 'cpu' in str(param.value.devices()).lower():
+                        logger.warning(
+                            f"Parameter {name} is still on CPU after loading weights."
+                        )
             elif isinstance(loader, RunaiModelStreamerLoader):
                 model_weights = vllm_config.model_config.model
                 if hasattr(vllm_config.model_config, "model_weights"):
