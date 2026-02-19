@@ -576,6 +576,16 @@ class DisaggEngineCore(vLLMEngineCore):
         for engine in itertools.chain(self._prefill_engines,
                                       self._decode_engines):
             engine.scheduler.reset_prefix_cache()
+    
+    def reset_kv_cache(self) -> None:
+        for engine in itertools.chain(self._prefill_engines,
+                                      self._decode_engines):
+            engine.collective_rpc("reset_kv_cache")
+
+    def reinitialize_kv_cache(self) -> None:
+        for engine in itertools.chain(self._prefill_engines,
+                                      self._decode_engines):
+            engine.collective_rpc("reinitialize_kv_cache")
 
 
 class DisaggEngineCoreProc(vLLMEngineCoreProc):
@@ -784,3 +794,20 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
 
     def shutdown(self):
         self._orchestrator.shutdown()
+
+    def reset_kv_cache(self) -> None:
+        """Delete KV cache JAX arrays on all workers **and** clear prefix cache.
+        See :pymeth:`DisaggEngineCore.reset_kv_cache` for details.
+        """
+        for engine in itertools.chain(self._prefill_engines,
+                                      self._decode_engines):
+            engine.collective_rpc("reset_kv_cache")
+            engine.scheduler.reset_prefix_cache()
+
+    def reinitialize_kv_cache(self) -> None:
+        """Reallocate KV cache on all workers.
+        See :pymeth:`DisaggEngineCore.reinitialize_kv_cache` for details.
+        """
+        for engine in itertools.chain(self._prefill_engines,
+                                      self._decode_engines):
+            engine.collective_rpc("reinitialize_kv_cache")
