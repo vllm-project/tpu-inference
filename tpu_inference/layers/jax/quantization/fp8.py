@@ -43,8 +43,8 @@ from tpu_inference.layers.jax.quantization.unquantized import (
     UnquantizedFusedMoEMethod, UnquantizedLinearMethod)
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
-    jax_array_from_reshaped_torch, load_nnx_param_from_reshaped_torch,
-    shard_put)
+    cpu_mesh_context, jax_array_from_reshaped_torch,
+    load_nnx_param_from_reshaped_torch, shard_put)
 
 logger = init_logger(__name__)
 
