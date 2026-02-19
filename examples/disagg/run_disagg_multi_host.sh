@@ -22,6 +22,7 @@ set -e
 # docker related
 CONTAINER_PREFIX=${CONTAINER_PREFIX:="disagg-node"}
 RUN_IN_BUILDKITE=${RUN_IN_BUILDKITE:=false}
+IS_FOR_V7X=${IS_FOR_V7X:=false}
 MODEL=${MODEL:="Qwen/Qwen3-0.6B"}
 DOCKER_IMAGE=${DOCKER_IMAGE:="vllm-tpu:000"}
 
@@ -94,7 +95,7 @@ fi
 if [ "$RUN_IN_BUILDKITE" = "false" ]; then
     echo "Running in local mode, building image."
     docker image prune -f
-    docker build -f docker/Dockerfile -t ${DOCKER_IMAGE} .
+    docker build -f docker/Dockerfile -t ${DOCKER_IMAGE} --build-arg IS_FOR_V7X="${IS_FOR_V7X}" .
 fi
 
 # log folder $HOME/logs
@@ -115,15 +116,24 @@ if [ "$RUN_IN_BUILDKITE" = "false" ]; then
 fi
 
 # General configs
-HOST_HF_HOME="/mnt/disks/data/hf-docker"
-NUM_HOSTS_PER_INSTANCE=4
+HOST_HF_HOME="/mnt/disks/persist/models"
 COMMON_SIDE_PORT=8900
 
+# v6ex has 4 hosts with 4 TPUs, while v7x has 2 hosts with 2 TPU chips (4 cores). Adjust configs accordingly.
+NUM_HOSTS_PER_INSTANCE=4
+TPU_PROCESS_BOUNDS="2,2,1"
+PREFILL_TPU_PORTS=(8476 8477 8478 8479)
+DECODE_TPU_PORTS=(9476 9477 9478 9479)
+
+if [ "$IS_FOR_V7X" = "true" ]; then
+    NUM_HOSTS_PER_INSTANCE=2
+    TPU_PROCESS_BOUNDS="1,2,1"
+    PREFILL_TPU_PORTS=(8476 8477)
+    DECODE_TPU_PORTS=(9476 9477)
+fi
 ######## Prefill hosts setup ########
 
 # Start ray cluster on 4 hosts.
-
-PREFILL_TPU_PORTS=(8476 8477 8478 8479)
 PREFILL_TPU_ADDRS=()
 for port in "${PREFILL_TPU_PORTS[@]}"; do
   PREFILL_TPU_ADDRS+=("127.0.0.1:$port")
@@ -159,13 +169,14 @@ for ((i=0; i<NUM_HOSTS_PER_INSTANCE; i++)); do
         -e SKIP_JAX_PRECOMPILE="1" \
         \
         -e TPU_CHIPS_PER_PROCESS_BOUNDS="1,1,1" \
-        -e TPU_PROCESS_BOUNDS="2,2,1" \
+        -e TPU_PROCESS_BOUNDS="${TPU_PROCESS_BOUNDS}" \
         -e TPU_VISIBLE_CHIPS="${i}" \
         -e CLOUD_TPU_TASK_ID="${i}" \
         -e TPU_PROCESS_ADDRESSES="${PREFILL_TPU_ADDRS}" \
         -e TPU_PROCESS_PORT="${tpu_port}" \
         \
         -e HF_HOME="/root/hf" \
+        -e IS_FOR_V7X="${IS_FOR_V7X}" \
         -v "${HOST_HF_HOME}:/root/hf" \
         -v $LOG_DIR:/root/logs \
         "${local_mounts[@]}" \
@@ -190,12 +201,10 @@ docker exec -d ${CONTAINER_PREFIX}-0 /bin/bash -c \
     > /root/logs/prefill.txt 2>&1"
 set +x
 
-
 ######## Decode hosts setup ########
 
 # Start ray cluster on 4 hosts.
 
-DECODE_TPU_PORTS=(9476 9477 9478 9479)
 DECODE_TPU_ADDRS=()
 for port in "${DECODE_TPU_PORTS[@]}"; do
   DECODE_TPU_ADDRS+=("127.0.0.1:$port")
@@ -232,13 +241,14 @@ for ((i=0; i<NUM_HOSTS_PER_INSTANCE; i++)); do
         -e SKIP_JAX_PRECOMPILE="1" \
         \
         -e TPU_CHIPS_PER_PROCESS_BOUNDS="1,1,1" \
-        -e TPU_PROCESS_BOUNDS="2,2,1" \
+        -e TPU_PROCESS_BOUNDS="${TPU_PROCESS_BOUNDS}" \
         -e TPU_VISIBLE_CHIPS="${tpu_index}" \
         -e CLOUD_TPU_TASK_ID="${i}" \
         -e TPU_PROCESS_ADDRESSES="${DECODE_TPU_ADDRS}" \
         -e TPU_PROCESS_PORT="${tpu_port}" \
         \
         -e HF_HOME="/root/hf" \
+        -e IS_FOR_V7X="${IS_FOR_V7X}" \
         -v "${HOST_HF_HOME}:/root/hf" \
         -v $LOG_DIR:/root/logs \
         "${local_mounts[@]}" \
