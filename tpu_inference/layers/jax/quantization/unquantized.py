@@ -108,8 +108,9 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
             }
 
         elif layer.moe_backend in [MoEBackend.GMM_EP, MoEBackend.GMM_TP]:
-            expected_count = layer.num_local_experts
-            if layer.kernel_gating_EDF._cnt_moe_weights_loaded != expected_count or layer.kernel_up_proj_EDF._cnt_moe_weights_loaded != expected_count:
+            if any(
+                    any(w is None for w in param._weights_to_load) for param in
+                [layer.kernel_gating_EDF, layer.kernel_up_proj_EDF]):
                 return
             w_gate = layer.kernel_gating_EDF.value
             w_up = layer.kernel_up_proj_EDF.value
