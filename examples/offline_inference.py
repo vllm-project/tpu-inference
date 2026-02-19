@@ -93,26 +93,11 @@ def main(args: dict):
     if profiler_config.profiler == "torch":
         llm.start_profile()
     outputs = llm.generate(prompts, sampling_params)
-    ### Test ###
-    print("\n" + "="*30)
-    print(">>> PHASE 1: BEFORE RESET")
-    print("="*30)
-    ### Test ###
     if profiler_config.profiler == "torch":
         llm.stop_profile()
     
     llm.collective_rpc("reset_kv_cache")
-    ### Test ###
-    print("\n" + "="*30)
-    print(">>> PHASE 2: AFTER RESET (HBM should be low now)")
-    print("="*30)
-    ### Test ###
     llm.collective_rpc("reinitialize_kv_cache")
-    ### Test ###
-    print("\n" + "="*30)
-    print(">>> PHASE 3: AFTER RE-INIT (HBM should be back)")
-    print("="*30)
-    ### Test ###
 
     outputs = llm.generate(prompts, sampling_params)
 
