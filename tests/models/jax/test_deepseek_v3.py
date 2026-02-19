@@ -22,10 +22,13 @@ import numpy as np
 import pytest
 import torch
 from flax import nnx
+from flax.typing import PRNGKey
 from jax.sharding import Mesh, PartitionSpec
 from parameterized import parameterized
 from vllm.config import ModelConfig
 
+from tpu_inference.distributed.jax_parallel_state import \
+    init_pp_distributed_environment
 # Assuming the model file is named deepseek_v3.py
 import tpu_inference.kernels.mla.v1.kernel as mla
 from tpu_inference.layers.common.attention_interface import get_kv_cache_shape
@@ -36,6 +39,7 @@ from tpu_inference.layers.jax.moe.moe import MoEBackend
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer
 from tpu_inference.models.jax.deepseek_v3 import (DeepSeekV3,
                                                   DeepseekV3Attention,
+                                                  DeepseekV3DecoderLayer,
                                                   DeepseekV3MLA,
                                                   DeepSeekV3Router,
                                                   DeepSeekV3WeightLoader)
@@ -46,9 +50,10 @@ from tpu_inference.models.jax.jax_intermediate_tensor import \
 class MockVariable:
     """Mocks an nnx.Variable or a QArray structure."""
 
-    def __init__(self, shape, dtype=jnp.bfloat16, sharding=None):
+    def __init__(self, shape, dtype=jnp.bfloat16, out_sharding=None):
         self.value = jnp.zeros(shape, dtype=dtype)
-        self.sharding = sharding or (None, ) * len(shape)
+        self.out_sharding = out_sharding or (None, ) * len(shape)
+        self.sharding = self.out_sharding # For print_param_info
         self.nbytes = self.value.nbytes
         # Handle the QArray structure used in the loader
         self.array = SimpleNamespace(
@@ -56,7 +61,8 @@ class MockVariable:
             scale=SimpleNamespace(
                 value=jnp.ones((1, )),
                 nbytes=4,
-                sharding=None,
+                out_sharding=None,
+                sharding=None, # For print_param_info
                 addressable_shards=[SimpleNamespace(data=jnp.ones((1, )))]))
         self.addressable_shards = [SimpleNamespace(data=self.value)]
 
@@ -66,19 +72,25 @@ class MockVllmConfig:
 
     def __init__(self,
                  model_name: str = "deepseek-ai/DeepSeek-V3",
-                 use_mla: bool = False):
+                 use_mla: bool = True):
         self.model_config = MagicMock(spec=ModelConfig)
         self.model_config.model = model_name
         self.model_config.use_mla = use_mla
+        self.model_config.dtype = "bfloat16"
 
         # DeepSeek V3 specific config
         hf_config = MagicMock()
         hf_config.num_hidden_layers = 1  # Small for testing
         hf_config.num_nextn_predict_layers = 1
+        hf_config.tie_word_embeddings = False
+        hf_config.num_attention_heads = 128
+        hf_config.num_key_value_heads = 128
+        hf_config.quantization_config = {"weight_block_size": [128, 128]}
         self.model_config.hf_config = hf_config
 
         self.load_config = MagicMock()
         self.load_config.download_dir = None
+        self.load_config.load_format = "auto"
 
         self.cache_config = MagicMock()
         self.cache_config.cache_dtype = "auto"
@@ -90,46 +102,79 @@ class MockVllmConfig:
         }
 
 
-@pytest.fixture()
+@pytest.fixture(scope="module")
 def mesh():
+    """Creates a mesh with all required axes for testing."""
     if not jax.devices():
-        pytest.skip("No JAX devices available.")
+        pytest.skip("No JAX devices available for mesh creation.")
     devices = np.array(jax.local_devices())
     num_devices = len(devices)
     device_mesh = devices.reshape((num_devices, 1, 1, 1, 1))
-    # Simplify axis names for testing
-    with Mesh(device_mesh,
-              axis_names=('data', 'attn_dp', 'attn_dp_expert', 'model',
-                          'expert')) as m:
-        yield m
+    return Mesh(device_mesh,
+                axis_names=('data', 'attn_dp', 'attn_dp_expert', 'model',
+                          'expert'))
 
 
 @pytest.fixture
-def rng():
-    return jax.random.PRNGKey(0)
+def rng() -> PRNGKey:
+    """Provides a reusable JAX PRNGKey."""
+    return jax.random.PRNGKey(42)
 
 
 @pytest.fixture
-def mock_config():
+def mock_vllm_config() -> MockVllmConfig:
     return MockVllmConfig()
+
+
+@pytest.fixture
+def rngs(rng: PRNGKey) -> nnx.Rngs:
+    return nnx.Rngs(params=rng)
+
+
+@pytest.fixture(autouse=True, scope="module")
+def initialize_pp():
+    if not jax.devices():
+        pytest.skip("No JAX devices available for PP initialization.")
+    init_pp_distributed_environment(
+        ip="",
+        rank=0,
+        world_size=1,
+        device=jax.devices()[0],
+        need_pp=False,
+    )
+
+
+@pytest.fixture(autouse=True)
+def mock_get_pp_group():
+    with patch("tpu_inference.distributed.jax_parallel_state.get_pp_group",
+               return_value=MagicMock(is_first_rank=True,
+                                      is_last_rank=True,
+                                      rank_in_group=0,
+                                      world_size=1)), \
+         patch("tpu_inference.layers.jax.pp_utils.get_pp_group",
+               return_value=MagicMock(is_first_rank=True,
+                                      is_last_rank=True,
+                                      rank_in_group=0,
+                                      world_size=1)):
+        yield
 
 
 class TestDeepSeekV3:
 
-    def test_init(self, mock_config, rng, mesh):
+    def test_init(self, mock_vllm_config, rng, mesh):
         """Tests if the model initializes with the correct hierarchy."""
         with patch("tpu_inference.models.jax.deepseek_v3.ShardingAxisName",
                    ShardingAxisNameBase), jax.set_mesh(mesh):
-            model = DeepSeekV3(mock_config, rng, mesh)
+            model = DeepSeekV3(mock_vllm_config, rng, mesh)
             assert len(model.layers) == 1
             assert isinstance(model.embedder, nnx.Module)
             assert model.vllm_config.model_config.hf_config.num_hidden_layers == 1
 
-    def test_random_weights(self, mock_config, rng, mesh):
+    def test_random_weights(self, mock_vllm_config, rng, mesh):
         """Tests that force_random_weights initializes non-zero weights."""
         with patch("tpu_inference.models.jax.deepseek_v3.ShardingAxisName",
                    ShardingAxisNameBase), jax.set_mesh(mesh):
-            model = DeepSeekV3(mock_config,
+            model = DeepSeekV3(mock_vllm_config,
                                rng,
                                mesh,
                                force_random_weights=True)
@@ -145,10 +190,10 @@ class TestDeepSeekV3:
         return_value=[],
     )
     def test_load_weights_called(self, mock_weights_generator, mock_loader_cls,
-                                 mock_config, rng, mesh):
+                                 mock_vllm_config, rng, mesh):
         with patch("tpu_inference.models.jax.deepseek_v3.ShardingAxisName",
                    ShardingAxisNameBase), jax.set_mesh(mesh):
-            model = DeepSeekV3(mock_config, rng, mesh)
+            model = DeepSeekV3(mock_vllm_config, rng, mesh)
 
             model.load_weights(rng)
 
@@ -159,162 +204,169 @@ class TestDeepSeekV3PipelineParallelism:
 
     @pytest.fixture
     def pp_config(self):
-        config = MockVllmConfig()
+        # We use use_mla=True to avoid sharding rank mismatch in DeepseekV3Attention
+        config = MockVllmConfig(use_mla=True)
         config.model_config.hf_config.num_hidden_layers = 4
         return config
 
     def test_pp_initialization(self, pp_config, rng, mesh):
         """Tests model initialization with different PP ranks."""
         with patch("tpu_inference.models.jax.deepseek_v3.ShardingAxisName",
-                   ShardingAxisNameBase), jax.set_mesh(mesh):
+                   ShardingAxisNameBase), \
+             patch("tpu_inference.layers.jax.pp_utils.get_pp_group") as mock_pp_utils, \
+             patch("tpu_inference.distributed.jax_parallel_state.get_pp_group") as mock_pp_dist, \
+             patch("tpu_inference.models.jax.deepseek_v3.get_pp_group") as mock_pp_model, \
+             jax.set_mesh(mesh):
 
             # Test Rank 0 of 2
-            with patch("tpu_inference.models.jax.deepseek_v3.get_pp_group"
-                       ) as mock_pp:
-                mock_pp.return_value.rank_in_group = 0
-                mock_pp.return_value.world_size = 2
-                mock_pp.return_value.is_first_rank = True
-                mock_pp.return_value.is_last_rank = False
+            mock_pp = MagicMock(rank_in_group=0, world_size=2, is_first_rank=True, is_last_rank=False)
+            mock_pp_utils.return_value = mock_pp
+            mock_pp_dist.return_value = mock_pp
+            mock_pp_model.return_value = mock_pp
 
-                model_rank0 = DeepSeekV3(pp_config, rng, mesh)
+            model_rank0 = DeepSeekV3(pp_config, rng, mesh)
 
-                # Rank 0 should have layers 0, 1 and embedder, but no final_norm/lm_head
-                assert not isinstance(model_rank0.layers[0], PPMissingLayer)
-                assert not isinstance(model_rank0.layers[1], PPMissingLayer)
-                assert isinstance(model_rank0.layers[2], PPMissingLayer)
-                assert isinstance(model_rank0.layers[3], PPMissingLayer)
+            # Rank 0 should have layers 0, 1 and embedder, but no final_norm/lm_head
+            assert not isinstance(model_rank0.layers[0], PPMissingLayer)
+            assert not isinstance(model_rank0.layers[1], PPMissingLayer)
+            assert isinstance(model_rank0.layers[2], PPMissingLayer)
+            assert isinstance(model_rank0.layers[3], PPMissingLayer)
 
-                assert not isinstance(model_rank0.embedder, PPMissingLayer)
-                assert isinstance(model_rank0.final_norm, PPMissingLayer)
-                assert isinstance(model_rank0.lm_head, PPMissingLayer)
+            assert not isinstance(model_rank0.embedder, PPMissingLayer)
+            assert isinstance(model_rank0.final_norm, PPMissingLayer)
+            assert isinstance(model_rank0.lm_head, PPMissingLayer)
 
             # Test Rank 1 of 2
-            with patch("tpu_inference.models.jax.deepseek_v3.get_pp_group"
-                       ) as mock_pp:
-                mock_pp.return_value.rank_in_group = 1
-                mock_pp.return_value.world_size = 2
-                mock_pp.return_value.is_first_rank = False
-                mock_pp.return_value.is_last_rank = True
+            mock_pp = MagicMock(rank_in_group=1, world_size=2, is_first_rank=False, is_last_rank=True)
+            mock_pp_utils.return_value = mock_pp
+            mock_pp_dist.return_value = mock_pp
+            mock_pp_model.return_value = mock_pp
 
-                model_rank1 = DeepSeekV3(pp_config, rng, mesh)
+            model_rank1 = DeepSeekV3(pp_config, rng, mesh)
 
-                # Rank 1 should have layers 2, 3 and final_norm/lm_head, but no embedder
-                assert isinstance(model_rank1.layers[0], PPMissingLayer)
-                assert isinstance(model_rank1.layers[1], PPMissingLayer)
-                assert not isinstance(model_rank1.layers[2], PPMissingLayer)
-                assert not isinstance(model_rank1.layers[3], PPMissingLayer)
+            # Rank 1 should have layers 2, 3 and final_norm/lm_head, but no embedder
+            assert isinstance(model_rank1.layers[0], PPMissingLayer)
+            assert isinstance(model_rank1.layers[1], PPMissingLayer)
+            assert not isinstance(model_rank1.layers[2], PPMissingLayer)
+            assert not isinstance(model_rank1.layers[3], PPMissingLayer)
 
-                assert isinstance(model_rank1.embedder, PPMissingLayer)
-                assert not isinstance(model_rank1.final_norm, PPMissingLayer)
-                assert not isinstance(model_rank1.lm_head, PPMissingLayer)
+            assert isinstance(model_rank1.embedder, PPMissingLayer)
+            assert not isinstance(model_rank1.final_norm, PPMissingLayer)
+            assert not isinstance(model_rank1.lm_head, PPMissingLayer)
 
     def test_pp_weight_skipping(self, pp_config, rng, mesh):
         """Tests that weight loader skips weights for missing layers."""
         with patch("tpu_inference.models.jax.deepseek_v3.ShardingAxisName",
-                   ShardingAxisNameBase), jax.set_mesh(mesh):
-            with patch("tpu_inference.models.jax.deepseek_v3.get_pp_group"
-                       ) as mock_pp:
-                mock_pp.return_value.rank_in_group = 1
-                mock_pp.return_value.world_size = 2
-                mock_pp.return_value.is_first_rank = False
-                mock_pp.return_value.is_last_rank = True
+                   ShardingAxisNameBase), \
+             patch("tpu_inference.layers.jax.pp_utils.get_pp_group") as mock_pp_utils, \
+             patch("tpu_inference.distributed.jax_parallel_state.get_pp_group") as mock_pp_dist, \
+             patch("tpu_inference.models.jax.deepseek_v3.get_pp_group") as mock_pp_model, \
+             jax.set_mesh(mesh):
+            
+            mock_pp = MagicMock(rank_in_group=1, world_size=2, is_first_rank=False, is_last_rank=True)
+            mock_pp_utils.return_value = mock_pp
+            mock_pp_dist.return_value = mock_pp
+            mock_pp_model.return_value = mock_pp
 
-                model = DeepSeekV3(pp_config, rng, mesh)
-                loader = model.weight_loader
+            model = DeepSeekV3(pp_config, rng, mesh)
+            loader = model.weight_loader
 
-                # Weight for layer 0 (missing on Rank 1)
-                res = loader._load_individual_weight(
-                    "model.layers.0.self_attn.q_down_proj.weight",
-                    torch.ones((10, 10)), {}, mesh)
-                assert res == (0, 0)
+            # Initialize pp_missing_layers in the loader manually for test
+            loader.pp_missing_layers = ["layers.0", "layers.1", "embedder"]
 
-                # Weight for layer 2 (present on Rank 1)
-                # Mock get_param to avoid actual parameter access
-                with patch("tpu_inference.models.jax.deepseek_v3.get_param"
-                           ) as mock_get_param:
-                    mock_var = MockVariable((10, 10))
-                    mock_get_param.return_value = mock_var
-                    with patch("jax.make_array_from_callback") as mock_make:
-                        mock_make.return_value = jnp.ones((10, 10))
-                        res = loader._load_individual_weight(
-                            "model.layers.2.self_attn.q_down_proj.weight",
-                            torch.ones((10, 10)), {}, mesh)
-                        assert res != (0, 0)
+            # Weight for layer 0 (missing on Rank 1)
+            # Use original HF name which maps to layers.0.self_attn.q_down_proj.weight
+            # Ensure input torch tensor has the correct dtype (BF16) to avoid shape doubling via view(int16)
+            res = loader._load_individual_weight(
+                "model.layers.0.self_attn.q_a_proj.weight",
+                torch.ones((10, 10), dtype=torch.bfloat16), {}, mesh)
+            assert res == (0, 0)
+
+            # Weight for layer 2 (present on Rank 1)
+            # HF name model.layers.2.self_attn.q_a_proj.weight maps to layers.2.self_attn.q_down_proj.weight
+            with patch("tpu_inference.models.jax.deepseek_v3.get_param") as mock_get_param:
+                mock_var = MockVariable((10, 10), dtype=jnp.bfloat16)
+                mock_get_param.return_value = mock_var
+                with patch("jax.make_array_from_callback") as mock_make:
+                    mock_make.return_value = jnp.ones((10, 10), dtype=jnp.bfloat16)
+                    res = loader._load_individual_weight(
+                        "model.layers.2.self_attn.q_a_proj.weight",
+                        torch.ones((10, 10), dtype=torch.bfloat16), {}, mesh)
+                    assert res != (0, 0)
 
     def test_pp_forward_pass_stages(self, pp_config, rng, mesh):
         """Tests the forward pass logic for different PP stages."""
         with patch("tpu_inference.models.jax.deepseek_v3.ShardingAxisName",
-                   ShardingAxisNameBase), jax.set_mesh(mesh):
+                   ShardingAxisNameBase), \
+             patch("tpu_inference.layers.jax.pp_utils.get_pp_group") as mock_pp_utils, \
+             patch("tpu_inference.distributed.jax_parallel_state.get_pp_group") as mock_pp_dist, \
+             patch("tpu_inference.models.jax.deepseek_v3.get_pp_group") as mock_pp_model, \
+             jax.set_mesh(mesh):
+            
             # Rank 0 forward pass
-            with patch("tpu_inference.models.jax.deepseek_v3.get_pp_group"
-                       ) as mock_pp:
-                mock_pp.return_value.rank_in_group = 0
-                mock_pp.return_value.world_size = 2
-                mock_pp.return_value.is_first_rank = True
-                mock_pp.return_value.is_last_rank = False
+            mock_pp = MagicMock(rank_in_group=0, world_size=2, is_first_rank=True, is_last_rank=False)
+            mock_pp_utils.return_value = mock_pp
+            mock_pp_dist.return_value = mock_pp
+            mock_pp_model.return_value = mock_pp
 
-                model_rank0 = DeepSeekV3(pp_config, rng, mesh)
+            model_rank0 = DeepSeekV3(pp_config, rng, mesh)
+            model_rank0.initialize_cache()
 
-                input_ids = jnp.array([1, 2, 3])
-                kv_caches = [jnp.zeros((1, 1, 1, 1))] * 4
-                attention_metadata = MagicMock(spec=AttentionMetadata)
+            input_ids = jnp.array([1, 2, 3])
+            kv_caches = [jnp.zeros((1, 1, 1, 1))] * 4
+            attention_metadata = MagicMock(spec=AttentionMetadata)
+            attention_metadata.input_positions = jnp.arange(3)
+            attention_metadata.seq_lens = jnp.array([3], dtype=jnp.int32)
+            attention_metadata.block_tables = jnp.zeros((1, 1), dtype=jnp.int32)
 
-                # Mock layers to avoid actual computation
-                for layer in model_rank0.layers:
-                    if not isinstance(layer, PPMissingLayer):
-                        layer.__call__ = MagicMock(
-                            return_value=(jnp.zeros((1, 1, 1, 1)),
-                                          jnp.ones((3, 7168))))
+            # Mock layer __call__ at the class level to effectively intercept all calls
+            with patch.object(DeepseekV3DecoderLayer, "__call__", 
+                             return_value=(jnp.zeros((1, 1, 1, 1)), jnp.ones((3, 7168)))):
 
                 kv_caches_out, hidden_states_out, _ = model_rank0(
                     kv_caches, input_ids, attention_metadata)
 
-                # Rank 0 should return JaxIntermediateTensors
-                assert isinstance(hidden_states_out, JaxIntermediateTensors)
-                assert "hidden_states" in hidden_states_out.tensors
+            # Rank 0 should return JaxIntermediateTensors
+            assert isinstance(hidden_states_out, JaxIntermediateTensors)
+            assert "hidden_states" in hidden_states_out.tensors
 
             # Rank 1 forward pass
-            with patch("tpu_inference.models.jax.deepseek_v3.get_pp_group"
-                       ) as mock_pp:
-                mock_pp.return_value.rank_in_group = 1
-                mock_pp.return_value.world_size = 2
-                mock_pp.return_value.is_first_rank = False
-                mock_pp.return_value.is_last_rank = True
+            mock_pp = MagicMock(rank_in_group=1, world_size=2, is_first_rank=False, is_last_rank=True)
+            mock_pp_utils.return_value = mock_pp
+            mock_pp_dist.return_value = mock_pp
+            mock_pp_model.return_value = mock_pp
 
-                model_rank1 = DeepSeekV3(pp_config, rng, mesh)
+            model_rank1 = DeepSeekV3(pp_config, rng, mesh)
+            model_rank1.initialize_cache()
 
-                # Rank 1 expects intermediate_tensors as input
-                intermediate_tensors = JaxIntermediateTensors(
-                    {"hidden_states": jnp.ones((3, 7168))})
+            # Rank 1 expects intermediate_tensors as input
+            intermediate_tensors = JaxIntermediateTensors(
+                {"hidden_states": jnp.ones((3, 7168))})
 
-                # Mock layers and final_norm/lm_head
-                for layer in model_rank1.layers:
-                    if not isinstance(layer, PPMissingLayer):
-                        layer.__call__ = MagicMock(
-                            return_value=(jnp.zeros((1, 1, 1, 1)),
-                                          jnp.ones((3, 7168))))
-                model_rank1.final_norm.__call__ = MagicMock(
-                    return_value=jnp.ones((3, 7168)))
-
+            # Mock layers and final_norm/lm_head
+            with patch.object(DeepseekV3DecoderLayer, "__call__", 
+                             return_value=(jnp.zeros((1, 1, 1, 1)), jnp.ones((3, 7168)))), \
+                 patch.object(nnx.RMSNorm, "__call__", return_value=jnp.ones((3, 7168))):
+                
                 kv_caches_out, final_activation, _ = model_rank1(
                     kv_caches,
                     None,
                     attention_metadata,
                     intermediate_tensors=intermediate_tensors)
 
-                # Rank 1 should return final_activation as jax.Array
-                assert isinstance(final_activation, jax.Array)
+            # Rank 1 should return final_activation as jax.Array
+            assert isinstance(final_activation, jax.Array)
 
 
 class TestDeepSeekV3WeightLoader:
 
     @pytest.fixture
-    def loader(self, mock_config):
+    def loader(self, mock_vllm_config):
         # We need to mock the generator so it doesn't try to download files
         with patch(
                 "tpu_inference.models.jax.utils.weight_utils.model_weights_generator",
                 return_value=[]):
-            return DeepSeekV3WeightLoader(vllm_config=mock_config,
+            return DeepSeekV3WeightLoader(vllm_config=mock_vllm_config,
                                           num_layers=2,
                                           hidden_size=7168,
                                           q_lora_rank=1536,
@@ -415,7 +467,7 @@ class TestDeepSeekV3WeightLoader:
         mock_var = MockVariable(
             (128, 128),
             dtype=jnp.float4_e2m1fn,
-            sharding=(None, ('attn_dp', 'model',
+            out_sharding=(None, ('attn_dp', 'model',
                              'expert')))  # Unpacked shape (64 * 2)
         mock_params = {
             "layers": {
