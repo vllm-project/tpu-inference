@@ -233,7 +233,7 @@ class Qwen3MoeModel(JaxModule):
         else:
             self.embed_tokens = PPMissingLayer()
 
-        self.start_layer, self.end_layer, layers = make_layers(
+        self.start_layer, self.end_layer, self.layers = make_layers(
             hf_config.num_hidden_layers,
             lambda layer_index: Qwen3MoeDecoderLayer(
                 config=hf_config,
@@ -246,7 +246,6 @@ class Qwen3MoeModel(JaxModule):
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.layers.{layer_index}",
             ))
-        self.layers = nnx.List(layers)
 
         if self.is_last_rank:
             self.norm = JaxRmsNorm(

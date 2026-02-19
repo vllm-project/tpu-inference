@@ -26,6 +26,7 @@ import jaxtyping
 import numpy as np
 import vllm.envs as vllm_envs
 from flax import nnx
+from jax._src.pallas.utils import next_power_of_2
 from jax.experimental import mesh_utils
 from jax.sharding import NamedSharding, PartitionSpec
 from vllm.config import VllmConfig
@@ -323,11 +324,21 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             sharding_strategy.tp_size,
         )
 
-        return mesh_utils.create_device_mesh(
-            mesh_shape,
-            self.devices,
-            allow_split_physical_axes=True,
-        )
+        # Attempt to create a physically optimized mesh. Fall back to a simple
+        # logical reshape for non-power-of-two device counts (e.g., DP=6) to
+        # bypass strict physical topology constraints.
+        try:
+            return mesh_utils.create_device_mesh(
+                mesh_shape,
+                self.devices,
+                allow_split_physical_axes=True,
+            )
+        except (AssertionError, ValueError, RuntimeError) as e:
+            logger.warning(
+                "Physical mesh creation failed (shape=%s, devices=%d). "
+                "Falling back to logical reshape. Error: %s", mesh_shape,
+                len(self.devices), e)
+            return np.array(self.devices).reshape(mesh_shape)
 
     def _create_multi_slice_mesh(self, num_slices: int) -> jax.Array:
         sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config
@@ -343,12 +354,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         )
         dcn_mesh_shape = (num_slices, 1, 1, 1, 1)
 
-        return mesh_utils.create_hybrid_device_mesh(
-            mesh_shape=ici_mesh_shape,
-            dcn_mesh_shape=dcn_mesh_shape,
-            devices=self.devices,
-            allow_split_physical_axes=True,
-        )
+        # Attempt to create a physically optimized hybrid mesh (ICI + DCN).
+        # Fall back to a logical reshape for non-power-of-two device counts
+        # to bypass strict hardware topology constraints across slices.
+        try:
+            return mesh_utils.create_hybrid_device_mesh(
+                mesh_shape=ici_mesh_shape,
+                dcn_mesh_shape=dcn_mesh_shape,
+                devices=self.devices,
+                allow_split_physical_axes=True,
+            )
+        except (AssertionError, ValueError, RuntimeError) as e:
+            logger.warning(
+                "Hybrid physical mesh creation failed. Falling back to logical reshape. "
+                "ICI shape: %s, DCN shape: %s, Error: %s", ici_mesh_shape,
+                dcn_mesh_shape, e)
+            return np.array(self.devices).reshape(
+                tuple(i * d for i, d in zip(ici_mesh_shape, dcn_mesh_shape)))
 
     def _create_2d_mesh(self) -> jax.sharding.Mesh:
 
@@ -419,7 +441,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         kv_cache_dtype = to_jax_dtype(cache_dtype)
         kv_packing = common_utils.get_dtype_packing(kv_cache_dtype)
         self.num_tokens_paddings = runner_utils.get_token_paddings(
-            min_token_size=max(16, self.dp_size * kv_packing),
+            min_token_size=max(16, next_power_of_2(self.dp_size * kv_packing)),
             max_token_size=scheduler_config.max_num_batched_tokens *
             self.dp_size,
             padding_gap=vllm_envs.VLLM_TPU_BUCKET_PADDING_GAP)

@@ -53,13 +53,6 @@ def get_requirements() -> List[str]:
 
     try:
         _read_requirements("requirements.txt")
-
-        # For TPU v7x build
-        # TODO: Temporary workaround. The v7x requirements will be consolidated, and this block will be removed,
-        # once the JAX package fix is released, since v6e/v7x differentiation will no longer be required.
-        if os.getenv("IS_FOR_V7X", "true").lower() == "true":
-            print("Overriding and adding packages from requirements_v7x.txt")
-            _read_requirements("requirements_v7x.txt")
     except (FileNotFoundError, IOError):
         print("Failed to read requirements.txt in vllm_tpu.")
 
