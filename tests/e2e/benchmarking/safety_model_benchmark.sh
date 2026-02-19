@@ -287,17 +287,7 @@ run_multimodal_performance_benchmark() {
         2>&1 | tee -a "$LOG_FILE") &
 
     waitForServerReady
-
-    # Warm up
-    vllm bench serve \
-        --model "$MODEL_NAME" \
-        --dataset-name custom \
-        --dataset-path /tmp/mm_safety_bench.jsonl \
-        --num-prompts "$NUM_PROMPTS" \
-        --backend "openai-chat" \
-        --endpoint "/v1/chat/completions" \
-        2>&1 | tee -a "$BENCHMARK_LOG_FILE"
-
+    
     # Test run
     vllm bench serve \
         --model "$MODEL_NAME" \

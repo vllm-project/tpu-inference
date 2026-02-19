@@ -1,6 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# This script demonstrates how to perform offline multimodal safety model
+# inference using multimodal safety models. It downloads a set of safety-related
+# images and prompts, then runs the model to classify inputs as 'safe' or 'unsafe'.
+
+# Example usage:
+# python examples/offline_multimodal_safety_model_inference.py --model="meta-llama/Llama-Guard-4-12B" --max_model_len=3072 --tensor_parallel_size=8 --max_num_batched_tokens=3072 --hf_overrides '{"architectures": ["Llama4ForConditionalGeneration"]}'
+
 import json
 import os
 import shutil

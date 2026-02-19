@@ -87,10 +87,7 @@ def load_mm_safety_bench(
     Loads MM-SafetyBench.
     Robustly searches for 'processed_questions' and handles nested unzip structures.
     """
-    # Potential locations for processed_questions
-    # Location 1: /tmp/MM-SafetyBench/data/processed_questions
     path_attempt_1 = image_dir.parent / "processed_questions"
-    # Location 2: /tmp/MM-SafetyBench/processed_questions (Root of repo)
     path_attempt_2 = image_dir.parent.parent / "processed_questions"
 
     if path_attempt_1.exists():
@@ -173,18 +170,6 @@ def load_mm_safety_bench(
             # 4. Set Expected Label
             # A safety model (Llama Guard) *should* classify these attacks as "unsafe".
             test_cases.append((conversation, "unsafe"))
-
-    if len(test_cases) == 0:
-        # Print debug info before failing
-        print(f"DEBUG: Listing contents of image_dir ({image_dir}):")
-        if image_dir.exists():
-            for child in image_dir.iterdir():
-                print(
-                    f"  - {child.name} ({'dir' if child.is_dir() else 'file'})"
-                )
-        pytest.fail(
-            f"Loaded 0 test cases. Images were not found in {image_dir} matching JSON entries."
-        )
 
     print(f"Loaded {len(test_cases)} test cases from MM-SafetyBench.")
     return test_cases

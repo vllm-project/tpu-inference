@@ -35,6 +35,7 @@ from tpu_inference.layers.jax.misc import shard_put
 from tpu_inference.layers.jax.moe.moe import JaxMoE, Router
 from tpu_inference.layers.jax.pp_utils import (PPMissingLayer,
                                                get_start_end_layer)
+from tpu_inference.layers.jax.rope import Llama4VisionRotaryEmbedding
 from tpu_inference.layers.jax.transformer_block import \
     SharedExpertsTransformerBlock
 from tpu_inference.logger import init_logger
@@ -43,8 +44,6 @@ from tpu_inference.models.jax.jax_intermediate_tensor import \
 from tpu_inference.models.jax.utils.weight_utils import (
     BaseWeightLoader, _is_pp_missing_layer, convert_torch_to_jax_with_view,
     get_param, print_param_info, reshape_params, transpose_params)
-
-from ...layers.jax.llama4_vision_rope import Llama4VisionRotaryEmbedding
 
 logger = init_logger(__name__)
 
@@ -728,11 +727,19 @@ class Llama4ForCausalLM(nnx.Module):
 # --- Vision Classes ---
 
 
-def gelu_jax(x):
-    return jax.nn.gelu(x)
-
-
 class JAXUnfoldConvolution(nnx.Module):
+    """
+    A module that performs an "unfold" convolution operation,
+    similar to a patch embedding layer in Vision Transformers.
+
+    It reshapes input images into non-overlapping patches and then
+    applies a linear projection to embed these patches into a higher-dimensional space.
+
+    Attributes:
+        kernel_size: The size of the image patches (e.g., 16 for 16x16 patches).
+        num_channels: The number of input channels in the image (e.g., 3 for RGB).
+        linear: A linear layer to project the flattened patches into the hidden size.
+    """
 
     def __init__(self,
                  config: dict,
@@ -812,7 +819,7 @@ class JAXLlama4VisionMLP(nnx.Module):
 
     def __call__(self, hidden_states: jax.Array) -> jax.Array:
         hidden_states = self.fc1(hidden_states)
-        hidden_states = gelu_jax(hidden_states)
+        hidden_states = jax.nn.gelu(hidden_states)
         hidden_states = self.fc2(hidden_states)
         return hidden_states
 
@@ -834,7 +841,6 @@ class JAXLlama4VisionEncoderLayer(nnx.Module):
             num_attention_heads=cfg.num_attention_heads,
             num_key_value_heads=cfg.num_attention_heads,
             # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
-            #kv_cache_dtype="auto",
             head_dim=cfg.hidden_size // cfg.num_attention_heads,
             rope_theta=10000.0,  # From vision_config
             rope_scaling=None,
@@ -1002,7 +1008,7 @@ class JAXLlama4VisionMLP2(nnx.Module):
                  deterministic: bool = False) -> jax.Array:
         # First linear layer with GELU activation
         hidden_states = self.fc1(hidden_states)
-        hidden_states = gelu_jax(hidden_states)
+        hidden_states = jax.nn.gelu(hidden_states)
 
         # Apply dropout
         hidden_states = self.dropout(hidden_states,
@@ -1010,7 +1016,7 @@ class JAXLlama4VisionMLP2(nnx.Module):
 
         # Second linear layer with GELU activation
         hidden_states = self.fc2(hidden_states)
-        hidden_states = gelu_jax(hidden_states)
+        hidden_states = jax.nn.gelu(hidden_states)
         return hidden_states
 
 

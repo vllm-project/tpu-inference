@@ -39,7 +39,6 @@ steps:
 
   - label: "Performance benchmarks (Text) for meta-llama/Llama-Guard-4-12B"
     key: "meta-llama_Llama-Guard-4-12B_Benchmark_Text"
-    depends_on: "record_meta-llama_Llama-Guard-4-12B_IntegrationTest_Text"
     soft_fail: true
     env:
       TEST_MODEL: meta-llama/Llama-Guard-4-12B
@@ -66,14 +65,13 @@ steps:
 
   - label: "Integration tests (Text) for meta-llama/Llama-Guard-4-12B"
     key: "meta-llama_Llama-Guard-4-12B_IntegrationTest_Text"
-    depends_on: "record_meta-llama_Llama-Guard-4-12B_UnitTest"
     agents:
       queue: tpu_v6e_queue
     soft_fail: true
     env:
       TEST_MODEL: meta-llama/Llama-Guard-4-12B
       TENSOR_PARALLEL_SIZE: 1
-      MINIMUM_ACCURACY_THRESHOLD: 0.31
+      MINIMUM_ACCURACY_THRESHOLD: 0.31 #TODO: This will be updated later with a true threshold
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/safety_model_benchmark.sh --mode accuracy --benchmark text-only
@@ -92,7 +90,6 @@ steps:
 
   - label: "Integration tests (Multimodal) for meta-llama/Llama-Guard-4-12B"
     key: "meta-llama_Llama-Guard-4-12B_IntegrationTest_Multimodal"
-    depends_on: "record_meta-llama_Llama-Guard-4-12B_IntegrationTest_Text"
     agents:
       queue: tpu_v6e_queue
     soft_fail: true
@@ -117,7 +114,6 @@ steps:
         .buildkite/scripts/record_step_result.sh meta-llama_Llama-Guard-4-12B_IntegrationTest_Multimodal
   - label: "Performance benchmarks (Multimodal) for meta-llama/Llama-Guard-4-12B"
     key: "meta-llama_Llama-Guard-4-12B_Benchmark_Multimodal"
-    depends_on: "record_meta-llama_Llama-Guard-4-12B_IntegrationTest_Multimodal"
     soft_fail: true
     env:
       TEST_MODEL: meta-llama/Llama-Guard-4-12B

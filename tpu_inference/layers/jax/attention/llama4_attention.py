@@ -137,7 +137,6 @@ class Llama4Attention(Attention):
         q_scale = k_scale = v_scale = None
         if self.kv_cache_quantized_dtype:
             # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
-            # q_scale = self._q_scale
             k_scale = self._k_scale
             v_scale = self._v_scale
             k_SKH, v_SKH = quantize_kv(self.kv_cache_quantized_dtype, k_SKH,
@@ -208,7 +207,7 @@ class Llama4VisionAttention(nnx.Module):
     temperature_tuning_scale: float
     activation_attention_td: Sharding
     activation_attention_out_td: Sharding
-    is_causal: bool = True
+    is_causal: bool = False
     kv_cache_quantized_dtype: Optional[jnp.dtype] = None
     rngs: InitVar[nnx.Rngs]
 
@@ -310,7 +309,6 @@ class Llama4VisionAttention(nnx.Module):
             v_SKH += self.bias_v_proj_KH.value[None, ...]
             v_SKH = nnx.with_sharding_constraint(v_SKH, self.keyvalue_skh)
 
-        # q_scale = k_scale = v_scale = None
         if self.kv_cache_quantized_dtype:
             k_scale = self._k_scale
             v_scale = self._v_scale
@@ -337,8 +335,6 @@ class Llama4VisionAttention(nnx.Module):
         k_BKTH = jnp.transpose(k_SKH, (0, 2, 1, 3))
         v_BKTH = jnp.transpose(v_SKH, (0, 2, 1, 3))
 
-        # T_padded = T_attn + pad_len
-
         # Mask Padding
         valid_ids = jnp.zeros((B, T_attn), dtype=jnp.int32)
         pad_ids = jnp.ones((B, pad_len), dtype=jnp.int32)
@@ -349,7 +345,7 @@ class Llama4VisionAttention(nnx.Module):
         with jax.named_scope("flash_attn_op"):
             outputs_BNTH = sharded_flash_attention(
                 mesh=self.mesh,
-                causal=False,
+                causal=self.is_causal,
                 sm_scale=self.head_dim**-0.5,
             )(q_BNTH, k_BKTH, v_BKTH, segment_ids)
             new_kv_cache = kv_cache

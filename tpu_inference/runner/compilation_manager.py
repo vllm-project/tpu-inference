@@ -36,8 +36,6 @@ from tpu_inference.utils import device_array
 if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
 
-import torch
-
 logger = init_logger(__name__)
 
 # Constants for block bucketing in disaggregated utilities
@@ -55,22 +53,11 @@ class CompilationManager:
             jax.config.update("jax_compilation_cache_dir",
                               vllm_envs.VLLM_XLA_CACHE_PATH)
 
-    def _to_jnp_dtype(self, dtype):
-        if dtype == torch.bfloat16:
-            return jnp.bfloat16
-        elif dtype == torch.float16:
-            return jnp.float16
-        elif dtype == torch.float32:
-            return jnp.float32
-        else:
-            return dtype
-
     def _create_dummy_tensor(self,
                              shape: Tuple[int, ...],
                              dtype: Any,
                              sharding: Optional[NamedSharding] = None) -> Any:
         """Helper to create dummy tensors for precompilation."""
-        dtype = self._to_jnp_dtype(dtype)
         tensor = jnp.ones(shape, dtype=dtype)
         if sharding:
             return device_array(self.runner.mesh, tensor, sharding=sharding)
