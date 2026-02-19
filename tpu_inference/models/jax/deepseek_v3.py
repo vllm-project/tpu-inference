@@ -16,6 +16,7 @@ import math
 import os
 import re
 from dataclasses import InitVar, dataclass
+from itertools import islice
 from typing import Any, List, Optional, Tuple, Union
 
 import jax
@@ -31,6 +32,7 @@ from torchax.ops.mappings import j2t_dtype
 from vllm.config import VllmConfig
 
 from tpu_inference import utils
+from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.kernels.mla.v1.kernel import mla_ragged_paged_attention
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     ragged_paged_attention
@@ -52,12 +54,15 @@ from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.moe.utils import (get_expert_parallelism,
                                                 select_moe_backend)
 from tpu_inference.layers.jax.norm import JaxRmsNorm
-from tpu_inference.layers.jax.pp_utils import make_layers
+from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.layers.jax.quantization.unquantized import UnquantizedConfig
 from tpu_inference.layers.jax.rope import DeepseekScalingRotaryEmbedding
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.jax_intermediate_tensor import \
+    JaxIntermediateTensors
 from tpu_inference.models.jax.utils.weight_utils import (BaseWeightLoader,
+                                                         _is_pp_missing_layer,
                                                          get_param,
                                                          print_param_info)
 
@@ -1010,6 +1015,7 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
 
         # TODO (jacobplatin): remove this once the JAX path refactor is done
         self.is_native_fp8_model = False
+        self.pp_missing_layers = []
 
         if self.is_model_quantized:
             # NOTE: this is only needed for pre-quantized models when doing random weight loading
@@ -1123,6 +1129,8 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                 NOTE: if using the pre-quantized model (with Qwix), we'll include the scale size as well.
         """
         mapped_name = self.map_loaded_to_standardized_name(name)
+        if _is_pp_missing_layer(mapped_name, self.pp_missing_layers):
+            return 0, 0
         base_model_weight = get_param(model_params, mapped_name)
         model_weight = base_model_weight.array.qvalue if hasattr(
             base_model_weight, "array") else base_model_weight
@@ -1258,6 +1266,13 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
 
     def load_weights(self, model_for_loading: nnx.Module):
         model_params = nnx.state(model_for_loading)
+
+        for path, module in nnx.iter_graph(model_for_loading):
+            if isinstance(module, PPMissingLayer):
+                # this layer name is layers.{i} or final_norm, embedder, lm_head, etc
+                layer_name = ".".join([str(s) for s in path])
+                self.pp_missing_layers.append(layer_name)
+
         logger.warning(
             f"loaded_to_standardized_keys: {self._loaded_to_standardized_keys}"
         )
@@ -1281,6 +1296,15 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
                     if int(layer_num) >= self.num_layers:
                         del loaded_weight
                         continue
+
+                    # Early skip for PP
+                    mapped_name = self.map_loaded_to_standardized_name(
+                        loaded_name)
+                    if _is_pp_missing_layer(mapped_name,
+                                            self.pp_missing_layers):
+                        del loaded_weight
+                        continue
+
                 if 'layers.61' in loaded_name:
                     # skip loading MTP module.
                     del loaded_weight
@@ -1512,7 +1536,7 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
 
 
 @dataclass
-class DeepSeekV3(JaxModule):
+class DeepSeekV3(JaxModule, LoadableWithIterator):
     WeightLoader = DeepSeekV3WeightLoader
 
     def __init__(self,
@@ -1567,6 +1591,8 @@ class DeepSeekV3(JaxModule):
         v_head_dim = 128
 
         self.mesh = mesh
+        self.is_first_rank = get_pp_group().is_first_rank
+        self.is_last_rank = get_pp_group().is_last_rank
 
         # TODO (jacobplatin): this shouldn't be related to
         # the (DeepSeek) modelling code since it's really
@@ -1607,17 +1633,23 @@ class DeepSeekV3(JaxModule):
             moe_backend=self.moe_backend,
             use_mla_kernel=self.use_mla_kernel)
         self.quant_config = vllm_config.quant_config
-        self.embed_tokens = JaxEmbed(
-            num_embeddings=vocab_size,
-            features=hidden_size,
-            param_dtype=dtype,
-            dtype=dtype,
-            embedding_init=nnx.with_partitioning(
-                init_fn, (ShardingAxisName.MLP_TENSOR, None)),
-            rngs=self.rng,
-            quant_config=self.quant_config,
-            prefix=prefix + ".embed_tokens",
-        )
+
+        if self.is_first_rank or (
+                vllm_config.model_config.hf_config.tie_word_embeddings
+                and self.is_last_rank):
+            self.embed_tokens = JaxEmbed(
+                num_embeddings=vocab_size,
+                features=hidden_size,
+                param_dtype=dtype,
+                dtype=dtype,
+                embedding_init=nnx.with_partitioning(
+                    init_fn, (ShardingAxisName.MLP_TENSOR, None)),
+                rngs=self.rng,
+                quant_config=self.quant_config,
+                prefix=prefix + ".embed_tokens",
+            )   
+        else:
+            self.embed_tokens = PPMissingLayer()
 
         def _create_deepseek_attention(
         ) -> Union[DeepseekV3MLA, DeepseekV3Attention]:
@@ -1805,29 +1837,33 @@ class DeepSeekV3(JaxModule):
         self.start_layer, self.end_layer, self.layers = make_layers(
             num_layers, get_decoder_layer)
 
-        self.final_norm = JaxRmsNorm(
-            hidden_size,
-            rngs=self.rng,
-            epsilon=rms_norm_eps,
-            scale_init=nnx.with_partitioning(init_fn, (None, )),
-            dtype=dtype,
-            param_dtype=dtype,
-            quant_config=self.quant_config,
-        )
+        if self.is_last_rank:
+            self.final_norm = JaxRmsNorm(
+                hidden_size,
+                rngs=self.rng,
+                epsilon=rms_norm_eps,
+                scale_init=nnx.with_partitioning(init_fn, (None, )),
+                dtype=dtype,
+                param_dtype=dtype,
+                quant_config=self.quant_config,
+            )
 
-        self.lm_head = JaxEinsum(
-            einsum_str="TD,DV->TV",
-            kernel_shape=(hidden_size, vocab_size),
-            dtype=dtype,
-            rngs=self.rng,
-            kernel_init=nnx.with_partitioning(
-                init_fn, (None, ShardingAxisName.MLP_TENSOR)),
-            param_dtype=dtype,
-            # Same as https://github.com/vllm-project/tpu-inference/issues/1684
-            # DS-V3 doesn't quantize lm_head, so set quant_config to None.
-            quant_config=None,
-            prefix="lm_head",
-        )
+            self.lm_head = JaxEinsum(
+                einsum_str="TD,DV->TV",
+                kernel_shape=(hidden_size, vocab_size),
+                dtype=dtype,
+                rngs=self.rng,
+                kernel_init=nnx.with_partitioning(
+                    init_fn, (None, ShardingAxisName.MLP_TENSOR)),
+                param_dtype=dtype,
+                # Same as https://github.com/vllm-project/tpu-inference/issues/1684
+                # DS-V3 doesn't quantize lm_head, so set quant_config to None.
+                quant_config=None,
+                prefix="lm_head",
+            )
+        else:
+            self.final_norm = PPMissingLayer()
+            self.lm_head = PPMissingLayer()
 
         if os.environ.get("VLLM_LOGGING_LEVEL", "").upper() == "DEBUG":
             self._print_model_architecture()
@@ -1873,13 +1909,28 @@ class DeepSeekV3(JaxModule):
         kv_caches: List[jax.Array],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
+        inputs_embeds: Optional[jax.Array] = None,
+        _input_positions: Optional[jax.Array] = None,
+        _layer_name_to_kv_cache: Optional[Tuple[Tuple[str, int]]] = None,
+        _lora_metadata: Any = None,
+        intermediate_tensors: Optional[JaxIntermediateTensors] = None,
         *args,
-    ) -> Tuple[List[KVCacheType], jax.Array, List[jax.Array]]:
-        x = self.embed_tokens(input_ids)
-        for (i, block) in enumerate(self.layers):
+    ) -> Tuple[List[KVCacheType], jax.Array | JaxIntermediateTensors,
+               List[jax.Array]]:
+        if self.is_first_rank:
+            x = self.embed_tokens(input_ids)
+        else:
+            assert intermediate_tensors is not None
+            x = intermediate_tensors["hidden_states"]
+
+        for (i, block) in enumerate(
+                islice(self.layers, self.start_layer, self.end_layer)):
             kv_cache = kv_caches[i]
             new_kv_cache, x = block(x, kv_cache, attention_metadata)
             kv_caches[i] = new_kv_cache
+
+        if not self.is_last_rank:
+            return kv_caches, JaxIntermediateTensors({"hidden_states": x}), []
 
         final_activation = self.final_norm(x)
 
