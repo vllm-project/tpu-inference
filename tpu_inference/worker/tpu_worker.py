@@ -436,7 +436,7 @@ class TPUWorker:
                                                mappings=mappings,
                                                transpose_keys=transpose_keys,
                                                reshard_fn=reshard_fn)
-    
+
     def reset_kv_cache(self) -> None:
         self.model_runner.reset_kv_cache()
 

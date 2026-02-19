@@ -95,7 +95,7 @@ def main(args: dict):
     outputs = llm.generate(prompts, sampling_params)
     if profiler_config.profiler == "torch":
         llm.stop_profile()
-    
+
     llm.collective_rpc("reset_kv_cache")
     llm.collective_rpc("reinitialize_kv_cache")
 

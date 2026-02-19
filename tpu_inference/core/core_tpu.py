@@ -576,7 +576,7 @@ class DisaggEngineCore(vLLMEngineCore):
         for engine in itertools.chain(self._prefill_engines,
                                       self._decode_engines):
             engine.scheduler.reset_prefix_cache()
-    
+
     def reset_kv_cache(self) -> None:
         for engine in itertools.chain(self._prefill_engines,
                                       self._decode_engines):

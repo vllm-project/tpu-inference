@@ -280,7 +280,7 @@ class KVCacheManager:
             f"sharding={kv_caches[0].sharding} | "
             f"dtype={kv_caches[0].dtype} | "
             f"hbm={utils.hbm_usage_gb(self.runner.mesh.devices.flatten())}Gb")
-    
+
     def reset_kv_cache(self) -> None:
         """Delete KV cache JAX arrays to free HBM.
         This explicitly deletes all KV cache JAX arrays, clearing the HBM
