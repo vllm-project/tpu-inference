@@ -542,52 +542,56 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                     layer, down_scale_name)._weights_to_load,
                                                   axis=0)
 
-            # Fuse the weights into w13: [Gate, Up]
-            w13_weight = jnp.concatenate([w_gate, w_up], axis=-1)
-            # NOTE: this is needed because the GMM kernels expect the RHS
-            # to be transposed for w13. Specifically, w2 is expected to be
-            # (num_experts, hidden_size, intermediate_size), w13 is expected to
-            # be (num_experts, 2 * hidden_size, intermediate_size)
-            w13_weight = jnp.transpose(w13_weight, (0, 2, 1))
-            # TODO (jacobplatin): make the string retrieval less fragile
-            w13_weight_scale = jnp.concatenate([s_gate, s_up], axis=-1)
-            w13_weight_scale = jnp.transpose(w13_weight_scale, (0, 2, 1))
+                # Fuse the weights into w13: [Gate, Up]
+                w13_weight = jnp.concatenate([w_gate, w_up], axis=-1)
+                # NOTE: this is needed because the GMM kernels expect the RHS
+                # to be transposed for w13. Specifically, w2 is expected to be
+                # (num_experts, hidden_size, intermediate_size), w13 is expected to
+                # be (num_experts, 2 * hidden_size, intermediate_size)
+                w13_weight = jnp.transpose(w13_weight, (0, 2, 1))
+                # TODO (jacobplatin): make the string retrieval less fragile
+                w13_weight_scale = jnp.concatenate([s_gate, s_up], axis=-1)
+                w13_weight_scale = jnp.transpose(w13_weight_scale, (0, 2, 1))
 
-            w2_weight = jnp.transpose(w2_weight, (0, 2, 1))
-            w2_weight_scale = jnp.transpose(w2_weight_scale, (0, 2, 1))
+                w2_weight = jnp.transpose(w2_weight, (0, 2, 1))
+                w2_weight_scale = jnp.transpose(w2_weight_scale, (0, 2, 1))
 
-            weight_block_size = None
-            if self.weight_block_size is not None:
-                weight_block_size = tuple(self.weight_block_size)
+                weight_block_size = None
+                if self.weight_block_size is not None:
+                    weight_block_size = tuple(self.weight_block_size)
 
-            # TODO (jacobplatin): we should support bias
-            input_weights = FusedMoEWeights(w13_weight=w13_weight,
-                                            w13_weight_scale=w13_weight_scale,
-                                            w13_bias=None,
-                                            w2_weight=w2_weight,
-                                            w2_weight_scale=w2_weight_scale,
-                                            w2_bias=None)
+                # TODO (jacobplatin): we should support bias
+                input_weights = FusedMoEWeights(
+                    w13_weight=w13_weight,
+                    w13_weight_scale=w13_weight_scale,
+                    w13_bias=None,
+                    w2_weight=w2_weight,
+                    w2_weight_scale=w2_weight_scale,
+                    w2_bias=None)
 
-            weights = process_fp8_moe_weights(
-                input_weights,
-                moe_backend=layer.moe_backend,
-                mesh=layer.mesh,
-                activation=layer.activation,
-                # Convert to tuple so jax jit can hash it
-                weight_block_size=weight_block_size,
-            )
+                weights = process_fp8_moe_weights(
+                    input_weights,
+                    moe_backend=layer.moe_backend,
+                    mesh=layer.mesh,
+                    activation=layer.activation,
+                    # Convert to tuple so jax jit can hash it
+                    weight_block_size=weight_block_size,
+                )
 
             # TODO (jacobplatin): we probably want to make the sharding configurable
             layer.kernel_gating_upproj_EDF = nnx.Param(
-                weights.w13_weight, sharding=layer.edf_sharding)
-            layer.kernel_down_proj_EFD = nnx.Param(weights.w2_weight,
-                                                   sharding=layer.efd_sharding)
+                shard_put(weights.w13_weight, shardings=layer.edf_sharding))
+            layer.kernel_down_proj_EFD = nnx.Param(
+                shard_put(weights.w2_weight, shardings=layer.efd_sharding))
             # NOTE: we aren't sharding the weight scales
-            setattr(layer,
-                    f"kernel_gating_upproj_EDF_{self.weight_scale_name}",
-                    nnx.Param(weights.w13_weight_scale))
-            setattr(layer, f"kernel_down_proj_EFD_{self.weight_scale_name}",
-                    nnx.Param(weights.w2_weight_scale))
+            setattr(
+                layer, f"kernel_gating_upproj_EDF_{self.weight_scale_name}",
+                nnx.Param(
+                    shard_put(weights.w13_weight_scale, shardings=(None, ))))
+            setattr(
+                layer, f"kernel_down_proj_EFD_{self.weight_scale_name}",
+                nnx.Param(
+                    shard_put(weights.w2_weight_scale, shardings=(None, ))))
 
             del layer.kernel_gating_EDF
             del layer.kernel_up_proj_EDF
