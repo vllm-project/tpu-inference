@@ -42,8 +42,8 @@ from tpu_inference.layers.jax.quantization.unquantized import (
     UnquantizedFusedMoEMethod, UnquantizedLinearMethod)
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
-    jax_array_from_reshaped_torch, load_nnx_param_from_reshaped_torch,
-    shard_put)
+    cpu_mesh_context, jax_array_from_reshaped_torch,
+    load_nnx_param_from_reshaped_torch, shard_put)
 
 logger = init_logger(__name__)
 
@@ -386,9 +386,13 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
 
             assert isinstance(jax_param, nnx.Param)
 
-            jax_weight = jax_array_from_reshaped_torch(
-                torch_weight, reshape_dims=(1, ) +
-                torch_weight.shape)  # add expert dim for concatenation later
+            # Here we rely on `jax_array_from_reshaped_torch` to load weights
+            # onto CPU and prepend a leading dimension for expert_id, because
+            # later in `process_weights_after_loading` the sharded experts
+            # will be concatenated altogether then put onto the device.
+            jax_weight = jax_array_from_reshaped_torch(torch_weight,
+                                                       reshape_dims=(1, ) +
+                                                       torch_weight.shape)
             jax_param._weights_to_load[expert_id] = jax_weight
 
         logger.debug(
@@ -492,8 +496,7 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                 # more than once. We only want to process the weights once all of them are loaded.
                 return
 
-            with jax.set_mesh(
-                    jax.make_mesh((1, ), ('x', ), devices=jax.devices('cpu'))):
+            with cpu_mesh_context():
                 w_gate = jnp.concatenate(
                     layer.kernel_gating_EDF._weights_to_load, axis=0)
                 w_up = jnp.concatenate(
