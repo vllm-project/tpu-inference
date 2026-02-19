@@ -20,6 +20,7 @@ import jax.numpy as jnp
 from flax import nnx
 from flax.typing import Sharding
 from jax._src.dtypes import TypePromotionError
+from jax.sharding import NamedSharding, PartitionSpec
 from jaxtyping import Float
 
 from tpu_inference.layers.common.moe import MoEBackend
@@ -77,6 +78,7 @@ class Router(nnx.Module):
     ed_sharding: Sharding
     random_init: bool = False
     moe_backend: MoEBackend = MoEBackend.DENSE_MAT
+    mesh: Optional[jax.sharding.Mesh] = None
 
     def __call__(self, x_TD: Float):
         """Routes tokens to experts.
@@ -90,7 +92,9 @@ class Router(nnx.Module):
                 - selected_experts_TX: Indices of selected experts, shape (sequence_length, num_experts_per_tok).
         """
         x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
+        x_TD = jax.lax.with_sharding_constraint(
+            x_TD,
+            NamedSharding(self.mesh, PartitionSpec(*self.activation_ffw_td)))
         router_act = modeling_flax_utils.ACT2FN[self.router_act]
         router_logits_TE = jnp.einsum('TD,DE -> TE', x_TD,
                                       self.kernel_DE.value)
@@ -278,8 +282,9 @@ class JaxMoE(JaxModule):
             if not hasattr(jax_param, "_cnt_moe_weights_loaded"):
                 jax_param.value = jax.numpy.zeros(jax_param.value.shape,
                                                   dtype=jax_param.value.dtype)
-                setattr(jax_param, "_cnt_moe_weights_loaded", 0)
-            jax_param._cnt_moe_weights_loaded += 1
+                jax_param.set_metadata("_cnt_moe_weights_loaded", 0)
+            jax_param.set_metadata("_cnt_moe_weights_loaded",
+                                   jax_param._cnt_moe_weights_loaded + 1)
             assert isinstance(
                 jax_param.value,
                 jax.Array), f"Expecting jax.Array, got {type(jax_param.value)}"

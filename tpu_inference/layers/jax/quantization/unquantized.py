@@ -17,6 +17,8 @@ from typing import Optional
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from jax.sharding import NamedSharding
+from jax.sharding import PartitionSpec as P
 
 from tpu_inference.layers.common.moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.process_weights.moe_weights import (
@@ -67,6 +69,9 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
                                       **kwargs) -> None:
         """
         Process weights after loading.
+
+        Please see https://github.com/vllm-project/tpu-inference/blob/bb1a88/tpu_inference/layers/common/moe.py#L39
+        for more information on the expected weights per MoE backend.
 
         Args:
             layer: The layer to process.
@@ -123,7 +128,8 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
         assert isinstance(layer, JaxMoE)
 
         x_TD = jnp.asarray(x, layer.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD, layer.activation_ffw_td)
+        x_TD = jax.lax.with_sharding_constraint(
+            x_TD, NamedSharding(layer.mesh, P(*layer.activation_ffw_td)))
 
         router_logits = None
         # Fused weight backends

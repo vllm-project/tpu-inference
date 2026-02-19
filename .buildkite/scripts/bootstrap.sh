@@ -20,6 +20,7 @@ set -euo pipefail
 echo "--- :git: Checking changed files"
 
 BASE_BRANCH=${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-"main"}
+FILES_CHANGED=""
 
 if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     echo "PR detected. Target branch: $BASE_BRANCH"
@@ -61,7 +62,11 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     fi
 else
     echo "Non-PR build. Bypassing file change check."
+    FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r -m "$BUILDKITE_COMMIT")
 fi
+
+# Store changed files in metadata for sub-pipelines (newlines to commas)
+echo "$FILES_CHANGED" | tr '\n' ',' | buildkite-agent meta-data set "changed_files"
 
 upload_pipeline() {
     if [ "${MODEL_IMPL_TYPE:-auto}" == "auto" ]; then

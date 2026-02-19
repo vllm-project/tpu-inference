@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
 import jax.numpy as jnp
 import torch
 import vllm.envs as vllm_envs
-from tpu_info import device
 from vllm.platforms.interface import Platform, PlatformEnum
 
 from tpu_inference import envs
@@ -48,9 +47,15 @@ class TpuPlatform(Platform):
     ]
 
     additional_env_vars: list[str] = [
-        "PHASED_PROFILING_DIR", "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS",
-        "TPU_MULTIHOST_BACKEND", "VLLM_MLA_DISABLE", "TPU_BACKEND_TYPE",
-        "NEW_MODEL_DESIGN"
+        "PHASED_PROFILING_DIR",
+        "TPU_CHIPS_PER_HOST_BOUNDS",
+        "TPU_HOST_BOUNDS",
+        "TPU_MULTIHOST_BACKEND",
+        "VLLM_MLA_DISABLE",
+        "TPU_BACKEND_TYPE",
+        "NEW_MODEL_DESIGN",
+        "MODEL_IMPL_TYPE",
+        "VLLM_DISABLE_SHARED_EXPERTS_STREAM",
     ]
 
     @classmethod
@@ -75,6 +80,12 @@ class TpuPlatform(Platform):
                 # Causes mutliprocess accessing IFRT when calling jax.devices()
                 return "TPU v6 lite"
             else:
+                # The tpu_info package, upon being imported, executes
+                # _initialize_libtpu_safely(), which attempts to start a new
+                # process (process.start()). Python's multiprocessing module
+                # forbids starting new processes, resulting in error.
+                # So import tpu_info here instead.
+                from tpu_info import device
                 chip_type, _ = device.get_local_chips()
                 return f"TPU {chip_type.name}"
         except Exception as e:

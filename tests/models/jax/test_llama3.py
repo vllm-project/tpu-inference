@@ -112,7 +112,8 @@ class TestLlamaForCausalLM:
         """Tests model init and model forward for the 8B model variant."""
 
         # Test model init
-        model = LlamaForCausalLM(mock_vllm_config, rng, mesh)
+        with jax.set_mesh(mesh):
+            model = LlamaForCausalLM(mock_vllm_config, rng, mesh)
 
         model_config = mock_vllm_config.model_config
         hf_config = model_config.hf_config
@@ -127,7 +128,7 @@ class TestLlamaForCausalLM:
         layers = model.model.layers
         assert len(layers) == hf_config.num_hidden_layers
         assert isinstance(model.rng, nnx.Rngs)
-        assert model.model.lm_head == model.model.embed.embedding
+        assert (model.model.lm_head == model.model.embed.embedding).all()
 
         attn = layers[0].self_attn
         hidden_size = hf_config.hidden_size
