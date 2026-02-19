@@ -213,17 +213,7 @@ def _get_nnx_model(
             loader = get_model_loader(vllm_config.load_config)
             if isinstance(model, LoadableWithIterator):
                 assert isinstance(model, JaxModule)
-                jax.profiler.start_trace("./profiler-traces")
-                try:
-                    loader.load_weights(model, vllm_config.model_config)
-                except Exception as e:
-                    jax.profiler.save_device_memory_profile(
-                        "memory.error.prof")
-                    jax.profiler.stop_trace()
-                    raise e
-                jax.profiler.save_device_memory_profile("memory.prof")
-                jax.profiler.stop_trace()
-
+                loader.load_weights(model, vllm_config.model_config)
             elif isinstance(loader, RunaiModelStreamerLoader):
                 model_weights = vllm_config.model_config.model
                 if hasattr(vllm_config.model_config, "model_weights"):
