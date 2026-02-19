@@ -1348,12 +1348,16 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
             # Use next parent class in MRO.
             return super().load_weights(weights)
 
+        start_ignore_layer_num = len(self.model.layers)
+        end_ignore_layer_num = 62  # last layer is MTP, we ignore it for now
         loader = JaxAutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head"]
                            if not hasattr(self, 'lm_head') else []),
-            skip_substrs=["layers.61"
-                          ],  # last layer is MTP, we ignore it for now
+            skip_substrs=[
+                f"layers.{i}"
+                for i in range(start_ignore_layer_num, end_ignore_layer_num)
+            ],
         )
         return loader.load_weights(weights)
 
