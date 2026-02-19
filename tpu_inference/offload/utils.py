@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, List, Literal, Optional, Tuple
 
 import jax
+import jax.numpy as jnp
 from vllm.config import get_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.factory import \
     KVConnectorFactory
@@ -120,6 +121,7 @@ SwapFn = Callable[
 KVCacheSwapFn = Callable[[List[jax.Array]], List[jax.Array]]
 
 
+# TODO(jcgu): cleanup
 def _split_per_shard_to_chunks(
     per_shard_data: List[List[jax.Array]],
     split_size_list: List[int],
@@ -148,6 +150,7 @@ def _split_per_shard_to_chunks(
     return chunks_on_cpu
 
 
+# TODO(jcgu): cleanup
 def jax_copy_swap_kv_caches(
     src_kv_caches,
     src_sharding: jax.sharding.NamedSharding,
@@ -224,6 +227,7 @@ def jax_copy_swap_kv_caches(
         return result
 
 
+# TODO(jcgu): cleanup
 # NOTE(jcgu): keep the same interface as the pallas one
 def jax_swap_kv_caches(
     src_kv_caches: List[jax.Array],
@@ -248,6 +252,7 @@ def jax_swap_kv_caches(
     return jax.tree.map(_jax_device_put, src_kv_caches)
 
 
+# TODO(jcgu): cleanup
 def pallas_swap_kv_caches(
     src_kv_caches: List[jax.Array],
     src_sharding: jax.sharding.NamedSharding,
@@ -285,6 +290,7 @@ def pallas_swap_kv_caches(
         return swap_in_fn(src_kv_caches, src_sharding, dst_sharding)
 
 
+# TODO(jcgu): cleanup
 def get_kv_cache_swap_fn(
     swap_op_type: CPU_OFFLOADING_SWAP_OP_TYPE,
     host_sharding: jax.sharding.NamedSharding,
@@ -329,7 +335,7 @@ def get_kv_cache_swap_fn(
                                     direction="d2h")
     return swap_in_fn, swap_out_fn
 
-
+# TODO(jcgu): cleanup
 @functools.partial(
     jax.jit,
     static_argnames=("block_size"),
@@ -363,3 +369,68 @@ def jitted_insert_kv_cache_slices(
         return cache
 
     return jax.tree.map(_update_layer, kv_caches, kv_cache_slices)
+
+
+@functools.partial(jax.jit, static_argnames=['num_blocks'])
+def jitted_stack_kv_cache_cross_layers(kv_caches: List[jax.Array],
+                            block_ids: jax.Array, num_blocks: int) -> List[jax.Array]:
+    """
+    This uses jax.tree.map to apply the operation across all layers.
+    """
+
+    def _gather_blocks(layer_kv_cache):
+        return layer_kv_cache.at[block_ids].get()
+
+    gathered_kv_layers = jax.tree.map(_gather_blocks, kv_caches)
+    stacked_blocks = jnp.stack(gathered_kv_layers, axis=1)
+
+    # Split the stacked_blocks along axis=0 into individual blocks
+    # split_blocks = jnp.split(stacked_blocks, indices_or_sections=len(block_ids), axis=0)
+    split_blocks = jnp.split(stacked_blocks, indices_or_sections=num_blocks, axis=0)
+    # split_blocks = jnp.array_split(stacked_blocks, num_blocks, axis=0)
+    
+    # Squeeze the first dimension from each of the split arrays
+    # squeezed_blocks = [jnp.squeeze(c, axis=0) for c in split_blocks]
+
+    # return squeezed_blocks
+    return split_blocks
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=("dim_nums",),
+    donate_argnames=(
+        "kv_caches",
+        "stacked_blocks",
+    ),
+)
+def update_kv_caches(kv_caches: List[jax.Array], stacked_blocks: List[jax.Array], block_indices: jax.Array, dim_nums: jax.lax.ScatterDimensionNumbers) -> List[jax.Array]:
+    """
+    Updates KV caches by unstacking gathered blocks and inserting slices using scatter.
+
+    Args:
+      kv_caches: List of original KV caches for each layer.
+      stacked_blocks: List of gathered blocks, each with shape (1, num_layers, ...).
+      block_indices: Array of block indices to update.
+
+    Returns:
+      List of updated KV caches for each layer.
+    """
+    concatenated_blocks = jnp.concatenate(stacked_blocks, axis=0)
+    layer_slices_tuple = jnp.unstack(concatenated_blocks, axis=1)
+    layer_slices_list = list(layer_slices_tuple)
+
+    def _update_layer(cache_layer, slices):
+        # dnums = jax.lax.ScatterDimensionNumbers(
+        #     update_window_dims=tuple(range(1, len(slices.shape))),
+        #     inserted_window_dims=(0,),
+        #     scatter_dims_to_operand_dims=(0,)
+        # )
+        return jax.lax.scatter(
+            cache_layer,
+            block_indices[:, None],
+            slices,
+            dim_nums
+        )
+
+    return jax.tree.map(_update_layer, kv_caches, layer_slices_list)

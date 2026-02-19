@@ -72,9 +72,9 @@ class LocalCPUBackend:
         self._num_saved_cpu_chunks += 1
         value_size = self._get_value_size(value)
         self.current_size_bytes += value_size
-        logger.info(
+        logger.debug(
             f"Added chunk_id: {chunk_id} (size:{value_size}) to CPU backend.")
-        logger.info(
+        logger.debug(
             f"Cache: {self.current_size_bytes} bytes, {self._num_saved_cpu_chunks} occupied chunks."
         )
         return True
