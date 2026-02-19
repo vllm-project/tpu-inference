@@ -129,10 +129,30 @@ def _selective_gather_ep(hidden_states, token_indices_sorted, group_sizes,
     ep_token_start = jnp.where(ep_expert_start > 0,
                                cumsum_gs[ep_expert_start - 1], 0)
     ep_token_end = cumsum_gs[ep_expert_start + num_experts_per_shard - 1]
-    positions = jnp.arange(num_total)
-    is_local = (positions >= ep_token_start) & (positions < ep_token_end)
-    safe_indices = jnp.where(is_local, token_indices_sorted, 0)
-    return hidden_states[safe_indices]
+    ep_token_cnt = ep_token_end - ep_token_start
+
+    max_num_local_tokens = hidden_states.shape[0]
+    hidden_size = hidden_states.shape[1]
+    # pad so dynamic_slice won't read OOB.
+    padded_indices = jnp.pad(token_indices_sorted, (0, max_num_local_tokens), mode='constant', constant_values=0)
+    local_indices = jax.lax.dynamic_slice(padded_indices, (ep_token_start,), (max_num_local_tokens,))
+    local_pos = jnp.arange(max_num_local_tokens)
+    valid = local_pos < ep_token_cnt
+    local_indices = jnp.where(valid, local_indices, local_pos % max_num_local_tokens)
+    x_local = hidden_states[local_indices]
+    x = jnp.zeros((num_total, hidden_size), dtype=hidden_states.dtype)
+    # xw32: what is the difference between x.at[].set() and jax.lax.dynamic_update_slice?
+    # x = x.at[local_indices].set(x_local)
+    x = jax.lax.dynamic_update_slice(x, x_local, (ep_token_start, 0))
+    return x
+
+    
+
+
+    # positions = jnp.arange(num_total)
+    # is_local = (positions >= ep_token_start) & (positions < ep_token_end)
+    # safe_indices = jnp.where(is_local, token_indices_sorted, 0)
+    # return hidden_states[safe_indices]
 
 
 def moe_gmm_local(
