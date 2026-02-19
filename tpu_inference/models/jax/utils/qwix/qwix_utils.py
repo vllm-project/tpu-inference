@@ -66,7 +66,7 @@ DEFAULT_DEEPSEEK_FP4_MLP_MOE_FP8_ATTN_CONFIG = {
         "rules": [
             # Exclude router from quantization
             {
-                "module_path": ".*.custom_module.experts.router.*",
+                "module_path": ".*.mlp.experts.router.*",
                 "weight_qtype": None,
             },
             # Avoid the combine expert ops
@@ -82,7 +82,7 @@ DEFAULT_DEEPSEEK_FP4_MLP_MOE_FP8_ATTN_CONFIG = {
             },
             # MoE experts: use FP4 for expert weights
             {
-                "module_path": ".*.custom_module.*",
+                "module_path": ".*.mlp.*",
                 "weight_qtype": "float4_e2m1fn",
                 "act_qtype": "float8_e4m3fn",
                 "tile_size": 256,

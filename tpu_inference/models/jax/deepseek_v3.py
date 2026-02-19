@@ -40,7 +40,9 @@ from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.quantization import (quantize_kv,
                                                       u8_unpack_e2m1)
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
+from tpu_inference.layers.jax.base import _init_fn as init_fn
 from tpu_inference.layers.jax.base import create_param, sharded_initializer
 from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.embed import JaxEmbed
@@ -50,6 +52,7 @@ from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.moe.utils import (get_expert_parallelism,
                                                 select_moe_backend)
 from tpu_inference.layers.jax.norm import JaxRmsNorm
+from tpu_inference.layers.jax.pp_utils import make_layers
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.layers.jax.quantization.unquantized import UnquantizedConfig
 from tpu_inference.layers.jax.rope import DeepseekScalingRotaryEmbedding
@@ -196,17 +199,19 @@ class DeepseekV3BaseAttention(JaxModule):
                                         epsilon=self.rms_norm_eps,
                                         scale_init=nnx.with_partitioning(
                                             init_fn, (None, )),
+                                        param_dtype=self.dtype,
                                         dtype=self.dtype,
-                                        random_init=self.random_init,
-                                        rngs=rngs)
+                                        rngs=rngs,
+                                        quant_config=self.quant_config)
 
         self.kv_a_layernorm = JaxRmsNorm(self.kv_lora_rank,
                                          epsilon=self.rms_norm_eps,
                                          scale_init=nnx.with_partitioning(
                                              init_fn, (None, )),
+                                         param_dtype=self.dtype,
                                          dtype=self.dtype,
-                                         random_init=self.random_init,
-                                         rngs=rngs)
+                                         rngs=rngs,
+                                         quant_config=self.quant_config)
 
         self.kv_cache_quantized_dtype = None
         if self.kv_cache_dtype != "auto":
@@ -741,7 +746,7 @@ class DeepseekV3DecoderLayer(nnx.Module):
 
     # MLP can be either the Dense MLP (for first k layers) or DeepseekV2MoE
     # TODO: rename to mlp? custom_module seems needlessly confusing
-    custom_module: nnx.Module | DeepseekV3MoE | DeepseekV3MLP
+    mlp: nnx.Module | DeepseekV3MoE | DeepseekV3MLP
 
     def __call__(
         self, x_TD: jax.Array, kv_cache: List[jax.Array],
@@ -758,10 +763,10 @@ class DeepseekV3DecoderLayer(nnx.Module):
         # Run MLP/MoE
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        custom_module_output = self.custom_module(hidden_states)
+        mlp_output = self.mlp(hidden_states)
 
         # Residual
-        hidden_states = residual + custom_module_output
+        hidden_states = residual + mlp_output
 
         return new_cache, hidden_states
 
@@ -937,17 +942,17 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
         self._loaded_to_standardized_keys = {
             # encode & decode
             "model.embed_tokens.weight":
-            "embed_tokens.input_embedding_table_VD",
+            "embed_tokens.weight",
             "lm_head.weight":
             "lm_head.input_embedding_table_DV",
             # final norm
             "model.norm.weight":
-            "final_norm.scale",
+            "final_norm.weight",
             # norm in transformer blocks
             "model.layers.*.input_layernorm.weight":
-            "layers.*.input_layernorm.scale",
+            "layers.*.input_layernorm.weight",
             "model.layers.*.post_attention_layernorm.weight":
-            "layers.*.post_attention_layernorm.scale",
+            "layers.*.post_attention_layernorm.weight",
             # attention (MLA)
             "model.layers.*.self_attn.q_a_layernorm.weight":
             "layers.*.self_attn.q_a_layernorm.weight",
@@ -1015,17 +1020,17 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
             # TODO (jacobplatin): remove or clean this up
             self.scale_shape_map_for_random_weight_loading = {
                 # MoE experts (3D)
-                "custom_module.experts.kernel_down_proj_EFD": (256, 8, 7168),
-                "custom_module.experts.kernel_gating_EDF": (256, 28, 2048),
-                "custom_module.experts.kernel_up_proj_EDF": (256, 28, 2048),
+                "mlp.experts.kernel_down_proj_EFD": (256, 8, 7168),
+                "mlp.experts.kernel_gating_EDF": (256, 28, 2048),
+                "mlp.experts.kernel_up_proj_EDF": (256, 28, 2048),
                 # Shared experts (2D)
-                "custom_module.shared_experts.down_proj.weight": (8, 7168),
-                "custom_module.shared_experts.gating_proj.weight": (28, 2048),
-                "custom_module.shared_experts.up_proj.weight": (28, 2048),
+                "mlp.shared_experts.down_proj.weight": (8, 7168),
+                "mlp.shared_experts.gating_proj.weight": (28, 2048),
+                "mlp.shared_experts.up_proj.weight": (28, 2048),
                 # Dense FFW (2D)
-                "custom_module.gating_proj.weight": (28, 18432),
-                "custom_module.up_proj.weight": (28, 18432),
-                "custom_module.down_proj.weight": (72, 7168),
+                "mlp.gating_proj.weight": (28, 18432),
+                "mlp.up_proj.weight": (28, 18432),
+                "mlp.down_proj.weight": (72, 7168),
                 # Attention (3D for MLA, 2D for the rest)
                 "self_attn.q_a_proj.weight": (28, 1536),
                 "self_attn.q_b_proj.weight": (6, 24576),
@@ -1516,7 +1521,6 @@ class DeepSeekV3(JaxModule):
                  vllm_config: VllmConfig,
                  rng: jax.Array,
                  mesh: Mesh,
-                 quant_config,
                  force_random_weights: bool = False,
                  prefix: str = ""):
         assert mesh is not None
@@ -1604,15 +1608,16 @@ class DeepSeekV3(JaxModule):
             model_dtype=dtype,
             moe_backend=self.moe_backend,
             use_mla_kernel=self.use_mla_kernel)
-
+        self.quant_config = vllm_config.quant_config
         self.embed_tokens = JaxEmbed(
             num_embeddings=vocab_size,
             features=hidden_size,
+            param_dtype=dtype,
             dtype=dtype,
             embedding_init=nnx.with_partitioning(
                 init_fn, (ShardingAxisName.MLP_TENSOR, None)),
             rngs=self.rng,
-            quant_config=quant_config,
+            quant_config=self.quant_config,
             prefix=prefix + ".embed_tokens",
         )
 
@@ -1667,7 +1672,7 @@ class DeepSeekV3(JaxModule):
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
                 rngs=self.rng,
-                quant_config=vllm_config.quant_config,
+                quant_config=self.quant_config,
                 activation_attention_td=P(None, None),
                 activation_q_td=P(None, None),
                 query_tnh=query_tnh_spec,
@@ -1689,7 +1694,9 @@ class DeepSeekV3(JaxModule):
                 epsilon=rms_norm_eps,
                 scale_init=nnx.with_partitioning(init_fn, (None, )),
                 dtype=dtype,
+                param_dtype=dtype,
                 rngs=self.rng,
+                quant_config=self.quant_config,
             )
 
             post_attention_layernorm = JaxRmsNorm(
@@ -1697,16 +1704,19 @@ class DeepSeekV3(JaxModule):
                 epsilon=rms_norm_eps,
                 scale_init=nnx.with_partitioning(init_fn, (None, )),
                 dtype=dtype,
+                param_dtype=dtype,
                 rngs=self.rng,
+                quant_config=self.quant_config,
             )
 
             # Logic to determine if this layer is Dense or MoE
             # * The first k layers are always dense.
             # * Subsequent layers are MoE if interleave_moe_layer_step conditions are met
-            if i < first_k_dense_replace:
+            if layer_index < first_k_dense_replace:
                 is_moe_layer = False
             else:
-                is_moe_layer = ((i + 1) % interleave_moe_layer_step == 0)
+                is_moe_layer = ((layer_index + 1) %
+                                interleave_moe_layer_step == 0)
 
             if not is_moe_layer:
                 # Dense Layer (used for first k layers or interleaved dense layers)
@@ -1719,7 +1729,7 @@ class DeepSeekV3(JaxModule):
                     activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
                     df_sharding=(None, ShardingAxisName.MLP_TENSOR),
                     fd_sharding=(ShardingAxisName.MLP_TENSOR, None),
-                    quant_config=vllm_config.quant_config)
+                    quant_config=self.quant_config)
             else:
                 # MoE Layer
                 moe_dtype = jnp.float8_e4m3fn if self.weight_loader.is_native_fp8_model else vllm_config.model_config.hf_config.quantization_config.get(
@@ -1739,7 +1749,7 @@ class DeepSeekV3(JaxModule):
                     activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
                     ed_sharding=(None, None),
                     e_sharding=(None, ),
-                    quant_config=vllm_config.quant_config)
+                    quant_config=self.quant_config)
 
                 # routed experts
                 custom_module = JaxMoE(
@@ -1754,7 +1764,7 @@ class DeepSeekV3(JaxModule):
                     mesh=self.mesh,
                     hidden_act=hidden_act,
                     rngs=self.rng,
-                    quant_config=self.vllm_config.quant_config,
+                    quant_config=self.quant_config,
                     activation_ffw_td=P(ShardingAxisName.MLP_DATA,
                                         ShardingAxisName.MOE_TENSOR),
                     activation_ffw_ted=P(ShardingAxisName.MLP_DATA, None,
@@ -1779,7 +1789,7 @@ class DeepSeekV3(JaxModule):
                     activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
                     df_sharding=(None, ShardingAxisName.MLP_TENSOR),
                     fd_sharding=(ShardingAxisName.MLP_TENSOR, None),
-                    quant_config=vllm_config.quant_config)
+                    quant_config=self.quant_config)
 
                 mlp_layer = DeepseekV3MoE(
                     experts=custom_module,
@@ -1788,11 +1798,11 @@ class DeepSeekV3(JaxModule):
                 )
 
             return DeepseekV3DecoderLayer(
-                layer_idx=i,
+                layer_idx=layer_index,
                 input_layernorm=input_layernorm,
                 post_attention_layernorm=post_attention_layernorm,
                 self_attn=_create_deepseek_attention(),
-                custom_module=mlp_layer)
+                mlp=mlp_layer)
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             num_layers, get_decoder_layer)
@@ -1803,6 +1813,8 @@ class DeepSeekV3(JaxModule):
             epsilon=rms_norm_eps,
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             dtype=dtype,
+            param_dtype=dtype,
+            quant_config=self.quant_config,
         )
 
         self.lm_head = LMhead(vocab_size=vocab_size,
@@ -1858,7 +1870,7 @@ class DeepSeekV3(JaxModule):
         attention_metadata: AttentionMetadata,
         *args,
     ) -> Tuple[List[KVCacheType], jax.Array, List[jax.Array]]:
-        x = self.embed_tokens.encode(input_ids)
+        x = self.embed_tokens(input_ids)
         for (i, block) in enumerate(self.layers):
             kv_cache = kv_caches[i]
             new_kv_cache, x = block(x, kv_cache, attention_metadata)
