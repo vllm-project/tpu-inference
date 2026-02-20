@@ -1066,7 +1066,8 @@ class DeepSeekV3(JaxModule):
                 num_embeddings=vocab_size,
                 features=hf_config.hidden_size,
                 dtype=dtype,
-                embedding_init=nnx.with_partitioning(init_fn, (None, )),
+                embedding_init=nnx.with_partitioning(
+                    init_fn, (ShardingAxisName.MLP_TENSOR, )),
                 rngs=rng,
                 quant_config=quant_config,
                 prefix=prefix + ".embed_tokens",
@@ -1306,7 +1307,8 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
                 kernel_shape=(hidden_size, vocab_size),
                 dtype=model_config.dtype,
                 rngs=rng,
-                kernel_init=nnx.with_partitioning(init_fn, (None, )),
+                kernel_init=nnx.with_partitioning(
+                    init_fn, (None, ShardingAxisName.MLP_TENSOR)),
                 # Same as https://github.com/vllm-project/tpu-inference/issues/1684
                 # DS-V3 doesn't quantize lm_head.
                 quant_config=None,
@@ -1374,5 +1376,16 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
         loaded = loader.load_weights(weights)
 
         self.model.initialize_cache()
+
+        # Display model arch
+        num_layers_to_display = 5
+        should_skip_layer_display = False
+        for name, param in self.named_parameters():
+            if f"layers.{num_layers_to_display}." in name:
+                should_skip_layer_display = True
+            if should_skip_layer_display and "layers." in name:
+                continue
+            v: jax.Array = param.value
+            logger.info(f"{name} : {v.dtype}{v.shape} on {v.device}")
 
         return loaded
