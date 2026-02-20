@@ -261,10 +261,6 @@ class LlamaGuard4WeightLoader(BaseWeightLoader):
                     else:
                         loaded_weight = jnp.array(loaded_weight.cpu().numpy())
 
-                # [FIX] Ensure we are working with numpy/jax arrays for shape ops
-                if hasattr(loaded_weight, 'cpu'):
-                    loaded_weight = jnp.array(loaded_weight.cpu().numpy())
-
                 mapped_name = self.map_loaded_to_standardized_name(loaded_name)
 
                 if _is_pp_missing_layer(mapped_name, self.pp_missing_layers):
@@ -326,17 +322,10 @@ class LlamaGuard4WeightLoader(BaseWeightLoader):
                     print_param_info(model_weight, loaded_name)
 
                 model_weight.value = shard_put(loaded_weight,
-                                               model_weight.sharding,
+                                               model_weight.out_sharding,
                                                mesh=model_for_loading.mesh)
 
         nnx.update(model_for_loading, model_params)
-        has_nan = any(jnp.isnan(leaf).any() for leaf in jax.tree_util.tree_leaves(model_params))
-        if has_nan:
-            print("!!! NAN FOUND IN MODEL STATE !!!")
-            # To find exactly which one:
-            for path, value in model_params.flatten().items():
-                if jnp.isnan(value).any():
-                    print(f"NaN in parameter: {path}")
 
 
 class LlamaGuard4ForCausalLM(nnx.Module):
@@ -401,7 +390,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                 vocab_size=vocab_size,
                 hidden_size=self.hidden_size,
                 dtype=self.dtype,
-                vd_sharding=(('data', 'model'), None),
+                vd_sharding=P(('data', 'model'), None),
                 rngs=self.rng,
                 random_init=force_random_weights,
             )
@@ -425,6 +414,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             random_init=force_random_weights,
             vision_rope=self.vision_rope)
 
+
         self.multi_modal_projector = JAXLlama4MultiModalProjector(
             self.projector_config_dict,
             rngs=self.rng,
@@ -432,14 +422,14 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             random_init=force_random_weights,
         )
 
-        self.layers = []
+        self.layers = nnx.List([])
         self.start_layer, self.end_layer = get_start_end_layer(
             self.num_layers,
             get_pp_group().rank_in_group,
             get_pp_group().world_size)
 
         for i in range(self.start_layer):
-            layers.append(PPMissingLayer())
+            self.layers.append(PPMissingLayer())
 
         for i in range(self.start_layer, self.end_layer):
             use_attention_rope = True
@@ -452,8 +442,8 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                                      rngs=self.rng,
                                      df_sharding=P(None, 'model'),
                                      fd_sharding=P('model', None),
-                                     activation_ffw_td=('data', None),
-                                     mesh = self.mesh)
+                                     activation_ffw_td=P('data', None),
+                                     mesh=self.mesh)
 
             attn = Llama4Attention(
                 hidden_size=self.hidden_size,
@@ -519,12 +509,10 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                                      pre_attention_norm=pre_attention_norm,
                                      pre_mlp_norm=pre_mlp_norm,
                                      use_attention_rope=use_attention_rope)
-            layers.append(block)
+            self.layers.append(block)
 
         for i in range(self.end_layer, self.num_layers):
-            layers.append(PPMissingLayer())
-
-        self.layers = nnx.List(layers)
+            self.layers.append(PPMissingLayer())
 
         if self.is_last_rank:
             self.final_norm = RMSNorm(
@@ -540,8 +528,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                                   hidden_size=self.hidden_size,
                                   dtype=self.dtype,
                                   rngs=self.rng,
-                                  vd_sharding=(('data', 'model'), None),
-                                  dv_sharding=(None, ('data', 'model')),
+                                  dv_sharding=P(None, ('data', 'model')),
                                   random_init=force_random_weights)
         else:
             self.final_norm = PPMissingLayer()

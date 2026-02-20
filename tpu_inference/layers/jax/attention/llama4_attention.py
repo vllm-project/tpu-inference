@@ -18,7 +18,8 @@ from typing import Any, NamedTuple, Optional
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from jax.sharding import Mesh
+from jax import lax
+from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jax.sharding import Sharding
 
@@ -276,8 +277,8 @@ class Llama4VisionAttention(nnx.Module):
 
         # md = attention_metadata
         x = jnp.asarray(x, self.dtype)
-        x_SD = nnx.with_sharding_constraint(x, self.activation_attention_td)
-        x_q_TD = nnx.with_sharding_constraint(x, self.activation_q_td)
+        x_SD = lax.with_sharding_constraint(x, self.activation_attention_td)
+        x_q_TD = lax.with_sharding_constraint(x, self.activation_q_td)
 
         rope_scaling = self.rope_scaling
         rope_theta = self.rope_theta
@@ -291,7 +292,7 @@ class Llama4VisionAttention(nnx.Module):
             if use_attention_rope:
                 q_TNH = apply_rope(q_TNH, freqs_cis, H, rope_theta,
                                    rope_scaling, self.rope_input_ordering)
-            q_TNH = nnx.with_sharding_constraint(q_TNH, self.query_tnh)
+            q_TNH = lax.with_sharding_constraint(q_TNH, self.query_tnh)
 
         with jax.named_scope("k_proj"):
             k_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
@@ -301,13 +302,13 @@ class Llama4VisionAttention(nnx.Module):
             if use_attention_rope:
                 k_SKH = apply_rope(k_SKH, freqs_cis, H, rope_theta,
                                    rope_scaling, self.rope_input_ordering)
-            k_SKH = nnx.with_sharding_constraint(k_SKH, self.keyvalue_skh)
+            k_SKH = lax.with_sharding_constraint(k_SKH, self.keyvalue_skh)
 
         with jax.named_scope("v_proj"):
             v_SKH = jnp.einsum('SD,DKH -> SKH', x_SD,
                                self.kernel_v_proj_DKH.value)
             v_SKH += self.bias_v_proj_KH.value[None, ...]
-            v_SKH = nnx.with_sharding_constraint(v_SKH, self.keyvalue_skh)
+            v_SKH = lax.with_sharding_constraint(v_SKH, self.keyvalue_skh)
 
         if self.kv_cache_quantized_dtype:
             k_scale = self._k_scale
@@ -358,7 +359,7 @@ class Llama4VisionAttention(nnx.Module):
             o_TD = jnp.einsum('TNH,NHD -> TD', outputs_TNH,
                               self.kernel_o_proj_NHD.value)
             o_TD += self.bias_o_proj_D.value
-            o_TD = nnx.with_sharding_constraint(
+            o_TD = lax.with_sharding_constraint(
                 o_TD, self.activation_attention_out_td)
 
         return new_kv_cache, o_TD

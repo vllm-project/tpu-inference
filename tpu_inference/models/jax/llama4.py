@@ -860,6 +860,7 @@ class JAXLlama4VisionEncoderLayer(nnx.Module):
             temperature_tuning_scale=0.0,
             activation_attention_td=None,
             activation_attention_out_td=None,
+            activation_q_td=P('data', 'model'),
         )
 
         self.mlp = JAXLlama4VisionMLP(cfg,
@@ -933,13 +934,13 @@ class JAXLlama4VisionEncoder(nnx.Module):
                  random_init: bool = False):
         cfg = config
         num_layers = cfg.num_hidden_layers if 'num_hidden_layers' in cfg else 34
-        self.layers = [
+        self.layers = nnx.List([
             JAXLlama4VisionEncoderLayer(cfg,
                                         rngs=rngs,
                                         dtype=dtype,
                                         random_init=random_init,
                                         mesh=mesh) for _ in range(num_layers)
-        ]
+        ])
 
     def __call__(self, hidden_states: jax.Array, freqs_ci_stacked: jax.Array,
                  **kwargs) -> jax.Array:
