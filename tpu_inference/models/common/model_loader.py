@@ -110,7 +110,7 @@ def _get_nnx_model(
         """
         return model_class(vllm_config, rng, mesh)
 
-    @nnx.jit(donate_argnums=(0, ),
+    @jax.jit(donate_argnums=(0, ),
              static_argnames=('use_qwix_on_abstract_model', ))
     def create_jit_model(
             model: nnx.Module,
@@ -162,7 +162,7 @@ def _get_nnx_model(
                                              use_qwix_on_abstract_model=True)
             return jit_model
 
-        @nnx.jit
+        @jax.jit
         def create_sharded_model():
             model = model_class(vllm_config, rng, mesh)
             state = nnx.state(model)
