@@ -307,8 +307,8 @@ def fused_moe_func(
 
     Args:
         hidden_states: [num_tokens, hidden_size]
-        w1: first moe weights [num_experts, intermediate_size * 2, hidden_size]
-        w2: second moe weights [num_experts, hidden_size, intermediate_size]
+        w1: first moe weights [num_experts, hidden_size, intermediate_size * 2]
+        w2: second moe weights [num_experts, intermediate_size, hidden_size]
         w1_scale: w1 scale [num_experts, num_blocks, 1, intermediate_size * 2]
         w2_scale: w2 scale [num_experts, num_blocks, 1, hidden_size]
         w1_bias: optional bias of w1 [num_experts, 1, intermediate_size * 2]
