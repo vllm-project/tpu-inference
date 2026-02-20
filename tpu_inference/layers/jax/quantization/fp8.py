@@ -42,7 +42,7 @@ from tpu_inference.layers.jax.quantization.unquantized import (
     UnquantizedFusedMoEMethod, UnquantizedLinearMethod)
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
-    cpu_mesh_context, jax_array_from_reshaped_torch,
+    cpu_mesh, cpu_mesh_context, jax_array_from_reshaped_torch,
     load_nnx_param_from_reshaped_torch, shard_put)
 
 logger = init_logger(__name__)
@@ -250,6 +250,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                                   permute_dims=(0, 1),
                                   param_name=layer.prefix + ".weight"),
             eager_sharding=False)
+        layer.weight.set_metadata('mesh', cpu_mesh)
         layer.weight.set_metadata('sharding', self.weight_sharding)
 
         # Block-wise quantization scale
@@ -268,6 +269,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 param_name=layer.prefix + ".weight_scale_inv",
             ),
             eager_sharding=False)
+        layer.weight.set_metadata('mesh', cpu_mesh)
         layer.weight_scale_inv.set_metadata('sharding', self.weight_sharding)
 
     def process_weights_after_loading(self, layer):
@@ -279,39 +281,47 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             # needed — the batched matmul uses dot_general with FP8 natively.
             return
 
-        weight = layer.weight.value
-        weight_scale_inv = layer.weight_scale_inv.value
-        bias = layer.bias.value if getattr(layer, 'bias',
-                                           None) is not None else None
-        if bias is not None:
-            bias = bias.reshape(-1)
-        weights = common_fp8.process_blockwise_fp8_linear_weights(
-            weight,
-            weight_scale_inv,
-            bias=bias,
-            weight_block_size=tuple(self.quant_config.weight_block_size),
-            linear_config=self.linear_config)
-        delattr(layer, 'weight')
-        delattr(layer, 'weight_scale_inv')
-        delattr(layer, 'bias')
+        # Do the re-quant process on CPU to avoid OOM on device.
+        with cpu_mesh_context():
+            weight = layer.weight.value
+            weight_scale_inv = layer.weight_scale_inv.value
+            bias = layer.bias.value if getattr(layer, 'bias',
+                                               None) is not None else None
+            if bias is not None:
+                bias = bias.reshape(-1)
+            weights = common_fp8.process_blockwise_fp8_linear_weights(
+                weight,
+                weight_scale_inv,
+                bias=bias,
+                weight_block_size=tuple(self.quant_config.weight_block_size),
+                linear_config=self.linear_config)
+            delattr(layer, 'weight')
+            delattr(layer, 'weight_scale_inv')
+            delattr(layer, 'bias')
 
-        if self.linear_config.enable_quantized_matmul_kernel:
-            # The quantized_matmul_kernel expects weight scales shaped (n_out_features, 1, n_blocks) for blockwisze quantization.
-            weights.weight_scale = jnp.expand_dims(
-                jnp.transpose(weights.weight_scale),
-                axis=1,
+            if self.linear_config.enable_quantized_matmul_kernel:
+                # The quantized_matmul_kernel expects weight scales shaped (n_out_features, 1, n_blocks) for blockwisze quantization.
+                weights.weight_scale = jnp.expand_dims(
+                    jnp.transpose(weights.weight_scale),
+                    axis=1,
+                )
+            weights = shard_linear_weights(
+                weights,
+                mesh=self.linear_config.mesh,
+                weight_p_spec=self.linear_config.weight_sharding,
+                bias_p_spec=self.linear_config.bias_sharding,
             )
-        weights = shard_linear_weights(
-            weights,
-            mesh=self.linear_config.mesh,
-            weight_p_spec=self.linear_config.weight_sharding,
-            bias_p_spec=self.linear_config.bias_sharding,
-        )
 
         if self.linear_config.fuse_matmuls:
-            layer.weight = nnx.Param(weights.weight)
-            layer.weight_scale_inv = nnx.Param(weights.weight_scale)
-            layer.bias = nnx.Param(weights.bias) if bias is not None else None
+            layer.weight = nnx.Param(
+                shard_put(weights.weight,
+                          shardings=self.linear_config.weight_sharding))
+            layer.weight_scale_inv = nnx.Param(
+                shard_put(weights.weight_scale, shardings=(None, )))
+            layer.bias = nnx.Param(
+                shard_put(weights.bias,
+                          shardings=self.linear_config.bias_sharding)
+            ) if bias is not None else None
         else:
             raise NotImplementedError(
                 "Fp8 block-wise linear method only supports fuse_matmuls.")
