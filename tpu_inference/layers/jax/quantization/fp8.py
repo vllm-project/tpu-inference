@@ -184,6 +184,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         else:
             self.kernel_shape = (math.prod(self.out_features),
                                  self.in_features)
+        self.bias_sharding = adapt_info.out_features_sharding
 
     def create_weights_jax(self, layer: JaxModule, *weight_args, rngs,
                            **extra_weight_attrs):
@@ -220,6 +221,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         # Follow upstream limitation that only float8_e4m3 is supported.
         # https://github.com/vllm-project/vllm/blob/2a99c5a6c86daef8c766ba2dbf05c385b192c64b/vllm/model_executor/layers/quantization/fp8.py#L283-L284
         param_dtype = jnp.float8_e4m3
+        mesh = jax.make_mesh((1, ), ('x', ), devices=jax.devices('cpu'))
         layer.weight = nnx.Param(
             kernel_init(rngs.params(), self.kernel_shape, param_dtype),
             weight_loader=partial(load_nnx_param_from_reshaped_torch,
