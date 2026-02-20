@@ -1,3 +1,17 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from unittest.mock import MagicMock
 
 import jax
@@ -45,6 +59,7 @@ def mesh():
               axis_names=('data', 'attn_dp', 'expert', 'model')) as m:
         yield m
 
+
 @pytest.fixture
 def mock_model_inputs():
     num_tokens = 8
@@ -69,10 +84,12 @@ def mock_model_inputs():
 
     return (input_ids, attention_metadata, indices_do_sample)
 
+
 @pytest.fixture
 def rng() -> PRNGKey:
     """Provides a reusable JAX PRNGKey."""
     return jax.random.PRNGKey(42)
+
 
 class TestGemma3ForCausalLM:
 
@@ -87,7 +104,7 @@ class TestGemma3ForCausalLM:
         }]
     ])
     def test_gemma3_1B(self, model_name, kv_cache_type, qwix_rules, rng, mesh,
-                        mock_model_inputs):
+                       mock_model_inputs):
         """Tests model init and model forward for the 0.6B model variant."""
         mock_vllm_config = MockVllmConfig(model_name, kv_cache_type)
         if qwix_rules:
@@ -112,7 +129,7 @@ class TestGemma3ForCausalLM:
         assert len(layers) == hf_config.num_hidden_layers
         assert isinstance(model.rng, nnx.Rngs)
 
-        # local attn layer 
+        # local attn layer
         attn = layers[0].self_attn
         hidden_size = hf_config.hidden_size
         num_heads = hf_config.num_attention_heads
@@ -140,12 +157,12 @@ class TestGemma3ForCausalLM:
         assert mlp.up_proj.kernel.shape == (hidden_size, intermediate_size)
         assert mlp.down_proj.kernel.shape == (intermediate_size, hidden_size)
 
-        # global attn layer 
+        # global attn layer
         attn = layers[5].self_attn
-        rope_theta = hf_config.rope_theta 
+        rope_theta = hf_config.rope_theta
 
-        assert attn.rope_theta == rope_theta 
-        assert attn.sliding_window is None 
+        assert attn.rope_theta == rope_theta
+        assert attn.sliding_window is None
 
         # Test model load
         with jax.set_mesh(mesh):
@@ -159,15 +176,14 @@ class TestGemma3ForCausalLM:
                                         apply_to_abstract_model=False)
 
         # Test model forward
-        kv_caches = create_kv_caches(
-            num_blocks=4,
-            block_size=32,
-            num_kv_heads=num_kv_heads,
-            head_size=head_dim,
-            mesh=mesh,
-            layer_names=["layer"] * hf_config.num_hidden_layers,
-            cache_dtype=jnp.bfloat16
-        )
+        kv_caches = create_kv_caches(num_blocks=4,
+                                     block_size=32,
+                                     num_kv_heads=num_kv_heads,
+                                     head_size=head_dim,
+                                     mesh=mesh,
+                                     layer_names=["layer"] *
+                                     hf_config.num_hidden_layers,
+                                     cache_dtype=jnp.bfloat16)
         # 1 seq with 16 tokens
         input_ids, attention_metadata, indices_do_sample = mock_model_inputs
         kv_caches, hidden_states, aux_hidden_states = model(
