@@ -179,7 +179,7 @@ def _get_nnx_model(
                                                 mesh,
                                                 apply_to_abstract_model=False)
             if hasattr(jit_model, 'initialize_cache'):
-                jit_model.initialize_cache()
+                jit_model.initialize_cache(mesh)
     else:
         # We first create an abstract model without allocating any weights,
         # then fill in its weigths during load_weights from HF.

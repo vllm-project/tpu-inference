@@ -95,9 +95,6 @@ def sharded_quantized_matmul(x: jax.Array,
                                                        x_q_dtype=x_q_dtype,
                                                        block_size=block_size)
         else:
-            print(
-                f"clkbp {x.shape=}, {w_q.shape=}, {w_s.shape=}, using xla_quantized_matmul"
-            )  # TODO: remove this debug print
             output = xla_quantized_matmul(x, w_q, w_s)
         if in_axis:
             output = jax.lax.psum(output, axis_name=in_axis)
