@@ -29,6 +29,9 @@ from jax.sharding import PartitionSpec as P
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
 from tpu_inference.kernels.flash_attention.kernel import flash_attention
+from tpu_inference.kernels.mla.v1.kernel import mla_ragged_paged_attention
+from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import \
+    get_tuned_block_sizes
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_megacore
@@ -415,3 +418,74 @@ def attention(
     )
 
     return kv_cache, output
+
+
+def mla(q_TNA,
+        q_rope_TNH,
+        k_SA,
+        k_rope_SH,
+        kv_cache,
+        md: AttentionMetadata,
+        mesh: Mesh,
+        num_attention_heads,
+        qk_nope_head_dim,
+        query_tnh=None,
+        keyvalue_skh=None,
+        attn_o_tnh=None,
+        q_scale: float | None = None,
+        k_scale: float | None = None,
+        v_scale: float | None = None,
+        sinks: jax.Array | None = None,
+        sm_scale=None):
+    in_specs = (
+        query_tnh or P(ShardingAxisName.MLP_TENSOR, None, None),  # q
+        query_tnh or P(ShardingAxisName.MLP_TENSOR, None, None),  # q_rope
+        keyvalue_skh or P(ShardingAxisName.MLP_TENSOR, None),  # k
+        keyvalue_skh or P(ShardingAxisName.MLP_TENSOR, None),  # k_rope
+        P(ShardingAxisName.MLP_TENSOR),  # kv_cache
+        P(ShardingAxisName.ATTN_DATA),  # md.seq_lens: Replicated
+        P(ShardingAxisName.ATTN_DATA),  # page_indices_flat: Replicated
+        P(ShardingAxisName.ATTN_DATA),  # query_start_loc: Replicated
+        P(ShardingAxisName.ATTN_DATA),  # distribution: Replicated
+    )
+    out_specs = (attn_o_tnh or P(ShardingAxisName.MLP_TENSOR, None, None),
+                 P(ShardingAxisName.MLP_TENSOR))
+
+    def _mla_ragged_paged_attention(q, q_rope, k, k_rope, cache, *args):
+        max_num_tokens = q.shape[0]
+        max_num_seqs = md.seq_lens.shape[0]
+        pages_per_seq = md.block_tables.shape[0] // max_num_seqs
+
+        bkv_p, bq_sz = get_tuned_block_sizes(q.dtype, cache.dtype,
+                                             num_attention_heads, 1,
+                                             qk_nope_head_dim, cache.shape[1],
+                                             max_num_tokens, pages_per_seq)
+        num_kv_pages_per_block = min(min(pages_per_seq, bkv_p), 4)
+        num_queries_per_block = min(min(max_num_tokens, bq_sz), 4)
+
+        out, new_cache = mla_ragged_paged_attention(
+            q,
+            q_rope,
+            k,
+            k_rope,
+            cache,
+            *args,
+            sm_scale=sm_scale,
+            num_kv_pages_per_block=num_kv_pages_per_block,
+            num_queries_per_block=num_queries_per_block,
+            q_scale=q_scale,
+            k_scale=k_scale,
+            v_scale=v_scale)
+
+        return new_cache, out
+
+    kv_cache, output_TNA = jax.jit(
+        jax.shard_map(_mla_ragged_paged_attention,
+                      mesh=mesh,
+                      in_specs=in_specs,
+                      out_specs=out_specs,
+                      check_vma=False))(q_TNA, q_rope_TNH, k_SA, k_rope_SH,
+                                        kv_cache, md.seq_lens, md.block_tables,
+                                        md.query_start_loc,
+                                        md.request_distribution)
+    return kv_cache, output_TNA

@@ -102,12 +102,12 @@ class CompilationManager:
             else:
                 self._precompile_compute_pooling()
             # Skip sampling if already precompiled before KV cache allocation
-            if not self._sampling_precompiled:
-                self._precompile_sampling()
+            # if not self._sampling_precompiled:
+            #     self._precompile_sampling()
             self._precompile_disagg_utils()
             # Skip gather_logprobs if already precompiled before KV cache allocation
-            if not self._gather_logprobs_precompiled:
-                self._precompile_gather_logprobs()
+            # if not self._gather_logprobs_precompiled:
+            #     self._precompile_gather_logprobs()
             self._precompile_structured_decoding()
             if self.runner.speculative_config:
                 self._precompile_speculative_decoding()
@@ -149,6 +149,7 @@ class CompilationManager:
                                     positions,
                                     inputs_embeds,
                                     intermediate_tensors=None,
+                                    num_tokens_actual=None,
                                     is_first_rank=True,
                                     is_last_rank=True) -> None:
         num_tokens = None
@@ -157,6 +158,8 @@ class CompilationManager:
         elif inputs_embeds is not None:
             num_tokens = inputs_embeds.shape[0]
         assert num_tokens is not None
+
+        assert num_tokens == num_tokens_actual
 
         dp_size = self.runner.vllm_config.sharding_config.total_dp_size
         dp_sharding = NamedSharding(
@@ -191,7 +194,12 @@ class CompilationManager:
                 seq_lens=seq_lens,
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
-                num_actual_tokens=num_tokens  # TODO: is this right?
+                num_actual_tokens=
+                num_tokens_actual,  # TODO: does this value matter?
+                num_decode_tokens=
+                num_tokens_actual,  # TODO: does this value matter?
+                num_decodes=1,  # TODO: does this value matter?
+                num_prefills=0  # TODO: does this value matter?
             )
             return attention_metadata_gid
 
@@ -334,6 +342,7 @@ class CompilationManager:
                 inputs_embeds=None,
                 intermediate_tensors=intermediate_tensors,
                 is_first_rank=is_first_rank,
+                num_tokens_actual=num_tokens,
                 is_last_rank=is_last_rank)
 
     def _precompile_backbone_with_inputs_embeds(self) -> None:

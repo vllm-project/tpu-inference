@@ -181,6 +181,10 @@ IMAGE_NAME="${GCR_REPO}/vllm-tpu"
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 TOP_DIR=$(dirname "$(dirname "$SCRIPT_DIR")")
 
+# Prune Head Node BEFORE building the new image to ensure we have disk space
+echo "--- Pruning Docker on Head Node to clear disk space..."
+docker system prune -a --volumes -f || true
+
 # Source the environment setup script
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/setup_docker_env.sh"
@@ -209,14 +213,20 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   -e MODEL_IMPL_TYPE=vllm \
   -e VLLM_DISABLE_SHARED_EXPERTS_STREAM=1 &
 
-sleep 5
+sleep 20
 
 # 2. Distribute run_cluster.sh to workers and start them
 IFS=',' read -r -a WORKER_IPS_ARRAY <<< "${WORKER_IPS}"
 for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
     echo "--- Distributing and starting Ray Worker on ${worker_ip}"
+
+    # Prune Worker Node BEFORE it tries to pull the new giant image
+    echo "   -> Pruning Docker on worker to free disk space..."
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker system prune -a --volumes -f" || true
+    
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "mkdir -p ~/tpu-inference/scripts/multihost" || true
-    scp "${SSH_OPTS[@]}" "${TOP_DIR}/scripts/multihost/run_cluster.sh" "${SSH_USER}@${worker_ip}:~/tpu-inference/scripts/multihost/run_cluster.sh"
+    # shellcheck disable=SC2002
+    cat "${TOP_DIR}/scripts/multihost/run_cluster.sh" | ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "cat > ~/tpu-inference/scripts/multihost/run_cluster.sh"
     
     REMOTE_CMD="bash ~/tpu-inference/scripts/multihost/run_cluster.sh \
       '${DOCKER_IMAGE}' \

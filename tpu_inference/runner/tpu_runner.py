@@ -1411,18 +1411,35 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                                    dp_size]
         seq_lens = self.seq_lens_cpu[:self.max_num_reqs]
 
+        num_decodes = 0
+        num_decode_tokens = 0
         _request_distribution = []
         for dp_rank in range(dp_size):
             _num_reqs = num_req_per_dp_rank[dp_rank]
             # The batch has been reordered by _reorder_batch so decode requests come first
             # Count decode requests (those with num_scheduled_tokens == 1) in this DP rank
             num_decode_in_dp_rank = 0
-            for req_id in req_ids_dp[dp_rank]:
-                if scheduler_output.num_scheduled_tokens[req_id] == 1:
+            for i, req_id in enumerate(req_ids_dp[dp_rank]):
+                # Determine phase based on computed tokens (0 means prefill)
+                req_idx = req_indices_dp[dp_rank][i]
+                is_prefill = self.input_batch.num_computed_tokens_cpu[
+                    req_idx] == 0
+                n_tokens = scheduled_tokens_per_dp_rank[dp_rank][i]
+
+                # Original logic for request_distribution (heuristic: 1 token = decode)
+                if n_tokens == 1:
                     num_decode_in_dp_rank += 1
+
+                # Robust logic for metadata statistics
+                if not is_prefill:
+                    num_decodes += 1
+                    num_decode_tokens += n_tokens
+
             _request_distribution.append(
                 [num_decode_in_dp_rank, num_decode_in_dp_rank, _num_reqs])
         request_distribution = np.array(_request_distribution).ravel()
+        num_prefills = num_reqs - num_decodes
+        num_actual_tokens = total_num_scheduled_tokens
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
@@ -1495,7 +1512,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 seq_lens=seq_lens,
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
-            )
+                num_decodes=num_decodes,
+                num_prefills=num_prefills,
+                num_actual_tokens=
+                padded_total_num_scheduled_tokens,  # not sure if we want to actually be num_actual_tokens, but then we get padding issues
+                num_decode_tokens=num_decode_tokens)
 
             # This is for making these cpu buffers hidden during tracing
             attention_metadata_gid.query_start_loc_cpu = query_start_loc_cpu

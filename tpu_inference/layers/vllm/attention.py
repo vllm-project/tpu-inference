@@ -17,7 +17,7 @@ from vllm.v1.attention.backends.registry import (AttentionBackendEnum,
                                                  register_backend)
 
 from tpu_inference import utils
-from tpu_inference.layers.common.attention_interface import attention
+from tpu_inference.layers.common.attention_interface import attention, mla
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.logger import init_logger
@@ -115,14 +115,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
         sinks: torch.Tensor | None = None,
-        q_lora_rank=None,
-        kv_lora_rank=None,
-        qk_nope_head_dim=None,
-        qk_rope_head_dim=None,
-        qk_head_dim=None,
-        v_head_dim=None,
-        kv_b_proj=None,
-        indexer=None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -241,6 +233,159 @@ class PallasMLAttentionBackendImpl(PallasAttentionBackendImpl):
             *args,
             **kwargs,
         )
+        self.q_lora_rank = q_lora_rank
+        self.kv_lora_rank = kv_lora_rank
+        self.qk_nope_head_dim = qk_nope_head_dim
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.qk_head_dim = qk_head_dim
+        self.v_head_dim = v_head_dim
+        self.kv_b_proj = kv_b_proj
+        self.indexer = indexer
+
+    def forward_mha(
+        self,
+        q: torch.Tensor,
+        k_c: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+        k_scale: torch.Tensor,
+        layer: AttentionLayer,
+        output: torch.Tensor,
+    ) -> None:
+
+        kv_cache = kv_c_and_k_pe_cache
+
+        print(attn_metadata.num_actual_tokens,
+              attn_metadata.input_positions.shape, attn_metadata.num_prefills,
+              attn_metadata.num_decode_tokens, attn_metadata.num_prefills,
+              attn_metadata.num_decodes)
+        jax.debug.print("{x} {y} {z} {aa} {asa} {at}",
+                        x=attn_metadata.num_actual_tokens,
+                        y=attn_metadata.input_positions.shape,
+                        z=attn_metadata.num_prefills,
+                        aa=attn_metadata.num_decode_tokens,
+                        asa=attn_metadata.num_prefills,
+                        at=attn_metadata.num_decodes)
+        vllm_model_wrapper_context = get_vllm_model_wrapper_context()
+        # TODO: use this?
+        kv_cache_index = vllm_model_wrapper_context.layer_name_to_kvcache_index[
+            layer.layer_name]
+        kv_cache = vllm_model_wrapper_context.kv_caches[kv_cache_index]
+
+        mesh = vllm_model_wrapper_context.mesh
+
+        q, k_c, k_pe = jax_view(q), jax_view(k_c), jax_view(k_pe)
+
+        q_nope, q_pe = q[..., :self.qk_nope_head_dim], q[
+            ..., self.qk_nope_head_dim:]
+
+        q_scale = k_scale = v_scale = None
+        if self.kv_cache_quantized_dtype:
+            k_c, _ = quantize_kv(self.kv_cache_quantized_dtype,
+                                 k_c,
+                                 value=None,
+                                 k_scale=layer._k_scale_float)
+            k_pe, _ = quantize_kv(self.kv_cache_quantized_dtype,
+                                  k_pe,
+                                  value=None,
+                                  k_scale=layer._k_scale_float)
+            # TODO(kyuyeunk): Enable w8a8 when VREG spill issue is resolved.
+            # q_scale = layer._q_scale_float
+            k_scale = layer._k_scale_float
+            v_scale = layer._v_scale_float
+
+        sinks = jax_view(self.sinks)
+
+        print(q.shape, q_nope.shape, q_pe.shape, k_c.shape, k_pe.shape)
+        # (1024, 128, 192) (1024, 128, 128) (1024, 128, 64) (1024, 512) (1024, 1, 64)
+        new_kv_cache, outputs = _jax_mla_func(
+            kv_cache,
+            q_nope,
+            q_pe,
+            k_c,
+            k_pe,
+            sinks,
+            attn_metadata,
+            mesh,
+            self.scale,
+            self.qk_nope_head_dim,
+            self.head_size,
+            self.num_heads,
+            self.num_kv_heads,
+            q_scale,
+            k_scale,
+            v_scale,
+            self.sliding_window,
+        )
+        vllm_model_wrapper_context.kv_caches[kv_cache_index] = new_kv_cache
+
+        # TODO: jacobplatin update outputs
+
+    def forward_mqa(
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        k_c,
+        k_pe,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+        layer: AttentionLayer,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+
+        assert isinstance(q, tuple)
+        kv_cache = kv_c_and_k_pe_cache
+        q_nope, q_pe = q
+
+        vllm_model_wrapper_context = get_vllm_model_wrapper_context()
+        # TODO: use this?
+        kv_cache_index = vllm_model_wrapper_context.layer_name_to_kvcache_index[
+            layer.layer_name]
+        kv_cache = vllm_model_wrapper_context.kv_caches[kv_cache_index]
+
+        mesh = vllm_model_wrapper_context.mesh
+
+        q_nope, q_pe, k_c, k_pe = jax_view(q_nope), jax_view(q_pe), jax_view(
+            k_c), jax_view(k_pe)
+        q_scale = k_scale = v_scale = None
+        if self.kv_cache_quantized_dtype:
+            k_c, _ = quantize_kv(self.kv_cache_quantized_dtype,
+                                 k_c,
+                                 value=None,
+                                 k_scale=layer._k_scale_float)
+            k_pe, _ = quantize_kv(self.kv_cache_quantized_dtype,
+                                  k_pe,
+                                  value=None,
+                                  k_scale=layer._k_scale_float)
+            # TODO(kyuyeunk): Enable w8a8 when VREG spill issue is resolved.
+            # q_scale = layer._q_scale_float
+            k_scale = layer._k_scale_float
+            v_scale = layer._v_scale_float
+
+        sinks = jax_view(self.sinks)
+
+        new_kv_cache, outputs = _jax_mla_func(
+            kv_cache,
+            q_nope,
+            q_pe,
+            k_c,
+            k_pe,
+            sinks,
+            attn_metadata,
+            mesh,
+            self.scale,
+            self.qk_nope_head_dim,
+            self.head_size,
+            self.num_heads,
+            self.num_kv_heads,
+            q_scale,
+            k_scale,
+            v_scale,
+            self.sliding_window,
+        )
+        # TODO: need this?
+        vllm_model_wrapper_context.kv_caches[kv_cache_index] = new_kv_cache
+        # NOTE: second return value is LSE, which I don't believe is needed
+        return torch_view(outputs), None
 
 
 @register_backend(AttentionBackendEnum.FLASHMLA)
@@ -268,7 +413,8 @@ class PallasMLAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         padded_head_size = (cdiv(head_size, TPU_HEAD_SIZE_ALIGNMENT) *
                             TPU_HEAD_SIZE_ALIGNMENT)
-        return (num_blocks, block_size, num_kv_heads * 2, padded_head_size)
+        # TODO: is this right?
+        return (num_blocks, block_size, padded_head_size)
 
 
 @functools.partial(
@@ -333,5 +479,73 @@ def _jax_attn_func(
     assert outputs.shape[1] == num_heads
     assert outputs.shape[2] == head_size
     outputs = outputs.reshape(q_len, num_heads * head_size)
+
+    return new_kv_cache, outputs
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=(
+        "mesh",
+        "scale",
+        "head_size",
+        "num_heads",
+        "num_kv_heads",
+        "qk_nope_head_dim",
+        "q_scale",
+        "k_scale",
+        "v_scale",
+        "sliding_window",
+    ),
+    donate_argnames=("kv_cache"),
+)
+def _jax_mla_func(
+    kv_cache: jax.Array,
+    q: jax.Array,
+    q_rope: jax.Array,
+    k: jax.Array,
+    k_rope: jax.Array,
+    sinks: jax.Array | None,
+    attention_metadata: AttentionMetadata,
+    mesh: Mesh,
+    scale: float,
+    qk_nope_head_dim: int,
+    head_size: int,
+    num_heads: int,
+    num_kv_heads: int,
+    q_scale: float | None = None,
+    k_scale: float | None = None,
+    v_scale: float | None = None,
+    sliding_window: int | None = None,
+) -> Tuple[jax.Array, jax.Array]:
+
+    k_rope = k_rope.squeeze(1)
+
+    new_kv_cache, outputs = mla(
+        q,
+        q_rope,
+        k,
+        k_rope,
+        kv_cache,
+        attention_metadata,
+        mesh,
+        num_heads,
+        qk_nope_head_dim,
+        query_tnh=None,
+        keyvalue_skh=None,
+        attn_o_tnh=None,
+        q_scale=q_scale,
+        k_scale=k_scale,
+        v_scale=v_scale,
+        sinks=sinks,
+        sm_scale=scale,
+        # attention_chunk_size=sliding_window,
+    )
+
+    # Convert the shape back to vLLM's convention
+    # assert outputs.shape[0] == q_len
+    # assert outputs.shape[1] == num_heads
+    # assert outputs.shape[2] == head_size
+    # outputs = outputs.reshape(q_len, num_heads * head_size)
 
     return new_kv_cache, outputs

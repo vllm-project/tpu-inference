@@ -27,9 +27,11 @@ import jax
         "seq_lens",
         "query_start_loc",
         "request_distribution",
-        "num_actual_tokens",
     ],
-    meta_fields=[],
+    meta_fields=[
+        "num_actual_tokens", "num_decodes", "num_decodes", "num_prefills",
+        "num_decode_tokens", "decode"
+    ],
     drop_fields=["query_start_loc_cpu", "seq_lens_cpu"],
 )
 @dataclass
@@ -50,3 +52,10 @@ class AttentionMetadata(object):
     seq_lens_cpu: Any = field(init=False)
 
     num_actual_tokens: int | None = None
+    num_decodes: int | None = None
+    num_prefills: int | None = None
+    num_decode_tokens: int | None = None
+    # NOTE: this is a hack because this is only used in vLLM `forward_mqa`, which we implement in
+    # tpu-inference/tpu_inference/layers/vllm/attention.py.  Specific line that we patch:
+    # https://github.com/vllm-project/vllm/blob/f2c4788/vllm/model_executor/layers/attention/mla_attention.py#L635
+    decode: bool = True
