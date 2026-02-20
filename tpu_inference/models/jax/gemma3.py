@@ -278,7 +278,7 @@ class Gemma3Model(nnx.Module):
             embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng
         ) 
-        self.layers = [
+        self.layers = nnx.List([
             Gemma3DecoderLayer(
                 config=hf_config,
                 dtype=self.dtype,
@@ -287,7 +287,7 @@ class Gemma3Model(nnx.Module):
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype, 
                 is_local=(i + 1) % self.sliding_window_pattern != 0,
             ) for i in range(hf_config.num_hidden_layers)
-        ]
+        ])
         self.norm = RMSNorm(
             self.hidden_size,
             hf_config,
