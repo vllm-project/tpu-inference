@@ -43,6 +43,7 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils import file_utils
 
 logger = init_logger(__name__)
+cpu_mesh = jax.make_mesh((1, ), ('x', ), devices=jax.devices('cpu'))
 
 HF_WEIGHTS_FORMAT = "*.safetensors"
 
@@ -657,6 +658,11 @@ def transfer_state_with_mappings(src_state,
     return tgt_state
 
 
+def cpu_mesh_context():
+    """A context to enforce using CPU mesh, used for loading weights on CPU."""
+    return jax.set_mesh(cpu_mesh)
+
+
 class BaseWeightLoader:
 
     def __init__(self, vllm_config: VllmConfig, **kwargs):
@@ -774,7 +780,7 @@ def load_nnx_param_from_reshaped_torch(
         spec = jax_param.sharding.spec
     elif isinstance(jax_param.sharding, SingleDeviceSharding):
         spec = ()
-    mesh = getattr(jax_param, 'mesh', None)
+    mesh = jax_param.get_metadata().get('mesh', None)
 
     try:
         jax_param.value = shard_put(jax_weight, spec, mesh=mesh)
