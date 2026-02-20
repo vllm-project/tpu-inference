@@ -96,8 +96,6 @@ def main(args: dict):
     if profiler_config.profiler == "torch":
         llm.stop_profile()
 
-    outputs = llm.generate(prompts, sampling_params)
-
     # Print the outputs.
     print("-" * 50)
     for output in outputs:
