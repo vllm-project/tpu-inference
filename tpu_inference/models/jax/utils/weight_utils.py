@@ -30,7 +30,7 @@ import torchax
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from jax.sharding import SingleDeviceSharding, get_mesh
+from jax.sharding import SingleDeviceSharding
 from safetensors import safe_open
 from torchax.ops.mappings import t2j
 from vllm.config import ModelConfig, VllmConfig
@@ -45,6 +45,7 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils import file_utils
 
 logger = init_logger(__name__)
+cpu_mesh = jax.make_mesh((1, ), ('x', ), devices=jax.devices('cpu'))
 
 HF_WEIGHTS_FORMAT = "*.safetensors"
 
@@ -219,7 +220,9 @@ def shard_put(x: jax.Array,
     # Single device sharding requires this special handling
     # to avoid the recursive jit error.
     if mesh is None:
-        mesh = get_mesh()
+        if isinstance(shardings, tuple):
+            return jax.device_put(x, P(*shardings))
+        return jax.device_put(x, shardings)
 
     if math.prod(mesh.axis_sizes) == 1:
         return jax.device_put(x, mesh.devices.flatten()[0])
@@ -659,8 +662,7 @@ def transfer_state_with_mappings(src_state,
 
 def cpu_mesh_context():
     """A context to enforce using CPU mesh, used for loading weights on CPU."""
-    return jax.set_mesh(
-        jax.make_mesh((1, ), ('x', ), devices=jax.devices('cpu')))
+    return jax.set_mesh(cpu_mesh)
 
 
 class BaseWeightLoader:
@@ -746,7 +748,8 @@ def jax_array_from_reshaped_torch(
     if permute_dims is not None:
         torch_weight = torch_weight.permute(*permute_dims)
 
-    return t2j(torch_weight, use_dlpack=False).to_device(jax.devices('cpu')[0])
+    with cpu_mesh_context():
+        return t2j(torch_weight, use_dlpack=False)
 
 
 def load_nnx_param_from_reshaped_torch(
@@ -780,7 +783,7 @@ def load_nnx_param_from_reshaped_torch(
         spec = jax_param.sharding.spec
     elif isinstance(jax_param.sharding, SingleDeviceSharding):
         spec = ()
-    mesh = getattr(jax_param, 'mesh', None)
+    mesh = jax_param.get_metadata().get('mesh', None)
 
     try:
         jax_param.value = shard_put(jax_weight, spec, mesh=mesh)
