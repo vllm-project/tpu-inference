@@ -800,7 +800,6 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
         for engine in itertools.chain(self._prefill_engines,
                                       self._decode_engines):
             engine.collective_rpc("reset_kv_cache")
-            engine.scheduler.reset_prefix_cache()
 
     def reinitialize_kv_cache(self) -> None:
         """Reallocate KV cache on all workers. See :pymeth:`DisaggEngineCore.reinitialize_kv_cache` for details."""
