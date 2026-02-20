@@ -1925,7 +1925,6 @@ class TPUOffloadConnectorWorker:
     def _prepare_save_plan(
         self,
         meta: TPUReqMeta,
-        validate: bool = False,
     ) -> tuple[list[int], list[int]] | None:
         """
         Validate and plan the blocks for the save operation for the given request.
@@ -1938,60 +1937,58 @@ class TPUOffloadConnectorWorker:
         save_spec = meta.save_spec
         blocks_to_save = save_spec.src_blocks
         dst_chunks = save_spec.dst_chunks
+        req_id = meta.req_id
+        full_block_ids = meta.local_block_ids
+        full_token_ids = meta.token_ids
+        num_total_tokens = save_spec.num_total_tokens
+        num_skip_leading_tokens = save_spec.num_skip_leading_tokens
+        assert num_total_tokens <= len(
+            full_token_ids), f"{num_total_tokens} > {len(full_token_ids)}"
 
-        if validate:
-            req_id = meta.req_id
-            full_block_ids = meta.local_block_ids
-            full_token_ids = meta.token_ids
-            num_total_tokens = save_spec.num_total_tokens
-            num_skip_leading_tokens = save_spec.num_skip_leading_tokens
-            assert num_total_tokens <= len(
-                full_token_ids), f"{num_total_tokens} > {len(full_token_ids)}"
+        num_tokens_to_save = num_total_tokens - num_skip_leading_tokens
+        if num_tokens_to_save <= 0 and not save_spec.is_final_save:
+            logger.info(f"Request {req_id}: No new tokens to save.")
+            return None
 
-            num_tokens_to_save = num_total_tokens - num_skip_leading_tokens
-            if num_tokens_to_save <= 0 and not save_spec.is_final_save:
-                logger.info(f"Request {req_id}: No new tokens to save.")
-                return None
+        process_token_ids = full_token_ids[:num_total_tokens]
+        tokens_to_save = process_token_ids[num_skip_leading_tokens:]
 
-            process_token_ids = full_token_ids[:num_total_tokens]
-            tokens_to_save = process_token_ids[num_skip_leading_tokens:]
+        logger.info(
+            f"Request {req_id} save details: "
+            f"full_block_ids len={len(full_block_ids)}, "
+            f"num_skip_leading_tokens={num_skip_leading_tokens}, "
+            f"num_total_tokens={num_total_tokens}, "
+            f"num_tokens_to_save={num_tokens_to_save}, "
+            f"blocks_to_save({len(blocks_to_save)}: {blocks_to_save}), "
+            f"dst_chunks({len(dst_chunks)}: {dst_chunks}) ")
 
+        if not blocks_to_save and tokens_to_save:
+            logger.warning(
+                f"Request {req_id}: Tokens to save but no corresponding blocks found."
+            )
+            return None
+
+        if not tokens_to_save:
             logger.info(
-                f"Request {req_id} save details: "
-                f"full_block_ids len={len(full_block_ids)}, "
-                f"num_skip_leading_tokens={num_skip_leading_tokens}, "
-                f"num_total_tokens={num_total_tokens}, "
-                f"num_tokens_to_save={num_tokens_to_save}, "
-                f"blocks_to_save({len(blocks_to_save)}: {blocks_to_save}), "
-                f"dst_chunks({len(dst_chunks)}: {dst_chunks}) ")
+                f"Request {req_id}: No new tokens to save, but processing as final save."
+            )
+            return None
 
-            if not blocks_to_save and tokens_to_save:
-                logger.warning(
-                    f"Request {req_id}: Tokens to save but no corresponding blocks found."
-                )
-                return None
-
-            if not tokens_to_save:
-                logger.info(
-                    f"Request {req_id}: No new tokens to save, but processing as final save."
-                )
-                return None
-
-            # Verify if blocks_to_save is a contiguous subarray of full_block_ids
-            first_src_block = blocks_to_save[0]
-            last_src_block = blocks_to_save[-1]
-            try:
-                first_block_idx_in_full = full_block_ids.index(first_src_block)
-                last_block_idx_in_full = full_block_ids.index(last_src_block)
-                if not (last_block_idx_in_full - first_block_idx_in_full + 1
-                        == len(blocks_to_save)):
-                    raise ValueError(
-                        f"Request({req_id}): blocks_to_save {blocks_to_save} does not exist in full_block_ids {full_block_ids}"
-                    )
-            except Exception:
+        # Verify if blocks_to_save is a contiguous subarray of full_block_ids
+        first_src_block = blocks_to_save[0]
+        last_src_block = blocks_to_save[-1]
+        try:
+            first_block_idx_in_full = full_block_ids.index(first_src_block)
+            last_block_idx_in_full = full_block_ids.index(last_src_block)
+            if not (last_block_idx_in_full - first_block_idx_in_full + 1
+                    == len(blocks_to_save)):
                 raise ValueError(
-                    f"Request({req_id}): blocks_to_save {blocks_to_save} contains blocks not present in local_block_ids {full_block_ids}"
+                    f"Request({req_id}): blocks_to_save {blocks_to_save} does not exist in full_block_ids {full_block_ids}"
                 )
+        except Exception:
+            raise ValueError(
+                f"Request({req_id}): blocks_to_save {blocks_to_save} contains blocks not present in local_block_ids {full_block_ids}"
+            )
 
         return blocks_to_save, dst_chunks
 
@@ -2113,10 +2110,10 @@ class TPUOffloadConnectorWorker:
             return None
 
         # 2. SYNC BLOCKING: Unified Batch Gather
-        GATHER_TPU_BLOCKS_CALLS.inc()
-        start_time = time.time()
         total_num_blocks_to_save = len(all_src_blocks)
         if not self.no_op_gather:
+            GATHER_TPU_BLOCKS_CALLS.inc()
+            start_time = time.time()
             all_src_blocks_arr = jnp.array(all_src_blocks)
             if self.use_bucketed_swap_ops:
                 gathered_kv_caches_tpu = self._bucketed_stack_kv_caches(
@@ -2126,10 +2123,10 @@ class TPUOffloadConnectorWorker:
                     self.runner.kv_caches, all_src_blocks_arr,
                     total_num_blocks_to_save)
             jax.block_until_ready(gathered_kv_caches_tpu)
+            duration = time.time() - start_time
+            GATHER_TPU_BLOCKS_LATENCY.observe(duration)
         else:
             gathered_kv_caches_tpu = None
-        duration = time.time() - start_time
-        GATHER_TPU_BLOCKS_LATENCY.observe(duration)
 
         # Record gather synchronously to signal scheduler for these requests
         # after successful TPU gather.
@@ -2462,7 +2459,7 @@ class TPUOffloadConnectorWorker:
         if completed_count > 0:
             duration = time.time() - start_time
             PROCESS_COMPLETED_SAVE_LATENCY.observe(duration)
-            logger.info(f"collecte {completed_count} save operation "
+            logger.info(f"collected {completed_count} save operation "
                         f"completions in {duration:.4f} seconds.")
 
         self._pending_save_futures = remaining_futures
@@ -2504,7 +2501,6 @@ class TPUOffloadConnectorWorker:
 
         # Process each request that needs its KV cache loaded
         load_times = []
-        validate = False
         for meta in metadata.requests_meta:
             if not (meta.load_spec and meta.load_spec.can_load):
                 continue
@@ -2526,32 +2522,31 @@ class TPUOffloadConnectorWorker:
                     f"Request {meta.req_id}: No new tokens to load. Skipping.")
                 continue
 
-            if validate:
-                # Verify if dst_blocks is a contiguous subarray of meta.local_block_ids
-                assert num_blocks_to_load > 0, f"Request({meta.req_id}) has no dst blocks to load."
-                first_dst_block = dst_blocks[0]
-                last_dst_block = dst_blocks[-1]
-                try:
-                    first_block_idx_in_local = meta.local_block_ids.index(
-                        first_dst_block)
-                    last_block_idx_in_local = meta.local_block_ids.index(
-                        last_dst_block)
-                    if not (last_block_idx_in_local -
-                            first_block_idx_in_local + 1 == len(dst_blocks)):
-                        raise ValueError(
-                            f"Request({meta.req_id}): dst_blocks {dst_blocks} does not exist in local_block_ids {meta.local_block_ids}"
-                        )
-                except ValueError:
+            # Verify if dst_blocks is a contiguous subarray of meta.local_block_ids
+            assert num_blocks_to_load > 0, f"Request({meta.req_id}) has no dst blocks to load."
+            first_dst_block = dst_blocks[0]
+            last_dst_block = dst_blocks[-1]
+            try:
+                first_block_idx_in_local = meta.local_block_ids.index(
+                    first_dst_block)
+                last_block_idx_in_local = meta.local_block_ids.index(
+                    last_dst_block)
+                if not (last_block_idx_in_local - first_block_idx_in_local + 1
+                        == len(dst_blocks)):
                     raise ValueError(
-                        f"Request({meta.req_id}): dst_blocks {dst_blocks} contains blocks not present in local_block_ids {meta.local_block_ids}"
+                        f"Request({meta.req_id}): dst_blocks {dst_blocks} does not exist in local_block_ids {meta.local_block_ids}"
                     )
+            except ValueError:
+                raise ValueError(
+                    f"Request({meta.req_id}): dst_blocks {dst_blocks} contains blocks not present in local_block_ids {meta.local_block_ids}"
+                )
 
-                logger.info(
-                    f"Processing KV load for request {meta.req_id}: "
-                    f"Total matched: {num_matched_tokens}, "
-                    f"Already computed: {num_skip_leading_tokens}. "
-                    f"Fetching delta of {num_tokens_to_load_delta} tokens from cache for "
-                    f"{num_blocks_to_load} blocks.")
+            logger.info(
+                f"Processing KV load for request {meta.req_id}: "
+                f"Total matched: {num_matched_tokens}, "
+                f"Already computed: {num_skip_leading_tokens}. "
+                f"Fetching delta of {num_tokens_to_load_delta} tokens from cache for "
+                f"{num_blocks_to_load} blocks.")
 
             if not self.no_op_load:
                 # Assemble the per-layer data for the delta tokens on the CPU.

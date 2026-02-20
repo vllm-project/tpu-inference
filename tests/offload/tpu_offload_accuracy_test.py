@@ -164,6 +164,7 @@ def test_kv_cache_cpu_offloading_accuracy_larger_than_cpu_ram(
         )
 
 
+# TODO(jcgu): verify the batched_save mode
 # def test_kv_cache_cpu_offloading_batch_save_multi_request(
 #     monkeypatch: pytest.MonkeyPatch,
 #     sampling_config: SamplingParams,
@@ -175,7 +176,7 @@ def test_kv_cache_cpu_offloading_accuracy_larger_than_cpu_ram(
 #     on the host correctly distributes KV blocks to their respective requests.
 #     """
 #     num_requests = 10
-#     swap_op_types = ["pallas", "jax", "jax_copy"]
+#     swap_op_types = ["jax"]
 #     decode_save = "0"
 #     skip_precompile = "1"
 #     batched_save = "1"
