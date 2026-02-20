@@ -195,6 +195,33 @@ class TestPallasAttentionBackendImpl:
                 layer_name_to_kvcache_index={'0': 0}):
             impl.forward(layer, query, key, value, torch.tensor([]), metadata)
 
+    def test_forward_with_3d_qkv(self, mesh):
+        impl = PallasAttentionBackendImpl(
+            num_heads=NUM_HEADS,
+            head_size=HEAD_DIM,
+            scale=0.088,
+            num_kv_heads=NUM_KV_HEADS,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="auto",
+            attn_type=AttentionType.DECODER,
+        )
+
+        layer = MagicMock()
+        layer.layer_name = "0"
+
+        query, key, value, kv_cache, metadata = create_inputs(mesh)
+
+        with torchax.default_env(), set_vllm_model_wrapper_context(
+                kv_caches=[kv_cache],
+                mesh=mesh,
+                layer_name_to_kvcache_index={'0': 0}):
+            query = query.reshape(TOTAL_TOKENS, NUM_HEADS, HEAD_DIM)
+            key = key.reshape(TOTAL_TOKENS, NUM_KV_HEADS, HEAD_DIM)
+            value = value.reshape(TOTAL_TOKENS, NUM_KV_HEADS, HEAD_DIM)
+
+            impl.forward(layer, query, key, value, torch.tensor([]), metadata)
+
     def test_forward_with_fp8_kv_cache(self, mesh):
         impl = PallasAttentionBackendImpl(
             num_heads=NUM_HEADS,

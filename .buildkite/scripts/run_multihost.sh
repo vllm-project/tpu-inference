@@ -181,6 +181,10 @@ IMAGE_NAME="${GCR_REPO}/vllm-tpu"
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 TOP_DIR=$(dirname "$(dirname "$SCRIPT_DIR")")
 
+# Prune Head Node BEFORE building the new image to ensure we have disk space
+echo "--- Pruning Docker on Head Node to clear disk space..."
+docker system prune -a --volumes -f || true
+
 # Source the environment setup script
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/setup_docker_env.sh"
@@ -215,6 +219,11 @@ sleep 20
 IFS=',' read -r -a WORKER_IPS_ARRAY <<< "${WORKER_IPS}"
 for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
     echo "--- Distributing and starting Ray Worker on ${worker_ip}"
+
+    # Prune Worker Node BEFORE it tries to pull the new giant image
+    echo "   -> Pruning Docker on worker to free disk space..."
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker system prune -a --volumes -f" || true
+    
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "mkdir -p ~/tpu-inference/scripts/multihost" || true
     # shellcheck disable=SC2002
     cat "${TOP_DIR}/scripts/multihost/run_cluster.sh" | ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "cat > ~/tpu-inference/scripts/multihost/run_cluster.sh"

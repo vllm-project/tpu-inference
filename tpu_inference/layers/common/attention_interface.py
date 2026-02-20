@@ -372,6 +372,7 @@ def attention(
     attention_metadata: AttentionMetadata,
     mesh: Mesh,
     head_dim_original: int | None = None,  # before padding,
+    sm_scale: float | None = None,
     attention_chunk_size: int | None = None,
     q_scale: float | None = None,
     k_scale: float | None = None,
@@ -393,6 +394,9 @@ def attention(
     if head_dim_original is None:
         head_dim_original = q.shape[-1]
 
+    if sm_scale is None:
+        sm_scale = head_dim_original**-0.5
+
     md = attention_metadata
 
     # (T, N, H)
@@ -407,7 +411,7 @@ def attention(
         md.query_start_loc,
         md.request_distribution,
         sinks,
-        sm_scale=head_dim_original**-0.5,
+        sm_scale=sm_scale,
         attention_chunk_size=attention_chunk_size,
         q_scale=q_scale,
         k_scale=k_scale,

@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import math
 from unittest.mock import patch
 
 import jax
@@ -67,6 +68,18 @@ def quantize_to_fp8_block_3d(weight: jax.Array,
     return w_q, scale_blocks
 
 
+def sharding_to_tuple(sharding):
+    if sharding is None:
+        return None
+    if isinstance(sharding, tuple):
+        return sharding
+    if isinstance(sharding, jax.sharding.NamedSharding):
+        return tuple(s for s in sharding.spec)
+    if isinstance(sharding, jax.sharding.PartitionSpec):
+        return tuple(s for s in sharding)
+    raise ValueError(f"Unsupported sharding type: {type(sharding)}")
+
+
 @pytest.fixture(scope="module")
 def mesh():
     """
@@ -91,14 +104,25 @@ def rngs():
 class TestLinearOpAdaptInfo:
     """Test QuantLinearConfig.get_adapt_info axis classification."""
 
-    def test_simple_2d_linear(self, rngs):
+    @pytest.mark.parametrize("einsum_str,weight_shape,weight_sharding", [
+        ("ab,bc->ac", (32, 16), (None, 'out')),
+        ("ab,cb->ac", (16, 32), ('out', None)),
+        ("ab,cb->ac", (16, 32), ('out',)),
+    ])
+    @pytest.mark.parametrize("kernel_init_with_sharding", [True, False])
+    def test_simple_2d_linear(self, einsum_str, weight_shape, weight_sharding, kernel_init_with_sharding, rngs):
         """ab,bc->ac: standard 2D linear (JaxLinear pattern)."""
-        layer = JaxEinsum('ab,bc->ac', (32, 16), rngs)
+        if kernel_init_with_sharding:
+            layer = JaxEinsum(einsum_str, weight_shape, rngs, kernel_init=nnx.with_partitioning(nnx.initializers.uniform(), weight_sharding))
+        else:
+            layer = JaxEinsum(einsum_str, weight_shape, rngs)
         info = QuantLinearConfig.get_adapt_info(einsum_str=layer.einsum_str,
                                                 weight=layer.weight)
         assert info.in_features == (32, )  # b is contracting
         assert info.out_features == (16, )  # c is free
         assert info.batch_features == ()  # no batch dims
+        if kernel_init_with_sharding:
+            assert info.out_features_sharding == ("out", )
 
     def test_2d_weight_3d_output(self, rngs):
         """TD,DNH->TNH: D is contracting, N and H are output-only."""
@@ -134,8 +158,9 @@ class TestFp8BlockwiseJaxLinear:
                                                           (256, 128)])
     @pytest.mark.parametrize("use_bias", [True, False])
     @pytest.mark.parametrize("batch_size", [1, 4])
+    @pytest.mark.parametrize("weight_sharding", [(None,), ('in', None), (None, 'out'), ('in', 'out')])
     def test_linear_forward_correctness(self, in_features, out_features,
-                                        use_bias, batch_size, rngs):
+                                        use_bias, batch_size, weight_sharding, rngs):
         hf_quant_config = {
             "quant_method": "fp8",
             "activation_scheme": "dynamic",
@@ -150,6 +175,7 @@ class TestFp8BlockwiseJaxLinear:
             rngs=rngs,
             use_bias=use_bias,
             quant_config=quant_config,
+            kernel_init=nnx.with_partitioning(nnx.initializers.uniform(), weight_sharding)
         )
 
         # Use a dummy mesh for testing
@@ -166,12 +192,18 @@ class TestFp8BlockwiseJaxLinear:
             output = layer(x)
 
         assert output.shape == (batch_size, out_features)
+        assert layer.weight.shape == (out_features, in_features)
+        assert sharding_to_tuple(layer.weight.sharding) in [(None, None), ('out', None), (None, 'in'), ('out', 'in')]
+        if use_bias:
+            assert layer.bias.shape == (out_features, )
+            assert sharding_to_tuple(layer.bias.sharding) in [(None,), ('out',)]
 
     @pytest.mark.parametrize("kernel_shape", [(128, 8, 16), (256, 32, 32)])
     @pytest.mark.parametrize("use_bias", [True, False])
     @pytest.mark.parametrize("batch_size", [1, 4])
+    @pytest.mark.parametrize("weight_sharding", [(None,), ('in', None), (None, 'out'), ('in', None, 'out'), (None, None, 'out')])
     def test_einsum_forward_correctness(self, kernel_shape, use_bias,
-                                        batch_size, rngs):
+                                        batch_size, weight_sharding, rngs):
         hf_quant_config = {
             "quant_method": "fp8",
             "activation_scheme": "dynamic",
@@ -185,6 +217,7 @@ class TestFp8BlockwiseJaxLinear:
             rngs=rngs,
             bias_shape=kernel_shape[1:] if use_bias else None,
             quant_config=quant_config,
+            kernel_init=nnx.with_partitioning(nnx.initializers.uniform(), weight_sharding)
         )
 
         # Use a dummy mesh for testing
@@ -203,6 +236,11 @@ class TestFp8BlockwiseJaxLinear:
         # Output shape should be (B, N, H)
         expected_shape = (batch_size, ) + kernel_shape[1:]
         assert output.shape == expected_shape
+        assert layer.weight.shape == (math.prod(kernel_shape[1:]), kernel_shape[0])
+        assert sharding_to_tuple(layer.weight.sharding) in [(None, None), ('out', None), (None, 'in'), ('out', 'in')]
+        if use_bias:
+            assert layer.bias.shape == (math.prod(kernel_shape[1:]),)
+            assert sharding_to_tuple(layer.bias.sharding) in [(None,), ('out',)]
 
     @pytest.mark.parametrize("kernel_shape", [(16, 4, 8), (32, 8, 16)])
     @pytest.mark.parametrize("batch_size", [1, 4])
