@@ -165,7 +165,6 @@ class DeepseekV3BaseAttention(JaxModule):
             quant_config=self.quant_config,
             param_dtype=self.dtype,
             kernel_init=nnx.with_partitioning(weight_init, self.q_da_sharding),
-            prefix=self.prefix + ".q_a_proj",
         )
 
         self.q_b_proj = JaxEinsum(
@@ -175,7 +174,7 @@ class DeepseekV3BaseAttention(JaxModule):
             quant_config=self.quant_config,
             param_dtype=self.dtype,
             kernel_init=nnx.with_partitioning(weight_init, self.ap_sharding),
-            prefix=self.prefix + ".q_b_proj")
+        )
 
         self.kv_down_proj = JaxEinsum(
             einsum_str="SD,DA -> SA",
@@ -185,7 +184,7 @@ class DeepseekV3BaseAttention(JaxModule):
             param_dtype=self.dtype,
             kernel_init=nnx.with_partitioning(weight_init,
                                               self.kv_da_sharding),
-            prefix=self.prefix + ".kv_a_proj_with_mqa")
+        )
 
         self.o_proj = JaxEinsum(
             einsum_str="TR,RD->TD",
@@ -194,7 +193,7 @@ class DeepseekV3BaseAttention(JaxModule):
             quant_config=self.quant_config,
             param_dtype=self.dtype,
             kernel_init=nnx.with_partitioning(weight_init, self.rd_sharding),
-            prefix=self.prefix + ".o_proj")
+        )
 
         self.q_a_layernorm = JaxRmsNorm(self.q_lora_rank,
                                         epsilon=self.rms_norm_eps,
@@ -298,7 +297,6 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
             quant_config=self.quant_config,
             param_dtype=self.dtype,
             kernel_init=nnx.with_partitioning(weight_init, self.ap_sharding),
-            prefix=self.prefix + ".kv_b_proj",
         )
 
     def compute_q_projection(self, x_q_TD: jax.Array,
@@ -1529,7 +1527,6 @@ class DeepSeekV3(JaxModule):
 
         self.vllm_config = vllm_config
         self.rng = nnx.Rngs(rng)
-        self.prefix = prefix
 
         # NOTE: the default is 61
         num_layers: int = vllm_config.model_config.hf_config.num_hidden_layers
@@ -1625,7 +1622,7 @@ class DeepSeekV3(JaxModule):
         )
 
         def _create_deepseek_attention(
-                layer_index: int) -> Union[DeepseekV3MLA, DeepseekV3Attention]:
+        ) -> Union[DeepseekV3MLA, DeepseekV3Attention]:
             if self.use_mla_kernel:
                 query_tnh_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
                 keyvalue_skh_spec = P(ShardingAxisName.MLP_TENSOR, None)
@@ -1685,9 +1682,7 @@ class DeepSeekV3(JaxModule):
                 q_da_sharding=q_da_sharding,
                 ap_sharding=ap_sharding,
                 kv_da_sharding=kv_da_sharding,
-                rd_sharding=rd_sharding,
-                prefix=f"{self.prefix}.layers.{layer_index}.self_attn",
-            )
+                rd_sharding=rd_sharding)
             if self.use_mla_kernel:
                 kwargs.update(anh_sharding=anh_sharding)
 
@@ -1806,7 +1801,7 @@ class DeepSeekV3(JaxModule):
                 layer_idx=layer_index,
                 input_layernorm=input_layernorm,
                 post_attention_layernorm=post_attention_layernorm,
-                self_attn=_create_deepseek_attention(layer_index),
+                self_attn=_create_deepseek_attention(),
                 mlp=mlp_layer)
 
         self.start_layer, self.end_layer, self.layers = make_layers(
