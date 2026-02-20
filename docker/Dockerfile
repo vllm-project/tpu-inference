@@ -76,14 +76,6 @@ RUN  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then
 COPY . .
 RUN --mount=type=cache,target=/root/.cache/pip pip install -e .
 
-# TODO (jacobplatin): remove when v7x is supported in JAX/Libtpu officially
-# NOTE: it's important that this is done after installing tpu_inference above,
-# so that the v7x-specific dependencies can override any existing ones.
-COPY requirements_v7x.txt .
-RUN --mount=type=cache,target=/root/.cache/pip if [ "$IS_FOR_V7X" = "true" ]; then \
-        pip install -r requirements_v7x.txt; \
-    fi
-
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

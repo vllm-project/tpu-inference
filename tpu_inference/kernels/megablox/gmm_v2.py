@@ -661,7 +661,7 @@ def get_cost_estimate(
 
 def get_scope_name(dims: Dimensions, tiles: TileSizes) -> str:
     return (
-        f"gmm-g_{dims.size_group}-m_{dims.size_m}-k_{dims.size_k}"
+        f"gmm_v2-g_{dims.size_group}-m_{dims.size_m}-k_{dims.size_k}"
         f"-n_{dims.size_n}-tm_{tiles.tile_m}-tk_{tiles.tile_k}-tn_{tiles.tile_n}"
     )
 

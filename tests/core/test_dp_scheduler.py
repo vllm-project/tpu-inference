@@ -256,8 +256,8 @@ class TestDPScheduler:
                 scheduler.output_queues = {
                     (0, "get_token_count"): mock_queue_get_token_0,
                     (1, "get_token_count"): mock_queue_get_token_1,
-                    (0, "get_computed_blocks"): mock_queue_computed_0,
-                    (1, "get_computed_blocks"): mock_queue_computed_1,
+                    (0, "probe_computed_blocks"): mock_queue_computed_0,
+                    (1, "probe_computed_blocks"): mock_queue_computed_1,
                 }
 
                 rank = scheduler._find_best_rank_for_request(mock_request)
@@ -298,8 +298,8 @@ class TestDPScheduler:
                 scheduler.output_queues = {
                     (0, "get_token_count"): mock_queue_get_token_0,
                     (1, "get_token_count"): mock_queue_get_token_1,
-                    (0, "get_computed_blocks"): mock_queue_computed_0,
-                    (1, "get_computed_blocks"): mock_queue_computed_1,
+                    (0, "probe_computed_blocks"): mock_queue_computed_0,
+                    (1, "probe_computed_blocks"): mock_queue_computed_1,
                 }
 
                 rank = scheduler._find_best_rank_for_request(mock_request)

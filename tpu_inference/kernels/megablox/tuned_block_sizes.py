@@ -233,28 +233,80 @@ TUNED_BLOCK_SIZES = {
 }
 
 
-def get_default_gmm_block_sizes(m: int, k: int, n: int):
+# TODO (jacobplatin): make this more generic
+def round_up_to_multiple_of_128_within_limit(x: int, limit: int) -> int:
     """
-    Heuristic-based defaults for GMM tiling. 
+    Rounds the given integer `x` up to the nearest multiple of 128, without
+    exceeding the specified `limit`.
+
+    If `x` is less than or equal to 128, returns 128.
+    If `x` is less than `limit`, returns the smallest multiple of 128 greater
+    than or equal to `x`.
+    If `x` is greater than or equal to `limit`, searches for the largest
+    multiple of 128 less than or equal to `limit` (down to 512) that divides `x`
+    evenly, and returns it.
+    If no such candidate is found, returns `limit`.
+
+    Args:
+        x (int): The integer to round up.
+        limit (int): The upper bound (must be a multiple of 128).
+
+    Returns:
+        int: The rounded value according to the rules above.
+
+    Raises:
+        AssertionError: If `limit` is less than 128 or not a multiple of 128.
     """
-    # TODO (Qiliang Cui): when update to v2, use the v2 default tiling.
-    del k, n  # Currently not using input dimensions for heuristics
+    assert limit >= 128 and limit % 128 == 0
+    if x <= 128:
+        return 128
+    if x < limit:
+        return (x + 127) // 128 * 128
+    for candidate in range(limit, 511, -128):
+        if x % candidate == 0:
+            return candidate
+    return limit
 
-    if m < 128:
-        return (m, 128, 128)
-    if m % 128 == 0:
-        return (128, 128, 128)
 
-    # TODO(catswe): consider replacing _calculate_num_tiles(m, tm) with
-    # _calculate_irregular_num_tiles(m, tm) in make_group_metadata. this
-    # would allow using tm=128 with a partial final tile, like k and n
-    # already do, as this divisor-search approach may produce suboptimal
-    # tile sizes (e.g., num_tokens=64 and topk=5 (m=num_tokens*topk=320)
-    # will result in tm=80 and 4 tiles, instead of tm=128 and 3 tiles).
-    # or consider padding the tensor so m is always multiple of 128.
-    for tm in range(127, 0, -1):
-        if m % tm == 0:
-            return (tm, 128, 128)
+def get_default_gmm_block_sizes(m: int, k: int, n: int,
+                                g: int) -> tuple[int, int, int]:
+    """
+    Heuristic-based defaults for GMM tiling.
+
+    Args:
+        m (int): The total number of tokens.
+        n (int): The output feature dimension.
+        k (int): The input feature dimension.
+
+    Returns:
+        tuple[int, int, int]: A tuple (tm, tk, tn)
+    """
+
+    # TODO(Chengji): increase the upper limit tiling size of m when we can set
+    # the vmem size to be used for gmm kernel.
+    # NOTE: In average each expert has m // g tokens, but as it might be
+    # unbalanced, here we doubled the token size when choosing tiling size of m.
+    # 2m//g can be either greater or less than 512. If there are 32 tokens and
+    # topk=2, m=topk * num_tokens=64, in this case, 2*m//g will be less than
+    # 512.
+    tm = round_up_to_multiple_of_128_within_limit(2 * m // g, 512)
+    # NOTE(catswe): this divisor-search approach may produce suboptimal tile
+    # sizes (e.g., num_tokens=64 and topk=5, so m=num_tokens*topk=320, will
+    # result in tm=80 and 4 tiles, instead of tm=128 and 3 tiles), though it's
+    # unclear if such a case currently exists in practice. one solution is to
+    # replace _calculate_num_tiles(m, tm) with
+    # _calculate_irregular_num_tiles(m, tm) in make_group_metadata. this would
+    # allow using tm=128 with a partial final tile, like k and n already do.
+    # another solution is to pad the tensor so m is always a multiple of 128.
+    for candidate in range(tm, 0, -1):
+        if m % candidate == 0:  # there's a requirement that m % tm == 0
+            tm = candidate
+            break
+    # k/n correspond to n_input_features/n_output_features in the matmul so they
+    # are normally greater than 2048, unless the num shards is large.
+    tk = round_up_to_multiple_of_128_within_limit(k, 2048)
+    tn = round_up_to_multiple_of_128_within_limit(n, 2048)
+    return tm, tk, tn
 
 
 def get_tuned_block_sizes(
@@ -284,7 +336,7 @@ def get_tuned_block_sizes(
     )
 
     if key not in TUNED_BLOCK_SIZES:
-        default_val = get_default_gmm_block_sizes(m, k, n)
+        default_val = get_default_gmm_block_sizes(m, k, n, num_current_groups)
         logger.warning_once(
             f'[GMM kernel] using default block sizes for key: {key}: {default_val}'
         )
