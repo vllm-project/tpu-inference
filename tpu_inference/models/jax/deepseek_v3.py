@@ -1000,7 +1000,7 @@ class DeepSeekV3Router(JaxEinsum):
         x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
 
-        scores_TE = self.gate_proj(x_TD)
+        scores_TE = super().__call__(x_TD)
         scores_TE = nnx.sigmoid(scores_TE)
 
         if self.moe_backend in MoEBackend.fused_moe_backends():
@@ -1305,8 +1305,6 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
         else:
             self.lm_head = PPMissingLayer()
 
-        self.model.initialize_cache()
-
         if os.environ.get("VLLM_LOGGING_LEVEL", "").upper() == "DEBUG":
             self.model._print_model_architecture()
 
@@ -1363,7 +1361,11 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
                 for i in range(start_ignore_layer_num, end_ignore_layer_num)
             ],
         )
-        return loader.load_weights(weights)
+        loaded = loader.load_weights(weights)
+
+        self.model.initialize_cache()
+
+        return loaded
 
 
 def weights_dequant_cpu(x: torch.Tensor,

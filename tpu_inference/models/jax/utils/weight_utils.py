@@ -217,9 +217,7 @@ def shard_put(x: jax.Array,
     # Single device sharding requires this special handling
     # to avoid the recursive jit error.
     if mesh is None:
-        if isinstance(shardings, tuple):
-            return jax.device_put(x, P(*shardings))
-        return jax.device_put(x, shardings)
+        mesh = get_mesh()
 
     if math.prod(mesh.axis_sizes) == 1:
         return jax.device_put(x, mesh.devices.flatten()[0])
@@ -775,8 +773,6 @@ def load_nnx_param_from_reshaped_torch(
     elif isinstance(jax_param.sharding, SingleDeviceSharding):
         spec = ()
     mesh = getattr(jax_param, 'mesh', None)
-    if mesh is None:
-        mesh = get_mesh()
 
     try:
         jax_param.value = shard_put(jax_weight, spec, mesh=mesh)
@@ -833,9 +829,24 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
         # Post-process module after loading weights. Unlike vLLM post-process
         # weights after loading all weights, we do it per-module here to
         # avoid OOM.
+        self._process_weights_after_loading(module)
+
+        if module == self.module:
+            # For those modules without `load_weights` method, do the post-processing
+            # here.
+            self._process_weights_after_loading(module)
+
+    def _process_weights_after_loading(self, module: JaxModule):
         if (quant_method := getattr(module, 'quant_method', None)) is not None:
             assert isinstance(quant_method, QuantizeMethodBase)
             quant_method.process_weights_after_loading(module)
+        else:
+            for _, child in module.named_children():
+                if isinstance(child, JaxModule):
+                    self._process_weights_after_loading(child)
+                else:
+                    for c in child:
+                        self._process_weights_after_loading(c)
 
 
 class LoadableWithIterator:
