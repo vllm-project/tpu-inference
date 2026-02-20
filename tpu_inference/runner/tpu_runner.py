@@ -26,7 +26,6 @@ import jaxtyping
 import numpy as np
 import vllm.envs as vllm_envs
 from flax import nnx
-from jax._src.pallas.utils import next_power_of_2
 from jax.experimental import mesh_utils
 from jax.sharding import NamedSharding, PartitionSpec
 from vllm.config import VllmConfig
@@ -227,6 +226,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         is_first_rank: bool = True,
         is_last_rank: bool = True,
     ):
+        logger.debug("wyzhangd: enter __init__")
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         # TODO(jevinjiang): override block size based on RPA v3.
@@ -282,6 +282,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self.is_pooling_model: bool = self.model_config.runner_type == "pooling"
         """Generative model or pooling model select different computations."""
+        logger.debug("wyzhangd: exit __init__")
 
     def _init_random(self):
         if self.model_config.seed is None:
@@ -324,21 +325,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             sharding_strategy.tp_size,
         )
 
-        # Attempt to create a physically optimized mesh. Fall back to a simple
-        # logical reshape for non-power-of-two device counts (e.g., DP=6) to
-        # bypass strict physical topology constraints.
-        try:
-            return mesh_utils.create_device_mesh(
-                mesh_shape,
-                self.devices,
-                allow_split_physical_axes=True,
-            )
-        except (AssertionError, ValueError, RuntimeError) as e:
-            logger.warning(
-                "Physical mesh creation failed (shape=%s, devices=%d). "
-                "Falling back to logical reshape. Error: %s", mesh_shape,
-                len(self.devices), e)
-            return np.array(self.devices).reshape(mesh_shape)
+        return mesh_utils.create_device_mesh(
+            mesh_shape,
+            self.devices,
+            allow_split_physical_axes=True,
+        )
 
     def _create_multi_slice_mesh(self, num_slices: int) -> jax.Array:
         sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config
@@ -354,23 +345,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         )
         dcn_mesh_shape = (num_slices, 1, 1, 1, 1)
 
-        # Attempt to create a physically optimized hybrid mesh (ICI + DCN).
-        # Fall back to a logical reshape for non-power-of-two device counts
-        # to bypass strict hardware topology constraints across slices.
-        try:
-            return mesh_utils.create_hybrid_device_mesh(
-                mesh_shape=ici_mesh_shape,
-                dcn_mesh_shape=dcn_mesh_shape,
-                devices=self.devices,
-                allow_split_physical_axes=True,
-            )
-        except (AssertionError, ValueError, RuntimeError) as e:
-            logger.warning(
-                "Hybrid physical mesh creation failed. Falling back to logical reshape. "
-                "ICI shape: %s, DCN shape: %s, Error: %s", ici_mesh_shape,
-                dcn_mesh_shape, e)
-            return np.array(self.devices).reshape(
-                tuple(i * d for i, d in zip(ici_mesh_shape, dcn_mesh_shape)))
+        return mesh_utils.create_hybrid_device_mesh(
+            mesh_shape=ici_mesh_shape,
+            dcn_mesh_shape=dcn_mesh_shape,
+            devices=self.devices,
+            allow_split_physical_axes=True,
+        )
 
     def _create_2d_mesh(self) -> jax.sharding.Mesh:
 
@@ -441,7 +421,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         kv_cache_dtype = to_jax_dtype(cache_dtype)
         kv_packing = common_utils.get_dtype_packing(kv_cache_dtype)
         self.num_tokens_paddings = runner_utils.get_token_paddings(
-            min_token_size=max(16, next_power_of_2(self.dp_size * kv_packing)),
+            min_token_size=max(16, self.dp_size * kv_packing),
             max_token_size=scheduler_config.max_num_batched_tokens *
             self.dp_size,
             padding_gap=vllm_envs.VLLM_TPU_BUCKET_PADDING_GAP)
@@ -533,6 +513,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                             dtype=np.int64)
 
     def load_model(self):
+        logger.debug("wyzhangd: enter load_model")
         self.model_fn, self.compute_logits_fn, self.pooler_fn, self.combine_hidden_states_fn, multimodal_fns, self.state, self.lora_manager, self.model = get_model(
             self.vllm_config,
             self.rng_key,
@@ -566,30 +547,41 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         logger.info(f"Init model | "
                     f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")
+        logger.debug("wyzhangd: exit load_model")
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        logger.debug("wyzhangd: enter get_supported_tasks")
         runner_type = self.model_config.runner_type
         if runner_type == "generate":
+            logger.debug("wyzhangd: exit get_supported_tasks")
             return ("generate", )
         if runner_type == "pooling":
+            logger.debug("wyzhangd: exit get_supported_tasks")
             return ("embed", )
         assert False, f"unsupported runner type: {runner_type}"
 
     def get_kv_cache_spec(self):
-        return self.kv_cache_manager.get_kv_cache_spec()
+        logger.debug("wyzhangd: enter get_kv_cache_spec")
+        result = self.kv_cache_manager.get_kv_cache_spec()
+        logger.debug("wyzhangd: exit get_kv_cache_spec")
+        return result
 
     def initialize_kv_cache(self,
                             kv_cache_config: KVCacheConfig,
                             topology_order_id: int = 0) -> None:
+        logger.debug("wyzhangd: enter initialize_kv_cache")
         self.topology_order_id = topology_order_id
         self.kv_cache_config = kv_cache_config
         self.use_hybrid_kvcache = len(kv_cache_config.kv_cache_groups) > 1
         self.kv_cache_manager.initialize_kv_cache(kv_cache_config)
         if has_kv_transfer_group():
             get_kv_transfer_group().register_runner(self)
+        logger.debug("wyzhangd: exit initialize_kv_cache")
 
     def capture_model(self) -> None:
+        logger.debug("wyzhangd: enter capture_model")
         self.compilation_manager.capture_model()
+        logger.debug("wyzhangd: exit capture_model")
 
     @time_function
     def execute_model(
@@ -597,20 +589,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         scheduler_output: "VllmSchedulerOutput",
         intermediate_tensors: Optional[JaxIntermediateTensors] = None,
     ) -> ModelRunnerOutput | JaxIntermediateTensors | None:
+        logger.debug("wyzhangd: enter execute_model")
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called "
                                "after execute_model() returns None.")
         with jax.set_mesh(self.mesh):
             output = self._execute_model(scheduler_output,
                                          intermediate_tensors)
+        logger.debug("wyzhangd: exit execute_model")
         return output
 
     def sample_tokens(
         self,
         grammar_output: "GrammarOutput | None",
     ) -> ModelRunnerOutput | AsyncTPUModelRunnerOutput:
+        logger.debug("wyzhangd: enter sample_tokens")
         if self.execute_model_state is None:
             # This can happen in pipeline parallel case.
+            logger.debug("wyzhangd: exit sample_tokens")
             return EMPTY_MODEL_RUNNER_OUTPUT
 
         (scheduler_output, attn_metadata, input_ids, hidden_states, logits,
@@ -639,10 +635,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 logits,
                 arange,
             )
-        return self._sample_from_logits(
+        result = self._sample_from_logits(
             scheduler_output, attn_metadata, input_ids, hidden_states, logits,
             aux_hidden_states, spec_decode_metadata, kv_connector_output,
             logits_indices_selector, padded_num_reqs)
+        logger.debug("wyzhangd: exit sample_tokens")
+        return result
 
     def _modify_prev_results(self):
         # If copy to host has not been done, we just wait.
@@ -1756,7 +1754,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             return input_ids, None
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
-        return self.speculative_decoding_manager.take_draft_token_ids()
+        logger.debug("wyzhangd: enter take_draft_token_ids")
+        result = self.speculative_decoding_manager.take_draft_token_ids()
+        logger.debug("wyzhangd: exit take_draft_token_ids")
+        return result
 
     ###### Local disagg utilities ######
 
@@ -1790,6 +1791,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                              jaxtyping.PyTree] = None
     ) -> None:
         """For RL framework integration."""
+        logger.debug("wyzhangd: enter _sync_weights")
         if reshard_fn is not None:
             updated_weights = reshard_fn(updated_weights, self.state)
             shard = None
@@ -1801,6 +1803,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             mappings=mappings,
             transpose_keys=transpose_keys,
             shard=shard)
+        logger.debug("wyzhangd: exit _sync_weights")
 
     def get_intermediate_tensor_spec(self, num_tokens: int):
         jax_dtype = to_jax_dtype(self.dtype)

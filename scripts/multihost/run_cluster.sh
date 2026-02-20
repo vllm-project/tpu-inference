@@ -88,8 +88,8 @@ CONTAINER_NAME="node"
 # Define a cleanup routine that removes the container when the script exits.
 # This prevents orphaned containers from accumulating if the script is interrupted.
 cleanup() {
-    docker stop "${CONTAINER_NAME}"
-    docker rm "${CONTAINER_NAME}"
+    docker stop "${CONTAINER_NAME}" > /dev/null 2>&1 || true
+    docker rm "${CONTAINER_NAME}" > /dev/null 2>&1 || true
 }
 trap cleanup EXIT
 

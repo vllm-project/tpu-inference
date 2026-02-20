@@ -123,15 +123,18 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
                 "Ray is already initialized. Skipping Ray initialization.")
         else:
             logger.warning("Ray is not initialized, this is mainly for test.")
+            logger.debug("wyzhangd: Initializing Ray in _initialize_ray_cluster start")
             ray.init()
+            logger.debug("wyzhangd: Initializing Ray in _initialize_ray_cluster end")
 
         device_str = current_platform.ray_device_key
         if not device_str:
             raise ValueError(
                 f"current platform {current_platform.device_name} does not "
                 "support ray.")
-
+        logger.debug(f"wyzhangd: device_str={device_str}")
         pp_size = self.parallel_config.pipeline_parallel_size
+        logger.debug(f"wyzhangd: parallel_config = {self.parallel_config}")
         placement_group_specs: List[Dict[str, float]] = []
 
         ray_nodes = ray.nodes()
