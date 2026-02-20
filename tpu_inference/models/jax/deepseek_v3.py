@@ -825,6 +825,22 @@ class DeepseekV2Moe(JaxModule):
             quant_config=quant_config)
 
         # routed experts
+        if moe_backend == MoEBackend.GMM_TP:
+            moe_activation_ffw_td = (ShardingAxisName.MLP_DATA, None)
+            moe_activation_ffw_ted = (ShardingAxisName.MLP_DATA, None,
+                                      ShardingAxisName.MOE_TENSOR)
+            moe_edf_sharding = (None, None, ShardingAxisName.MOE_TENSOR)
+            moe_efd_sharding = (None, ShardingAxisName.MOE_TENSOR, None)
+        else:
+            moe_activation_ffw_td = (ShardingAxisName.MLP_DATA,
+                                     ShardingAxisName.MOE_TENSOR)
+            moe_activation_ffw_ted = (ShardingAxisName.MLP_DATA, None,
+                                      ShardingAxisName.MOE_TENSOR)
+            moe_edf_sharding = (None, ShardingAxisName.MOE_TENSOR,
+                                ShardingAxisName.ATTN_DATA_EXPERT)
+            moe_efd_sharding = (None, ShardingAxisName.ATTN_DATA_EXPERT,
+                                ShardingAxisName.MOE_TENSOR)
+
         self.experts = SharedFusedMoe(
             dtype=dtype,
             num_local_experts=num_local_experts,
@@ -838,14 +854,10 @@ class DeepseekV2Moe(JaxModule):
             hidden_act=hidden_act,
             rngs=rng,
             quant_config=quant_config,
-            activation_ffw_td=(ShardingAxisName.MLP_DATA,
-                               ShardingAxisName.MOE_TENSOR),
-            activation_ffw_ted=(ShardingAxisName.MLP_DATA, None,
-                                ShardingAxisName.MOE_TENSOR),
-            edf_sharding=(None, ShardingAxisName.MOE_TENSOR,
-                          ShardingAxisName.ATTN_DATA_EXPERT),
-            efd_sharding=(None, ShardingAxisName.ATTN_DATA_EXPERT,
-                          ShardingAxisName.MOE_TENSOR),
+            activation_ffw_td=moe_activation_ffw_td,
+            activation_ffw_ted=moe_activation_ffw_ted,
+            edf_sharding=moe_edf_sharding,
+            efd_sharding=moe_efd_sharding,
             moe_backend=moe_backend,
             qwix_quantized_weight_dtype=None,
             # It's abnormal prefix here because we are using dataclass for SharedFusedMoe and JaxMoe.
