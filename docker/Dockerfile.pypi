@@ -47,10 +47,6 @@ RUN  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then
         pip install -r requirements_test.txt --retries 3; \
     fi
 
-<<<<<<< HEAD
-COPY . .
-=======
->>>>>>> f38ab7b6 (remove requirements_v7x.txt (#1734))
 # Build tpu_inference
 RUN python3 -m pip install build
 RUN python3 -m build
