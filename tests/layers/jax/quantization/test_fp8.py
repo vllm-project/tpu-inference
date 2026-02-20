@@ -592,11 +592,11 @@ class TestFp8FusedMoE:
         # Begin mimic loading weights from checkpoint.
         block_m, block_n = quant_config.weight_block_size
         w_gate_fp8, gate_scale = quantize_to_fp8_block_3d(
-            jnp.transpose(gate.to_device(jax.devices('cpu')[0]), (0, 2, 1)), block_m, block_n, jnp.float8_e4m3fn)
+            gate.to_device(jax.devices('cpu')[0]), block_m, block_n, jnp.float8_e4m3fn)
         w_up_fp8, up_scale = quantize_to_fp8_block_3d(
-            jnp.transpose(up.to_device(jax.devices('cpu')[0]), (0, 2, 1)), block_m, block_n, jnp.float8_e4m3fn)
+            up.to_device(jax.devices('cpu')[0]), block_m, block_n, jnp.float8_e4m3fn)
         w2_weight, w2_weight_scale = quantize_to_fp8_block_3d(
-            jnp.transpose(w2.to_device(jax.devices('cpu')[0]), (0, 2, 1)), block_m, block_n, jnp.float8_e4m3fn)
+            w2.to_device(jax.devices('cpu')[0]), block_m, block_n, jnp.float8_e4m3fn)
 
         scale_suffix = layer.quant_method.weight_scale_name
 
@@ -610,9 +610,9 @@ class TestFp8FusedMoE:
                 f"kernel_down_proj_EFD_{scale_suffix}").set_metadata(_weights_to_load = jnp.vsplit(w2_weight_scale, num_experts))
 
         # Overwrite the layer's parameters with our FP8 data
-        layer.kernel_gating_EDF.set_metadata(_weights_to_load = jnp.vsplit( w_gate_fp8, num_experts))
-        layer.kernel_up_proj_EDF.set_metadata(_weights_to_load = jnp.vsplit( w_up_fp8, num_experts))
-        layer.kernel_down_proj_EFD.set_metadata(_weights_to_load = jnp.vsplit( w2_weight, num_experts))
+        layer.kernel_gating_EDF.set_metadata(_weights_to_load = jnp.vsplit(w_gate_fp8, num_experts))
+        layer.kernel_up_proj_EDF.set_metadata(_weights_to_load = jnp.vsplit(w_up_fp8, num_experts))
+        layer.kernel_down_proj_EFD.set_metadata(_weights_to_load = jnp.vsplit(w2_weight, num_experts))
         # End mimic loading weights from checkpoint.
 
         with jax.set_mesh(mesh):
