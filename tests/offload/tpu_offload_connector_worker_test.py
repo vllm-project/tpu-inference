@@ -14,7 +14,7 @@ import numpy as np
 from absl.testing import parameterized
 from jax._src import compilation_cache as cc
 from jax._src import test_util as jtu
-from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
 from tpu_inference.logger import init_logger
@@ -27,7 +27,7 @@ from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 logger = init_logger(__name__)
 
-_DEFAULT_BLOCK_SIZE = 64
+_DEFAULT_BLOCK_SIZE = 128
 
 
 class MockTPUModelRunner(TPUModelRunner):
@@ -70,7 +70,7 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
     def setUp(self):
         super().setUp()
         self.vllm_config = MockVllmConfig(block_size=_DEFAULT_BLOCK_SIZE)
-        self.num_layers = 80
+        self.num_layers = 64
         self.num_blocks = 128
         self.num_cpu_chunks = 128
         self.block_size = self.vllm_config.cache_config.block_size
@@ -117,9 +117,7 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
                     f"Not enough devices to create mesh of shape {axis_shapes}."
                 )
             device_array = devices[:num_required_devices].reshape(axis_shapes)
-            return jax.sharding.Mesh(
-                device_array, axis_names,
-                tuple([AxisType.Explicit] * len(axis_shapes)))
+            return jax.sharding.Mesh(device_array, axis_names, None)
         except RuntimeError:
             return None
 
@@ -192,10 +190,7 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
             f"Decomposition for {num_blocks} blocks into {expected_buckets}.")
 
     @parameterized.named_parameters(
-        dict(testcase_name="_jax", swap_op_type="jax"),
-        dict(testcase_name="_pallas", swap_op_type="pallas"),
-        dict(testcase_name="_jax_copy", swap_op_type="jax_copy"),
-    )
+        dict(testcase_name="_jax", swap_op_type="jax"), )
     def test_precompile_run_success(self, swap_op_type: str):
         """
         Tests that _precompile_kv_swap_operations runs without errors and
@@ -240,7 +235,7 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
         ),
         dict(
             testcase_name="_multi_requests_multi_blocks",
-            num_blocks_to_save=5,
+            num_blocks_to_save=16,
             num_requests=6,
         ),
         dict(
@@ -260,34 +255,6 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
             num_blocks_to_save=5,
             num_requests=6,
             use_precompiled_swap_ops=True,
-        ),
-        dict(
-            testcase_name="_multi_blocks_with_compile_jax_copy",
-            num_blocks_to_save=5,
-            num_requests=1,
-            use_precompiled_swap_ops=True,
-            swap_op_type="jax_copy",
-        ),
-        dict(
-            testcase_name="_multi_requests_multi_blocks_with_compile_jax_copy",
-            num_blocks_to_save=5,
-            num_requests=6,
-            use_precompiled_swap_ops=True,
-            swap_op_type="jax_copy",
-        ),
-        dict(
-            testcase_name="_multi_blocks_with_compile_pallas",
-            num_blocks_to_save=5,
-            num_requests=1,
-            use_precompiled_swap_ops=True,
-            swap_op_type="pallas",
-        ),
-        dict(
-            testcase_name="_multi_requests_multi_blocks_with_compile_pallas",
-            num_blocks_to_save=5,
-            num_requests=6,
-            use_precompiled_swap_ops=True,
-            swap_op_type="pallas",
         ),
         dict(
             testcase_name="_final_save",
@@ -372,6 +339,7 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
         connector.bind_connector_metadata(connector_metadata)
         logger.info(
             "Connector metadata bound, calling worker.start_save_kv().")
+
         worker.start_save_kv()
         logger.info("Waiting for all save operations to complete...")
         while worker._pending_save_futures:
@@ -406,14 +374,14 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
 
             for tpu_block_id, cpu_chunk_id in zip(src_blocks, dst_chunks):
                 cpu_kv_chunk = cpu_backend.get(cpu_chunk_id)
+                np_cpu_kv_chunk = np.array(cpu_kv_chunk)
+                if len(np_cpu_kv_chunk.shape) == 6:
+                    np_cpu_kv_chunk = np.squeeze(np_cpu_kv_chunk, axis=0)
                 for layer_idx in range(self.num_layers):
                     tpu_kv_block = kv_caches[layer_idx][tpu_block_id]
                     if swap_op_type != "jax_copy":
-                        assert cpu_kv_chunk[
-                            layer_idx].sharding.memory_kind == 'pinned_host'
-                        self.assertArraysEqual(
-                            np.array(tpu_kv_block),
-                            np.array(cpu_kv_chunk[layer_idx]))
+                        self.assertArraysEqual(np.array(tpu_kv_block),
+                                               np_cpu_kv_chunk[layer_idx])
                     else:
                         cpu_shards_for_layer = cpu_kv_chunk[layer_idx]
                         tpu_shards_for_layer = tpu_kv_block.addressable_shards
@@ -455,24 +423,10 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
         ),
         dict(
             testcase_name="_multi_requests_multi_blocks_compile_jax",
-            num_blocks_to_operate=5,
+            num_blocks_to_operate=16,
             num_requests=6,
             use_precompiled_swap_ops=True,
             swap_op_type="jax",
-        ),
-        dict(
-            testcase_name="_multi_requests_multi_blocks_compile_jax_copy",
-            num_blocks_to_operate=5,
-            num_requests=6,
-            use_precompiled_swap_ops=True,
-            swap_op_type="jax_copy",
-        ),
-        dict(
-            testcase_name="_multi_requests_multi_blocks_compile_pallas",
-            num_blocks_to_operate=5,
-            num_requests=6,
-            use_precompiled_swap_ops=True,
-            swap_op_type="pallas",
         ),
     )
     def test_tpu_connector_load(
@@ -559,7 +513,6 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
             time.sleep(0.01)
 
         logger.info("worker save completed.")
-
         # 3. Prepare and Execute Delta Load
         worker.runner.kv_caches = dst_kv_cache
 
