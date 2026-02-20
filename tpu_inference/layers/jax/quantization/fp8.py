@@ -227,6 +227,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                                   permute_dims=(0, 1),
                                   param_name=layer.prefix + ".weight"),
             eager_sharding=False)
+        layer.weight.set_metadata('mesh', cpu_mesh)
         layer.weight.set_metadata('sharding', self.weight_sharding)
 
         # Block-wise quantization scale
@@ -245,6 +246,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 param_name=layer.prefix + ".weight_scale_inv",
             ),
             eager_sharding=False)
+        layer.weight.set_metadata('mesh', cpu_mesh)
         layer.weight_scale_inv.set_metadata('sharding', self.weight_sharding)
 
         # Force the parameters to be loaded onto CPU, such that in `process_weights_after_loading`
@@ -277,6 +279,23 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             weight_scale_inv = layer.weight_scale_inv[...]
             bias = layer.bias[...] if getattr(layer, 'bias',
                                               None) is not None else None
+            if bias is not None:
+                bias = bias.reshape(-1)
+            weights = common_fp8.process_blockwise_fp8_linear_weights(
+                weight,
+                weight_scale_inv,
+                bias=bias,
+                weight_block_size=tuple(self.quant_config.weight_block_size),
+                linear_config=self.linear_config)
+            delattr(layer, 'weight')
+            delattr(layer, 'weight_scale_inv')
+            delattr(layer, 'bias')
+        # Do the re-quant process on CPU to avoid OOM on device.
+        with cpu_mesh_context():
+            weight = layer.weight.value
+            weight_scale_inv = layer.weight_scale_inv.value
+            bias = layer.bias.value if getattr(layer, 'bias',
+                                               None) is not None else None
             if bias is not None:
                 bias = bias.reshape(-1)
             weights = common_fp8.process_blockwise_fp8_linear_weights(
