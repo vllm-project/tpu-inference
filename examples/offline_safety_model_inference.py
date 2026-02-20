@@ -27,6 +27,7 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from tpu_inference.core import disagg_utils
 
 
+# TODO: Place in safety model common utils file
 def get_llama_guard_4_config():
     """Configuration specific to the Llama Guard 4 model."""
     return {

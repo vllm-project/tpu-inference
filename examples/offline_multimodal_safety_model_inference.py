@@ -81,6 +81,7 @@ def download_and_unzip_images(url: str, dest_dir: Path):
     print("Download and extraction complete.")
 
 
+# TODO: Place in safety model common utils file
 def get_llama_guard_4_config():
     """Configuration specific to the Llama Guard 4 model."""
     return {
@@ -111,6 +112,7 @@ def get_llama_guard_4_config():
     }
 
 
+# TODO: Place in safety model common utils file
 # Dictionary to map command-line arguments to model configs
 MODEL_CONFIG_MAP = {
     # Key is the exact value passed via the --model argument

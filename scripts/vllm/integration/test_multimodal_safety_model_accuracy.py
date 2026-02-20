@@ -19,6 +19,7 @@ from vllm.platforms import current_platform
 
 from tpu_inference.core import disagg_utils
 
+# TODO: Place in safety model common utils file
 # --- HAZARD MAPPING ---
 # This mapping is based on the MLCommons taxonomy and is needed for the data loader.
 # The ailuminate test set is a standard dataset for safety models
@@ -43,6 +44,7 @@ HAZARD_MAPPING = {
 # --- MODEL CONFIGURATION SUITES (Generic Setup) ---
 
 
+# TODO: Place in safety model common utils file
 def get_llama_guard_4_config():
     """Configuration specific to the Llama Guard 4 model."""
     return {
@@ -73,6 +75,7 @@ def get_llama_guard_4_config():
     }
 
 
+# TODO: Place in safety model common utils file
 # Dictionary to map the --model argument to the configuration
 MODEL_CONFIG_MAP = {
     "meta-llama/Llama-Guard-4-12B": get_llama_guard_4_config(),
