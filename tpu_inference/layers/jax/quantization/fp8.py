@@ -264,7 +264,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             # needed — the batched matmul uses dot_general with FP8 natively.
             return True
 
-        if getattr(layer.weight, "_is_loaded", False) or getattr(
+        if not getattr(layer.weight, "_is_loaded", False) or not getattr(
                 layer.weight_scale_inv, "_is_loaded", False):
             # Weight and scale could spread across multiple files,
             # so we only process once both of them are loaded.
@@ -371,6 +371,7 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
         self.block_quant: bool = self.weight_block_size is not None
         self.weight_scale_name = ("weight_scale_inv"
                                   if self.block_quant else "weight_scale")
+        self._called_process_weights_after_loading = False
 
     def load_weights(self, *, layer: JaxMoE, original_load_weights_fn,
                      weights: Iterable) -> set:
@@ -496,6 +497,9 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
             layer: The layer to process.
         """
         # TODO (#1681): support other backends
+        if self._called_process_weights_after_loading:
+            return
+
         if layer.moe_backend in FP8_QUANT_METHOD_SUPPORTED_MOE_BACKENDS:
             gating_scale_name = f"kernel_gating_EDF_{self.weight_scale_name}"
             up_scale_name = f"kernel_up_proj_EDF_{self.weight_scale_name}"

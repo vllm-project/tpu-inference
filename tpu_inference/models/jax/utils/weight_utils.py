@@ -866,14 +866,26 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
         # Post-process module after loading weights. Unlike vLLM post-process
         # weights after loading all weights, we do it per-module here to
         # avoid OOM.
+        self._process_weights_after_loading(base_prefix, module)
+
+        if module == self.module:
+            # For those modules without `load_weights` method, do the post-processing
+            # here.
+            self._process_weights_after_loading(base_prefix, module)
+
+    def _process_weights_after_loading(self, base_prefix: str, module: JaxModule):
         if self._process_weights_after_loading_per_module[base_prefix]:
             return
         if (quant_method := getattr(module, 'quant_method', None)) is not None:
             assert isinstance(quant_method, QuantizeMethodBase)
-            loaded = quant_method.process_weights_after_loading(module)
-            assert isinstance(loaded, bool)
-            self._process_weights_after_loading_per_module[
-                base_prefix] = loaded
+            quant_method.process_weights_after_loading(module)
+        else:
+            for _, child in module.named_children():
+                if isinstance(child, JaxModule):
+                    self._process_weights_after_loading(child)
+                else:
+                    for c in child:
+                        self._process_weights_after_loading(c)
 
 
 class LoadableWithIterator:
