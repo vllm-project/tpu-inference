@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import os
 import math
+import os
 import tempfile
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional, Tuple
@@ -60,27 +60,23 @@ class PPConfig:
         self.default_tpu_visible_chips = f"{self.rank}"
 
         if self.pp_world_size > 1:
-            # When Pipeline Parallelism (PP) is enabled on a single host, we must partition 
-            # the local TPU chips so that each pipeline stage process is isolated.
-            # We dynamically calculate the physical chip range for each stage by 
-            # mapping logical JAX devices (cores) to physical hardware. This is 
-            # critical for multi-core TPUs (e.g., v7 has 2 cores per chip) to ensure 
-            # the driver's topology check matches the visible devices.
+            # We need to know if we are on a 2-core-per-chip (v7) or 1-core-per-chip (v6) system
             from tpu_inference import tpu_info
             cores_per_chip = tpu_info.get_num_cores_per_chip()
+
+            # This tells us how many logical JAX devices (cores) this specific pipeline stage needs. If you are doing Tensor Parallelism (TP) within a stage, total_devices would be the TP size.
             sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
             total_cores_per_stage = sharding_config.total_devices
-            
-            # Number of physical chips needed for this stage's cores.
+
+            # Number of physical chips needed for this stage.
             chips_per_stage = math.ceil(total_cores_per_stage / cores_per_chip)
-            
+
             if chips_per_stage > 0:
                 start_chip = self.rank * chips_per_stage
                 self.default_tpu_visible_chips = ",".join(
                     str(i)
-                    for i in range(start_chip,
-                                   start_chip + chips_per_stage))
-                
+                    for i in range(start_chip, start_chip + chips_per_stage))
+
                 # Set bounds to match the visible chips exactly.
                 self.default_tpu_chips_per_process_bounds = f"1,{chips_per_stage},1"
 
