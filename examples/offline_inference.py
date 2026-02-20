@@ -35,9 +35,6 @@ def main(args: dict):
     # Create an LLM
     llm = LLM(**args)
 
-    llm.collective_rpc("reset_kv_cache")
-    llm.collective_rpc("reinitialize_kv_cache")
-
     # Create a sampling params object
     sampling_params = llm.get_default_sampling_params()
     if max_tokens is not None:
@@ -95,6 +92,11 @@ def main(args: dict):
     outputs = llm.generate(prompts, sampling_params)
     if profiler_config.profiler == "torch":
         llm.stop_profile()
+
+    llm.collective_rpc("reset_kv_cache")
+    llm.collective_rpc("reinitialize_kv_cache")
+
+    outputs = llm.generate(prompts, sampling_params)
 
     # Print the outputs.
     print("-" * 50)
