@@ -1547,11 +1547,10 @@ class TPUOffloadConnectorScheduler():
             if req_id in self._save_reqs_w_pending_gather:
                 assert len(self._save_reqs_w_pending_gather[req_id]) == 0
                 self._save_reqs_w_pending_gather.pop(req_id)
-            num_freed_blocks = self.staging_buffer_manager.free(req_id,
-                                                                usage="save")
-            logger.info(
-                f"  freed {num_freed_blocks} staging blocks (save) from {req_id}"
-            )
+
+            # NOTE(jcgu): finished_sending == gather_done != swap_out done
+            # there might be in-flight savings, we can not clean up
+            # the staging buffer of the request yet!
             STAGING_BUFFER_BLOCKS_FOR_SAVE.set(
                 self.staging_buffer_manager.get_num_blocks_for_save())
             STAGING_BUFFER_BLOCKS_FOR_SAVE_FREE.labels(
