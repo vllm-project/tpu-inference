@@ -427,7 +427,7 @@ def _ragged_paged_attention_kernel(
         head_acc_ref = acc_ref.at[kv_head_idx, :p.shape[0]]
 
         def load_with_init(ref, init_val):
-            return jnp.where(bkv_idx == 0, jnp.full_like(ref, init_val),
+            return jnp.where(bkv_idx == bkv_idx_start, jnp.full_like(ref, init_val),
                              ref[...])
 
         pv = jnp.matmul(p, v, preferred_element_type=jnp.float32)
@@ -853,7 +853,7 @@ def _ragged_paged_attention_kernel(
                                     next_bkv_sem_idx)
 
                 # Wait for cur bq if not ready yet
-                @pl.when(bkv_idx == 0)
+                @pl.when(bkv_idx == bkv_idx_start)
                 def wait_cur_bq():
                     wait_fetch_bq(seq_idx, bq_idx, bq_sem_idx)
 
@@ -939,7 +939,7 @@ def _ragged_paged_attention_kernel(
                     kv_head_idx=prev_kv_head_idx,
                 )
 
-            lax.fori_loop(0, num_bkv, compute_with_bkv, None, unroll=False)
+            lax.fori_loop(bkv_idx_start, num_bkv, compute_with_bkv, None, unroll=False)
 
             # Load acc and calculate final output.
             acc = acc_ref[...]
