@@ -79,9 +79,9 @@ if [ "${NODE_TYPE}" != "--head" ] && [ "${NODE_TYPE}" != "--worker" ]; then
 fi
 
 # Set up Docker authentication for Google Container Registry.
-# Modify the hostname to accomodate your specific docker region.
-gcloud auth configure-docker us-east5-docker.pkg.dev
-gcloud auth configure-docker us-central1-docker.pkg.dev
+if [[ "${DOCKER_IMAGE}" =~ ^([a-z0-9-]+-docker\.pkg\.dev) ]]; then
+    gcloud auth configure-docker "${BASH_REMATCH[1]}"
+fi
 
 CONTAINER_NAME="node"
 

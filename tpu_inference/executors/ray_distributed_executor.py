@@ -388,8 +388,12 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
             if self.parallel_config.pipeline_parallel_size == 1:
                 kwargs["rank"] = 0
             all_kwargs.append(kwargs)
+        logger.info(f'wyzhangd: init_worker start')
         self.collective_rpc("init_worker", args=(all_kwargs, ))
+        logger.info(f'wyzhangd: init_worker end')
+        logger.info(f'wyzhangd: init_device start')
         self.collective_rpc("init_device")
+        logger.info(f'wyzhangd: init_device end')
         if self.parallel_config.pipeline_parallel_size > 1:
             self.collective_rpc("initialize_pp_transfer_connect")
         self.collective_rpc("load_model")

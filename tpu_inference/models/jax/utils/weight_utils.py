@@ -67,40 +67,50 @@ class MetadataMap:
 
 
 def print_param_info(param: nnx.Param, name: str):
+    logger.info("wyzhangd: enter print_param_info")
     logger.warning(f"Global shape for {name}: {param.value.shape}")
     logger.warning(f"Sharding for {name}: {param.sharding}")
 
     logger.warning(
         f"Shape of {name} on a single device: {param.value.addressable_shards[0].data.shape}"
     )
+    logger.info("wyzhangd: exit print_param_info")
 
 
 def transpose_params(param_key: str, param_tensor: jax.Array, transpose_map):
+    logger.info("wyzhangd: enter transpose_params")
     for key, value in transpose_map.items():
         if key in param_key:
+            logger.info("wyzhangd: exit transpose_params")
             return jnp.transpose(param_tensor, value)
+    logger.info("wyzhangd: exit transpose_params")
     return param_tensor  # Base case / no-op
 
 
 def reshape_params(param_key: str, param_tensor: jax.Array, shape_map):
+    logger.info("wyzhangd: enter reshape_params")
     for key, new_shape in shape_map.items():
         if key in param_key:
             try:
                 #TODO:(gpolovets) Add validation on whether reshape preserves data layout.
+                logger.info("wyzhangd: exit reshape_params")
                 return jnp.reshape(param_tensor, new_shape)
             except TypeError:
                 raise TypeError(
                     f"Cannot reshape for key={key}, new_shape={new_shape}, param_shape={param_tensor.shape}"
                 )
+    logger.info("wyzhangd: exit reshape_params")
     return param_tensor  # Base case / no-op
 
 
 def model_file_generator(
         model_name_or_path: str,
         download_dir: Optional[str]) -> Generator[str, None, None]:
+    logger.info("wyzhangd: enter model_file_generator")
     weights_files = get_model_weights_files(model_name_or_path, download_dir)
     for st_file in weights_files:
         yield st_file
+    logger.info("wyzhangd: exit model_file_generator")
 
 
 def model_weights_generator(
@@ -109,14 +119,17 @@ def model_weights_generator(
     filter_regex: Optional[str] = None,
     download_dir: Optional[str] = None,
 ) -> Generator[tuple, None, None]:
+    logger.info("wyzhangd: enter model_weights_generator")
     for st_file in model_file_generator(model_name_or_path, download_dir):
         for name, weight_tensor in model_weights_single_file_generator(
                 st_file, framework, filter_regex):
             yield name, weight_tensor
+    logger.info("wyzhangd: exit model_weights_generator")
 
 
 def convert_torch_to_jax_with_view(loaded_weight: torch.Tensor,
                                    cast_type: jnp.dtype) -> jax.Array:
+    logger.info("wyzhangd: enter convert_torch_to_jax_with_view")
     """
     Converts a PyTorch tensor to a JAX array by reinterpreting its
     bit representation using a dtype view map.
@@ -124,6 +137,7 @@ def convert_torch_to_jax_with_view(loaded_weight: torch.Tensor,
     torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
     loaded_weight = jnp.array(
         loaded_weight.view(torch_view_type).numpy()).view(cast_type)
+    logger.info("wyzhangd: exit convert_torch_to_jax_with_view")
     return loaded_weight
 
 
@@ -133,6 +147,7 @@ def convert_torch_to_jax_with_view(loaded_weight: torch.Tensor,
 def get_model_weights_files(
         model_name_or_path: str,
         download_dir: Optional[str]) -> tuple[list[str], str]:
+    logger.info("wyzhangd: enter get_model_weights_files")
     """
     Helper to get weight files and their location.
     """
@@ -156,6 +171,7 @@ def get_model_weights_files(
         )
 
     weights_files.sort()
+    logger.info("wyzhangd: exit get_model_weights_files")
     return weights_files
 
 
@@ -164,6 +180,7 @@ def model_weights_single_file_generator(
     framework: str,
     filter_regex: Optional[str] = None,
 ) -> Generator[tuple, None, None]:
+    logger.info("wyzhangd: enter model_weights_single_file_generator")
     logger.info(f"Loading weights from {weights_file}")
     # NOTE: We enforce loading tensors on CPU here.
     # Because otherwise the tensor will be loaded on TPU:0 by default,
@@ -177,9 +194,11 @@ def model_weights_single_file_generator(
                     continue
                 weight_tensor = f.get_tensor(name)
                 yield name, weight_tensor
+    logger.info("wyzhangd: exit model_weights_single_file_generator")
 
 
 def get_param(params: nnx.State, path: str) -> nnx.State:
+    logger.info("wyzhangd: enter get_param")
     keys = path.split(".")
     plevel = params
     for key in keys:
@@ -190,11 +209,13 @@ def get_param(params: nnx.State, path: str) -> nnx.State:
                 plevel = plevel[key]
             else:
                 raise ValueError(f"{path} is not a valid param path")
+    logger.info("wyzhangd: exit get_param")
     return plevel
 
 
 def get_param_and_sharding(params: nnx.State, shardings: Any,
                            path: str) -> tuple[nnx.State, nnx.State]:
+    logger.info("wyzhangd: enter get_param_and_sharding")
     keys = path.split(".")
     plevel = params
     slevel = shardings
@@ -208,30 +229,38 @@ def get_param_and_sharding(params: nnx.State, shardings: Any,
                 slevel = slevel[key]
             else:
                 raise ValueError(f"{path} is not a valid param path")
+    logger.info("wyzhangd: exit get_param_and_sharding")
     return plevel, slevel.value
 
 
 def shard_put(x: jax.Array,
               shardings,
               mesh: jax.sharding.Mesh | None = None) -> jax.Array:
+    logger.info("wyzhangd: enter shard_put")
     # Single device sharding requires this special handling
     # to avoid the recursive jit error.
     if mesh is None:
         if isinstance(shardings, tuple):
+            logger.info("wyzhangd: exit shard_put")
             return jax.device_put(x, P(*shardings))
+        logger.info("wyzhangd: exit shard_put")
         return jax.device_put(x, shardings)
 
     if math.prod(mesh.axis_sizes) == 1:
+        logger.info("wyzhangd: exit shard_put")
         return jax.device_put(x, mesh.devices.flatten()[0])
 
     if isinstance(shardings, tuple):
+        logger.info("wyzhangd: exit shard_put")
         return jax.device_put(x, NamedSharding(mesh, P(*shardings)))
     else:
+        logger.info("wyzhangd: exit shard_put")
         return jax.device_put(x, shardings)
 
 
 def get_default_maps(model_config, mesh: Mesh,
                      name_map: dict[str, str]) -> MetadataMap:
+    logger.info("wyzhangd: enter get_default_maps")
     """Load weights from one model weights file to the model, run on single thread."""
     sharding_size = mesh.shape["model"]
 
@@ -290,6 +319,7 @@ def get_default_maps(model_config, mesh: Mesh,
         "v_proj.bias": (0, sharding_size // num_kv_heads),
     }
 
+    logger.info("wyzhangd: exit get_default_maps")
     return MetadataMap(name_map=name_map,
                        reshape_map=reshape_keys,
                        bias_reshape_map=bias_reshape_keys,
@@ -309,6 +339,7 @@ def _load_and_shard_weight(vllm_config,
                            keep_original_dtype_keys_regex: list[str]
                            | None = None,
                            pp_missing_layers: list[str] | None = None):
+    logger.info("wyzhangd: enter _load_and_shard_weight")
     name_map = metadata_map.name_map
     reshape_keys = metadata_map.reshape_map
     bias_reshape_keys = metadata_map.bias_reshape_map
@@ -365,16 +396,19 @@ def _load_and_shard_weight(vllm_config,
     else:
         if hf_key not in name_map and hf_key == "lm_head":
             logger.warning(f"Skip loading {hf_key} due to tie_word_embeddings")
+            logger.info("wyzhangd: exit _load_and_shard_weight")
             return
         if hf_key not in name_map and "t2d" in hf_key:
             logger.warning(
                 f"Skip loading {hf_key} as it's not used in eagle-3 for now")
+            logger.info("wyzhangd: exit _load_and_shard_weight")
             return
         model_key = name_map.get(hf_key, hf_key)
 
     if pp_missing_layers and _is_pp_missing_layer(hf_key, pp_missing_layers):
         logger.warning(
             f"Skip loading {hf_key} as it doesn't belong to this PP stage.")
+        logger.info("wyzhangd: exit _load_and_shard_weight")
         return
     model_weight, model_sharding = get_param_and_sharding(
         params, shardings, model_key)
@@ -437,12 +471,15 @@ def _load_and_shard_weight(vllm_config,
     spec = model_weight.sharding.spec if isinstance(
         model_weight.sharding, NamedSharding) else model_weight.sharding
     model_weight.value = shard(hf_weight, spec)
+    logger.info("wyzhangd: exit _load_and_shard_weight")
 
 
 def _is_pp_missing_layer(hf_key: str, pp_missing_layers: list[str]) -> bool:
+    logger.info("wyzhangd: enter _is_pp_missing_layer")
     has_digit = any(char.isdigit() for char in hf_key)
     # add the suffix after digits to avoid it matches "layers.10" with "layers.1"
     suffix = "." if has_digit else ""
+    logger.info("wyzhangd: exit _is_pp_missing_layer")
     return any(f'{pp_missing_layer}{suffix}' in hf_key
                for pp_missing_layer in pp_missing_layers)
 
@@ -458,6 +495,7 @@ def _load_hf_weights_on_thread(
     keep_original_dtype_keys_regex: Optional[list[str]] = None,
     pp_missing_layers: list[str] | None = None,
 ):
+    logger.info("wyzhangd: enter _load_hf_weights_on_thread")
     """Loads weights from a single weights file."""
     try:
         shardings = nnx.get_named_sharding(params, mesh)
@@ -478,6 +516,7 @@ def _load_hf_weights_on_thread(
             pp_missing_layers=pp_missing_layers,
             keep_hf_weight_suffix_when_match=keep_hf_weight_suffix_when_match,
         )
+    logger.info("wyzhangd: exit _load_hf_weights_on_thread")
 
 
 def load_hf_weights(
@@ -491,6 +530,7 @@ def load_hf_weights(
     pp_missing_layers: list[str] | None = None,
     keep_hf_weight_suffix_when_match: list[str] = [],
 ):
+    logger.info("wyzhangd: enter load_hf_weights")
     """Load weights into a JAX model from either an iterator or files.
 
     For tensors whose name matches any string in `keep_hf_weight_suffix_when_match`, the
@@ -568,19 +608,25 @@ def load_hf_weights(
 
     check_all_loaded(params)
     nnx.update(model, params)
+    logger.info("wyzhangd: exit load_hf_weights")
 
 
 def check_all_loaded(params: nnx.State):
+    logger.info("wyzhangd: enter check_all_loaded")
 
     def _check(x: Any):
+        logger.info("wyzhangd: enter _check")
         if isinstance(x, nnx.Param) and isinstance(x.value,
                                                    jax.ShapeDtypeStruct):
             raise ValueError(f"The param does not load weights: {x}")
+        logger.info("wyzhangd: exit _check")
 
     jax.tree.map(_check, params)
+    logger.info("wyzhangd: exit check_all_loaded")
 
 
 def build_flat_dict(flat_state, mappings):
+    logger.info("wyzhangd: enter build_flat_dict")
     """Build a new flat dictionary from the flat state using the provided mappings."""
     new_flat_dict = {}
     for keys, v in flat_state:
@@ -606,6 +652,7 @@ def build_flat_dict(flat_state, mappings):
                 break
         if not mapped:
             logger.info(f"!!! No mapping for flat state: {keys}")
+    logger.info("wyzhangd: exit build_flat_dict")
     return new_flat_dict
 
 
@@ -614,6 +661,7 @@ def transfer_state_with_mappings(src_state,
                                  mappings,
                                  transpose_keys=None,
                                  shard=None):
+    logger.info("wyzhangd: enter transfer_state_with_mappings")
     """Transfer state from src_state to tgt_state using the provided mappings."""
     src_flat = src_state.flat_state()
     tgt_flat = tgt_state.flat_state()
@@ -654,39 +702,48 @@ def transfer_state_with_mappings(src_state,
             v_maybe_t, sharding) if shard else v_maybe_t
 
     tgt_state = tgt_state.from_flat_path(tgt_flat)
+    logger.info("wyzhangd: exit transfer_state_with_mappings")
     return tgt_state
 
 
 class BaseWeightLoader:
 
     def __init__(self, vllm_config: VllmConfig, **kwargs):
+        logger.info("wyzhangd: enter BaseWeightLoader.__init__")
         self.vllm_config = vllm_config
         self.names_and_weights_generator = model_weights_generator(
             model_name_or_path=vllm_config.model_config.model,
             download_dir=vllm_config.load_config.download_dir,
             **kwargs,
         )
+        logger.info("wyzhangd: exit BaseWeightLoader.__init__")
 
     def get_weights_iterator(self):
+        logger.info("wyzhangd: enter BaseWeightLoader.get_weights_iterator")
         weights_iterator = getattr(self.vllm_config.model_config,
                                    "runai_model_weights_iterator", None)
         if weights_iterator:
+            logger.info("wyzhangd: exit BaseWeightLoader.get_weights_iterator")
             return weights_iterator
         else:
+            logger.info("wyzhangd: exit BaseWeightLoader.get_weights_iterator")
             return self.names_and_weights_generator
 
 
 class StandardWeightLoader(BaseWeightLoader):
 
     def __init__(self, vllm_config: VllmConfig, mesh: Mesh):
+        logger.info("wyzhangd: enter StandardWeightLoader.__init__")
         super().__init__(vllm_config, framework="pt")
         self.vllm_config = vllm_config
         self.mesh = mesh
+        logger.info("wyzhangd: exit StandardWeightLoader.__init__")
 
     def load_weights(self,
                      model: nnx.Module,
                      mappings: dict | MetadataMap,
                      keep_hf_weight_suffix_when_match: list[str] = []):
+        logger.info("wyzhangd: enter StandardWeightLoader.load_weights")
         """
         Calls the generic load_hf_weights utility, passing the correct
         weights iterator.
@@ -715,6 +772,7 @@ class StandardWeightLoader(BaseWeightLoader):
             mesh=self.mesh,
             pp_missing_layers=getattr(model, 'pp_missing_layers', []),
             keep_hf_weight_suffix_when_match=keep_hf_weight_suffix_when_match)
+        logger.info("wyzhangd: exit StandardWeightLoader.load_weights")
 
 
 def jax_array_from_reshaped_torch(
@@ -722,6 +780,7 @@ def jax_array_from_reshaped_torch(
         *,
         reshape_dims: Optional[tuple[int, ...]] = None,
         permute_dims: Optional[tuple[int, ...]] = None) -> jax.Array:
+    logger.info("wyzhangd: enter jax_array_from_reshaped_torch")
     """Convert a torch.Tensor to a jax.Array with reshaping and transposing.
 
     HuggingFace model almost always store linear layer weights with contracting dimension
@@ -740,6 +799,7 @@ def jax_array_from_reshaped_torch(
     if permute_dims is not None:
         torch_weight = torch_weight.permute(*permute_dims)
 
+    logger.info("wyzhangd: exit jax_array_from_reshaped_torch")
     return t2j(torch_weight, use_dlpack=False)
 
 
@@ -750,6 +810,7 @@ def load_nnx_param_from_reshaped_torch(
         reshape_dims: Optional[tuple[int, ...]] = None,
         permute_dims: Optional[tuple[int, ...]] = None,
         param_name: str = "Unknown"):
+    logger.info("wyzhangd: enter load_nnx_param_from_reshaped_torch")
     """Load a nnx.Param from a torch.Tensor with reshaping and transposing.
 
     HuggingFace model almost always store linear layer weights with contracting dimension
@@ -782,12 +843,14 @@ def load_nnx_param_from_reshaped_torch(
         raise RuntimeError(
             f"Failed to load weight '{param_name}' with shape {jax_weight.shape} into param with shape {jax_param.value.shape}"
         ) from e
+    logger.info("wyzhangd: exit load_nnx_param_from_reshaped_torch")
 
 
 class JaxAutoWeightsLoader(AutoWeightsLoader):
     """A weights loader for JAX models."""
 
     def __init__(self, model, **kwargs):
+        logger.info("wyzhangd: enter JaxAutoWeightsLoader.__init__")
         assert isinstance(model, JaxModule)
 
         for name, param in model.named_parameters():
@@ -823,9 +886,11 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                                       param_name=name))
 
         super().__init__(model, **kwargs)
+        logger.info("wyzhangd: exit JaxAutoWeightsLoader.__init__")
 
     def _load_module(self, base_prefix: str, module: JaxModule,
                      weights: Iterable) -> Iterable:
+        logger.info("wyzhangd: enter JaxAutoWeightsLoader._load_module")
         yield from super()._load_module(base_prefix, module, weights)
         # Post-process module after loading weights. Unlike vLLM post-process
         # weights after loading all weights, we do it per-module here to
@@ -833,6 +898,7 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
         if (quant_method := getattr(module, 'quant_method', None)) is not None:
             assert isinstance(quant_method, QuantizeMethodBase)
             quant_method.process_weights_after_loading(module)
+        logger.info("wyzhangd: exit JaxAutoWeightsLoader._load_module")
 
 
 class LoadableWithIterator:
@@ -843,12 +909,15 @@ class LoadableWithIterator:
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
+        logger.info("wyzhangd: enter LoadableWithIterator.load_weights")
         if not isinstance(weights, Iterable):
             # Use next parent class in MRO.
+            logger.info("wyzhangd: exit LoadableWithIterator.load_weights")
             return super().load_weights(weights)
 
         loader = JaxAutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head"]
                            if not hasattr(self, 'lm_head') else None))
+        logger.info("wyzhangd: exit LoadableWithIterator.load_weights")
         return loader.load_weights(weights)
