@@ -93,11 +93,6 @@ def main(args: dict):
     if profiler_config.profiler == "torch":
         llm.stop_profile()
 
-    llm.collective_rpc("delete_kv_cache")
-    llm.collective_rpc("reinitialize_kv_cache")
-
-    outputs = llm.generate(prompts, sampling_params)
-
     # Print the outputs.
     print("-" * 50)
     for output in outputs:
