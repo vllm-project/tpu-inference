@@ -340,6 +340,7 @@ def _load_and_shard_weight(vllm_config,
                            | None = None,
                            pp_missing_layers: list[str] | None = None):
     logger.info("wyzhangd: enter _load_and_shard_weight")
+    logger.info(f"Loading weight for {hf_key} with shape {hf_weight.shape} and dtype {hf_weight.dtype} and sharding {shardings}")
     name_map = metadata_map.name_map
     reshape_keys = metadata_map.reshape_map
     bias_reshape_keys = metadata_map.bias_reshape_map
@@ -459,7 +460,7 @@ def _load_and_shard_weight(vllm_config,
                 hf_weight = jnp.repeat(hf_weight, dim_size, axis=dim)
                 break
 
-    logger.debug(
+    logger.info(
         "after transform | "
         f"{hf_key}: {hf_weight.shape} --> {model_key}: {model_weight.value.shape} {model_sharding}"
     )
