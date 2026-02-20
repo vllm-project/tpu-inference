@@ -1,0 +1,22 @@
+#!/bin/bash
+
+ITERATIONS=1
+
+while getopts "n:" opt; do
+  case $opt in
+    n) ITERATIONS=$OPTARG ;;
+    *) echo "Usage: $0 [-n iterations]" >&2; exit 1 ;;
+  esac
+done
+
+for ((i=1; i<=ITERATIONS; i++)); do
+    curl http://localhost:8000/v1/completions \
+        -H "Content-Type: application/json" \
+        -d '{
+            "model": "meta-llama/Llama-3.1-8B",
+            "prompt": ["Hello, my name is", "what is plural of child"],
+            "max_tokens": 20,
+            "temperature": 0.7
+        }'
+    echo ""
+done

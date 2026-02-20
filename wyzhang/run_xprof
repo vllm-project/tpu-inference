@@ -1,0 +1,1 @@
+curl http://localhost:8791/data/plugin/profile/capture_profile?service_addr=localhost:9999&duration=1000

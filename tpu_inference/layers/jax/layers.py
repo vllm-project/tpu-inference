@@ -216,7 +216,7 @@ class Embedder(nnx.Module):
             decode: A boolean flag. If False (default), performs encoding. If
                 True, performs decoding.
 
-        Returns:
+    Returns:
             Either embedding vectors or logit scores.
         """
         if decode:

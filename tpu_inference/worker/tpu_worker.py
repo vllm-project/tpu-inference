@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+import traceback
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional, Tuple
 
@@ -49,6 +50,7 @@ class PPConfig:
     default_tpu_visible_chips: str = field(init=False)
 
     def __post_init__(self):
+        logger.debug("Enter PPConfig.__post_init__")
         # In the isolated stage architecture, each pipeline stage operates
         # as an independent JAX cluster.
         # For single-host PP or multi-host with one host per stage,
@@ -56,6 +58,7 @@ class PPConfig:
         self.default_tpu_process_bounds = "1,1,1"
         self.default_tpu_chips_per_process_bounds = "1,1,1"
         self.default_tpu_visible_chips = f"{self.rank}"
+        logger.debug("Exit PPConfig.__post_init__")
 
 
 class TPUWorker:
@@ -71,6 +74,8 @@ class TPUWorker:
         ip: str = "localhost",
         prev_worker_ip: str = "localhost",
     ):
+        logger.debug("Enter TPUWorker.__init__")
+        logger.info(f"TPUWorker init stack trace: {''.join(traceback.format_stack())}")
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.parallel_config = vllm_config.parallel_config
@@ -128,16 +133,20 @@ class TPUWorker:
 
         # step_counter is used to calculate uuid to transfer intermediate tensors.
         self.step_counter = 0
+        logger.debug("Exit TPUWorker.__init__")
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
+        logger.debug("Enter TPUWorker.initialize_cache")
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
+        logger.debug("Exit TPUWorker.initialize_cache")
 
     def init_device(self,
                     tpu_process_bounds="",
                     tpu_chips_per_process_bounds="",
                     tpu_visible_chips=""):
+        logger.debug("Enter TPUWorker.init_device")
         # set tpu visible devices for Jax runtime in single host PP.
         multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "").lower()
         if multihost_backend != "ray" and self.parallel_config.pipeline_parallel_size > 1:
@@ -260,14 +269,19 @@ class TPUWorker:
                     f"total devices={jax.devices()} | "
                     f"local_devices={jax.local_devices()}")
         vllm_utils.report_usage_stats(self.vllm_config)
+        logger.debug("Exit TPUWorker.init_device")
 
     def initialize_pp_transfer_connect(self):
+        logger.debug("Enter TPUWorker.initialize_pp_transfer_connect")
         if self.rank == 0:
+            logger.debug("Exit TPUWorker.initialize_pp_transfer_connect")
             return
         jax_parallel_state.connect(self.pp_config.prev_worker_ip,
                                    self.rank - 1)
+        logger.debug("Exit TPUWorker.initialize_pp_transfer_connect")
 
     def determine_available_memory(self) -> int:
+        logger.debug("Enter TPUWorker.determine_available_memory")
         gpu_memory_utilization = self.cache_config.gpu_memory_utilization
         hbm_usage = utils.hbm_usage_bytes(self.devices)
         total_hbm_limit = total_hbm_used = 0
@@ -290,11 +304,13 @@ class TPUWorker:
                     f"{total_hbm_avail_gb=}GiB")
 
         if total_hbm_avail <= 0:
+            logger.debug("Exit TPUWorker.determine_available_memory")
             raise ValueError(f"{total_hbm_used_gb=}GiB exceeds "
                              f"{total_hbm_limit_cap_gb=}GiB by "
                              f"{-total_hbm_avail_gb}GiB. Please consider "
                              f"increasing --gpu-memory-utilization from "
                              f"{gpu_memory_utilization} to a larger value.")
+        logger.debug("Exit TPUWorker.determine_available_memory")
         return total_hbm_avail
 
     def execute_model(
@@ -306,6 +322,7 @@ class TPUWorker:
         # deliberate, temporary compromise for the same reasons outlined in
         # the `get_kv_cache_spec` method.
 
+        logger.debug("Enter TPUWorker.execute_model")
         if self.parallel_config.pipeline_parallel_size == 1 or self.rank == 0:
             intermediate_tensors = None
         else:
@@ -331,30 +348,43 @@ class TPUWorker:
                 scheduler_output, self.rank, self.step_counter)
             get_pp_group().send_tensor_dict(uuid, output.tensors)
             self.step_counter += 1
+            logger.debug("Exit TPUWorker.execute_model")
             return None
         else:
             self.step_counter += 1
             # With a connector, the scheduler expects output from all workers
             # TODO(mrjunwan): Figure out if this is ok after https://github.com/vllm-project/vllm/pull/26866
             if has_kv_transfer_group():
+                logger.debug("Exit TPUWorker.execute_model")
                 return output
-            return output if self.is_driver_worker else None
+            ret = output if self.is_driver_worker else None
+            logger.debug("Exit TPUWorker.execute_model")
+            return ret
 
     def sample_tokens(self,
                       grammar_output: GrammarOutput) -> ModelRunnerOutput:
-        return self.model_runner.sample_tokens(grammar_output)
+        logger.debug("Enter TPUWorker.sample_tokens")
+        ret = self.model_runner.sample_tokens(grammar_output)
+        logger.debug("Exit TPUWorker.sample_tokens")
+        return ret
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
-        return self.model_runner.take_draft_token_ids()
+        logger.debug("Enter TPUWorker.take_draft_token_ids")
+        ret = self.model_runner.take_draft_token_ids()
+        logger.debug("Exit TPUWorker.take_draft_token_ids")
+        return ret
 
     def add_lora(
         self,
         lora_request: LoRARequest,
     ) -> bool:
+        logger.debug("Enter TPUWorker.add_lora")
+        logger.debug("Exit TPUWorker.add_lora")
         raise NotImplementedError(
             "LoRA is not supported by the JAX worker yet.")
 
     def profile(self, is_start: bool = True):
+        logger.debug("Enter TPUWorker.profile")
         if is_start:
             options = jax.profiler.ProfileOptions()
             # default: https://docs.jax.dev/en/latest/profiling.html#general-options
@@ -364,24 +394,37 @@ class TPUWorker:
                                      profiler_options=options)
         else:
             jax.profiler.stop_trace()
+        logger.debug("Exit TPUWorker.profile")
 
     def load_model(self) -> None:
+        logger.debug("Enter TPUWorker.load_model")
         self.model_runner.load_model()
+        logger.debug("Exit TPUWorker.load_model")
 
     def compile_or_warm_up_model(self) -> None:
+        logger.debug("Enter TPUWorker.compile_or_warm_up_model")
         self.model_runner.capture_model()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         self.model_runner._init_random()
+        logger.debug("Exit TPUWorker.compile_or_warm_up_model")
 
     def reset_mm_cache(self) -> None:
+        logger.debug("Enter TPUWorker.reset_mm_cache")
         pass
+        logger.debug("Exit TPUWorker.reset_mm_cache")
 
     def get_model(self):
-        return self.model_runner.get_model()
+        logger.debug("Enter TPUWorker.get_model")
+        ret = self.model_runner.get_model()
+        logger.debug("Exit TPUWorker.get_model")
+        return ret
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-        return self.model_runner.get_supported_tasks()
+        logger.debug("Enter TPUWorker.get_supported_tasks")
+        ret = self.model_runner.get_supported_tasks()
+        logger.debug("Exit TPUWorker.get_supported_tasks")
+        return ret
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         # NOTE: This method intentionally returns a concrete vLLM type, which
@@ -396,13 +439,17 @@ class TPUWorker:
         # responsible for this translation. When vLLM can be modified, this
         # method should be changed to return `dict[str, AbstractKVCacheSpec]`,
         # and the vLLM side should be updated to handle the translation.
-        return self.model_runner.get_kv_cache_spec()
+        logger.debug("Enter TPUWorker.get_kv_cache_spec")
+        ret = self.model_runner.get_kv_cache_spec()
+        logger.debug("Exit TPUWorker.get_kv_cache_spec")
+        return ret
 
     def initialize_from_config(
         self,
         kv_cache_config: KVCacheConfig,
     ) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
+        logger.debug("Enter TPUWorker.initialize_from_config")
         # Precompile functions with large vocab_size tensors before allocating KV cache to avoid OOM
         if not (envs.SKIP_JAX_PRECOMPILE or
                 (hasattr(self.model_runner.model_config, "enforce_eager")
@@ -411,14 +458,19 @@ class TPUWorker:
             self.model_runner.compilation_manager._precompile_gather_logprobs()
         self.model_runner.initialize_kv_cache(kv_cache_config,
                                               self.topology_order_id)
+        logger.debug("Exit TPUWorker.initialize_from_config")
 
     def get_node_kv_ip_port(self) -> tuple[int, str, int]:
+        logger.debug("Enter TPUWorker.get_node_kv_ip_port")
         ip = get_host_ip()
         port = get_kv_transfer_port()
+        logger.debug("Exit TPUWorker.get_node_kv_ip_port")
         return (int(self.topology_order_id), ip, int(port))
 
     def check_health(self) -> None:
+        logger.debug("Enter TPUWorker.check_health")
         # worker will always be healthy as long as it's running.
+        logger.debug("Exit TPUWorker.check_health")
         return
 
     def sync_weights(
@@ -430,15 +482,22 @@ class TPUWorker:
                              jaxtyping.PyTree] = None
     ) -> None:
         """Sync the updated weights to the model runner."""
-        return self.model_runner._sync_weights(updated_weights=updated_weights,
+        logger.debug("Enter TPUWorker.sync_weights")
+        ret = self.model_runner._sync_weights(updated_weights=updated_weights,
                                                mappings=mappings,
                                                transpose_keys=transpose_keys,
                                                reshard_fn=reshard_fn)
+        logger.debug("Exit TPUWorker.sync_weights")
+        return ret
 
     def shutdown(self) -> None:
+        logger.debug("Enter TPUWorker.shutdown")
+        logger.debug("Exit TPUWorker.shutdown")
         return
 
     # Ray executor do not need handshake metadata
     # as we pass the kv_parameters through proxy server
     def get_kv_connector_handshake_metadata(self) -> None:
+        logger.debug("Enter TPUWorker.get_kv_connector_handshake_metadata")
         pass
+        logger.debug("Exit TPUWorker.get_kv_connector_handshake_metadata")

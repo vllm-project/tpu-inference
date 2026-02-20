@@ -68,6 +68,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
     """
 
     def _init_executor(self) -> None:
+        logger.debug("Enter RayDistributedExecutor._init_executor")
         self.forward_dag: Optional[ray.dag.CompiledDAG] = None
 
         os.environ["VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE"] = "shm"
@@ -105,8 +106,10 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         self.uses_sampler = self.vllm_config.model_config.runner_type != "pooling" and (
             self.vllm_config.ec_transfer_config is None
             or not self.vllm_config.ec_transfer_config.is_ec_producer)
+        logger.debug("Exit RayDistributedExecutor._init_executor")
 
     def _initialize_ray_cluster(self) -> None:
+        logger.debug("Enter RayDistributedExecutor._initialize_ray_cluster")
         """Initialize the distributed cluster with Ray.
 
         it will connect to the Ray cluster and create a placement group
@@ -174,9 +177,11 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         assert current_placement_group is not None
         # Set the placement group in the parallel config
         self.parallel_config.placement_group = current_placement_group
+        logger.debug("Exit RayDistributedExecutor._initialize_ray_cluster")
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
+        logger.debug("Enter RayDistributedExecutor._init_workers_ray")
         # The workers are the actual ray actors.
         self.workers: List[RayWorkerWrapper] = []
 
@@ -399,11 +404,14 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
                     assert len(self.pp_tp_workers[pp_rank]) == tp_rank
                     assert pp_rank < len(self.pp_tp_workers)
                     self.pp_tp_workers[pp_rank].append(self.workers[rank])
+        logger.debug("Exit RayDistributedExecutor._init_workers_ray")
 
     # Ray executor do not need handshake metadata
     # as we pass the kv_parameters through proxy server
     def get_kv_connector_handshake_metadata(self) -> None:
+        logger.debug("Enter RayDistributedExecutor.get_kv_connector_handshake_metadata")
         pass
+        logger.debug("Exit RayDistributedExecutor.get_kv_connector_handshake_metadata")
 
 
 class RayWorkerWrapper(RayWorkerWrapperV1):
@@ -416,4 +424,7 @@ class RayWorkerWrapper(RayWorkerWrapperV1):
     """
 
     def _is_intermediate_tensors(self, output) -> bool:
-        return isinstance(output, JaxIntermediateTensors)
+        logger.debug("Enter RayWorkerWrapper._is_intermediate_tensors")
+        ret = isinstance(output, JaxIntermediateTensors)
+        logger.debug("Exit RayWorkerWrapper._is_intermediate_tensors")
+        return ret

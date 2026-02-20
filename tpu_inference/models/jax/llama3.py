@@ -230,17 +230,21 @@ class LlamaDecoderLayer(nnx.Module):
         x: jax.Array,
         attention_metadata: AttentionMetadata,
     ) -> Tuple[jax.Array, jax.Array]:
-        hidden_states = self.input_layernorm(x)
-        kv_cache, attn_output = self.self_attn(
-            kv_cache,
-            hidden_states,
-            attention_metadata,
-        )
+        with jax.named_scope("input_norm"):
+            hidden_states = self.input_layernorm(x)
+        with jax.named_scope("self_attn"):
+            kv_cache, attn_output = self.self_attn(
+                kv_cache,
+                hidden_states,
+                attention_metadata,
+            )
         attn_output += x
 
         residual = attn_output
-        attn_output = self.post_attention_layernorm(attn_output)
-        outputs = self.mlp(attn_output)
+        with jax.named_scope("post_attn_norm"):
+            attn_output = self.post_attention_layernorm(attn_output)
+        with jax.named_scope("mlp"):
+            outputs = self.mlp(attn_output)
         outputs = residual + outputs
         return kv_cache, outputs
 
@@ -321,7 +325,8 @@ class LlamaModel(nnx.Module):
     ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]] | Tuple[
             List[jax.Array], JaxIntermediateTensors]:
         if self.is_first_rank:
-            x = self.embed(input_ids)
+            with jax.named_scope("embed"):
+                x = self.embed(input_ids)
         else:
             assert intermediate_tensors is not None
             x = intermediate_tensors["hidden_states"]
@@ -329,15 +334,16 @@ class LlamaModel(nnx.Module):
         aux_hidden_states = []
         for i, layer in enumerate(
                 islice(self.layers, self.start_layer, self.end_layer)):
-            if i in self.aux_hidden_state_layers:
-                aux_hidden_states.append(x)
-            kv_cache = kv_caches[i]
-            kv_cache, x = layer(
-                kv_cache,
-                x,
-                attention_metadata,
-            )
-            kv_caches[i] = kv_cache
+            with jax.named_scope(f"layer_{i}"):
+                if i in self.aux_hidden_state_layers:
+                    aux_hidden_states.append(x)
+                kv_cache = kv_caches[i]
+                kv_cache, x = layer(
+                    kv_cache,
+                    x,
+                    attention_metadata,
+                )
+                kv_caches[i] = kv_cache
         if not self.is_last_rank:
             # Note: add aux_hidden_states to make the output spec consistent.
             return kv_caches, JaxIntermediateTensors({"hidden_states":

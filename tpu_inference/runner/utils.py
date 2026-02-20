@@ -346,6 +346,7 @@ class PhasedBasedProfiler:
         """
         current_determined_phase = determine_phase_from_batch_composition_stats(
             batch_composition_stats)
+        logger.info(f"[xprof] Current determined phase: {current_determined_phase}")
         for phase, has_been_seen in self.inference_phase_seen.items():
             if has_been_seen or phase != current_determined_phase:
                 continue
@@ -355,8 +356,8 @@ class PhasedBasedProfiler:
 
             self.current_phase = phase.name.lower()
 
-            logger.info(f"Starting profiling for {self.current_phase} phase")
-            logger.info(f"Batch composition stats: {batch_composition_stats}")
+            logger.info(f"[xprof] Starting profiling for {self.current_phase} phase")
+            logger.info(f"[xprof] Batch composition stats: {batch_composition_stats}")
             self.profile_dir_with_phase_suffix = os.path.join(
                 self.profile_dir, self.current_phase)
 
@@ -389,13 +390,14 @@ class PhasedBasedProfiler:
         """
         # We only should decrement the profiling_n_steps_left if we are profiling
         if self.current_phase != "":
+            logger.info(f"[xprof] Stepping profiling for {self.current_phase} phase. Steps left: {self.profiling_n_steps_left}")
             self._write_batch_composition_stats_to_file_helper(
                 batch_composition_stats)
             self.profiling_n_steps_left -= 1
             if self.profiling_n_steps_left <= 0:
                 jax.profiler.stop_trace()
                 logger.info(
-                    f"Profiling for {self.current_phase} phase finished")
+                    f"[xprof] Profiling for {self.current_phase} phase finished")
                 self.current_phase = ""
 
     def step(self, batch_composition_stats: dict) -> None:
@@ -411,11 +413,15 @@ class PhasedBasedProfiler:
                     padded_total_num_scheduled_tokens: The padded total number of tokens scheduled for the batch.
                     num_reqs: The number of requests in the batch.
         """
+        logger.info(f"[xprof] Step called. batch_composition_stats: {batch_composition_stats}")
         have_seen_all_phases = all(self.inference_phase_seen.values())
         # We want to start profiling only after the first trial request
         is_past_initial_request = batch_composition_stats[
             "num_reqs"] > 1 and batch_composition_stats[
                 "total_num_scheduled_tokens"] > 1
+
+        logger.info(f"[xprof] Step called. is_past_initial_request: {is_past_initial_request}, have_seen_all_phases: {have_seen_all_phases}, current_phase: {self.current_phase}")
+
         if is_past_initial_request and (not have_seen_all_phases
                                         or self.current_phase != ""):
             # We haven't started profiling yet
