@@ -100,14 +100,18 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
     ):
         super().__init__(quant_config)
         self.linear_config = linear_config
-        if self.linear_config.enable_quantized_matmul_kernel and not self.linear_config.requant_block_size:
+        if (self.linear_config.enable_quantized_matmul_kernel
+                and not self.linear_config.requant_block_size):
             raise ValueError(
-                "You should set REQUANTIZE_BLOCK_SIZE to enable quantized matmul kernel. Please set the value or disable the quantized matmul kernel."
-            )
-        if not self.linear_config.enable_quantized_matmul_kernel and self.linear_config.requant_block_size:
+                "Please specify environment varialble REQUANTIZE_BLOCK_SIZE to "
+                "enable quantized "
+                "matmul kernel.")
+        if (not self.linear_config.enable_quantized_matmul_kernel
+                and self.linear_config.requant_block_size):
             raise ValueError(
-                "Blockwise quantization is supported by quantized matmul kernel. Please enable quantized_matmul_kernel or unset the quantize block size to trigger XLA per-channel quantization."
-            )
+                "REQUANTIZE_BLOCK_SIZE is specified but quantized matmul "
+                "kernel is not enabled. Please enable it via setting "
+                "environment variable ENABLE_QUANTIZED_MATMUL_KERNEL.")
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         assert isinstance(layer, vllm_linear.LinearBase)
@@ -134,7 +138,8 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
             weight_block_size=tuple(self.weight_block_size),
             linear_config=self.linear_config)
         if self.linear_config.enable_quantized_matmul_kernel:
-            # The quantized_matmul_kernel expects weight scales shaped (n_out_features, 1, n_blocks) for blockwisze quantization.
+            # The quantized_matmul_kernel expects weight scales shaped
+            # (n_out_features, 1, n_blocks) for blockwisze quantization.
             weights.weight_scale = jnp.expand_dims(
                 jnp.transpose(weights.weight_scale),
                 axis=1,
@@ -175,8 +180,8 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
             else:
                 assert isinstance(layer.weight, torch.nn.ParameterList)
                 assert isinstance(layer.weight_scale, torch.nn.ParameterList)
-                # jax_view cannot handle ParameterList directly, so we explicitly
-                # convert them to list of jax.Array.
+                # jax_view cannot handle ParameterList directly, so we
+                # explicitly convert them to list of jax.Array.
                 weight_and_scale = [
                     (jax_view(w), jax_view(s))
                     for w, s in zip(layer.weight, layer.weight_scale)

@@ -29,7 +29,6 @@ import vllm.envs as vllm_envs
 from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
-from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.lora.layers import BaseLayerWithLoRA
@@ -131,10 +130,8 @@ class VllmModelWrapper:
         # Set up to load the model into CPU first.
         # Cache device slice config since device config cannot be deepcopied
         modified_slice_config = False
-        if hasattr(
-                self.vllm_config.device_config,
-                'slice') and self.vllm_config.device_config.slice is not None:
-            slice_config = self.vllm_config.device_config.slice
+        if (slice_config := getattr(self.vllm_config.device_config, 'slice')
+                is not None):
             modified_slice_config = True
             self.vllm_config.device_config.slice = None
         self.vllm_config.compilation_config.static_forward_context.clear()
@@ -142,15 +139,15 @@ class VllmModelWrapper:
         vllm_config_for_load = copy.deepcopy(self.vllm_config)
         if modified_slice_config:
             self.vllm_config.device_config.slice = slice_config
-        assert self.vllm_config.model_config.dtype in TORCH_DTYPE_TO_JAX, "The model_config.dtype must be a PyTorch dtype."
+        assert isinstance(self.vllm_config.model_config.dtype, torch.dtype)
         vllm_config_for_load.device_config.device = "cpu"
         # Remove the dynamically added sharding_config attribute to avoid errors
-        # when vLLM's replace() function checks for dataclass fields.
-        # This is safe because vllm_config_for_load is only used for model loading
-        # which doesn't need sharding_config, and self.vllm_config still has it.
+        # when vLLM's replace() function checks for dataclass fields.  This is
+        # safe because vllm_config_for_load is only used for model loading which
+        # doesn't need sharding_config, and self.vllm_config still has it.
         if hasattr(vllm_config_for_load, 'sharding_config'):
             delattr(vllm_config_for_load, 'sharding_config')
-        # Clearing the cached compilation config, otherwise vllm model init will fail
+        # Clearing the cached compilation config to avoid vllm model init.
 
         # When expert parallelism is enabled, vLLM loads weight in sharding
         # aware manner. Since tpu-inference has its own sharding logic, this
@@ -160,9 +157,7 @@ class VllmModelWrapper:
         use_random_weights = (
             vllm_config_for_load.load_config.load_format == "dummy")
         if use_random_weights:
-            logger.info(
-                "Initializing vLLM model with random weights, weight loading skipped."
-            )
+            logger.info("Initializing vLLM model with random weights.")
         # The DummyModelLoader in vLLM calls torch._sync for torch_xla path when
         # it detects the tpu platform, but we don't need it and it causes crash
         # without proper setup.
@@ -202,9 +197,8 @@ class VllmModelWrapper:
 
         loading_end = time.time()
         total_loading_time = loading_end - loading_start
-        logger.info(
-            f"Total time to load model weights from storage to TPU: {total_loading_time:.2f} seconds."
-        )
+        logger.info("Total time to load model weights from storage to TPU: "
+                    f"{total_loading_time:.2f} seconds.")
         # Returning to the jax land, so we need to wrap it into a JaxValue.
         return jax_view(params_and_buffers), lora_manager
 
