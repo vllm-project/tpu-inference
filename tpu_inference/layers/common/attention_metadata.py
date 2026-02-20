@@ -27,6 +27,7 @@ import jax
         "seq_lens",
         "query_start_loc",
         "request_distribution",
+        "num_actual_tokens",
     ],
     meta_fields=[],
     drop_fields=["query_start_loc_cpu", "seq_lens_cpu"],
@@ -47,3 +48,5 @@ class AttentionMetadata(object):
 
     query_start_loc_cpu: Any = field(init=False)
     seq_lens_cpu: Any = field(init=False)
+
+    num_actual_tokens: int | None = None

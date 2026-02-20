@@ -191,6 +191,7 @@ class CompilationManager:
                 seq_lens=seq_lens,
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
+                num_actual_tokens=num_tokens  # TODO: is this right?
             )
             return attention_metadata_gid
 

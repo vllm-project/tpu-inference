@@ -115,6 +115,14 @@ class PallasAttentionBackendImpl(AttentionImpl):
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
         sinks: torch.Tensor | None = None,
+        q_lora_rank=None,
+        kv_lora_rank=None,
+        qk_nope_head_dim=None,
+        qk_rope_head_dim=None,
+        qk_head_dim=None,
+        v_head_dim=None,
+        kv_b_proj=None,
+        indexer=None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -214,6 +222,53 @@ class PallasAttentionBackendImpl(AttentionImpl):
         vllm_model_wrapper_context.kv_caches[kv_cache_index] = new_kv_cache
 
         return torch_view(outputs)
+
+
+class PallasMLAttentionBackendImpl(PallasAttentionBackendImpl):
+
+    def __init__(self,
+                 *args,
+                 q_lora_rank=None,
+                 kv_lora_rank=None,
+                 qk_nope_head_dim=None,
+                 qk_rope_head_dim=None,
+                 qk_head_dim=None,
+                 v_head_dim=None,
+                 kv_b_proj=None,
+                 indexer=None,
+                 **kwargs) -> None:
+        super().__init__(
+            *args,
+            **kwargs,
+        )
+
+
+@register_backend(AttentionBackendEnum.FLASHMLA)
+class PallasMLAttentionBackend(AttentionBackend):
+
+    @property
+    def accept_output_buffer(self) -> bool:
+        return True
+
+    @staticmethod
+    def get_name() -> str:
+        return "FLASHMLA"
+
+    @staticmethod
+    def get_impl_cls() -> type["PallasAttentionBackendImpl"]:
+        return PallasMLAttentionBackendImpl
+
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_dtype_str: str = "auto",
+    ) -> tuple[int, ...]:
+        padded_head_size = (cdiv(head_size, TPU_HEAD_SIZE_ALIGNMENT) *
+                            TPU_HEAD_SIZE_ALIGNMENT)
+        return (num_blocks, block_size, num_kv_heads * 2, padded_head_size)
 
 
 @functools.partial(
