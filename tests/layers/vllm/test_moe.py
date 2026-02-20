@@ -21,7 +21,11 @@ import pytest
 from tests.layers.common import utils as test_utils
 # Adjust the import below to match the actual location of your function
 # For example: from my_module.moe_selector import select_moe_backend_from_fused_moe_config
-from tpu_inference.layers.common.fused_moe_gmm import fused_moe_func
+from tpu_inference.layers.common.fused_moe_gmm import (
+    fused_moe_func,
+    _selective_gather_ep_0,
+    _selective_gather_ep_1,
+)
 from tpu_inference.layers.common.moe import MoEBackend
 # We assume the function is in a file that can be imported.
 # If testing locally without the full repo, you might need to adjust imports.
@@ -144,3 +148,176 @@ def test_fused_moe_func_ep_gmm_v2():
     assert result.shape == expected.shape
     assert jnp.allclose(result, expected, atol=2e-1, rtol=2e-1), \
         f"Max absolute diff: {jnp.max(jnp.abs(result - expected))}"
+
+
+class TestSelectiveGatherEp:
+    """Tests for _selective_gather_ep_0 and _selective_gather_ep_1.
+
+    These run outside jit/shard_map so you can use plain Python debugging
+    (breakpoint(), print, pdb) to inspect intermediate values.
+
+    Setup:
+        4 experts, 8 total token-expert slots (num_tokens * topk).
+        group_sizes tells how many slots are routed to each expert.
+        token_indices_sorted is the permutation that maps sorted position
+        back to the original token index in hidden_states.
+    """
+
+    @pytest.fixture
+    def gather_inputs(self):
+        """Build a concrete routing scenario.
+
+        Experts: 0, 1, 2, 3
+        group_sizes: [2, 3, 1, 2]  -> cumsum = [2, 5, 6, 8]
+          expert 0 owns sorted positions [0, 1]
+          expert 1 owns sorted positions [2, 3, 4]
+          expert 2 owns sorted positions [5]
+          expert 3 owns sorted positions [6, 7]
+
+        hidden_states: 8 tokens, hidden_size=4, each row = [i+1]*4
+          so hidden_states[i] is easily identifiable.
+
+        token_indices_sorted: the gather permutation produced by the
+          router — maps each sorted slot to the original token index.
+        """
+        num_tokens = 8
+        hidden_size = 4
+        hidden_states = jnp.array(
+            [[(i + 1)] * hidden_size for i in range(num_tokens)],
+            dtype=jnp.float32,
+        )
+        # arbitrary permutation (each value in [0, num_tokens))
+        token_indices_sorted = jnp.array([3, 7, 0, 5, 2, 6, 1, 4])
+        group_sizes = jnp.array([2, 3, 1, 2])
+        return hidden_states, token_indices_sorted, group_sizes
+
+    # -- helpers -------------------------------------------------------
+
+    @staticmethod
+    def _naive_selective_gather(hidden_states, token_indices_sorted,
+                                group_sizes, group_offset,
+                                num_experts_per_shard):
+        """Straightforward NumPy-style reference implementation."""
+        cumsum = jnp.cumsum(group_sizes)
+        ep_start_expert = group_offset[0]
+        start = 0 if ep_start_expert == 0 else int(cumsum[ep_start_expert - 1])
+        end = int(cumsum[ep_start_expert + num_experts_per_shard - 1])
+
+        num_total = token_indices_sorted.shape[0]
+        hidden_size = hidden_states.shape[1]
+        out = jnp.zeros((num_total, hidden_size), dtype=hidden_states.dtype)
+        for pos in range(start, end):
+            token_idx = int(token_indices_sorted[pos])
+            out = out.at[pos].set(hidden_states[token_idx])
+        return out
+
+    # -- tests ---------------------------------------------------------
+
+    @pytest.mark.parametrize("ep_expert_start, num_experts_per_shard", [
+        (0, 1),   # shard owns expert 0
+        (1, 1),   # shard owns expert 1
+        (2, 2),   # shard owns experts 2-3
+        (0, 2),   # shard owns experts 0-1
+        (0, 4),   # shard owns all experts
+    ])
+    def test_selective_gather_ep_0(self, gather_inputs,
+                                   ep_expert_start, num_experts_per_shard):
+        # Experts: 0, 1, 2, 3
+        # group_sizes: [2, 3, 1, 2]  -> cumsum = [2, 5, 6, 8]
+        #   expert 0 owns sorted positions [0, 1]
+        #   expert 1 owns sorted positions [2, 3, 4]
+        #   expert 2 owns sorted positions [5]
+        #   expert 3 owns sorted positions [6, 7]
+
+        # hidden_states: 8 tokens, hidden_size=4, each row = [i+1]*4
+        #   so hidden_states[i] is easily identifiable.
+        # token_indices_sorted=[3, 7, 0, 5, 2, 6, 1, 4]
+        # group_offset = jnp.arange(0, num_experts, num_experts_per_shard)
+        hidden_states, token_indices_sorted, group_sizes = gather_inputs
+        group_offset = jnp.array([ep_expert_start])
+        cumsum_gs = jnp.cumsum(group_sizes)
+        token_start = jnp.where(ep_expert_start > 0, cumsum_gs[ep_expert_start - 1], 0)
+        token_end = cumsum_gs[ep_expert_start + num_experts_per_shard - 1]
+
+
+        result = _selective_gather_ep_0(
+            hidden_states, token_indices_sorted, group_sizes,
+            group_offset, num_experts_per_shard,
+        )
+        expected = self._naive_selective_gather(
+            hidden_states, token_indices_sorted, group_sizes,
+            group_offset, num_experts_per_shard,
+        )
+        assert result.shape == expected.shape
+        assert jnp.allclose(result[token_start:token_end], expected[token_start:token_end]), (
+            f"ep_expert_start={ep_expert_start}, "
+            f"num_experts_per_shard={num_experts_per_shard}\n"
+            f"result:\n{result}\nexpected:\n{expected}"
+        )
+
+    @pytest.mark.parametrize("ep_expert_start, num_experts_per_shard", [
+        (0, 1),   # shard owns expert 0
+        (1, 1),   # shard owns expert 1
+        (2, 2),   # shard owns experts 2-3
+        (0, 2),   # shard owns experts 0-1
+        (0, 4),   # shard owns all experts
+    ])
+    def test_selective_gather_ep_1(self, gather_inputs,
+                                   ep_expert_start, num_experts_per_shard):
+        # Experts: 0, 1, 2, 3
+        # group_sizes: [2, 3, 1, 2]  -> cumsum = [2, 5, 6, 8]
+        #   expert 0 owns sorted positions [0, 1]
+        #   expert 1 owns sorted positions [2, 3, 4]
+        #   expert 2 owns sorted positions [5]
+        #   expert 3 owns sorted positions [6, 7]
+
+        # hidden_states: 8 tokens, hidden_size=4, each row = [i+1]*4
+        #   so hidden_states[i] is easily identifiable.
+        # token_indices_sorted=[3, 7, 0, 5, 2, 6, 1, 4]
+        # group_offset = jnp.arange(0, num_experts, num_experts_per_shard)
+        hidden_states, token_indices_sorted, group_sizes = gather_inputs
+        group_offset = jnp.array([ep_expert_start])
+        cumsum_gs = jnp.cumsum(group_sizes)
+        token_start = jnp.where(ep_expert_start > 0, cumsum_gs[ep_expert_start - 1], 0) # cumsum_gs[0]==2
+        token_end = cumsum_gs[ep_expert_start + num_experts_per_shard - 1]  # 5
+
+        result = _selective_gather_ep_1(
+            hidden_states, token_indices_sorted, group_sizes,
+            group_offset, num_experts_per_shard,
+        )
+        expected = self._naive_selective_gather(
+            hidden_states, token_indices_sorted, group_sizes,
+            group_offset, num_experts_per_shard,
+        )
+        assert result.shape == expected.shape
+        assert jnp.allclose(result[token_start:token_end], expected[token_start:token_end]), (
+            f"ep_expert_start={ep_expert_start}, "
+            f"num_experts_per_shard={num_experts_per_shard}\n"
+            f"result:\n{result}\nexpected:\n{expected}"
+        )
+
+    @pytest.mark.parametrize("ep_expert_start, num_experts_per_shard", [
+        (0, 1),
+        (1, 1),
+        (2, 2),
+        (0, 4),
+    ])
+    def test_ep_0_matches_ep_1(self, gather_inputs,
+                               ep_expert_start, num_experts_per_shard):
+        """Both implementations should produce identical results."""
+        hidden_states, token_indices_sorted, group_sizes = gather_inputs
+        group_offset = jnp.array([ep_expert_start])
+
+        r0 = _selective_gather_ep_0(
+            hidden_states, token_indices_sorted, group_sizes,
+            group_offset, num_experts_per_shard,
+        )
+        r1 = _selective_gather_ep_1(
+            hidden_states, token_indices_sorted, group_sizes,
+            group_offset, num_experts_per_shard,
+        )
+        assert jnp.allclose(r0, r1), (
+            f"ep_expert_start={ep_expert_start}, "
+            f"num_experts_per_shard={num_experts_per_shard}\n"
+            f"ep_0 result:\n{r0}\nep_1 result:\n{r1}"
+        )

@@ -19,6 +19,7 @@ import jax
 from jax import numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
+from jax.experimental import checkify
 
 from tpu_inference.kernels.megablox.gmm import gmm
 from tpu_inference.kernels.megablox.gmm_v2 import (gmm_v2,
@@ -86,7 +87,21 @@ def gmm_wrapper(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset):
     return gmm_res
 
 
-def _selective_gather_ep(hidden_states, token_indices_sorted, group_sizes,
+def _selective_gather_ep_0(hidden_states, token_indices_sorted, group_sizes,
+                         group_offset, num_experts_per_shard):
+    num_total = token_indices_sorted.shape[0]
+    ep_expert_start = group_offset[0]
+    cumsum_gs = jnp.cumsum(group_sizes)
+    ep_token_start = jnp.where(ep_expert_start > 0,
+                               cumsum_gs[ep_expert_start - 1], 0)
+    ep_token_end = cumsum_gs[ep_expert_start + num_experts_per_shard - 1]
+    positions = jnp.arange(num_total)
+    is_local = (positions >= ep_token_start) & (positions < ep_token_end)
+    safe_indices = jnp.where(is_local, token_indices_sorted, 0)
+    return hidden_states[safe_indices]
+
+
+def _selective_gather_ep_1(hidden_states, token_indices_sorted, group_sizes,
                          group_offset, num_experts_per_shard):
     num_total = token_indices_sorted.shape[0]
     ep_expert_start = group_offset[0]
@@ -95,7 +110,9 @@ def _selective_gather_ep(hidden_states, token_indices_sorted, group_sizes,
                                cumsum_gs[ep_expert_start - 1], 0)
     ep_token_end = cumsum_gs[ep_expert_start + num_experts_per_shard - 1]
     ep_token_cnt = ep_token_end - ep_token_start
+    # jax.debug.print("xw32 ep_expert_start={s}, ep_token_start={ts}, ep_token_end={te}, ep_token_cnt={tc}", s=ep_expert_start, ts=ep_token_start, te=ep_token_end, tc=ep_token_cnt)
 
+    # jax.debug.breakpoint()
     max_num_local_tokens = hidden_states.shape[0]
     hidden_size = hidden_states.shape[1]
     # pad so dynamic_slice won't read OOB.
@@ -105,11 +122,12 @@ def _selective_gather_ep(hidden_states, token_indices_sorted, group_sizes,
     valid = local_pos < ep_token_cnt
     local_indices = jnp.where(valid, local_indices, local_pos % max_num_local_tokens)
     x_local = hidden_states[local_indices]
-    x = jnp.zeros((num_total, hidden_size), dtype=hidden_states.dtype)
+    # the manual padding is needed because dynamic_update_slice will "If the update slice is too large to fit in the array, the start index will be adjusted to make it fit" per https://docs.jax.dev/en/latest/_autosummary/jax.lax.dynamic_update_slice.html
+    x = jnp.zeros((num_total+max_num_local_tokens, hidden_size), dtype=hidden_states.dtype)
     # xw32: what is the difference between x.at[].set() and jax.lax.dynamic_update_slice?
     # x = x.at[local_indices].set(x_local)
     x = jax.lax.dynamic_update_slice(x, x_local, (ep_token_start, 0))
-    return x
+    return x[:num_total]
 
     
 
@@ -119,6 +137,39 @@ def _selective_gather_ep(hidden_states, token_indices_sorted, group_sizes,
     # safe_indices = jnp.where(is_local, token_indices_sorted, 0)
     # return hidden_states[safe_indices]
 
+def _selective_gather_ep_2(hidden_states, token_indices_sorted, group_sizes,
+                       group_offset, num_experts_per_shard):
+    num_total = token_indices_sorted.shape[0]
+    hidden_size = hidden_states.shape[1]
+    ep_expert_start = group_offset[0]
+
+    cumsum_gs = jnp.cumsum(group_sizes)
+    ep_token_start = jnp.where(ep_expert_start > 0,
+                               cumsum_gs[ep_expert_start - 1], 0)
+    ep_token_end = cumsum_gs[ep_expert_start + num_experts_per_shard - 1]
+    ep_count = ep_token_end - ep_token_start
+
+    # Pad so dynamic_slice never reads out of bounds
+    padded_indices = jnp.pad(token_indices_sorted, (0, num_total),
+                             mode='constant', constant_values=0)
+
+    # Extract CONTIGUOUS block — this is a fast DMA slice, not a gather
+    local_indices = jax.lax.dynamic_slice(padded_indices,
+                                          (ep_token_start,), (num_total,))
+
+    # Mask positions beyond ep_count to a safe index
+    local_pos = jnp.arange(num_total)
+    valid = local_pos < ep_count
+    local_indices = jnp.where(valid, local_indices, local_pos%num_total)
+
+    # Gather — same static size but indices are now [real, real, ..., 0, 0, 0]
+    # starting from position 0 of local_indices (not scattered across the array)
+    x_local = hidden_states[local_indices]
+
+    # Place back into full-size output at the correct offset
+    x = jnp.zeros((num_total+num_total, hidden_size), dtype=hidden_states.dtype)
+    x = jax.lax.dynamic_update_slice(x, x_local, (ep_token_start, 0))
+    return x[:num_total]
 
 def moe_gmm_local(
     x: jax.Array,
@@ -193,8 +244,12 @@ def moe_gmm_local_ep_ragged(
     num_experts_per_shard: int,
 ) -> jax.Array:
     """EP MoE with ragged token routing: gather only local expert tokens."""
-    x = _selective_gather_ep(hidden_states, token_indices_sorted, group_sizes,
-                             group_offset, num_experts_per_shard)
+    # x_0 = _selective_gather_ep_0(hidden_states, token_indices_sorted, group_sizes, group_offset, num_experts_per_shard)
+    x = _selective_gather_ep_2(hidden_states, token_indices_sorted, group_sizes, group_offset, num_experts_per_shard)
+    # checkify.checkify(jnp.allclose(x_0, x_1, atol=1e-2, rtol=1e-2))
+    # if jnp.allclose(x_0, x_1, atol=1e-2, rtol=1e-2):
+    #     print("selective gather return different result.")
+    #     x_1 = _selective_gather_ep_1(hidden_states, token_indices_sorted, group_sizes, group_offset, num_experts_per_shard)
     return moe_gmm_local(x,
                          w1,
                          w1_scale,
