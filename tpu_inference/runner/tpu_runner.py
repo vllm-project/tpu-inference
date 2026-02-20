@@ -588,8 +588,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if has_kv_transfer_group():
             get_kv_transfer_group().register_runner(self)
 
-    def reset_kv_cache(self) -> None:
-        self.kv_cache_manager.reset_kv_cache()
+    def delete_kv_cache(self) -> None:
+        self.kv_cache_manager.delete_kv_cache()
 
     def reinitialize_kv_cache(self) -> None:
         self.kv_cache_manager.reinitialize_kv_cache()

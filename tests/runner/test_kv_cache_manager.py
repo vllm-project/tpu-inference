@@ -508,8 +508,8 @@ class TestKVCacheManager:
             assert isinstance(spec, MLAAttentionSpec)
             assert spec.num_kv_heads == 1
 
-    def test_reset_kv_cache(self):
-        """Test that reset_kv_cache deletes JAX arrays and clears state."""
+    def test_delete_kv_cache(self):
+        """Test that delete_kv_cache deletes JAX arrays and clears state."""
         # First, initialize KV cache using the same setup as
         # test_initialize_kv_cache.
         block_size = self.runner.vllm_config.cache_config.block_size
@@ -544,7 +544,7 @@ class TestKVCacheManager:
         assert len(self.runner.layer_name_to_kvcache_index) == 10
 
         # Now reset.
-        self.runner.reset_kv_cache()
+        self.runner.delete_kv_cache()
 
         assert len(self.runner.kv_caches) == 0
         assert len(self.runner.layer_name_to_kvcache_index) == 0
@@ -583,7 +583,7 @@ class TestKVCacheManager:
         assert len(self.runner.kv_caches) == 10
 
         # Reset and then reinitialize.
-        self.runner.reset_kv_cache()
+        self.runner.delete_kv_cache()
         assert len(self.runner.kv_caches) == 0
 
         self.runner.reinitialize_kv_cache()
@@ -601,9 +601,9 @@ class TestKVCacheManager:
         with pytest.raises(RuntimeError, match="Cannot reinitialize KV cache"):
             self.runner.reinitialize_kv_cache()
 
-    def test_reset_kv_cache_no_op_when_empty(self):
-        """Test that reset_kv_cache is safe to call when no KV cache exists."""
+    def test_delete_kv_cache_no_op_when_empty(self):
+        """Test that delete_kv_cache is safe to call when no KV cache exists."""
         assert len(self.runner.kv_caches) == 0
         # Should not raise.
-        self.runner.reset_kv_cache()
+        self.runner.delete_kv_cache()
         assert len(self.runner.kv_caches) == 0

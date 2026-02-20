@@ -281,7 +281,7 @@ class KVCacheManager:
             f"dtype={kv_caches[0].dtype} | "
             f"hbm={utils.hbm_usage_gb(self.runner.mesh.devices.flatten())}Gb")
 
-    def reset_kv_cache(self) -> None:
+    def delete_kv_cache(self) -> None:
         """Delete KV cache JAX arrays to free HBM.
         This explicitly deletes all KV cache JAX arrays, clearing the HBM
         they occupy. 
@@ -297,12 +297,12 @@ class KVCacheManager:
         """
         kv_caches = self.runner.kv_caches
         if not kv_caches:
-            logger.info("reset_kv_cache: No KV cache to reset.")
+            logger.info("delete_kv_cache: No KV cache to delete.")
             return
 
         num_layers = len(kv_caches)
         logger.info(
-            f"Resetting kv-cache | "
+            f"Deleting kv-cache | "
             f"num_layers={num_layers} | "
             f"hbm_before="
             f"{utils.hbm_usage_gb(self.runner.mesh.devices.flatten())}Gb")
@@ -314,7 +314,7 @@ class KVCacheManager:
         self.runner.layer_name_to_kvcache_index.clear()
 
         logger.info(
-            f"KV cache reset complete | "
+            f"KV cache delete complete | "
             f"hbm_after="
             f"{utils.hbm_usage_gb(self.runner.mesh.devices.flatten())}Gb")
 
@@ -323,7 +323,7 @@ class KVCacheManager:
         This reallocates fresh (empty) KV cache arrays using the
         ``KVCacheConfig`` that was saved during the initial
         ``initialize_kv_cache`` call.  It is intended to be called after
-        ``reset_kv_cache`` (and typically after a weight-sync / resharding
+        ``delete_kv_cache`` (and typically after a weight-sync / resharding
         step) so that inference can resume with a clean cache.
         Raises:
             RuntimeError: If ``initialize_kv_cache`` was never called (i.e.
