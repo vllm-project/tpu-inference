@@ -370,6 +370,7 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
         self.block_quant: bool = self.weight_block_size is not None
         self.weight_scale_name = ("weight_scale_inv"
                                   if self.block_quant else "weight_scale")
+        self._called_process_weights_after_loading = False
 
     def load_weights(self, *, layer: JaxMoE, original_load_weights_fn,
                      weights: Iterable) -> set:
