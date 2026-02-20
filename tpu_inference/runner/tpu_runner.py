@@ -555,14 +555,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self.rng_params_for_sampling = nnx.Rngs(
             jax.random.key(self.model_config.seed)).params()
-        self.is_multimodal_model = (
-            self.model_config.is_multimodal_model
-            and self.embed_multimodal_fn is not None and hasattr(
-                self.model_config.hf_config, "architectures"
-            )  #TODO: Remove Llama Guard 4 specific condition once the LG4 Vision portion is implemented
-            and len(self.model_config.hf_config.architectures) >= 1
-            and self.model_config.hf_config.architectures[0]
-            != "Llama4ForConditionalGeneration")
+        self.is_multimodal_model = (self.model_config.is_multimodal_model
+                                    and self.embed_multimodal_fn is not None
+                                    and hasattr(self.model_config.hf_config,
+                                                "architectures"))
 
         logger.info(f"Init model | "
                     f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")
@@ -761,14 +757,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             padded_num_reqs,
         ) = self._prepare_inputs(scheduler_output)
 
-        is_llama_guard_4 = (
-            hasattr(
-                self.model_config.hf_config, "architectures"
-            )  #TODO: Remove Llama Guard 4 specific condition once the LG4 Vision portion is implemented
-            and len(self.model_config.hf_config.architectures) >= 1
-            and self.model_config.hf_config.architectures[0]
-            == "Llama4ForConditionalGeneration")
-
         # multi-modal support
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
@@ -776,13 +764,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.mm_manager.execute_mm_encoder(scheduler_output)
             mm_embeds = self.mm_manager.gather_mm_embeddings(
                 scheduler_output, input_ids.shape[0])
-        #TODO: Remove the follow elif statement once Llama Guard 4 Vision portion has been implemented
-        elif is_llama_guard_4 and any(
-                self.mm_manager.runner.requests[req_id].mm_features
-                for req_id in self.mm_manager.runner.input_batch.req_ids):
-            raise NotImplementedError(
-                "Llama Guard 4 (JAX) currently supports only text inputs. "
-                "Multimodal processing not yet implemented.")
         else:
             mm_embeds = []
 

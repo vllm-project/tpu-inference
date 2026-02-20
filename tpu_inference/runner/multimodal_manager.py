@@ -137,7 +137,8 @@ class MultiModalManager:
                             torch.float32).numpy().astype(jnp.bfloat16)
                     else:
                         batched_mm_inputs[key] = value.numpy()
-            batched_mm_inputs.pop('image_grid_thw')
+            if 'image_grid_thw' in batched_mm_inputs:
+                batched_mm_inputs.pop('image_grid_thw')
 
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
@@ -158,11 +159,10 @@ class MultiModalManager:
                 encoder_outputs.append(output)
 
         # Cache the encoder outputs.
-        for (mm_hash, _), output in zip(
+        for (mm_hash, pos_info), output in zip(
                 mm_hashes_pos,
                 encoder_outputs,
         ):
-
             self.runner.encoder_cache[mm_hash] = output
 
     def gather_mm_embeddings(self, scheduler_output: "VllmSchedulerOutput",
@@ -205,7 +205,6 @@ class MultiModalManager:
                 encoder_output = self.runner.encoder_cache.get(mm_hash, None)
                 assert encoder_output is not None,\
                       f"Encoder cache miss for {mm_hash}."
-                encoder_output = self.runner.encoder_cache[mm_hash]
 
                 if (is_embed := pos_info.is_embed) is not None:
                     is_embed = is_embed[start_idx:end_idx]
