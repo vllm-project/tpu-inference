@@ -95,7 +95,8 @@ class TestGemma3ForCausalLM:
                 qwix=dict(rules=qwix_rules))
 
         # Test model init
-        model = Gemma3ForCausalLM(mock_vllm_config, rng, mesh)
+        with jax.set_mesh(mesh):
+            model = Gemma3ForCausalLM(mock_vllm_config, rng, mesh)
 
         model_config = mock_vllm_config.model_config
         hf_config = model_config.hf_config
@@ -147,7 +148,8 @@ class TestGemma3ForCausalLM:
         assert attn.sliding_window is None 
 
         # Test model load
-        model.load_weights(rng)
+        with jax.set_mesh(mesh):
+            model.load_weights(rng)
 
         # Apply qwix quantization, no-op if rules are not given.
         model = apply_qwix_quantization(mock_vllm_config,
