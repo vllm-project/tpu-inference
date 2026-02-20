@@ -1168,9 +1168,10 @@ class JAXLlama4VisionModel(nnx.Module):
 
         hidden_states = self.layernorm_post(hidden_states)
 
-        encoder_out_no_cls = hidden_states[:, :-1, :]
-
         # 5. Remove CLS token
+        # The encoder outputs N^2 + 1 tokens so removing the [CLS] token restores the
+        # N * N grid structure required for spatial reshaping
+        encoder_out_no_cls = hidden_states[:, :-1, :]
         hidden_states = encoder_out_no_cls
 
         # 6. Vision Adapter (Pixel Shuffle MLP)
