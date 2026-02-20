@@ -43,7 +43,7 @@ from tpu_inference.layers.jax.quantization.unquantized import (
     UnquantizedFusedMoEMethod, UnquantizedLinearMethod)
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
-    cpu_mesh_context, jax_array_from_reshaped_torch,
+    cpu_mesh, cpu_mesh_context, jax_array_from_reshaped_torch,
     load_nnx_param_from_reshaped_torch, shard_put)
 
 logger = init_logger(__name__)
@@ -226,6 +226,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                                   permute_dims=(0, 1),
                                   param_name=layer.prefix + ".weight"),
             eager_sharding=False)
+        layer.weight.set_metadata('mesh', cpu_mesh)
         layer.weight.set_metadata('sharding', self.weight_sharding)
 
         # Block-wise quantization scale
@@ -244,6 +245,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 param_name=layer.prefix + ".weight_scale_inv",
             ),
             eager_sharding=False)
+        layer.weight.set_metadata('mesh', cpu_mesh)
         layer.weight_scale_inv.set_metadata('sharding', self.weight_sharding)
 
         # Force the parameters to be loaded onto CPU, such that in `process_weights_after_loading`
