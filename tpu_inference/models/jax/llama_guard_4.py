@@ -33,7 +33,7 @@ from tpu_inference.layers.jax.attention.attention import AttentionMetadata
 from tpu_inference.layers.jax.attention.llama4_attention import Llama4Attention
 from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
-from tpu_inference.layers.jax.llama4_vision_rope import \
+from tpu_inference.layers.jax.rope import \
     Llama4VisionRotaryEmbedding
 from tpu_inference.layers.jax.misc import shard_put
 from tpu_inference.layers.jax.pp_utils import (PPMissingLayer,

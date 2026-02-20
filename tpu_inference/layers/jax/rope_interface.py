@@ -96,6 +96,9 @@ def apply_rope(
 
         out = jnp.concatenate([outputs_real, outputs_imag], axis=-1)
 
+    # The positions tensor is multidimensional for vision (hence >= 2) and
+    # the value of the last axis should be 2 as the tensor holds the pre-computed
+    # rotation factors (cosine and sine values) for each position.
     elif positions.ndim >= 2 and positions.shape[-1] == 2:  #VISION RoPE
         # positions = freqs_cis_stacked: (S, D_rot, 2)
         # Unstack to get the complex rotation factors (cos + i*sin) in a trace-compatible way.
