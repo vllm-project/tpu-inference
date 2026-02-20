@@ -73,8 +73,6 @@ class Attention(nnx.Module):
     attention_chunk_size: int | None = None
     rope_input_ordering: str = "split"
 
-    is_causal: bool = True
-
     _q_scale: float = 1.0
     _k_scale: float = 1.0
     _v_scale: float = 1.0
@@ -246,7 +244,6 @@ class Attention(nnx.Module):
             return ragged_paged_attention(
                 *args,
                 sm_scale=q_TNH.shape[-1]**-0.5,
-                is_causal=self.is_causal,
                 q_scale=q_scale,
                 k_scale=k_scale,
                 v_scale=v_scale,
