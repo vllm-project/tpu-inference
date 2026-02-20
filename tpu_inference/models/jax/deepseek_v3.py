@@ -122,7 +122,7 @@ v_head_dim = 128
 # here, we need to keep it for now.
 # TODO (jacobplatin): remove this in another PR
 edf_sharding = (None, ShardingAxisName.MODEL_1, ShardingAxisName.MODEL_2)
-expert_axis_name = edf_sharding[0]
+expert_axis_name = ShardingAxisName.ATTN_DATA_EXPERT
 
 
 @dataclass(kw_only=True)
@@ -829,17 +829,15 @@ class DeepseekV2Moe(JaxModule):
             moe_activation_ffw_td = (ShardingAxisName.MLP_DATA, None)
             moe_activation_ffw_ted = (ShardingAxisName.MLP_DATA, None,
                                       ShardingAxisName.MOE_TENSOR)
-            moe_edf_sharding = (None, None, ShardingAxisName.MOE_TENSOR)
-            moe_efd_sharding = (None, ShardingAxisName.MOE_TENSOR, None)
+            moe_edf_sharding = (None, ShardingAxisName.ATTN_DATA_EXPERT, ShardingAxisName.MOE_TENSOR)
+            moe_efd_sharding = (None, ShardingAxisName.MOE_TENSOR, ShardingAxisName.ATTN_DATA_EXPERT)
         else:
             moe_activation_ffw_td = (ShardingAxisName.MLP_DATA,
                                      ShardingAxisName.MOE_TENSOR)
             moe_activation_ffw_ted = (ShardingAxisName.MLP_DATA, None,
                                       ShardingAxisName.MOE_TENSOR)
-            moe_edf_sharding = (None, ShardingAxisName.MOE_TENSOR,
-                                ShardingAxisName.ATTN_DATA_EXPERT)
-            moe_efd_sharding = (None, ShardingAxisName.ATTN_DATA_EXPERT,
-                                ShardingAxisName.MOE_TENSOR)
+            moe_edf_sharding = (ShardingAxisName.ATTN_DATA_EXPERT, None, None)
+            moe_efd_sharding = (ShardingAxisName.ATTN_DATA_EXPERT, None, None)
 
         self.experts = SharedFusedMoe(
             dtype=dtype,
@@ -1059,7 +1057,9 @@ class DeepSeekV3(JaxModule):
 
         self.num_expert_parallelism = get_expert_parallelism(
             expert_axis_name, self.mesh)
-        self.use_ep = self.num_expert_parallelism > 1
+        total_tensor_parallelsim = self.vllm_config.sharding_config.tp_size * \
+                                        self.vllm_config.sharding_config.attn_dp_size
+        self.use_ep = self.num_expert_parallelism > 1 and total_tensor_parallelsim == 1
         self.moe_backend = select_moe_backend(self.use_ep)
 
         # TODO (jacobplatin): we will resolve this issue in a forthcoming PR that will refactor weight loading
