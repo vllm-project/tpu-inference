@@ -71,7 +71,7 @@ class TPUWorker:
         ip: str = "localhost",
         prev_worker_ip: str = "localhost",
     ):
-        logger.debug("wyzhangd: enter __init__")
+        logger.info("wyzhangd: enter __init__")
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.parallel_config = vllm_config.parallel_config
@@ -129,20 +129,20 @@ class TPUWorker:
 
         # step_counter is used to calculate uuid to transfer intermediate tensors.
         self.step_counter = 0
-        logger.debug("wyzhangd: exit __init__")
+        logger.info("wyzhangd: exit __init__")
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
-        logger.debug("wyzhangd: enter initialize_cache")
+        logger.info("wyzhangd: enter initialize_cache")
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
-        logger.debug("wyzhangd: exit initialize_cache")
+        logger.info("wyzhangd: exit initialize_cache")
 
     def init_device(self,
                     tpu_process_bounds="",
                     tpu_chips_per_process_bounds="",
                     tpu_visible_chips=""):
-        logger.debug("wyzhangd: enter init_device")
+        logger.info("wyzhangd: enter init_device")
         # set tpu visible devices for Jax runtime in single host PP.
         multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "").lower()
         if multihost_backend != "ray" and self.parallel_config.pipeline_parallel_size > 1:
@@ -265,19 +265,19 @@ class TPUWorker:
                     f"total devices={jax.devices()} | "
                     f"local_devices={jax.local_devices()}")
         vllm_utils.report_usage_stats(self.vllm_config)
-        logger.debug("wyzhangd: exit init_device")
+        logger.info("wyzhangd: exit init_device")
 
     def initialize_pp_transfer_connect(self):
-        logger.debug("wyzhangd: enter initialize_pp_transfer_connect")
+        logger.info("wyzhangd: enter initialize_pp_transfer_connect")
         if self.rank == 0:
-            logger.debug("wyzhangd: exit initialize_pp_transfer_connect")
+            logger.info("wyzhangd: exit initialize_pp_transfer_connect")
             return
         jax_parallel_state.connect(self.pp_config.prev_worker_ip,
                                    self.rank - 1)
-        logger.debug("wyzhangd: exit initialize_pp_transfer_connect")
+        logger.info("wyzhangd: exit initialize_pp_transfer_connect")
 
     def determine_available_memory(self) -> int:
-        logger.debug("wyzhangd: enter determine_available_memory")
+        logger.info("wyzhangd: enter determine_available_memory")
         gpu_memory_utilization = self.cache_config.gpu_memory_utilization
         hbm_usage = utils.hbm_usage_bytes(self.devices)
         total_hbm_limit = total_hbm_used = 0
@@ -305,14 +305,14 @@ class TPUWorker:
                              f"{-total_hbm_avail_gb}GiB. Please consider "
                              f"increasing --gpu-memory-utilization from "
                              f"{gpu_memory_utilization} to a larger value.")
-        logger.debug("wyzhangd: exit determine_available_memory")
+        logger.info("wyzhangd: exit determine_available_memory")
         return total_hbm_avail
 
     def execute_model(
         self,
         scheduler_output: SchedulerOutput,
     ) -> Optional[ModelRunnerOutput]:
-        logger.debug("wyzhangd: enter execute_model")
+        logger.info("wyzhangd: enter execute_model")
         # NOTE: This method intentionally returns a concrete vLLM type, which
         # violates the pure abstract contract of the base class. This is a
         # deliberate, temporary compromise for the same reasons outlined in
@@ -343,44 +343,44 @@ class TPUWorker:
                 scheduler_output, self.rank, self.step_counter)
             get_pp_group().send_tensor_dict(uuid, output.tensors)
             self.step_counter += 1
-            logger.debug("wyzhangd: exit execute_model")
+            logger.info("wyzhangd: exit execute_model")
             return None
         else:
             self.step_counter += 1
             # With a connector, the scheduler expects output from all workers
             # TODO(mrjunwan): Figure out if this is ok after https://github.com/vllm-project/vllm/pull/26866
             if has_kv_transfer_group():
-                logger.debug("wyzhangd: exit execute_model")
+                logger.info("wyzhangd: exit execute_model")
                 return output
             result = output if self.is_driver_worker else None
-            logger.debug("wyzhangd: exit execute_model")
+            logger.info("wyzhangd: exit execute_model")
             return result
 
     def sample_tokens(self,
                       grammar_output: GrammarOutput) -> ModelRunnerOutput:
-        logger.debug("wyzhangd: enter sample_tokens")
+        logger.info("wyzhangd: enter sample_tokens")
         result = self.model_runner.sample_tokens(grammar_output)
-        logger.debug("wyzhangd: exit sample_tokens")
+        logger.info("wyzhangd: exit sample_tokens")
         return result
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
-        logger.debug("wyzhangd: enter take_draft_token_ids")
+        logger.info("wyzhangd: enter take_draft_token_ids")
         result = self.model_runner.take_draft_token_ids()
-        logger.debug("wyzhangd: exit take_draft_token_ids")
+        logger.info("wyzhangd: exit take_draft_token_ids")
         return result
 
     def add_lora(
         self,
         lora_request: LoRARequest,
     ) -> bool:
-        logger.debug("wyzhangd: enter add_lora")
+        logger.info("wyzhangd: enter add_lora")
         raise NotImplementedError(
             "LoRA is not supported by the JAX worker yet.")
 
     def profile(self,
                 is_start: bool = True,
                 profile_prefix: str | None = None):
-        logger.debug("wyzhangd: enter profile")
+        logger.info("wyzhangd: enter profile")
         if is_start:
             options = jax.profiler.ProfileOptions()
             # default: https://docs.jax.dev/en/latest/profiling.html#general-options
@@ -390,40 +390,40 @@ class TPUWorker:
                                      profiler_options=options)
         else:
             jax.profiler.stop_trace()
-        logger.debug("wyzhangd: exit profile")
+        logger.info("wyzhangd: exit profile")
 
     def load_model(self) -> None:
-        logger.debug("wyzhangd: enter load_model")
+        logger.info("wyzhangd: enter load_model")
         self.model_runner.load_model()
-        logger.debug("wyzhangd: exit load_model")
+        logger.info("wyzhangd: exit load_model")
 
     def compile_or_warm_up_model(self) -> None:
-        logger.debug("wyzhangd: enter compile_or_warm_up_model")
+        logger.info("wyzhangd: enter compile_or_warm_up_model")
         self.model_runner.capture_model()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         self.model_runner._init_random()
-        logger.debug("wyzhangd: exit compile_or_warm_up_model")
+        logger.info("wyzhangd: exit compile_or_warm_up_model")
 
     def reset_mm_cache(self) -> None:
-        logger.debug("wyzhangd: enter reset_mm_cache")
+        logger.info("wyzhangd: enter reset_mm_cache")
         pass
-        logger.debug("wyzhangd: exit reset_mm_cache")
+        logger.info("wyzhangd: exit reset_mm_cache")
 
     def get_model(self):
-        logger.debug("wyzhangd: enter get_model")
+        logger.info("wyzhangd: enter get_model")
         result = self.model_runner.get_model()
-        logger.debug("wyzhangd: exit get_model")
+        logger.info("wyzhangd: exit get_model")
         return result
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-        logger.debug("wyzhangd: enter get_supported_tasks")
+        logger.info("wyzhangd: enter get_supported_tasks")
         result = self.model_runner.get_supported_tasks()
-        logger.debug("wyzhangd: exit get_supported_tasks")
+        logger.info("wyzhangd: exit get_supported_tasks")
         return result
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
-        logger.debug("wyzhangd: enter get_kv_cache_spec")
+        logger.info("wyzhangd: enter get_kv_cache_spec")
         # NOTE: This method intentionally returns a concrete vLLM type, which
         # violates the pure abstract contract of the base class. This is a
         # deliberate, temporary compromise.
@@ -437,14 +437,14 @@ class TPUWorker:
         # method should be changed to return `dict[str, AbstractKVCacheSpec]`,
         # and the vLLM side should be updated to handle the translation.
         result = self.model_runner.get_kv_cache_spec()
-        logger.debug("wyzhangd: exit get_kv_cache_spec")
+        logger.info("wyzhangd: exit get_kv_cache_spec")
         return result
 
     def initialize_from_config(
         self,
         kv_cache_config: KVCacheConfig,
     ) -> None:
-        logger.debug("wyzhangd: enter initialize_from_config")
+        logger.info("wyzhangd: enter initialize_from_config")
         """Allocate GPU KV cache with the specified kv_cache_config."""
         # Precompile functions with large vocab_size tensors before allocating KV cache to avoid OOM
         if not (envs.SKIP_JAX_PRECOMPILE or
@@ -454,19 +454,19 @@ class TPUWorker:
             self.model_runner.compilation_manager._precompile_gather_logprobs()
         self.model_runner.initialize_kv_cache(kv_cache_config,
                                               self.topology_order_id)
-        logger.debug("wyzhangd: exit initialize_from_config")
+        logger.info("wyzhangd: exit initialize_from_config")
 
     def get_node_kv_ip_port(self) -> tuple[int, str, int]:
-        logger.debug("wyzhangd: enter get_node_kv_ip_port")
+        logger.info("wyzhangd: enter get_node_kv_ip_port")
         ip = get_host_ip()
         port = get_kv_transfer_port()
-        logger.debug("wyzhangd: exit get_node_kv_ip_port")
+        logger.info("wyzhangd: exit get_node_kv_ip_port")
         return (int(self.topology_order_id), ip, int(port))
 
     def check_health(self) -> None:
-        logger.debug("wyzhangd: enter check_health")
+        logger.info("wyzhangd: enter check_health")
         # worker will always be healthy as long as it's running.
-        logger.debug("wyzhangd: exit check_health")
+        logger.info("wyzhangd: exit check_health")
         return
 
     def sync_weights(
@@ -478,22 +478,22 @@ class TPUWorker:
                              jaxtyping.PyTree] = None
     ) -> None:
         """Sync the updated weights to the model runner."""
-        logger.debug("wyzhangd: enter sync_weights")
+        logger.info("wyzhangd: enter sync_weights")
         result = self.model_runner._sync_weights(updated_weights=updated_weights,
                                                mappings=mappings,
                                                transpose_keys=transpose_keys,
                                                reshard_fn=reshard_fn)
-        logger.debug("wyzhangd: exit sync_weights")
+        logger.info("wyzhangd: exit sync_weights")
         return result
 
     def shutdown(self) -> None:
-        logger.debug("wyzhangd: enter shutdown")
-        logger.debug("wyzhangd: exit shutdown")
+        logger.info("wyzhangd: enter shutdown")
+        logger.info("wyzhangd: exit shutdown")
         return
 
     # Ray executor do not need handshake metadata
     # as we pass the kv_parameters through proxy server
     def get_kv_connector_handshake_metadata(self) -> None:
-        logger.debug("wyzhangd: enter get_kv_connector_handshake_metadata")
+        logger.info("wyzhangd: enter get_kv_connector_handshake_metadata")
         pass
-        logger.debug("wyzhangd: exit get_kv_connector_handshake_metadata")
+        logger.info("wyzhangd: exit get_kv_connector_handshake_metadata")

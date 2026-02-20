@@ -137,7 +137,7 @@ class TpuPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        logger.debug("wyzhangd: enter check_and_update_config")
+        logger.info("wyzhangd: enter check_and_update_config")
 
         if vllm_envs.VLLM_TPU_USING_PATHWAYS:
             assert not vllm_envs.VLLM_ENABLE_V1_MULTIPROCESSING, (
@@ -224,7 +224,7 @@ class TpuPlatform(Platform):
         from tpu_inference.core.sched.dp_scheduler import \
             update_vllm_config_for_dp_scheduler
         update_vllm_config_for_dp_scheduler(vllm_config)
-        logger.debug("wyzhangd: exit check_and_update_config")
+        logger.info("wyzhangd: exit check_and_update_config")
 
     @classmethod
     def is_pin_memory_available(cls):

@@ -68,7 +68,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
     """
 
     def _init_executor(self) -> None:
-        logger.debug("wyzhangd: enter _init_executor")
+        logger.info("wyzhangd: enter _init_executor")
         self.forward_dag: Optional[ray.dag.CompiledDAG] = None
 
         os.environ["VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE"] = "shm"
@@ -106,7 +106,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         self.uses_sampler = self.vllm_config.model_config.runner_type != "pooling" and (
             self.vllm_config.ec_transfer_config is None
             or not self.vllm_config.ec_transfer_config.is_ec_producer)
-        logger.debug("wyzhangd: exit _init_executor")
+        logger.info("wyzhangd: exit _init_executor")
 
     def _initialize_ray_cluster(self) -> None:
         """Initialize the distributed cluster with Ray.
@@ -115,7 +115,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         for the workers, which includes the specification of the resources
         for each distributed worker.
         """
-        logger.debug("wyzhangd: enter _initialize_ray_cluster")
+        logger.info("wyzhangd: enter _initialize_ray_cluster")
         from vllm.platforms import current_platform
 
         if ray.is_initialized():
@@ -123,18 +123,18 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
                 "Ray is already initialized. Skipping Ray initialization.")
         else:
             logger.warning("Ray is not initialized, this is mainly for test.")
-            logger.debug("wyzhangd: Initializing Ray in _initialize_ray_cluster start")
+            logger.info("wyzhangd: Initializing Ray in _initialize_ray_cluster start")
             ray.init()
-            logger.debug("wyzhangd: Initializing Ray in _initialize_ray_cluster end")
+            logger.info("wyzhangd: Initializing Ray in _initialize_ray_cluster end")
 
         device_str = current_platform.ray_device_key
         if not device_str:
             raise ValueError(
                 f"current platform {current_platform.device_name} does not "
                 "support ray.")
-        logger.debug(f"wyzhangd: device_str={device_str}")
+        logger.info(f"wyzhangd: device_str={device_str}")
         pp_size = self.parallel_config.pipeline_parallel_size
-        logger.debug(f"wyzhangd: parallel_config = {self.parallel_config}")
+        logger.info(f"wyzhangd: parallel_config = {self.parallel_config}")
         placement_group_specs: List[Dict[str, float]] = []
 
         ray_nodes = ray.nodes()
@@ -180,11 +180,11 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         assert current_placement_group is not None
         # Set the placement group in the parallel config
         self.parallel_config.placement_group = current_placement_group
-        logger.debug("wyzhangd: exit _initialize_ray_cluster")
+        logger.info("wyzhangd: exit _initialize_ray_cluster")
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
-        logger.debug("wyzhangd: enter _init_workers_ray")
+        logger.info("wyzhangd: enter _init_workers_ray")
         # The workers are the actual ray actors.
         self.workers: List[RayWorkerWrapper] = []
 
@@ -406,14 +406,14 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
                     assert len(self.pp_tp_workers[pp_rank]) == tp_rank
                     assert pp_rank < len(self.pp_tp_workers)
                     self.pp_tp_workers[pp_rank].append(self.workers[rank])
-        logger.debug("wyzhangd: exit _init_workers_ray")
+        logger.info("wyzhangd: exit _init_workers_ray")
 
     # Ray executor do not need handshake metadata
     # as we pass the kv_parameters through proxy server
     def get_kv_connector_handshake_metadata(self) -> None:
-        logger.debug("wyzhangd: enter get_kv_connector_handshake_metadata")
+        logger.info("wyzhangd: enter get_kv_connector_handshake_metadata")
         pass
-        logger.debug("wyzhangd: exit get_kv_connector_handshake_metadata")
+        logger.info("wyzhangd: exit get_kv_connector_handshake_metadata")
 
 
 class RayWorkerWrapper(RayWorkerWrapperV1):
@@ -426,7 +426,7 @@ class RayWorkerWrapper(RayWorkerWrapperV1):
     """
 
     def _is_intermediate_tensors(self, output) -> bool:
-        logger.debug("wyzhangd: enter _is_intermediate_tensors")
+        logger.info("wyzhangd: enter _is_intermediate_tensors")
         result = isinstance(output, JaxIntermediateTensors)
-        logger.debug("wyzhangd: exit _is_intermediate_tensors")
+        logger.info("wyzhangd: exit _is_intermediate_tensors")
         return result
