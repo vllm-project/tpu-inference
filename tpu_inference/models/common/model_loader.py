@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import functools
+from collections.abc import Iterator
 from typing import Any, Optional
 
 import jax
@@ -20,7 +21,7 @@ import torch
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from transformers import PretrainedConfig
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.runai_streamer_loader import \
     RunaiModelStreamerLoader
@@ -90,6 +91,273 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
         "registered in tpu-inference. Falling back to vLLM-native "
         f"Pytorch definition. JAX-native architectures: {list(_MODEL_REGISTRY.keys())}"
     )
+
+
+_SAFETENSOR_DTYPE_MAP = {
+    "F64": torch.float64,
+    "F32": torch.float32,
+    "F16": torch.float16,
+    "BF16": torch.bfloat16,
+    "F8_E4M3": torch.float8_e4m3fn,
+    "F8_E5M2": torch.float8_e5m2,
+    "I64": torch.int64,
+    "I32": torch.int32,
+    "I16": torch.int16,
+    "I8": torch.int8,
+    "U8": torch.uint8,
+    "BOOL": torch.bool,
+}
+
+
+def _read_safetensor_headers(
+    hf_weights_files: list[str], ) -> list[tuple[str, dict[str, Any], str]]:
+    """Read safetensors file headers and return list of (name, meta, file)."""
+    import json
+    import struct
+
+    entries = []
+    for st_file in sorted(hf_weights_files):
+        with open(st_file, 'rb') as f:
+            header_size = struct.unpack('<Q', f.read(8))[0]
+            header = json.loads(f.read(header_size))
+        for name, meta in header.items():
+            if name == "__metadata__":
+                continue
+            entries.append((name, meta, st_file))
+    return entries
+
+
+def _create_moe_mock_weights(model: JaxModule) -> int:
+    """Create mock MoE weights directly on TPU, bypassing checkpoint loading.
+
+    Generates random weights matching the final post-processed shapes that
+    ``process_fp8_moe_weights`` would produce.  This skips the expensive
+    per-expert dequant -> requant -> transpose pipeline entirely, making it
+    orders of magnitude faster than loading real checkpoint data.
+
+    Weights are created on CPU one layer at a time to avoid memory pressure,
+    then transferred to TPU via ``shard_put`` with the correct shardings.
+
+    For FP8 + GMM_TP the output shapes are:
+
+    ============  ==============  ========
+    Attribute     Shape           Dtype
+    ============  ==============  ========
+    w13_weight    (E, D, 2F)      float8
+    w13_scale     (E, 1, 1, 2F)   float32
+    w2_weight     (E, F, D)       float8
+    w2_scale      (E, 1, 1, D)    float32
+    ============  ==============  ========
+
+    After creation, ``_called_process_weights_after_loading`` is set on each
+    layer's quant method so ``process_weights_after_loading`` is skipped later.
+
+    Args:
+        model: The model whose ``JaxMoE`` sub-modules will receive mock
+            weights.  Only modules using ``Fp8FusedMoEMethod`` are processed.
+
+    Returns:
+        The number of MoE layers processed.
+    """
+    import time
+
+    import jax.numpy as jnp
+
+    from tpu_inference.layers.jax.moe.moe import JaxMoE
+    from tpu_inference.layers.jax.quantization.fp8 import Fp8FusedMoEMethod
+    from tpu_inference.models.jax.utils.weight_utils import shard_put
+
+    cpu = jax.devices('cpu')[0]
+    start = time.time()
+    layers_processed = 0
+
+    for module in _iter_modules(model):
+        if not isinstance(module, JaxMoE):
+            continue
+        quant_method = getattr(module, 'quant_method', None)
+        if not isinstance(quant_method, Fp8FusedMoEMethod):
+            continue
+
+        E = module.num_local_experts
+        D = module.hidden_size
+        F = module.intermediate_size_moe
+        scale_name = quant_method.weight_scale_name
+
+        # Create random values matching process_fp8_moe_weights output shapes.
+        # Created on CPU one at a time, then shard_put to TPU.
+        key = jax.random.PRNGKey(layers_processed)
+        k1, k2, k3, k4 = jax.random.split(key, 4)
+        with jax.default_device(cpu):
+            w13 = jax.random.normal(k1, (E, D, 2 * F), dtype=jnp.float8_e4m3fn)
+            w13_s = jnp.ones((E, 1, 1, 2 * F), dtype=jnp.float32)
+            w2 = jax.random.normal(k2, (E, F, D), dtype=jnp.float8_e4m3fn)
+            w2_s = jnp.ones((E, 1, 1, D), dtype=jnp.float32)
+
+        # Delete old params (same as process_moe_after_loading)
+        for attr in [
+                'kernel_gating_EDF', 'kernel_up_proj_EDF',
+                f'kernel_gating_EDF_{scale_name}',
+                f'kernel_up_proj_EDF_{scale_name}'
+        ]:
+            if hasattr(module, attr):
+                delattr(module, attr)
+
+        # Set new params with correct shardings
+        module.kernel_gating_upproj_EDF = nnx.Param(
+            shard_put(w13, shardings=module.edf_sharding))
+        module.kernel_down_proj_EFD = nnx.Param(
+            shard_put(w2, shardings=module.efd_sharding))
+        setattr(module, f'kernel_gating_upproj_EDF_{scale_name}',
+                nnx.Param(shard_put(w13_s, shardings=(None, ))))
+        setattr(module, f'kernel_down_proj_EFD_{scale_name}',
+                nnx.Param(shard_put(w2_s, shardings=(None, ))))
+
+        # Prevent process_weights_after_loading from re-processing
+        quant_method._called_process_weights_after_loading = True
+        layers_processed += 1
+
+        if layers_processed % 10 == 0:
+            logger.info(
+                "MOCK_WEIGHTS: Created MoE weights for %d layers [%.1fs]",
+                layers_processed,
+                time.time() - start)
+
+    logger.info("MOCK_WEIGHTS: Created MoE weights for %d layers in %.1fs",
+                layers_processed,
+                time.time() - start)
+    return layers_processed
+
+
+def _iter_modules(module: nnx.Module) -> Any:
+    """Recursively yield all submodules (depth-first)."""
+    yield module
+    for _, child in module.named_children():
+        if isinstance(child, (list, tuple)):
+            for item in child:
+                yield from _iter_modules(item)
+        else:
+            yield from _iter_modules(child)
+
+
+def _non_moe_mock_weights(
+    hf_weights_files: list[str],
+    prefix: str = "",
+    skip_experts: bool = False,
+) -> Iterator[tuple[str, torch.Tensor]]:
+    """Yield random tensors for checkpoint entries not handled by Phase 1.
+
+    Reads safetensor file headers (metadata only, not weight data) to discover
+    every tensor name, shape, and dtype in the checkpoint.  When
+    ``skip_experts`` is ``True``, entries whose name contains ``".experts."``
+    are filtered out because they were already created directly on TPU by
+    ``_create_moe_mock_weights``.  When ``False`` (the default), all entries
+    are included so that MoE models without FP8 still get their expert weights.
+
+    For each included entry a random ``torch.Tensor`` with the correct shape
+    and dtype is yielded so that the normal weight-loading pipeline
+    (reshape / transpose / sharding) still runs.
+
+    Args:
+        hf_weights_files: List of safetensor file paths that make up the
+            checkpoint.
+        prefix: Optional string prepended to each tensor name before
+            yielding.
+        skip_experts: If ``True``, skip tensors whose name contains
+            ``".experts."``.  Should be set when ``_create_moe_mock_weights``
+            already handled those layers.
+
+    Yields:
+        ``(name, tensor)`` pairs where *name* is the (possibly prefixed)
+        checkpoint key and *tensor* is a random ``torch.Tensor`` matching the
+        original shape and dtype.
+    """
+    import time
+
+    entries = _read_safetensor_headers(hf_weights_files)
+    total = len(entries)
+    if skip_experts:
+        filtered = [(n, m) for n, m, _ in entries if ".experts." not in n]
+    else:
+        filtered = [(n, m) for n, m, _ in entries]
+    skipped = total - len(filtered)
+    if skipped:
+        logger.info(
+            "MOCK_WEIGHTS: %d total checkpoint tensors, %d MoE expert "
+            "tensors handled directly, %d remaining tensors to load", total,
+            skipped, len(filtered))
+    else:
+        logger.info("MOCK_WEIGHTS: %d total checkpoint tensors to load", total)
+
+    start_time = time.time()
+    for i, (name, meta) in enumerate(filtered):
+        dtype = _SAFETENSOR_DTYPE_MAP.get(meta["dtype"])
+        if dtype is None:
+            logger.warning("Skipping %s: unknown dtype %s", name,
+                           meta["dtype"])
+            continue
+        if (i + 1) % 50 == 0 or (i + 1) == len(filtered):
+            elapsed = time.time() - start_time
+            logger.info(
+                "MOCK_WEIGHTS: tensor %d/%d (%.1f%%) "
+                "[%.1fs elapsed] - %s", i + 1, len(filtered),
+                100.0 * (i + 1) / len(filtered), elapsed, prefix + name)
+        yield prefix + name, torch.randn(meta["shape"]).to(dtype)
+
+
+def _load_mock_weights(
+    loader: BaseWeightLoader,
+    model: JaxModule,
+    model_config: ModelConfig,
+) -> None:
+    """Load random mock weights instead of real checkpoint data.
+
+    Uses a two-phase approach so that compilation is identical to a real run
+    (all weight shapes, dtypes, and shardings are preserved) while avoiding
+    the cost of reading checkpoint files from disk.
+
+    Phase 1 — MoE expert weights (``_create_moe_mock_weights``):
+        Creates post-processed MoE weights directly on TPU, skipping the
+        per-expert tensor conversions and the dequant -> requant pipeline.
+
+    Phase 2 — Remaining weights (``_non_moe_mock_weights``):
+        Yields random tensors through the normal ``load_weights`` pipeline so
+        that reshape / transpose / sharding logic is still exercised.  If
+        Phase 1 handled MoE expert layers, expert tensors are skipped here;
+        otherwise all checkpoint entries (including experts) are included,
+        making this path work for any model.
+
+    Args:
+        loader: A weight loader instance (e.g. ``StandardWeightLoader``)
+            that provides ``_prepare_weights`` for locating checkpoint files.
+        model: The model to populate.  Must implement ``LoadableWithIterator``
+            and ``load_weights``.
+        model_config: The ``ModelConfig`` for the current run, used to
+            resolve the checkpoint path and revision.
+    """
+    import time
+    start = time.time()
+
+    _, hf_weights_files, _ = loader._prepare_weights(
+        model_config.model,
+        model_config.revision,
+        fall_back_to_pt=getattr(model, "fall_back_to_pt_during_load", True),
+        allow_patterns_overrides=getattr(model, "allow_patterns_overrides",
+                                         None),
+    )
+
+    # Phase 1: Create FP8 MoE weights directly on TPU (optimization).
+    # Returns 0 for non-MoE models or models without Fp8FusedMoEMethod.
+    moe_layers = _create_moe_mock_weights(model)
+
+    # Phase 2: Load remaining weights through normal pipeline.
+    # If Phase 1 handled MoE experts, skip those tensors here;
+    # otherwise include everything so non-FP8 MoE models still work.
+    mock_iter = _non_moe_mock_weights(hf_weights_files,
+                                      skip_experts=moe_layers > 0)
+    model.load_weights(mock_iter)
+
+    logger.info("MOCK_WEIGHTS: Total mock-weight loading completed in %.1fs",
+                time.time() - start)
 
 
 def _get_nnx_model(
@@ -213,7 +481,14 @@ def _get_nnx_model(
             loader = get_model_loader(vllm_config.load_config)
             if isinstance(model, LoadableWithIterator):
                 assert isinstance(model, JaxModule)
-                loader.load_weights(model, vllm_config.model_config)
+                if envs.MOCK_WEIGHTS:
+                    logger.warning(
+                        "MOCK_WEIGHTS=1: Replacing checkpoint data with "
+                        "random values. Weight shapes/dtypes/shardings are "
+                        "preserved so compilation is identical to a real run.")
+                    _load_mock_weights(loader, model, vllm_config.model_config)
+                else:
+                    loader.load_weights(model, vllm_config.model_config)
             elif isinstance(loader, RunaiModelStreamerLoader):
                 model_weights = vllm_config.model_config.model
                 if hasattr(vllm_config.model_config, "model_weights"):
