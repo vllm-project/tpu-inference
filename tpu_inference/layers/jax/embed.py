@@ -35,8 +35,6 @@ class JaxEmbed(nnx.Embed, JaxModule):
         # `self.weight` such that `named_parameters()` can match the names in HF models.
         self.weight = self.embedding
         delattr(self, 'embedding')
-        if hasattr(self.weight, "out_sharding"):
-            self.weight.set_metadata('sharding', self.weight.out_sharding)
 
         self.quant_method = None
         if quant_config is not None:

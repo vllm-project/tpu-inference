@@ -36,8 +36,6 @@ class JaxRmsNorm(nnx.RMSNorm, JaxModule):
         # apply transpose here to match HF weight layout.
         self.weight = self.scale
         delattr(self, 'scale')
-        if hasattr(self.weight, 'out_sharding'):
-            self.weight.set_metadata('sharding', self.weight.out_sharding)
 
         self.quant_method = None
         if quant_config is not None:
