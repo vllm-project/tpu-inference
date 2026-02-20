@@ -59,6 +59,8 @@ class SchedulerCommand(Enum):
     GET_TOKEN_COUNT = "get_token_count"
     GET_COMPUTED_BLOCKS = "get_computed_blocks"
     RESET_ENCODER_CACHE = "reset_encoder_cache"
+    SET_PAUSE_STATE = "set_pause_state"
+    GET_PAUSE_STATE = "get_pause_state"
     SHUTDOWN = "shutdown"
 
 
@@ -185,7 +187,10 @@ def _scheduler_worker_process(
                     output_queues[command.value].put(result)
 
                 case SchedulerCommand.RESET_PREFIX_CACHE:
-                    result = scheduler.reset_prefix_cache()
+                    reset_running_requests, reset_connector = data
+                    result = scheduler.reset_prefix_cache(
+                        reset_running_requests=reset_running_requests,
+                        reset_connector=reset_connector)
                     output_queues[command.value].put(result)
 
                 case SchedulerCommand.RESET_ENCODER_CACHE:
@@ -221,6 +226,15 @@ def _scheduler_worker_process(
                     # Only return cached_tokens, not blocks, to avoid circular reference issues
                     # The blocks object contains a linked list structure that can cause recursion errors during pickling
                     output_queues[command.value].put(cached_tokens)
+
+                case SchedulerCommand.SET_PAUSE_STATE:
+                    pause_state = data
+                    scheduler.set_pause_state(pause_state)
+                    output_queues[command.value].put(None)
+
+                case SchedulerCommand.GET_PAUSE_STATE:
+                    result = scheduler.pause_state
+                    output_queues[command.value].put(result)
 
                 case SchedulerCommand.SHUTDOWN:
                     logger.info(f"Rank {rank}: Shutting down")
@@ -295,7 +309,6 @@ class DPScheduler(SchedulerInterface):
         self.assigned_dp_rank: Dict[str, int] = {}  # req_id -> dp_rank
         self.cached_schedulers_output = deque()
         self._create_per_rank_configs(kv_cache_config)
-        self._pause_state: PauseState = PauseState.UNPAUSED
 
         # Initialize NONE_HASH global before forking worker processes
         # This ensures all workers inherit the initialized value
@@ -739,11 +752,16 @@ class DPScheduler(SchedulerInterface):
             total_waiting += waiting
         return total_running, total_waiting
 
-    def reset_prefix_cache(self) -> bool:
+    def reset_prefix_cache(
+        self,
+        reset_running_requests: bool = False,
+        reset_connector: bool = False,
+    ) -> bool:
         """Reset prefix cache for all DP rank schedulers."""
         for rank in range(self.dp_size):
             self.input_queues[rank].put(
-                (SchedulerCommand.RESET_PREFIX_CACHE, None))
+                (SchedulerCommand.RESET_PREFIX_CACHE, (reset_running_requests,
+                                                       reset_connector)))
 
         all_success = True
         for rank in range(self.dp_size):
@@ -764,13 +782,21 @@ class DPScheduler(SchedulerInterface):
 
     @property
     def pause_state(self) -> PauseState:
-        return self._pause_state
+        """Get the pause state from the first DP rank scheduler.
+
+        All ranks share the same pause state, so we only need to query one.
+        """
+        self.input_queues[0].put((SchedulerCommand.GET_PAUSE_STATE, None))
+        return self._get_result_from_queue(0, SchedulerCommand.GET_PAUSE_STATE)
 
     def set_pause_state(self, pause_state: PauseState) -> None:
-        del pause_state
-        # TODO: set pause state
-        # self._pause_state = pause_state
-        pass
+        """Set pause state for all DP rank schedulers."""
+        for rank in range(self.dp_size):
+            self.input_queues[rank].put(
+                (SchedulerCommand.SET_PAUSE_STATE, pause_state))
+
+        for rank in range(self.dp_size):
+            self._get_result_from_queue(rank, SchedulerCommand.SET_PAUSE_STATE)
 
     def make_stats(self,
                    spec_decoding_stats=None,
