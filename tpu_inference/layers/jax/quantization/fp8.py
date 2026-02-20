@@ -102,58 +102,36 @@ class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
         common_fp8.Fp8LinearMethod.__init__(self, linear_config)
 
         self.einsum_str = layer.einsum_str
-        kernel_shape = layer.kernel_shape
-        if len(kernel_shape) > 2:
-            adapt_info = linear_config.get_adapt_info(
-                einsum_str=layer.einsum_str, weight=layer.weight)
-            self.output_shape = adapt_info.out_features
-            self.batch_features = adapt_info.batch_features
-            self.batch_sharding = adapt_info.batch_sharding
-            out_features = math.prod(self.output_shape)
-            in_features = math.prod(adapt_info.in_features)
-            if self.batch_features:
-                # Batched case: keep original weight sharding for the full
-                # 3D weight (matches kernel_shape).
-                self.weight_sharding = _to_partition_spec(
-                    layer.weight.sharding)
-            else:
-                self.weight_sharding = adapt_info.weight_sharding
+
+        adapt_info = linear_config.get_adapt_info(einsum_str=layer.einsum_str,
+                                                  weight=layer.weight)
+        self.output_shape = adapt_info.out_features
+        self.batch_features = adapt_info.batch_features
+        self.batch_sharding = adapt_info.batch_sharding
+        out_features = math.prod(self.output_shape)
+        in_features = math.prod(adapt_info.in_features)
+        if self.batch_features:
+            # Batched case: keep original weight sharding for the full
+            # 3D weight (matches kernel_shape).
+            self.weight_sharding = _to_partition_spec(layer.weight.sharding)
+            self.kernel_shape = layer.kernel_shape
         else:
-            in_features, out_features = kernel_shape
-            # Reverse sharding to match transposed weight layout (out, in).
-            sharding = layer.weight.sharding
-            if isinstance(sharding, jax.sharding.NamedSharding):
-                sharding = sharding.spec
-            if isinstance(sharding, P) and len(sharding) == 2:
-                sharding = P(sharding[1], sharding[0])
-            elif isinstance(sharding, (tuple, list)) and len(sharding) == 2:
-                sharding = (sharding[1], sharding[0])
-            self.weight_sharding = sharding
-            self.output_shape = (out_features, )
-            self.batch_features = ()
-            self.batch_sharding = ()
+            self.weight_sharding = adapt_info.out_features_sharding + adapt_info.in_features_sharding
+            self.kernel_shape = (out_features, in_features)
 
         self.linear_config.output_sizes = [out_features]
         self.in_features = in_features
 
-    def create_weights_jax(self, layer: JaxModule, *weight_args, rngs,
+    def create_weights_jax(self, layer: JaxEinsum, *weight_args, rngs,
                            **extra_weight_attrs):
         assert isinstance(layer, JaxEinsum)
 
         out_features = sum(self.linear_config.output_sizes)
 
-        if self.batch_features:
-            # Batched case: create weight with the original 3D kernel shape
-            # so the weight loader can populate it directly after transpose.
-            layer.weight = create_param(rngs,
-                                        shape=layer.kernel_shape,
-                                        dtype=jnp.float8_e4m3fn,
-                                        sharding=self.weight_sharding)
-        else:
-            layer.weight = create_param(rngs,
-                                        shape=(out_features, self.in_features),
-                                        dtype=jnp.float8_e4m3fn,
-                                        sharding=self.weight_sharding)
+        layer.weight = create_param(rngs,
+                                    shape=self.kernel_shape,
+                                    dtype=jnp.float8_e4m3fn,
+                                    sharding=self.weight_sharding)
 
         # Attach custom loader to avoid default upcasting behavior
         layer.weight.set_metadata(
@@ -212,28 +190,22 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         self.quant_config = quant_config
         self.einsum_str = layer.einsum_str
 
-        kernel_shape = layer.kernel_shape
-        if len(kernel_shape) > 2:
-            adapt_info = linear_config.get_adapt_info(
-                einsum_str=layer.einsum_str, weight=layer.weight)
-            self.out_features = adapt_info.out_features
-            self.in_features = math.prod(adapt_info.in_features)
-            self.batch_features = adapt_info.batch_features
-            self.batch_sharding = adapt_info.batch_sharding
-            if self.batch_features:
-                # Batched case: keep original weight sharding for the full
-                # 3D weight (matches kernel_shape).
-                self.weight_sharding = _to_partition_spec(
-                    layer.weight.sharding)
-            else:
-                self.weight_sharding = adapt_info.weight_sharding
+        adapt_info = linear_config.get_adapt_info(einsum_str=layer.einsum_str,
+                                                  weight=layer.weight)
+        self.out_features = adapt_info.out_features
+        self.in_features = math.prod(adapt_info.in_features)
+        self.batch_features = adapt_info.batch_features
+        self.batch_sharding = adapt_info.batch_sharding
+        if self.batch_features:
+            # Batched case: keep original weight sharding for the full
+            # 3D weight (matches kernel_shape).
+            self.weight_sharding = _to_partition_spec(layer.weight.sharding)
+            self.kernel_shape = layer.kernel_shape
         else:
-            in_features, out_features = kernel_shape
-            self.weight_sharding = getattr(layer.weight, "sharding", (None, ))
-            self.in_features = in_features
-            self.out_features = (out_features, )
-            self.batch_features = ()
-            self.batch_sharding = ()
+            self.weight_sharding = (adapt_info.out_features_sharding +
+                                    adapt_info.in_features_sharding)
+            self.kernel_shape = (math.prod(self.out_features),
+                                 self.in_features)
 
         # Storing list of output sizes (instead of self.out_features) for compatibility.
         self.linear_config.output_sizes = [math.prod(self.out_features)]
@@ -251,11 +223,12 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             # Weight stays in FP8 and is used with sharded_quantized_batched_matmul.
             param_dtype = jnp.float8_e4m3
             layer.weight = nnx.Param(
-                kernel_init(rngs.params(), layer.kernel_shape, param_dtype),
+                kernel_init(rngs.params(), self.kernel_shape, param_dtype),
                 weight_loader=partial(load_nnx_param_from_reshaped_torch,
                                       permute_dims=None,
-                                      param_name="linear_fp8_weight"))
-            layer.weight.sharding = self.weight_sharding
+                                      param_name=layer.prefix + ".weight"),
+                eager_sharding=False)
+            layer.weight.set_metadata('sharding', self.weight_sharding)
 
             # Per-output-channel scale (1D, covers the free weight dim).
             layer.weight_scale_inv = nnx.Param(
@@ -263,20 +236,20 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 weight_loader=partial(
                     load_nnx_param_from_reshaped_torch,
                     permute_dims=None,
-                    param_name="linear_fp8_weight_scale_inv",
-                ))
-            layer.weight_scale_inv.sharding = ()
+                    param_name=layer.prefix + ".weight_scale_inv",
+                ),
+                eager_sharding=False)
+            layer.weight_scale_inv.set_metadata('sharding', ())
             return
 
         # Follow upstream limitation that only float8_e4m3 is supported.
         # https://github.com/vllm-project/vllm/blob/2a99c5a6c86daef8c766ba2dbf05c385b192c64b/vllm/model_executor/layers/quantization/fp8.py#L283-L284
         param_dtype = jnp.float8_e4m3
         layer.weight = nnx.Param(
-            kernel_init(rngs.params(), (out_features, self.in_features),
-                        param_dtype),
+            kernel_init(rngs.params(), self.kernel_shape, param_dtype),
             weight_loader=partial(load_nnx_param_from_reshaped_torch,
                                   permute_dims=(0, 1),
-                                  param_name="linear_fp8_weight"),
+                                  param_name=layer.prefix + ".weight"),
             eager_sharding=False)
         layer.weight.set_metadata('sharding', self.weight_sharding)
 
@@ -293,7 +266,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             weight_loader=partial(
                 load_nnx_param_from_reshaped_torch,
                 permute_dims=(0, 1),
-                param_name="linear_fp8_weight_scale_inv",
+                param_name=layer.prefix + ".weight_scale_inv",
             ),
             eager_sharding=False)
         layer.weight_scale_inv.set_metadata('sharding', self.weight_sharding)
@@ -448,6 +421,9 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
         """
         Create the quant method-specific weights.
 
+        Please see https://github.com/vllm-project/tpu-inference/blob/bb1a88/tpu_inference/layers/common/moe.py#L39
+        for more information on the expected weights per MoE backend.
+
         Args:
             layer: The layer to create weights for.
         """
@@ -498,6 +474,9 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
     def process_weights_after_loading(self, layer: JaxMoE) -> None:
         """
         Process weights after loading.
+
+        Please see https://github.com/vllm-project/tpu-inference/blob/bb1a88/tpu_inference/layers/common/moe.py#L39
+        for more information on the expected weights per MoE backend.
 
         Args:
             layer: The layer to process.
@@ -597,7 +576,10 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
         assert isinstance(layer, JaxMoE)
 
         x_TD = jnp.asarray(x, layer.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD, layer.activation_ffw_td)
+        x_TD = jax.lax.with_sharding_constraint(
+            x_TD,
+            jax.sharding.NamedSharding(layer.mesh,
+                                       P(*layer.activation_ffw_td)))
 
         router_logits = None
         # Fused weight backends

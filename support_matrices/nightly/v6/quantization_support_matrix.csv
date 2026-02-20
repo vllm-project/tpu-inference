@@ -3,5 +3,5 @@ Quantization dtype,Quantization methods,Recommended TPU Generations,CorrectnessT
 "FP4 W4A16",mxfp4,v7,unverified,unverified
 "FP8 W8A8",compressed-tensor,v7,unverified,unverified
 "FP8 W8A16",compressed-tensor,v7,unverified,unverified
-"INT4 W4A16",awq,"v5, v6",❌,N/A
+"INT4 W4A16",awq,"v5, v6",unverified,unverified
 "INT8 W8A8",compressed-tensor,"v5, v6",unverified,unverified

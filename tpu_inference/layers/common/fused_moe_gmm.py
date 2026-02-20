@@ -21,8 +21,6 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 from tpu_inference.kernels.megablox.gmm import gmm
-from tpu_inference.kernels.megablox.gmm_v2 import (gmm_v2,
-                                                   is_supported_by_gmm_v2)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
 
@@ -332,8 +330,8 @@ def fused_moe_func(
 
     Args:
         hidden_states: [num_tokens, hidden_size]
-        w1: first moe weights [num_experts, intermediate_size * 2, hidden_size]
-        w2: second moe weights [num_experts, hidden_size, intermediate_size]
+        w1: first moe weights [num_experts, hidden_size, intermediate_size * 2]
+        w2: second moe weights [num_experts, intermediate_size, hidden_size]
         w1_scale: w1 scale [num_experts, num_blocks, 1, intermediate_size * 2]
         w2_scale: w2 scale [num_experts, num_blocks, 1, hidden_size]
         w1_bias: optional bias of w1 [num_experts, 1, intermediate_size * 2]
@@ -372,14 +370,15 @@ def fused_moe_func(
         num_tokens_local = hidden_states_local.shape[0]
         topk_indices_flat = topk_indices_local.flatten()
         topk_argsort_indices = jnp.argsort(topk_indices_flat)
-        topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
         token_indices = jnp.arange(num_tokens_local,
                                    dtype=jnp.int32).repeat(topk)
         token_indices_sorted = token_indices[topk_argsort_indices]
-        group_sizes_local = jnp.bincount(topk_indices_flat,
-                                         length=global_num_experts)
-
         x = hidden_states_local[token_indices_sorted]
+        # Below one_hot is equivalent to jnp.bincount(topk_indices_flat, length=global_num_experts) but is more performant.
+        group_sizes_local = jax.nn.one_hot(topk_indices_flat,
+                                           global_num_experts,
+                                           dtype=jnp.int32).sum(axis=0)
+        topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
 
         return x, group_sizes_local, topk_argsort_revert_indices
 

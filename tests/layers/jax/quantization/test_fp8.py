@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import math
 from unittest.mock import patch
 
 import jax
@@ -67,6 +68,18 @@ def quantize_to_fp8_block_3d(weight: jax.Array,
     return w_q, scale_blocks
 
 
+def sharding_to_tuple(sharding):
+    if sharding is None:
+        return None
+    if isinstance(sharding, tuple):
+        return sharding
+    if isinstance(sharding, jax.sharding.NamedSharding):
+        return tuple(s for s in sharding.spec)
+    if isinstance(sharding, jax.sharding.PartitionSpec):
+        return tuple(s for s in sharding)
+    raise ValueError(f"Unsupported sharding type: {type(sharding)}")
+
+
 @pytest.fixture(scope="module")
 def mesh():
     """
@@ -78,11 +91,10 @@ def mesh():
     devices = np.array(jax.local_devices()[:1])
     num_devices = len(devices)
     assert num_devices == 1
-    device_mesh = devices.reshape((num_devices, 1, 1, 1))
+    device_mesh = devices.reshape((1, ) * len(MESH_AXIS_NAMES))
 
     with Mesh(device_mesh, axis_names=MESH_AXIS_NAMES) as m:
         yield m
-
 
 
 @pytest.fixture
@@ -92,54 +104,25 @@ def rngs():
 class TestLinearOpAdaptInfo:
     """Test QuantLinearConfig.get_adapt_info axis classification."""
 
-    def test_simple_2d_linear(self, rngs):
+    @pytest.mark.parametrize("einsum_str,weight_shape,weight_sharding", [
+        ("ab,bc->ac", (32, 16), (None, 'out')),
+        ("ab,cb->ac", (16, 32), ('out', None)),
+        ("ab,cb->ac", (16, 32), ('out',)),
+    ])
+    @pytest.mark.parametrize("kernel_init_with_sharding", [True, False])
+    def test_simple_2d_linear(self, einsum_str, weight_shape, weight_sharding, kernel_init_with_sharding, rngs):
         """ab,bc->ac: standard 2D linear (JaxLinear pattern)."""
-        layer = JaxEinsum('ab,bc->ac', (32, 16), rngs)
+        if kernel_init_with_sharding:
+            layer = JaxEinsum(einsum_str, weight_shape, rngs, kernel_init=nnx.with_partitioning(nnx.initializers.uniform(), weight_sharding))
+        else:
+            layer = JaxEinsum(einsum_str, weight_shape, rngs)
         info = QuantLinearConfig.get_adapt_info(einsum_str=layer.einsum_str,
                                                 weight=layer.weight)
         assert info.in_features == (32, )  # b is contracting
         assert info.out_features == (16, )  # c is free
         assert info.batch_features == ()  # no batch dims
-
-    def test_2d_weight_3d_output(self, rngs):
-        """TD,DNH->TNH: D is contracting, N and H are output-only."""
-        layer = JaxEinsum('TD,DNH->TNH', (128, 8, 16), rngs)
-        info = QuantLinearConfig.get_adapt_info(einsum_str=layer.einsum_str,
-                                                weight=layer.weight)
-        assert info.in_features == (128, )  # D is contracting
-        assert info.out_features == (8, 16)  # N, H are free
-        assert info.batch_features == ()  # no batch dims
-
-    def test_batched_einsum_tnh_anh_tna(self, rngs):
-        """TNH,ANH->TNA: N is batch dim, H is contracting."""
-        layer = JaxEinsum('TNH,ANH->TNA', (16, 4, 8), rngs)
-        info = QuantLinearConfig.get_adapt_info(einsum_str=layer.einsum_str,
-                                                weight=layer.weight)
-        assert info.in_features == (8, )  # H is contracting
-        assert info.out_features == (16, )  # A is free
-        assert info.batch_features == (4, )  # N is batch
-
-    def test_batched_einsum_tna_anh_tnh(self, rngs):
-        """TNA,ANH->TNH: N is batch dim, A is contracting."""
-        layer = JaxEinsum('TNA,ANH->TNH', (16, 4, 8), rngs)
-        info = QuantLinearConfig.get_adapt_info(einsum_str=layer.einsum_str,
-                                                weight=layer.weight)
-        assert info.in_features == (16, )  # A is contracting
-        assert info.out_features == (8, )  # H is free
-        assert info.batch_features == (4, )  # N is batch
-
-
-class TestLinearOpAdaptInfo:
-    """Test QuantLinearConfig.get_adapt_info axis classification."""
-
-    def test_simple_2d_linear(self, rngs):
-        """ab,bc->ac: standard 2D linear (JaxLinear pattern)."""
-        layer = JaxEinsum('ab,bc->ac', (32, 16), rngs)
-        info = QuantLinearConfig.get_adapt_info(einsum_str=layer.einsum_str,
-                                                weight=layer.weight)
-        assert info.in_features == (32, )  # b is contracting
-        assert info.out_features == (16, )  # c is free
-        assert info.batch_features == ()  # no batch dims
+        if kernel_init_with_sharding:
+            assert info.out_features_sharding == ("out", )
 
     def test_2d_weight_3d_output(self, rngs):
         """TD,DNH->TNH: D is contracting, N and H are output-only."""
@@ -175,8 +158,9 @@ class TestFp8BlockwiseJaxLinear:
                                                           (256, 128)])
     @pytest.mark.parametrize("use_bias", [True, False])
     @pytest.mark.parametrize("batch_size", [1, 4])
+    @pytest.mark.parametrize("weight_sharding", [(None,), ('in', None), (None, 'out'), ('in', 'out')])
     def test_linear_forward_correctness(self, in_features, out_features,
-                                        use_bias, batch_size, rngs):
+                                        use_bias, batch_size, weight_sharding, rngs):
         hf_quant_config = {
             "quant_method": "fp8",
             "activation_scheme": "dynamic",
@@ -191,6 +175,7 @@ class TestFp8BlockwiseJaxLinear:
             rngs=rngs,
             use_bias=use_bias,
             quant_config=quant_config,
+            kernel_init=nnx.with_partitioning(nnx.initializers.uniform(), weight_sharding)
         )
 
         # Use a dummy mesh for testing
@@ -207,12 +192,18 @@ class TestFp8BlockwiseJaxLinear:
             output = layer(x)
 
         assert output.shape == (batch_size, out_features)
+        assert layer.weight.shape == (out_features, in_features)
+        assert sharding_to_tuple(layer.weight.sharding) in [(None, None), ('out', None), (None, 'in'), ('out', 'in')]
+        if use_bias:
+            assert layer.bias.shape == (out_features, )
+            assert sharding_to_tuple(layer.bias.sharding) in [(None,), ('out',)]
 
     @pytest.mark.parametrize("kernel_shape", [(128, 8, 16), (256, 32, 32)])
     @pytest.mark.parametrize("use_bias", [True, False])
     @pytest.mark.parametrize("batch_size", [1, 4])
+    @pytest.mark.parametrize("weight_sharding", [(None,), ('in', None), (None, 'out'), ('in', None, 'out'), (None, None, 'out')])
     def test_einsum_forward_correctness(self, kernel_shape, use_bias,
-                                        batch_size, rngs):
+                                        batch_size, weight_sharding, rngs):
         hf_quant_config = {
             "quant_method": "fp8",
             "activation_scheme": "dynamic",
@@ -226,6 +217,7 @@ class TestFp8BlockwiseJaxLinear:
             rngs=rngs,
             bias_shape=kernel_shape[1:] if use_bias else None,
             quant_config=quant_config,
+            kernel_init=nnx.with_partitioning(nnx.initializers.uniform(), weight_sharding)
         )
 
         # Use a dummy mesh for testing
@@ -244,99 +236,13 @@ class TestFp8BlockwiseJaxLinear:
         # Output shape should be (B, N, H)
         expected_shape = (batch_size, ) + kernel_shape[1:]
         assert output.shape == expected_shape
+        assert layer.weight.shape == (math.prod(kernel_shape[1:]), kernel_shape[0])
+        assert sharding_to_tuple(layer.weight.sharding) in [(None, None), ('out', None), (None, 'in'), ('out', 'in')]
+        if use_bias:
+            assert layer.bias.shape == (math.prod(kernel_shape[1:]),)
+            assert sharding_to_tuple(layer.bias.sharding) in [(None,), ('out',)]
 
     @pytest.mark.parametrize("kernel_shape", [(16, 4, 8), (32, 8, 16)])
-    @pytest.mark.parametrize("batch_size", [1, 4])
-    def test_batched_einsum_forward_correctness(self, kernel_shape, batch_size,
-                                                rngs):
-        """Test 3D einsum with batch dims (e.g. MLA k/v up projections)."""
-        hf_quant_config = {
-            "quant_method": "fp8",
-            "activation_scheme": "dynamic",
-            "weight_block_size": [8, 16],
-        }
-        quant_config = Fp8Config(hf_quant_config)
-
-        A, N, H = kernel_shape
-        layer = JaxEinsum(
-            einsum_str='TNH,ANH->TNA',
-            kernel_shape=kernel_shape,
-            rngs=rngs,
-            quant_config=quant_config,
-        )
-
-        devices = jax.devices()
-        mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
-        with jax.set_mesh(mesh):
-            layer.quant_method.process_weights_after_loading(layer)
-
-            x = jax.random.normal(rngs.params(), (batch_size, N, H))
-            output = layer(x)
-
-        expected_shape = (batch_size, N, A)
-        assert output.shape == expected_shape
-
-    @pytest.mark.parametrize("kernel_shape", [(16, 4, 8), (32, 8, 16)])
-    @pytest.mark.parametrize("batch_size", [1, 4])
-    def test_batched_einsum_v_up_proj(self, kernel_shape, batch_size, rngs):
-        """Test blockwise FP8 with MLA v_up_proj pattern (TNA,ANH->TNH)."""
-        hf_quant_config = {
-            "quant_method": "fp8",
-            "activation_scheme": "dynamic",
-            "weight_block_size": [8, 16],
-        }
-        quant_config = Fp8Config(hf_quant_config)
-
-        A, N, H = kernel_shape
-        layer = JaxEinsum(
-            einsum_str='TNA,ANH->TNH',
-            kernel_shape=kernel_shape,
-            rngs=rngs,
-            quant_config=quant_config,
-        )
-
-        devices = jax.devices()
-        mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
-        with jax.set_mesh(mesh):
-            layer.quant_method.process_weights_after_loading(layer)
-
-            x = jax.random.normal(rngs.params(), (batch_size, N, A))
-            output = layer(x)
-
-        expected_shape = (batch_size, N, H)
-        assert output.shape == expected_shape
-
-
-class TestFp8TensorwiseJaxLinear:
-
-    def test_fp8_linear_method_create_weights(self, rngs):
-        layer = JaxEinsum("ab,bc->ac", (32, 16), rngs, bias_shape=None)
-        config = QuantLinearConfig(enable_sp=False, output_sizes=[16])
-        method = Fp8TensorwiseLinearMethod(layer, config)
-        method.create_weights_jax(layer, rngs=rngs)
-
-        assert hasattr(layer, 'weight')
-        assert hasattr(layer, 'weight_scale')
-        assert layer.weight.value.dtype == jnp.float8_e4m3fn
-        assert layer.weight_scale.value.dtype == jnp.float32
-        assert layer.weight.value.shape == (16, 32)
-        assert layer.weight_scale.value.shape == (16, )
-        assert hasattr(layer.weight, 'weight_loader')
-
-    def test_fp8_loader_prevents_upcast(self, rngs):
-        layer = JaxEinsum("ab,bc->ac", (4, 2), rngs, bias_shape=None)
-        config = QuantLinearConfig(enable_sp=False, output_sizes=[2])
-        method = Fp8TensorwiseLinearMethod(layer, config)
-        method.create_weights_jax(layer, rngs=rngs)
-
-        torch_fp8 = torch.zeros((2, 4), dtype=torch.float8_e4m3fn)
-        layer.weight.weight_loader(layer.weight, torch_fp8)
-
-        assert layer.weight.value.dtype == jnp.float8_e4m3fn
-
-    @pytest.mark.parametrize("in_features,out_features", [(128, 64),
-                                                          (256, 128)])
-    @pytest.mark.parametrize("use_bias", [True, False])
     @pytest.mark.parametrize("batch_size", [1, 4])
     def test_batched_einsum_forward_correctness(self, kernel_shape, batch_size,
                                                 rngs):
@@ -612,54 +518,60 @@ class TestFp8FusedMoE:
 
         dtype = jnp.bfloat16
 
+        activation_ffw_td = (ShardingAxisNameBase.MLP_DATA,
+                                       ShardingAxisNameBase.MOE_TENSOR) if enable_attn_dp else (ShardingAxisNameBase.MLP_DATA,
+                                       ShardingAxisNameBase.MODEL_1)
+        edf_sharding= (None, ShardingAxisNameBase.MOE_TENSOR,
+                                  ShardingAxisNameBase.ATTN_DATA_EXPERT) if enable_attn_dp else (None, ShardingAxisNameBase.MODEL_1, None)
+        efd_sharding=  (None, ShardingAxisNameBase.ATTN_DATA_EXPERT,
+                                  ShardingAxisNameBase.MOE_TENSOR) if enable_attn_dp else (None, None, ShardingAxisNameBase.MODEL_1)
+
         # This won't be used in reality since we are patching
         # the router_logits
-        router = DeepSeekV3Router(
-            hidden_size=hidden_size,
-            num_experts=num_experts,
-            num_experts_per_tok=topk,
-            n_groups=8,
-            topk_groups=4,
-            norm_topk_prob=True,
-            rngs=rngs,
-            routed_scaling_factor=2.5,
-            dtype=dtype,
-            moe_backend=moe_backend,
-            activation_ffw_td=(ShardingAxisNameBase.MLP_DATA, None),
-            ed_sharding=(None, None),
-            e_sharding=(None, ))
+        with jax.set_mesh(mesh):
+            router = DeepSeekV3Router(
+                hidden_size=hidden_size,
+                num_experts=num_experts,
+                num_experts_per_tok=topk,
+                n_groups=8,
+                topk_groups=4,
+                norm_topk_prob=True,
+                rngs=rngs,
+                routed_scaling_factor=2.5,
+                dtype=dtype,
+                moe_backend=moe_backend,
+                activation_ffw_td=(ShardingAxisNameBase.MLP_DATA, None),
+                ed_sharding=(None, None),
+                e_sharding=(None, ))
 
-        layer = JaxMoE(dtype=jnp.float8_e4m3fn,
-                       num_local_experts=num_experts,
-                       apply_expert_weight_before_computation=False,
-                       expert_axis_name=expert_axis_name,
-                       num_expert_parallelism=2 if use_ep else 1,
-                       hidden_size=hidden_size,
-                       intermediate_size_moe=intermediate_size,
-                       num_experts_per_tok=topk,
-                       mesh=mesh,
-                       hidden_act="silu",
-                       rngs=rngs,
-                       quant_config=quant_config,
-                       activation_ffw_td=(ShardingAxisNameBase.MLP_DATA,
-                                          ShardingAxisNameBase.MODEL_1),
-                       activation_ffw_ted=(ShardingAxisNameBase.MLP_DATA, None,
-                                           ShardingAxisNameBase.MODEL_1),
-                       edf_sharding=(None, ShardingAxisNameBase.MODEL_1,
-                                     ShardingAxisNameBase.MODEL_2),
-                       efd_sharding=(None, ShardingAxisNameBase.MODEL_2,
-                                     ShardingAxisNameBase.MODEL_1),
-                       moe_backend=moe_backend,
-                       renormalize=False,
-                       router=router)
+            layer = JaxMoE(dtype=jnp.float8_e4m3fn,
+                        num_local_experts=num_experts,
+                        apply_expert_weight_before_computation=False,
+                        expert_axis_name=expert_axis_name,
+                        num_expert_parallelism=2 if use_ep else 1,
+                        hidden_size=hidden_size,
+                        intermediate_size_moe=intermediate_size,
+                        num_experts_per_tok=topk,
+                        mesh=mesh,
+                        hidden_act="silu",
+                        rngs=rngs,
+                        quant_config=quant_config,
+                        activation_ffw_td=activation_ffw_td,
+                        activation_ffw_ted=(ShardingAxisNameBase.MLP_DATA, None,
+                                            ShardingAxisNameBase.MOE_TENSOR),
+                        edf_sharding=edf_sharding,
+                        efd_sharding=efd_sharding,
+                        moe_backend=moe_backend,
+                        renormalize=False,
+                        router=router)
 
-        assert layer.use_ep == use_ep
+            assert layer.use_ep == use_ep
 
-        k1, k2, k3, k4 = jax.random.split(jax.random.PRNGKey(42), 4)
+            k1, k2, k3, k4 = jax.random.split(jax.random.PRNGKey(42), 4)
 
-        a = jax.random.normal(k1,
-                              (num_tokens, hidden_size), dtype=dtype) / 10.0
-        score = jax.random.normal(k2, (num_tokens, num_experts), dtype=dtype)
+            a = jax.random.normal(k1,
+                                (num_tokens, hidden_size), dtype=dtype) / 10.0
+            score = jax.random.normal(k2, (num_tokens, num_experts), dtype=dtype)
 
         gate_and_up_shape = (num_experts, intermediate_size, hidden_size)
         w2_shape = (num_experts, hidden_size, intermediate_size)
@@ -669,8 +581,8 @@ class TestFp8FusedMoE:
         w2 = jax.random.normal(k4, w2_shape, dtype=dtype) / 10.0
 
         expected = test_utils.ref_moe_jax(a, score, w13, w2, None, None,
-                                          layer.top_k, layer.renormalize,
-                                          layer.activation)
+                                        layer.top_k, layer.renormalize,
+                                        layer.activation)
 
         if use_ep:
             assert layer.moe_backend == MoEBackend.GMM_EP
@@ -710,10 +622,11 @@ class TestFp8FusedMoE:
             layer.kernel_up_proj_EDF,
             layer.kernel_down_proj_EFD
         ]:
-            setattr(param, "_cnt_moe_weights_loaded", layer.num_local_experts)
+            param.set_metadata("_cnt_moe_weights_loaded", layer.num_local_experts)
         # End mimic loading weights from checkpoint.
 
-        layer.quant_method.process_weights_after_loading(layer)
+        with jax.set_mesh(mesh):
+            layer.quant_method.process_weights_after_loading(layer)
 
         # Patch the router since we don't want to use the
         # real router
@@ -727,7 +640,7 @@ class TestFp8FusedMoE:
 
 class TestFp8Config:
 
-    def test_skip_layers(self, rngs):
+    def test_skip_layers(self, rngs, mesh):
         """Test that if quantization_config has ignored layers, those layers are skipped from quantization."""
 
         class MLP(nnx.Module):
@@ -759,7 +672,8 @@ class TestFp8Config:
         }
         quant_config = Fp8Config(hf_quant_config)
 
-        mlp = MLP(16, 16, rngs, quant_config, prefix="mlp")
+        with jax.set_mesh(mesh):
+            mlp = MLP(16, 16, rngs, quant_config, prefix="mlp")
 
         # Check that proj1 is NOT quantized (UnquantizedLinearMethod)
         assert isinstance(mlp.proj1.quant_method, UnquantizedLinearMethod)
