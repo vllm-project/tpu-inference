@@ -437,6 +437,12 @@ class TPUWorker:
                                                transpose_keys=transpose_keys,
                                                reshard_fn=reshard_fn)
 
+    def delete_kv_cache(self) -> None:
+        self.model_runner.delete_kv_cache()
+
+    def reinitialize_kv_cache(self) -> None:
+        self.model_runner.reinitialize_kv_cache()
+
     def shutdown(self) -> None:
         return
 
