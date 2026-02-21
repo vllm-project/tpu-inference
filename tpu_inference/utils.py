@@ -48,7 +48,7 @@ def to_jax_dtype(dtype: str | jnp.dtype | torch.dtype) -> jnp.dtype:
     elif isinstance(dtype, _ScalarMeta):
         return dtype.dtype
     else:
-        return dtype
+        raise ValueError(f"Argument is unsupported data type {type(dtype)}")
 
 
 def to_torch_dtype(dtype: str | jnp.dtype | torch.dtype) -> torch.dtype:
