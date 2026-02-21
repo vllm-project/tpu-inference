@@ -46,7 +46,7 @@ _MODEL_REGISTRY = {}
 # List of architectures that are preferred to use  "vllm" implementation over
 # "flax_nnx" implementation due to various factors such as performance.
 _VLLM_PREFERRED_ARCHITECTURES: frozenset[str] = frozenset(
-    {"GptOssForCausalLM"})
+    {"GptOssForCausalLM", "Qwen3MoeForCausalLM"})
 
 
 class UnsupportedArchitectureError(ValueError):
