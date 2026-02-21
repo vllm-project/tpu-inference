@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+
+<head>
+    <meta charset="utf-8">
+    <title>Community Engine Presentation</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;700&display=swap"
+        rel="stylesheet">
+
+    <!-- Reveal.js Core -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.3.1/reset.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.3.1/reveal.min.css">
+
+    <!-- Tailwind CSS (CDN for zero-build setup) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                        display: ['Space Grotesk', 'sans-serif'],
+                    },
+                    colors: {
+                        brand: {
+                            400: '#818cf8',
+                            500: '#6366f1',
+                            600: '#4f46e5',
+                        }
+                    },
+                    animation: {
+                        'blob': 'blob 7s infinite',
+                    },
+                    keyframes: {
+                        blob: {
+                            '0%': { transform: 'translate(0px, 0px) scale(1)' },
+                            '33%': { transform: 'translate(30px, -50px) scale(1.1)' },
+                            '66%': { transform: 'translate(-20px, 20px) scale(0.9)' },
+                            '100%': { transform: 'translate(0px, 0px) scale(1)' },
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- Custom UI UX Pro Max Styles -->
+    <style>
+        /* Base Reveal Overrides */
+        .reveal {
+            background: transparent;
+            font-family: 'Inter', sans-serif;
+            color: #f8fafc;
+        }
+
+        .reveal h1,
+        .reveal h2,
+        .reveal h3,
+        .reveal h4 {
+            font-family: 'Space Grotesk', sans-serif;
+            text-transform: none;
+            letter-spacing: -0.02em;
+            color: #ffffff;
+            font-weight: 700;
+        }
+
+        /* Animated Gradient Background */
+        body {
+            background-color: #0f172a;
+            background-image:
+                radial-gradient(at 0% 0%, hsla(253, 16%, 7%, 1) 0, transparent 50%),
+                radial-gradient(at 50% 0%, hsla(225, 39%, 30%, 0.4) 0, transparent 50%),
+                radial-gradient(at 100% 0%, hsla(339, 49%, 30%, 0.4) 0, transparent 50%);
+            background-attachment: fixed;
+            margin: 0;
+            overflow: hidden;
+        }
+
+        /* Glassmorphism Card Style */
+        .glass-card {
+            background: rgba(30, 41, 59, 0.4);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-top: 1px solid rgba(255, 255, 255, 0.2);
+            border-left: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 24px;
+            padding: 3rem;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .glass-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 30px 60px -12px rgba(0, 0, 0, 0.6), 0 0 20px rgba(99, 102, 241, 0.2);
+        }
+
+        /* Bento Grid Item (Smaller glass card) */
+        .bento-item {
+            background: rgba(15, 23, 42, 0.6);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 16px;
+            padding: 1.5rem;
+            height: 100%;
+            text-align: left;
+            transition: all 0.3s ease;
+        }
+
+        .bento-item:hover {
+            background: rgba(30, 41, 59, 0.8);
+            border-color: rgba(99, 102, 241, 0.4);
+        }
+
+        /* Text Gradients */
+        .text-gradient {
+            background-clip: text;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-image: linear-gradient(to right, #818cf8, #c084fc);
+        }
+
+        /* Ambient Blobs */
+        .blob {
+            position: absolute;
+            filter: blur(80px);
+            z-index: -1;
+            opacity: 0.5;
+            border-radius: 50%;
+        }
+
+        .reveal ul {
+            margin-left: 1.5em;
+        }
+
+        .reveal li {
+            margin-bottom: 0.75em;
+            font-size: 0.9em;
+            line-height: 1.5;
+            color: #cbd5e1;
+        }
+
+        .reveal p {
+            font-size: 0.9em;
+            line-height: 1.6;
+            color: #cbd5e1;
+        }
+
+        .speaker-notes-box {
+            display: none;
+        }
+    </style>
+</head>
+
+<body>
+    <!-- Ambient Background Blobs -->
+    <div class="blob bg-brand-600 w-96 h-96 top-0 left-0 animate-blob"></div>
+    <div class="blob bg-purple-600 w-96 h-96 bottom-0 right-0 animate-blob" style="animation-delay: 2s;"></div>
+    <div class="blob bg-blue-600 w-96 h-96 top-1/2 left-1/2 animate-blob" style="animation-delay: 4s;"></div>
+
+    <div class="reveal">
+        <div class="slides">
+
+            <!-- Slide 1: Title Slide (Glass Minimalist) -->
+            <section data-transition="fade">
+                <div class="glass-card max-w-4xl mx-auto">
+                    <div
+                        class="inline-block px-4 py-1.5 rounded-full bg-brand-500/20 border border-brand-500/30 text-brand-400 text-sm font-semibold tracking-wide mb-6 uppercase">
+                        Community Collaboration MVP
+                    </div>
+                    <h2 class="text-6xl mb-4 leading-tight">Building the Software Stack "Community Engine"</h2>
+                    <h3 class="text-3xl font-medium text-slate-300 mb-12">Hustle & Have Fun: Redefining UX / PM / Eng
+                        Collaboration</h3>
+
+                    <div class="flex items-center justify-center gap-8 pt-8 border-t border-slate-700/50">
+                        <div class="text-left">
+                            <p class="text-slate-400 text-sm uppercase tracking-wider mb-1">UX / Design</p>
+                            <p class="font-medium text-white text-lg">Your Name</p>
+                        </div>
+                        <div class="w-px h-12 bg-slate-700/50"></div>
+                        <div class="text-left">
+                            <p class="text-slate-400 text-sm uppercase tracking-wider mb-1">Product</p>
+                            <p class="font-medium text-white text-lg">Brittany</p>
+                        </div>
+                        <div class="w-px h-12 bg-slate-700/50"></div>
+                        <div class="text-left">
+                            <p class="text-slate-400 text-sm uppercase tracking-wider mb-1">Engineering</p>
+                            <p class="font-medium text-white text-lg">Rob</p>
+                        </div>
+                    </div>
+                </div>
+
+                <aside class="notes">
+                    Hi everyone. Today, Brittany, Rob, and I want to share a story about how we completely reimagined
+                    how UX, Product, and Engineering collaborate. By leaning into the principles of 'Stay Scrappy' and
+                    'Hustle & Have Fun', we moved from a blank whiteboard to a fully functional 'Community Engine' MVP
+                    in exactly 3 months.
+                </aside>
+            </section>
+
+            <!-- Slide 2: The Opportunity (Bento Grid) -->
+            <section data-transition="slide">
+                <h2 class="text-4xl mb-8"><span class="text-gradient">The Opportunity</span> & The "Scrappy" Shift</h2>
+
+                <div class="grid grid-cols-2 gap-4 max-w-5xl mx-auto">
+                    <!-- Expanded Problem Section -->
+                    <div class="bento-item col-span-2 flex gap-6">
+                        <div class="flex-1 border-r border-slate-700/50 pr-6">
+                            <h3 class="text-xl mb-3 text-red-300">User Problem</h3>
+                            <p class="text-slate-300 text-sm">External contributors faced a "Black Box" when trying to
+                                build on our TPU software stack—it was too hard to know what was broken or where to
+                                start.</p>
+                        </div>
+                        <div class="flex-1">
+                            <h3 class="text-xl mb-3 text-red-300">Business Problem</h3>
+                            <p class="text-slate-300 text-sm">Internal engineers were drowning in review bottlenecks and
+                                bespoke support requests, slowing down our own feature velocity.</p>
+                        </div>
+                    </div>
+
+                    <!-- The Opportunity -->
+                    <div class="bento-item">
+                        <div class="flex items-center gap-4 mb-4">
+                            <div class="p-3 rounded-lg bg-emerald-500/20 text-emerald-400">
+                                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                        d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                                </svg>
+                            </div>
+                            <h3 class="text-2xl m-0">Open Acceleration</h3>
+                        </div>
+                        <p class="text-sm text-slate-300">Enable the community to drive performance enhancements (like
+                            vLLM) so internal engineers don't have to.</p>
+                    </div>
+
+                    <!-- Stay Scrappy Idea -->
+                    <div class="bento-item relative overflow-hidden group border-brand-500/30 bg-brand-900/20">
+                        <div
+                            class="absolute inset-0 bg-gradient-to-br from-brand-600/20 to-purple-600/20 opacity-0 group-hover:opacity-100 transition-opacity duration-500">
+                        </div>
+                        <div class="relative z-10 flex flex-col items-start text-left">
+                            <h3 class="text-2xl mb-4 text-brand-300">"Stay Scrappy"</h3>
+                            <p class="text-sm text-slate-300 mb-4">We skipped endless pixel-perfect design cycles.
+                                Instead, we rapidly brainstormed the "Six-Stage Flywheel" concepts to find our hook, and
+                                instantly jumped into building a working end-to-end MVP.</p>
+
+                            <!-- Design Placeholder -->
+                            <div
+                                class="w-full h-24 bg-slate-800/60 rounded-lg flex items-center justify-center border border-dashed border-slate-600">
+                                <span class="text-xs text-slate-400">📸 Insert Brainstorm Whiteboard/Deck
+                                    Screenshot</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <aside class="notes">
+                    The core issue was that community developers wanted to build on our TPU software stack, but faced a
+                    'Black Box'. Internally, our engineers were drowning in bespoke requests and review bottlenecks.
+                    Instead of doing what we normally do—spending weeks on high-fidelity Figma mockups and PM
+                    requirements docs—we got scrappy. We defined a 'Six-Stage Flywheel' for community engagement, and
+                    immediately started writing code to build the foundational automation MVP.
+                </aside>
+            </section>
+
+            <!-- Slide 3: The MVP (Process UI) -->
+            <section data-transition="slide">
+                <h2 class="text-4xl mb-4">The MVP – <span class="text-white">The "Community Engine"</span></h2>
+                <p class="text-slate-400 mb-10">A 3-step automated workflow requiring zero human intervention.</p>
+
+                <div class="flex flex-col gap-4 max-w-4xl mx-auto">
+                    <!-- Step 1 -->
+                    <div class="glass-card !p-6 flex items-center gap-6 text-left">
+                        <div
+                            class="w-16 h-16 rounded-2xl bg-slate-800 flex items-center justify-center text-2xl font-bold text-brand-400 border border-slate-700 shrink-0 shadow-inner">
+                            1</div>
+                        <div>
+                            <h4 class="text-xl mb-1 text-white">Auto CUJ (The Truth Pipeline)</h4>
+                            <p class="m-0 text-sm text-slate-300">Automated sweeps find TPU test failures and expose
+                                them in a transparent matrix.</p>
+                        </div>
+                    </div>
+
+                    <!-- Arrow down -->
+                    <div class="w-full flex justify-center text-slate-600">
+                        <svg class="w-6 h-6 animate-bounce" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                d="M19 14l-7 7m0 0l-7-7m7 7V3"></path>
+                        </svg>
+                    </div>
+
+                    <!-- Step 2 -->
+                    <div class="glass-card !p-6 flex items-center gap-6 text-left">
+                        <div
+                            class="w-16 h-16 rounded-2xl bg-slate-800 flex items-center justify-center text-2xl font-bold text-purple-400 border border-slate-700 shrink-0 shadow-inner">
+                            2</div>
+                        <div>
+                            <h4 class="text-xl mb-1 text-white">Auto Mission Board (Candy Crush)</h4>
+                            <p class="m-0 text-sm text-slate-300">Those failures automatically generate "Good First
+                                Issues" to lower the entry barrier.</p>
+                        </div>
+                    </div>
+
+                    <!-- Arrow down -->
+                    <div class="w-full flex justify-center text-slate-600">
+                        <svg class="w-6 h-6 animate-bounce" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                d="M19 14l-7 7m0 0l-7-7m7 7V3"></path>
+                        </svg>
+                    </div>
+
+                    <!-- Step 3 -->
+                    <div class="glass-card !p-6 flex items-center gap-6 text-left">
+                        <div
+                            class="w-16 h-16 rounded-2xl bg-slate-800 flex items-center justify-center text-2xl font-bold text-emerald-400 border border-slate-700 shrink-0 shadow-inner">
+                            3</div>
+                        <div>
+                            <h4 class="text-xl mb-1 text-white">Auto Leaderboard</h4>
+                            <p class="m-0 text-sm text-slate-300">Triggers an automated "Inclusive Contributor Wall"
+                                update when code is merged.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <aside class="notes">
+                    Our MVP focused purely on the automated workflow to eliminate human overhead. We call it the
+                    Community Engine. Step 1 is the Auto CUJ, which automatically detects missing features and surfaces
+                    them. Step 2 is the 'Candy Crush' Mission Board: those gaps automatically turn into bite-sized
+                    GitHub issues. Step 3 closes the loop—when the community merges a fix, an automated Leaderboard
+                    updates to celebrate them. We went from concept to a live, automated ecosystem in 3 months.
+                </aside>
+            </section>
+
+            <!-- Slide 4: Roles Reimagined (Cards) -->
+            <section data-transition="slide">
+                <h2 class="text-4xl mb-12">Roles Reimagined: <span class="text-gradient">"Mission First"</span></h2>
+
+                <div class="grid grid-cols-3 gap-6 max-w-6xl mx-auto">
+                    <div class="bento-item flex flex-col items-center text-center !p-8">
+                        <div class="w-16 h-16 rounded-full bg-blue-500/20 flex items-center justify-center mb-6">
+                            <svg class="w-8 h-8 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z">
+                                </path>
+                            </svg>
+                        </div>
+                        <h3 class="text-xl text-white mb-4">UX / Design</h3>
+                        <p class="text-sm">Erased the "mockup" boundary. Wrote the actual working Python code and GitHub
+                            Actions to automate the MVP.</p>
+                    </div>
+
+                    <div class="bento-item flex flex-col items-center text-center !p-8">
+                        <div class="w-16 h-16 rounded-full bg-brand-500/20 flex items-center justify-center mb-6">
+                            <svg class="w-8 h-8 text-brand-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path>
+                            </svg>
+                        </div>
+                        <h3 class="text-xl text-white mb-4">Engineering</h3>
+                        <p class="text-sm">Shifted to an accelerator. Helped modularize the kernel tuner, solved complex
+                            infra blocks, and reviewed designer's code.</p>
+                    </div>
+
+                    <div class="bento-item flex flex-col items-center text-center !p-8">
+                        <div class="w-16 h-16 rounded-full bg-fuchsia-500/20 flex items-center justify-center mb-6">
+                            <svg class="w-8 h-8 text-fuchsia-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z">
+                                </path>
+                            </svg>
+                        </div>
+                        <h3 class="text-xl text-white mb-4">Product</h3>
+                        <p class="text-sm">Managed the "Hockey Stick". Aligned internal strategy, prioritized the
+                            "Golden Path", and provided continuous input.</p>
+                    </div>
+                </div>
+
+                <aside class="notes">
+                    The secret to doing this in 3 months was erasing our traditional job titles and working 'Mission
+                    First'. I stepped outside UX and actually wrote the working Python scripts and GitHub Actions to
+                    bring the Mission Board to life. Rob shifted from strictly writing features to acting as an
+                    accelerator—reviewing my code and modularizing the internal tuner. And Brittany focused on
+                    unblocking us and aligning our work with the wider TPU strategy without slowing down our daily
+                    execution.
+                </aside>
+            </section>
+
+            <!-- Slide 5: The Impact & Ask -->
+            <section data-transition="zoom">
+                <div class="glass-card max-w-4xl mx-auto border-brand-500/30 shadow-[0_0_50px_rgba(99,102,241,0.2)]">
+                    <h2 class="text-5xl mb-10">The Impact & The Future</h2>
+
+                    <ul class="text-left space-y-6 text-xl mb-12">
+                        <li class="flex items-start gap-4">
+                            <span class="text-brand-400 mt-1">✦</span>
+                            <div>
+                                <strong class="text-white">Impact:</strong>
+                                <span class="text-slate-300 block text-lg mt-1">A live, scalable Contribution Ecosystem
+                                    that reduces internal engineering load and increases external velocity.</span>
+                            </div>
+                        </li>
+                        <li class="flex items-start gap-4">
+                            <span class="text-brand-400 mt-1">✦</span>
+                            <div>
+                                <strong class="text-white">Key Takeaway:</strong>
+                                <span class="text-slate-300 block text-lg mt-1">Proving value via working code (Stay
+                                    Scrappy) builds momentum faster than pitching slides.</span>
+                            </div>
+                        </li>
+                    </ul>
+
+                    <div
+                        class="p-6 rounded-2xl bg-gradient-to-r from-brand-900/40 to-purple-900/40 border border-brand-500/20 text-center">
+                        <h3 class="text-2xl text-white mb-2">Our Ask</h3>
+                        <p class="text-brand-200 text-lg m-0">How can leadership help us scale this embedded,
+                            high-velocity ("Hustle & Have Fun") team model to other critical infrastructure tracks?</p>
+                    </div>
+                </div>
+
+                <aside class="notes">
+                    The impact here isn't just a cool GitHub script. We've built a scalable engine that actively reduces
+                    our internal engineering load. What we learned is that proving value via working code builds
+                    unstoppable momentum. Our ask for you today is this: How can we scale this exact model—this
+                    high-velocity, boundary-less collaboration—to other critical infrastructure teams at Google?
+                </aside>
+            </section>
+
+        </div>
+    </div>
+
+    <!-- Reveal JS Built -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.3.1/reveal.js"></script>
+    <script>
+        Reveal.initialize({
+            hash: true,
+            slideNumber: 'c/t',
+            transition: 'slide',
+            backgroundTransition: 'fade',
+            // Display presentation control arrows
+            controls: true,
+            // Help the user with a progress bar
+            progress: true,
+            // You can press 'S' on your keyboard to open Speaker Notes!
+            plugins: []
+        });
+    </script>
+</body>
+
+</html>

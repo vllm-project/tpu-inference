@@ -1,0 +1,753 @@
+﻿Overview: Quick wins list
+Software Stack Community Engagement: 
+🛠 Scaling Technical & Tooling Impact through Developer Experience (DX)
+
+
+
+
+Author (A-Z) : Brittany RockwellChao WangJordan BarberPatrick CullenRob MullaXinchen Gu
+
+
+Link to meeting note:
+2026/02/03⚡️ AI/ML (TPU) Community Engine | Weekly Sync - 2026/02/03 11:59 PST - Notes by Gemini
+2026/01/22 ⚡️ AI/ML (TPU) Community Engine | Weekly Sync - 2026/01/22 13:29 PST - Notes by Gemini
+2026/01/16 ⚡️ AI/ML (TPU) Community Engine | Weekly Sync - 2026/01/16 12:30 PST - Notes by Gemini
+2025/12/12 Brainstorming: Open Source Community Engagement (Part 2) - 2025/12/12 10:59 PST - Notes by Gemini
+2025/12/08 Brainstorming: Open Source Community Engagement - 2025/12/08 15:29 PST - Notes by Gemini
+________________
+
+
+Executive Summary: The "Community Engine" Framework
+This initiative establishes a scalable Contribution Ecosystem to accelerate engineering throughput for TPU software stacks. By shifting from closed development to an "Open Acceleration" model, we enable the community to drive performance enhancements for projects like vLLM, while reducing internal engineering load.
+Rather than bespoke fixes, we are building a modular "Community Engine"—a reusable framework of engagement and automation tools designed to be integrated into other major Google Open Source projects like JAX or MaxText.
+
+
+The Six-Stage Flywheel:[a]
+* Concept 1 (The Superpower): Externalize the TPU Kernel Tuner to allow self-service optimization.
+* Concept 2 (The Hook): Use Executive Social Alignment to drive high-intent developer traffic.
+* Concept 3 (Candy Crush): Lower entry barriers with bite-sized tasks and a gamified "Mission Board".
+* Concept 4 (The Leaderboard): Drive retention through automated badges and public recognition.
+* Concept 5 (The Golden Path): Solve the Reviewer Bottleneck by automating PR validation and mirroring to Buganizer.
+* Concept 6 (Buddy Program): Pair internal engineers with "Hero" contributors (e.g., Stanford) for high-impact strategic unblocking.
+
+
+________________
+
+
+
+
+Concept 1:The "Superpower" :
+ – Externalizing the TPU Kernel Tuner
+Key value
+	Critical Phase 1 project. It stops the "Performance Cliff" by allowing users to tune their own models without waiting for a Google Eng cycle.
+	User action
+	Downloads the Externalized Kernel Tuner to optimize a specific model shape.
+	Impact
+	This is the ultimate "Superpower." It empowers the community to bridge performance gaps themselves, reducing internal engineering load on bespoke tuning requests.
+	Low Hanging Fruit (LHF)
+	Flip the Script: Rob Mulla has already modularized the tpu-kernel-tuner. We just need to move from private to public validation.
+	Our deliverable
+	The Tuner Repo: A public, dependency-free Python package that reproduces internal baselines for Quantized Matmul and RPA kernels.
+	Stage
+	Stage: In Progress ( Building ) 
+	Priority:  Very high
+	Sizing: M
+	Next step
+	Timeline: Q1
+Current: Already deployed on GitHub, gathering feedback from the internal team.
+
+
+Next Step: Brittany Rockwellto reach out to rupliu@google.com for touch points with Rupeng and Rob.
+
+Rob Mulla- to refine PR to account for feedback.
+
+
+Validation: Confirm repro-usability with stakeholders (Janus, Lightricks) before the Q1 public flip.
+
+
+https://github.com/vllm-project/tpu-inference/pull/1433
+
+
+Next Step:
+
+
+Tasks
+	Contributor
+	Date
+	Brittany Rockwellto reach out to rupliu@google.com for touch points with Rupeng and Rob.
+
+	Brittany Rockwell
+	
+
+	Rob Mulla- to refine PR to account for feedback.
+	Rob Mulla
+	
+
+	Validation: Confirm repro-usability with stakeholders (Janus, Lightricks) before the Q1 public flip.
+
+
+https://github.com/vllm-project/tpu-inference/pull/1433
+
+
+	
+
+	
+
+	
+
+	
+
+Concept 2: The "Clean House" Strategy (MVP)
+Strategy Alignment & Code Path Unification
+Key Value
+	Ensures internal readiness before scaling. By unifying fragmented code paths (Flax/JAX vs. PyTorch) and clarifying internal strategy, we prevent "pouring gas on the fire" when engaging external builders.
+	User Action
+	Consults a transparent Support Matrix. Instead of a "Black Box" experience, a developer sees exactly which features are supported on which implementation path (Jax vs. Torch).
+	Impact
+	Eliminates "Hidden" Friction. Stops community effort from being wasted on paths Google doesn't intend to adopt (e.g., multimodal Flax contributions that lack parity) and provides a clear roadmap for what work can be outsourced
+	Low Hanging Fruit (LHF)
+	Surface the Gaps: Immediately update the existing Support Matrix to include dedicated columns for Jax/Flax and Torch to clearly communicate broken areas
+	Our deliverable
+	The Truth Pipeline:
+1. The Transparency Matrix: An expanded support grid showing path-specific feature status.
+2. Automated Sweep Suite: A CI/CD testing pipeline (leveraging Gemini for test generation) that runs exhaustive sweeps across all 20+ models and features to identify deficiencies
+	Stage
+	Stage: Concept        
+	Priority:  Very high
+	Sizing: XL
+	Next step
+	Timeline: TBD
+
+
+Current: Identifying the root causes of fragmentation between vLLM implementation details.
+Next Step: Define a standard benchmark for a Customer Usage Journey (CUJ) to be used in automated sweeps.
+Validation: Confirm the list of models and features for Gemini to sweep before generating automated test code.
+
+
+Tasks
+	Contributor
+	Date
+	Strategy Alignment: Define which work is kept in-house vs. outsourced to the community.
+	Person
+	Date
+	Automated Testing: Draft a prompt for Gemini to generate sweeps across all models/features.
+	Person
+	Date
+	Support Matrix Update: Add Jax/Flax and Torch columns to surface current deficiencies.
+	Person
+	Date
+	
+
+
+
+	
+
+
+
+
+
+Concept 3: The “Hook[b]”[c] 
+– Executive Social Alignment & CTA, enhance awareness  
+Quick win
+	Directs high-intent traffic to our contribution path rather than just generic "marketing" noise.
+	User action
+	Sees a high-signal post on different platforms and clicks the "Get Started" link.
+	Impact
+	Drive more & new potential contributors to our product pages.
+Leverages internal "Whale" influence to build external credibility.
+	Low Hanging Fruit (LHF)
+	- The playbook: draft templates for social media posts. 
+	Our deliverable
+	Social Media Kit:
+-Pre-drafted posts with "catchy images" that lead directly to the "One-Stop Shop."
+	Stage
+	Stage: Concept 
+	Priority:  High
+	Sizing: M
+	Next step
+	Timeline: Q1
+
+
+List of event
+Segment
+	P
+	Marketing Channel/Moment
+Engagement Programs
+	Needs & delivery
+	Impact/measurement
+	Alphabet-wide
+	P1
+	Gemma 4  model release message etc end of Feb
+GTM Proposal: Launching Gemma 4 Support on Cloud TPU
+	
+
+	
+
+	
+
+	…
+	
+
+	
+
+	Enterprise
+	P0
+	CloudNext: April 22–24, 2026
+	
+
+	
+
+	Developer/AI
+	
+
+	I/O May 18-20, 2026 (estimated)
+	
+
+	
+
+	
+
+	Builders Program (free) 
+2026 TPU Builders Vision Plan
+	
+
+	
+
+	
+
+	PyTorch Con?
+	
+
+	
+
+	Academia (free)
+	
+
+	TRC  (TPU Research Cloud)
+https://sites.research.google/trc/about/
+Google TPU Research & Education Awards 2026 (Josh)
+	
+
+	
+
+	
+
+	…
+	
+
+	
+
+	Major model release
+	
+
+	Deepseek v4 release - mid-February 2026 
+	
+
+	
+
+	TPU framework release
+	P0
+	vLLM
+	Release every 2 weeks ish 
+	
+
+	P0
+	Pytorch TPU
+	Launch March 2026
+	
+
+	P0
+	JAX
+	??
+	
+
+	
+
+
+
+⭐  Content Sync: Align the social calendar with the vLLM-TPU release notes to ensure the "Hook" happens when the code is ready.
+
+
+
+
+Next Step:
+
+
+Tasks
+	Contributor
+	Date
+	List of event: The table above
+	Person
+	Jan 22, 2026
+	Design concept creates a first round  concept UI to visualize the concept, getting feedback.
+	Chao Wang
+	Jan 29, 2026
+	
+
+	
+
+	
+
+	
+
+
+
+ 
+	
+
+
+
+Concept 4: The "Compass"
+– Enhancing Grassroots Discoverability[d] & Entry Points
+Key value
+[e]	
+Transitioning high-level interest into granular action. It ensures developers don't just "see" the product but can "find" their way into the code, moving from broad awareness to lower-funnel technical onboarding.
+	User action
+[f]	
+A developer seeking to solve a specific problem (e.g., "How do I optimize a Llama-3 shape?") finds a direct path via the README, Contribution Guide, or Technical Site rather than a generic marketing post.
+	Impact
+	Reduces "High Churn" before the first "Hello World". It prevents the "Black Box" feeling by exposing internal roadmaps and entry points across the entire software stack
+	Low Hanging Fruit (LHF)
+	The One-Stop Shop: Audit and unify the "Contributor Guide" to include the Support Matrix and a "Contribution Map" that highlights exactly where external effort is currently needed.
+	Our deliverable
+	The Developer Navigation Hub: A restructured GitHub Landing Page (README) and documentation sidebar that categorizes resources by "Persona" (Enterprise vs. Research) and "Intent" (Using vs. Contributing).
+A restructured webpage (existing domain)
+	Stage
+	Stage: Concept 
+	Priority:  High
+	Sizing: M
+	Next step
+	Timeline: Q1
+Current: Already deployed on GitHub, gathering feedback from the internal team.
+
+
+Next Step:
+
+
+Tasks
+	Contributor
+	Date
+	Audit: Identify the #1 drop-off point in the current "I want to fix a bug" journey
+	Person
+	Date
+	Integration: Link Rob Mulla’s documentation metrics to track improvements in engagement with the "Contributor Guide". 
+	Person
+	Date
+	Design concept creates a first round  concept UI to visualize the concept, getting feedback.
+	Chao Wang
+	Feb 5, 2026
+	
+
+	
+
+Key difference from the “Hood”
+* Segmented Entry Points: Distinguishes between those attending conferences (like PyTorch Con) and those in academia (via TRC).
+* Unlike the Gemma 4 launch or Cloud Next, this focus remains active regardless of the marketing calendar.
+
+
+
+
+Concept 5: The "Candy Crush"
+– Bite size issues list to get it started
+Integrated Github metrics: https://github.com/vllm-project/tpu-inference/pulse
+vLLM Docs Metrics: vLLM Analytics Dashboard# 
+
+
+Key Value
+	Lowering the barrier to the first "Merge" creates a dopamine hit that keeps developers in the ecosystem. It transforms complex TPU development into manageable, "flavor-based" tasks.
+	User action
+	Clicks "Contribute" on the repo and finds a prioritized "Mission Board" of Level 1 (5-minute) and Level 2 (30-minute) fixes.
+	Impact
+	Increases contributor trust with a low-commitment entry point ; solves high-volume maintenance debt (broken links, typos, type hinting) without draining senior engineering time.
+	Low Hanging Fruit (LHF)
+	Bite size tasks list for community to “pick” and solve. 
+The "Drop Zone": A pinned GitHub issue titled "Found a small bug? Drop it here!" that acts as a catch-all bucket for new "Candy Crush" tasks.
+	Our deliverable
+	The Mission Board: A GitHub Project board under tpu-inference utilizing a Labeling Strategy (e.g., difficulty: candy-crush, time: <15-mins) to visually sort issues by complexity.
+	Stage
+	Stage: Concept        
+	Priority:  Very high
+	Sizing: XL (Requires setup of automated scraping and a rotating "merging buddy") 
+	Next step
+	Timeline: Q1
+
+
+Next Step: 
+Tasks
+	Contributor
+	Date
+	A list of items, things we need to fix:
+    Example: 
+     - github issues, 
+     - Define what we can outsource   to the community….
+	Person
+	Date
+	Design concept creates a first round  concept UI to visualize the concept, getting feedbacks.
+	Chao Wang
+	Jan 29, 2026
+	
+
+	Drafted detail tab here
+Concept 6: The “Leaderboard”
+Gamification, Overall contribution leaderboard, with badges. And a rewarding system
+Key Value
+	Incentivize repeat contributions by providing public, verifiable status and a rewarding "dopamine loop" for external developers
+	User action
+	Top contributors are celebrated via public leaderboards and automated digital rewards for hitting specific milestones.
+	Impact
+	Increases engagement and identifies high-value "Hero" contributors for deeper collaboration. It transforms one-time contributors into long-term stewards.
+	Low Hanging Fruit (LHF)
+	Tiered Recognition: Create lists for "Top of the Week" or "Top of the Month" and implement automated digital badges for different contribution levels
+	Our deliverable
+	 The Gamification Framework:
+ 1. Auto-Tracking System: A dashboard that monitors PR merges and issue closures. 
+ 2. Badge & Level System: Visual assets for digital rewards (Bronze, Silver, Gold "TPU Insider").
+	Stage
+	Stage: Concept        
+	Priority:  Very high
+	Sizing: L (Requires tracking infrastructure and visual design) 
+	Next step
+	Timeline: Q1
+
+Define the specific "Rules of Play" (e.g., how many PRs equal a badge) and select the primary location for the leaderboard.
+
+
+Next Step: 
+Tasks
+	Contributor
+	Date
+	
+
+	Person
+	Date
+	
+
+	Person
+	Date
+	Design concept creates a first round  concept UI to visualize the concept, getting feedbacks.
+	Chao Wang
+	Feb 5, 2026
+	
+
+
+
+	
+
+
+
+
+
+
+
+Concept 7: The Unified "Golden Path"  
+- Solve the “Reviewer Bottleneck" complaint.
+Key value
+	The Automated "Golden Path": Solve the “Reviewer Bottleneck” complaint.
+Solves the Reviewer Bottleneck by creating a "Shield" (automated validation) and a "Bridge" (internal tracking) so engineers only spend time on high-quality code.
+	User Action
+	Submits a PR and receives an immediate Automated Performance Report. Once validated, the user sees their PR linked to an internal Google ticket, signaling it is in the formal review queue.
+	Impact
+	Reduces "Time-to-Merge" by automating 80% of the triage work; protects internal engineering bandwidth from low-quality or non-performant code; provides "Insider" transparency to external devs.
+	Low Hanging Fruit (LHF)
+	uto-Triage & Mirroring: Use existing GitHub-to-Buganizer scripts to mirror PRs. Implement basic linting and "Dry Run" TPU benchmarks as the first gate.
+	Our deliverable
+	The Reviewer Relief Suite: 
+1. The Shield: A CI/CD pipeline that blocks PRs that fail linting or performance baselines.
+2. The Bridge: Bi-directional sync between GitHub and Buganizer for seamless internal visibility.
+3. Dedicate internal resources for final approval 
+	Stage
+	Stage: Concept        
+	Priority:  Very high (Critical for Scaling)
+	Sizing: XL (Requires cross-team infra and API integration)
+	Next step
+	Timeline: TBD
+
+Technical Spike: Define the "Green Light" performance thresholds for the Community Performance Engine and verify the Buganizer API permissions for external repo mirroring.
+
+
+Next Step: 
+Tasks
+	Contributor
+	Date
+	
+
+	Person
+	Date
+	
+
+	Person
+	Date
+	
+
+	Person
+	Date
+	
+
+	
+
+
+
+Concept 8: The “Buddy program”
+Pair internal eng with Hero customers/collaborators
+Key Value
+	Direct, high-bandwidth collaboration between Google internal engineers and elite external contributors/customers (e.g., Stanford, Lightricks).
+	User Action
+	Top-tier contributors are "matched" with a Google Buddy for 1:1 syncs, roadmap deep-dives, and technical unblocking.
+	Impact
+	Fast-tracks complex performance optimizations; builds deep institutional trust; ensures "Hero" customers feel like genuine partners in the TPU roadmap.
+	Low Hanging Fruit (LHF)
+	The Stanford Pilot: Formalize the existing interaction with Stanford researchers into a structured "Buddy" trial to define the engagement model.
+	Our deliverable
+	The Partnership Framework:
+1. Selection Criteria: Define what qualifies a "Hero" (e.g., specific performance PR threshold).
+2. Engagement Rules: Set expectations for "Office Hours" vs. async support to protect internal bandwidth
+	Stage
+	Stage: Concept        
+	Priority:  High
+	Sizing: M
+	Next step
+	Timeline: TBD
+
+
+Pilot Launch: Officially match the first 3 "Hero" contributors with their internal buddies and track "Time-to-Merge" for their high-complexity PRs.
+
+
+Next Step: 
+	
+
+
+
+
+
+
+
+MVP Design: The Pilot ( Simplified)
+MVP Design Pilot proposal
+Goal
+Goal on timeline: End of Feb
+
+
+This MVP establishes a minimal, automated workflow to turn identified code deficiencies into community driven contributions. It serves as the foundational "engine" for our Community Flywheel by proving the viability of the core loop:
+
+
+1. Auto CUJ → 2. Auto Mission board → 3. Auto leaderboard
+
+
+________________
+
+
+
+
+Core Automated Workflow
+The pilot is centered on a three-step, automated workflow that requires minimal human intervention:
+Step 1: Auto CUJ
+ Identify "CUJ Breaks" via Automated Sweeps
+Action 1: Evolve the Status Language
+The current statuses (✅, unverified, N/A) are ambiguous. "Unverified" could mean "broken," "planned," or "we just haven't checked." We can make this much clearer by enriching the language used within the CSV files.
+
+
+Let's introduce a clearer, more descriptive set of statuses.
+Emoji
+	Status
+	Meaning
+	✅
+	Passing
+	Tested and works as expected. Ready for use.
+	⚠️
+	Beta
+	Works, but may be unstable or have known issues, or performance is not yet optimized. Use with caution.
+	❌
+	Failing
+	Known to be broken or not functional. Help wanted!
+	📝
+	Planned
+	Not yet implemented, but on the official roadmap.
+	❓
+	Untested
+	The functionality exists but has not been recently or thoroughly verified. Its status is unknown.
+	
+
+	N/A
+	Not applicable for this feature.
+	
+
+This would transform the CSV into something much more informative:
+
+
+Before: （Current Github)
+Feature_support_matrix.csv
+  
+
+ 
+The term "Unverified" is confusing users. It will be replaced with clearer status categories like "In Progress," "Planned," or "Not Working On."
+
+
+After: ( Proposed )
+1
+	Feature 
+	CorrectnessTest
+	PerformanceTest
+	2
+	Chunked Prefill
+	✅Passing
+	✅Passing
+	3
+	DCN-based P/D disaggregation
+	❓ Untested
+	❌Failing
+	4
+	KV cache host offloading
+	❓ Untested
+	❓ Untested
+	5
+	LoRA_Torch
+	✅Passing
+	✅Passing
+	The current matrices are too complex. The team is exploring a "cookbook" style visualization or a high-level summary grid (similar to the VLM recipes site) to better show feature support across backends (Flax vs. PyTorch). 
+Example: https://cookbook.sglang.io/autoregressive/Qwen/Qwen3-Next
+  
+[g][h]
+UX impact
+1. Sets Clear Expectations.
+2. Creates a Call to Action.
+
+
+Tasks
+	Contributor
+	Date
+	Generate and automit the metrics 
+	Johnny Yang (xWF)
+	Feb 6, 2026In Progress ( Building )
+	Design: New table layout & format
+	Chao Wang
+	Jan 29, 2026Done 
+	Next update: Waiting until all metrics to be finalized to redefine the statement tags
+	Chao Wang
+	Feb 12, 2026
+	
+
+
+
+Action 2: Create a "Live" Support Dashboard in the README
+
+
+Instead of forcing users to click through multiple CSV files, we can create a single, easy-to-read dashboard in the main README.md 
+
+
+https://github.com/ica-chao/vLLM-community-engagement-mocks
+
+
+
+
+  The same Dashboard can be reused in website
+UX impact
+1. Single Source of Truth.
+2. Improved Readability.
+3. Drives Engagement.
+
+
+Tasks
+	Contributor
+	Date
+	Generate and automit the metrics 
+	Johnny Yang (xWF)
+	Feb 6, 2026In Progress ( Building )
+	Design: New table layout & format
+	Chao Wang
+	Jan 29, 2026Done 
+	Next update: Waiting until all metrics to be finalized to redefine the statement tags
+	Chao Wang
+	Feb 12, 2026
+	Step 2: Auto Mission Board
+The Contributor's Storefront
+Goal: Automate the pipeline for "Good First Issues" to drive community engagement.
+Mechanism: Customer User Journey (CUJ) breaks (missing or broken tests in CI/CD) will automatically generate issues tagged as "good first issue".
+Benefit: Creates a steady stream of easy-to-fix items for external contributors without manual tagging.
+Design Task: Improve the Auto-Generated GitHub Issue & Contributing Overview page user experience.   Example: https://reactnative.dev/contributing/overview
+Version 1: Mission Board in Github Project
+
+
+Option 1: Improve the existing Issues page ( suggested for MVP )
+              Better tagging, filters in our issue page: “Good first issue” + clear information to improve overall experience.
+  
+
+Example: https://github.com/facebook/react-native/issues
+
+
+Open challenge: 
+Contribution Verification:[i]
+* Challenge: Community members currently struggle to verify if their fixes work (turning the matrix "green") without their code being merged into the nightly build.
+* Action: The team needs to define a workflow for pre-merge verification.
+
+
+Version 2: Mission Board on website ( Post MVP)
+This is the most popular approach for top-tier open-source projects. You create a simple, dedicated webpage that acts as the Mission Board. With links to the Github Issues detail page.
+
+
+Existing project: 
+* Up For Grabs: https://up-for-grabs.net/#/
+* Mozilla Code Tribute: https://codetribute.mozilla.org/
+
+
+  
+
+
+
+Step 3: Auto Leaderboard
+Track Contributions & Update Leaderboards
+- This step closes the loop by providing recognition, turning a one-time fix into a rewarding experience.
+
+
+Here is a simple MVP to a more advanced vision, inspired by top-tier open-source projects.
+
+
+MVP: The "Inclusive Contributor Wall" 
+This approach prioritizes collaboration and recognition over competition. It's visually engaging, easy to automate, and makes everyone feel valued from their very first contribution.
+
+
+Concept:
+Instead of a ranked list, we create a visual "wall" of contributor avatars in our README.md. It's not about who is #1; it's about celebrating everyone who has helped. This is heavily inspired by the highly successful all-contributors project.  https://allcontributors.org/
+
+
+How to Implement It:
+1. Use the all-contributors Bot & Spec: This is a well-known tool designed for exactly this purpose.
+2. Automate with GitHub Actions: Create a workflow that triggers when a Pull Request is merged.
+3. The Flow:
+   * When a user's first PR is merged, the GitHub Action calls the all-contributors bot.
+   * The bot automatically adds the user's avatar to a grid in your README.md or a CONTRIBUTORS.md file.
+   * Crucially, you can configure it to recognize different types of contributions with emojis (e.g., 💻 for code, 📖 for documentation, 🐛 for bug reports).
+4. Extend it for Reviewers: Create a separate, simpler action that triggers when a PR is approved. This action adds the reviewer's avatar to a special "Community Reviewers" section.
+Why it's a great MVP:
+* Highly Inclusive: It celebrates everyone, regardless of the size of their contribution.
+* Visual & Personal: Seeing your own face on a project's README is a powerful and rewarding experience.
+* Encourages More Than Code: It explicitly values documentation, bug reports, and reviews.
+* Low Friction: It's fully automated and lives right on the main project page.
+  
+
+
+
+
+
+[a]Let's evaluate them, prioritize them together and see which ones we'd like to get start first in Q1.
+[b]We need to ensure the "Hook" isn't just a brag. Every post must include a "Give" (Free TPU credits via TRC) and an "Ask" (Help us optimize these 5 kernels).
+[c]Go to market vs. In product discovery.
+[d]Hi @guxinchen@google.com I put together concept focusing on discoverability based our conversation last Friday. Let me know what you think.
+[e]I think something around making it easy for potential OSS contributors to 
+
+
+(1) discover what issues need to be addressed (next step from concept 3) 
+
+
+(2) and if there're willing and able, how to contribute (e.g., contribution guide, readme, review SLA, incentives)
+[f]I think something around making it easy for potential OSS contributors to 
+
+
+(1) discover what issues need to be addressed (next step from concept 3) 
+
+
+(2) and if there're willing and able, how to contribute (e.g., contribution guide, readme, review SLA, incentives)
+[g]@guxinchen@google.com Hi Xinchun, you mean this configuration table in the cookbook, right? 
+This is super nice!
+[h]yes!
+[i]Hi team, any good ideas or examples to help resolve this challenge? If you have some idea, let me know, I'll mock up the flow for them.
+@robmulla@google.com @guxinchen@google.com

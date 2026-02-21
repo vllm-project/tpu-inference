@@ -1,9 +1,15 @@
-,w16a16,,,w8a8,,,w8a16,,,w4a4,,,w4a8,,,w4a16,,
-kernels,correctness,performance,tpu versions,correctness,performance,tpu versions,correctness,performance,tpu versions,correctness,performance,tpu versions,correctness,performance,tpu versions,correctness,performance,tpu versions
-"all-gather-matmul",unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220
-"* For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision",unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220
-"fused moe",unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220
-"generic ragged paged attention v3*",unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220
-"gmm",unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220
-"mla*",unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220
-"ragged paged attention v3 head_dim 64*",unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220,unverified,unverified,nightly_20260220
+Kernel&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;,W16&nbsp;A16<br>(Corr),W16&nbsp;A16<br>(Perf),W8&nbsp;A8<br>(Corr),W8&nbsp;A8<br>(Perf),W8&nbsp;A16<br>(Corr),W8&nbsp;A16<br>(Perf),W4&nbsp;A4<br>(Corr),W4&nbsp;A4<br>(Perf),W4&nbsp;A8<br>(Corr),W4&nbsp;A8<br>(Perf),W4&nbsp;A16<br>(Corr),W4&nbsp;A16<br>(Perf)
+all-gather-matmul,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓
+fused moe,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓
+generic ragged paged<br>attention v3*,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓
+gmm,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓
+mla*,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓
+ragged paged attention v3<br>head_dim 64*,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓
+
+> **Note:**
+> *   ✅ = Verified Passing
+> *   ❓ = Unverified
+> *   ❌ = Failed
+"> *   Performance numbers (e.g., `10ms`) will appear under the icon if available."
+> *   *Tested on TPU v7 (Nightly 20260217)*
+"> *   *For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision.*"
