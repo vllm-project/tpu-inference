@@ -119,7 +119,7 @@ cleanup() {
 
   echo "✅ Cleanup complete."
 }
-# trap cleanup EXIT
+trap cleanup EXIT
 
 wait_for_server() {
   local port=$1
@@ -193,8 +193,6 @@ setup_environment "${IMAGE_NAME}" "true"
 
 DOCKER_IMAGE="${IMAGE_NAME}:${BUILDKITE_COMMIT:-latest}"
 
-# RunAI streamer setup 
-
 # Clean up potential leftovers from previous runs
 echo "--- Cleaning up previous cluster state..."
 cleanup
@@ -213,7 +211,7 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   -e MODEL_IMPL_TYPE=vllm \
   -e VLLM_DISABLE_SHARED_EXPERTS_STREAM=1 &
 
-sleep 20
+sleep 60
 
 # 2. Distribute run_cluster.sh to workers and start them
 IFS=',' read -r -a WORKER_IPS_ARRAY <<< "${WORKER_IPS}"
@@ -247,7 +245,7 @@ done
 
 echo "--- Waiting for all worker nodes to connect"
 # Wait a few seconds for all worker nodes to connect
-sleep 60
+sleep 120
 
 # 3. Start vLLM server on the head node
 echo "--- Starting vLLM server on head node"
