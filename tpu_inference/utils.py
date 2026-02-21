@@ -35,8 +35,10 @@ _VLLM_DTYPE_STR_TO_JAX_DTYPE = {
 
 
 def to_jax_dtype(dtype: str | jnp.dtype | torch.dtype) -> jnp.dtype:
-    if isinstance(dtype, str):
-        if dict_dtype := _VLLM_DTYPE_STR_TO_JAX_DTYPE.get(dtype, None):
+    if isinstance(dtype, (str, type)):
+        if isinstance(dtype, str) and (dict_dtype :=
+                                       _VLLM_DTYPE_STR_TO_JAX_DTYPE.get(
+                                           dtype, None)):
             return dict_dtype
         return jnp.dtype(dtype)
     elif isinstance(dtype, torch.dtype):
@@ -46,7 +48,7 @@ def to_jax_dtype(dtype: str | jnp.dtype | torch.dtype) -> jnp.dtype:
     elif isinstance(dtype, _ScalarMeta):
         return dtype.dtype
     else:
-        raise ValueError(f"Argument is unsupported data type {type(dtype)}")
+        return dtype
 
 
 def to_torch_dtype(dtype: str | jnp.dtype | torch.dtype) -> torch.dtype:
