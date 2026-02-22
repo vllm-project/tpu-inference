@@ -14,5 +14,5 @@ Feature,CorrectnessTest,PerformanceTest
 "hybrid kv cache",✅,N/A
 "multi-host",N/A,N/A
 "runai_model_streamer_loader",✅,N/A
-"sampling_params",❌,N/A
-"structured_decoding",❌,N/A
+"sampling_params",✅,N/A
+"structured_decoding",✅,N/A
