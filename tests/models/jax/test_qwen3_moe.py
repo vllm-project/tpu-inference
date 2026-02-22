@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from unittest.mock import MagicMock
+
 import jax
 import pytest
 from jax import numpy as jnp
@@ -71,13 +73,24 @@ class TestQwen3MoeForCausalLM:
 
         with jax.set_mesh(mesh):
             model = Qwen3MoeForCausalLM(vllm_config, rng, mesh)
-        # load weights from HF model
-        with jax.set_mesh(mesh):
+            layer_idx = model.model.start_layer
+            jax_layer_0 = model.model.layers[layer_idx]
+
+            moe_process_weights = jax_layer_0.mlp.experts.quant_method.process_weights_after_loading
+            mock_moe_process_weights = MagicMock(
+                side_effect=moe_process_weights)
+            jax_layer_0.mlp.experts.quant_method.process_weights_after_loading = mock_moe_process_weights
+            linear_process_weights = jax_layer_0.self_attn.q_proj.quant_method.process_weights_after_loading
+            mock_linear_process_weights = MagicMock(
+                side_effect=linear_process_weights)
+            jax_layer_0.self_attn.q_proj.quant_method.process_weights_after_loading = mock_linear_process_weights
+
+            # load weights from HF model
             loader = get_model_loader(vllm_config.load_config)
             loader.load_weights(model, model_config)
 
-        layer_idx = model.model.start_layer
-        jax_layer_0 = model.model.layers[layer_idx]
+            assert mock_linear_process_weights.called
+            assert mock_moe_process_weights.called
 
         input_tensor_jax = jnp.array(input, dtype=jnp.bfloat16)
 
