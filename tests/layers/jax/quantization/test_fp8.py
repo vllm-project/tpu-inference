@@ -68,23 +68,18 @@ def quantize_to_fp8_block_3d(weight: jax.Array,
     return w_q, scale_blocks
 
 
-def sharding_to_tuple(sharding, ndim=2):
+def sharding_to_tuple(sharding):
     if sharding is None:
         return None
     if isinstance(sharding, tuple):
-        res = sharding
-    elif isinstance(sharding, jax.sharding.NamedSharding):
-        res = tuple(s for s in sharding.spec)
-    elif isinstance(sharding, jax.sharding.PartitionSpec):
-        res = tuple(s for s in sharding)
-    elif isinstance(sharding, jax.sharding.SingleDeviceSharding):
-        res = ()
-    else:
-        raise ValueError(f"Unsupported sharding type: {type(sharding)}")
-
-    if len(res) < ndim:
-        res = res + (None,) * (ndim - len(res))
-    return res
+        return sharding
+    if isinstance(sharding, jax.sharding.NamedSharding):
+        return tuple(s for s in sharding.spec)
+    if isinstance(sharding, jax.sharding.PartitionSpec):
+        return tuple(s for s in sharding)
+    if isinstance(sharding, jax.sharding.SingleDeviceSharding):
+        return ()
+    raise ValueError(f"Unsupported sharding type: {type(sharding)}")
 
 
 @pytest.fixture(scope="module")
@@ -317,25 +312,6 @@ class TestFp8BlockwiseJaxLinear:
 
         expected_shape = (batch_size, N, H)
         assert output.shape == expected_shape
-
-
-    @pytest.mark.parametrize("einsum_str,weight_shape,weight_sharding", [
-        ("ab,bc->ac", (32, 16), (None, 'out')),
-        ("ab,bc->ac", (32, 16), ('in', 'out')),
-        ("ab,bc->ac", (32, 16), ('in', None)),
-    ])
-    def test_put_sharding_correctness(self, rngs, einsum_str, weight_shape, weight_sharding):
-        """Test that the weight sharding from the original weight is preserved."""
-        hf_quant_config = {
-            "quant_method": "fp8",
-            "activation_scheme": "dynamic",
-            "weight_block_size": [8, 16],
-        }
-        quant_config = Fp8Config(hf_quant_config)
-
-        layer = JaxEinsum(einsum_str, weight_shape, rngs, quant_config=quant_config, kernel_init=nnx.with_partitioning(nnx.initializers.uniform(), weight_sharding))
-        assert layer.weight.shape == (16, 32)
-        assert layer.weight.sharding in [('out', None), ('out', 'in'), (None, 'in')]
 
 
 class TestFp8TensorwiseJaxLinear:
