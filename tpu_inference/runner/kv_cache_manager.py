@@ -23,6 +23,7 @@ from jax.sharding import NamedSharding, PartitionSpec
 from torchax.ops.mappings import t2j_dtype
 from vllm.config import get_layers_from_vllm_config
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.mla import MLAAttention
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
@@ -151,8 +152,12 @@ class KVCacheManager:
                                 block_size, num_kv_heads, head_size)
         else:
             # Else propagate attention modules from compilation config.
-            layers = get_layers_from_vllm_config(self.runner.vllm_config,
-                                                 Attention)
+            attn = get_layers_from_vllm_config(self.runner.vllm_config,
+                                               Attention)
+            mla = get_layers_from_vllm_config(self.runner.vllm_config,
+                                              MLAAttention)
+            layers = attn | mla
+
             logger.warning(f"Compilation num_layers = {len(layers.items())}")
             for layer_name, attn_module in layers.items():
                 if (kv_tgt_layer :=
