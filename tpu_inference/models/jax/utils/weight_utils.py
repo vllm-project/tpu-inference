@@ -786,10 +786,10 @@ def load_nnx_param_from_reshaped_torch(
     assert tuple(jax_weight.shape) == jax_param.value.shape, \
         f"Shape mismatch when loading weight '{param_name}': torch {jax_weight.shape} vs jax {jax_param.value.shape}"
 
-    spec = jax_param.sharding
-    if isinstance(jax_param.sharding, NamedSharding):
-        spec = jax_param.sharding.spec
-    elif isinstance(jax_param.sharding, SingleDeviceSharding):
+    spec = jax_param.get_metadata().get('sharding', ())
+    if isinstance(spec, NamedSharding):
+        spec = spec.spec
+    elif isinstance(spec, SingleDeviceSharding):
         spec = ()
     mesh = jax_param.get_metadata().get('mesh', None)
 
