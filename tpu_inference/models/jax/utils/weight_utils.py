@@ -30,7 +30,7 @@ import torchax
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from jax.sharding import SingleDeviceSharding
+from jax.sharding import SingleDeviceSharding, get_mesh
 from safetensors import safe_open
 from torchax.ops.mappings import t2j
 from vllm.config import VllmConfig
@@ -219,9 +219,7 @@ def shard_put(x: jax.Array,
     # Single device sharding requires this special handling
     # to avoid the recursive jit error.
     if mesh is None:
-        if isinstance(shardings, tuple):
-            return jax.device_put(x, P(*shardings))
-        return jax.device_put(x, shardings)
+        mesh = get_mesh()
 
     if math.prod(mesh.axis_sizes) == 1:
         return jax.device_put(x, mesh.devices.flatten()[0])
