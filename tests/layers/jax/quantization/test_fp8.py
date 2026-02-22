@@ -161,8 +161,9 @@ class TestFp8BlockwiseJaxLinear:
     @pytest.mark.parametrize("use_bias", [True, False])
     @pytest.mark.parametrize("batch_size", [1, 4])
     @pytest.mark.parametrize("weight_sharding", [(None,), ('in', None), (None, 'out'), ('in', 'out')])
+    @pytest.mark.parametrize("num_devices", [1, len(jax.devices())])
     def test_linear_forward_correctness(self, in_features, out_features,
-                                        use_bias, batch_size, weight_sharding, rngs):
+                                        use_bias, batch_size, weight_sharding, num_devices, rngs):
         hf_quant_config = {
             "quant_method": "fp8",
             "activation_scheme": "dynamic",
@@ -181,7 +182,7 @@ class TestFp8BlockwiseJaxLinear:
         )
 
         # Use a dummy mesh for testing
-        devices = jax.devices()
+        devices = jax.devices()[:num_devices]
         mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
         with jax.set_mesh(mesh):
             # Process weights in mesh context
