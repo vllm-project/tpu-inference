@@ -672,7 +672,7 @@ def transfer_state_with_mappings(src_state,
 def cpu_mesh():
     global _cpu_mesh
     if _cpu_mesh is None:
-        _cpu_mesh = Mesh(jax.devices("cpu"), ("cpu", ))
+        _cpu_mesh = Mesh(jax.devices("cpu")[:1], ("cpu", ))
     return _cpu_mesh
 
 
