@@ -253,14 +253,14 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         if layer.bias is not None:
             layer.bias.set_metadata('mesh', cpu_mesh())
 
-    def process_weights_after_loading(self, layer):
+    def process_weights_after_loading(self, layer: JaxEinsum) -> bool:
         assert isinstance(layer, JaxEinsum)
         assert self.quant_config.weight_block_size is not None
 
         if self.batch_features:
             # Batched case: weight stays in FP8. No blockwise processing
             # needed — the batched matmul uses dot_general with FP8 natively.
-            return
+            return True
 
         # Do the re-quant process on CPU to avoid OOM on device.
         with cpu_mesh_context():
@@ -322,6 +322,8 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         else:
             raise NotImplementedError(
                 "Fp8 block-wise linear method only supports fuse_matmuls.")
+
+        return True
 
     def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
         if self.batch_features:
@@ -475,7 +477,7 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                 f"Unsupported moe backend: {layer.moe_backend}! Currently supported: {FP8_QUANT_METHOD_SUPPORTED_MOE_BACKENDS}"
             )
 
-    def process_weights_after_loading(self, layer: JaxMoE) -> None:
+    def process_weights_after_loading(self, layer: JaxMoE) -> bool:
         """
         Process weights after loading.
 
@@ -501,7 +503,7 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                 ]):
                 # If weights for a module is spread across multiple files, this function may be called
                 # more than once. We only want to process the weights once all of them are loaded.
-                return
+                return False
 
             with cpu_mesh_context():
                 w_gate = jnp.concatenate(
@@ -571,6 +573,8 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
             raise NotImplementedError(
                 f"Unsupported moe backend: {layer.moe_backend}! Currently supported: {FP8_QUANT_METHOD_SUPPORTED_MOE_BACKENDS}"
             )
+
+        return True
 
     def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
         """

@@ -18,6 +18,7 @@ import glob
 import math
 import os
 import re
+from collections import defaultdict
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -855,6 +856,8 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                                       param_name=name))
 
         super().__init__(model, **kwargs)
+        self._process_weights_after_loading_per_module = defaultdict(
+            lambda: False)
 
     def _load_module(self, base_prefix: str, module: JaxModule,
                      weights: Iterable) -> Iterable:
@@ -862,9 +865,14 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
         # Post-process module after loading weights. Unlike vLLM post-process
         # weights after loading all weights, we do it per-module here to
         # avoid OOM.
+        if self._process_weights_after_loading_per_module[base_prefix]:
+            return
         if (quant_method := getattr(module, 'quant_method', None)) is not None:
             assert isinstance(quant_method, QuantizeMethodBase)
-            quant_method.process_weights_after_loading(module)
+            loaded = quant_method.process_weights_after_loading(module)
+            assert isinstance(loaded, bool)
+            self._process_weights_after_loading_per_module[
+                base_prefix] = loaded
 
 
 class LoadableWithIterator:
