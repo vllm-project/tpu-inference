@@ -41,7 +41,6 @@ from tpu_inference.layers.common.sharding import \
     ShardingAxisNameBase as ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
-from tpu_inference.layers.jax.base import _init_fn as init_fn
 from tpu_inference.layers.jax.base import create_param, sharded_initializer
 from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.layers.jax.layers import FlaxUtils
