@@ -46,8 +46,6 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils import file_utils
 
 logger = init_logger(__name__)
-# Lazy initialized, since device might not be ready at import time.
-_cpu_mesh = None
 
 HF_WEIGHTS_FORMAT = "*.safetensors"
 
@@ -668,18 +666,6 @@ def transfer_state_with_mappings(src_state,
     return tgt_state
 
 
-def cpu_mesh():
-    global _cpu_mesh
-    if _cpu_mesh is None:
-        _cpu_mesh = Mesh(jax.devices("cpu")[:1], ("cpu", ))
-    return _cpu_mesh
-
-
-def cpu_mesh_context():
-    """A context to enforce using CPU mesh, used for loading weights on CPU."""
-    return jax.set_mesh(cpu_mesh())
-
-
 class BaseWeightLoader:
 
     def __init__(self, vllm_config: VllmConfig, **kwargs):
@@ -856,6 +842,7 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                                       param_name=name))
 
         super().__init__(model, **kwargs)
+        # Book mark those already done processing, skip if visited.
         self._process_weights_after_loading_per_module = defaultdict(
             lambda: False)
 
