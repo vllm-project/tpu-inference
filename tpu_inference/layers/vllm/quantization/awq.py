@@ -66,15 +66,17 @@ class VllmAWQConfig(AWQConfig, VllmQuantConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional[Union["LinearMethodBase", "QuantizeMethodBase"]]:
-        if isinstance(layer, LinearBase):
-            linear_config = self.get_linear_config(layer)
-            if is_layer_skipped(prefix, self.modules_to_not_convert):
-                return VllmUnquantizedLinearMethod(linear_config)
-            return VllmAWQLinearMethod(self, linear_config)
-        elif isinstance(layer, FusedMoE):
-            raise NotImplementedError(
-                "AWQ FusedMoE is currently not supported in torchax-jax")
-        return None
+        match layer:
+            case LinearBase():
+                linear_config = self.get_linear_config(layer)
+                if is_layer_skipped(prefix, self.modules_to_not_convert):
+                    return VllmUnquantizedLinearMethod(linear_config)
+                return VllmAWQLinearMethod(self, linear_config)
+            case FusedMoE():
+                raise NotImplementedError(
+                    "AWQ FusedMoE is currently not supported in torchax-jax")
+            case _:
+                return None
 
 
 class VllmAWQLinearMethod(AWQLinearMethod):
