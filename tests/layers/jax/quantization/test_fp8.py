@@ -77,6 +77,8 @@ def sharding_to_tuple(sharding):
         return tuple(s for s in sharding.spec)
     if isinstance(sharding, jax.sharding.PartitionSpec):
         return tuple(s for s in sharding)
+    if isinstance(sharding, jax.sharding.SingleDeviceSharding):
+        return ()
     raise ValueError(f"Unsupported sharding type: {type(sharding)}")
 
 
