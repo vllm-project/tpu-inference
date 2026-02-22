@@ -33,6 +33,7 @@ from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
+from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.model_executor.models import supports_lora, supports_multimodal
@@ -45,6 +46,7 @@ from tpu_inference.distributed.jax_parallel_state import \
     get_pp_group as jax_get_pp_group
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.vllm.mla import TPUMultiHeadLatentAttentionWrapper
 from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
     shard_model_to_tpu
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
@@ -109,6 +111,9 @@ class VllmModelWrapper:
         self.vllm_config.quant_config = get_tpu_quantization_config(
             self.vllm_config, self.mesh)
         self._apply_pp_patch()
+
+        MultiHeadLatentAttentionWrapper.register_oot(
+            TPUMultiHeadLatentAttentionWrapper)
 
     def _apply_pp_patch(self):
         # patch `get_pp_group` in vLLM to jax's get_pp_group.
