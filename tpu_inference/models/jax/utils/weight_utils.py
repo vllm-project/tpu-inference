@@ -46,8 +46,6 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils import file_utils
 
 logger = init_logger(__name__)
-# Lazy initialized, since device might not be ready at import time.
-_cpu_mesh = None
 
 HF_WEIGHTS_FORMAT = "*.safetensors"
 
@@ -668,18 +666,6 @@ def transfer_state_with_mappings(src_state,
     return tgt_state
 
 
-def cpu_mesh():
-    global _cpu_mesh
-    if _cpu_mesh is None:
-        _cpu_mesh = Mesh(jax.devices("cpu")[:1], ("cpu", ))
-    return _cpu_mesh
-
-
-def cpu_mesh_context():
-    """A context to enforce using CPU mesh, used for loading weights on CPU."""
-    return jax.set_mesh(cpu_mesh())
-
-
 class BaseWeightLoader:
 
     def __init__(self, vllm_config: VllmConfig, **kwargs):
@@ -802,7 +788,7 @@ def load_nnx_param_from_reshaped_torch(
 
     try:
         jax_param.value = shard_put(jax_weight, spec, mesh=mesh)
-        setattr(jax_param, '_is_loaded', True)
+        jax_param.set_metadata(_is_loaded=True)
     except Exception as e:
         raise RuntimeError(
             f"Failed to load weight '{param_name}' with shape {jax_weight.shape} into param with shape {jax_param.value.shape}"
@@ -873,19 +859,33 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
             # here.
             self._process_weights_after_loading(base_prefix, module)
 
-    def _process_weights_after_loading(self, base_prefix: str, module: JaxModule):
+    def _process_weights_after_loading(self, base_prefix: str,
+                                       module: JaxModule):
         if self._process_weights_after_loading_per_module[base_prefix]:
             return
         if (quant_method := getattr(module, 'quant_method', None)) is not None:
             assert isinstance(quant_method, QuantizeMethodBase)
-            quant_method.process_weights_after_loading(module)
+            loaded = quant_method.process_weights_after_loading(module)
+            assert isinstance(
+                loaded, bool
+            ), f"{quant_method} should return a bool indicating whether the weights have been processed, but got {type(loaded)}"
+            self._process_weights_after_loading_per_module[
+                base_prefix] = loaded
         else:
-            for _, child in module.named_children():
+            for name, child in module.named_children():
                 if isinstance(child, JaxModule):
-                    self._process_weights_after_loading(child)
+                    if base_prefix:
+                        new_prefix = f"{base_prefix}.{name}"
+                    else:
+                        new_prefix = name
+                    self._process_weights_after_loading(new_prefix, child)
                 else:
-                    for c in child:
-                        self._process_weights_after_loading(c)
+                    for i, c in enumerate(child):
+                        if base_prefix:
+                            new_prefix = f"{base_prefix}.{name}.{i}"
+                        else:
+                            new_prefix = f"{name}.{i}"
+                        self._process_weights_after_loading(new_prefix, c)
 
 
 class LoadableWithIterator:

@@ -22,6 +22,8 @@ from jax import numpy as jnp
 from jax.experimental.layout import Layout, with_layout_constraint
 from jax.sharding import PartitionSpec
 
+from tpu_inference.layers.common.utils import cpu_mesh_context
+
 
 @dataclass(kw_only=True)
 class RotaryEmbedding(nnx.Module):
@@ -97,14 +99,17 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         if self.sin_cos_cache is not None and not isinstance(
                 self.sin_cos_cache, jax.ShapeDtypeStruct):
             return
-        mscale_val = _yarn_get_mscale(
-            self.scaling_factor, self.mscale_value) / _yarn_get_mscale(
-                self.scaling_factor, self.mscale_all_dim)
+        with cpu_mesh_context():
+            mscale_val = _yarn_get_mscale(
+                self.scaling_factor, self.mscale_value) / _yarn_get_mscale(
+                    self.scaling_factor, self.mscale_all_dim)
+            _sin_cos = self._compute_sin_cos(mscale_val)
         replicated_sharding = PartitionSpec()
-        self.mscale = nnx.data(jax.device_put(mscale_val, replicated_sharding))
-        self.sin_cos_cache = nnx.data(self._compute_sin_cos())
+        # self.mscale = nnx.data(jax.device_put(mscale_val, replicated_sharding))
+        self.sin_cos_cache = nnx.data(
+            jax.device_put(_sin_cos, replicated_sharding))
 
-    def _compute_inv_freq(self):
+    def _compute_inv_freq(self) -> jax.Array:
         fractions = jnp.arange(0, self.rotary_dim, 2,
                                dtype=jnp.float32) / self.rotary_dim
         inv_freq_extrapolation = 1.0 / (self.rope_theta**fractions)
@@ -121,13 +126,13 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
             1 - inv_freq_mask) + inv_freq_extrapolation * inv_freq_mask
         return inv_freq
 
-    def _compute_sin_cos(self):
+    def _compute_sin_cos(self, mscale) -> jax.Array:
         inv_freq_H = self._compute_inv_freq()
         t = jnp.arange(self.original_max_position_embeddings *
                        self.scaling_factor,
                        dtype=jnp.float32)
         freqs = jnp.einsum("...T,k->...Tk", t, inv_freq_H)
-        sin, cos = jnp.sin(freqs) * self.mscale, jnp.cos(freqs) * self.mscale
+        sin, cos = jnp.sin(freqs) * mscale, jnp.cos(freqs) * mscale
         cache = jnp.concatenate((cos, sin), axis=-1)
         H = cache.shape[1]
         target_dim = ((H - 1) // 128 + 1) * 128
@@ -138,7 +143,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         cache_padded = with_layout_constraint(cache_padded, desired_layout)
         return cache_padded
 
-    def apply_rope(self, positions: jax.Array, x_TNH: jax.Array):
+    def apply_rope(self, positions: jax.Array, x_TNH: jax.Array) -> jax.Array:
         assert x_TNH.ndim == 3
         assert self.sin_cos_cache is not None, "RoPE cache not initialized."
         cos_sin_padded = self.sin_cos_cache[positions]

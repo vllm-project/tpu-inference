@@ -326,25 +326,6 @@ class TestFp8BlockwiseJaxLinear:
         assert output.shape == expected_shape
 
 
-    @pytest.mark.parametrize("einsum_str,weight_shape,weight_sharding", [
-        ("ab,bc->ac", (32, 16), (None, 'out')),
-        ("ab,bc->ac", (32, 16), ('in', 'out')),
-        ("ab,bc->ac", (32, 16), ('in', None)),
-    ])
-    def test_put_sharding_correctness(self, rngs, einsum_str, weight_shape, weight_sharding):
-        """Test that the weight sharding from the original weight is preserved."""
-        hf_quant_config = {
-            "quant_method": "fp8",
-            "activation_scheme": "dynamic",
-            "weight_block_size": [8, 16],
-        }
-        quant_config = Fp8Config(hf_quant_config)
-
-        layer = JaxEinsum(einsum_str, weight_shape, rngs, quant_config=quant_config, kernel_init=nnx.with_partitioning(nnx.initializers.uniform(), weight_sharding))
-        assert layer.weight.shape == (16, 32)
-        assert layer.weight.sharding in [('out', None), ('out', 'in'), (None, 'in')]
-
-
 class TestFp8TensorwiseJaxLinear:
 
     def test_fp8_linear_method_create_weights(self, mesh, rngs):

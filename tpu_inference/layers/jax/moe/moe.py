@@ -31,7 +31,7 @@ from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
-    cpu_mesh_context, jax_array_from_reshaped_torch, shard_put)
+    jax_array_from_reshaped_torch, shard_put)
 
 modeling_flax_utils = FlaxUtils()
 logger = init_logger(__name__)
@@ -143,11 +143,11 @@ class JaxMoE(JaxModule):
     router: nnx.Module
     mesh: jax.sharding.Mesh
     # --- Sharding Config ---
-    activation_ffw_td: Sharding
-    activation_ffw_ted: Sharding
-    edf_sharding: Sharding
-    efd_sharding: Sharding
-    e2df_sharding: Sharding = ()
+    activation_ffw_td: PartitionSpec
+    activation_ffw_ted: PartitionSpec
+    edf_sharding: PartitionSpec
+    efd_sharding: PartitionSpec
+    e2df_sharding: PartitionSpec = PartitionSpec()
 
     # --- Flags & Configs ---
     apply_expert_weight_before_computation: bool

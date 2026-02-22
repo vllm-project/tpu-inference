@@ -13,8 +13,6 @@
 # limitations under the License.
 
 import math
-import os
-import re
 from abc import abstractmethod
 from dataclasses import InitVar, dataclass
 from itertools import islice
@@ -26,7 +24,7 @@ import torch
 from flax import nnx
 from flax.typing import Sharding
 from jax import lax
-from jax.sharding import Mesh, NamedSharding
+from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Float
 from torchax.ops.mappings import j2t_dtype
@@ -44,9 +42,7 @@ from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
-from tpu_inference.layers.jax.base import _init_fn as init_fn
 from tpu_inference.layers.jax.base import create_param, sharded_initializer
-from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.layers.jax.linear import JaxEinsum
@@ -226,7 +222,7 @@ class DeepseekV3BaseAttention(JaxModule):
             prefix=self.prefix + ".q_b_proj")
 
         self.kv_a_proj_with_mqa = JaxEinsum(
-            einsum_str="SD,DA -> SA",
+            einsum_str="SD,DA->SA",
             kernel_shape=(self.D, self.kv_lora_rank + self.qk_rope_head_dim),
             rngs=rngs,
             quant_config=self.quant_config,
@@ -510,6 +506,7 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
             quant_config=self.quant_config,
             param_dtype=self.dtype,
             kernel_init=nnx.with_partitioning(weight_init, self.anh_sharding),
+            prefix=self.prefix + ".k_up_proj",
         )
 
         self.v_up_proj = JaxEinsum(
@@ -519,6 +516,7 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
             quant_config=self.quant_config,
             param_dtype=self.dtype,
             kernel_init=nnx.with_partitioning(weight_init, self.anh_sharding),
+            prefix=self.prefix + ".v_up_proj",
         )
 
     def compute_q_projection(
@@ -699,9 +697,9 @@ class DeepseekV3MLP(JaxModule):
     hidden_act: str
     hidden_size: int
     intermediate_size: int
-    df_sharding: Sharding = ()
-    fd_sharding: Sharding = ()
-    activation_ffw_td: Sharding = ()
+    df_sharding: P = P()
+    fd_sharding: P = P()
+    activation_ffw_td: P = P()
     random_init: bool = False
     quant_config: Optional[QuantizationConfig] = None
 
@@ -807,9 +805,9 @@ class DeepseekV2Moe(JaxModule):
             routed_scaling_factor=routed_scaling_factor,
             dtype=dtype,
             moe_backend=moe_backend,
-            activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
-            ed_sharding=(None, None),
-            e_sharding=(None, ),
+            activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
+            ed_sharding=P(None, None),
+            e_sharding=P(None, ),
             quant_config=quant_config)
 
         # shared experts
@@ -819,25 +817,27 @@ class DeepseekV2Moe(JaxModule):
             hidden_size=hidden_size,
             intermediate_size=num_shared_experts * moe_intermediate_size,
             rngs=rng,
-            activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
-            df_sharding=(None, ShardingAxisName.MLP_TENSOR),
-            fd_sharding=(ShardingAxisName.MLP_TENSOR, None),
+            activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
+            df_sharding=P(None, ShardingAxisName.MLP_TENSOR),
+            fd_sharding=P(ShardingAxisName.MLP_TENSOR, None),
             quant_config=quant_config)
 
         # routed experts
         if moe_backend == MoEBackend.GMM_TP:
-            moe_activation_ffw_td = (ShardingAxisName.MLP_DATA, None)
-            moe_activation_ffw_ted = (ShardingAxisName.MLP_DATA, None,
-                                      ShardingAxisName.MOE_TENSOR)
-            moe_edf_sharding = (None, ShardingAxisName.ATTN_DATA_EXPERT, ShardingAxisName.MOE_TENSOR)
-            moe_efd_sharding = (None, ShardingAxisName.MOE_TENSOR, ShardingAxisName.ATTN_DATA_EXPERT)
+            moe_activation_ffw_td = P(ShardingAxisName.MLP_DATA, None)
+            moe_activation_ffw_ted = P(ShardingAxisName.MLP_DATA, None,
+                                       ShardingAxisName.MOE_TENSOR)
+            moe_edf_sharding = P(None, ShardingAxisName.ATTN_DATA_EXPERT,
+                                 ShardingAxisName.MOE_TENSOR)
+            moe_efd_sharding = P(None, ShardingAxisName.MOE_TENSOR,
+                                 ShardingAxisName.ATTN_DATA_EXPERT)
         else:
-            moe_activation_ffw_td = (ShardingAxisName.MLP_DATA,
-                                     ShardingAxisName.MOE_TENSOR)
-            moe_activation_ffw_ted = (ShardingAxisName.MLP_DATA, None,
+            moe_activation_ffw_td = P(ShardingAxisName.MLP_DATA,
                                       ShardingAxisName.MOE_TENSOR)
-            moe_edf_sharding = (ShardingAxisName.ATTN_DATA_EXPERT, None, None)
-            moe_efd_sharding = (ShardingAxisName.ATTN_DATA_EXPERT, None, None)
+            moe_activation_ffw_ted = P(ShardingAxisName.MLP_DATA, None,
+                                       ShardingAxisName.MOE_TENSOR)
+            moe_edf_sharding = P(ShardingAxisName.ATTN_DATA_EXPERT, None, None)
+            moe_efd_sharding = P(ShardingAxisName.ATTN_DATA_EXPERT, None, None)
 
         self.experts = SharedFusedMoe(
             dtype=dtype,
@@ -891,7 +891,7 @@ class DeepseekV3DecoderLayer(JaxModule):
         self.mlp = custom_module
 
     def __call__(
-        self, x_TD: jax.Array, kv_cache: List[jax.Array],
+        self, x_TD: jax.Array, *, kv_cache: List[jax.Array],
         attention_metadata: AttentionMetadata
     ) -> Tuple[List[jax.Array], jax.Array]:
 
@@ -931,9 +931,9 @@ class DeepSeekV3Router(JaxEinsum):
             dtype: jnp.dtype,
             rngs: nnx.Rngs,
             # Sharding Attributes
-            activation_ffw_td: Sharding = (),
-            ed_sharding: Sharding = (),
-            e_sharding: Sharding = (),
+            activation_ffw_td: P = P(),
+            ed_sharding: P = P(),
+            e_sharding: P = P(),
             random_init: bool = False,
             quant_config: Optional[QuantizationConfig] = None,
             router_bias_dtype: jnp.dtype = jnp.float32,
@@ -1095,9 +1095,9 @@ class DeepSeekV3(JaxModule):
                 attn_o_tnh_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
                 anh_sharding = (None, ShardingAxisName.MLP_TENSOR, None)
             else:
-                query_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
-                keyvalue_skh_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
-                attn_o_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
+                query_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR)
+                keyvalue_skh_spec = P(None, ShardingAxisName.MLP_TENSOR)
+                attn_o_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR)
             rd_sharding = (ShardingAxisName.MLP_TENSOR, None)
             ap_sharding = (None, ShardingAxisName.MLP_TENSOR)
             q_da_sharding = (ShardingAxisName.MLP_TENSOR, None)
@@ -1139,8 +1139,8 @@ class DeepSeekV3(JaxModule):
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
                 rngs=rng,
                 quant_config=quant_config,
-                activation_attention_td=(None, None),
-                activation_q_td=(None, None),
+                activation_attention_td=P(None, None),
+                activation_q_td=P(None, None),
                 query_tnh=query_tnh_spec,
                 keyvalue_skh=keyvalue_skh_spec,
                 activation_attention_out_td=P(None, None),
@@ -1192,9 +1192,9 @@ class DeepSeekV3(JaxModule):
                     hidden_size=hidden_size,
                     intermediate_size=ffw_intermediate_size,
                     rngs=rng,
-                    activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
-                    df_sharding=(None, ShardingAxisName.MLP_TENSOR),
-                    fd_sharding=(ShardingAxisName.MLP_TENSOR, None),
+                    activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
+                    df_sharding=P(None, ShardingAxisName.MLP_TENSOR),
+                    fd_sharding=P(ShardingAxisName.MLP_TENSOR, None),
                     quant_config=quant_config)
             else:
                 # MoE Layer
@@ -1206,14 +1206,14 @@ class DeepSeekV3(JaxModule):
                     moe_backend=self.moe_backend,
                     quant_config=quant_config,
                     rng=rng,
-                    prefix=f"{prefix}.layers.{i}.mlp")
+                    prefix=f"{prefix}.layers.{layer_index}.mlp")
 
             return DeepseekV3DecoderLayer(
                 input_layernorm=input_layernorm,
                 post_attention_layernorm=post_attention_layernorm,
-                self_attn=_create_deepseek_attention(i),
+                self_attn=_create_deepseek_attention(layer_index),
                 custom_module=mlp_layer,
-                prefix=f"{prefix}.layers.{i}")
+                prefix=f"{prefix}.layers.{layer_index}")
 
         # hf_config.num_hidden_layers is 61, which ignores the last MTP layer.
         self.start_layer, self.end_layer, self.layers = make_layers(
@@ -1233,18 +1233,6 @@ class DeepSeekV3(JaxModule):
             )
         else:
             self.norm = PPMissingLayer()
-
-    def _print_model_architecture(self):
-        num_display_layers = 5
-
-        logger.debug("### Embedding ###")
-        nnx.display(self.embed_tokens)
-
-        logger.debug(f"\n### First {num_display_layers} Layers ###")
-        # Loop through the slice and display each layer
-        for i, layer in enumerate(self.layers[:num_display_layers]):
-            logger.debug(f"\n--- Layer {i} ---")
-            nnx.display(layer)
 
     # For compatibility with flax.
     def apply(self, variables, *args, **kwargs):
@@ -1274,9 +1262,9 @@ class DeepSeekV3(JaxModule):
                 islice(self.layers, self.start_layer, self.end_layer)):
             kv_cache = kv_caches[i]
             kv_cache, x = layer(
-                kv_cache,
                 x,
-                attention_metadata,
+                kv_cache=kv_cache,
+                attention_metadata=attention_metadata,
             )
             kv_caches[i] = kv_cache
         x = self.norm(x)
@@ -1328,12 +1316,6 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
             )
         else:
             self.lm_head = PPMissingLayer()
-
-        if os.environ.get("VLLM_LOGGING_LEVEL", "").upper() == "DEBUG":
-            self.model._print_model_architecture()
-
-            logger.debug("\n### LM Head ###")
-            nnx.display(self.lm_head)
 
     def __call__(
         self,
@@ -1390,6 +1372,7 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
         self.model.initialize_cache()
 
         # Display model arch
+        logger.info("Model architecture and parameter dtypes:")
         num_layers_to_display = 5
         should_skip_layer_display = False
         for name, param in self.named_parameters():

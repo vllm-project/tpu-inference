@@ -124,11 +124,6 @@ class TestQwen3ForCausalLM:
     def test_qwen3_600M(self, model_name, kv_cache_type, qwix_rules, rng, mesh,
                         mock_model_inputs, pp_rank, pp_world_size):
         """Tests model init and model forward for the 0.6B model variant."""
-        mock_vllm_config = MockVllmConfig(model_name, kv_cache_type)
-        if qwix_rules:
-            mock_vllm_config.additional_config["quanntization"] = dict(
-                qwix=dict(rules=qwix_rules))
-
         init_pp_distributed_environment(
             ip="",
             rank=pp_rank,
@@ -136,6 +131,11 @@ class TestQwen3ForCausalLM:
             device=jax.devices()[0],
             need_pp=False,
         )
+        mock_vllm_config = MockVllmConfig(model_name, kv_cache_type)
+        if qwix_rules:
+            mock_vllm_config.additional_config["quanntization"] = dict(
+                qwix=dict(rules=qwix_rules))
+
         # Test model init
         with jax.set_mesh(mesh):
             model = Qwen3ForCausalLM(mock_vllm_config, rng, mesh)
@@ -220,11 +220,11 @@ class TestQwen3ForCausalLM:
                              ["Qwen/Qwen3-0.6B", "Qwen/Qwen3-0.6B-FP8"])
     @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
                                                        (3, 4)])
-    def test_model_loading(self, model_name, pp_rank, pp_world_size, rng,
-                           mesh):
+    def test_model_loading(self, model_name, pp_rank, pp_world_size, rng, mesh,
+                           mock_vllm_config):
         """Tests loading weights from HF model"""
         kv_cache_type = "auto"
-        mock_vllm_config = MockVllmConfig(model_name, kv_cache_type)
+        mock_vllm_config = mock_vllm_config(model_name, kv_cache_type)
         # No need to load full model.
         mock_vllm_config.model_config.hf_config.num_hidden_layers = 4
         mock_vllm_config.load_config.load_format = "skip_layers_model_loader_for_test"

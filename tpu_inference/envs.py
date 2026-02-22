@@ -15,7 +15,6 @@ if TYPE_CHECKING:
     PREFILL_SLICES: str = ""
     DECODE_SLICES: str = ""
     SKIP_JAX_PRECOMPILE: bool = False
-    MOCK_WEIGHTS: bool = False
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     MODEL_IMPL_TYPE: str = "auto"
     NEW_MODEL_DESIGN: bool = False
@@ -131,10 +130,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Skip JAX precompilation step during initialization
     "SKIP_JAX_PRECOMPILE":
     env_bool("SKIP_JAX_PRECOMPILE", default=False),
-    # Replace checkpoint weights with random mock data during loading.
-    # The weight shapes, dtypes, and shardings are preserved
-    "MOCK_WEIGHTS":
-    env_bool("MOCK_WEIGHTS", default=False),
     # Check for XLA recompilation during execution
     "VLLM_XLA_CHECK_RECOMPILATION":
     env_bool("VLLM_XLA_CHECK_RECOMPILATION", default=False),
