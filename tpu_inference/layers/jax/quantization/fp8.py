@@ -251,7 +251,6 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                                   permute_dims=(0, 1),
                                   param_name=layer.prefix + ".weight"),
             eager_sharding=False)
-        layer.weight.set_metadata('mesh', cpu_mesh)
         layer.weight.set_metadata('sharding', self.weight_sharding)
 
         # Block-wise quantization scale
@@ -270,7 +269,6 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 param_name=layer.prefix + ".weight_scale_inv",
             ),
             eager_sharding=False)
-        layer.weight.set_metadata('mesh', cpu_mesh)
         layer.weight_scale_inv.set_metadata('sharding', self.weight_sharding)
 
         # Force the parameters to be loaded onto CPU, such that in `process_weights_after_loading`
