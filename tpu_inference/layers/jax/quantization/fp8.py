@@ -310,23 +310,17 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                     jnp.transpose(weights.weight_scale),
                     axis=1,
                 )
-            weights = shard_linear_weights(
-                weights,
-                mesh=self.linear_config.mesh,
-                weight_p_spec=self.linear_config.weight_sharding,
-                bias_p_spec=self.linear_config.bias_sharding,
-            )
-
+        # Put onto the device.
+        weights = shard_linear_weights(
+            weights,
+            mesh=None,
+            weight_p_spec=self.linear_config.weight_sharding,
+            bias_p_spec=self.linear_config.bias_sharding,
+        )
         if self.linear_config.fuse_matmuls:
-            layer.weight = nnx.Param(
-                shard_put(weights.weight,
-                          shardings=self.linear_config.weight_sharding))
-            layer.weight_scale_inv = nnx.Param(
-                shard_put(weights.weight_scale, shardings=(None, )))
-            layer.bias = nnx.Param(
-                shard_put(weights.bias,
-                          shardings=self.linear_config.bias_sharding)
-            ) if bias is not None else None
+            layer.weight = nnx.Param(weights.weight)
+            layer.weight_scale_inv = nnx.Param((weights.weight_scale))
+            layer.bias = nnx.Param(weights.bias) if bias is not None else None
         else:
             raise NotImplementedError(
                 "Fp8 block-wise linear method only supports fuse_matmuls.")
