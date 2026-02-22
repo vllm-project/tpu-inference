@@ -102,12 +102,12 @@ class CompilationManager:
             else:
                 self._precompile_compute_pooling()
             # Skip sampling if already precompiled before KV cache allocation
-            # if not self._sampling_precompiled:
-            #     self._precompile_sampling()
+            if not self._sampling_precompiled:
+                self._precompile_sampling()
             self._precompile_disagg_utils()
             # Skip gather_logprobs if already precompiled before KV cache allocation
-            # if not self._gather_logprobs_precompiled:
-            #     self._precompile_gather_logprobs()
+            if not self._gather_logprobs_precompiled:
+                self._precompile_gather_logprobs()
             self._precompile_structured_decoding()
             if self.runner.speculative_config:
                 self._precompile_speculative_decoding()

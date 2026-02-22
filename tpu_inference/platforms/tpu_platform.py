@@ -73,7 +73,6 @@ class TpuPlatform(Platform):
             logger.info("Cannot use %s backend on TPU. Setting to FLASH_ATTN.",
                         selected_backend)
             selected_backend = AttentionBackendEnum.FLASH_ATTN
-
         logger.info("Using %s backend.", selected_backend.name)
         return selected_backend.get_path()
 
