@@ -79,12 +79,24 @@ class SkipLayersModelLoaderForTest(DefaultModelLoader):
 
     def __init__(self, load_config):
         self._num_layers_to_load = load_config.num_layers_to_load_for_test
+        # During test, control how many tensors there are in a safetensor file.
+        self._safetensor_granularity = getattr(
+            load_config, "safetensor_granularity_for_test", None)
         assert isinstance(self._num_layers_to_load, int)
         # `_prepare_weights` only recogonizes `load_format` from upstream.
         load_config.load_format = "auto"
         super().__init__(load_config)
 
     def get_all_weights(self, *args, **kwargs):
+        if self._safetensor_granularity is None:
+            return self._get_all_weights(*args, **kwargs)
+        else:
+            # return iterator each has at most `_safetensor_granularity` tensors.
+            all_weights = list(self._get_all_weights(*args, **kwargs))
+            for i in range(0, len(all_weights), self._safetensor_granularity):
+                yield from all_weights[i:i + self._safetensor_granularity]
+
+    def _get_all_weights(self, *args, **kwargs):
         for name, param in super().get_all_weights(*args, **kwargs):
             # If name matches "layers.\d+.", parse and skip if layer index is beyond limit
             match = re.search(r"layers\.(\d+)\.", name)
