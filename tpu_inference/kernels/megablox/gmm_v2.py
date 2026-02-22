@@ -488,7 +488,8 @@ def calculate_tiling(
     lhs_bits = jax.dtypes.itemsize_bits(lhs_dtype)
     rhs_bits = jax.dtypes.itemsize_bits(rhs_dtype)
 
-    # Otherwise we run into: https://paste.googleplex.com/4725244972630016
+    # Otherwise we run into a VMEM OOM
+    # TODO: Tracking bug: b/483425355 to resolve
     if rhs_bits == 4:
         rhs_bits = 8
 

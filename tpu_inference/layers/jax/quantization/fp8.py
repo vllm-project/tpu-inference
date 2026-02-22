@@ -33,6 +33,8 @@ from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_fp8_moe_weights)
 from tpu_inference.layers.common.quantization import fp8 as common_fp8
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
+from tpu_inference.layers.common.utils import \
+    get_desired_quant_dtype_for_fp8_moe_weights_from_hf_config
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.linear import JaxEinsum
@@ -560,7 +562,8 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                                             w2_weight=w2_weight,
                                             w2_weight_scale=w2_weight_scale,
                                             w2_bias=None)
-
+            desired_quant_dtype = get_desired_quant_dtype_for_fp8_moe_weights_from_hf_config(
+                layer.quant_config.vllm_config)
             weights = process_fp8_moe_weights(
                 input_weights,
                 moe_backend=layer.moe_backend,
@@ -568,7 +571,7 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                 activation=layer.activation,
                 # Convert to tuple so jax jit can hash it
                 weight_block_size=weight_block_size,
-            )
+                desired_quant_dtype=desired_quant_dtype)
 
             # TODO (jacobplatin): we probably want to make the sharding configurable
             layer.kernel_gating_upproj_EDF = nnx.Param(

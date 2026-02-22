@@ -15,6 +15,7 @@
 import jax
 import jax.numpy as jnp
 from jax.experimental.layout import Format
+from vllm.config import VllmConfig
 
 from tpu_inference import envs
 
@@ -126,3 +127,27 @@ def general_device_put(tensor: jax.Array, sharding, layout=None) -> jax.Array:
         return global_array
 
     return jax.tree_util.tree_map(_put, tensor)
+
+
+def get_desired_quant_dtype_for_fp8_moe_weights_from_hf_config(
+        vllm_config: VllmConfig) -> jnp.dtype | None:
+    """
+    Gets the desired quant dtype for the `process_fp8_moe_weights` function.
+
+    Args:
+        vllm_config: The VllmConfig object.
+
+    Returns:
+        The desired quant dtype.
+    """
+    try:
+        quantization_format_str = vllm_config.model_config.hf_config.quantization_config[
+            "format"]
+        # For all FP8 checkpoints, this should be the case but we check just in case
+        assert quantization_format_str == "e4m3"
+        desired_quant_dtype = jnp.float8_e4m3fn
+
+    except Exception:
+        desired_quant_dtype = None
+
+    return desired_quant_dtype

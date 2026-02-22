@@ -20,15 +20,19 @@ from jax.experimental.layout import Layout, with_layout_constraint
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.tensor import Tensor
 
+import tpu_inference.envs as envs
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.quantization import (dequantize_tensor,
                                                       quantize_tensor)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import (
     general_device_put, reorder_concatenated_tensor_for_sharding)
-from tpu_inference.utils import align_to, get_mesh_shape_product
+from tpu_inference.logger import init_logger
+from tpu_inference.utils import align_to, get_mesh_shape_product, to_jax_dtype
 
 P = PartitionSpec
+
+logger = init_logger(__name__)
 
 
 @jax.tree_util.register_dataclass
@@ -393,21 +397,16 @@ def shard_moe_weights(
 
 
 @functools.partial(jax.jit,
-                   static_argnames=(
-                       "moe_backend",
-                       "mesh",
-                       "activation",
-                       "weight_block_size",
-                       "desired_quant_dtype",
-                   ))
+                   static_argnames=("moe_backend", "mesh", "activation",
+                                    "weight_block_size",
+                                    "desired_quant_dtype"))
 def process_fp8_moe_weights(
-    weights: FusedMoEWeights,
-    moe_backend: MoEBackend,
-    mesh: Mesh,
-    activation: str,
-    desired_quant_dtype: jnp.dtype,
-    weight_block_size: tuple[int, ...] | None = None,
-) -> FusedMoEWeights:
+        weights: FusedMoEWeights,
+        moe_backend: MoEBackend,
+        mesh: Mesh,
+        activation: str,
+        weight_block_size: tuple[int, ...] | None = None,
+        desired_quant_dtype: jnp.dtype | None = None) -> FusedMoEWeights:
     w13_weight = weights.w13_weight
     w13_weight_scale = weights.w13_weight_scale
     w2_weight = weights.w2_weight
@@ -424,6 +423,13 @@ def process_fp8_moe_weights(
     w13_interleave = activation == "swigluoai"
     w13_reorder_size = get_mesh_shape_product(mesh,
                                               ShardingAxisName.MLP_TENSOR)
+
+    if desired_quant_dtype_from_env := envs.REQUANTIZE_WEIGHT_DTYPE:
+        desired_quant_dtype = to_jax_dtype(desired_quant_dtype_from_env)
+
+    logger.info(
+        f"[MoE requantization]: Quantizing moe weights to {desired_quant_dtype}"
+    )
 
     weights = quantize_moe_weights(
         FusedMoEWeights(
