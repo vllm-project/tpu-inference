@@ -193,10 +193,10 @@ class TestFp8BlockwiseJaxLinear:
 
         assert output.shape == (batch_size, out_features)
         assert layer.weight.shape == (out_features, in_features)
-        assert sharding_to_tuple(layer.weight.sharding) in [(None, None), ('out', None), (None, 'in'), ('out', 'in')]
+        assert sharding_to_tuple(layer.weight.out_sharding) in [(None, None), ('out', None), (None, 'in'), ('out', 'in')]
         if use_bias:
             assert layer.bias.shape == (out_features, )
-            assert sharding_to_tuple(layer.bias.sharding) in [(None,), ('out',)]
+            assert sharding_to_tuple(layer.bias.out_sharding) in [(None,), ('out',)]
 
     @pytest.mark.parametrize("kernel_shape", [(128, 8, 16), (256, 32, 32)])
     @pytest.mark.parametrize("use_bias", [True, False])
@@ -237,10 +237,10 @@ class TestFp8BlockwiseJaxLinear:
         expected_shape = (batch_size, ) + kernel_shape[1:]
         assert output.shape == expected_shape
         assert layer.weight.shape == (math.prod(kernel_shape[1:]), kernel_shape[0])
-        assert sharding_to_tuple(layer.weight.sharding) in [(None, None), ('out', None), (None, 'in'), ('out', 'in')]
+        assert sharding_to_tuple(layer.weight.out_sharding) in [(None, None), ('out', None), (None, 'in'), ('out', 'in')]
         if use_bias:
             assert layer.bias.shape == (math.prod(kernel_shape[1:]),)
-            assert sharding_to_tuple(layer.bias.sharding) in [(None,), ('out',)]
+            assert sharding_to_tuple(layer.bias.out_sharding) in [(None,), ('out',)]
 
     @pytest.mark.parametrize("kernel_shape", [(16, 4, 8), (32, 8, 16)])
     @pytest.mark.parametrize("batch_size", [1, 4])
