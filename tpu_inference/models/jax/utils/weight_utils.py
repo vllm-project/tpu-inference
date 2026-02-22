@@ -765,7 +765,7 @@ def load_nnx_param_from_reshaped_torch(
                                                permute_dims=permute_dims)
 
     assert tuple(jax_weight.shape) == jax_param.value.shape, \
-        f"Shape mismatch when loading weight '{param_name}': torch {jax_weight.shape} vs jax {jax_param.value.shape}"
+        f"Shape mismatch when loading weight '{param_name}': torch {jax_weight.shape} vs jax {jax_param.value.shape} when loading torch_weight: {torch_weight.shape}"
 
     spec = jax_param.sharding
     if isinstance(jax_param.sharding, NamedSharding):
@@ -790,29 +790,53 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
         assert isinstance(model, JaxModule)
 
         for name, param in model.named_parameters():
-            if not hasattr(param, "weight_loader"):
+            if not hasattr(param, "weight_loader") or any(
+                    name.endswith(suffix) for suffix in [
+                        "k_up_proj.weight", "v_up_proj.weight",
+                        "k_up_proj.weight_scale_inv",
+                        "v_up_proj.weight_scale_inv"
+                    ]):
                 # Following are common patterns in standard transformers. To add pattern for modules
                 # beyond standard transformers, please consider setting weight_loader.
                 reshape_dims = None
                 permute_dims = None
-                if any(substr in name for substr in
+                if any(name.endswith(suffix) for suffix in
                        ["q_proj.weight", "k_proj.weight", "v_proj.weight"]):
                     D, N, H = param.value.shape
                     reshape_dims = (N, H, D)
                     permute_dims = (2, 0, 1)
-                elif any(substr in name for substr in
+                elif any(name.endswith(suffix) for suffix in
+                         ["k_up_proj.weight", "v_up_proj.weight"]):
+                    # MLA up-projections are (Rank, Heads, HeadDim) in JAX.
+                    if len(param.value.shape) == 3:
+                        D, N, H = param.value.shape
+                        # Checkpoint provides (Rank, Heads * HeadDim).
+                        reshape_dims = (D, N, H)
+                        permute_dims = (0, 1, 2)
+                elif any(name.endswith(suffix) for suffix in
+                         ["k_up_proj.weight_scale_inv", "v_up_proj.weight_scale_inv"]):
+                    # Handle 2D block-wise scales for MLA up-projections.
+                    # Keep them in the original 2D format for processing later.
+                    permute_dims = (0, 1)
+                elif any(name.endswith(suffix) for suffix in
                          ["q_proj.bias", "k_proj.bias", "v_proj.bias"]):
                     N, H = param.value.shape
                     reshape_dims = (N, H)
                     permute_dims = (0, 1)
-                elif "o_proj.weight" in name:
+                elif name.endswith("o_proj.weight"):
                     N, H, D = param.value.shape
                     reshape_dims = (D, N, H)
                     permute_dims = (1, 2, 0)
-                elif "embed_tokens.weight" in name:
+                elif name.endswith("embed_tokens.weight"):
                     permute_dims = (0, 1)
-                elif "lm_head" in name:
+                elif name.endswith("lm_head.weight") or name.endswith(
+                        "lm_head"):
                     permute_dims = (1, 0)
+                elif name.endswith("weight_scale_inv") and len(
+                        param.value.shape) == 1:
+                    # Handle 1D scales that are stored as 2D in checkpoint (e.g. MLA)
+                    reshape_dims = (-1, )
+                    permute_dims = (0, )
 
                 setattr(
                     param, "weight_loader",
@@ -820,7 +844,12 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                                       reshape_dims=reshape_dims,
                                       permute_dims=permute_dims,
                                       param_name=name))
-
+        for name, param in model.named_parameters():
+            if hasattr(param, "weight_loader") and isinstance(param.weight_loader, functools.partial):
+                # Update the param_name keyword argument in the partial function
+                new_keywords = dict(param.weight_loader.keywords)
+                new_keywords['param_name'] = name
+                param.weight_loader = functools.partial(param.weight_loader.func, **new_keywords)
         super().__init__(model, **kwargs)
 
     def _load_module(self, base_prefix: str, module: JaxModule,

@@ -165,7 +165,6 @@ class DeepseekV3BaseAttention(JaxModule):
     rngs: InitVar[nnx.Rngs]
 
     quant_config: Optional[QuantizationConfig] = None
-    prefix: str = ''
 
     # Scales for Q/KV quantization (per-tensor)
     _q_scale: float = 1
@@ -207,7 +206,6 @@ class DeepseekV3BaseAttention(JaxModule):
             quant_config=self.quant_config,
             param_dtype=self.dtype,
             kernel_init=nnx.with_partitioning(weight_init, self.q_da_sharding),
-            prefix=self.prefix + ".q_a_proj",
         )
 
         self.q_b_proj = JaxEinsum(
@@ -217,7 +215,7 @@ class DeepseekV3BaseAttention(JaxModule):
             quant_config=self.quant_config,
             param_dtype=self.dtype,
             kernel_init=nnx.with_partitioning(weight_init, self.ap_sharding),
-            prefix=self.prefix + ".q_b_proj")
+        )
 
         self.kv_a_proj_with_mqa = JaxEinsum(
             einsum_str="SD,DA -> SA",
@@ -227,7 +225,7 @@ class DeepseekV3BaseAttention(JaxModule):
             param_dtype=self.dtype,
             kernel_init=nnx.with_partitioning(weight_init,
                                               self.kv_da_sharding),
-            prefix=self.prefix + ".kv_a_proj_with_mqa")
+        )
 
         self.o_proj = JaxEinsum(
             einsum_str="TR,RD->TD",
@@ -236,7 +234,7 @@ class DeepseekV3BaseAttention(JaxModule):
             quant_config=self.quant_config,
             param_dtype=self.dtype,
             kernel_init=nnx.with_partitioning(weight_init, self.rd_sharding),
-            prefix=self.prefix + ".o_proj")
+        )
 
         self.q_a_layernorm = JaxRmsNorm(self.q_lora_rank,
                                         epsilon=self.rms_norm_eps,
@@ -244,7 +242,6 @@ class DeepseekV3BaseAttention(JaxModule):
                                             init_fn, (None, )),
                                         dtype=self.dtype,
                                         quant_config=self.quant_config,
-                                        prefix=self.prefix + ".q_a_layernorm",
                                         rngs=rngs)
 
         self.kv_a_layernorm = JaxRmsNorm(
@@ -253,7 +250,6 @@ class DeepseekV3BaseAttention(JaxModule):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             dtype=self.dtype,
             quant_config=self.quant_config,
-            prefix=self.prefix + ".kv_a_layernorm",
             rngs=rngs)
 
         self.kv_cache_quantized_dtype = None
@@ -340,7 +336,6 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
             quant_config=self.quant_config,
             param_dtype=self.dtype,
             kernel_init=nnx.with_partitioning(weight_init, self.ap_sharding),
-            prefix=self.prefix + ".kv_b_proj",
         )
 
     def compute_q_projection(self, x_q_TD: jax.Array,
@@ -1074,7 +1069,6 @@ class DeepSeekV3(JaxModule):
                     init_fn, (ShardingAxisName.MLP_TENSOR, )),
                 rngs=rng,
                 quant_config=quant_config,
-                prefix=prefix + ".embed_tokens",
             )
         else:
             self.embed_tokens = PPMissingLayer()
@@ -1141,7 +1135,6 @@ class DeepSeekV3(JaxModule):
                 ap_sharding=ap_sharding,
                 kv_da_sharding=kv_da_sharding,
                 rd_sharding=rd_sharding,
-                prefix=f"{prefix}.layers.{i}.self_attn",
             )
             if self.use_mla_kernel:
                 kwargs.update(anh_sharding=anh_sharding)
@@ -1297,7 +1290,6 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
             rng=rng,
             mesh=mesh,
             quant_config=vllm_config.quant_config,
-            prefix="model",
         )
 
         model_config = vllm_config.model_config
@@ -1314,7 +1306,6 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
                 # Same as https://github.com/vllm-project/tpu-inference/issues/1684
                 # DS-V3 doesn't quantize lm_head.
                 quant_config=None,
-                prefix="lm_head",
             )
         else:
             self.lm_head = PPMissingLayer()
@@ -1364,6 +1355,28 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
             # Use next parent class in MRO.
             return super().load_weights(weights)
 
+        def mla_weight_generator(weights_iter):
+            # Use model attributes to determine split ratios
+            attn = self.model.layers[0].self_attn
+            k_out = attn.num_attention_heads * attn.qk_nope_head_dim
+            v_out = attn.num_attention_heads * attn.v_head_dim
+            total_out = k_out + v_out
+            ratio = k_out / total_out
+
+            for name, weight in weights_iter:
+                if "self_attn.kv_b_proj" in name:
+                    # DeepSeek MLA weights/scales are typically (Out, In).
+                    # We split on the 'Out' dimension (dim 0).
+                    split_idx = int(weight.shape[0] * ratio)
+                    
+                    k_val = weight[:split_idx, ...]
+                    v_val = weight[split_idx:, ...]
+                    
+                    yield name.replace("kv_b_proj", "k_up_proj"), k_val
+                    yield name.replace("kv_b_proj", "v_up_proj"), v_val
+                else:
+                    yield name, weight
+
         start_ignore_layer_num = len(self.model.layers)
         end_ignore_layer_num = 62  # last layer is MTP, we ignore it for now
         loader = JaxAutoWeightsLoader(
@@ -1375,7 +1388,7 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
                 for i in range(start_ignore_layer_num, end_ignore_layer_num)
             ],
         )
-        loaded = loader.load_weights(weights)
+        loaded = loader.load_weights(mla_weight_generator(weights))
 
         self.model.initialize_cache()
 
