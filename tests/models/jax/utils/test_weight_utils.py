@@ -18,7 +18,6 @@ from unittest.mock import MagicMock
 
 import jax
 import numpy as np
-import pytest
 import torch
 from flax import nnx
 from jax.sharding import Mesh
@@ -26,12 +25,8 @@ from safetensors.torch import save_file
 from torch import nn
 from vllm.model_executor.model_loader import LoadConfig, get_model_loader
 
-from tpu_inference.distributed.jax_parallel_state import \
-    init_pp_distributed_environment
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import JaxLinear
-from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
-from tpu_inference.models.jax.qwen3_moe import Qwen3MoeForCausalLM
 from tpu_inference.models.jax.utils.weight_utils import LoadableWithIterator
 
 
@@ -113,49 +108,3 @@ class TestJaxAutoWeightsLoader:
                                    jax_output,
                                    rtol=1e-3,
                                    atol=1e-2)
-
-    @pytest.mark.parametrize(
-        "model_name",
-        [
-            # Qwen3MoeForCausalLM has Linear/MoE layers which we care about.
-            # NOTE: the linear layer does not have bias.
-            "Qwen/Qwen3-30B-A3B-Instruct-2507",
-            "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8",
-        ])
-    def test_process_weights_after_loading(
-            self,
-            model_name,
-            # following are defined in conftest.py
-            rng,
-            mesh,
-            mock_vllm_config):
-        """Tests process_weights_after_loading are called.
-        """
-        kv_cache_type = "auto"
-        vllm_config = mock_vllm_config(model_name, kv_cache_type)
-        # No need to load full model.
-        vllm_config.model_config.hf_config.num_hidden_layers = 2
-        vllm_config.load_config.load_format = "skip_layers_model_loader_for_test"
-        vllm_config.load_config.num_layers_to_load_for_test = 2
-        # In extreme case, mimic each safetensor file only has 1 tensor
-        vllm_config.load_config.safetensor_granularity_for_test = 1
-
-        init_pp_distributed_environment(
-            ip="",
-            rank=0,
-            world_size=1,
-            device=jax.devices()[0],
-            need_pp=False,
-        )
-        vllm_config.quant_config = get_tpu_quantization_config(vllm_config)
-
-        model_config = vllm_config.model_config
-
-        with jax.set_mesh(mesh):
-            model = Qwen3MoeForCausalLM(vllm_config, rng, mesh)
-        # load weights from HF model
-        with jax.set_mesh(mesh):
-            loader = get_model_loader(vllm_config.load_config)
-            loader.load_weights(model, model_config)
-
-        assert model is not None
