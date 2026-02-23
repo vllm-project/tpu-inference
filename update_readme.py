@@ -12,7 +12,8 @@ CSV_MAP = {
     "core_features": "support_matrices/feature_support_matrix.csv",
     "parallelism": "support_matrices/parallelism_support_matrix.csv",
     "quantization": "support_matrices/quantization_support_matrix.csv",
-    "kernel_support": "support_matrices/kernel_support_matrix.csv"
+    "kernel_support": "support_matrices/kernel_support_matrix.csv",
+    "microbenchmarks": "support_matrices/nightly/v7/kernel_support_matrix-microbenchmarks.csv"
 }
 
 README_PATH = "README.md"
@@ -71,6 +72,20 @@ def update_readme():
                 all_data.extend(d)
         
         new_table = generate_markdown_table(headers, all_data)
+        
+        # Special handling for microbenchmarks to append footer
+        if section_key == "microbenchmarks":
+            footer = (
+                "\n\n> **Note:**\n"
+                "> *   ✅ = Verified Passing\n"
+                "> *   ❓ = Unverified\n"
+                "> *   ❌ = Failed\n"
+                "> *   Performance numbers (e.g., `10ms`) will appear under the icon if available.\n"
+                "> *   *Tested on TPU v7 (Nightly 20260217)*\n"
+                "> *   *For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision.*"
+            )
+            new_table += footer
+
         start_marker, end_marker = f"<!-- START: {section_key} -->", f"<!-- END: {section_key} -->"
         pattern = f"({re.escape(start_marker)})(.*?)({re.escape(end_marker)})"
         replacement = f"\\1\n{new_table}\n\\3"

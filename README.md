@@ -136,22 +136,22 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- START: core_features -->
 | Feature | CorrectnessTest | PerformanceTest |
 | --- | --- | --- |
-| Chunked&nbsp;Prefill | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| DCN-based&nbsp;P/D&nbsp;disaggregation | ❓&nbsp;Untested | ✅&nbsp;Passing |
-| KV&nbsp;cache&nbsp;host&nbsp;offloading | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| LoRA_Torch | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| Multimodal&nbsp;Inputs | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| Out-of-tree&nbsp;model&nbsp;support | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| Prefix&nbsp;Caching | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| Single&nbsp;Program&nbsp;Multi&nbsp;Data | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| Single-Host-P-D-disaggregation | ⚪&nbsp;N/A | ⚪&nbsp;N/A |
-| Speculative&nbsp;Decoding:&nbsp;Eagle3 | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| Speculative&nbsp;Decoding:&nbsp;Ngram | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| async&nbsp;scheduler | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| data_parallelism | ✅&nbsp;Passing | ❓&nbsp;Untested |
-| runai_model_streamer_loader | ✅&nbsp;Passing | ⚪&nbsp;N/A |
-| sampling_params | ✅&nbsp;Passing | ⚪&nbsp;N/A |
-| structured_decoding | ✅&nbsp;Passing | ⚪&nbsp;N/A |
+| Chunked&nbsp;Prefill | ✅ | ✅ |
+| DCN-based&nbsp;P/D&nbsp;disaggregation | unverified | ✅ |
+| KV&nbsp;cache&nbsp;host&nbsp;offloading | unverified | unverified |
+| LoRA_Torch | ✅ | ✅ |
+| Multimodal&nbsp;Inputs | ✅ | ✅ |
+| Out-of-tree&nbsp;model&nbsp;support | ✅ | ✅ |
+| Prefix&nbsp;Caching | ✅ | ✅ |
+| Single&nbsp;Program&nbsp;Multi&nbsp;Data | ✅ | ✅ |
+| Single-Host-P-D-disaggregation | N/A | N/A |
+| Speculative&nbsp;Decoding:&nbsp;Eagle3 | ✅ | ✅ |
+| Speculative&nbsp;Decoding:&nbsp;Ngram | ✅ | ✅ |
+| async&nbsp;scheduler | ✅ | ✅ |
+| data_parallelism | ✅ | unverified |
+| runai_model_streamer_loader | ✅ | N/A |
+| sampling_params | ✅ | N/A |
+| structured_decoding | ✅ | N/A |
 
 <!-- END: core_features -->
 
@@ -164,12 +164,12 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- START: parallelism -->
 | Feature | CorrectnessTest | PerformanceTest |
 | --- | --- | --- |
-| CP | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| DP | ✅&nbsp;Passing | ❓&nbsp;Untested |
-| EP | ✅&nbsp;Passing | ❓&nbsp;Untested |
-| PP | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| SP | 🧪&nbsp;Experimental ([vote to prioritize](https://github.com/vllm-project/tpu-inference/issues/1749)) | 🧪&nbsp;Experimental ([vote to prioritize](https://github.com/vllm-project/tpu-inference/issues/1749)) |
-| TP | ✅&nbsp;Passing | ❓&nbsp;Untested |
+| CP | unverified | unverified |
+| DP | ✅ | unverified |
+| EP | ✅ | unverified |
+| PP | ✅ | ✅ |
+| SP | unverified | unverified |
+| TP | ✅ | unverified |
 
 <!-- END: parallelism -->
 
@@ -182,12 +182,12 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- START: quantization -->
 | Feature | Recommended&nbsp;TPU&nbsp;Generations | CorrectnessTest | PerformanceTest |
 | --- | --- | --- | --- |
-| AWQ&nbsp;INT4 | v5,&nbsp;v6 | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| FP4&nbsp;W4A16 | v7 | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| FP8&nbsp;W8A8 | v7 | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| FP8&nbsp;W8A16 | v7 | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| INT4&nbsp;W4A16 | v5,&nbsp;v6 | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| INT8&nbsp;W8A8 | v5,&nbsp;v6 | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| AWQ&nbsp;INT4 | v5,&nbsp;v6 | unverified | unverified |
+| FP4&nbsp;W4A16 | v7 | unverified | unverified |
+| FP8&nbsp;W8A8 | v7 | unverified | unverified |
+| FP8&nbsp;W8A16 | v7 | unverified | unverified |
+| INT4&nbsp;W4A16 | v5,&nbsp;v6 | unverified | unverified |
+| INT8&nbsp;W8A8 | v5,&nbsp;v6 | unverified | unverified |
 
 <!-- END: quantization -->
 
@@ -212,14 +212,16 @@ Below is the live status of our supported models, features, and kernels. Click o
 <details markdown="1">
 <summary><b> 🔬 Microbenchmark Kernel Support </b></summary>
 
-| Kernel&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | W16&nbsp;A16<br>(Corr) | W16&nbsp;A16<br>(Perf) | W8&nbsp;A8<br>(Corr) | W8&nbsp;A8<br>(Perf) | W8&nbsp;A16<br>(Corr) | W8&nbsp;A16<br>(Perf) | W4&nbsp;A4<br>(Corr) | W4&nbsp;A4<br>(Perf) | W4&nbsp;A8<br>(Corr) | W4&nbsp;A8<br>(Perf) | W4&nbsp;A16<br>(Corr) | W4&nbsp;A16<br>(Perf) |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| all-gather-matmul | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ |
-| fused moe | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ |
-| generic ragged paged<br>attention v3* | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ |
-| gmm | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ |
-| mla* | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ |
-| ragged paged attention v3<br>head_dim 64* | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ |
+<!-- START: microbenchmarks -->
+| Kernel | W16&nbsp;A16&nbsp;(Corr) | W16&nbsp;A16&nbsp;(Perf) | W8&nbsp;A8&nbsp;(Corr) | W8&nbsp;A8&nbsp;(Perf) | W8&nbsp;A16&nbsp;(Corr) | W8&nbsp;A16&nbsp;(Perf) | W4&nbsp;A4&nbsp;(Corr) | W4&nbsp;A4&nbsp;(Perf) | W4&nbsp;A8&nbsp;(Corr) | W4&nbsp;A8&nbsp;(Perf) | W4&nbsp;A16&nbsp;(Corr) | W4&nbsp;A16&nbsp;(Perf) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| all-gather-matmul | ❓ | ❓ | ❓ | ❓ | - |  | - |  |  |  |  |  |
+| fused&nbsp;moe | ❓ | ❓ | ❓ | ❓ | - |  | - |  |  |  |  |  |
+| generic&nbsp;ragged&nbsp;paged<br>attention&nbsp;v3* | ❓ | ❓ | ❓ | ❓ | - |  | - |  |  |  |  |  |
+| gmm | ❓ | ❓ | ❓ | ❓ | - |  | - |  |  |  |  |  |
+| mla* | ❓ | ❓ | ❓ | ❓ | - |  | - |  |  |  |  |  |
+| ragged&nbsp;paged&nbsp;attention&nbsp;v3<br>head_dim&nbsp;64* | ❓ | ❓ | ❓ | ❓ | - |  | - |  |  |  |  |  |
+
 
 > **Note:**
 > *   ✅ = Verified Passing
@@ -228,6 +230,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 > *   Performance numbers (e.g., `10ms`) will appear under the icon if available.
 > *   *Tested on TPU v7 (Nightly 20260217)*
 > *   *For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision.*
+<!-- END: microbenchmarks -->
 
 </details>
 
