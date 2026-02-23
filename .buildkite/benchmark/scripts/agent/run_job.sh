@@ -15,6 +15,9 @@
 
 set -euo pipefail
 
+readonly EXIT_SUCCESS=0
+readonly EXIT_FAILURE=1
+
 # Record the exact start time in a format journalctl understands.
 SCRIPT_START_TIME=$(date +"%Y-%m-%d %H:%M:%S")
 
@@ -87,14 +90,18 @@ fi
 #
 # Run job in docker
 #
+BM_JOB_STATUS=$EXIT_SUCCESS
 echo "Running job in docker..."
-.buildkite/benchmark/scripts/agent/docker_run_bm.sh "artifacts/${RECORD_ID}.env"
-if [ $? -ne 0 ]; then
-  echo "Error running job in docker."
-  exit 1
-fi
+.buildkite/benchmark/scripts/agent/docker_run_bm.sh "artifacts/${RECORD_ID}.env" || {
+  echo "Error running benchmark job in docker."
+  BM_JOB_STATUS=$EXIT_FAILURE
+}
+# if [ $? -ne 0 ]; then
+#   echo "Error running job in docker."
+#   exit 1
+# fi
 
-echo "Benchmark script completed successfully."
+echo "Benchmark script completed."
 
 #
 # Report result
@@ -104,3 +111,5 @@ echo "Reporting result..."
 
 echo ".buildkite/benchmark/scripts/cleanup_docker.sh"
 .buildkite/benchmark/scripts/cleanup_docker.sh
+
+exit $BM_JOB_STATUS
