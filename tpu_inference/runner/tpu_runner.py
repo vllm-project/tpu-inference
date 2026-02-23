@@ -562,7 +562,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             )  #TODO: Remove Llama Guard 4 specific condition once the LG4 Vision portion is implemented
             and len(self.model_config.hf_config.architectures) >= 1
             and self.model_config.hf_config.architectures[0]
-            != "Llama4ForConditionalGeneration")
+            != "Llama4ForConditionalGeneration"
+            and self.model_config.hf_config.architectures[0]
+            != "Gemma3ForConditionalGeneration")
 
         logger.info(f"Init model | "
                     f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")
