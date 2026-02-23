@@ -118,10 +118,25 @@ class Qwen2Attention(JaxModule):
         self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
 
         sharding_size = mesh.shape["model"]
+
+        original_num_heads = self.num_heads
+        original_num_kv_heads = self.num_kv_heads
         self.num_heads = utils.get_padded_num_heads(self.num_heads,
                                                     sharding_size)
         self.num_kv_heads = utils.get_padded_num_heads(self.num_kv_heads,
                                                        sharding_size)
+
+        logger.info(
+            "[Qwen2Attention] prefix=%s | mesh.shape=%s | "
+            "sharding_size(mesh['model'])=%d | "
+            "num_heads: %d -> %d | num_kv_heads: %d -> %d | "
+            "head_dim: %d -> %d (padded) | hidden_size=%d",
+            prefix, dict(mesh.shape), sharding_size,
+            original_num_heads, self.num_heads,
+            original_num_kv_heads, self.num_kv_heads,
+            self.head_dim_original, self.head_dim,
+            self.hidden_size,
+        )
 
         self.mesh = mesh
 
@@ -166,6 +181,22 @@ class Qwen2Attention(JaxModule):
             rngs=rng,
             quant_config=quant_config,
             prefix=prefix + ".o_proj",
+        )
+
+        logger.info(
+            "[Qwen2Attention] %s weight shapes | "
+            "q_proj.w: (%d, %d, %d) | q_proj.bias: (%d, %d) | "
+            "k_proj.w: (%d, %d, %d) | k_proj.bias: (%d, %d) | "
+            "v_proj.w: (%d, %d, %d) | v_proj.bias: (%d, %d) | "
+            "o_proj.w: (%d, %d, %d)",
+            prefix,
+            self.hidden_size, self.num_heads, self.head_dim,
+            self.num_heads, self.head_dim,
+            self.hidden_size, self.num_kv_heads, self.head_dim,
+            self.num_kv_heads, self.head_dim,
+            self.hidden_size, self.num_kv_heads, self.head_dim,
+            self.num_kv_heads, self.head_dim,
+            self.num_heads, self.head_dim, self.hidden_size,
         )
 
         self._q_scale = 1.0
