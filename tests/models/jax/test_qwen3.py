@@ -227,14 +227,16 @@ class TestQwen3ForCausalLM:
                              ["Qwen/Qwen3-0.6B", "Qwen/Qwen3-0.6B-FP8"])
     @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
                                                        (3, 4)])
-    def test_model_loading(self, model_name, pp_rank, pp_world_size, rng, mesh,
-                           mock_vllm_config):
+    @pytest.mark.parametrize(
+        "load_format", ["skip_layers_model_loader_for_test", "jax_dummy"])
+    def test_model_loading(self, model_name, pp_rank, pp_world_size,
+                           load_format, rng, mesh, mock_vllm_config):
         """Tests loading weights from HF model"""
         kv_cache_type = "auto"
         mock_vllm_config = mock_vllm_config(model_name, kv_cache_type)
         # No need to load full model.
         mock_vllm_config.model_config.hf_config.num_hidden_layers = 4
-        mock_vllm_config.load_config.load_format = "skip_layers_model_loader_for_test"
+        mock_vllm_config.load_config.load_format = load_format
         mock_vllm_config.load_config.num_layers_to_load_for_test = 4
 
         init_pp_distributed_environment(
