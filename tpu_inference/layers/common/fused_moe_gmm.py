@@ -276,6 +276,40 @@ def expert_parallel_gmm(
     )
 
 
+def sharded_gather(hidden_states, token_indices_sorted, *, mesh):
+    """Gather hidden_states by token_indices_sorted, parallelized across EP devices.
+
+    Args:
+        hidden_states: [num_tokens, hidden_size] - replicated across EP devices
+        token_indices_sorted: [num_tokens * topk] - sharded across EP devices
+        mesh: JAX mesh
+
+    Returns:
+        x: [num_tokens * topk, hidden_size] - unsharded (replicated)
+    """
+
+    def _gather_local(hs, indices):
+        local_result = hs[indices]
+        full_result = jax.lax.all_gather(
+            local_result,
+            axis_name=ShardingAxisName.EXPERT,
+            axis=0,
+            tiled=True,
+        )
+        return full_result
+
+    return jax.shard_map(
+        _gather_local,
+        mesh=mesh,
+        in_specs=(
+            P(None, None),
+            P(ShardingAxisName.EXPERT),
+        ),
+        out_specs=P(None, None),
+        check_vma=False,
+    )(hidden_states, token_indices_sorted)
+
+
 @functools.partial(
     jax.jit,
     static_argnames=(
@@ -481,21 +515,13 @@ def fused_moe_func(
 
         # group_size_local: (global_num_experts,)
         # token_indices_sorted = [0, 1, 1, 0]
-        x = hidden_states_local[token_indices_sorted]
-        # x: [num_tokens_local * topk, hidden_size]
-        # This uses token_indices_sorted as a gather index to build the expert-grouped input tensor for GMM. It
-        #    fetches hidden_states[0], hidden_states[1], hidden_states[1], hidden_states[0] — placing each
-        #   token's hidden state at the position where GMM expects it based on expert grouping.
-        # IOW:
-        # position 0 gets hidden_states_local[0]
-        # position 1 gets hidden_states_local[1]
-        # position 2 gets hidden_states_local[1]
-        # position 3 gets hidden_states_local[0]
+        # The gather (hidden_states_local[token_indices_sorted]) is done outside
+        # this function via sharded_gather to parallelize across EP devices.
 
-        return x, group_sizes_local, topk_argsort_revert_indices
+        return token_indices_sorted, group_sizes_local, topk_argsort_revert_indices
 
     # hidden_states: [num_tokens, hidden_size]=[16, 6144], topk_indices: [num_tokens, topk]=[16, 8]
-    x, group_sizes, topk_argsort_revert_indices = jax.shard_map(
+    token_indices_sorted, group_sizes, topk_argsort_revert_indices = jax.shard_map(
         _process_tokens_locally,
         mesh=mesh,
         in_specs=(
@@ -503,11 +529,14 @@ def fused_moe_func(
             P(ShardingAxisName.MLP_DATA, None),
         ),
         out_specs=(
-            P(ShardingAxisName.MLP_DATA, None),
+            P(ShardingAxisName.MLP_DATA),
             P(ShardingAxisName.MLP_DATA),
             P(ShardingAxisName.MLP_DATA),
         ),
     )(hidden_states, topk_indices)
+
+    # Parallelize the gather across EP devices
+    x = sharded_gather(hidden_states, token_indices_sorted, mesh=mesh)
 
     x = jnp.pad(x, ((0, 0), (0, padded_hidden_size - hidden_size)))
 
