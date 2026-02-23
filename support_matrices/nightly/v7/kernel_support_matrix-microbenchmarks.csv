@@ -1,7 +1,7 @@
-Kernel&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;,W16&nbsp;A16<br>(Corr),W16&nbsp;A16<br>(Perf),W8&nbsp;A8<br>(Corr),W8&nbsp;A8<br>(Perf),W8&nbsp;A16<br>(Corr),W8&nbsp;A16<br>(Perf),W4&nbsp;A4<br>(Corr),W4&nbsp;A4<br>(Perf),W4&nbsp;A8<br>(Corr),W4&nbsp;A8<br>(Perf),W4&nbsp;A16<br>(Corr),W4&nbsp;A16<br>(Perf)
-all-gather-matmul,❓,❓,❓,❓,❓,❓,-,,,,,
-fused moe,❓,❓,❓,❓,❓,❓,-,,,,,
-generic ragged paged<br>attention v3*,❓,❓,❓,❓,❓,❓,-,,,,,
-gmm,❓,❓,❓,❓,❓,❓,-,,,,,
-mla*,❓,❓,❓,❓,❓,❓,-,,,,,
-ragged paged attention v3<br>head_dim 64*,❓,❓,❓,❓,❓,❓,-,,,,,
+Kernel,W16 A16 (Corr),W16 A16 (Perf),W8 A8 (Corr),W8 A8 (Perf),W8 A16 (Corr),W8 A16 (Perf),W4 A4 (Corr),W4 A4 (Perf),W4 A8 (Corr),W4 A8 (Perf),W4 A16 (Corr),W4 A16 (Perf)
+all-gather-matmul,❓,❓,❓,❓,-,,-,,,,,
+fused moe,❓,❓,❓,❓,-,,-,,,,,
+generic ragged paged<br>attention v3*,❓,❓,❓,❓,-,,-,,,,,
+gmm,❓,❓,❓,❓,-,,-,,,,,
+mla*,❓,❓,❓,❓,-,,-,,,,,
+ragged paged attention v3<br>head_dim 64*,❓,❓,❓,❓,-,,-,,,,,
