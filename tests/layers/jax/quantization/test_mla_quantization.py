@@ -27,6 +27,11 @@ from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
 def rngs():
     return nnx.Rngs(42)
 
+def get_spec(sharding):
+    if hasattr(sharding, 'spec'):
+        return sharding.spec
+    return jax.sharding.PartitionSpec()
+
 def test_standard_linear_lifecycle(rngs):
     # Standard 2D linear TD,DA->TA (In=7168, Out=1536)
     # Optimized layout is (1536, 7168)
@@ -60,9 +65,9 @@ def test_standard_linear_lifecycle(rngs):
     assert layer.weight.sharding == ()
     assert layer.weight_scale_inv.sharding == ()
     
-    # Mock Loaded Checkpoint (InTotal, OutTotal)
-    torch_weight = torch.randn(7168, 1536) 
-    torch_scale = torch.randn(56, 12)      # (InBlocks, OutBlocks)
+    # Mock Loaded Checkpoint (OutTotal, InTotal)
+    torch_weight = torch.randn(1536, 7168) 
+    torch_scale = torch.randn(12, 56)      # (OutBlocks, InBlocks)
     
     layer.weight.weight_loader(layer.weight, torch_weight)
     layer.weight_scale_inv.weight_loader(layer.weight_scale_inv, torch_scale)
@@ -116,9 +121,9 @@ def test_mla_k_up_proj_lifecycle(rngs):
     assert layer.weight.sharding == ()
     assert layer.weight_scale_inv.sharding == ()
     
-    # Mock Loaded Checkpoint (InTotal, OutTotal)
-    torch_weight = torch.randn(16384, 512) 
-    torch_scale = torch.randn(128, 4)      # (InBlocks, OutBlocks)
+    # Mock Loaded Checkpoint (OutTotal, InTotal)
+    torch_weight = torch.randn(512, 16384) 
+    torch_scale = torch.randn(4, 128)      # (OutBlocks, InBlocks)
     
     layer.weight.weight_loader(layer.weight, torch_weight)
     layer.weight_scale_inv.weight_loader(layer.weight_scale_inv, torch_scale)
@@ -170,8 +175,8 @@ def test_mla_v_up_proj_lifecycle(rngs):
     assert layer.weight.sharding == ()
     assert layer.weight_scale_inv.sharding == ()
     
-    # Mock Loaded Checkpoint (InTotal, OutTotal)
-    torch_weight = torch.randn(65536, 128) 
+    # Mock Loaded Checkpoint (OutTotal, InTotal)
+    torch_weight = torch.randn(128, 65536) 
     torch_scale = torch.randn(1, 512)      # (OutBlocks, InBlocks)
     
     layer.weight.weight_loader(layer.weight, torch_weight)
