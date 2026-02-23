@@ -504,11 +504,10 @@ def gmm(
 
                 if rhs_zero_point is not None:
                     # NOTE(catswe): chain-casting as direct uint4
-                    # to bf16 isn't yet supported in pallas
-                    rhs_block = (
-                        rhs_block.astype(jnp.int8).astype(jnp.bfloat16) -
-                        rhs_zero_point[b_i].astype(jnp.int8).astype(
-                            jnp.bfloat16))
+                    # to bf16 for awq isn't yet supported in pallas
+                    rhs_block = rhs_block.astype(jnp.int8).astype(
+                        jnp.bfloat16) - rhs_zero_point[b_i].astype(
+                            jnp.int8).astype(jnp.bfloat16)
 
                 partial_result = jnp.dot(
                     loaded_lhs[..., b_i * quant_block_size:(b_i + 1) *
