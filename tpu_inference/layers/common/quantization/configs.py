@@ -50,6 +50,10 @@ class QuantLinearConfig:
         batch_features: tuple[int, ...] = ()
         # Sharding for batch dims, extracted from weight sharding.
         batch_sharding: tuple = ()
+        # Indices of weight axes that match activation axes (Input side).
+        input_side_indices: tuple[int, ...] = ()
+        # Indices of weight axes that are unique to the weight (Output side).
+        output_side_indices: tuple[int, ...] = ()
 
     @classmethod
     def get_adapt_info(cls, *, einsum_str: str,
@@ -94,6 +98,9 @@ class QuantLinearConfig:
                                if c in batch_axes)
         batch_sharding_tuple = tuple(batch_sharding_set)
 
+        input_side_indices = tuple(i for i, c in enumerate(w_axis) if c in x_axis)
+        output_side_indices = tuple(i for i, c in enumerate(w_axis) if c not in x_axis)
+
         return cls.LinearOpAdaptInfo(
             out_features=out_features,
             out_features_sharding=(next(iter(out_sharding), None), ),
@@ -101,6 +108,8 @@ class QuantLinearConfig:
             in_features_sharding=(next(iter(in_sharding), None), ),
             batch_features=batch_features,
             batch_sharding=batch_sharding_tuple,
+            input_side_indices=input_side_indices,
+            output_side_indices=output_side_indices,
         )
 
     def __init__(self, *, enable_sp: bool, output_sizes: list[int]):

@@ -208,70 +208,52 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                                  self.in_features)
         self.bias_sharding = adapt_info.out_features_sharding
 
-        # Storing list of output sizes (instead of self.out_features) for compatibility.
-        self.linear_config.output_sizes = [math.prod(self.out_features)]
+        # Correctly partition weight axes for unified 2D processing.
+        self.in_features_total = math.prod(self.kernel_shape[i] for i in adapt_info.input_side_indices)
+        self.out_features_total = math.prod(self.kernel_shape[i] for i in adapt_info.output_side_indices)
+        self.linear_config.output_sizes = [self.out_features_total]
+        self.input_side_indices = adapt_info.input_side_indices
+        self.output_side_indices = adapt_info.output_side_indices
 
     def create_weights_jax(self, layer: JaxModule, *weight_args, rngs,
                            **extra_weight_attrs):
         assert isinstance(layer, JaxEinsum)
 
-        out_features = sum(self.linear_config.output_sizes)
         kernel_init = layer.kernel_init
-
-        if self.batch_features:
-            # Batched case: create weight with the original 3D kernel shape
-            # so the weight loader can populate it directly after transpose.
-            # Weight stays in FP8 and is used with sharded_quantized_batched_matmul.
-            param_dtype = jnp.float8_e4m3
-            layer.weight = nnx.Param(
-                kernel_init(rngs.params(), self.kernel_shape, param_dtype),
-                weight_loader=partial(load_nnx_param_from_reshaped_torch,
-                                      permute_dims=None,
-                                      param_name=layer.prefix + ".weight"))
-            layer.weight.sharding = self.weight_sharding
-
-            # Per-output-channel scale (1D, covers the free weight dim).
-            layer.weight_scale_inv = nnx.Param(
-                jnp.ones((out_features, ), dtype=layer.dtype),
-                weight_loader=partial(
-                    load_nnx_param_from_reshaped_torch,
-                    permute_dims=None,
-                    param_name=layer.prefix + ".weight_scale_inv",
-                ))
-            layer.weight_scale_inv.sharding = ()
-            return
-
-        # Follow upstream limitation that only float8_e4m3 is supported.
-        # https://github.com/vllm-project/vllm/blob/2a99c5a6c86daef8c766ba2dbf05c385b192c64b/vllm/model_executor/layers/quantization/fp8.py#L283-L284
-        param_dtype = jnp.float8_e4m3
         mesh = jax.make_mesh((1, ), ('x', ), devices=jax.devices('cpu'))
+        param_dtype = jnp.float8_e4m3
+
+        # Always initialize layer.weight as a 2D CPU placeholder matching OutTotal x InTotal.
+        # This aligns with the natural layout of almost all checkpoints and dequant logic.
         layer.weight = nnx.Param(
-            kernel_init(rngs.params(), self.kernel_shape, param_dtype),
+            kernel_init(rngs.params(), (self.out_features_total, self.in_features_total), param_dtype),
             weight_loader=partial(load_nnx_param_from_reshaped_torch,
-                                  permute_dims=(0, 1),
+                                  reshape_dims=(self.in_features_total, self.out_features_total),
+                                  permute_dims=(1, 0), 
                                   param_name=layer.prefix + ".weight"),
             _is_loaded=False)
         layer.weight.get_metadata()['mesh'] = mesh
-        layer.weight.sharding = self.weight_sharding
+        layer.weight.sharding = ()
 
-        # Block-wise quantization scale
-        block_n, block_k = self.quant_config.weight_block_size[
-            0], self.quant_config.weight_block_size[1]
+        # Block-wise quantization scale. Always 2D (OutBlocks, InBlocks) internally.
+        block_n, block_k = self.quant_config.weight_block_size[0], self.quant_config.weight_block_size[1]
+        
+        out_blocks = (self.out_features_total + block_n - 1) // block_n
+        in_blocks = (self.in_features_total + block_k - 1) // block_k
+        scale_shape = (out_blocks, in_blocks)
+
         layer.weight_scale_inv = nnx.Param(
-            kernel_init(
-                rngs.params(),
-                [(out_features + block_n - 1) // block_n,
-                 (self.in_features + block_k - 1) // block_k],
-                layer.dtype,
-            ),
+            kernel_init(rngs.params(), scale_shape, layer.dtype),
             weight_loader=partial(
                 load_nnx_param_from_reshaped_torch,
-                permute_dims=(0, 1),
+                reshape_dims=scale_shape,
+                permute_dims=(0, 1), 
                 param_name=layer.prefix + ".weight_scale_inv",
             ),
             _is_loaded=False)
         layer.weight_scale_inv.get_metadata()['mesh'] = mesh
-        layer.weight_scale_inv.sharding = self.weight_sharding
+        layer.weight_scale_inv.sharding = ()
+        return
 
     def process_weights_after_loading(self, layer):
         assert isinstance(layer, JaxEinsum)

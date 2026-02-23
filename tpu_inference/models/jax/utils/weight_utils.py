@@ -790,12 +790,7 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
         assert isinstance(model, JaxModule)
 
         for name, param in model.named_parameters():
-            if not hasattr(param, "weight_loader") or any(
-                    name.endswith(suffix) for suffix in [
-                        "k_up_proj.weight", "v_up_proj.weight",
-                        "k_up_proj.weight_scale_inv",
-                        "v_up_proj.weight_scale_inv"
-                    ]):
+            if not hasattr(param, "weight_loader"):
                 # Following are common patterns in standard transformers. To add pattern for modules
                 # beyond standard transformers, please consider setting weight_loader.
                 reshape_dims = None
