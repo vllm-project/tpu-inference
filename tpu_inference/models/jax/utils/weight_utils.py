@@ -39,7 +39,7 @@ from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
 from tpu_inference import envs, utils
-from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.jax import JaxModule, JaxModuleList
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils import file_utils
@@ -882,3 +882,19 @@ class JaxDummyModelLoader(DummyModelLoader):
                 maxval=1e-3)
         params = nnx.unflatten(graph_def, params)
         nnx.update(model, params)
+
+        self._process_weights_after_loading(model)
+
+    def _process_weights_after_loading(
+            self, module: JaxModule | JaxModuleList) -> None:
+        """Recursively call process_weights_after_loading if any."""
+        if (quant_method := getattr(module, 'quant_method', None)) is not None:
+            assert isinstance(quant_method, QuantizeMethodBase)
+            quant_method.process_weights_after_loading(module)
+            return
+        if isinstance(module, JaxModuleList):
+            for sub_module in module:
+                self._process_weights_after_loading(sub_module)
+        else:
+            for name, sub_module in module.named_children():
+                self._process_weights_after_loading(sub_module)
