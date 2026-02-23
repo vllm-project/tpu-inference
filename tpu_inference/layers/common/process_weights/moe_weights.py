@@ -432,8 +432,10 @@ def process_fp8_moe_weights(
             w2_weight_scale=None,
             w2_bias=None,
         ),
-        jnp.float8_e4m3fn,
-        None,
+        # jnp.float8_e4m3fn,
+        # None,
+        jnp.float4_e2m1fn,
+        512,
     )
     return process_moe_weights(
         weights,
