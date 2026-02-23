@@ -167,80 +167,54 @@ def process_moe_weights(
     w2_weight_zero_point = weights.w2_weight_zero_point
     w2_bias = weights.w2_bias
 
-    if transposed:
-        num_experts, intermediate_size, hidden_size = w2_weight.shape
-    else:
-        num_experts, hidden_size, intermediate_size = w2_weight.shape
+    num_experts, hidden_size, intermediate_size = w2_weight.shape
 
     if w13_interleave:
-        if transposed:
-            w1_weight = w13_weight[:, :, ::2]
-            w3_weight = w13_weight[:, :, 1::2]
-            w13_weight = jnp.concat([w1_weight, w3_weight], axis=2)
+        w1_weight = w13_weight[:, :, ::2]
+        w3_weight = w13_weight[:, :, 1::2]
+        w13_weight = jnp.concat([w1_weight, w3_weight], axis=2)
 
-            if w13_weight_scale is not None:
-                w1_weight_scale = w13_weight_scale[:, :, ::2]
-                w3_weight_scale = w13_weight_scale[:, :, 1::2]
-                w13_weight_scale = jnp.concat(
-                    [w1_weight_scale, w3_weight_scale], axis=2)
+        if w13_weight_scale is not None:
+            w1_weight_scale = w13_weight_scale[:, :, ::2]
+            w3_weight_scale = w13_weight_scale[:, :, 1::2]
+            w13_weight_scale = jnp.concat([w1_weight_scale, w3_weight_scale],
+                                          axis=2)
 
-            if w13_weight_zero_point is not None:
-                w1_weight_zp = w13_weight_zero_point[:, :, ::2]
-                w3_weight_zp = w13_weight_zero_point[:, :, 1::2]
-                w13_weight_zero_point = jnp.concat(
-                    [w1_weight_zp, w3_weight_zp], axis=2)
-        else:
-            w1_weight = w13_weight[:, ::2, :]
-            w3_weight = w13_weight[:, 1::2, :]
-            w13_weight = jnp.concat([w1_weight, w3_weight], axis=1)
-
-            if w13_weight_scale is not None:
-                w1_weight_scale = w13_weight_scale[:, ::2, :]
-                w3_weight_scale = w13_weight_scale[:, 1::2, :]
-                w13_weight_scale = jnp.concat(
-                    [w1_weight_scale, w3_weight_scale], axis=1)
-
-            if w13_weight_zero_point is not None:
-                w1_weight_zp = w13_weight_zero_point[:, ::2, :]
-                w3_weight_zp = w13_weight_zero_point[:, 1::2, :]
-                w13_weight_zero_point = jnp.concat(
-                    [w1_weight_zp, w3_weight_zp], axis=1)
+        if w13_weight_zero_point is not None:
+            w1_weight_zp = w13_weight_zero_point[:, :, ::2]
+            w3_weight_zp = w13_weight_zero_point[:, :, 1::2]
+            w13_weight_zero_point = jnp.concat([w1_weight_zp, w3_weight_zp],
+                                               axis=2)
 
         if w13_bias is not None:
             w1_bias = w13_bias[:, ::2]
             w3_bias = w13_bias[:, 1::2]
             w13_bias = jnp.concat([w1_bias, w3_bias], axis=1)
 
-    if not transposed:
-        # Transpose non-contracting dim to rightmost dim.
-        w13_weight = jnp.swapaxes(w13_weight, 1, 2)
-        w2_weight = jnp.swapaxes(w2_weight, 1, 2)
-        # Workaround for JAX error "must have valid byte strides"
-        w13_weight = with_layout_constraint(w13_weight, Layout((0, 1, 2)))
-        w2_weight = with_layout_constraint(w2_weight, Layout((0, 1, 2)))
+    # Transpose non-constracting dim to right most dim
+    w13_weight = jnp.swapaxes(w13_weight, 1, 2)
+    w2_weight = jnp.swapaxes(w2_weight, 1, 2)
+
+    # Workaround for JAX error "must have valid byte strides"
+    w13_weight = with_layout_constraint(w13_weight, Layout((0, 1, 2)))
+    w2_weight = with_layout_constraint(w2_weight, Layout((0, 1, 2)))
 
     if w13_weight_scale is not None:
         w13_weight_scale = w13_weight_scale.astype(jnp.float32)
-        if not transposed:
-            w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
+        w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
         w13_weight_scale = jnp.expand_dims(w13_weight_scale, 2)
 
     if w2_weight_scale is not None:
         w2_weight_scale = w2_weight_scale.astype(jnp.float32)
-        if not transposed:
-            w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
+        w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
         w2_weight_scale = jnp.expand_dims(w2_weight_scale, 2)
 
     if w13_weight_zero_point is not None:
-        # Keep zero points in their original integer dtype (int8) for
-        # kernel-side subtraction.
-        if not transposed:
-            w13_weight_zero_point = jnp.swapaxes(w13_weight_zero_point, 1, 2)
+        w13_weight_zero_point = jnp.swapaxes(w13_weight_zero_point, 1, 2)
         w13_weight_zero_point = jnp.expand_dims(w13_weight_zero_point, 2)
 
     if w2_weight_zero_point is not None:
-        if not transposed:
-            w2_weight_zero_point = jnp.swapaxes(w2_weight_zero_point, 1, 2)
+        w2_weight_zero_point = jnp.swapaxes(w2_weight_zero_point, 1, 2)
         w2_weight_zero_point = jnp.expand_dims(w2_weight_zero_point, 2)
 
     if w13_bias is not None:
@@ -259,12 +233,14 @@ def process_moe_weights(
             # Current format:
             # w13_weight: (num_experts, 2*intermediate_size, hidden_size)
             # w2_weight: (num_experts, hidden_size, intermediate_size)
+
             w13_weight = w13_weight.reshape(
                 num_experts,
                 hidden_size,
                 2,
                 intermediate_size,
             )
+
             w13_weight = jnp.swapaxes(w13_weight, 1, 2)
             w13_weight = with_layout_constraint(w13_weight, Layout(
                 (0, 1, 2, 3)))
@@ -331,7 +307,6 @@ def process_moe_weights(
                     w2_bias,
                     ((0, 0), (0, 0), (0, pad_width_hidden_size)),
                 )
-
         case MoEBackend.GMM_TP:
             assert w13_reorder_size is not None
             assert intermediate_size % w13_reorder_size == 0
@@ -493,7 +468,6 @@ def shard_moe_weights(
             sharding = getattr(weight_shardings, key)
             weight = general_device_put(weight, sharding, layout)
             setattr(weights, key, weight)
-
     return weights
 
 
@@ -542,7 +516,6 @@ def process_fp8_moe_weights(
         jnp.float8_e4m3fn,
         None,
     )
-
     return process_moe_weights(
         weights,
         moe_backend=moe_backend,

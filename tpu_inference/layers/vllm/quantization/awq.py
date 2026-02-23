@@ -394,7 +394,6 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
             moe_backend=self.moe_backend,
             w13_interleave=self._w13_interleave,
             w13_reorder_size=self._w13_reorder_size,
-            transposed=False,
         )
 
         weights = shard_moe_weights(weights, self.moe_backend, self.mesh)
