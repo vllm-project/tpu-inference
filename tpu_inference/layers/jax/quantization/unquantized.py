@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
+from typing import Iterable, Optional
 
 import jax
 import jax.numpy as jnp
@@ -66,6 +66,15 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
         super().__init__(*args, **kwargs)
         self.extra_backend_kwargs = {}
 
+    def load_weights(self, *, layer: JaxMoE, original_load_weights_fn,
+                     weights: Iterable) -> set:
+        loaded = original_load_weights_fn(weights)
+        if layer.moe_backend in (MoEBackend.GMM_TP, MoEBackend.GMM_EP):
+            loaded.add("kernel_gating_upproj_EDF")
+        elif layer.moe_backend == MoEBackend.FUSED_MOE:
+            loaded.add("kernel_gating_upproj_E2DF")
+        return loaded
+
     def process_weights_after_loading(self, layer: JaxMoE, *args,
                                       **kwargs) -> None:
         """
@@ -88,7 +97,7 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
             # stack to create a 4d array
             w13_val = jnp.stack([w_gate, w_up], axis=1)
 
-            layer.kernel_gating_upproj_E2DF = nnx.Param(
+            layer.kernel_gating_upproj_E2DF.value = nnx.Param(
                 shard_put(w13_val, shardings=e2df_sharding))
 
             del layer.kernel_gating_EDF

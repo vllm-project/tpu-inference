@@ -80,6 +80,8 @@ class Qwen3MoeSparseMoeBlock(JaxModule):
         self.gate = JaxLinear(
             config.hidden_size,
             config.num_experts,
+            dtype=dtype,
+            param_dtype=dtype,
             rngs=rng,
             use_bias=False,
             quant_config=quant_config,
@@ -143,6 +145,7 @@ class Qwen3MoeDecoderLayer(JaxModule):
         self.input_layernorm = JaxRmsNorm(
             hidden_size,
             epsilon=rms_norm_eps,
+            dtype=dtype,
             param_dtype=dtype,
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
@@ -161,6 +164,7 @@ class Qwen3MoeDecoderLayer(JaxModule):
         self.post_attention_layernorm = JaxRmsNorm(
             hidden_size,
             epsilon=rms_norm_eps,
+            dtype=dtype,
             param_dtype=dtype,
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
@@ -224,6 +228,7 @@ class Qwen3MoeModel(JaxModule):
             self.embed_tokens = JaxEmbed(
                 num_embeddings=vocab_size,
                 features=hidden_size,
+                dtype=dtype,
                 param_dtype=dtype,
                 embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
                 rngs=rng,
@@ -251,6 +256,7 @@ class Qwen3MoeModel(JaxModule):
             self.norm = JaxRmsNorm(
                 hidden_size,
                 epsilon=rms_norm_eps,
+                dtype=dtype,
                 param_dtype=dtype,
                 scale_init=nnx.with_partitioning(init_fn, (None, )),
                 rngs=rng,
@@ -323,6 +329,7 @@ class Qwen3MoeForCausalLM(JaxModule, LoadableWithIterator):
                     einsum_str="TD,DV->TV",
                     kernel_shape=(hidden_size, vocab_size),
                     dtype=model_config.dtype,
+                    param_dtype=model_config.dtype,
                     rngs=rng,
                     quant_config=vllm_config.quant_config,
                     prefix="lm_head",

@@ -20,6 +20,7 @@ import os
 import re
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 
@@ -885,14 +886,29 @@ class JaxDummyModelLoader(DummyModelLoader):
             assert isinstance(
                 param,
                 nnx.Param), f"Expected nnx.Param, got {type(param)} {param=}"
-            param.value = jax.random.uniform(
-                jax.random.PRNGKey(0),
-                param.value.shape,
+            kwargs = dict(
+                shape=param.value.shape,
                 dtype=param.value.dtype,
                 # upstream claims this range works well
                 # https://github.com/vllm-project/vllm/blob/7291d1b288558d48508e1a17c37b0aa170332264/vllm/model_executor/model_loader/weight_utils.py#L1088
                 minval=-1e-3,
-                maxval=1e-3)
+                maxval=1e-3,
+            )
+            if hasattr(param, "_weights_to_load"):
+                # MoE param
+                E, K, N = param.value.shape
+                with cpu_mesh_context():
+                    kwargs["key"] = jax.random.PRNGKey(0)
+                    kwargs["shape"] = (1, N, K)
+                    for i in range(E):
+                        param._weights_to_load[i] = jax.random.uniform(
+                            **kwargs)
+                continue
+            mesh = param.get_metadata().get('mesh', None)
+            ctx = nullcontext() if mesh is None else jax.set_mesh(mesh)
+            with ctx:
+                kwargs["key"] = jax.random.PRNGKey(0)
+                param.value = jax.random.uniform(**kwargs)
         params = nnx.unflatten(graph_def, params)
         nnx.update(model, params)
 
