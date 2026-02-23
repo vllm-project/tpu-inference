@@ -1,0 +1,26 @@
+# General Settings
+project_id: "your-gcp-project"
+zone: "us-central1-a"
+
+# TPU Configuration
+tpu:
+  name: "benchmarking-tpu"
+  accelerator_type: "v5e-4"
+  version: "tpu-ubuntu2204-base"
+
+# Models to Benchmark
+models:
+  - name: "facebook/opt-125m"
+    max_model_len: 2048
+    tensor_parallel_size: 4
+  - name: "meta-llama/Llama-2-7b-hf"
+    max_model_len: 4096
+    tensor_parallel_size: 4
+
+# Benchmark Settings
+benchmarks:
+  - dataset: "ShareGPT_V3_unfiltered_cleaned_split.json"
+    num_prompts: 1000
+    request_rate: "inf" # Use "inf" for throughput measurement
+    input_len: 128
+    output_len: 128
