@@ -221,10 +221,12 @@ class CompilationManager:
             is_first_rank,
             is_last_rank,
         ):
-            kv_caches, hidden_states, _ = self.runner.model_fn(
+            model_output = self.runner.model_fn(
                 state, kv_caches, input_ids, attention_metadata, inputs_embeds,
                 positions, layer_name_to_kvcache_index, lora_metadata,
                 intermediate_tensors, is_first_rank, is_last_rank)
+            kv_caches = model_output[0]
+            hidden_states = model_output[1]
             self.runner.kv_caches = kv_caches
             return hidden_states
 
@@ -811,9 +813,11 @@ class CompilationManager:
                 draft_hidden_states,
                 attention_metadata,
             ):
-                kv_caches, hidden_states, _ = self.runner.drafter.model_fn(
+                draft_output = self.runner.drafter.model_fn(
                     state, kv_caches, input_ids, draft_hidden_states,
                     attention_metadata)
+                kv_caches = draft_output[0]
+                hidden_states = draft_output[1]
                 self.runner.kv_caches = kv_caches
                 return hidden_states
 

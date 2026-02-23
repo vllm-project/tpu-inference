@@ -177,7 +177,13 @@ class JaxMoE(JaxModule):
             x_TD: Input array of shape (sequence_length, d_model).
 
         Returns:
-            Output array of shape (sequence_length, d_model) after passing through MoE.
+            If RETURN_EXPERT_SELECTION is enabled:
+                Tuple of (output, LayerExpertSelection) where output has shape
+                (sequence_length, d_model) and LayerExpertSelection contains
+                topk_weights and topk_ids.
+            Otherwise:
+                Output array of shape (sequence_length, d_model) after passing
+                through MoE.
         """
         if self.quant_method is not None:
             return self.quant_method.apply_jax(self, x_TD)

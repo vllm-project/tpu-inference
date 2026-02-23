@@ -46,6 +46,8 @@ from tpu_inference.distributed.jax_parallel_state import \
     get_pp_group as jax_get_pp_group
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.expert_selection import (
+    ExpertSelection, is_expert_selection_enabled)
 from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
     shard_model_to_tpu
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
@@ -210,15 +212,21 @@ class VllmModelWrapper:
 
     def jit_step_func(self):
 
+        _return_expert_selection = is_expert_selection_enabled()
+
+        _out_shardings = (
+            None,  # kv_caches - keep original sharding
+            NamedSharding(self.mesh,
+                          PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
+            None,  # empty list (aux_hidden_states)
+        )
+        if _return_expert_selection:
+            _out_shardings = _out_shardings + (None, )  # expert_selection
+
         @functools.partial(
             jax.jit,
             donate_argnames=("kv_caches", ),
-            out_shardings=(
-                None,  # kv_caches - keep original sharding
-                NamedSharding(self.mesh,
-                              PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
-                None,  # empty list
-            ),
+            out_shardings=_out_shardings,
             compiler_options={
                 "xla_tpu_all_gather_collective_matmul_mode":
                 "post_spmd_conservative",
@@ -271,12 +279,15 @@ class VllmModelWrapper:
                                       self.vllm_config.lora_config)
                 vllm_model_wrapper_context = get_vllm_model_wrapper_context()
                 new_kv_caches = vllm_model_wrapper_context.kv_caches
+                expert_selection = vllm_model_wrapper_context.expert_selection
             # Wrap the output(hidden states or intermediate tensor)
             # from torch land into a JaxValue for the jax code to consume.
             if not is_last_rank:
                 output = JaxIntermediateTensors.from_torch(output_from_torch)
             else:
                 output = jax_view(output_from_torch)
+            if _return_expert_selection:
+                return new_kv_caches, output, [], expert_selection
             return new_kv_caches, output, []
 
         return step_fun

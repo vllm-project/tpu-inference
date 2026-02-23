@@ -13,11 +13,14 @@
 # limitations under the License.
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 import jax
 from jax.sharding import Mesh
+
+from tpu_inference.layers.common.expert_selection import (
+    ExpertSelection, LayerExpertSelection)
 
 
 @dataclass
@@ -25,6 +28,20 @@ class VllmModelWrapperContext:
     kv_caches: List[jax.Array]
     mesh: Mesh
     layer_name_to_kvcache_index: Dict[str, int]
+    expert_selection: Optional[ExpertSelection] = None
+
+    def record_expert_selection(self, layer_idx: int,
+                                selection: LayerExpertSelection) -> None:
+        """Record expert selection from a MoE layer during forward pass.
+
+        Args:
+            layer_idx: The index of the MoE layer.
+            selection: The expert selection for this layer.
+        """
+        if self.expert_selection is None:
+            self.expert_selection = ExpertSelection()
+        self.expert_selection.add_layer(layer_idx, selection.topk_weights,
+                                        selection.topk_ids)
 
 
 _vllm_model_wrapper_context: Optional[VllmModelWrapperContext] = None

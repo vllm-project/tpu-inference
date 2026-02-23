@@ -36,6 +36,8 @@ from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     ragged_paged_attention
 from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import \
     get_tuned_block_sizes
+from tpu_inference.layers.common.expert_selection import (
+    ExpertSelection, LayerExpertSelection, is_expert_selection_enabled)
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.quantization import (quantize_kv,
                                                       u8_unpack_e2m1)
@@ -713,15 +715,25 @@ class DeepseekV3MoE(nnx.Module):
 
     routed_scaling_factor: float = 1.0
 
-    def __call__(self, x_TD: jax.Array) -> jax.Array:
+    def __call__(self, x_TD: jax.Array) -> Union[jax.Array, Tuple[jax.Array, LayerExpertSelection]]:
+        _return_selection = is_expert_selection_enabled()
+
         # Compute Routed Experts
-        final_hidden_states = self.experts(x_TD)
+        experts_result = self.experts(x_TD)
+
+        # Unpack expert selection if enabled
+        if _return_selection:
+            final_hidden_states, expert_selection = experts_result
+        else:
+            final_hidden_states = experts_result
 
         # (Maybe) Compute Shared Experts
         if self.shared_experts is not None:
             shared_output = self.shared_experts(x_TD)
             final_hidden_states += shared_output
 
+        if _return_selection:
+            return final_hidden_states, expert_selection
         return final_hidden_states
 
 
@@ -743,7 +755,11 @@ class DeepseekV3DecoderLayer(nnx.Module):
     def __call__(
         self, x_TD: jax.Array, kv_cache: List[jax.Array],
         attention_metadata: AttentionMetadata
-    ) -> Tuple[List[jax.Array], jax.Array]:
+    ) -> Union[Tuple[List[jax.Array], jax.Array],
+               Tuple[List[jax.Array], jax.Array, LayerExpertSelection]]:
+        _return_selection = (is_expert_selection_enabled()
+                             and isinstance(self.custom_module,
+                                            DeepseekV3MoE))
 
         # Run Self-Attention
         residual = x_TD
@@ -757,9 +773,14 @@ class DeepseekV3DecoderLayer(nnx.Module):
         hidden_states = self.post_attention_layernorm(hidden_states)
         custom_module_output = self.custom_module(hidden_states)
 
+        # Unpack expert selection if the MoE returned it
+        if _return_selection:
+            custom_module_output, expert_selection = custom_module_output
+            hidden_states = residual + custom_module_output
+            return new_cache, hidden_states, expert_selection
+
         # Residual
         hidden_states = residual + custom_module_output
-
         return new_cache, hidden_states
 
 
@@ -1852,14 +1873,25 @@ class DeepSeekV3(nnx.Module):
         attention_metadata: AttentionMetadata,
         *args,
     ) -> Tuple[List[KVCacheType], jax.Array, List[jax.Array]]:
+        _return_selection = is_expert_selection_enabled()
+        expert_selection = ExpertSelection() if _return_selection else None
+
         x = self.embedder.encode(input_ids)
         for (i, block) in enumerate(self.layers):
             kv_cache = kv_caches[i]
-            new_kv_cache, x = block(x, kv_cache, attention_metadata)
+            block_result = block(x, kv_cache, attention_metadata)
+            if _return_selection and len(block_result) == 3:
+                new_kv_cache, x, layer_selection = block_result
+                expert_selection.add_layer(i, layer_selection.topk_weights,
+                                           layer_selection.topk_ids)
+            else:
+                new_kv_cache, x = block_result[:2]
             kv_caches[i] = new_kv_cache
 
         final_activation = self.final_norm(x)
 
+        if _return_selection:
+            return kv_caches, final_activation, [], expert_selection
         return kv_caches, final_activation, []
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:

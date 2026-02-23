@@ -25,7 +25,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -37,6 +37,8 @@ from vllm.config import VllmConfig
 
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.expert_selection import (
+    ExpertSelection, LayerExpertSelection, is_expert_selection_enabled)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.embed import JaxEmbed
@@ -118,10 +120,20 @@ class Qwen3MoeSparseMoeBlock(JaxModule):
             quant_config=quant_config,
             prefix=prefix + ".experts")
 
-    def __call__(self, x: jax.Array) -> jax.Array:
-        out = self.experts(x)
+    def __call__(self, x: jax.Array) -> Union[jax.Array, Tuple[jax.Array, LayerExpertSelection]]:
+        _return_selection = is_expert_selection_enabled()
+        experts_result = self.experts(x)
+
+        if _return_selection:
+            out, expert_selection = experts_result
+        else:
+            out = experts_result
+
         if self.shared_expert is not None:
             out += self.shared_expert(x)
+
+        if _return_selection:
+            return out, expert_selection
         return out
 
 
@@ -186,7 +198,10 @@ class Qwen3MoeDecoderLayer(JaxModule):
         kv_cache: jax.Array,
         x: jax.Array,
         attention_metadata: AttentionMetadata,
-    ) -> Tuple[jax.Array, jax.Array]:
+    ) -> Union[Tuple[jax.Array, jax.Array],
+               Tuple[jax.Array, jax.Array, LayerExpertSelection]]:
+        _return_selection = is_expert_selection_enabled()
+
         hidden_states = self.input_layernorm(x)
         kv_cache, attn_output = self.self_attn(
             kv_cache,
@@ -197,7 +212,15 @@ class Qwen3MoeDecoderLayer(JaxModule):
 
         residual = attn_output
         attn_output = self.post_attention_layernorm(attn_output)
-        outputs = self.mlp(attn_output)
+        mlp_result = self.mlp(attn_output)
+
+        if _return_selection and isinstance(self.mlp,
+                                            Qwen3MoeSparseMoeBlock):
+            outputs, expert_selection = mlp_result
+            outputs = residual + outputs
+            return kv_cache, outputs, expert_selection
+
+        outputs = mlp_result
         outputs = residual + outputs
         return kv_cache, outputs
 
@@ -266,7 +289,11 @@ class Qwen3MoeModel(JaxModule):
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
         inputs_embeds: Optional[jax.Array] = None,
-    ) -> Tuple[List[jax.Array], jax.Array]:
+    ) -> Union[Tuple[List[jax.Array], jax.Array],
+               Tuple[List[jax.Array], jax.Array, ExpertSelection]]:
+        _return_selection = is_expert_selection_enabled()
+        expert_selection = ExpertSelection() if _return_selection else None
+
         if self.is_first_rank:
             assert inputs_embeds is None
             inputs_embeds = self.embed_tokens(input_ids)
@@ -280,12 +307,20 @@ class Qwen3MoeModel(JaxModule):
                 new_kv_caches.append(kv_caches[i])
                 continue
             kv_cache = kv_caches[i]
-            kv_cache, x = layer(kv_cache, x, attention_metadata)
+            layer_result = layer(kv_cache, x, attention_metadata)
+            if _return_selection and len(layer_result) == 3:
+                kv_cache, x, layer_sel = layer_result
+                expert_selection.add_layer(i, layer_sel.topk_weights,
+                                           layer_sel.topk_ids)
+            else:
+                kv_cache, x = layer_result[:2]
             new_kv_caches.append(kv_cache)
 
         if self.is_last_rank:
             x = self.norm(x)
 
+        if _return_selection:
+            return new_kv_caches, x, expert_selection
         return new_kv_caches, x
 
 
@@ -345,17 +380,27 @@ class Qwen3MoeForCausalLM(JaxModule, LoadableWithIterator):
         *args,
     ) -> Tuple[List[jax.Array], jax.Array | JaxIntermediateTensors,
                List[jax.Array]]:
+        _return_selection = is_expert_selection_enabled()
+
         if not is_first_rank:
             assert intermediate_tensors is not None
             inputs_embeds = intermediate_tensors["hidden_states"]
-        kv_caches, x = self.model(
+        model_result = self.model(
             kv_caches,
             input_ids,
             attention_metadata,
             inputs_embeds,
         )
+
+        if _return_selection:
+            kv_caches, x, expert_selection = model_result
+        else:
+            kv_caches, x = model_result
+
         if not is_last_rank:
             x = JaxIntermediateTensors(tensors={"hidden_states": x}, )
+        if _return_selection:
+            return kv_caches, x, [], expert_selection
         return kv_caches, x, []
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:

@@ -17,10 +17,14 @@ from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 
 from tpu_inference import envs
+from tpu_inference.layers.common.expert_selection import (
+    LayerExpertSelection, is_expert_selection_enabled)
 from tpu_inference.layers.common.moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.process_weights.moe_weights import \
     FusedMoEWeights
 from tpu_inference.logger import init_logger
+from tpu_inference.models.vllm.vllm_model_wrapper_context import \
+    get_vllm_model_wrapper_context
 
 logger = init_logger(__name__)
 
@@ -71,19 +75,50 @@ def vllm_moe_apply(layer: FusedMoE, weights: FusedMoEWeights,
         router_logits: The router logits.
 
     Returns:
-        The output tensor from the MoE fowrard pass.
+        The output tensor from the MoE forward pass. When RETURN_EXPERT_SELECTION
+        is enabled, expert selection data is stored in VllmModelWrapperContext
+        rather than returned (to avoid breaking the vLLM FusedMoE dispatch chain).
     """
     assert isinstance(layer, FusedMoE)
     assert isinstance(quant_method_instance, FusedMoEMethodBase)
     assert isinstance(weights, FusedMoEWeights)
 
-    return torch_view(
-        moe_apply(
-            layer=layer,
-            x=jax_view(x),
-            gating_output=jax_view(router_logits),
-            weights=weights,
-            moe_backend=quant_method_instance.moe_backend,
-            mesh=quant_method_instance.mesh,
-            extra_backend_kwargs=quant_method_instance.extra_backend_kwargs,
-        ))
+    return_selection = is_expert_selection_enabled()
+    result = moe_apply(
+        layer=layer,
+        x=jax_view(x),
+        gating_output=jax_view(router_logits),
+        weights=weights,
+        moe_backend=quant_method_instance.moe_backend,
+        mesh=quant_method_instance.mesh,
+        extra_backend_kwargs=quant_method_instance.extra_backend_kwargs,
+        return_expert_selection=return_selection,
+    )
+
+    if return_selection:
+        output, expert_selection = result
+        # Store expert selection in the context side-channel.
+        # We use the layer_name to derive a layer index for ordering.
+        try:
+            ctx = get_vllm_model_wrapper_context()
+            # Extract layer index from layer_name (e.g., "model.layers.0.block_sparse_moe")
+            layer_idx = _extract_layer_idx(layer.layer_name)
+            ctx.record_expert_selection(layer_idx, expert_selection)
+        except AssertionError:
+            logger.warning_once(
+                "VllmModelWrapperContext not available. "
+                "Expert selection will not be recorded.")
+        return torch_view(output)
+    return torch_view(result)
+
+
+def _extract_layer_idx(layer_name: str) -> int:
+    """Extract the numeric layer index from a vLLM layer name.
+
+    E.g., "model.layers.3.block_sparse_moe" -> 3
+    """
+    import re
+    match = re.search(r'layers\.(\d+)', layer_name)
+    if match:
+        return int(match.group(1))
+    return -1

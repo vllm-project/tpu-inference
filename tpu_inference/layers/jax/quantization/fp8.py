@@ -26,6 +26,8 @@ from jax.sharding import PartitionSpec as P
 from torchax.ops.mappings import t2j
 
 from tpu_inference.layers.common.linear import sharded_quantized_batched_matmul
+from tpu_inference.layers.common.expert_selection import \
+    is_expert_selection_enabled
 from tpu_inference.layers.common.moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.process_weights.linear_weights import \
     shard_linear_weights
@@ -642,7 +644,8 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
 
         return moe_apply(layer, x_TD, router_logits, weights,
                          layer.moe_backend, layer.mesh,
-                         self.extra_backend_kwargs)
+                         self.extra_backend_kwargs,
+                         return_expert_selection=is_expert_selection_enabled())
 
 
 class Fp8Config(QuantizationConfig):

@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from enum import Enum
-from typing import TYPE_CHECKING, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -21,7 +21,10 @@ from jax.sharding import Mesh
 from vllm.model_executor.layers.fused_moe import FusedMoE
 
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
-from tpu_inference.layers.common.fused_moe_gmm import fused_moe_func
+from tpu_inference.layers.common.expert_selection import (
+    LayerExpertSelection, is_expert_selection_enabled)
+from tpu_inference.layers.common.fused_moe_gmm import (apply_scoring_fn,
+                                                        fused_moe_func)
 from tpu_inference.logger import init_logger
 
 if TYPE_CHECKING:
@@ -68,6 +71,42 @@ class MoEBackend(Enum):
         return {cls.FUSED_MOE, cls.GMM_EP, cls.GMM_TP}
 
 
+def _extract_expert_selection(
+    gating_output: Union[jax.Array, Tuple[jax.Array, jax.Array]],
+    top_k: int,
+    scoring_func: str,
+    renormalize: bool,
+) -> LayerExpertSelection:
+    """Extract expert selection (topk weights and ids) from router output.
+
+    For fused backends, gating_output is raw logits (T, E) - we apply scoring
+    and topk. For unfused backends, it's already (weights_TX, indices_TX).
+
+    Args:
+        gating_output: Raw router logits (T, E) or tuple of (weights, indices).
+        top_k: Number of experts per token.
+        scoring_func: Scoring function name (e.g., "softmax", "sigmoid").
+        renormalize: Whether to renormalize topk weights.
+
+    Returns:
+        LayerExpertSelection with topk_weights and topk_ids.
+    """
+    if isinstance(gating_output, tuple):
+        # Unfused backends: already have (weights, indices)
+        weights_TX, indices_TX = gating_output
+        return LayerExpertSelection(topk_weights=weights_TX,
+                                    topk_ids=indices_TX)
+    else:
+        # Fused backends: need to compute topk from raw logits
+        scores = apply_scoring_fn(scoring_func, gating_output)
+        topk_weights, topk_ids = jax.lax.top_k(scores, k=top_k)
+        if renormalize:
+            topk_weights = topk_weights / jnp.sum(
+                topk_weights, axis=-1, keepdims=True)
+        return LayerExpertSelection(topk_weights=topk_weights,
+                                    topk_ids=topk_ids)
+
+
 def moe_apply(
     layer: Union[FusedMoE, JaxMoE],
     x: jax.Array,
@@ -76,11 +115,20 @@ def moe_apply(
     moe_backend: MoEBackend,
     mesh: Mesh,
     extra_backend_kwargs: dict,
-) -> jax.Array:
+    return_expert_selection: bool = False,
+) -> Union[jax.Array, Tuple[jax.Array, LayerExpertSelection]]:
 
     with jax.named_scope(layer._get_name()):
         activation = layer.activation if isinstance(
             layer.activation, str) else layer.activation.value
+
+        # Extract expert selection before the MoE computation if requested
+        expert_selection = None
+        if return_expert_selection:
+            expert_selection = _extract_expert_selection(
+                gating_output, layer.top_k, layer.scoring_func,
+                layer.renormalize)
+
         match moe_backend:
             case MoEBackend.FUSED_MOE:
                 subc_quant_w1_sz = None
@@ -147,7 +195,7 @@ def moe_apply(
                 assert len(
                     gating_output
                 ) == 2, "Expected the gating output to be have 2 entries: weights and indices"
-                return dense_moe_func(
+                output = dense_moe_func(
                     weights=weights,
                     x_TD=x,
                     gating_output=gating_output,
@@ -159,16 +207,24 @@ def moe_apply(
                     activation_ffw_td=layer.activation_ffw_td,
                     hidden_act=layer.hidden_act,
                     mesh=mesh)
+                if return_expert_selection:
+                    return output, expert_selection
+                return output
 
             case MoEBackend.MEGABLX_GMM:
                 # NOTE: circular import avoidance
                 from tpu_inference.layers.jax.moe.sparse_moe import \
                     sparse_moe_func
 
-                return sparse_moe_func(weights=weights,
+                output = sparse_moe_func(weights=weights,
                                        x_TD=x,
                                        gating_output=gating_output,
                                        layer=layer,
                                        mesh=mesh)
+                if return_expert_selection:
+                    return output, expert_selection
+                return output
 
+        if return_expert_selection:
+            return output, expert_selection
         return output

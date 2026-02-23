@@ -20,6 +20,8 @@ from flax import nnx
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 
+from tpu_inference.layers.common.expert_selection import (
+    LayerExpertSelection, is_expert_selection_enabled)
 from tpu_inference.layers.common.moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, UnfusedMoEWeights)
@@ -170,7 +172,8 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
             raise ValueError(f"Unsupported moe backend {layer.moe_backend}")
         return moe_apply(layer, x_TD, router_logits, weights,
                          layer.moe_backend, layer.mesh,
-                         self.extra_backend_kwargs)
+                         self.extra_backend_kwargs,
+                         return_expert_selection=is_expert_selection_enabled())
 
 
 class UnquantizedConfig(QuantizationConfig):

@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     ENABLE_QUANTIZED_MATMUL_KERNEL: bool = False
     REQUANTIZE_BLOCK_SIZE: int | None = None
     REQUANTIZE_WEIGHT_DTYPE: str = "float8_e4m3fn"
+    RETURN_EXPERT_SELECTION: bool = False
 
 
 def env_with_choices(
@@ -175,6 +176,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Specify dtype for quantized weights
     "REQUANTIZE_WEIGHT_DTYPE":
     lambda: os.getenv("REQUANTIZE_WEIGHT_DTYPE", "float8_e4m3fn"),
+    # Return per-layer expert selection (topk_weights, topk_ids) from MoE
+    # layers as part of the model output. Useful for maintaining consistent
+    # routing between inference and training.
+    "RETURN_EXPERT_SELECTION":
+    env_bool("RETURN_EXPERT_SELECTION", default=False),
 }
 
 

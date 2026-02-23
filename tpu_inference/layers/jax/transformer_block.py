@@ -13,12 +13,14 @@
 # limitations under the License.
 
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Tuple, Union
 
 # Flax and JAX sharding imports
 import jax
 from flax import nnx
 
+from tpu_inference.layers.common.expert_selection import (
+    LayerExpertSelection, is_expert_selection_enabled)
 from tpu_inference.layers.jax.attention.attention import (AttentionMetadata,
                                                           KVCache)
 from tpu_inference.layers.jax.layers import DenseFFW
@@ -83,6 +85,8 @@ class SharedExpertsTransformerBlock(TransformerBlock):
     shared_experts: Optional[DenseFFW] = None
 
     def __call__(self, x_TD, is_prefill, kv_cache, attention_metadata):
+        _return_selection = is_expert_selection_enabled()
+
         # Attn Block
         attn_residual_TD = x_TD
         x_TD = self.pre_attention_norm(x_TD)
@@ -105,8 +109,13 @@ class SharedExpertsTransformerBlock(TransformerBlock):
         else:
             dense_layer = self.dense_ffw
 
+        expert_selection = None
         if moe_layer is not None:
-            logits_TD = moe_layer(normed_ffw_input_TD)
+            moe_result = moe_layer(normed_ffw_input_TD)
+            if _return_selection:
+                logits_TD, expert_selection = moe_result
+            else:
+                logits_TD = moe_result
             # Add the shared expert outputs to the MoE outputs.
             shared_expert_output_TD = self.shared_experts(normed_ffw_input_TD)
             logits_TD += shared_expert_output_TD
@@ -118,4 +127,6 @@ class SharedExpertsTransformerBlock(TransformerBlock):
             )
 
         logits_TD += ffw_residual_TD
+        if expert_selection is not None:
+            return new_cache, logits_TD, expert_selection
         return new_cache, logits_TD

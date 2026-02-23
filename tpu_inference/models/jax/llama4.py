@@ -25,6 +25,8 @@ from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
 
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
+from tpu_inference.layers.common.expert_selection import (
+    ExpertSelection, is_expert_selection_enabled)
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
 from tpu_inference.layers.jax.attention.llama4_attention import Llama4Attention
 from tpu_inference.layers.jax.constants import KVCacheType
@@ -693,6 +695,9 @@ class Llama4ForCausalLM(nnx.Module):
         intermediate_tensors: Optional[JaxIntermediateTensors] = None,
         *args,
     ) -> Tuple[List[KVCacheType], jax.Array, List[jax.Array]]:
+        _return_selection = is_expert_selection_enabled()
+        expert_selection = ExpertSelection() if _return_selection else None
+
         is_prefill = False
         if self.is_first_rank:
             x_TD = self.embedder.encode(input_ids)
@@ -703,8 +708,15 @@ class Llama4ForCausalLM(nnx.Module):
         for (i, block) in enumerate(
                 islice(self.layers, self.start_layer, self.end_layer)):
             kv_cache = kv_caches[i]
-            new_kv_cache, x_TD = block(x_TD, is_prefill, kv_cache,
-                                       attention_metadata)
+            block_result = block(x_TD, is_prefill, kv_cache,
+                                 attention_metadata)
+            if _return_selection and len(block_result) == 3:
+                new_kv_cache, x_TD, layer_selection = block_result
+                expert_selection.add_layer(
+                    self.start_layer + i, layer_selection.topk_weights,
+                    layer_selection.topk_ids)
+            else:
+                new_kv_cache, x_TD = block_result[:2]
             jax.block_until_ready(x_TD)
             kv_caches[i] = new_kv_cache
 
@@ -713,6 +725,8 @@ class Llama4ForCausalLM(nnx.Module):
                                                       x_TD}), []
 
         final_activation_TD = self.final_norm(x_TD)
+        if _return_selection:
+            return kv_caches, final_activation_TD, [], expert_selection
         return kv_caches, final_activation_TD, []
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:

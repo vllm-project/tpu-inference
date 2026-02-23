@@ -50,6 +50,8 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 import tpu_inference.envs as envs
 from tpu_inference import utils as common_utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.expert_selection import (
+    ExpertSelection, is_expert_selection_enabled)
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   MESH_AXIS_NAMES_2D,
                                                   ShardingAxisName,
@@ -153,6 +155,7 @@ class ExecuteModelState:
     aux_hidden_states: Optional[jax.Array]
     spec_decode_metadata: Optional[SpecDecodeMetadata]
     kv_connector_output: Optional[KVConnectorOutput]
+    expert_selection: Optional[ExpertSelection] = None
     logits_indices_selector: Optional[List[int]] = None
     padded_num_reqs: Optional[int] = None
 
@@ -615,7 +618,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         (scheduler_output, attn_metadata, input_ids, hidden_states, logits,
          aux_hidden_states, spec_decode_metadata, kv_connector_output,
-         logits_indices_selector,
+         expert_selection, logits_indices_selector,
          padded_num_reqs) = (self.execute_model_state.scheduler_output,
                              self.execute_model_state.attn_metadata,
                              self.execute_model_state.input_ids,
@@ -624,6 +627,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                              self.execute_model_state.aux_hidden_states,
                              self.execute_model_state.spec_decode_metadata,
                              self.execute_model_state.kv_connector_output,
+                             self.execute_model_state.expert_selection,
                              self.execute_model_state.logits_indices_selector,
                              self.execute_model_state.padded_num_reqs)
         self.execute_model_state = None
@@ -642,7 +646,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         return self._sample_from_logits(
             scheduler_output, attn_metadata, input_ids, hidden_states, logits,
             aux_hidden_states, spec_decode_metadata, kv_connector_output,
-            logits_indices_selector, padded_num_reqs)
+            expert_selection, logits_indices_selector, padded_num_reqs)
 
     def _modify_prev_results(self):
         # If copy to host has not been done, we just wait.
@@ -807,8 +811,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     scheduler_output) as kv_connector_output:
                 # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
                 # but one of them would be `None`
-                (self.kv_caches, hidden_states,
-                 aux_hidden_states) = self.model_fn(
+                model_output = self.model_fn(
                      self.state,
                      self.kv_caches,
                      input_ids,
@@ -821,6 +824,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      self.is_first_rank,
                      self.is_last_rank,
                  )
+                if is_expert_selection_enabled() and len(model_output) == 4:
+                    (self.kv_caches, hidden_states,
+                     aux_hidden_states, expert_selection) = model_output
+                else:
+                    (self.kv_caches, hidden_states,
+                     aux_hidden_states) = model_output
+                    expert_selection = None
             if not self.is_last_rank:
                 assert isinstance(hidden_states, JaxIntermediateTensors)
                 hidden_states.kv_connector_output = kv_connector_output
@@ -863,6 +873,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             aux_hidden_states=aux_hidden_states,
             spec_decode_metadata=spec_decode_metadata,
             kv_connector_output=kv_connector_output,
+            expert_selection=expert_selection,
             logits_indices_selector=logits_indices_selector,
             padded_num_reqs=padded_num_reqs)
         return None
@@ -877,6 +888,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         aux_hidden_states: Optional[jax.Array],
         spec_decode_metadata: Optional[SpecDecodeMetadata],
         kv_connector_output: Optional[KVConnectorOutput],
+        expert_selection: Optional[ExpertSelection] = None,
         logits_indices_selector: Optional[List[int]] = None,
         padded_num_reqs: Optional[int] = None,
     ) -> ModelRunnerOutput | AsyncTPUModelRunnerOutput:
@@ -1014,6 +1026,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 prompt_logprobs_dict=prompt_logprobs_dict,
                 pooler_output=[],
                 kv_connector_output=kv_connector_output,
+                expert_selection=expert_selection,
             )
             # Return async_model_runner_output
             async_model_runner_output = AsyncTPUModelRunnerOutput(
@@ -1082,6 +1095,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
             kv_connector_output=kv_connector_output,
+            expert_selection=expert_selection,
         )
         return model_runner_output
 

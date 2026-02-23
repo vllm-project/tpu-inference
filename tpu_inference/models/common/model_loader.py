@@ -27,6 +27,8 @@ from vllm.model_executor.model_loader.runai_streamer_loader import \
 from vllm.utils.func_utils import supports_kw
 
 from tpu_inference import envs
+from tpu_inference.layers.common.expert_selection import \
+    is_expert_selection_enabled
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
@@ -273,13 +275,19 @@ def get_flax_model(
     # https://flax.readthedocs.io/en/latest/guides/performance.html
     graphdef, state = nnx.split(jit_model)
 
+    _return_expert_selection = is_expert_selection_enabled()
+    _run_model_out_shardings = (
+        kv_cache_sharding,
+        hidden_states_sharding,
+        hidden_states_sharding,  # aux hidden states
+    )
+    if _return_expert_selection:
+        _run_model_out_shardings = _run_model_out_shardings + (
+            None, )  # expert_selection
+
     @functools.partial(
         jax.jit,
-        out_shardings=(
-            kv_cache_sharding,
-            hidden_states_sharding,
-            hidden_states_sharding,  # aux hidden states
-        ),
+        out_shardings=_run_model_out_shardings,
         donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
         static_argnums=(
             7, 10, 11
