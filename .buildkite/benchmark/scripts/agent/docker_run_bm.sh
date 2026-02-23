@@ -29,36 +29,38 @@ echo $(cat $ENV_FILE)
 echo "--- Cat Env end"
 
 remove_docker_container() {
+    echo "Removing Docker container: $CONTAINER_NAME"
     docker rm -f tpu-test || true;
     docker rm -f vllm-tpu || true;
     docker rm -f $CONTAINER_NAME || true;
 }
-trap remove_docker_container EXIT
 
 cleanup_docker_image() {
     if [[ -n "$IMAGE_TAG" ]]; then
         echo "Removing Docker image: $IMAGE_TAG"
         docker rmi "$IMAGE_TAG" 2>/dev/null || true
+    else
+        echo "IMAGE_TAG not found"
     fi
 }
-trap cleanup_docker_image EXIT
+trap "remove_docker_container; cleanup_docker_image" EXIT
 
 # Remove the container that might not be cleaned up in the previous run.
 remove_docker_container
 
 echo "Code_Hash: $CODE_HASH"
 
-image_tag="$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/$ARTIFACT_REPO/vllm-tpu:$CODE_HASH"
+IMAGE_TAG="$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/$ARTIFACT_REPO/vllm-tpu:$CODE_HASH"
 
 IFS='-' read -r VLLM_HASH TPU_INFERENCE_HASH TORCHAX_HASH _ <<< "$CODE_HASH"
 
-echo "image tag: $image_tag"
+echo "image tag: $IMAGE_TAG"
 
 gcloud auth configure-docker $GCP_REGION-docker.pkg.dev --quiet
-docker pull $image_tag
+docker pull $IMAGE_TAG
 
 if [ $? -ne 0 ]; then
-  echo "Failed to pull the Docker image: $image_tag"
+  echo "Failed to pull the Docker image: $IMAGE_TAG"
   exit 1
 fi
 
@@ -120,7 +122,7 @@ docker run \
  --privileged \
  --network host \
  -v /dev/shm:/dev/shm \
- $image_tag tail -f /dev/null
+ $IMAGE_TAG tail -f /dev/null
 
 # =============== temp solution start ===============
 
