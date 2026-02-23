@@ -33,7 +33,9 @@ from jax.sharding import PartitionSpec as P
 from jax.sharding import SingleDeviceSharding, get_mesh
 from safetensors import safe_open
 from torchax.ops.mappings import t2j
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
+from vllm.model_executor.model_loader import register_model_loader
+from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
 from tpu_inference import envs, utils
@@ -870,3 +872,31 @@ class LoadableWithIterator:
             skip_prefixes=(["lm_head"]
                            if not hasattr(self, 'lm_head') else None))
         return loader.load_weights(weights)
+
+
+@register_model_loader("jax_dummy")
+class JaxDummyModelLoader(DummyModelLoader):
+    """A dummy weights loader for flax_nnx models.
+
+    The upstream DummyModelLoader relies on many torch-specific APIs, this
+    implementation overrides the load_weights method to support flax_nnx models.
+    """
+
+    def load_weights(self, model: JaxModule,
+                     model_config: ModelConfig) -> None:
+        params = nnx.state(model, nnx.Param)
+        graph_def, params = nnx.flatten(params)
+        for path, param in params:
+            assert isinstance(
+                param,
+                nnx.Param), f"Expected nnx.Param, got {type(param)} {param=}"
+            param.value = jax.random.uniform(
+                jax.random.PRNGKey(0),
+                param.value.shape,
+                dtype=param.value.dtype,
+                # upstream claims this range works well
+                # https://github.com/vllm-project/vllm/blob/7291d1b288558d48508e1a17c37b0aa170332264/vllm/model_executor/model_loader/weight_utils.py#L1088
+                minval=-1e-3,
+                maxval=1e-3)
+        params = nnx.unflatten(graph_def, params)
+        nnx.update(model, params)
