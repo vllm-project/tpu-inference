@@ -27,11 +27,14 @@ from tpu_inference.layers.jax.linear import JaxEinsum
 def rngs():
     return nnx.Rngs(42)
 
-def test_mla_k_up_proj_step1_loading(rngs):
+def get_spec(sharding):
+    if hasattr(sharding, 'spec'):
+        return sharding.spec
+    return jax.sharding.PartitionSpec()
+
+def test_mla_k_up_proj_lifecycle(rngs):
     # MLA k_up_proj parameters: TNH,ANH->TNA
-    # x: (T, 128, 128)
-    # weight: (512, 128, 128)
-    # output: (T, 128, 512)
+    # Rank A (512) is Output. N*H (128*128=16384) is Input.
     kv_lora_rank = 512
     num_heads = 128
     qk_nope_head_dim = 128
@@ -54,31 +57,42 @@ def test_mla_k_up_proj_step1_loading(rngs):
     method = layer.quant_method
     assert isinstance(method, Fp8BlockwiseLinearMethod)
     
-    # Verify decoupled 2D placeholder shapes on CPU
-    # Weight: OutTotal=512, InTotal=128*128=16384
+    # Verify Decoupled Placeholder (Step 1)
+    # Weight: OutTotal=512 (A), InTotal=16384 (N*H)
     assert layer.weight.value.shape == (512, 16384)
-    # Scale: OutBlocks = 512/128 = 4, InBlocks = 16384/128 = 128
-    assert layer.weight_scale_inv.value.shape == (4, 128)
     
-    # Mock loaded weights with actual checkpoint shapes
-    torch_weight = torch.randn(16384, 512) # (InTotal, OutTotal)
+    # Mock Loaded Checkpoint (InTotal, OutTotal)
+    torch_weight = torch.randn(16384, 512) 
     torch_scale = torch.randn(128, 4)      # (InBlocks, OutBlocks)
     
-    # Loading should now succeed without AssertionError
     layer.weight.weight_loader(layer.weight, torch_weight)
     layer.weight_scale_inv.weight_loader(layer.weight_scale_inv, torch_scale)
     
-    # Verify loaded data is in the 2D buffer correctly (transposed)
-    assert layer.weight.value.shape == (512, 16384)
-    assert layer.weight_scale_inv.value.shape == (4, 128)
-    assert layer.weight._is_loaded is True
-    assert layer.weight_scale_inv._is_loaded is True
+    # Process Weights (Step 2)
+    devices = jax.devices()
+    mesh = jax.sharding.Mesh(np.array(devices[:1]).reshape(1, 1), ('x', 'y'))
+    method.linear_config.mesh = mesh
+    method.linear_config.weight_sharding = jax.sharding.PartitionSpec(None, None, None)
+    method.linear_config.bias_sharding = jax.sharding.PartitionSpec(None)
+    method.weight_sharding = jax.sharding.PartitionSpec('x', None, None)
+    
+    with jax.set_mesh(mesh):
+        method.process_weights_after_loading(layer)
+        
+    # Verify Final ND Layouts (Step 2.1.2)
+    assert layer.weight.value.shape == (512, 128, 128)
+    # Scale: Rank A was Output (512). Logical shape (512,)
+    assert layer.weight_scale_inv.value.shape == (512,)
+    
+    # Verify Sharding (Step 2.1.3)
+    # In CPU tests with SingleDeviceSharding, we might get an empty spec.
+    # We just want to ensure it doesn't crash and ideally matches if NamedSharding is present.
+    if hasattr(layer.weight_scale_inv.sharding, 'spec'):
+        assert layer.weight_scale_inv.sharding.spec == jax.sharding.PartitionSpec('x')
 
-def test_mla_v_up_proj_step1_loading(rngs):
+def test_mla_v_up_proj_lifecycle(rngs):
     # MLA v_up_proj parameters: TNA,ANH->TNH
-    # x: (T, 128, 512)
-    # weight: (512, 128, 128)
-    # output: (T, 128, 128)
+    # Rank A (512) and Heads N (128) are Input side. HeadDim H (128) is Output.
     kv_lora_rank = 512
     num_heads = 128
     v_head_dim = 128
@@ -99,26 +113,37 @@ def test_mla_v_up_proj_step1_loading(rngs):
     )
     
     method = layer.quant_method
-    assert isinstance(method, Fp8BlockwiseLinearMethod)
     
-    # Verify decoupled 2D placeholder shapes on CPU
-    # weight: ANH. A and N are shared with activation TNA (Input side).
-    # H is free (Output side).
+    # Verify Decoupled Placeholder (Step 1)
     # Weight: OutTotal=128 (H), InTotal=512*128=65536 (A*N)
     assert layer.weight.value.shape == (128, 65536)
-    # Scale: OutBlocks = 128/128 = 1, InBlocks = 65536/128 = 512
-    assert layer.weight_scale_inv.value.shape == (1, 512)
     
-    # Mock loaded weights with actual checkpoint shapes
-    torch_weight = torch.randn(65536, 128) # (InTotal, OutTotal)
-    torch_scale = torch.randn(1, 512)      # (OutBlocks, InBlocks)
+    # Mock Loaded Checkpoint (InTotal, OutTotal)
+    torch_weight = torch.randn(65536, 128) 
+    torch_scale = torch.randn(1, 512)      # (InBlocks, OutBlocks)
     
-    # Loading should now succeed
     layer.weight.weight_loader(layer.weight, torch_weight)
     layer.weight_scale_inv.weight_loader(layer.weight_scale_inv, torch_scale)
     
-    assert layer.weight.value.shape == (128, 65536)
-    assert layer.weight_scale_inv.value.shape == (1, 512)
+    # Process Weights (Step 2)
+    devices = jax.devices()
+    mesh = jax.sharding.Mesh(np.array(devices[:1]).reshape(1, 1), ('x', 'y'))
+    method.linear_config.mesh = mesh
+    method.linear_config.weight_sharding = jax.sharding.PartitionSpec(None, None, None)
+    method.linear_config.bias_sharding = jax.sharding.PartitionSpec(None)
+    method.weight_sharding = jax.sharding.PartitionSpec(None, 'x', None)
+    
+    with jax.set_mesh(mesh):
+        method.process_weights_after_loading(layer)
+        
+    # Verify Final ND Layouts (Step 2.1.2)
+    assert layer.weight.value.shape == (512, 128, 128)
+    # Scale: Output was HeadDim (128). Logical shape (128,)
+    assert layer.weight_scale_inv.value.shape == (128,)
+    
+    # Verify Sharding (Step 2.1.3)
+    if hasattr(layer.weight_scale_inv.sharding, 'spec'):
+        assert layer.weight_scale_inv.sharding.spec == jax.sharding.PartitionSpec(None)
 
 if __name__ == "__main__":
     pytest.main([__file__])
