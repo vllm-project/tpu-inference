@@ -31,10 +31,6 @@ from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedConfig
 
 
-# NOTE(catswe): this empty function exists solely
-# as an entry_points target for vllm plugin system,
-# which imports this module and registers the
-# quantization configs before validation happens
 def register_tpu_quantization_configs():
     pass
 
