@@ -219,13 +219,18 @@ def shard_put(x: jax.Array,
     # Single device sharding requires this special handling
     # to avoid the recursive jit error.
     if mesh is None:
+        print(f"clkbp {mesh=} using {get_mesh()=}")
         mesh = get_mesh()
 
     if math.prod(mesh.axis_sizes) == 1:
         return jax.device_put(x, mesh.devices.flatten()[0])
 
     if isinstance(shardings, tuple):
-        return jax.device_put(x, NamedSharding(mesh, P(*shardings)))
+        s = NamedSharding(mesh, P(*shardings))
+        print(
+            f"clkbp {mesh=}, {s.is_fully_addressable=} {mesh._internal_device_list=} {mesh._internal_device_list.is_fully_addressable=} {x.is_fully_addressable=} {x.sharding=}"
+        )
+        return jax.device_put(x, s)
     else:
         return jax.device_put(x, shardings)
 
