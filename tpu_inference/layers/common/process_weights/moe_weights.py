@@ -170,21 +170,21 @@ def process_moe_weights(
     num_experts, hidden_size, intermediate_size = w2_weight.shape
 
     if w13_interleave:
-        w1_weight = w13_weight[:, :, ::2]
-        w3_weight = w13_weight[:, :, 1::2]
-        w13_weight = jnp.concat([w1_weight, w3_weight], axis=2)
+        w1_weight = w13_weight[:, ::2, :]
+        w3_weight = w13_weight[:, 1::2, :]
+        w13_weight = jnp.concat([w1_weight, w3_weight], axis=1)
 
         if w13_weight_scale is not None:
-            w1_weight_scale = w13_weight_scale[:, :, ::2]
-            w3_weight_scale = w13_weight_scale[:, :, 1::2]
+            w1_weight_scale = w13_weight_scale[:, ::2, :]
+            w3_weight_scale = w13_weight_scale[:, 1::2, :]
             w13_weight_scale = jnp.concat([w1_weight_scale, w3_weight_scale],
-                                          axis=2)
+                                          axis=1)
 
         if w13_weight_zero_point is not None:
-            w1_weight_zp = w13_weight_zero_point[:, :, ::2]
-            w3_weight_zp = w13_weight_zero_point[:, :, 1::2]
+            w1_weight_zp = w13_weight_zero_point[:, ::2, :]
+            w3_weight_zp = w13_weight_zero_point[:, 1::2, :]
             w13_weight_zero_point = jnp.concat([w1_weight_zp, w3_weight_zp],
-                                               axis=2)
+                                               axis=1)
 
         if w13_bias is not None:
             w1_bias = w13_bias[:, ::2]
@@ -203,24 +203,19 @@ def process_moe_weights(
         w13_weight_scale = w13_weight_scale.astype(jnp.float32)
         w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
         w13_weight_scale = jnp.expand_dims(w13_weight_scale, 2)
-
     if w2_weight_scale is not None:
         w2_weight_scale = w2_weight_scale.astype(jnp.float32)
         w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
         w2_weight_scale = jnp.expand_dims(w2_weight_scale, 2)
-
     if w13_weight_zero_point is not None:
         w13_weight_zero_point = jnp.swapaxes(w13_weight_zero_point, 1, 2)
         w13_weight_zero_point = jnp.expand_dims(w13_weight_zero_point, 2)
-
     if w2_weight_zero_point is not None:
         w2_weight_zero_point = jnp.swapaxes(w2_weight_zero_point, 1, 2)
         w2_weight_zero_point = jnp.expand_dims(w2_weight_zero_point, 2)
-
     if w13_bias is not None:
         w13_bias = w13_bias.astype(jnp.float32)
         w13_bias = jnp.expand_dims(w13_bias, 1)
-
     if w2_bias is not None:
         w2_bias = w2_bias.astype(jnp.float32)
         w2_bias = jnp.expand_dims(w2_bias, 1)
@@ -240,7 +235,6 @@ def process_moe_weights(
                 2,
                 intermediate_size,
             )
-
             w13_weight = jnp.swapaxes(w13_weight, 1, 2)
             w13_weight = with_layout_constraint(w13_weight, Layout(
                 (0, 1, 2, 3)))
@@ -255,6 +249,7 @@ def process_moe_weights(
                 ((0, 0), (0, 0), (0, pad_width_hidden_size),
                  (0, pad_width_intermediate_size)),
             )
+
             w2_weight = jnp.pad(
                 w2_weight,
                 ((0, 0), (0, pad_width_intermediate_size),
@@ -287,7 +282,6 @@ def process_moe_weights(
                     ((0, 0), (0, 0), (0, pad_width_hidden_size), (0, 0),
                      (0, pad_width_intermediate_size)),
                 )
-
             if w2_weight_zero_point is not None:
                 w2_weight_zero_point = jnp.pad(
                     w2_weight_zero_point,
@@ -307,6 +301,7 @@ def process_moe_weights(
                     w2_bias,
                     ((0, 0), (0, 0), (0, pad_width_hidden_size)),
                 )
+
         case MoEBackend.GMM_TP:
             assert w13_reorder_size is not None
             assert intermediate_size % w13_reorder_size == 0
@@ -385,7 +380,6 @@ def shard_moe_weights(
                 w2_weight_zero_point=ep_sharding,
                 w2_bias=ep_sharding,
             )
-
         case MoEBackend.GMM_TP:
             # When using per-channel, in_dim // block_size == 1. This means we
             # are unable to shard w2_weight_scale along 1st dim. Therefore, we
