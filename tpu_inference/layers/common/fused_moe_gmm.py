@@ -55,14 +55,15 @@ def _swigluoai(x1: jax.Array,
                limit=7.0) -> jax.Array:
     x1 = jnp.clip(x1, a_max=limit)
     x2 = jnp.clip(x2, a_min=-limit, a_max=limit)
-
     gated_activation = x1 * jax.nn.sigmoid(alpha * x1)
-
     return gated_activation * (x2 + 1)
 
 
-def gmm_wrapper(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset):
-    if is_supported_by_gmm_v2(lhs, rhs, rhs_scale):
+def gmm_wrapper(lhs, rhs, rhs_scale, rhs_bias, rhs_zero_point, group_sizes,
+                group_offset):
+    # gmm_v2 does not support zero-point dequantization yet, so fall back to
+    # gmm when zero points are provided.
+    if rhs_zero_point is None and is_supported_by_gmm_v2(lhs, rhs, rhs_scale):
         gmm_res = gmm_v2(
             lhs=lhs,
             rhs=rhs,
@@ -77,12 +78,12 @@ def gmm_wrapper(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset):
             rhs=rhs,
             rhs_scale=rhs_scale,
             rhs_bias=rhs_bias,
+            rhs_zero_point=rhs_zero_point,
             group_sizes=group_sizes,
             preferred_element_type=lhs.dtype,
             tiling=None,
             group_offset=group_offset[0],
         )
-
     return gmm_res
 
 
@@ -90,9 +91,11 @@ def moe_gmm_local(
     x: jax.Array,
     w1: jax.Array,
     w1_scale: jax.Array | None,
+    w1_zero_point: jax.Array | None,
     w1_bias: jax.Array | None,
     w2: jax.Array,
     w2_scale: jax.Array | None,
+    w2_zero_point: jax.Array | None,
     w2_bias: jax.Array | None,
     group_sizes: jax.Array,
     group_offset: jax.Array,
@@ -107,13 +110,12 @@ def moe_gmm_local(
     
     Set parallelism for "tp" or "ep"
     """
-
     assert parallelism in ["tp", "ep"]
 
     # GMM1 computes x @ (W_up | W_gate) tegether and then split out to apply activation
     # to the gate result
-    gmm1_res_gate_up = gmm_wrapper(x, w1, w1_scale, w1_bias, group_sizes,
-                                   group_offset)
+    gmm1_res_gate_up = gmm_wrapper(x, w1, w1_scale, w1_bias, w1_zero_point,
+                                   group_sizes, group_offset)
     gmm1_res_gate, gmm1_res_up = jnp.split(gmm1_res_gate_up, 2, -1)
     gmm1_res = apply_act_fn(activation, gmm1_res_gate, gmm1_res_up)
 
@@ -124,8 +126,8 @@ def moe_gmm_local(
         shard_id = jax.lax.axis_index(ShardingAxisName.MLP_TENSOR).sum()
         w2_bias = jnp.where(shard_id == 0, w2_bias, 0)
 
-    gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
-                           group_offset)
+    gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, w2_zero_point,
+                           group_sizes, group_offset)
 
     # First run local reduction on topk experts owned by the rank for all tokens
     token_topk_hidden = gmm2_res[topk_argsort_revert_indices].reshape(
@@ -144,9 +146,11 @@ def tensor_parallel_gmm(
     x: jax.Array,
     w1: jax.Array,
     w1_scale: jax.Array | None,
+    w1_zero_point: jax.Array | None,
     w1_bias: jax.Array | None,
     w2: jax.Array,
     w2_scale: jax.Array | None,
+    w2_zero_point: jax.Array | None,
     w2_bias: jax.Array | None,
     group_sizes: jax.Array,
     topk_argsort_revert_indices: jax.Array,
@@ -164,12 +168,20 @@ def tensor_parallel_gmm(
 
     w1_scale_spec = (None if w1_scale is None else P(
         None, None, None, ShardingAxisName.MLP_TENSOR))
+    w1_zero_point_spec = (None if w1_zero_point is None else P(
+        None, None, None, ShardingAxisName.MLP_TENSOR))
     w1_bias_spec = (None if w1_bias is None else P(
         None, None, ShardingAxisName.MLP_TENSOR))
 
     num_blocks = 1 if w2_scale is None else w2_scale.shape[1]
     w2_scale_spec = (None if num_blocks == 1 else P(
         None, ShardingAxisName.MLP_TENSOR, None, None))
+
+    # Zero-point blocking matches scale blocking.
+    w2_zp_blocks = 1 if w2_zero_point is None else w2_zero_point.shape[1]
+    w2_zero_point_spec = (None if w2_zp_blocks == 1 else P(
+        None, ShardingAxisName.MLP_TENSOR, None, None))
+
     w2_bias_spec = None if w2_bias is None else P(None, None, None)
 
     return jax.shard_map(
@@ -184,9 +196,11 @@ def tensor_parallel_gmm(
             data_p_spec,
             w1_spec,
             w1_scale_spec,
+            w1_zero_point_spec,
             w1_bias_spec,
             w2_spec,
             w2_scale_spec,
+            w2_zero_point_spec,
             w2_bias_spec,
             data_p_spec,
             data_p_spec,
@@ -199,9 +213,11 @@ def tensor_parallel_gmm(
         x,
         w1,
         w1_scale,
+        w1_zero_point,
         w1_bias,
         w2,
         w2_scale,
+        w2_zero_point,
         w2_bias,
         group_sizes,
         group_offset,
@@ -214,9 +230,11 @@ def expert_parallel_gmm(
     x: jax.Array,
     w1: jax.Array,
     w1_scale: jax.Array | None,
+    w1_zero_point: jax.Array | None,
     w1_bias: jax.Array | None,
     w2: jax.Array,
     w2_scale: jax.Array | None,
+    w2_zero_point: jax.Array | None,
     w2_bias: jax.Array | None,
     group_sizes: jax.Array,
     topk_argsort_revert_indices: jax.Array,
@@ -229,13 +247,16 @@ def expert_parallel_gmm(
     ep_size = get_mesh_shape_product(mesh, ShardingAxisName.EXPERT)
     ep_p_spec = P(ShardingAxisName.EXPERT)
     data_p_spec = P(ShardingAxisName.MLP_DATA)
+
     num_experts = w1.shape[0]
     num_experts_per_shard = num_experts // ep_size
     group_offset = jnp.arange(0, num_experts, num_experts_per_shard)
 
     w1_scale_spec = None if w1_scale is None else ep_p_spec
+    w1_zero_point_spec = None if w1_zero_point is None else ep_p_spec
     w1_bias_spec = None if w1_bias is None else ep_p_spec
     w2_scale_spec = None if w2_scale is None else ep_p_spec
+    w2_zero_point_spec = None if w2_zero_point is None else ep_p_spec
     w2_bias_spec = None if w2_bias is None else ep_p_spec
 
     return jax.shard_map(
@@ -250,9 +271,11 @@ def expert_parallel_gmm(
             data_p_spec,
             ep_p_spec,
             w1_scale_spec,
+            w1_zero_point_spec,
             w1_bias_spec,
             ep_p_spec,
             w2_scale_spec,
+            w2_zero_point_spec,
             w2_bias_spec,
             data_p_spec,
             ep_p_spec,
@@ -265,9 +288,11 @@ def expert_parallel_gmm(
         x,
         w1,
         w1_scale,
+        w1_zero_point,
         w1_bias,
         w2,
         w2_scale,
+        w2_zero_point,
         w2_bias,
         group_sizes,
         group_offset,
@@ -293,6 +318,8 @@ def fused_moe_func(
     w2: jax.Array,
     w1_scale: jax.Array | None,
     w2_scale: jax.Array | None,
+    w1_zero_point: jax.Array | None,
+    w2_zero_point: jax.Array | None,
     w1_bias: jax.Array | None,
     w2_bias: jax.Array | None,
     gating_output: jax.Array,
@@ -311,6 +338,10 @@ def fused_moe_func(
         w2: second moe weights [num_experts, intermediate_size, hidden_size]
         w1_scale: w1 scale [num_experts, num_blocks, 1, intermediate_size * 2]
         w2_scale: w2 scale [num_experts, num_blocks, 1, hidden_size]
+        w1_zero_point: w1 zero point [num_experts, num_blocks, 1,
+            intermediate_size * 2] or None.
+        w2_zero_point: w2 zero point [num_experts, num_blocks, 1,
+            hidden_size] or None.
         w1_bias: optional bias of w1 [num_experts, 1, intermediate_size * 2]
         w2_bias: optional bias of w2 [num_experts, 1, hidden_size]
         gating_output: routing information of tokens [num_tokens, num_experts]
@@ -331,7 +362,6 @@ def fused_moe_func(
     assert (num_tokens * topk) % 16 == 0, (
         "The kernel requires num_tokens * topk to be a multiple of "
         f"16 but got {num_tokens}*{topk}={num_tokens*topk}")
-
     assert gating_output.shape == (num_tokens, global_num_experts)
 
     topk_weights = apply_scoring_fn(scoring_fn, gating_output)
@@ -356,7 +386,6 @@ def fused_moe_func(
                                            global_num_experts,
                                            dtype=jnp.int32).sum(axis=0)
         topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
-
         return x, group_sizes_local, topk_argsort_revert_indices
 
     x, group_sizes, topk_argsort_revert_indices = jax.shard_map(
@@ -380,9 +409,11 @@ def fused_moe_func(
             x,
             w1,
             w1_scale,
+            w1_zero_point,
             w1_bias,
             w2,
             w2_scale,
+            w2_zero_point,
             w2_bias,
             group_sizes,
             topk_argsort_revert_indices,
@@ -396,9 +427,11 @@ def fused_moe_func(
             x,
             w1,
             w1_scale,
+            w1_zero_point,
             w1_bias,
             w2,
             w2_scale,
+            w2_zero_point,
             w2_bias,
             group_sizes,
             topk_argsort_revert_indices,
@@ -407,5 +440,4 @@ def fused_moe_func(
             topk=topk,
             mesh=mesh,
         )
-
     return x[:num_tokens, :hidden_size]

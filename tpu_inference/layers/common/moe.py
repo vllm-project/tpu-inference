@@ -127,6 +127,8 @@ def moe_apply(
                     w2=weights.w2_weight,
                     w1_scale=weights.w13_weight_scale,
                     w2_scale=weights.w2_weight_scale,
+                    w1_zero_point=weights.w13_weight_zero_point,
+                    w2_zero_point=weights.w2_weight_zero_point,
                     w1_bias=weights.w13_bias,
                     w2_bias=weights.w2_bias,
                     gating_output=gating_output,
