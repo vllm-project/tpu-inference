@@ -201,19 +201,25 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             # 3D weight (matches kernel_shape).
             self.weight_sharding = _to_partition_spec(layer.weight.sharding)
             self.kernel_shape = layer.kernel_shape
+            self.input_side_indices = adapt_info.input_side_indices
+            self.output_side_indices = adapt_info.output_side_indices
         else:
             self.weight_sharding = (adapt_info.out_features_sharding +
                                     adapt_info.in_features_sharding)
             self.kernel_shape = (math.prod(self.out_features),
                                  self.in_features)
+            # Optimized 2D layout is always (Out, In)
+            self.input_side_indices = (1,)
+            self.output_side_indices = (0,)
         self.bias_sharding = adapt_info.out_features_sharding
 
         # Correctly partition weight axes for unified 2D processing.
-        self.in_features_total = math.prod(self.kernel_shape[i] for i in adapt_info.input_side_indices)
-        self.out_features_total = math.prod(self.kernel_shape[i] for i in adapt_info.output_side_indices)
+        self.in_features_total = math.prod(self.kernel_shape[i] for i in self.input_side_indices)
+        self.out_features_total = math.prod(self.kernel_shape[i] for i in self.output_side_indices)
         self.linear_config.output_sizes = [self.out_features_total]
-        self.input_side_indices = adapt_info.input_side_indices
-        self.output_side_indices = adapt_info.output_side_indices
+        
+        # Preserve original ND sharding for final execution layout.
+        self.original_weight_sharding = _to_partition_spec(layer.weight.sharding)
 
     def create_weights_jax(self, layer: JaxModule, *weight_args, rngs,
                            **extra_weight_attrs):
@@ -264,20 +270,16 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
 
         if not getattr(layer.weight, "_is_loaded", False) or not getattr(
                 layer.weight_scale_inv, "_is_loaded", False):
-            # Weight and scale could spread across multiple files,
-            # so we only process once both of them are loaded.
             return
 
         with jax.set_mesh(
                 jax.make_mesh((1, ), ('x', ), devices=jax.devices('cpu'))):
-            # These are already 2D CPU arrays from Step 1.
+            # These are guaranteed to be 2D CPU arrays from Step 1.
             weight_2d = layer.weight.value
             weight_scale_inv = layer.weight_scale_inv.value
 
             weight_block_size = tuple(self.quant_config.weight_block_size)
             old_output_sizes = self.linear_config.output_sizes
-            
-            # Temporarily set output_sizes to the total flattened size for the utility.
             self.linear_config.output_sizes = [self.out_features_total]
 
             bias = layer.bias.value if getattr(layer, 'bias', None) is not None else None
@@ -292,64 +294,46 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 linear_config=self.linear_config)
 
             # TRANSFORM: Convert the processed 2D result back to the ND execution layout.
-            # Reshape scale to match logical output dimensions for correct broadcasting.
             logical_output_shape = tuple(self.kernel_shape[i] for i in self.output_side_indices)
             weights.weight_scale = weights.weight_scale.reshape(logical_output_shape)
 
             if len(self.kernel_shape) > 2:
-                # For batched matmuls (MLA), we must carefully restore the ND shape.
                 if self.output_side_indices[0] == 0:
-                    # Case: Dim 0 is Output. (e.g. k_up_proj)
                     weights.weight = weights.weight.reshape(self.kernel_shape)
                 else:
-                    # Case: Dim 0 is Input. (e.g. v_up_proj)
-                    # We processed as (OutTotal, InTotal). Need back to (InTotal, OutTotal) -> JAX kernel layout
                     weights.weight = weights.weight.T.reshape(self.kernel_shape)
             else:
-                # Standard 2D linear.
                 weights.weight = weights.weight.reshape(self.kernel_shape)
             
-            # Restore original configuration after processing.
             self.linear_config.output_sizes = old_output_sizes
+
+            # Determine appropriate scale sharding for broadcasting.
+            scale_sharding = P(*(self.original_weight_sharding[i] for i in self.output_side_indices))
 
             delattr(layer, 'weight')
             delattr(layer, 'weight_scale_inv')
-            if hasattr(layer, 'bias'):
+            if bias is not None:
                 delattr(layer, 'bias')
 
             if self.linear_config.enable_quantized_matmul_kernel and not self.batch_features:
-                # The quantized_matmul_kernel expects weight scales shaped (n_out_features, 1, n_blocks) for blockwisze quantization.
                 weights.weight_scale = jnp.expand_dims(
-                    jnp.transpose(weights.weight_scale),
-                    axis=1,
-                )
-            weights = shard_linear_weights(
-                weights,
-                mesh=self.linear_config.mesh,
-                weight_p_spec=self.weight_sharding,
-                bias_p_spec=self.linear_config.bias_sharding,
-            )
+                    jnp.transpose(weights.weight_scale), axis=1)
+            
+            # Capture results for TPU placement.
+            final_w = weights.weight
+            final_s = weights.weight_scale
+            final_b = weights.bias
 
+        # 3. TPU PLACEMENT: Perform sharding outside CPU block.
+        mesh = self.linear_config.mesh
+        
         if self.linear_config.fuse_matmuls:
-            layer.weight = nnx.Param(
-                shard_put(weights.weight, shardings=self.weight_sharding))
-            
-            # Determine appropriate sharding for the multidimensional scale.
-            scale_spec = (None, ) * len(weights.weight_scale.shape)
-            if self.batch_features:
-                if len(weights.weight_scale.shape) == len(self.weight_sharding):
-                    scale_spec = self.weight_sharding
-                elif self.output_side_indices[0] == 0:
-                    scale_spec = (self.weight_sharding[0], )
-            
-            layer.weight_scale_inv = nnx.Param(
-                shard_put(weights.weight_scale, shardings=scale_spec))
-            layer.bias = nnx.Param(
-                shard_put(weights.bias, shardings=self.bias_sharding)
-            ) if bias is not None else None
+            layer.weight = nnx.Param(shard_put(final_w, self.original_weight_sharding, mesh=mesh))
+            layer.weight_scale_inv = nnx.Param(shard_put(final_s, scale_sharding, mesh=mesh))
+            if final_b is not None:
+                layer.bias = nnx.Param(shard_put(final_b, self.bias_sharding, mesh=mesh))
         else:
-            raise NotImplementedError(
-                "Fp8 block-wise linear method only supports fuse_matmuls.")
+            raise NotImplementedError("Fp8 block-wise linear method only supports fuse_matmuls.")
 
     def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
         if self.batch_features:

@@ -21,20 +21,73 @@ import pytest
 from flax import nnx
 
 from tpu_inference.layers.jax.quantization.fp8 import Fp8Config, Fp8BlockwiseLinearMethod
-from tpu_inference.layers.jax.linear import JaxEinsum
+from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
 
 @pytest.fixture
 def rngs():
     return nnx.Rngs(42)
 
-def get_spec(sharding):
-    if hasattr(sharding, 'spec'):
-        return sharding.spec
-    return jax.sharding.PartitionSpec()
+def test_standard_linear_lifecycle(rngs):
+    # Standard 2D linear TD,DA->TA (In=7168, Out=1536)
+    # Optimized layout is (1536, 7168)
+    in_features = 7168
+    out_features = 1536
+    
+    hf_quant_config = {
+        "quant_method": "fp8",
+        "activation_scheme": "dynamic",
+        "weight_block_size": [128, 128],
+    }
+    fp8_config = Fp8Config(hf_quant_config)
+    original_w_sharding = jax.sharding.PartitionSpec('x', None)
+    
+    layer = JaxLinear(
+        input_size=in_features,
+        output_size=out_features,
+        rngs=rngs,
+        quant_config=fp8_config,
+        prefix="model.layers.0.mlp.gate_proj",
+        use_bias=False,
+        kernel_init=nnx.with_partitioning(nnx.initializers.uniform(), original_w_sharding)
+    )
+    
+    method = layer.quant_method
+    assert isinstance(method, Fp8BlockwiseLinearMethod)
+    
+    # Verify Decoupled Placeholder (Step 1)
+    # Weight: OutTotal=1536, InTotal=7168
+    assert layer.weight.value.shape == (1536, 7168)
+    assert layer.weight.sharding == ()
+    assert layer.weight_scale_inv.sharding == ()
+    
+    # Mock Loaded Checkpoint (InTotal, OutTotal)
+    torch_weight = torch.randn(7168, 1536) 
+    torch_scale = torch.randn(56, 12)      # (InBlocks, OutBlocks)
+    
+    layer.weight.weight_loader(layer.weight, torch_weight)
+    layer.weight_scale_inv.weight_loader(layer.weight_scale_inv, torch_scale)
+    
+    # Process Weights (Step 2)
+    devices = jax.devices()
+    mesh = jax.sharding.Mesh(np.array(devices[:1]).reshape(1, 1), ('x', 'y'))
+    method.linear_config.mesh = mesh
+    method.linear_config.bias_sharding = jax.sharding.PartitionSpec(None)
+    
+    with jax.set_mesh(mesh):
+        method.process_weights_after_loading(layer)
+        
+    # Verify Optimized 2D Layouts (Step 2.1.2)
+    assert layer.weight.value.shape == (1536, 7168)
+    # Scale: Output was 1536. Logical shape (1536,)
+    assert layer.weight_scale_inv.value.shape == (1536,)
+    
+    # Verify Sharding
+    if hasattr(layer.weight.sharding, 'spec'):
+        assert layer.weight.sharding.spec == original_w_sharding
+        assert layer.weight_scale_inv.sharding.spec == jax.sharding.PartitionSpec('x')
 
 def test_mla_k_up_proj_lifecycle(rngs):
     # MLA k_up_proj parameters: TNH,ANH->TNA
-    # Rank A (512) is Output. N*H (128*128=16384) is Input.
     kv_lora_rank = 512
     num_heads = 128
     qk_nope_head_dim = 128
@@ -45,21 +98,23 @@ def test_mla_k_up_proj_lifecycle(rngs):
         "weight_block_size": [128, 128],
     }
     fp8_config = Fp8Config(hf_quant_config)
+    original_w_sharding = jax.sharding.PartitionSpec('x', None, None)
     
     layer = JaxEinsum(
         einsum_str="TNH,ANH->TNA",
         kernel_shape=(kv_lora_rank, num_heads, qk_nope_head_dim),
         rngs=rngs,
         quant_config=fp8_config,
-        prefix="model.layers.4.self_attn.k_up_proj"
+        prefix="model.layers.4.self_attn.k_up_proj",
+        kernel_init=nnx.with_partitioning(nnx.initializers.uniform(), original_w_sharding)
     )
     
     method = layer.quant_method
-    assert isinstance(method, Fp8BlockwiseLinearMethod)
     
     # Verify Decoupled Placeholder (Step 1)
-    # Weight: OutTotal=512 (A), InTotal=16384 (N*H)
     assert layer.weight.value.shape == (512, 16384)
+    assert layer.weight.sharding == ()
+    assert layer.weight_scale_inv.sharding == ()
     
     # Mock Loaded Checkpoint (InTotal, OutTotal)
     torch_weight = torch.randn(16384, 512) 
@@ -72,27 +127,21 @@ def test_mla_k_up_proj_lifecycle(rngs):
     devices = jax.devices()
     mesh = jax.sharding.Mesh(np.array(devices[:1]).reshape(1, 1), ('x', 'y'))
     method.linear_config.mesh = mesh
-    method.linear_config.weight_sharding = jax.sharding.PartitionSpec(None, None, None)
     method.linear_config.bias_sharding = jax.sharding.PartitionSpec(None)
-    method.weight_sharding = jax.sharding.PartitionSpec('x', None, None)
     
     with jax.set_mesh(mesh):
         method.process_weights_after_loading(layer)
         
     # Verify Final ND Layouts (Step 2.1.2)
     assert layer.weight.value.shape == (512, 128, 128)
-    # Scale: Rank A was Output (512). Logical shape (512,)
     assert layer.weight_scale_inv.value.shape == (512,)
     
-    # Verify Sharding (Step 2.1.3)
-    # In CPU tests with SingleDeviceSharding, we might get an empty spec.
-    # We just want to ensure it doesn't crash and ideally matches if NamedSharding is present.
-    if hasattr(layer.weight_scale_inv.sharding, 'spec'):
+    if hasattr(layer.weight.sharding, 'spec'):
+        assert layer.weight.sharding.spec == original_w_sharding
         assert layer.weight_scale_inv.sharding.spec == jax.sharding.PartitionSpec('x')
 
 def test_mla_v_up_proj_lifecycle(rngs):
     # MLA v_up_proj parameters: TNA,ANH->TNH
-    # Rank A (512) and Heads N (128) are Input side. HeadDim H (128) is Output.
     kv_lora_rank = 512
     num_heads = 128
     v_head_dim = 128
@@ -103,24 +152,27 @@ def test_mla_v_up_proj_lifecycle(rngs):
         "weight_block_size": [128, 128],
     }
     fp8_config = Fp8Config(hf_quant_config)
+    original_w_sharding = jax.sharding.PartitionSpec(None, 'x', None)
     
     layer = JaxEinsum(
         einsum_str="TNA,ANH->TNH",
         kernel_shape=(kv_lora_rank, num_heads, v_head_dim),
         rngs=rngs,
         quant_config=fp8_config,
-        prefix="model.layers.4.self_attn.v_up_proj"
+        prefix="model.layers.4.self_attn.v_up_proj",
+        kernel_init=nnx.with_partitioning(nnx.initializers.uniform(), original_w_sharding)
     )
     
     method = layer.quant_method
     
     # Verify Decoupled Placeholder (Step 1)
-    # Weight: OutTotal=128 (H), InTotal=512*128=65536 (A*N)
     assert layer.weight.value.shape == (128, 65536)
+    assert layer.weight.sharding == ()
+    assert layer.weight_scale_inv.sharding == ()
     
     # Mock Loaded Checkpoint (InTotal, OutTotal)
     torch_weight = torch.randn(65536, 128) 
-    torch_scale = torch.randn(1, 512)      # (InBlocks, OutBlocks)
+    torch_scale = torch.randn(1, 512)      # (OutBlocks, InBlocks)
     
     layer.weight.weight_loader(layer.weight, torch_weight)
     layer.weight_scale_inv.weight_loader(layer.weight_scale_inv, torch_scale)
@@ -129,20 +181,17 @@ def test_mla_v_up_proj_lifecycle(rngs):
     devices = jax.devices()
     mesh = jax.sharding.Mesh(np.array(devices[:1]).reshape(1, 1), ('x', 'y'))
     method.linear_config.mesh = mesh
-    method.linear_config.weight_sharding = jax.sharding.PartitionSpec(None, None, None)
     method.linear_config.bias_sharding = jax.sharding.PartitionSpec(None)
-    method.weight_sharding = jax.sharding.PartitionSpec(None, 'x', None)
     
     with jax.set_mesh(mesh):
         method.process_weights_after_loading(layer)
         
     # Verify Final ND Layouts (Step 2.1.2)
     assert layer.weight.value.shape == (512, 128, 128)
-    # Scale: Output was HeadDim (128). Logical shape (128,)
     assert layer.weight_scale_inv.value.shape == (128,)
     
-    # Verify Sharding (Step 2.1.3)
-    if hasattr(layer.weight_scale_inv.sharding, 'spec'):
+    if hasattr(layer.weight.sharding, 'spec'):
+        assert layer.weight.sharding.spec == original_w_sharding
         assert layer.weight_scale_inv.sharding.spec == jax.sharding.PartitionSpec(None)
 
 if __name__ == "__main__":
