@@ -17,13 +17,13 @@ def transform_csv(file_path):
         return
 
     # New Header: 1 + (6 * 2) = 13 columns
-    # Kernel, W16&nbsp;A16<br>(Corr), W16&nbsp;A16<br>(Perf), ...
-    precisions = ["W16&nbsp;A16", "W8&nbsp;A8", "W8&nbsp;A16", "W4&nbsp;A4", "W4&nbsp;A8", "W4&nbsp;A16"]
-    # Pad Kernel to force width in Markdown
-    new_header = ["Kernel" + "&nbsp;"*18]
+    # Clean text only: Kernel, W16 A16 (Corr), W16 A16 (Perf), ...
+    precisions = ["W16 A16", "W8 A8", "W8 A16", "W4 A4", "W4 A8", "W4 A16"]
+    
+    new_header = ["Kernel"]
     for p in precisions:
-        new_header.append(f"{p}<br>(Corr)")
-        new_header.append(f"{p}<br>(Perf)")
+        new_header.append(f"{p} (Corr)")
+        new_header.append(f"{p} (Perf)")
     
     transformed_rows = []
     transformed_rows.append(new_header)

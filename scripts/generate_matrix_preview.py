@@ -26,8 +26,8 @@ def generate_markdown_table(csv_path):
     md_lines.append("| " + " | ".join(headers) + " |")
     md_lines.append("| :--- | " + " | ".join([":---:"] * len(precisions)) + " |")
 
-    # Parse Data Rows (Skip first 2 header rows)
-    for row in reader[2:]:
+    # Parse Data Rows (Skip first 1 header row)
+    for row in reader[1:]:
         if not row: continue
         kernel_name = row[0]
         
