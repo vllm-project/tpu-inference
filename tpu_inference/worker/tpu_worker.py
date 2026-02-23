@@ -55,8 +55,12 @@ class PPConfig:
         # as an independent JAX cluster.
         # For single-host PP or multi-host with one host per stage,
         # the cluster size for each stage is 1.
+
+        # Defines the 3D topology of the JAX processes (nodes) in the cluster. Syntax: "a,b,c"
         self.default_tpu_process_bounds = "1,1,1"
+        # Defines how many physical TPU chips are allocated to each JAX process. Syntax: "a,b,c"
         self.default_tpu_chips_per_process_bounds = "1,1,1"
+        # Specifies the physical IDs of the TPU chips that this specific process is allowed to see and use. Syntax: comma separated ints like "a", "a,b"
         self.default_tpu_visible_chips = f"{self.rank}"
 
         if self.pp_world_size > 1:
