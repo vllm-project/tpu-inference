@@ -96,6 +96,58 @@ def apply_rope(
 
         out = jnp.concatenate([outputs_real, outputs_imag], axis=-1)
 
+    # The positions tensor is multidimensional for vision (hence >= 2) and
+    # the value of the last axis should be 2 as the tensor holds the pre-computed
+    # rotation factors (cosine and sine values) for each position.
+    elif positions.ndim >= 2 and positions.shape[-1] == 2:  #VISION RoPE
+        # positions = freqs_cis_stacked: (S, D_rot, 2)
+        # Unstack to get the complex rotation factors (cos + i*sin) in a trace-compatible way.
+        cos = jax.lax.slice_in_dim(positions, 0, 1, axis=-1)
+        sin = jax.lax.slice_in_dim(positions, 1, 2, axis=-1)
+
+        # Squeeze the trailing 1 dimension to get (S, D_rot)
+        cos = jnp.squeeze(cos, axis=-1)
+        sin = jnp.squeeze(sin, axis=-1)
+
+        seq_len_input = inputs.shape[0]
+        seq_len_pos = cos.shape[0]
+
+        if seq_len_input != seq_len_pos:
+            # Calculate how many images/blocks are in the input
+            num_repeats = seq_len_input // seq_len_pos
+            cos = jnp.tile(cos, (num_repeats, 1))
+            sin = jnp.tile(sin, (num_repeats, 1))
+
+        # Reshape to (S, 1, D_rot) for broadcasting over heads
+        cos = cos[:, jnp.newaxis, :]
+        sin = sin[:, jnp.newaxis, :]
+
+        cos_f32 = cos.astype(jnp.float32)
+        sin_f32 = sin.astype(jnp.float32)
+        inputs_f32 = inputs.astype(jnp.float32)
+
+        if rope_input_ordering == "interleaved":
+            shape_pre = inputs_f32.shape[:-1]
+            inputs_reshaped = inputs_f32.reshape(*shape_pre, -1, 2)
+
+            inputs_real = inputs_reshaped[..., 0]
+            inputs_imag = inputs_reshaped[..., 1]
+
+            outputs_real = inputs_real * cos_f32 - inputs_imag * sin_f32
+            outputs_imag = inputs_real * sin_f32 + inputs_imag * cos_f32
+
+            out_stacked = jnp.stack([outputs_real, outputs_imag], axis=-1)
+            out = out_stacked.reshape(inputs.shape)
+
+        else:
+            inputs_real = inputs_f32[..., :head_dim // 2]
+            inputs_imag = inputs_f32[..., head_dim // 2:head_dim]
+
+            outputs_real = inputs_real * cos_f32 - inputs_imag * sin_f32
+            outputs_imag = inputs_real * sin_f32 + inputs_imag * cos_f32
+
+            out = jnp.concatenate([outputs_real, outputs_imag], axis=-1)
+
     # Standard RoPE
     else:
         # Calculate inverse frequencies (timescale)

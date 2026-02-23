@@ -215,12 +215,12 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- START: microbenchmarks -->
 | Kernel | W16&nbsp;A16&nbsp;(Corr) | W16&nbsp;A16&nbsp;(Perf) | W8&nbsp;A8&nbsp;(Corr) | W8&nbsp;A8&nbsp;(Perf) | W8&nbsp;A16&nbsp;(Corr) | W8&nbsp;A16&nbsp;(Perf) | W4&nbsp;A4&nbsp;(Corr) | W4&nbsp;A4&nbsp;(Perf) | W4&nbsp;A8&nbsp;(Corr) | W4&nbsp;A8&nbsp;(Perf) | W4&nbsp;A16&nbsp;(Corr) | W4&nbsp;A16&nbsp;(Perf) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| all-gather-matmul | ❓ | ❓ | ❓ | ❓ | - |  | - |  |  |  |  |  |
-| fused&nbsp;moe | ❓ | ❓ | ❓ | ❓ | - |  | - |  |  |  |  |  |
-| generic&nbsp;ragged&nbsp;paged<br>attention&nbsp;v3* | ❓ | ❓ | ❓ | ❓ | - |  | - |  |  |  |  |  |
-| gmm | ❓ | ❓ | ❓ | ❓ | - |  | - |  |  |  |  |  |
-| mla* | ❓ | ❓ | ❓ | ❓ | - |  | - |  |  |  |  |  |
-| ragged&nbsp;paged&nbsp;attention&nbsp;v3<br>head_dim&nbsp;64* | ❓ | ❓ | ❓ | ❓ | - |  | - |  |  |  |  |  |
+| all-gather-matmul | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ |
+| fused&nbsp;moe | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ |
+| generic&nbsp;ragged&nbsp;paged<br>attention&nbsp;v3* | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ |
+| gmm | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ |
+| mla* | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ |
+| ragged&nbsp;paged&nbsp;attention&nbsp;v3<br>head_dim&nbsp;64* | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ |
 
 
 > **Note:**
