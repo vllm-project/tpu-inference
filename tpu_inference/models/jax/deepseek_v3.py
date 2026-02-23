@@ -1357,6 +1357,10 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
 
         def mla_weight_generator(weights_iter):
             # Use model attributes to determine split ratios
+            if not self.model.use_mla_kernel:
+                yield from weights_iter
+                return
+
             attn = self.model.layers[0].self_attn
             k_out = attn.num_attention_heads * attn.qk_nope_head_dim
             v_out = attn.num_attention_heads * attn.v_head_dim

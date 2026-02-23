@@ -213,12 +213,13 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             self.output_side_indices = (0,)
         self.bias_sharding = adapt_info.out_features_sharding
 
-        # Correctly partition weight axes for unified 2D processing.
+        # Multi dimensional kernels are flattened to 2D when loading the fp8 weights.
         self.in_features_total = math.prod(self.kernel_shape[i] for i in self.input_side_indices)
         self.out_features_total = math.prod(self.kernel_shape[i] for i in self.output_side_indices)
+        # Output sizes also need to be flattened (which is what out_features_total does).
         self.linear_config.output_sizes = [self.out_features_total]
         
-        # Preserve original ND sharding for final execution layout.
+        # Preserve original sharding for requantization layout.
         self.original_weight_sharding = _to_partition_spec(layer.weight.sharding)
 
     def create_weights_jax(self, layer: JaxModule, *weight_args, rngs,
@@ -227,21 +228,23 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
 
         kernel_init = layer.kernel_init
         mesh = jax.make_mesh((1, ), ('x', ), devices=jax.devices('cpu'))
+        # Follow upstream limitation that only float8_e4m3 is supported.
+        # https://github.com/vllm-project/vllm/blob/2a99c5a6c86daef8c766ba2dbf05c385b192c64b/vllm/model_executor/layers/quantization/fp8.py#L283-L284
         param_dtype = jnp.float8_e4m3
 
-        # Always initialize layer.weight as a 2D CPU placeholder matching OutTotal x InTotal.
-        # This aligns with the natural layout of almost all checkpoints and dequant logic.
+        # Initialize the layer.weight as a 2D CPU placeholder to load the fp8 checkpoint weights.
         layer.weight = nnx.Param(
             kernel_init(rngs.params(), (self.out_features_total, self.in_features_total), param_dtype),
             weight_loader=partial(load_nnx_param_from_reshaped_torch,
+                                  # Use the flattened dimensions for 2D fp8 format weights
                                   reshape_dims=(self.in_features_total, self.out_features_total),
                                   permute_dims=(1, 0), 
                                   param_name=layer.prefix + ".weight"),
             _is_loaded=False)
         layer.weight.get_metadata()['mesh'] = mesh
-        layer.weight.sharding = ()
+        layer.weight.sharding = () # Weight loading on CPU is unsharded.
 
-        # Block-wise quantization scale. Always 2D (OutBlocks, InBlocks) internally.
+        # Block-wise quantization scales to be loaded.
         block_n, block_k = self.quant_config.weight_block_size[0], self.quant_config.weight_block_size[1]
         
         out_blocks = (self.out_features_total + block_n - 1) // block_n
@@ -259,7 +262,6 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             _is_loaded=False)
         layer.weight_scale_inv.get_metadata()['mesh'] = mesh
         layer.weight_scale_inv.sharding = ()
-        return
 
     def process_weights_after_loading(self, layer):
         assert isinstance(layer, JaxEinsum)
@@ -270,11 +272,13 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
 
         if not getattr(layer.weight, "_is_loaded", False) or not getattr(
                 layer.weight_scale_inv, "_is_loaded", False):
+            # Weight and scale could spread across multiple files,
+            # so we only process once both of them are loaded.
             return
 
         with jax.set_mesh(
                 jax.make_mesh((1, ), ('x', ), devices=jax.devices('cpu'))):
-            # These are guaranteed to be 2D CPU arrays from Step 1.
+            # Weights & scales are 2D based on create_weights_jax
             weight_2d = layer.weight.value
             weight_scale_inv = layer.weight_scale_inv.value
 
@@ -293,7 +297,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 weight_block_size=weight_block_size,
                 linear_config=self.linear_config)
 
-            # TRANSFORM: Convert the processed 2D result back to the ND execution layout.
+            # Convert the requantized 2D results back to the 3D layout if necessary.
             logical_output_shape = tuple(self.kernel_shape[i] for i in self.output_side_indices)
             weights.weight_scale = weights.weight_scale.reshape(logical_output_shape)
 
@@ -301,6 +305,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 if self.output_side_indices[0] == 0:
                     weights.weight = weights.weight.reshape(self.kernel_shape)
                 else:
+                    # Some 3D weights like v_up_proj in deepseek-ai/DeepSeek-R1 are transposed
                     weights.weight = weights.weight.T.reshape(self.kernel_shape)
             else:
                 weights.weight = weights.weight.reshape(self.kernel_shape)
@@ -319,12 +324,11 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 weights.weight_scale = jnp.expand_dims(
                     jnp.transpose(weights.weight_scale), axis=1)
             
-            # Capture results for TPU placement.
             final_w = weights.weight
             final_s = weights.weight_scale
             final_b = weights.bias
 
-        # 3. TPU PLACEMENT: Perform sharding outside CPU block.
+        # Perform sharded device placement outside of the CPU block.
         mesh = self.linear_config.mesh
         
         if self.linear_config.fuse_matmuls:

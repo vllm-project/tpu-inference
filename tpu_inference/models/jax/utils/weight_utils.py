@@ -765,7 +765,7 @@ def load_nnx_param_from_reshaped_torch(
                                                permute_dims=permute_dims)
 
     assert tuple(jax_weight.shape) == jax_param.value.shape, \
-        f"Shape mismatch when loading weight '{param_name}': torch {jax_weight.shape} vs jax {jax_param.value.shape} when loading torch_weight: {torch_weight.shape}"
+        f"Shape mismatch when loading weight '{param_name}': loaded weight {jax_weight.shape} vs expected {jax_param.value.shape} when loading torch weight: {torch_weight.shape}"
 
     spec = jax_param.sharding
     if isinstance(jax_param.sharding, NamedSharding):
@@ -801,19 +801,6 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                     reshape_dims = (N, H, D)
                     permute_dims = (2, 0, 1)
                 elif any(name.endswith(suffix) for suffix in
-                         ["k_up_proj.weight", "v_up_proj.weight"]):
-                    # MLA up-projections are (Rank, Heads, HeadDim) in JAX.
-                    if len(param.value.shape) == 3:
-                        D, N, H = param.value.shape
-                        # Checkpoint provides (Rank, Heads * HeadDim).
-                        reshape_dims = (D, N, H)
-                        permute_dims = (0, 1, 2)
-                elif any(name.endswith(suffix) for suffix in
-                         ["k_up_proj.weight_scale_inv", "v_up_proj.weight_scale_inv"]):
-                    # Handle 2D block-wise scales for MLA up-projections.
-                    # Keep them in the original 2D format for processing later.
-                    permute_dims = (0, 1)
-                elif any(name.endswith(suffix) for suffix in
                          ["q_proj.bias", "k_proj.bias", "v_proj.bias"]):
                     N, H = param.value.shape
                     reshape_dims = (N, H)
@@ -839,6 +826,8 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                                       reshape_dims=reshape_dims,
                                       permute_dims=permute_dims,
                                       param_name=name))
+        
+        # Store the full parameter string. Makes it clearer during error handling.
         for name, param in model.named_parameters():
             if hasattr(param, "weight_loader") and isinstance(param.weight_loader, functools.partial):
                 # Update the param_name keyword argument in the partial function
