@@ -74,7 +74,7 @@ class QuantLinearConfig:
                             if c in contracting_axes)
 
         # Extract and fuse sharding per axis category.
-        spec = getattr(weight, "sharding", ())
+        spec = getattr(weight, "out_sharding", ())
         if isinstance(spec, jax.NamedSharding):
             spec = spec.spec
         elif isinstance(spec, jax.sharding.SingleDeviceSharding):
@@ -91,7 +91,7 @@ class QuantLinearConfig:
                                  if w_axis[i] in batch_axes and s is not None)
 
         assert len(in_sharding) <= 1 and len(out_sharding) <= 1, \
-            f"Cannot fuse sharding {getattr(weight, 'sharding', ())=} into 2D weight sharding for {einsum_str}"
+            f"Cannot fuse sharding {getattr(weight, 'out_sharding', ())=} into 2D weight out_sharding for {einsum_str}"
 
         out_features = tuple(
             weight.value.shape[i] for i, c in enumerate(w_axis)
