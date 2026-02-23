@@ -46,7 +46,7 @@ from tpu_inference.layers.jax.base import _init_fn as init_fn
 from tpu_inference.layers.jax.base import create_param, sharded_initializer
 from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.embed import JaxEmbed
-from tpu_inference.layers.jax.layers import FlaxUtils, LMhead
+from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.moe.utils import (get_expert_parallelism,
@@ -943,8 +943,6 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
             # encode & decode
             "model.embed_tokens.weight":
             "embed_tokens.weight",
-            "lm_head.weight":
-            "lm_head.input_embedding_table_DV",
             # final norm
             "model.norm.weight":
             "final_norm.weight",
@@ -1817,12 +1815,18 @@ class DeepSeekV3(JaxModule):
             quant_config=self.quant_config,
         )
 
-        self.lm_head = LMhead(vocab_size=vocab_size,
-                              hidden_size=hidden_size,
-                              dtype=dtype,
-                              rngs=self.rng,
-                              vd_sharding=(ShardingAxisName.MLP_TENSOR, None),
-                              dv_sharding=(None, ShardingAxisName.MLP_TENSOR))
+        self.lm_head = JaxEinsum(
+            einsum_str="TD,DV->TV",
+            kernel_shape=(hidden_size, vocab_size),
+            dtype=dtype,
+            rngs=self.rng,
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.MLP_TENSOR)),
+            # Same as https://github.com/vllm-project/tpu-inference/issues/1684
+            # DS-V3 doesn't quantize lm_head, so set quant_config to None.
+            quant_config=None,
+            prefix="lm_head",
+        )
 
         if os.environ.get("VLLM_LOGGING_LEVEL", "").upper() == "DEBUG":
             self._print_model_architecture()
@@ -1881,7 +1885,7 @@ class DeepSeekV3(JaxModule):
         return kv_caches, final_activation, []
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        return self.lm_head.decode(hidden_states)
+        return self.lm_head(hidden_states)
 
 
 def process_modules_after_loading(module, mesh):

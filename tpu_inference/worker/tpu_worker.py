@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import math
 import os
 import tempfile
 from dataclasses import dataclass, field
@@ -36,6 +37,7 @@ logger = init_logger(__name__)
 
 @dataclass
 class PPConfig:
+    vllm_config: VllmConfig
     rank: int
     ip: str
     prev_worker_ip: str
@@ -53,9 +55,34 @@ class PPConfig:
         # as an independent JAX cluster.
         # For single-host PP or multi-host with one host per stage,
         # the cluster size for each stage is 1.
+
+        # Defines the 3D topology of the JAX processes (nodes) in the cluster. Syntax: "a,b,c"
         self.default_tpu_process_bounds = "1,1,1"
+        # Defines how many physical TPU chips are allocated to each JAX process. Syntax: "a,b,c"
         self.default_tpu_chips_per_process_bounds = "1,1,1"
+        # Specifies the physical IDs of the TPU chips that this specific process is allowed to see and use. Syntax: comma separated ints like "a", "a,b"
         self.default_tpu_visible_chips = f"{self.rank}"
+
+        if self.pp_world_size > 1:
+            # We need to know if we are on a 2-core-per-chip (v7) or 1-core-per-chip (v6) system
+            from tpu_inference import tpu_info
+            cores_per_chip = tpu_info.get_num_cores_per_chip()
+
+            # This tells us how many logical JAX devices (cores) this specific pipeline stage needs. If you are doing Tensor Parallelism (TP) within a stage, total_devices would be the TP size.
+            sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
+            total_cores_per_stage = sharding_config.total_devices
+
+            # Number of physical chips needed for this stage.
+            chips_per_stage = math.ceil(total_cores_per_stage / cores_per_chip)
+
+            if chips_per_stage > 0:
+                start_chip = self.rank * chips_per_stage
+                self.default_tpu_visible_chips = ",".join(
+                    str(i)
+                    for i in range(start_chip, start_chip + chips_per_stage))
+
+                # Set bounds to match the visible chips exactly.
+                self.default_tpu_chips_per_process_bounds = f"1,{chips_per_stage},1"
 
 
 class TPUWorker:
@@ -82,7 +109,7 @@ class TPUWorker:
         self.devices = devices if devices is not None else []
         self.device_ranks = set(device.id for device in self.devices
                                 if isinstance(device, jaxlib._jax.Device))
-        self.pp_config = PPConfig(rank, ip, prev_worker_ip,
+        self.pp_config = PPConfig(vllm_config, rank, ip, prev_worker_ip,
                                   self.parallel_config.pipeline_parallel_size)
 
         # Explicitly trigger RunAI download on the worker if needed.

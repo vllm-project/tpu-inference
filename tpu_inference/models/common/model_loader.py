@@ -108,7 +108,7 @@ def _get_nnx_model(
         """
         return model_class(vllm_config, rng, mesh)
 
-    @jax.jit(donate_argnums=(0, ),
+    @nnx.jit(donate_argnums=(0, ),
              static_argnames=('use_qwix_on_abstract_model', ))
     def create_jit_model(
             model: nnx.Module,
