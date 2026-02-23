@@ -14,10 +14,12 @@
 from typing import Tuple
 
 import jax
+import jax.numpy as jnp
 import torch
 import torchax
 import vllm.envs as envs
 from jax.sharding import Mesh
+from torch.nn import Parameter
 from torchax.interop import jax_view, torch_view
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.model_executor.layers.attention.attention import (
@@ -107,6 +109,11 @@ class TPUMLAAttention(MLAAttention):
         self.attn_type = AttentionType.DECODER
         self.sliding_window = None
 
+        self.kv_cache = [
+            torch.tensor([]) for _ in range(get_current_vllm_config(
+            ).parallel_config.pipeline_parallel_size)
+        ]
+
         # Misc.
         self.is_aiter_triton_fp4_bmm_enabled = False
         self.is_aiter_triton_fp8_bmm_enabled = False
@@ -115,13 +122,16 @@ class TPUMLAAttention(MLAAttention):
         with torchax.default_env():
             super().process_weights_after_loading(act_dtype)
 
-    def _v_up_proj(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
-        out = torch.bmm(x, self.W_UV)
+            # NOTE: vLLM dequantizes kv_b_proj weights which causes more memory
+            # usage than expected.
+            self.W_UK_T = Parameter(self.W_UK_T, requires_grad=False)
+            self.W_UV = Parameter(self.W_UV, requires_grad=False)
 
-        # Convert from (N, B, V) to (B, N * V)
-        out = out.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
-        return out
+            # Delete kv_b_proj_params as the dequantized weights are now stored
+            # in self.W_UK_T and self.W_UV.
+            kv_b_proj_params = dict(self.kv_b_proj.named_parameters())
+            for key in kv_b_proj_params.keys():
+                delattr(self.kv_b_proj, key)
 
     def forward(
         self,
@@ -130,6 +140,10 @@ class TPUMLAAttention(MLAAttention):
         k_pe: torch.Tensor,
         output_shape: torch.Size | None = None,
     ) -> torch.Tensor:
+        if self.calculate_kv_scales:
+            torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe,
+                                                self.layer_name)
+
         # Load KV.
         vllm_model_wrapper_context = get_vllm_model_wrapper_context()
         kv_cache_index = vllm_model_wrapper_context.layer_name_to_kvcache_index[
@@ -138,30 +152,24 @@ class TPUMLAAttention(MLAAttention):
         mesh = vllm_model_wrapper_context.mesh
 
         # Get attention metadata.
-        self.kv_cache = kv_cache
-        # Get arounnd :kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
         attn_metadata, _, _ = get_attention_context(self.layer_name)
 
-        # TODO
-        k_scale = 1.0
+        q = jax_view(q)
+        kv_c_normed = jax_view(kv_c_normed)
+        k_pe = jax_view(k_pe)
 
         # Prepare inputs.
-        q_nope, q_pe = torch.split(
-            q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=2)
 
-        q_nope = q_nope.transpose(0, 1)
-        q_nope = torch.bmm(q_nope, self.W_UK_T)
-
-        # Convert from (N, B, L) to (B, N, L)
-        q_nope = q_nope.transpose(0, 1)
-
-        q_nope, q_pe, kv_c_normed, k_pe = jax_view(q_nope), jax_view(
-            q_pe), jax_view(kv_c_normed), jax_view(k_pe)
+        # (B, N, P) x (N, P, L) -> (B, N, L)
+        q_nope = jnp.einsum("bnp,npl->bnl", q_nope, jax_view(self.W_UK_T))
 
         q_scale = k_scale = v_scale = None
-        # TODO: use the layer scales
-        k_scale = 1.0
         if self.kv_cache_quantized_dtype:
+            q_scale = self._q_scale_float
+            k_scale = self._k_scale_float
+            v_scale = self._v_scale_float
+
             kv_c_normed, _ = quantize_kv(self.kv_cache_quantized_dtype,
                                          kv_c_normed,
                                          value=None,
@@ -170,10 +178,6 @@ class TPUMLAAttention(MLAAttention):
                                   k_pe,
                                   value=None,
                                   k_scale=k_scale)
-            # TODO: we should set these
-            # q_scale = layer._q_scale_float
-            # k_scale = layer._k_scale_float
-            # v_scale = layer._v_scale_float
 
         new_kv_cache, outputs = _jax_mla_func(
             kv_cache,
@@ -198,8 +202,9 @@ class TPUMLAAttention(MLAAttention):
         # Store KV.
         vllm_model_wrapper_context.kv_caches[kv_cache_index] = new_kv_cache
 
-        outputs = torch_view(outputs.reshape(outputs.shape[0], -1))
-        outputs = self._v_up_proj(outputs)
+        outputs = outputs.reshape(-1, self.num_heads, self.kv_lora_rank)
+        outputs = jnp.einsum("bnl,nlv->bnv", outputs, jax_view(self.W_UV))
+        outputs = outputs.reshape(-1, self.num_heads * self.v_head_dim)
 
         # Return output as torch.
         return torch_view(outputs)
