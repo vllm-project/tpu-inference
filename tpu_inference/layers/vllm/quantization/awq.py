@@ -357,35 +357,44 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
         assert not self.moe.has_bias
 
         w13_qweight = t2j(layer.w13_qweight, use_dlpack=False)
+        w13_qweight = jnp.swapaxes(awq_u32_unpack_u4(w13_qweight), 1, 2)
         delattr(layer, "w13_qweight")
+
         w2_qweight = t2j(layer.w2_qweight, use_dlpack=False)
+        w2_qweight = jnp.swapaxes(awq_u32_unpack_u4(w2_qweight), 1, 2)
         delattr(layer, "w2_qweight")
 
         w13_scales = t2j(layer.w13_scales, use_dlpack=False)
+        w13_scales = jnp.swapaxes(w13_scales, 1, 2)
         delattr(layer, "w13_scales")
+
         w2_scales = t2j(layer.w2_scales, use_dlpack=False)
+        w2_scales = jnp.swapaxes(w2_scales, 1, 2)
         delattr(layer, "w2_scales")
 
         w13_qzeros = t2j(layer.w13_qzeros, use_dlpack=False)
+        w13_qzeros = jnp.swapaxes(awq_u32_unpack_u4(w13_qzeros), 1, 2)
         delattr(layer, "w13_qzeros")
+
         w2_qzeros = t2j(layer.w2_qzeros, use_dlpack=False)
+        w2_qzeros = jnp.swapaxes(awq_u32_unpack_u4(w2_qzeros), 1, 2)
         delattr(layer, "w2_qzeros")
 
         weights = process_moe_weights(
             FusedMoEWeights(
-                w13_weight=awq_u32_unpack_u4(w13_qweight),
+                w13_weight=w13_qweight,
                 w13_weight_scale=w13_scales,
-                w13_weight_zero_point=awq_u32_unpack_u4(w13_qzeros),
+                w13_weight_zero_point=w13_qzeros,
                 w13_bias=None,
-                w2_weight=awq_u32_unpack_u4(w2_qweight),
+                w2_weight=w2_qweight,
                 w2_weight_scale=w2_scales,
-                w2_weight_zero_point=awq_u32_unpack_u4(w2_qzeros),
+                w2_weight_zero_point=w2_qzeros,
                 w2_bias=None,
             ),
             moe_backend=self.moe_backend,
             w13_interleave=self._w13_interleave,
             w13_reorder_size=self._w13_reorder_size,
-            transposed=True,
+            transposed=False,
         )
 
         weights = shard_moe_weights(weights, self.moe_backend, self.mesh)
