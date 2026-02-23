@@ -99,18 +99,9 @@ def transform_csv(file_path):
 
         transformed_rows.append(row_cells)
 
-    # Footer
-    footer = [
-        [],
-        ["> **Note:**"],
-        ["> *   ✅ = Verified Passing"],
-        ["> *   ❓ = Unverified"],
-        ["> *   ❌ = Failed"],
-        ["> *   Performance numbers (e.g., `10ms`) will appear under the icon if available."],
-        ["> *   *Tested on TPU v7 (Nightly 20260217)*"],
-        ["> *   *For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision.*"]
-    ]
-    transformed_rows.extend(footer)
+    # Footer removed from CSV to keep it clean.
+    # The footer will be appended programmatically in the Markdown generation script.
+
 
     # Write back to file
     with open(file_path, 'w', newline='') as f:
