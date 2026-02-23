@@ -557,11 +557,22 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
                                        value=None,
                                        k_scale=k_scale)
 
-        return mla_attention(q_TNA, q_rope_TNH, k_SA, k_rope_SH, kv_cache, md,
-                             self.mesh, self.num_attention_heads,
-                             self.qk_nope_head_dim, self.query_tnh,
-                             self.keyvalue_skh, self.attn_o_tnh, q_scale,
-                             k_scale, k_scale, None, self.scale)
+        return mla_attention(q_TNA,
+                             q_rope_TNH,
+                             k_SA,
+                             k_rope_SH,
+                             kv_cache,
+                             md,
+                             self.mesh,
+                             self.num_attention_heads,
+                             self.qk_nope_head_dim,
+                             query_tnh_sharding=self.query_tnh,
+                             keyvalue_skh_sharding=self.keyvalue_skh,
+                             attn_o_tnh_sharding=self.attn_o_tnh,
+                             q_scale=q_scale,
+                             k_scale=k_scale,
+                             v_scale=k_scale,
+                             sm_scale=self.scale)
 
     def process_output(self, outputs_TNA: jax.Array) -> jax.Array:
         """

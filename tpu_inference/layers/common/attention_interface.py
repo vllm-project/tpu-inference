@@ -390,6 +390,10 @@ def attention(
     # L: num_blocks
     # S: block_size
 
+    # TODO(jevinjiang, cuiq): transpose q weight offline.
+    # q: (T, N, H)
+    # k,v: (T, K, H)
+
     if head_dim_original is None:
         head_dim_original = q.shape[-1]
 
@@ -420,33 +424,55 @@ def attention(
     return kv_cache, output
 
 
-def mla_attention(q_TNA: jax.Array,
-                  q_rope_TNH: jax.Array,
-                  k_SA: jax.Array,
-                  k_rope_SH: jax.Array,
-                  kv_cache: jax.Array,
-                  md: AttentionMetadata,
-                  mesh: Mesh,
-                  num_attention_heads: int,
-                  qk_nope_head_dim: int,
-                  query_tnh: Sharding | None = None,
-                  keyvalue_skh: Sharding | None = None,
-                  attn_o_tnh: Sharding | None = None,
-                  q_scale: float | None = None,
-                  k_scale: float | None = None,
-                  v_scale: float | None = None,
-                  sinks: jax.Array | None = None,
-                  sm_scale: float | None = None):
+def mla_attention(
+        q_TNA: jax.Array,
+        q_rope_TNH: jax.Array,
+        k_SA: jax.Array,
+        k_rope_SH: jax.Array,
+        kv_cache: jax.Array,
+        md: AttentionMetadata,
+        mesh: Mesh,
+        num_attention_heads: int,
+        qk_nope_head_dim: int,
+        query_tnh: Sharding | None = None,
+        keyvalue_skh: Sharding | None = None,
+        attn_o_tnh: Sharding | None = None,
+        q_scale: float | None = None,
+        k_scale: float | None = None,
+        v_scale: float | None = None,
+        sm_scale: float | None = None) -> Tuple[jax.Array, jax.Array]:
+    """
+    Main shared interface for MLA attention.  Computes the sharded attention
+    output and kv cache update.
+
+    Args:
+        q_TNA: (tokens_query, num_query_heads, q_lora_rank)
+        q_rope_TNH: (tokens_query, num_query_heads, head_dim)
+        k_SA: (tokens_kv, q_lora_rank)
+        k_rope_SH: (tokens_kv, head_dim)
+        kv_cache: KV cache to be retrieved from/updated
+        md: attention metadata
+        mesh: Mesh
+        num_attention_heads: number of attention heads
+        qk_nope_head_dim: head dim for QK without rope
+        query_tnh: sharding to use for q/q_rope for the shard map (MLA kernel)
+        keyvalue_skh: sharding to use for k/k_rope for the shard map (MLA kernel)
+        attn_o_tnh: sharding to use for the attention output for the shard map (MLA kernel)
+        q_scale: scale to apply to q (if quantized)
+        k_scale: scale to apply to k (if quantized)
+        v_scale: scale to apply to v (if quantized)
+        sm_scale: softmax scale
+    """
     in_specs = (
         query_tnh or P(ShardingAxisName.MLP_TENSOR, None, None),  # q
         query_tnh or P(ShardingAxisName.MLP_TENSOR, None, None),  # q_rope
         keyvalue_skh or P(ShardingAxisName.MLP_TENSOR, None),  # k
         keyvalue_skh or P(ShardingAxisName.MLP_TENSOR, None),  # k_rope
         P(ShardingAxisName.MLP_TENSOR),  # kv_cache
-        P(ShardingAxisName.ATTN_DATA),  # md.seq_lens: Replicated
-        P(ShardingAxisName.ATTN_DATA),  # page_indices_flat: Replicated
-        P(ShardingAxisName.ATTN_DATA),  # query_start_loc: Replicated
-        P(ShardingAxisName.ATTN_DATA),  # distribution: Replicated
+        P(ShardingAxisName.ATTN_DATA),  # md.seq_lens
+        P(ShardingAxisName.ATTN_DATA),  # md.page_indices_flat
+        P(ShardingAxisName.ATTN_DATA),  # md.query_start_loc
+        P(ShardingAxisName.ATTN_DATA),  # md.distribution
     )
     out_specs = (attn_o_tnh or P(ShardingAxisName.MLP_TENSOR, None, None),
                  P(ShardingAxisName.MLP_TENSOR))
