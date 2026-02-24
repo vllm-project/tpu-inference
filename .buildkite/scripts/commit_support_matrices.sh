@@ -80,6 +80,9 @@ for ver in v6 v7; do
   fi
 done
 
+echo "--- Running update_all_matrices.py to format CSVs"
+python3 scripts/update_all_matrices.py
+
 echo "--- Staging changes"
 git add support_matrices/
 
