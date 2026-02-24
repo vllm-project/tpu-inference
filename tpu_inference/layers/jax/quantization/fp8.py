@@ -14,6 +14,7 @@
 
 import functools
 import math
+import os
 from functools import partial
 from typing import Iterable, Optional, Tuple
 
@@ -379,6 +380,24 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                                   if self.block_quant else "weight_scale")
         self._called_process_weights_after_loading = False
 
+        # Parse requantization settings from environment variables
+        self.requant_weight_dtype = self._parse_moe_requant_dtype(
+            os.environ.get("MOE_REQUANT_WEIGHT_DTYPE"))
+
+        requant_block_size = os.environ.get("MOE_REQUANT_BLOCK_SIZE")
+        self.requant_block_size = (int(requant_block_size)
+                                   if requant_block_size else None)
+
+    def _parse_moe_requant_dtype(self, dtype_str: str | None) -> jnp.dtype:
+        if dtype_str is None:
+            return jnp.float8_e4m3fn
+        dtype_str = dtype_str.lower()
+        if dtype_str in ["fp4", "float4_e2m1fn"]:
+            return jnp.float4_e2m1fn
+        if dtype_str in ["fp8", "float8_e4m3fn"]:
+            return jnp.float8_e4m3fn
+        raise ValueError(f"Unsupported requant dtype: {dtype_str}")
+
     def load_weights(self, *, layer: JaxMoE, original_load_weights_fn,
                      weights: Iterable) -> set:
         """Load scale paramters and delegate the weight paramters to `original_load_weights_fn`"""
@@ -561,6 +580,8 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                     activation=layer.activation,
                     # Convert to tuple so jax jit can hash it
                     weight_block_size=weight_block_size,
+                    requant_dtype=self.requant_weight_dtype,
+                    requant_block_size=self.requant_block_size,
                 )
 
             del layer.kernel_gating_EDF
