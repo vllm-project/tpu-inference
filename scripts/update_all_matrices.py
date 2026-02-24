@@ -2,15 +2,10 @@ import csv
 import os
 import glob
 
-def transform_csv(file_path):
-    print(f"Processing {file_path}...")
+def transform_microbenchmark_csv(file_path):
+    print(f"Processing Microbenchmark {file_path}...")
     with open(file_path, 'r') as f:
         reader = list(csv.reader(f))
-
-    # Expecting standard format:
-    # Row 0: Precisions (skip empty cols) -> [w16a16, w8a8, w8a16, w4a4, w4a8, w4a16]
-    # Row 1: Headers (kernels, correctness, performance, tpu versions...)
-    # Row 2+: Data
 
     if len(reader) < 2:
         print(f"Skipping {file_path}: Too few rows")
@@ -29,31 +24,29 @@ def transform_csv(file_path):
     transformed_rows.append(new_header)
 
     # Determine if this is a raw file or already updated
-    # Raw file: Row 0 has ",w16a16", Row 1 has "kernels,correctness" -> Data starts at 2
-    # Updated file: Row 0 has "Kernel" -> Data starts at 1
+    # Raw file: Row 0 has ",w16a16", Row 1 has "kernels,correctness" -> Data starts at 2. Stride 3.
+    # Updated file: Row 0 has "Kernel" -> Data starts at 1. Stride 2.
     
     start_row_idx = 0
+    stride = 3
     if len(reader) > 0 and "w16a16" in reader[0][1].lower():
         start_row_idx = 2
+        stride = 3
     elif len(reader) > 0 and "Kernel" in reader[0][0]:
         start_row_idx = 1
+        stride = 2
     else:
-        print(f"Unknown format for {file_path}, defaulting to row 2")
+        # Fallback
         start_row_idx = 2
-
-    # Process Data Rows
+        stride = 3
+        
     for row in reader[start_row_idx:]:
         if not row: continue
         kernel_name = row[0].strip()
-        
-        # Skip description/legend/footer rows
-        # Filter out rows starting with *, >, <, or empty
         if not kernel_name or kernel_name.startswith("*") or kernel_name.startswith(">") or kernel_name.startswith("<"):
             continue
 
-        row_cells = [kernel_name]
-
-        # Manually break long lines for better layout
+        # Manually break long lines
         if kernel_name == "generic ragged paged attention v3*":
             kernel_name = "generic ragged paged<br>attention v3*"
         elif kernel_name == "ragged paged attention v3 head_dim 64*":
@@ -61,10 +54,8 @@ def transform_csv(file_path):
 
         row_cells = [kernel_name]
         
-        # Iterating through precisions (striding by 3 columns: Correctness, Performance, TPU)
-        # Data starts at index 1
         for i in range(6):
-            base_idx = 1 + (i * 3)
+            base_idx = 1 + (i * stride)
             if base_idx >= len(row):
                 row_cells.append("")
                 row_cells.append("")
@@ -72,24 +63,21 @@ def transform_csv(file_path):
                 
             corr = row[base_idx].strip().lower()
             perf = row[base_idx+1].strip()
-            # tpu = row[base_idx+2] # Ignoring as requested
-
-            # Format Cell Content for CSV
+            # If stride is 3, we skip the 3rd column (TPU version) automatically by just picking +0 and +1
             
-            # Correctness Cell
+            # Icon logic
             icon = ""
-            if corr in ["verified", "passing", "ok"]:
+            if corr in ["verified", "passing", "ok", "✅"]:
                 icon = "✅"
-            elif corr == "unverified":
+            elif corr in ["unverified", "untested", "❓"]:
                 icon = "❓"
-            elif corr == "failed":
+            elif corr in ["failed", "❌"]:
                 icon = "❌"
             else:
                 icon = corr if corr else "-"
             
-            # Performance Cell
             perf_text = ""
-            if perf in ["unverified", "untested"]:
+            if perf in ["unverified", "untested", "❓"]:
                 perf_text = "❓"
             elif perf:
                  perf_text = perf
@@ -99,28 +87,61 @@ def transform_csv(file_path):
 
         transformed_rows.append(row_cells)
 
-    # Footer removed from CSV to keep it clean.
-    # The footer will be appended programmatically in the Markdown generation script.
-
-
-    # Write back to file
     with open(file_path, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerows(transformed_rows)
     print(f"Updated {file_path}")
 
+def transform_feature_csv(file_path):
+    print(f"Processing Feature Matrix {file_path}...")
+    with open(file_path, 'r') as f:
+        reader = list(csv.reader(f))
+        
+    if not reader: return
+
+    header = reader[0]
+    processed_rows = [header] # Keep header as is
+    
+    for row in reader[1:]:
+        new_row = []
+        for cell in row:
+            val = cell.strip()
+            # formatting logic
+            if val == "✅" or val.lower() == "passing":
+                 new_row.append("✅")
+            elif val.lower() == "unverified":
+                 new_row.append("❓") # Use ❓ for unverified
+            elif val == "❌" or val.lower() == "failed":
+                 new_row.append("❌")
+            elif val.lower() == "n/a":
+                 new_row.append("-") 
+            else:
+                 new_row.append(val)
+        processed_rows.append(new_row)
+        
+    with open(file_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerows(processed_rows)
+    print(f"Updated {file_path}")
+
 def main():
     root_dir = "."
-    # Find all matching files recursively
-    pattern = "**/*kernel_support_matrix-microbenchmarks.csv"
-    files = glob.glob(pattern, recursive=True)
-    
-    if not files:
-        print("No files found!")
-        return
+    # 1. Process Microbenchmarks (Specific Logic)
+    pattern_micro = "**/*kernel_support_matrix-microbenchmarks.csv"
+    files_micro = glob.glob(pattern_micro, recursive=True)
+    for f in files_micro:
+        transform_microbenchmark_csv(f)
 
-    for file_path in files:
-        transform_csv(file_path)
+    # 2. Process Other Matrices (Generic Logic)
+    # Exclude microbenchmarks to avoid double processing
+    pattern_all = "support_matrices/**/*.csv"
+    all_csvs = glob.glob(pattern_all, recursive=True)
+    
+    for f in all_csvs:
+        if f in files_micro: continue
+        # Also skip combined matrix if we are not regenerating it here (but usually we format it too)
+        # For now, let's treat all other CSVs as feature matrices
+        transform_feature_csv(f)
 
 if __name__ == "__main__":
     main()
