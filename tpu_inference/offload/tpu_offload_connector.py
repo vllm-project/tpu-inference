@@ -144,7 +144,7 @@ KV_CACHE_MISSES = Counter("vllm_kv_offload_cache_misses",
 KV_SAVE_TRANSFER_LATENCY = Histogram(
     "vllm_kv_cache_save_transfer_seconds",
     "Time spent transferring KV blocks from TPU to CPU memory (Hardware Phase).",
-    labelnames=["is_batched"],
+    labelnames=["is_batched", "num_blocks"],
     buckets=[0.01, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0])
 
 KV_SAVE_TRANSFER_BW_GBPS = Histogram(
@@ -156,7 +156,7 @@ KV_SAVE_TRANSFER_BW_GBPS = Histogram(
 KV_SAVE_POST_TRANSFER_LATENCY = Histogram(
     'vllm_kv_cache_save_post_transfer_seconds',
     'Time spent registering chunks and updating CPU backend (Software Phase)',
-    labelnames=["is_batched"],
+    labelnames=["is_batched", "num_blocks"],
     # Buckets often need to be smaller here (e.g., 1ms to 500ms) as Python loops are fast but variable
     buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0))
 
@@ -199,6 +199,7 @@ PROCESS_COMPLETED_SAVE_LATENCY = Histogram(
 GATHER_TPU_BLOCKS_LATENCY = Histogram(
     'vllm_kv_cache_gather_tpu_blocks_seconds',
     'Time spent synchronously gathering KV cache blocks on the TPU. This is a blocking operation that halts the model runner to ensure data consistency.',
+    labelnames=["num_blocks"],
     # Adjust buckets based on your step time.
     # If this blocks the step, you want to know if it's 10ms or 500ms.
     buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5))
@@ -279,24 +280,29 @@ GATHER_NUM_BLOCKS = Histogram(
     "Distribution of the number of blocks in gather requests")
 GATHER_DECOMPOSE_LATENCY = Histogram(
     "vllm_kv_cache_decompose_seconds",
-    "Time spent decomposing block counts into buckets")
+    "Time spent decomposing block counts into buckets",
+    labelnames=["num_blocks"])
 GATHER_CHUNK_LATENCY = Histogram(
     "vllm_kv_cache_chunk_gather_seconds",
-    "Time spent dispatching the jitted gather for a single chunk")
+    "Time spent dispatching the jitted gather for a single chunk",
+    labelnames=["num_blocks"])
 GATHER_APPEND_LATENCY = Histogram(
     "vllm_kv_cache_append_seconds",
-    "Time spent appending the gathered chunk to the list")
+    "Time spent appending the gathered chunk to the list",
+    labelnames=["num_blocks"])
 GATHER_REASSEMBLE_LATENCY = Histogram(
     "vllm_kv_cache_reassemble_seconds",
     "Time spent reassembling/concatenating all chunks")
 
 GATHER_SLICE_LATENCY = Histogram(
     "vllm_kv_cache_slice_seconds",
-    "Time spent creating the dynamic slice for a block chunk")
+    "Time spent creating the dynamic slice for a block chunk",
+    labelnames=["num_blocks"])
 
 UPDATE_KV_LATENCY_SECONDS = Histogram(
     'vllm_kv_cache_update_latency_seconds',
     'Latency of updating KV slices into KV cache per request',
+    labelnames=["num_blocks"],
     buckets=[
         0.001, 0.005, 0.01, 0.02, 0.04, 0.05, 0.06, 0.08, 0.1, 0.2, 0.5, 0.7,
         1.0, 2.0, 5.0
@@ -1866,7 +1872,8 @@ class TPUOffloadConnectorWorker:
                                                num_blocks)
 
         # 2. Report the latency of decomposed_block_sizes
-        with GATHER_DECOMPOSE_LATENCY.time():
+        with GATHER_DECOMPOSE_LATENCY.labels(
+                num_blocks=str(num_blocks)).time():
             decomposed_block_sizes = self._decompose_into_buckets(num_blocks)
         logger.info(
             f"Decomposing gather for {num_blocks} blocks into bucket sizes {decomposed_block_sizes}"
@@ -1874,13 +1881,16 @@ class TPUOffloadConnectorWorker:
         gathered_chunks = []
         block_offset = 0
         for decomposed_block_size in decomposed_block_sizes:
-            with GATHER_SLICE_LATENCY.time():
+            with GATHER_SLICE_LATENCY.labels(
+                    num_blocks=str(decomposed_block_size)).time():
                 block_slice = jax.lax.dynamic_slice_in_dim(
                     block_ids, block_offset, decomposed_block_size, axis=0)
-            with GATHER_CHUNK_LATENCY.time():
+            with GATHER_CHUNK_LATENCY.labels(
+                    num_blocks=str(decomposed_block_size)).time():
                 gathered_chunk = stack_kv_cache_cross_layers(
                     kv_caches, block_slice, decomposed_block_size)
-            with GATHER_APPEND_LATENCY.time():
+            with GATHER_APPEND_LATENCY.labels(
+                    num_blocks=str(decomposed_block_size)).time():
                 gathered_chunks.extend(gathered_chunk)
                 block_offset += decomposed_block_size
 
@@ -2035,7 +2045,8 @@ class TPUOffloadConnectorWorker:
             gathered_kv_caches_tpu = None
 
         duration = time.time() - start_time
-        GATHER_TPU_BLOCKS_LATENCY.observe(duration)
+        GATHER_TPU_BLOCKS_LATENCY.labels(
+            num_blocks=str(num_blocks_to_save)).observe(duration)
         if gathered_kv_caches_tpu is not None:
             logger.debug(
                 f"extracted_blocks_tpu: {gathered_kv_caches_tpu[0].shape}, {gathered_kv_caches_tpu[0].sharding}"
@@ -2124,7 +2135,8 @@ class TPUOffloadConnectorWorker:
                     total_num_blocks_to_save)
             jax.block_until_ready(gathered_kv_caches_tpu)
             duration = time.time() - start_time
-            GATHER_TPU_BLOCKS_LATENCY.observe(duration)
+            GATHER_TPU_BLOCKS_LATENCY.labels(
+                num_blocks=str(total_num_blocks_to_save)).observe(duration)
         else:
             gathered_kv_caches_tpu = None
 
@@ -2208,7 +2220,8 @@ class TPUOffloadConnectorWorker:
 
         duration = time.time() - start_time
         KV_SAVE_TRANSFER_LATENCY.labels(
-            is_batched=is_batched).observe(duration)
+            is_batched=is_batched,
+            num_blocks=str(total_num_blocks_to_save)).observe(duration)
         logger.debug(f"Successfully saved {total_num_blocks_to_save} blocks "
                      f"to CPU in {duration:.4f} seconds.")
 
@@ -2247,7 +2260,8 @@ class TPUOffloadConnectorWorker:
 
         post_transfer_duration = time.time() - post_transfer_start_time
         KV_SAVE_POST_TRANSFER_LATENCY.labels(
-            is_batched=is_batched).observe(post_transfer_duration)
+            is_batched=is_batched, num_blocks=str(
+                total_num_blocks_to_save)).observe(post_transfer_duration)
 
         log_prefix = "Batch" if is_batched else f"Request {manifest[0].req_id}"
         logger.debug(
@@ -2594,7 +2608,8 @@ class TPUOffloadConnectorWorker:
                     )
                 jax.block_until_ready(self.runner.kv_caches)
                 update_duration = time.time() - update_kv_start
-                UPDATE_KV_LATENCY_SECONDS.observe(update_duration)
+                UPDATE_KV_LATENCY_SECONDS.labels(num_blocks=str(
+                    num_blocks_to_load)).observe(update_duration)
                 logger.debug(
                     f"Request {meta.req_id}: Loaded {num_tokens_to_load_delta} tokens into "
                     f"{num_blocks_to_load} new blocks; "
