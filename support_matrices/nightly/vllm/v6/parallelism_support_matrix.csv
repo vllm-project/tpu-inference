@@ -1,7 +1,7 @@
 Feature,CorrectnessTest,PerformanceTest
-CP,❓,❓
-DP,✅,✅
-EP,❌,-
-PP,❓,❓
-SP,❌,-
-TP,❌,-
+CP,❓ Untested,❓ Untested
+DP,✅ Passing,✅ Passing
+EP,❌ Failing,-
+PP,❓ Untested,❓ Untested
+SP,❌ Failing,-
+TP,❌ Failing,-

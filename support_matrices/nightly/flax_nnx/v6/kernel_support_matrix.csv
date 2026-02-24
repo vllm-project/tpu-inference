@@ -1,8 +1,8 @@
 Feature,CorrectnessTest,PerformanceTest
-Collective Communication Matmul,✅,❓
-MLA,❓,❓
-MoE,❓,❓
-Quantized Attention,❓,❓
-Quantized KV Cache,❓,❓
-Quantized Matmul,❓,❓
-Ragged Paged Attention V3,✅,✅
+Collective Communication Matmul,✅ Passing,❓ Untested
+MLA,❓ Untested,❓ Untested
+MoE,❓ Untested,❓ Untested
+Quantized Attention,❓ Untested,❓ Untested
+Quantized KV Cache,❓ Untested,❓ Untested
+Quantized Matmul,❓ Untested,❓ Untested
+Ragged Paged Attention V3,✅ Passing,✅ Passing

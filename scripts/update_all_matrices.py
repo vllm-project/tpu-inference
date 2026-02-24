@@ -108,13 +108,19 @@ def transform_feature_csv(file_path):
             val = cell.strip()
             # formatting logic
             if val == "✅" or val.lower() == "passing":
-                 new_row.append("✅")
-            elif val.lower() == "unverified":
-                 new_row.append("❓") # Use ❓ for unverified
-            elif val == "❌" or val.lower() == "failed":
-                 new_row.append("❌")
+                 new_row.append("✅ Passing")
+            elif val.lower() in ["unverified", "untested", "❓"]:
+                 new_row.append("❓ Untested") 
+            elif val == "❌" or val.lower() in ["failed", "failing"]:
+                 new_row.append("❌ Failing")
             elif val.lower() == "n/a":
-                 new_row.append("-") 
+                 new_row.append("⚪ N/A") 
+            elif val.lower() == "beta":
+                 new_row.append("⚠️ Beta")
+            elif val.lower() == "experimental":
+                 new_row.append("🧪 Experimental")
+            elif val.lower() == "planned":
+                 new_row.append("📝 Planned")
             else:
                  new_row.append(val)
         processed_rows.append(new_row)
