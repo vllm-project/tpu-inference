@@ -32,6 +32,7 @@ from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_fp8_moe_weights)
 from tpu_inference.layers.common.quantization import fp8 as common_fp8
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
+from tpu_inference.layers.common.utils import cpu_mesh, cpu_mesh_context
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.linear import JaxEinsum
@@ -42,8 +43,8 @@ from tpu_inference.layers.jax.quantization.unquantized import (
     UnquantizedFusedMoEMethod, UnquantizedLinearMethod)
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
-    cpu_mesh, cpu_mesh_context, jax_array_from_reshaped_torch,
-    load_nnx_param_from_reshaped_torch, shard_put)
+    jax_array_from_reshaped_torch, load_nnx_param_from_reshaped_torch,
+    shard_put)
 
 logger = init_logger(__name__)
 

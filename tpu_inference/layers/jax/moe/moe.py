@@ -23,6 +23,7 @@ from jax.sharding import NamedSharding, PartitionSpec
 from jaxtyping import Float
 
 from tpu_inference.layers.common.moe import MoEBackend
+from tpu_inference.layers.common.utils import cpu_mesh_context
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
@@ -30,7 +31,7 @@ from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
-    cpu_mesh_context, jax_array_from_reshaped_torch, shard_put)
+    jax_array_from_reshaped_torch, shard_put)
 
 modeling_flax_utils = FlaxUtils()
 logger = init_logger(__name__)

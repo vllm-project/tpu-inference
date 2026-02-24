@@ -108,18 +108,15 @@ fi
 # mount the image into local source code
 local_mounts=()
 if [ "$RUN_IN_BUILDKITE" = "false" ]; then
-  echo "Running in local mode, mounting current tpu-inference directory."
+  echo "Running in local mode, mounting local vllm and tpu-inference directories."
   local_mounts=(
-    -v "$(pwd):/workspace/tpu_inference"
+    -v "$HOME/vllm:/workspace/vllm"
+    -v "$HOME/tpu-inference:/workspace/tpu_inference"
   )
-  if [ -d "$HOME/vllm" ] && [ -n "$(ls -A $HOME/vllm)" ]; then
-    echo "Mounting local vllm directory."
-    local_mounts+=(-v "$HOME/vllm:/workspace/vllm")
-  fi
 fi
 
 # General configs
-HOST_HF_HOME="/mnt/pd"
+HOST_HF_HOME="/mnt/disks/persist/models"
 COMMON_SIDE_PORT=8900
 
 # v6ex has 4 hosts with 4 TPUs, while v7x has 2 hosts with 2 TPU chips (4 cores). Adjust configs accordingly.

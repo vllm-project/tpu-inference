@@ -283,7 +283,9 @@ class TPUWorker:
                     f"topology_order_id={self.topology_order_id} | "
                     f"is_driver_worker={self.is_driver_worker} | "
                     f"hbm={utils.hbm_usage_gb(self.devices)}GiB |"
-                    f"self.devices={self.devices}")
+                    f"self.devices={self.devices} | "
+                    f"total devices={jax.devices()} | "
+                    f"local_devices={jax.local_devices()}")
         vllm_utils.report_usage_stats(self.vllm_config)
 
     def initialize_pp_transfer_connect(self):

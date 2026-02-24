@@ -37,15 +37,14 @@ from vllm.config import VllmConfig
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
 from tpu_inference import envs, utils
-from tpu_inference.layers.common.utils import general_device_put
+from tpu_inference.layers.common.utils import (cpu_mesh_context,
+                                               general_device_put)
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils import file_utils
 
 logger = init_logger(__name__)
-# Lazy initialized, since device might not be ready at import time.
-_cpu_mesh = None
 
 HF_WEIGHTS_FORMAT = "*.safetensors"
 
@@ -220,7 +219,6 @@ def shard_put(x: jax.Array,
     # Single device sharding requires this special handling
     # to avoid the recursive jit error.
     if mesh is None:
-        print(f"clkbp {mesh=} using {get_mesh()=}")
         mesh = get_mesh()
 
     x_mesh = None
@@ -233,11 +231,9 @@ def shard_put(x: jax.Array,
                                   source_mesh=x_mesh)
 
     if isinstance(shardings, tuple):
-        s = NamedSharding(mesh, P(*shardings))
-        print(
-            f"clkbp {mesh=}, {s.is_fully_addressable=} {mesh._internal_device_list=} {mesh._internal_device_list.is_fully_addressable=} {x.is_fully_addressable=} {x.sharding=}"
-        )
-        return general_device_put(x, s, source_mesh=x_mesh)
+        return general_device_put(x,
+                                  NamedSharding(mesh, P(*shardings)),
+                                  source_mesh=x_mesh)
     else:
         return general_device_put(x, shardings, source_mesh=x_mesh)
 
@@ -667,18 +663,6 @@ def transfer_state_with_mappings(src_state,
 
     tgt_state = tgt_state.from_flat_path(tgt_flat)
     return tgt_state
-
-
-def cpu_mesh():
-    global _cpu_mesh
-    if _cpu_mesh is None:
-        _cpu_mesh = Mesh(jax.devices("cpu")[:1], ("cpu", ))
-    return _cpu_mesh
-
-
-def cpu_mesh_context():
-    """A context to enforce using CPU mesh, used for loading weights on CPU."""
-    return jax.set_mesh(cpu_mesh())
 
 
 class BaseWeightLoader:
