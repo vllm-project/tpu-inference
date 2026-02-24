@@ -126,6 +126,8 @@ def general_device_put(tensor: jax.Array,
         shape = t.shape
         ctx = nullcontext() if source_mesh is None else jax.set_mesh(
             source_mesh)
+        # `t[i]` needs to be operated in the same mesh as `t`, which is provided as
+        # `source_mesh`.
         with ctx:
             x_split = [
                 jax.device_put(t[i], device) for device, i in
@@ -136,8 +138,10 @@ def general_device_put(tensor: jax.Array,
                                                                 x_split,
                                                                 dtype=t.dtype)
         if layout is not None:
-            global_array = jax.device_put(global_array,
-                                          Format(layout, sharding))
+            dst_mesh = sharding.mesh
+            with jax.set_mesh(dst_mesh):
+                global_array = jax.device_put(global_array,
+                                              Format(layout, sharding))
         return global_array
 
     return jax.tree_util.tree_map(_put, tensor)
