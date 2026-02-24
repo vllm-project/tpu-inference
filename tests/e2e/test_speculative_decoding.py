@@ -25,8 +25,8 @@ from vllm import LLM, SamplingParams
 
 # TODO (Qiliang Cui): remove this when XLA fixes the recursive jit call issue.
 def _is_v7x():
-    # jax.devices() will hang so use IS_FOR_V7X to indicate the version.
-    return os.environ.get("IS_FOR_V7X", "false") == "true"
+    # jax.devices() will hang so use TPU_VERSION to indicate the version.
+    return os.environ.get("TPU_VERSION", "tpu6e") == "tpu7x"
 
 
 def _get_tensor_parallel_size():
