@@ -499,20 +499,24 @@ def gmm(
 
             acc = acc_scratch[...]
             for b_i in range(num_quant_blocks_per_tk):
-                rhs_block = loaded_rhs[b_i * quant_block_size:(b_i + 1) *
-                                       quant_block_size, ...]
+                loaded_lhs_block = loaded_lhs[..., b_i *
+                                              quant_block_size:(b_i + 1) *
+                                              quant_block_size]
+                loaded_rhs_block = loaded_rhs[b_i *
+                                              quant_block_size:(b_i + 1) *
+                                              quant_block_size, ...]
 
                 if rhs_zero_point is not None:
                     # NOTE(catswe): chain-casting as direct uint4
                     # to bf16 for awq isn't yet supported in pallas
-                    rhs_block = rhs_block.astype(jnp.int8).astype(
-                        jnp.bfloat16) - rhs_zero_point[b_i].astype(
-                            jnp.int8).astype(jnp.bfloat16)
+                    loaded_rhs_block = loaded_rhs_block.astype(
+                        jnp.int8).astype(
+                            jnp.bfloat16) - rhs_zero_point[b_i].astype(
+                                jnp.int8).astype(jnp.bfloat16)
 
                 partial_result = jnp.dot(
-                    loaded_lhs[..., b_i * quant_block_size:(b_i + 1) *
-                               quant_block_size],
-                    rhs_block,
+                    loaded_lhs_block,
+                    loaded_rhs_block,
                     preferred_element_type=jnp.float32,
                 )
                 if rhs_scale is not None:
@@ -592,9 +596,17 @@ def gmm(
         input_output_aliases = {}
     else:
         in_out_block_spec = out_block_spec
-        # rhs_zero_point is inserted before existing_out in in_specs,
-        # shifting existing_out's position by 1.
-        input_output_aliases = {8: 0}
+        num_existing_out_leaves = len(
+            jax.tree_util.tree_leaves((
+                group_metadata,
+                group_offset,
+                lhs,
+                rhs,
+                rhs_scale,
+                rhs_zero_point,
+                rhs_bias,
+            )))
+        input_output_aliases = {num_existing_out_leaves: 0}
 
     lhs_block_spec = pl.BlockSpec((tm, tk), lhs_transform_indices)
     rhs_block_spec = pl.BlockSpec((None, tk, tn), rhs_transform_indices)

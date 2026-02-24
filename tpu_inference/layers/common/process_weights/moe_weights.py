@@ -1,4 +1,4 @@
-# Copyright 2026 Google LLC
+# Copyright 2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import functools
 from dataclasses import dataclass, fields
 
@@ -79,11 +78,11 @@ def quantize_moe_weights(
     Returns:
         Quantized fused moe weights that may have also been padded.
     """
+
     # If scale is present, it means the weights are already quantized.
-    # Ensure that weights are not quantized by checking if scales are None.
+    # Ensure that weights are not quantized by checking if scales and zero points are None.
     assert weights.w13_weight_scale is None
     assert weights.w2_weight_scale is None
-    # Zero points should not be present when quantizing from scratch.
     assert weights.w13_weight_zero_point is None
     assert weights.w2_weight_zero_point is None
 
@@ -104,7 +103,6 @@ def quantize_moe_weights(
     w13_pad_widths = [[0, 0] for _ in range(3)]
     w13_pad_widths[1][1] = 2 * (intermediate_size - orig_intermediate_size)
     w13_pad_widths[2][1] = hidden_size - orig_hidden_size
-
     w2_pad_widths = [[0, 0] for _ in range(3)]
     w2_pad_widths[1][1] = hidden_size - orig_hidden_size
     w2_pad_widths[2][1] = intermediate_size - orig_intermediate_size
@@ -128,6 +126,7 @@ def quantize_moe_weights(
     weights.w2_weight = w2_weight
     weights.w2_weight_scale = w2_weight_scale
     weights.w2_weight_zero_point = None
+
     return weights
 
 
@@ -136,7 +135,6 @@ def process_moe_weights(
     moe_backend: MoEBackend,
     w13_reorder_size: int | None = None,
     w13_interleave: bool = False,
-    transposed: bool = False,
 ) -> FusedMoEWeights:
     """Process fused moe weights to a layout that moe backend expects.
 
@@ -150,9 +148,6 @@ def process_moe_weights(
         w13_interleave: used when loaded w13_weight is stored in interleaved
             pattern where even index element is w1 and odd index element is w3.
             we uninterleave so that first half is w1 and second half is w3.
-        transposed: if True, weights are already in (E, contracting,
-            non_contracting) layout (e.g. AWQ's is_transposed=True format),
-            so the internal transpose is skipped.
 
     Returns:
         MoE weights that are processed for specified backend.
@@ -390,7 +385,7 @@ def shard_moe_weights(
             else:
                 w2_weight_scale_p_spec = P(None, ShardingAxisName.MLP_TENSOR)
 
-            # Same logic for as w2_weight_scale.
+            # Same logic as w2_weight_scale.
             if (weights.w2_weight_zero_point is not None
                     and weights.w2_weight_zero_point.shape[1] == 1):
                 w2_weight_zp_p_spec = P()
@@ -442,7 +437,6 @@ def shard_moe_weights(
                 w2_weight_zero_point=Layout((0, 1, 2, 3)),
                 w2_bias=Layout((0, 1, 2)),
             )
-
         case MoEBackend.GMM_TP | MoEBackend.GMM_EP:
             weight_layouts = FusedMoEWeights(
                 w13_weight=Layout((0, 1, 2)),

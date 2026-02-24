@@ -218,7 +218,7 @@ class GmmTest(jtu.JaxTestCase):
             group_offset=group_offset,
         )
 
-        if is_supported_by_gmm_v2(lhs, rhs_q, rhs_scale):
+        if is_supported_by_gmm_v2(lhs, rhs_q, rhs_scale, None):
             gmm_fn = gmm_v2
         else:
             gmm_fn = gmm

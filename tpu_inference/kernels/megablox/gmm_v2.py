@@ -791,7 +791,10 @@ def gmm_v2(
 
 
 def is_supported_by_gmm_v2(lhs: jax.Array, rhs: jax.Array,
-                           rhs_scale: jax.Array | None) -> bool:
+                           rhs_scale: jax.Array | None,
+                           rhs_zero_point: jax.Array | None) -> bool:
+    if rhs_zero_point is not None:
+        return False
     if rhs_scale is not None and rhs_scale.shape[1] != 1:
         # gmm_v2 does not support subchannel quantization.
         return False
