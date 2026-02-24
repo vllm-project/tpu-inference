@@ -137,21 +137,21 @@ Below is the live status of our supported models, features, and kernels. Click o
 | Feature | CorrectnessTest | PerformanceTest |
 | --- | --- | --- |
 | Chunked&nbsp;Prefill | ✅ | ✅ |
-| DCN-based&nbsp;P/D&nbsp;disaggregation | unverified | ✅ |
-| KV&nbsp;cache&nbsp;host&nbsp;offloading | unverified | unverified |
+| DCN-based&nbsp;P/D&nbsp;disaggregation | ❓ | ✅ |
+| KV&nbsp;cache&nbsp;host&nbsp;offloading | ❓ | ❓ |
 | LoRA_Torch | ✅ | ✅ |
 | Multimodal&nbsp;Inputs | ✅ | ✅ |
 | Out-of-tree&nbsp;model&nbsp;support | ✅ | ✅ |
 | Prefix&nbsp;Caching | ✅ | ✅ |
 | Single&nbsp;Program&nbsp;Multi&nbsp;Data | ✅ | ✅ |
-| Single-Host-P-D-disaggregation | N/A | N/A |
+| Single-Host-P-D-disaggregation | - | - |
 | Speculative&nbsp;Decoding:&nbsp;Eagle3 | ✅ | ✅ |
 | Speculative&nbsp;Decoding:&nbsp;Ngram | ✅ | ✅ |
 | async&nbsp;scheduler | ✅ | ✅ |
-| data_parallelism | ✅ | unverified |
-| runai_model_streamer_loader | ✅ | N/A |
-| sampling_params | ✅ | N/A |
-| structured_decoding | ✅ | N/A |
+| data_parallelism | ✅ | ❓ |
+| runai_model_streamer_loader | ✅ | - |
+| sampling_params | ✅ | - |
+| structured_decoding | ✅ | - |
 
 <!-- END: core_features -->
 
@@ -164,12 +164,12 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- START: parallelism -->
 | Feature | CorrectnessTest | PerformanceTest |
 | --- | --- | --- |
-| CP | unverified | unverified |
-| DP | ✅ | unverified |
-| EP | ✅ | unverified |
+| CP | ❓ | ❓ |
+| DP | ✅ | ❓ |
+| EP | ✅ | ❓ |
 | PP | ✅ | ✅ |
-| SP | unverified | unverified |
-| TP | ✅ | unverified |
+| SP | ❓ | ❓ |
+| TP | ✅ | ❓ |
 
 <!-- END: parallelism -->
 
@@ -182,12 +182,12 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- START: quantization -->
 | Feature | Recommended&nbsp;TPU&nbsp;Generations | CorrectnessTest | PerformanceTest |
 | --- | --- | --- | --- |
-| AWQ&nbsp;INT4 | v5,&nbsp;v6 | unverified | unverified |
-| FP4&nbsp;W4A16 | v7 | unverified | unverified |
-| FP8&nbsp;W8A8 | v7 | unverified | unverified |
-| FP8&nbsp;W8A16 | v7 | unverified | unverified |
-| INT4&nbsp;W4A16 | v5,&nbsp;v6 | unverified | unverified |
-| INT8&nbsp;W8A8 | v5,&nbsp;v6 | unverified | unverified |
+| AWQ&nbsp;INT4 | v5,&nbsp;v6 | ❓ | ❓ |
+| FP4&nbsp;W4A16 | v7 | ❓ | ❓ |
+| FP8&nbsp;W8A8 | v7 | ❓ | ❓ |
+| FP8&nbsp;W8A16 | v7 | ❓ | ❓ |
+| INT4&nbsp;W4A16 | v5,&nbsp;v6 | ❓ | ❓ |
+| INT8&nbsp;W8A8 | v5,&nbsp;v6 | ❓ | ❓ |
 
 <!-- END: quantization -->
 
