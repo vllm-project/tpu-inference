@@ -136,22 +136,22 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- START: core_features -->
 | Feature | CorrectnessTest | PerformanceTest |
 | --- | --- | --- |
-| Chunked&nbsp;Prefill | ✅ | ✅ |
-| DCN-based&nbsp;P/D&nbsp;disaggregation | ❓ | ✅ |
-| KV&nbsp;cache&nbsp;host&nbsp;offloading | ❓ | ❓ |
-| LoRA_Torch | ✅ | ✅ |
-| Multimodal&nbsp;Inputs | ✅ | ✅ |
-| Out-of-tree&nbsp;model&nbsp;support | ✅ | ✅ |
-| Prefix&nbsp;Caching | ✅ | ✅ |
-| Single&nbsp;Program&nbsp;Multi&nbsp;Data | ✅ | ✅ |
+| Chunked&nbsp;Prefill | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| DCN-based&nbsp;P/D&nbsp;disaggregation | ❓&nbsp;Untested | ✅&nbsp;Passing |
+| KV&nbsp;cache&nbsp;host&nbsp;offloading | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| LoRA_Torch | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| Multimodal&nbsp;Inputs | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| Out-of-tree&nbsp;model&nbsp;support | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| Prefix&nbsp;Caching | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| Single&nbsp;Program&nbsp;Multi&nbsp;Data | ✅&nbsp;Passing | ✅&nbsp;Passing |
 | Single-Host-P-D-disaggregation | - | - |
-| Speculative&nbsp;Decoding:&nbsp;Eagle3 | ✅ | ✅ |
-| Speculative&nbsp;Decoding:&nbsp;Ngram | ✅ | ✅ |
-| async&nbsp;scheduler | ✅ | ✅ |
-| data_parallelism | ✅ | ❓ |
-| runai_model_streamer_loader | ✅ | - |
-| sampling_params | ✅ | - |
-| structured_decoding | ✅ | - |
+| Speculative&nbsp;Decoding:&nbsp;Eagle3 | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| Speculative&nbsp;Decoding:&nbsp;Ngram | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| async&nbsp;scheduler | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| data_parallelism | ✅&nbsp;Passing | ❓&nbsp;Untested |
+| runai_model_streamer_loader | ✅&nbsp;Passing | - |
+| sampling_params | ✅&nbsp;Passing | - |
+| structured_decoding | ✅&nbsp;Passing | - |
 
 <!-- END: core_features -->
 
@@ -164,12 +164,12 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- START: parallelism -->
 | Feature | CorrectnessTest | PerformanceTest |
 | --- | --- | --- |
-| CP | ❓ | ❓ |
-| DP | ✅ | ❓ |
-| EP | ✅ | ❓ |
-| PP | ✅ | ✅ |
-| SP | ❓ | ❓ |
-| TP | ✅ | ❓ |
+| CP | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| DP | ✅&nbsp;Passing | ❓&nbsp;Untested |
+| EP | ✅&nbsp;Passing | ❓&nbsp;Untested |
+| PP | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| SP | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| TP | ✅&nbsp;Passing | ❓&nbsp;Untested |
 
 <!-- END: parallelism -->
 
@@ -182,12 +182,12 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- START: quantization -->
 | Feature | Recommended&nbsp;TPU&nbsp;Generations | CorrectnessTest | PerformanceTest |
 | --- | --- | --- | --- |
-| AWQ&nbsp;INT4 | v5,&nbsp;v6 | ❓ | ❓ |
-| FP4&nbsp;W4A16 | v7 | ❓ | ❓ |
-| FP8&nbsp;W8A8 | v7 | ❓ | ❓ |
-| FP8&nbsp;W8A16 | v7 | ❓ | ❓ |
-| INT4&nbsp;W4A16 | v5,&nbsp;v6 | ❓ | ❓ |
-| INT8&nbsp;W8A8 | v5,&nbsp;v6 | ❓ | ❓ |
+| AWQ&nbsp;INT4 | v5,&nbsp;v6 | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| FP4&nbsp;W4A16 | v7 | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| FP8&nbsp;W8A8 | v7 | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| FP8&nbsp;W8A16 | v7 | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| INT4&nbsp;W4A16 | v5,&nbsp;v6 | ❓&nbsp;Untested | ❓&nbsp;Untested |
+| INT8&nbsp;W8A8 | v5,&nbsp;v6 | ❓&nbsp;Untested | ❓&nbsp;Untested |
 
 <!-- END: quantization -->
 

@@ -1,7 +1,7 @@
 Feature,Recommended TPU Generations,CorrectnessTest,PerformanceTest
-AWQ INT4,"v5, v6",❓,❓
-FP4 W4A16,v7,❓,❓
-FP8 W8A8,v7,❓,❓
-FP8 W8A16,v7,❓,❓
-INT4 W4A16,"v5, v6",❓,❓
-INT8 W8A8,"v5, v6",❓,❓
+AWQ INT4,"v5, v6",❓ Untested,❓ Untested
+FP4 W4A16,v7,❓ Untested,❓ Untested
+FP8 W8A8,v7,❓ Untested,❓ Untested
+FP8 W8A16,v7,❓ Untested,❓ Untested
+INT4 W4A16,"v5, v6",❓ Untested,❓ Untested
+INT8 W8A8,"v5, v6",❓ Untested,❓ Untested

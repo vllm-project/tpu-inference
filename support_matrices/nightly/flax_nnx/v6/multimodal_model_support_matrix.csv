@@ -1,4 +1,4 @@
 Model,UnitTest,Accuracy/Correctness,Benchmark
-meta-llama/Llama-4-Maverick-17B-128E-Instruct,❓,❓,❓
-Qwen/Qwen2.5-VL-7B-Instruct,✅,✅,✅
-Qwen/Qwen3-Omni-30B-A3B-Instruct,❓,❓,❓
+meta-llama/Llama-4-Maverick-17B-128E-Instruct,❓ Untested,❓ Untested,❓ Untested
+Qwen/Qwen2.5-VL-7B-Instruct,✅ Passing,✅ Passing,✅ Passing
+Qwen/Qwen3-Omni-30B-A3B-Instruct,❓ Untested,❓ Untested,❓ Untested
