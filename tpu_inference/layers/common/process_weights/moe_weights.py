@@ -80,7 +80,7 @@ def quantize_moe_weights(
     """
 
     # If scale is present, it means the weights are already quantized.
-    # Ensure that weights are not quantized by checking if scales and zero points are None.
+    # Ensure that weights are not quantized by checking if scales are None.
     assert weights.w13_weight_scale is None
     assert weights.w2_weight_scale is None
     assert weights.w13_weight_zero_point is None
@@ -97,6 +97,7 @@ def quantize_moe_weights(
         w13_block_size = w2_block_size = block_size
 
     _, orig_hidden_size, orig_intermediate_size = w2_weight.shape
+
     hidden_size = align_to(orig_hidden_size, w13_block_size)
     intermediate_size = align_to(orig_intermediate_size, w2_block_size)
 
