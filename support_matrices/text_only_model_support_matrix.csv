@@ -1,12 +1,12 @@
 Model,UnitTest,Accuracy/Correctness,Benchmark
-"moonshotai/Kimi-K2-Thinking",unverified,unverified,unverified
-"Qwen/Qwen3-Coder-480B-A35B-Instruct",unverified,unverified,unverified
-"meta-llama/Llama-3.3-70B-Instruct",✅,✅,✅
-"Qwen/Qwen3-4B",✅,✅,✅
-"google/gemma-3-27b-it",✅,✅,✅
-"Qwen/Qwen3-32B",✅,✅,✅
-"deepseek-ai/DeepSeek-V3.1",unverified,unverified,unverified
-"meta-llama/Llama-Guard-4-12B",✅,✅,✅
-"openai/gpt-oss-120b",unverified,unverified,unverified
-"meta-llama/Llama-3.1-8B-Instruct",✅,✅,✅
-"Qwen/Qwen3-30B-A3B",✅,✅,✅
+moonshotai/Kimi-K2-Thinking,❓ Untested,❓ Untested,❓ Untested
+Qwen/Qwen3-Coder-480B-A35B-Instruct,❓ Untested,❓ Untested,❓ Untested
+meta-llama/Llama-3.3-70B-Instruct,✅ Passing,✅ Passing,✅ Passing
+Qwen/Qwen3-4B,✅ Passing,✅ Passing,✅ Passing
+google/gemma-3-27b-it,✅ Passing,✅ Passing,✅ Passing
+Qwen/Qwen3-32B,✅ Passing,✅ Passing,✅ Passing
+deepseek-ai/DeepSeek-V3.1,❓ Untested,❓ Untested,❓ Untested
+meta-llama/Llama-Guard-4-12B,✅ Passing,✅ Passing,✅ Passing
+openai/gpt-oss-120b,❓ Untested,❓ Untested,❓ Untested
+meta-llama/Llama-3.1-8B-Instruct,✅ Passing,✅ Passing,✅ Passing
+Qwen/Qwen3-30B-A3B,✅ Passing,✅ Passing,✅ Passing
