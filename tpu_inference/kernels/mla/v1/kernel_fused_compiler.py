@@ -835,6 +835,7 @@ def mla_ragged_paged_attention(
             compiler_params=pltpu.CompilerParams(
                 dimension_semantics=("arbitrary", ),
                 vmem_limit_bytes=vmem_limit_bytes,
+                disable_bounds_checks=True,
             ),
             out_shape=[
                 jax.ShapeDtypeStruct(shape=ql_nope.shape, dtype=ql_nope.dtype),

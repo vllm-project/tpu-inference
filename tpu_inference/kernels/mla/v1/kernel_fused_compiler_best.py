@@ -70,15 +70,22 @@ def _mla_ragged_paged_attention_kernel(
     sem_ids_ref,  # [3] (bq_sem_idx, bkv_sem_idx, bo_sem_idx) # Memory: SMEM
     bo_ids_ref,  # [4] (bo_sem_0_seq_idx, bo_sem_1_seq_idx, bo_sem_0_bo_idx, bo_sem_1_bo_idx) # Memory: SMEM
     bkv_update_ids_ref,  # [6] # Memory: SMEM
+    # ── Standard Attention Inputs ─────────────────────────────────────────
     # Input
     ql_nope_hbm_ref,  # [max_num_tokens, num_q_heads_per_q_packing, q_packing, lkv_dim] # Memory: HBM
     q_pe_hbm_ref,  # [max_num_tokens, num_q_heads_per_q_packing, q_packing, r_dim] # Memory: HBM
+    # ── [ADDED: Fused KV Cache Update] New compressed KV token inputs ────
     new_kv_c_hbm_ref,  # [max_num_tokens_per_kv_packing, kv_packing, lkv_dim] # Memory: HBM
     new_k_pe_hbm_ref,  # [max_num_tokens_per_kv_packing, kv_packing, r_dim] # Memory: HBM
+    # ─────────────────────────────────────────────────────────────────────
     cache_kv_hbm_ref,  # [total_num_pages, page_size_per_kv_packing, kv_packing, align_to(lkv_dim + r_dim, 128)] # Memory: HBM
+    # ── Standard Attention Output ─────────────────────────────────────────
     # Output
     o_hbm_ref,  # [max_num_tokens, num_q_heads_per_q_packing, q_packing, lkv_dim] # Memory: HBM
+    # ── [ADDED: Fused KV Cache Update] Updated cache written back in-place
     updated_cache_kv_hbm_ref,  # [total_num_pages, page_size_per_kv_packing, kv_packing, align_to(lkv_dim + r_dim, 128)] # Memory: HBM
+    # ─────────────────────────────────────────────────────────────────────
+    # ── Standard Attention Scratch (double-buffered VMEM) ─────────────────
     # Scratch
     bkvc_x2_ref,  # [2, bkv_sz_per_kv_packing, kv_packing, lkv_dim] # Memory: VMEM
     bkpe_x2_ref,  # [2, bkv_sz_per_kv_packing, kv_packing, r_dim] # Memory: VMEM
@@ -89,10 +96,14 @@ def _mla_ragged_paged_attention_kernel(
     l_ref,  # [bq_sz * num_q_heads, 128] # Memory: VMEM
     m_ref,  # [bq_sz * num_q_heads, 128] # Memory: VMEM
     acc_ref,  # [bq_sz * num_q_heads, lkv_dim] # Memory: VMEM
-    # Update Scratch
-    existing_cache_scratch_ref,  # [kv_packing, kv_dim] # Memory: VMEM
-    new_kv_c_scratch_ref,        # [scratch_size_kv] # Memory: VMEM
-    new_k_pe_scratch_ref,        # [scratch_size_pe] # Memory: VMEM
+    # ── [ADDED: Fused KV Cache Update] RMW staging scratch ─────────────
+    # existing_cache_scratch_ref : one cache row (kv_packing × kv_dim) for RMW.
+    # new_kv_c/pe_scratch_ref    : 8-row-aligned DMA staging buffers
+    #   (TPU DMA requires 8-row address alignment for new_kv_c / new_k_pe).
+    existing_cache_scratch_ref,  # [1, kv_packing, kv_dim]       # Memory: VMEM
+    new_kv_c_scratch_ref,        # [8, kv_packing, lkv_dim]      # Memory: VMEM
+    new_k_pe_scratch_ref,        # [8, kv_packing, r_dim]        # Memory: VMEM
+    # ─────────────────────────────────────────────────────────────────────
     *,
     sm_scale: float,
     sliding_window: int | None = None,
@@ -152,7 +163,22 @@ def _mla_ragged_paged_attention_kernel(
             cp.start()
         return cp
 
-    # Fused Update Logic (RMW)
+    # ╔══════════════════════════════════════════════════════════════════════╗
+    # ║  [ADDED: Fused KV Cache Update]                                     ║
+    # ║  Writes the current sequence's new compressed KV latent vectors     ║
+    # ║  (new_kv_c, new_k_pe) directly into cache_kv *inside* the Pallas   ║
+    # ║  kernel via a per-token Read-Modify-Write (RMW) loop.               ║
+    # ║                                                                     ║
+    # ║  Per token:                                                         ║
+    # ║    1. Async-DMA an 8-row-aligned block of new_kv from HBM → VMEM   ║
+    # ║    2. Extract the token's value via select_tree (dynamic indexing)  ║
+    # ║    3. DMA-load the existing cache line (HBM → VMEM)                ║
+    # ║    4. Column-masked RMW: update lkv_dim slice, then r_dim slice     ║
+    # ║    5. DMA-write the modified line back to updated_cache_kv HBM     ║
+    # ║                                                                     ║
+    # ║  Eliminates the separate update_kv_cache() host call and its       ║
+    # ║  associated HBM round-trip between attention and cache update.      ║
+    # ╚══════════════════════════════════════════════════════════════════════╝
     def update_kv_cache_block():
         # Helper for dynamic selection
         def select_tree(index, candidates):
@@ -610,8 +636,10 @@ def _mla_ragged_paged_attention_kernel(
     def prologue():
         pass
 
+    # ── [ADDED: Fused KV Cache Update] RMW for this sequence, runs before attention ──
     update_kv_cache_block()
-    
+    # ─────────────────────────────────────────────────────────────────────────────────
+
     @pl.when(seq_idx == 0)
     def start_prefetch():
         start_fetch_bq(0, 0, 0)
@@ -736,9 +764,11 @@ def mla_ragged_paged_attention(
     ql_nope = prepare_q_inputs(ql_nope)
     q_pe = prepare_q_inputs(q_pe)
     
-    # We pass new_kv_c and new_k_pe prepared for the kernel
-    new_kv_c_prepared = prepare_kv_inputs(new_kv_c) # [tokens/P, P, D]
-    new_k_pe_prepared = prepare_kv_inputs(new_k_pe)
+    # ── [ADDED: Fused KV Cache Update] Reshape/pad new KV inputs for kernel DMA
+    # Produces [ceil(tokens/kv_packing), kv_packing, dim] with 8-row row-alignment
+    # so the in-kernel async DMA loads satisfy TPU address-alignment constraints.
+    new_kv_c_prepared = prepare_kv_inputs(new_kv_c)  # [tokens/P, P, lkv_dim]
+    new_k_pe_prepared = prepare_kv_inputs(new_k_pe)  # [tokens/P, P, r_dim]
     
     lkv_dim = new_kv_c_prepared.shape[-1]
     r_dim = new_k_pe_prepared.shape[-1]
@@ -774,12 +804,16 @@ def mla_ragged_paged_attention(
     m_scratch = l_scratch
     acc_scratch = pltpu.VMEM((bq_sz * num_q_heads_per_q_packing * q_packing, lkv_dim), jnp.float32)
     
-    # Scratch for RMW update
+    # ── [ADDED: Fused KV Cache Update] VMEM scratch allocations ─────────
+    # existing_cache_scratch : holds one cache line (kv_packing rows × kv_dim)
+    #   during the per-token read-modify-write cycle.
+    # new_kv_c/pe_scratch    : 8-row-aligned staging buffers for DMA loads from
+    #   new_kv_c_hbm_ref / new_k_pe_hbm_ref (8-row alignment required by TPU DMA).
     kv_dim = lkv_dim + r_dim
     existing_cache_scratch = pltpu.VMEM((1, kv_packing, kv_dim), cache_kv.dtype)
-    # Scratch for loading new KVs: [8, kv_packing, dim]
     new_kv_c_scratch = pltpu.VMEM((8, kv_packing, lkv_dim), new_kv_c_prepared.dtype)
     new_k_pe_scratch = pltpu.VMEM((8, kv_packing, r_dim), new_k_pe_prepared.dtype)
+    # ─────────────────────────────────────────────────────────────────────
 
     scratch_shapes = [
         bkvc_double_buf,
@@ -832,16 +866,30 @@ def mla_ragged_paged_attention(
                 grid=grid,
                 scratch_shapes=scratch_shapes,
             ),
+            # ── [COMPILER] Pallas compiler configuration ──────────────────────
+            # dimension_semantics="arbitrary": the grid dim maps to sequences,
+            #   not a tensor axis, so no loop-carried dependency can be assumed.
+            # disable_bounds_checks=True: [ADDED: Fused KV Cache Update]
+            #   Suppresses compile-time index assertions that are incompatible
+            #   with the dynamic page/token offsets used by the RMW update.
+            # vmem_limit_bytes: caps VMEM usage; None uses the TPU default.
+            # ─────────────────────────────────────────────────────────────────
             compiler_params=pltpu.CompilerParams(
                 dimension_semantics=("arbitrary", ),
                 vmem_limit_bytes=vmem_limit_bytes,
+                disable_bounds_checks=True,
             ),
             out_shape=[
                 jax.ShapeDtypeStruct(shape=ql_nope.shape, dtype=ql_nope.dtype),
                 jax.ShapeDtypeStruct(shape=cache_kv.shape, dtype=cache_kv.dtype),
             ],
+            # ── [COMPILER / ADDED: Fused KV Cache Update] In-place buffer alias
+            # Input index 11 (cache_kv, 5th non-prefetch input after the 7
+            # scalar prefetches) is aliased to output index 1
+            # (updated_cache_kv_hbm_ref), enabling the RMW kernel to mutate
+            # the KV cache buffer in-place without an extra HBM allocation.
             input_output_aliases={
-                11: 1, # Aliasing cache_kv
+                11: 1,  # cache_kv → updated_cache_kv_hbm_ref (in-place RMW)
             },
             name=scope_name,
         ))
