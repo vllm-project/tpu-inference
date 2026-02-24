@@ -1795,25 +1795,30 @@ class TPUOffloadConnectorWorker:
         if self.use_bucketed_swap_ops:
             self._precompile_kv_swap_operations()
 
-    def _decompose_into_buckets(self, num_blocks: int) -> list[int]:
+    def _decompose_into_buckets(self, block_ids: list[int]) -> list[list[int]]:
         """
-        Decomposes a number into a sum of numbers from the BLOCK_SIZE_BUCKET_bucketed_stack_kv_cachesS
+        Decomposes a number into a sum of numbers from the BLOCK_SIZE_BUCKETS
         list using a greedy approach.
+        Return:
+            a list of block_id bucks
         """
         sorted_buckets = sorted(BLOCK_SIZE_BUCKETS, reverse=True)
-        chunks = []
-        remaining = num_blocks
+        decomposed_blocks = []
+        offset = 0
+        remaining = len(block_ids)
+
         while remaining > 0:
             for bucket_size in sorted_buckets:
                 if remaining >= bucket_size:
-                    chunks.append(bucket_size)
+                    decomposed_blocks.append(block_ids[offset:offset +
+                                                       bucket_size])
+                    offset += bucket_size
                     remaining -= bucket_size
                     break
             else:
                 # This should not happen if 1 is in the buckets
-                raise ValueError(
-                    "Could not decompose number with the given buckets.")
-        return chunks
+                raise ValueError("Could not decompose with given buckets.")
+        return decomposed_blocks
 
     def _precompile_kv_swap_operations(self):
         """
@@ -1856,7 +1861,7 @@ class TPUOffloadConnectorWorker:
     def _bucketed_stack_kv_caches(
         self,
         kv_caches: list[jax.Array],
-        block_ids: jax.Array,
+        block_ids: list[int],
     ) -> list[jax.Array]:
         """
         Gathers KV cache data for the given block_ids by breaking the operation
@@ -1867,31 +1872,31 @@ class TPUOffloadConnectorWorker:
         if num_blocks == 0:
             return []
         if num_blocks in BLOCK_SIZE_BUCKETS:
-            return stack_kv_cache_cross_layers(kv_caches, block_ids,
+            block_ids_arr = jnp.array(block_ids)
+            return stack_kv_cache_cross_layers(kv_caches, block_ids_arr,
                                                num_blocks)
 
         # 2. Report the latency of decomposed_block_sizes
         with GATHER_DECOMPOSE_LATENCY.labels(
                 num_blocks=str(num_blocks)).time():
-            decomposed_block_sizes = self._decompose_into_buckets(num_blocks)
+            decomposed_block_buckets = self._decompose_into_buckets(block_ids)
+            decomposed_block_slice_arr = [
+                jnp.array(x) for x in decomposed_block_buckets
+            ]
         logger.info(
-            f"Decomposing gather for {num_blocks} blocks into bucket sizes {decomposed_block_sizes}"
+            f"Decomposing gather for {num_blocks} blocks into buckets: {decomposed_block_buckets}"
         )
         gathered_chunks = []
-        block_offset = 0
-        for decomposed_block_size in decomposed_block_sizes:
-            with GATHER_SLICE_LATENCY.labels(
-                    num_blocks=str(decomposed_block_size)).time():
-                block_slice = jax.lax.dynamic_slice_in_dim(
-                    block_ids, block_offset, decomposed_block_size, axis=0)
+        for i, decomposed_block_bucket in enumerate(decomposed_block_buckets):
+            _num_blocks = len(decomposed_block_bucket)
+            block_slice = decomposed_block_slice_arr[i]
             with GATHER_CHUNK_LATENCY.labels(
-                    num_blocks=str(decomposed_block_size)).time():
+                    num_blocks=str(_num_blocks)).time():
                 gathered_chunk = stack_kv_cache_cross_layers(
-                    kv_caches, block_slice, decomposed_block_size)
+                    kv_caches, block_slice, len(decomposed_block_bucket))
             with GATHER_APPEND_LATENCY.labels(
-                    num_blocks=str(decomposed_block_size)).time():
+                    num_blocks=str(_num_blocks)).time():
                 gathered_chunks.extend(gathered_chunk)
-                block_offset += decomposed_block_size
 
         return gathered_chunks
 
@@ -1899,7 +1904,7 @@ class TPUOffloadConnectorWorker:
         self,
         kv_caches: list[jax.Array],
         kv_cache_slices: list[list[jax.Array]],
-        dst_blocks: jax.Array,
+        dst_blocks: list[int],
     ) -> list[jax.Array]:
         """
         Inserts KV cache slices into the main cache in bucket-aligned chunks.
@@ -1908,26 +1913,29 @@ class TPUOffloadConnectorWorker:
         if num_blocks == 0:
             return kv_caches
         if num_blocks in BLOCK_SIZE_BUCKETS:
-            return update_kv_caches(kv_caches, kv_cache_slices, dst_blocks,
+            dst_blocks_arr = jnp.array(dst_blocks)
+            return update_kv_caches(kv_caches, kv_cache_slices, dst_blocks_arr,
                                     self.stacked_kv_block_dim_nums)
 
-        decomposed_block_sizes = self._decompose_into_buckets(num_blocks)
+        decomposed_block_buckets = self._decompose_into_buckets(dst_blocks)
+        decomposed_block_slice_arr = [
+            jnp.array(x) for x in decomposed_block_buckets
+        ]
         logger.info(
-            f"Decomposing insert for {num_blocks} blocks into bucket sizes {decomposed_block_sizes}"
+            f"Decomposing insert for {num_blocks} blocks into bucket: {decomposed_block_buckets}"
         )
 
         updated_kv_caches = kv_caches
         block_offset = 0
-        for decomposed_block_size in decomposed_block_sizes:
-            slices_for_bucket = kv_cache_slices[block_offset:block_offset +
-                                                decomposed_block_size]
-            dst_blocks_for_bucket = jax.lax.dynamic_slice_in_dim(
-                dst_blocks, block_offset, decomposed_block_size, axis=0)
+        for i, decomposed_block_bucket in enumerate(decomposed_block_buckets):
+            bucket_size = len(decomposed_block_bucket)
+            next_offset = block_offset + bucket_size
+            slices_for_bucket = kv_cache_slices[block_offset:next_offset]
+            dst_blocks_for_bucket = decomposed_block_slice_arr[i]
             updated_kv_caches = update_kv_caches(
                 updated_kv_caches, slices_for_bucket, dst_blocks_for_bucket,
                 self.stacked_kv_block_dim_nums)
-
-            block_offset += decomposed_block_size
+            block_offset = next_offset
 
         return updated_kv_caches
 
@@ -2031,11 +2039,11 @@ class TPUOffloadConnectorWorker:
 
         start_time = time.time()
         if not self.no_op_gather:
-            blocks_to_save_arr = jnp.array(blocks_to_save)
             if self.use_bucketed_swap_ops:
                 gathered_kv_caches_tpu = self._bucketed_stack_kv_caches(
-                    self.runner.kv_caches, blocks_to_save_arr)
+                    self.runner.kv_caches, blocks_to_save)
             else:
+                blocks_to_save_arr = jnp.array(blocks_to_save)
                 gathered_kv_caches_tpu = stack_kv_cache_cross_layers(
                     self.runner.kv_caches, blocks_to_save_arr,
                     num_blocks_to_save)
@@ -2124,11 +2132,11 @@ class TPUOffloadConnectorWorker:
         if not self.no_op_gather:
             GATHER_TPU_BLOCKS_CALLS.inc()
             start_time = time.time()
-            all_src_blocks_arr = jnp.array(all_src_blocks)
             if self.use_bucketed_swap_ops:
                 gathered_kv_caches_tpu = self._bucketed_stack_kv_caches(
-                    self.runner.kv_caches, all_src_blocks_arr)
+                    self.runner.kv_caches, all_src_blocks)
             else:
+                all_src_blocks_arr = jnp.array(all_src_blocks)
                 gathered_kv_caches_tpu = stack_kv_cache_cross_layers(
                     self.runner.kv_caches, all_src_blocks_arr,
                     total_num_blocks_to_save)
@@ -2596,7 +2604,7 @@ class TPUOffloadConnectorWorker:
                     self.runner.kv_caches = self._bucketed_update_kv_caches(
                         self.runner.kv_caches,
                         raw_chunked_kv_on_tpu,
-                        jnp.array(dst_blocks),
+                        dst_blocks,
                     )
                 else:
                     self.runner.kv_caches = update_kv_caches(
