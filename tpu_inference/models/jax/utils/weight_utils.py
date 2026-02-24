@@ -37,6 +37,7 @@ from vllm.config import VllmConfig
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
 from tpu_inference import envs, utils
+from tpu_inference.layers.common.utils import general_device_put
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.logger import init_logger
@@ -222,17 +223,23 @@ def shard_put(x: jax.Array,
         print(f"clkbp {mesh=} using {get_mesh()=}")
         mesh = get_mesh()
 
+    x_mesh = None
+    if isinstance(x.sharding, NamedSharding):
+        x_mesh = x.sharding.mesh
+
     if math.prod(mesh.axis_sizes) == 1:
-        return jax.device_put(x, mesh.devices.flatten()[0])
+        return general_device_put(x,
+                                  mesh.devices.flatten()[0],
+                                  source_mesh=x_mesh)
 
     if isinstance(shardings, tuple):
         s = NamedSharding(mesh, P(*shardings))
         print(
             f"clkbp {mesh=}, {s.is_fully_addressable=} {mesh._internal_device_list=} {mesh._internal_device_list.is_fully_addressable=} {x.is_fully_addressable=} {x.sharding=}"
         )
-        return jax.device_put(x, s)
+        return general_device_put(x, s, source_mesh=x_mesh)
     else:
-        return jax.device_put(x, shardings)
+        return general_device_put(x, shardings, source_mesh=x_mesh)
 
 
 def get_default_maps(model_config, mesh: Mesh,
