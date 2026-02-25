@@ -1,17 +1,17 @@
-Feature,v6e (flax),v6e (pytorch),v6e (default),v7x (flax),v7x (pytorch),v7x (default)
-Chunked Prefill,✅ Passing,✅ Passing,✅ Passing,✅ Passing,❓ Untested,❓ Untested
-DCN-based P/D disaggregation,✅ Passing,✅ Passing,✅ Passing,❓ Untested,✅ Passing,
-KV cache host offloading,✅ Passing,✅ Passing,✅ Passing,✅ Passing,❓ Untested,❓ Untested
-LoRA_Torch,✅ Passing,✅ Passing,✅ Passing,✅ Passing,❓ Untested,❓ Untested
-Multimodal Inputs,✅ Passing,✅ Passing,✅ Passing,✅ Passing,❓ Untested,❓ Untested
-Out-of-tree model support,✅ Passing,✅ Passing,✅ Passing,✅ Passing,❓ Untested,❓ Untested
-Prefix Caching,✅ Passing,✅ Passing,✅ Passing,✅ Passing,❓ Untested,❓ Untested
-Single Program Multi Data,✅ Passing,✅ Passing,✅ Passing,✅ Passing,❓ Untested,❓ Untested
-Single-Host-P-D-disaggregation,-,-,-,-,-,-
-Speculative Decoding: Eagle3,✅ Passing,✅ Passing,✅ Passing,✅ Passing,❓ Untested,❓ Untested
-Speculative Decoding: Ngram,✅ Passing,✅ Passing,✅ Passing,✅ Passing,❓ Untested,❓ Untested
-async scheduler,✅ Passing,✅ Passing,✅ Passing,✅ Passing,❓ Untested,❓ Untested
-data_parallelism,✅ Passing,❓ Untested,✅ Passing,✅ Passing,❓ Untested,❓ Untested
-runai_model_streamer_loader,✅ Passing,-,✅ Passing,✅ Passing,❓ Untested,❓ Untested
-sampling_params,✅ Passing,-,✅ Passing,✅ Passing,❓ Untested,❓ Untested
-structured_decoding,✅ Passing,-,✅ Passing,✅ Passing,❓ Untested,❓ Untested
+Feature,CorrectnessTest,PerformanceTest
+"Chunked Prefill",✅,✅
+"DCN-based P/D disaggregation",unverified,✅
+"KV cache host offloading",unverified,unverified
+"LoRA_Torch",✅,✅
+"Multimodal Inputs",✅,✅
+"Out-of-tree model support",✅,✅
+"Prefix Caching",✅,✅
+"Single Program Multi Data",✅,✅
+"Single-Host-P-D-disaggregation",N/A,N/A
+"Speculative Decoding: Eagle3",✅,✅
+"Speculative Decoding: Ngram",✅,✅
+"async scheduler",✅,✅
+"data_parallelism",✅,unverified
+"runai_model_streamer_loader",✅,N/A
+"sampling_params",✅,N/A
+"structured_decoding",✅,N/A
