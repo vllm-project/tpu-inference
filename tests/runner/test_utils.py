@@ -41,7 +41,7 @@ def test_min_token_size_alignment():
     assert min_token_size == 64
     assert (min_token_size & (min_token_size - 1) == 0)
 
-def test_min_req_size_alignment_for_non_p2_dp():
+def test_min_req_size_alignment():
     """
     Simulates the logic in tpu_runner.py to verify that non-power-of-two 
     Data Parallel (DP) sizes are correctly aligned.
