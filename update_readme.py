@@ -161,7 +161,7 @@ def generate_html_microbenchmark_table(headers, data):
     html.append("<table>")
     html.append("  <thead>")
     html.append("    <tr>")
-    html.append("      <th rowspan=\"2\">test</th>")
+    html.append("      <th rowspan=\"2\" width=\"300\">test</th>")
     html.append("      <th colspan=\"6\">v6e</th>")
     html.append("      <th colspan=\"6\">V7X</th>")
     html.append("    </tr>")

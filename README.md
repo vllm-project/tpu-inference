@@ -438,7 +438,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 <table>
   <thead>
     <tr>
-      <th rowspan="2">test</th>
+      <th rowspan="2" width="300">test</th>
       <th colspan="6">v6e</th>
       <th colspan="6">V7X</th>
     </tr>
