@@ -84,7 +84,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 *Last Updated: 2026-02-13 11:00 AM UTC*
 
-<details markdown="1">
+<details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
 
 > | Emoji | Status | Meaning |
