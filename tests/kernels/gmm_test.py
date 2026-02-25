@@ -107,9 +107,11 @@ def reference_gmm(
                     jnp.float32)
                 rhs_block = rhs_slice[block_start:block_end, :].astype(
                     jnp.float32)
+
                 if rhs_zero_point is not None:
                     rhs_block = rhs_block - rhs_zero_point[group][
                         block].astype(jnp.float32)
+
                 acc = jnp.einsum("bd,dh->bh", lhs_block, rhs_block)
                 if rhs_scale is not None:
                     acc *= rhs_scale[group][block]
