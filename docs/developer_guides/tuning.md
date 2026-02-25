@@ -63,6 +63,8 @@ tpu-tune rpa-v3 \
 | `--head-dim` | `128` | Dimension of each attention head. |
 | `--num-q-heads` | `128` | **Global** number of Query heads. |
 | `--num-kv-heads` | `1` | **Global** number of Key/Value heads. |
+| `--q-dtype` | `bfloat16` | Data type for query tensor (e.g., `bfloat16`). |
+| `--kv-dtype` | `bfloat16` | Data type for KV cache. Use `float8_e4m3fn` if the model runs with `--kv-cache-dtype fp8`. |
 | `--max-model-len` | `1024` | Maximum sequence length to tune for. |
 | `--tp-size` | `1` | Tensor Parallelism degree. Scales global heads to local heads automatically. |
 | `--benchmarking-method` | `amortized` | `amortized` (recommended) or `xprof`. |
