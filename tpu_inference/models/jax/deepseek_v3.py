@@ -1376,18 +1376,21 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
                     # A is the out dim of k_up_proj so we need to permute it
                     # so that it is in the expected (OutShape, InShape) order.
                     if name.endswith(".weight"):
-                        k_val = weight[:split_idx, ...].T
+                        k_val = weight[:split_idx, ...].T.contiguous()
                         # Since A is the contracting dim of v_up_proj, it is already in (OutShape, InShape) order.
                         v_val = weight[split_idx:, ...]\
-                            .reshape(N, v_head_dim, kv_lora_rank)\
-                            .permute(1, 2, 0)\
-                            .reshape(v_head_dim, -1)
+                            .reshape(attn.num_attention_heads, attn.v_head_dim, attn.kv_lora_rank)\
+                            .permute(1, 2, 0).contiguous()\
+                            .reshape(attn.v_head_dim, -1).contiguous()
                     elif name.endswith(".weight_scale_inv"):
-                        k_val = weight[:split_idx, ...].T
+                        # k_up_proj scale: (N, A_blocks) -> (A_blocks, N)
+                        k_val = weight[:split_idx, ...].T.contiguous()
+                        # v_up_proj scale: (N, A_blocks) -> (H_blocks, A_blocks, N)
+                        # Since H=128, H_blocks=1. Result: (1, A_blocks * N)
                         v_val = weight[split_idx:, ...]\
-                            .reshape(N, -1, weight.shape[-1])\
-                            .permute(1, 2, 0)\
-                            .reshape(-1, N * weight.shape[-1])
+                            .reshape(attn.num_attention_heads, -1).contiguous()\
+                            .permute(1, 0).contiguous()\
+                            .reshape(1, -1).contiguous()
                     
                     yield name.replace("kv_b_proj", "k_up_proj"), k_val
                     yield name.replace("kv_b_proj", "v_up_proj"), v_val

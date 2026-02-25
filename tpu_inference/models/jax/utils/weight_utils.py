@@ -733,10 +733,20 @@ def jax_array_from_reshaped_torch(
     """
     if reshape_dims is not None:
         torch_weight = torch_weight.reshape(reshape_dims)
+
     if permute_dims is None and torch_weight.ndim == 2:
         permute_dims = (1, 0)
+    
+    # If no-op permute is passed, don't perform a physical move.
+    if permute_dims == (0, 1) and torch_weight.ndim == 2:
+        permute_dims = None
+    
     if permute_dims is not None:
         torch_weight = torch_weight.permute(*permute_dims)
+
+    # CRITICAL: Ensure the memory is contiguous after permutation/reshape 
+    # so that the JAX conversion reads the logical order correctly.
+    torch_weight = torch_weight.contiguous()
 
     return t2j(torch_weight, use_dlpack=False).to_device(jax.devices('cpu')[0])
 

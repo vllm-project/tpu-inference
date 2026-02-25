@@ -244,7 +244,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         layer.weight = nnx.Param(
             kernel_init(rngs.params(), (self.out_features_total, self.in_features_total), param_dtype),
             weight_loader=partial(load_nnx_param_from_reshaped_torch,
-                                  reshape_dims=(self.out_features_total, self.in_features_total),
+                                  reshape_dims=None,
                                   permute_dims=(0, 1)), 
             _is_loaded=False)
         layer.weight.get_metadata()['mesh'] = mesh
@@ -261,7 +261,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             kernel_init(rngs.params(), scale_shape, layer.dtype),
             weight_loader=partial(
                 load_nnx_param_from_reshaped_torch,
-                reshape_dims=scale_shape,
+                reshape_dims=None,
                 permute_dims=(0, 1), 
                 param_name=layer.prefix + ".weight_scale_inv",
             ),
@@ -270,6 +270,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         layer.weight_scale_inv.sharding = ()
 
     def process_weights_after_loading(self, layer):
+        logger.warning(f"PROCESS_START: {layer.prefix} | weight_loaded={getattr(layer.weight, '_is_loaded', False)} | scale_loaded={getattr(layer.weight_scale_inv, '_is_loaded', False)}")
         assert isinstance(layer, JaxEinsum)
         assert self.quant_config.weight_block_size is not None
 
@@ -333,7 +334,6 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             final_w = weights.weight
             final_s = weights.weight_scale
             final_b = weights.bias
-            logger.warning(f"!!!!!!kernel_shape = {self.kernel_shape}, final_w = {final_w.shape}, final_s = {final_s.shape}")
 
         # Perform sharded device placement outside of the CPU block.
         mesh = self.linear_config.mesh
@@ -688,8 +688,13 @@ class Fp8Config(QuantizationConfig):
     def get_quant_method(self, layer: JaxModule,
                          prefix: str) -> Optional[QuantizeMethodBase]:
         if isinstance(layer, JaxEinsum):
+            # Calculate logical output size across all dimensions not shared with activations.
+            adapt_info = QuantLinearConfig.get_adapt_info(
+                einsum_str=layer.einsum_str, weight=layer.weight)
+            out_features_total = math.prod(adapt_info.out_features)
+
             linear_config = QuantLinearConfig(
-                output_sizes=[layer.weight.shape[-1]], enable_sp=False)
+                output_sizes=[out_features_total], enable_sp=False)
             if self.is_layer_skipped(prefix,
                                      ignored_layers=self.ignored_layers):
                 return UnquantizedLinearMethod(linear_config)
