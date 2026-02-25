@@ -391,8 +391,13 @@ class TPUWorker:
             options.host_tracer_level = os.getenv("HOST_TRACER_LEVEL", 1)
             jax.profiler.start_trace(self.profile_dir,
                                      profiler_options=options)
+            self._profiling = True
         else:
+            if not getattr(self, '_profiling', False):
+                logger.warning("Profiler was not started, nothing to stop.")
+                return
             jax.profiler.stop_trace()
+            self._profiling = False
 
     def load_model(self) -> None:
         self.model_runner.load_model()
