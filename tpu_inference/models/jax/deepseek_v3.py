@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 import math
 import os
 from dataclasses import InitVar, dataclass
@@ -55,8 +56,9 @@ from tpu_inference.layers.jax.rope import DeepseekScalingRotaryEmbedding
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
-from tpu_inference.models.jax.utils.weight_utils import (JaxAutoWeightsLoader,
-                                                         LoadableWithIterator)
+from tpu_inference.models.jax.utils.weight_utils import (
+    JaxAutoWeightsLoader, LoadableWithIterator,
+    load_nnx_param_from_reshaped_torch)
 
 KVCache = Tuple[jax.Array, jax.Array]
 
@@ -261,10 +263,16 @@ class DeepseekV3BaseAttention(JaxModule):
             self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
                 self.kv_cache_dtype)
 
-        self.setup_specific_layers(rngs)
-
-    def setup_specific_layers(self, *args) -> None:
-        pass
+        self.kv_b_proj = JaxEinsum(
+            einsum_str="SA,AL->SL",
+            kernel_shape=(self.kv_lora_rank,
+                          self.N * (self.qk_nope_head_dim + self.v_head_dim)),
+            rngs=rngs,
+            quant_config=self.quant_config,
+            param_dtype=self.dtype,
+            kernel_init=nnx.with_partitioning(init_fn, self.ap_sharding),
+            prefix=self.prefix + ".kv_b_proj",
+        )
 
     def compute_q_projection(self, *args) -> jax.Array:
         raise NotImplementedError
@@ -329,19 +337,6 @@ class DeepseekV3BaseAttention(JaxModule):
 @dataclass(kw_only=True)
 class DeepseekV3Attention(DeepseekV3BaseAttention):
     """Standard Multi-Head Attention (MHA) for DeepSeek models."""
-
-    def setup_specific_layers(self, rngs: nnx.Rngs) -> None:
-        weight_init = _weight_init(self.random_init)
-        self.kv_b_proj = JaxEinsum(
-            einsum_str="SA,AL->SL",
-            kernel_shape=(self.kv_lora_rank,
-                          self.N * (self.qk_nope_head_dim + self.v_head_dim)),
-            rngs=rngs,
-            quant_config=self.quant_config,
-            param_dtype=self.dtype,
-            kernel_init=nnx.with_partitioning(weight_init, self.ap_sharding),
-            prefix=self.prefix + ".kv_b_proj",
-        )
 
     def compute_q_projection(self, x_q_TD: jax.Array,
                              input_positions: jax.Array) -> jax.Array:
@@ -491,26 +486,6 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
 class DeepseekV3MLA(DeepseekV3BaseAttention):
     """Multi-Head Latent Attention (MLA) for DeepSeek V3."""
     anh_sharding: Sharding = ()
-
-    def setup_specific_layers(self, rngs: nnx.Rngs) -> None:
-        weight_init = _weight_init(self.random_init)
-        self.k_up_proj = JaxEinsum(
-            einsum_str="TNH,ANH->TNA",
-            kernel_shape=(self.kv_lora_rank, self.N, self.qk_nope_head_dim),
-            rngs=rngs,
-            quant_config=self.quant_config,
-            param_dtype=self.dtype,
-            kernel_init=nnx.with_partitioning(weight_init, self.anh_sharding),
-        )
-
-        self.v_up_proj = JaxEinsum(
-            einsum_str="TNA,ANH->TNH",
-            kernel_shape=(self.kv_lora_rank, self.N, self.v_head_dim),
-            rngs=rngs,
-            quant_config=self.quant_config,
-            param_dtype=self.dtype,
-            kernel_init=nnx.with_partitioning(weight_init, self.anh_sharding),
-        )
 
     def compute_q_projection(
             self, x_q_TD: jax.Array,
@@ -674,6 +649,19 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
         outputs_TNH = self.v_up_proj(outputs_TNA)
         return outputs_TNH
 
+    def load_weights(self, weights: Iterable) -> set:
+        loaded = set()
+        weights = dict(weights)
+        for name, param in self.named_parameters():
+            weight_loader = getattr(
+                param, "weight_loader",
+                functools.partial(load_nnx_param_from_reshaped_torch,
+                                  param_name=name))
+            weight_loader(param, weights[name])
+            loaded.add(name)
+
+        self.kv_b_proj
+
 
 @dataclass(kw_only=True)
 class DeepseekV3MLP(JaxModule):
@@ -820,8 +808,10 @@ class DeepseekV2Moe(JaxModule):
             moe_activation_ffw_td = (ShardingAxisName.MLP_DATA, None)
             moe_activation_ffw_ted = (ShardingAxisName.MLP_DATA, None,
                                       ShardingAxisName.MOE_TENSOR)
-            moe_edf_sharding = (None, ShardingAxisName.ATTN_DATA_EXPERT, ShardingAxisName.MOE_TENSOR)
-            moe_efd_sharding = (None, ShardingAxisName.MOE_TENSOR, ShardingAxisName.ATTN_DATA_EXPERT)
+            moe_edf_sharding = (None, ShardingAxisName.ATTN_DATA_EXPERT,
+                                ShardingAxisName.MOE_TENSOR)
+            moe_efd_sharding = (None, ShardingAxisName.MOE_TENSOR,
+                                ShardingAxisName.ATTN_DATA_EXPERT)
         else:
             moe_activation_ffw_td = (ShardingAxisName.MLP_DATA,
                                      ShardingAxisName.MOE_TENSOR)
