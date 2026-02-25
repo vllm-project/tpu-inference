@@ -281,5 +281,50 @@ def test_mla_disabled_kv_b_proj_lifecycle(rngs):
     # Since it's fp8 -> bf16, there might be slight precision loss, but shapes must match.
     assert layer.weight.value.shape == torch_weight.shape
 
+def test_mla_replicated_weights_lifecycle(rngs):
+    # Simulate replicate_attn_weights=True by using empty sharding ()
+    kv_lora_rank = 512
+    num_heads = 128
+    qk_nope_head_dim = 128
+    
+    hf_quant_config = {
+        "quant_method": "fp8",
+        "activation_scheme": "dynamic",
+        "weight_block_size": [128, 128],
+    }
+    fp8_config = Fp8Config(hf_quant_config)
+    original_w_sharding = () # Replicated
+    
+    layer = JaxEinsum(
+        einsum_str="TNH,ANH->TNA",
+        kernel_shape=(kv_lora_rank, num_heads, qk_nope_head_dim),
+        rngs=rngs,
+        quant_config=fp8_config,
+        prefix="model.layers.4.self_attn.k_up_proj",
+        kernel_init=nnx.with_partitioning(nnx.initializers.uniform(), original_w_sharding)
+    )
+    
+    method = layer.quant_method
+    
+    # Checkpoint logic
+    torch_weight = torch.zeros(16384, 512)
+    k_val_gen = torch_weight.T.contiguous()
+    torch_scale = torch.zeros(128, 4)
+    k_scale_gen = torch_scale.T.contiguous()
+    
+    layer.weight.weight_loader(layer.weight, k_val_gen)
+    layer.weight_scale_inv.weight_loader(layer.weight_scale_inv, k_scale_gen)
+    
+    # Process Weights
+    devices = jax.devices()
+    mesh = jax.sharding.Mesh(np.array(devices[:1]).reshape(1), ('x',))
+    method.linear_config.mesh = mesh
+    
+    with jax.set_mesh(mesh):
+        # This should not raise an IndexError
+        method.process_weights_after_loading(layer)
+        
+    assert layer.weight.value.shape == (512, 128, 128)
+
 if __name__ == "__main__":
     pytest.main([__file__])

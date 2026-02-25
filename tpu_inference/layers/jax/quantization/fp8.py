@@ -220,7 +220,9 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         self.linear_config.output_sizes = [self.out_features_total]
         
         # Preserve original sharding for requantization layout.
-        self.original_weight_sharding = _to_partition_spec(layer.weight.sharding)
+        original_w_sharding = _to_partition_spec(layer.weight.sharding)
+        # Pad with None to match kernel_shape rank so that it can be indexed safely.
+        self.original_weight_sharding = P(*(tuple(original_w_sharding) + (None,) * (len(self.kernel_shape) - len(original_w_sharding))))
 
     def create_weights_jax(self, layer: JaxModule, *weight_args, rngs,
                            **extra_weight_attrs):
