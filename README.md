@@ -324,15 +324,93 @@ Below is the live status of our supported models, features, and kernels. Click o
 <summary>Quantization Methods</summary>
 
 <!-- START: quantization -->
-| Feature | Recommended&nbsp;TPU&nbsp;Generations | CorrectnessTest | PerformanceTest |
-| --- | --- | --- | --- |
-| AWQ&nbsp;INT4 | v5,&nbsp;v6 | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| FP4&nbsp;W4A16 | v7 | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| FP8&nbsp;W8A8 | v7 | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| FP8&nbsp;W8A16 | v7 | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| INT4&nbsp;W4A16 | v5,&nbsp;v6 | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| INT8&nbsp;W8A8 | v5,&nbsp;v6 | ❓&nbsp;Untested | ❓&nbsp;Untested |
-
+<table>
+  <thead>
+    <tr>
+      <th rowspan="2">Format</th>
+      <th rowspan="2">Method</th>
+      <th rowspan="2">Recommended<br>TPU Generations</th>
+      <th colspan="3">v6e</th>
+      <th colspan="3">v7x</th>
+    </tr>
+    <tr>
+      <th>flax</th>
+      <th>pytorch</th>
+      <th>default</th>
+      <th>flax</th>
+      <th>pytorch</th>
+      <th>default</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>AWQ INT4</td>
+      <td></td>
+      <td>v5, v6</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+    </tr>
+    <tr>
+      <td>FP4 W4A16</td>
+      <td>mxfp4</td>
+      <td>v7</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+    </tr>
+    <tr>
+      <td>FP8 W8A8</td>
+      <td>compressed-tensor</td>
+      <td>v7</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+    </tr>
+    <tr>
+      <td>FP8 W8A16</td>
+      <td>compressed-tensor</td>
+      <td>v7</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+    </tr>
+    <tr>
+      <td>INT4 W4A16</td>
+      <td>awq</td>
+      <td>v5, v6</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+    </tr>
+    <tr>
+      <td>INT8 W8A8</td>
+      <td>compressed-tensor</td>
+      <td>v5, v6</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+    </tr>
+  </tbody>
+</table>
 <!-- END: quantization -->
 
 </details>

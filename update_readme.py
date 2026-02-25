@@ -91,6 +91,43 @@ def generate_html_feature_table(headers, data):
     html.append("</table>")
     return "\n".join(html)
 
+def generate_html_quantization_table(headers, data):
+    """Generates an HTML table specifically for the quantization methods matrix."""
+    if not headers: return ""
+    
+    html = []
+    html.append("<table>")
+    html.append("  <thead>")
+    html.append("    <tr>")
+    html.append("      <th rowspan=\"2\">Format</th>")
+    html.append("      <th rowspan=\"2\">Method</th>")
+    html.append("      <th rowspan=\"2\">Recommended<br>TPU Generations</th>")
+    html.append("      <th colspan=\"3\">v6e</th>")
+    html.append("      <th colspan=\"3\">v7x</th>")
+    html.append("    </tr>")
+    html.append("    <tr>")
+    html.append("      <th>flax</th>")
+    html.append("      <th>pytorch</th>")
+    html.append("      <th>default</th>")
+    html.append("      <th>flax</th>")
+    html.append("      <th>pytorch</th>")
+    html.append("      <th>default</th>")
+    html.append("    </tr>")
+    html.append("  </thead>")
+    html.append("  <tbody>")
+    
+    for row in data:
+        html.append("    <tr>")
+        # Ensure we have 9 columns worth of data (3 metadata + 6 backend columns)
+        padded_row = row + [""] * (9 - len(row))
+        for cell in padded_row[:9]:
+            html.append(f"      <td>{cell}</td>")
+        html.append("    </tr>")
+        
+    html.append("  </tbody>")
+    html.append("</table>")
+    return "\n".join(html)
+
 def update_readme():
     """Finds markers in README.md and replaces content with fresh tables."""
     with open(README_PATH, "r", encoding="utf-8") as f:
@@ -108,6 +145,8 @@ def update_readme():
         
         if section_key == "core_features":
             new_table = generate_html_feature_table(headers, all_data)
+        elif section_key == "quantization":
+            new_table = generate_html_quantization_table(headers, all_data)
         else:
             new_table = generate_markdown_table(headers, all_data)
         
