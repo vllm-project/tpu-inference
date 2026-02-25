@@ -19,7 +19,7 @@ For detailed steps on installing `vllm-tpu` with `pip` or running it as a Docker
 We recommend using [uv](https://docs.astral.sh/uv/) (`uv pip install`) instead of standard `pip` as it improves installation speed.
 
 ```shell
-pip install vllm-tpu
+uv pip install vllm-tpu
 ```
 
 ## Verify Installation
