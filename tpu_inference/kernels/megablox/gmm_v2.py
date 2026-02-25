@@ -73,6 +73,7 @@ class GmmConfigs:
     rhs_cfgs: InputConfigs
     out_dtype: jnp.dtype
     acc_dtype: jnp.dtype
+    zero_init: bool
 
 
 TileFn = Callable[[jnp.dtype, jnp.dtype, Dimensions, int], TileSizes]
@@ -455,6 +456,88 @@ def fill_metadata(
     return num_gm
 
 
+def zero_out_start(
+    out_ref: jax.Array,  # [size_m, size_n]
+    zero_ref: jax.Array,  # [tile_zero_m, num_lanes]
+    semaphore_ref: jax.Array,  # [1]
+    metadata_ref: MetadataRef,
+    num_gm: jax.Array,
+    *,
+    dims: Dimensions,
+):
+    """Zero out output rows that are not used in the computation."""
+
+    num_lanes = pltpu.get_tpu_info().num_lanes
+    assert num_lanes == zero_ref.shape[-1]
+
+    zero_dma = zero_ref.reshape(-1, dims.size_lhs_sublane, num_lanes)
+    out_dma = out_ref.reshape(-1, dims.size_lhs_sublane, dims.size_n)
+    m_chunks = zero_dma.shape[0]
+
+    start_offset = metadata_ref.gm_id_to_m_offset[0]
+    end_offset = metadata_ref.gm_id_to_m_offset[num_gm]
+
+    left_zero_start = 0
+    left_zero_end = start_offset // dims.size_lhs_sublane
+    left_zero_size = left_zero_end - left_zero_start
+    left_num_tm = pl.cdiv(left_zero_size, m_chunks)
+
+    right_zero_start = pl.cdiv(end_offset, dims.size_lhs_sublane)
+    right_zero_end = out_dma.shape[0]
+    right_zero_size = right_zero_end - right_zero_start
+    right_num_tm = pl.cdiv(right_zero_size, m_chunks)
+
+    def fill_zero(i, zero_size, *, start, end):
+        dma_start = start + i * m_chunks
+        dma_end = jnp.minimum(dma_start + m_chunks, end)
+        dma_size = dma_end - dma_start
+
+        # Static loop. Will be unrolled during compile time.
+        for n_start in range(0, dims.size_n, num_lanes):
+            n_end = min(n_start + num_lanes, dims.size_n)
+            pltpu.make_async_copy(
+                src_ref=zero_dma.at[pl.ds(0, dma_size), :, :n_end - n_start],
+                dst_ref=out_dma.at[pl.ds(dma_start, dma_size), :,
+                                   n_start:n_end],
+                sem=semaphore_ref.at[0],
+            ).start(priority=1)
+
+        return zero_size + dma_size
+
+    @jax.named_scope("left_fill_zero")
+    def left_fill_zero(i, zero_size):
+        return fill_zero(i,
+                         zero_size,
+                         start=left_zero_start,
+                         end=left_zero_end)
+
+    @jax.named_scope("right_fill_zero")
+    def right_fill_zero(i, zero_size):
+        return fill_zero(i,
+                         zero_size,
+                         start=right_zero_start,
+                         end=right_zero_end)
+
+    zero_size = lax.fori_loop(0, left_num_tm, left_fill_zero, 0)
+    zero_size = lax.fori_loop(0, right_num_tm, right_fill_zero, zero_size)
+    return zero_size
+
+
+def zero_out_end(
+    out_ref: jax.Array,  # [size_m, size_n]
+    semaphore_ref: jax.Array,  # [1]
+    zero_size: jax.Array,
+    *,
+    dims: Dimensions,
+):
+    out_dma = out_ref.reshape(-1, dims.size_lhs_sublane, dims.size_n)
+    pltpu.make_async_copy(
+        src_ref=out_dma.at[pl.ds(0, zero_size)],
+        dst_ref=out_dma.at[pl.ds(0, zero_size)],
+        sem=semaphore_ref.at[0],
+    ).wait()
+
+
 def kernel_main(
     # Scalar prefetch
     lhs_group_sizes_ref: jax.Array,  # int32[size_lhs_group]
@@ -462,13 +545,14 @@ def kernel_main(
     # In
     lhs_ref: jax.Array,  # [size_m, size_k]
     rhs_ref: WeightsRef,  # [size_group, size_k, size_n]
-    _: jax.Array,  # [size_m, size_n]
     # Out
     out_ref: jax.Array,  # [size_m, size_n]
     # Scratch memory
     partial_out_ref: jax.Array,  # [size_lhs_sublane, tile_n]
     acc_ref: jax.Array,  # [tile_m, tile_n]
     metadata_ref: MetadataRef,
+    zero_ref: jax.Array | None,  # [tile_zero_m, num_lanes]
+    semaphore_ref: jax.Array | None,  # [1]
     *,
     cfgs: GmmConfigs,
 ):
@@ -490,11 +574,12 @@ def kernel_main(
         group_offset_ref: Reference to the group offset.
         lhs_ref: Reference to the lhs.
         rhs_ref: Reference to the rhs.
-        _: Reference to out_ref alias.
         out_ref: Reference to the out.
         partial_out_ref: Reference to the partial output.
         acc_ref: Reference to the accumulator.
         metadata_ref: Reference to the metadata.
+        zero_ref: Scratch memory for storing zero values used in initialization.
+        semaphore_ref: Semaphore for zero initialization DMAs.
         cfgs: GmmConfigs.
   """
 
@@ -511,6 +596,19 @@ def kernel_main(
 
     in_specs, out_specs = generate_block_specs(metadata_ref, cfgs)
 
+    if cfgs.zero_init:
+        assert zero_ref is not None
+        assert semaphore_ref is not None
+        zero_ref[...] = jnp.zeros_like(zero_ref)
+        zero_size = zero_out_start(
+            out_ref,
+            zero_ref,
+            semaphore_ref,
+            metadata_ref,
+            num_gm,
+            dims=cfgs.dims,
+        )
+
     # Execute the inner kernel.
     pipeline_fn = pltpu.emit_pipeline(
         functools.partial(inner_kernel, cfgs=cfgs),
@@ -525,6 +623,9 @@ def kernel_main(
     out_in = out_ref.reshape(-1, cfgs.dims.size_lhs_sublane, cfgs.dims.size_n)
     scratches = [partial_out_ref, acc_ref, metadata_ref]
     pipeline_fn(lhs_in, rhs_ref, out_in, scratches=scratches)
+
+    if cfgs.zero_init:
+        zero_out_end(out_ref, semaphore_ref, zero_size, dims=cfgs.dims)
 
 
 def calculate_tiling(
@@ -731,6 +832,7 @@ def make_gmm_configs(
     out_dtype: jnp.dtype | None,
     acc_dtype: jnp.dtype | None,
     maybe_quantize_lhs: bool,
+    zero_initialize: bool,
 ):
     """Fills the GMM config for the GMM kernel."""
 
@@ -803,6 +905,7 @@ def make_gmm_configs(
         rhs_cfgs=rhs_cfgs,
         out_dtype=out_dtype,
         acc_dtype=acc_dtype,
+        zero_init=zero_initialize,
     )
 
 
@@ -813,6 +916,7 @@ def make_gmm_configs(
     "preferred_element_type",
     "acc_dtype",
     "maybe_quantize_lhs",
+    "zero_initialize",
 ])
 def gmm_v2(
     lhs: jax.Array,  # [size_m, size_k]
@@ -828,6 +932,7 @@ def gmm_v2(
     preferred_element_type: jnp.dtype | None = None,
     acc_dtype: jnp.dtype | None = None,
     maybe_quantize_lhs: bool = True,
+    zero_initialize: bool = True,
 ) -> jax.Array:
     """GMM kernel implemented with emit_pipeline.
 
@@ -848,6 +953,7 @@ def gmm_v2(
         preferred_element_type: Optional jnp.dtype for the output matrix.
         acc_dtype: Optional jnp.dtype for the accumulator.
         maybe_quantize_lhs: Quantize lhs if set to True and rhs is quantized.
+        zero_initialize: Whether to initialize unvisited output elements to zero.
 
   Returns:
         Output of shape [size_m, size_n].
@@ -876,19 +982,17 @@ def gmm_v2(
         out_dtype=preferred_element_type,
         acc_dtype=acc_dtype,
         maybe_quantize_lhs=maybe_quantize_lhs,
+        zero_initialize=zero_initialize,
     )
     dims = cfgs.dims
     tiles = cfgs.tiles
 
-    # Prepare block specs and input aliases.
-    input_aliases = 4
+    # Prepare block specs.
     rhs_scale_spec = rhs_bias_spec = None
     if rhs_scale is not None:
-        input_aliases += 1
         rhs_scale = rhs_scale.astype(jnp.float32)
         rhs_scale_spec = pl.BlockSpec(memory_space=pltpu.HBM)
     if rhs_bias is not None:
-        input_aliases += 1
         rhs_bias = rhs_bias.astype(jnp.float32)
         rhs_bias_spec = pl.BlockSpec(memory_space=pltpu.HBM)
 
@@ -907,9 +1011,33 @@ def gmm_v2(
         ),
     ]
 
-    # Prepare inputs.
-    # TODO(kyuyeunk, kunjanp): Add support for fusing zero initialization.
-    out_init = jnp.zeros((dims.size_m, dims.size_n), dtype=cfgs.out_dtype)
+    if cfgs.zero_init:
+        # TODO(kyuyeunk): Create better heuristics for determining this value.
+        target_zero_ref_bytes = 2 * 1024 * 1024
+
+        # Zero initialization is done by tiling size_m dim where each tile invokes
+        # zero initializing DMA for up-to tile_zero_m rows. This means larger
+        # tile_zero_m will result in fewer number of tiles and lead to smaller
+        # overhead. However, in order to invoke DMA call up-to tile_zero_m rows, we
+        # need to store equivalent sized memory in VMEM buffer for the duration of
+        # DMA. Storing [tile_zero_m, size_n] in buffer will trigger OOM if
+        # tile_zero_m is too large. Instead, if we set column size as num_lanes
+        # (which is smallest allowed column size for DMA) and reuse the buffer by
+        # size_n//num_lanes times in a single tile, we can significantly increase
+        # tile_zero_m without triggering OOM.
+        num_lanes = pltpu.get_tpu_info().num_lanes
+        out_bytes = jnp.dtype(cfgs.out_dtype).itemsize
+        tile_zero_m = target_zero_ref_bytes // num_lanes // out_bytes
+        tile_zero_m = min(tile_zero_m, dims.size_m)
+
+        scratch_shapes += [
+            pltpu.VMEM((tile_zero_m, num_lanes), cfgs.out_dtype),
+            pltpu.SemaphoreType.DMA((1, )),
+        ]
+    else:
+        scratch_shapes += [None, None]
+
+    out_init = jax.ShapeDtypeStruct((dims.size_m, dims.size_n), cfgs.out_dtype)
     rhs_weights = WeightsRef(weight=rhs, scale=rhs_scale, bias=rhs_bias)
 
     return pl.pallas_call(
@@ -924,22 +1052,24 @@ def gmm_v2(
                     scale=rhs_scale_spec,
                     bias=rhs_bias_spec,
                 ),
-                pl.BlockSpec(memory_space=pltpu.HBM),
             ],
             out_specs=pl.BlockSpec(memory_space=pltpu.HBM),
             scratch_shapes=scratch_shapes,
         ),
-        input_output_aliases={input_aliases: 0},
         compiler_params=pltpu.CompilerParams(
-            vmem_limit_bytes=vmem_limit_bytes),
+            vmem_limit_bytes=vmem_limit_bytes,
+            disable_bounds_checks=True,
+        ),
         name=get_scope_name(dims, tiles),
         cost_estimate=get_cost_estimate(lhs, rhs_weights, out_init.dtype,
                                         dims),
-    )(group_sizes, group_offset, lhs, rhs_weights, out_init)
+    )(group_sizes, group_offset, lhs, rhs_weights)
 
 
 def is_supported_by_gmm_v2(lhs: jax.Array, rhs: jax.Array,
                            rhs_scale: jax.Array | None) -> bool:
+    """Return false if gmm_v2 does not support the inputs yet."""
+
     if rhs_scale is not None and rhs_scale.shape[1] != 1:
         # gmm_v2 does not support subchannel quantization.
         return False
