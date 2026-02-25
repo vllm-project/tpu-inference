@@ -20,8 +20,6 @@ steps:
     soft_fail: true
     agents:
       queue: {QUEUE}
-    env:
-      IS_FOR_V7X: "${{IS_FOR_V7X}}"
     commands:
       - echo "placeholder"  # TODO: replace with your unit test command
   - label: "${{TPU_VERSION:-tpu6e}} Record unit test result for {MODEL_NAME}"
@@ -45,7 +43,6 @@ steps:
     agents:
       queue: {QUEUE}
     env:
-      IS_FOR_V7X: "${{IS_FOR_V7X}}"
       TEST_MODEL: {MODEL_NAME}
       TENSOR_PARALLEL_SIZE: {TENSOR_PARALLEL_SIZE}
       MINIMUM_ACCURACY_THRESHOLD: 0  # TODO : replace 0 with your accuracy threshold
@@ -73,7 +70,6 @@ steps:
     agents:
       queue: {QUEUE}
     env:
-      IS_FOR_V7X: "${{IS_FOR_V7X}}"
       TEST_MODEL: {MODEL_NAME}
       TENSOR_PARALLEL_SIZE: {TENSOR_PARALLEL_SIZE}
       MINIMUM_THROUGHPUT_THRESHOLD: 0  # TODO : replace 0 with your performance threshold

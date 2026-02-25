@@ -91,8 +91,6 @@ steps:
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests part1"
         key: ${TPU_VERSION:-tpu6e}_test_7_1
         soft_fail: true
-        env:
-          IS_FOR_V7X: "${IS_FOR_V7X}"
         artifact_paths: ".coverage.part1.${TPU_VERSION:-tpu6e}"
         agents:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
@@ -105,8 +103,6 @@ steps:
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests part2"
         key: ${TPU_VERSION:-tpu6e}_test_7_2
         soft_fail: true
-        env:
-          IS_FOR_V7X: "${IS_FOR_V7X}"
         artifact_paths: ".coverage.part2.${TPU_VERSION:-tpu6e}"
         agents:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
@@ -122,8 +118,6 @@ steps:
           - "${TPU_VERSION:-tpu6e}_test_7_2"
         key: ${TPU_VERSION:-tpu6e}_test_7_3
         soft_fail: true
-        env:
-          IS_FOR_V7X: "${IS_FOR_V7X}"
         agents:
           queue: cpu
         commands:
@@ -146,8 +140,6 @@ steps:
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests - kernels"
         key: ${TPU_VERSION:-tpu6e}_test_8
         soft_fail: true
-        env:
-          IS_FOR_V7X: "${IS_FOR_V7X}"
         agents:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
         commands:
@@ -170,8 +162,6 @@ steps:
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests - collective kernels"
         key: ${TPU_VERSION:-tpu6e}_test_9
         soft_fail: true
-        env:
-          IS_FOR_V7X: "${IS_FOR_V7X}"
         agents:
           queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
         commands:
@@ -191,8 +181,6 @@ steps:
       - label: "${TPU_VERSION:-tpu6e} lora e2e tests for JAX + vLLM models single chip"
         key: ${TPU_VERSION:-tpu6e}_test_10
         soft_fail: true
-        env:
-          IS_FOR_V7X: "${IS_FOR_V7X}"
         agents:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
         if: build.env("NIGHTLY") == "1"
@@ -233,7 +221,6 @@ steps:
         env:
           TEST_LORA_TP: "True"
           VLLM_LOG_LEVEL: "INFO"
-          IS_FOR_V7X: "${IS_FOR_V7X}"
         agents:
           queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
         commands:
@@ -242,8 +229,6 @@ steps:
       - label: "${TPU_VERSION:-tpu6e} lora unit tests on single chip"
         key: ${TPU_VERSION:-tpu6e}_test_15
         soft_fail: true
-        env:
-          IS_FOR_V7X: "${IS_FOR_V7X}"
         agents:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
         commands:
@@ -258,7 +243,6 @@ steps:
         env:
           USE_V6E8_QUEUE: "True"
           VLLM_LOG_LEVEL: "INFO"
-          IS_FOR_V7X: "${IS_FOR_V7X}"
         agents:
           queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
         commands:
@@ -409,7 +393,7 @@ steps:
           # 1. Start vLLM with specific model and tensor parallel size
           # 2. Run curl commands against it
           - |
-            if [[ "$IS_FOR_V7X" == "true" ]]; then
+            if [[ "$$IS_FOR_V7X" == "true" ]]; then
               MODEL="gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
               .buildkite/scripts/run_multihost.sh \
                 "vllm serve \${MODEL} \
