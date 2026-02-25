@@ -1,0 +1,13 @@
+# Template for MLPerf evaluation.
+dataset_path: json
+process_docs: !function utils.process_docs
+doc_to_text: !function utils.doc_to_text
+doc_to_target: "{{output}}"
+metric_list:
+  - metric: rouge
+    aggregation: mean
+    higher_is_better: true
+    rouge_types: ["rouge1", "rouge2", "rougeL"]
+    use_stemmer: false
+metadata:
+  version: 1.0
