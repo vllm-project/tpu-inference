@@ -324,93 +324,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 <summary>Quantization Methods</summary>
 
 <!-- START: quantization -->
-<table>
-  <thead>
-    <tr>
-      <th rowspan="2">Format</th>
-      <th rowspan="2">Method</th>
-      <th rowspan="2">Recommended<br>TPU Generations</th>
-      <th colspan="3">v6e</th>
-      <th colspan="3">v7x</th>
-    </tr>
-    <tr>
-      <th>flax</th>
-      <th>pytorch</th>
-      <th>default</th>
-      <th>flax</th>
-      <th>pytorch</th>
-      <th>default</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td>AWQ INT4</td>
-      <td></td>
-      <td>v5, v6</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-    </tr>
-    <tr>
-      <td>FP4 W4A16</td>
-      <td>mxfp4</td>
-      <td>v7</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-    </tr>
-    <tr>
-      <td>FP8 W8A8</td>
-      <td>compressed-tensor</td>
-      <td>v7</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-    </tr>
-    <tr>
-      <td>FP8 W8A16</td>
-      <td>compressed-tensor</td>
-      <td>v7</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-    </tr>
-    <tr>
-      <td>INT4 W4A16</td>
-      <td>awq</td>
-      <td>v5, v6</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-    </tr>
-    <tr>
-      <td>INT8 W8A8</td>
-      <td>compressed-tensor</td>
-      <td>v5, v6</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-    </tr>
-  </tbody>
-</table>
+None
 <!-- END: quantization -->
 
 </details>
@@ -435,15 +349,121 @@ Below is the live status of our supported models, features, and kernels. Click o
 <summary><b> 🔬 Microbenchmark Kernel Support </b></summary>
 
 <!-- START: microbenchmarks -->
-| Kernel | W16&nbsp;A16&nbsp;(Corr) | W16&nbsp;A16&nbsp;(Perf) | W8&nbsp;A8&nbsp;(Corr) | W8&nbsp;A8&nbsp;(Perf) | W8&nbsp;A16&nbsp;(Corr) | W8&nbsp;A16&nbsp;(Perf) | W4&nbsp;A4&nbsp;(Corr) | W4&nbsp;A4&nbsp;(Perf) | W4&nbsp;A8&nbsp;(Corr) | W4&nbsp;A8&nbsp;(Perf) | W4&nbsp;A16&nbsp;(Corr) | W4&nbsp;A16&nbsp;(Perf) |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| all-gather-matmul | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ |
-| fused&nbsp;moe | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ |
-| generic&nbsp;ragged&nbsp;paged<br>attention&nbsp;v3* | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ |
-| gmm | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ |
-| mla* | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ |
-| ragged&nbsp;paged&nbsp;attention&nbsp;v3<br>head_dim&nbsp;64* | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ |
-
+<table>
+  <thead>
+    <tr>
+      <th rowspan="2">test</th>
+      <th colspan="6">v6e</th>
+      <th colspan="6">V7X</th>
+    </tr>
+    <tr>
+      <th>W16A16</th>
+      <th>W8A16</th>
+      <th>W8 A8</th>
+      <th>W4A4</th>
+      <th>W4A8</th>
+      <th>W4A16</th>
+      <th>W16A16</th>
+      <th>W8A16</th>
+      <th>W8 A8</th>
+      <th>W4A4</th>
+      <th>W4A8</th>
+      <th>W4A16</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>all-gather-matmul</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+    </tr>
+    <tr>
+      <td>fused moe</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+    </tr>
+    <tr>
+      <td>generic ragged paged<br>attention v3*</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+    </tr>
+    <tr>
+      <td>gmm</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+    </tr>
+    <tr>
+      <td>mla*</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+    </tr>
+    <tr>
+      <td>ragged paged attention v3<br>head_dim 64*</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+    </tr>
+  </tbody>
+</table>
 
 > **Note:**
 > *   ✅ = Verified Passing
