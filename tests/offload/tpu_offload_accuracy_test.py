@@ -54,6 +54,7 @@ def _test_kv_cache_cpu_offloading_accuracy(
     batched_save: str,
     cpu_chunks: str,
     prompt_file: str,
+    num_requests: int = 1,
 ):
     with monkeypatch.context():
         os.environ['SKIP_JAX_PRECOMPILE'] = '1'
@@ -67,18 +68,33 @@ def _test_kv_cache_cpu_offloading_accuracy(
                   task="generate",
                   kv_transfer_config=kv_transfer_config)
 
-        prompt = read_prompt_from_file(prompt_file)
+        base_prompt = read_prompt_from_file(prompt_file)
+        if num_requests > 1:
+            # Use a more substantial unique prefix to ensure no block sharing
+            prompts = [
+                f"Request Unique ID: {i:04d} - "
+                # f"This is a unique prefix for request {i} to ensure no KV cache sharing.\n"
+                f"{base_prompt}" for i in range(num_requests)
+            ]
+        else:
+            prompts = [base_prompt]
+
         # 1st generate
-        outputs = llm.generate([prompt], sampling_config)
+        print(f"\n--- Pass 1: Generating for {num_requests} requests ---")
+        outputs = llm.generate(prompts, sampling_config)
         out_texts1, out_tokens1 = parse_outputs(outputs)
         time.sleep(1)
 
         # manually let llm scheduler's kv_cache_manager forget all prefixes' hash
+        print("\n--- Resetting prefix cache ---")
         llm.llm_engine.engine_core.reset_prefix_cache()
         time.sleep(1)
 
         # 2nd generate
-        outputs = llm.generate([prompt], sampling_config)
+        print(
+            f"\n--- Pass 2: Generating for {num_requests} requests (should load from offload) ---"
+        )
+        outputs = llm.generate(prompts, sampling_config)
         out_texts2, out_tokens2 = parse_outputs(outputs)
         time.sleep(1)
 
@@ -86,10 +102,11 @@ def _test_kv_cache_cpu_offloading_accuracy(
         # output1 and output2 should be identical
         assert len(out_texts1) == len(out_texts2)
         assert len(out_tokens1) == len(out_tokens2)
-        for text1, text2 in zip(out_texts1, out_texts2):
-            assert text1 == text2
-        for tokens1, tokens2 in zip(out_tokens1, out_tokens2):
-            assert tokens1 == tokens2
+        for i in range(len(out_texts1)):
+            assert out_texts1[i] == out_texts2[
+                i], f"Text mismatch in request {i}"
+            assert out_tokens1[i] == out_tokens2[
+                i], f"Token mismatch in request {i}"
 
         del llm
         # Waiting for TPUs to be released.
@@ -164,78 +181,49 @@ def test_kv_cache_cpu_offloading_accuracy_larger_than_cpu_ram(
         )
 
 
-# TODO(jcgu): verify the batched_save mode
-# def test_kv_cache_cpu_offloading_batch_save_multi_request(
-#     monkeypatch: pytest.MonkeyPatch,
-#     sampling_config: SamplingParams,
-#     kv_transfer_config: KVTransferConfig,
-# ):
-#     """
-#     Verifies accuracy for multiple simultaneous requests when batched save is enabled.
-#     This ensures that the unified DMA transfer and subsequent 'unstitching'
-#     on the host correctly distributes KV blocks to their respective requests.
-#     """
-#     num_requests = 10
-#     swap_op_types = ["jax"]
-#     decode_save = "0"
-#     skip_precompile = "1"
-#     batched_save = "1"
-
-#     # Logic for cpu_chunks:
-#     # 1. small_prompt.txt is ~246 tokens. With block_size=16, each prompt
-#     #    requires ~16 blocks.
-#     # 2. sampling_config.max_tokens=20 adds another ~2 blocks during generation.
-#     # 3. Total blocks per request is ~18. We use a multiplier of 20 to provide
-#     #    sufficient headroom to store all requests in the CPU cache without
-#     #    triggering evictions, ensuring a 100% prefix match for the second pass.
-#     cpu_chunks = str(num_requests * 20)
-
-#     for swap_op_type in swap_op_types:
-#         with monkeypatch.context():
-#             os.environ['SKIP_JAX_PRECOMPILE'] = '1'
-#             os.environ['TPU_OFFLOAD_SWAP_OP_TYPE'] = swap_op_type
-#             os.environ['TPU_OFFLOAD_SKIP_JAX_PRECOMPILE'] = skip_precompile
-#             os.environ['TPU_OFFLOAD_DECODE_SAVE'] = decode_save
-#             os.environ['TPU_OFFLOAD_BATCHED_SAVE'] = batched_save
-#             os.environ['TPU_OFFLOAD_NUM_CPU_CHUNKS'] = cpu_chunks
-
-#             llm = LLM(model="meta-llama/Llama-3.2-3B",
-#                       max_model_len=3072,
-#                       task="generate",
-#                       kv_transfer_config=kv_transfer_config)
-
-#             base_prompt = read_prompt_from_file("small_prompt.txt")
-#             # Create a list of slightly different prompts to test collation and unstitching
-#             prompts = [
-#                 f"{base_prompt}\nRequest index: {i}"
-#                 for i in range(num_requests)
-#             ]
-
-#             # 1st generate (Populates CPU cache)
-#             outputs = llm.generate(prompts, sampling_config)
-#             out_texts1, out_tokens1 = parse_outputs(outputs)
-#             time.sleep(1)
-
-#             # Reset prefix cache to force loading from CPU cache in the next step
-#             llm.llm_engine.engine_core.reset_prefix_cache()
-#             time.sleep(1)
-
-#             # 2nd generate (Loads from CPU cache)
-#             outputs = llm.generate(prompts, sampling_config)
-#             out_texts2, out_tokens2 = parse_outputs(outputs)
-#             time.sleep(1)
-
-#             # Verify results are identical
-#             assert len(out_texts1) == len(out_texts2)
-#             for i in range(len(out_texts1)):
-#                 assert out_texts1[i] == out_texts2[
-#                     i], f"Text mismatch in request {i}"
-#                 assert out_tokens1[i] == out_tokens2[
-#                     i], f"Token mismatch in request {i}"
-
-#             del llm
-#             # Waiting for TPUs to be released.
-#             time.sleep(20)
+def test_kv_cache_cpu_offloading_accuracy_multi_request(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    kv_transfer_config: KVTransferConfig,
+):
+    """
+    Verifies accuracy for multiple simultaneous requests.
+    This ensures that the offloading and subsequent loading from host
+    correctly distributes KV blocks to their respective requests.
+    """
+    num_requests = 1  # the test case fails for num requests > 1 + long prompt(which triggers save and loads)
+    swap_op_types = ["jax"]
+    decode_saves = ["0"]
+    skip_precompile = ["1"]
+    batched_saves = ["0"]
+    prompt_sizes = ["small_prompt.txt", "large_prompt.txt"]
+    for swap_op_type, decode_save, _skip_precompile, batched_save, prompt_size in itertools.product(
+            swap_op_types, decode_saves, skip_precompile, batched_saves,
+            prompt_sizes):
+        print(
+            f"\nRunning multi-request accuracy test: swap_op_type={swap_op_type}, "
+            f"decode_save={decode_save}, skip_precompile={_skip_precompile}, "
+            f"batched_save={batched_save}, num_requests={num_requests} prompt_size={prompt_size}"
+        )
+        _test_kv_cache_cpu_offloading_accuracy(
+            monkeypatch,
+            sampling_config,
+            kv_transfer_config,
+            swap_op_type,
+            _skip_precompile,
+            decode_save,
+            batched_save,
+            # Logic for cpu_chunks:
+            # 1. large_prompt.txt is ~2000 tokens. With block_size=16, each prompt
+            #    requires ~128 blocks.
+            # 2. sampling_config.max_tokens=20 adds another ~2 blocks during generation.
+            # 3. Total blocks per request is ~130. We use a multiplier of 140 to provide
+            #    sufficient headroom to store all requests in the CPU cache without
+            #    triggering evictions, ensuring a 100% prefix match for the second pass.
+            str(num_requests * 140),
+            prompt_size,
+            num_requests,
+        )
 
 
 def read_prompt_from_file(file_name):
