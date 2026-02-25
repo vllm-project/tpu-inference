@@ -134,25 +134,169 @@ Below is the live status of our supported models, features, and kernels. Click o
 <summary>Core Features</summary>
 
 <!-- START: core_features -->
-| Feature | CorrectnessTest | PerformanceTest |
-| --- | --- | --- |
-| Chunked&nbsp;Prefill | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| DCN-based&nbsp;P/D&nbsp;disaggregation | ❓&nbsp;Untested | ✅&nbsp;Passing |
-| KV&nbsp;cache&nbsp;host&nbsp;offloading | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| LoRA_Torch | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| Multimodal&nbsp;Inputs | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| Out-of-tree&nbsp;model&nbsp;support | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| Prefix&nbsp;Caching | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| Single&nbsp;Program&nbsp;Multi&nbsp;Data | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| Single-Host-P-D-disaggregation | - | - |
-| Speculative&nbsp;Decoding:&nbsp;Eagle3 | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| Speculative&nbsp;Decoding:&nbsp;Ngram | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| async&nbsp;scheduler | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| data_parallelism | ✅&nbsp;Passing | ❓&nbsp;Untested |
-| runai_model_streamer_loader | ✅&nbsp;Passing | - |
-| sampling_params | ✅&nbsp;Passing | - |
-| structured_decoding | ✅&nbsp;Passing | - |
-
+<table>
+  <thead>
+    <tr>
+      <th rowspan="2">Test / Feature</th>
+      <th colspan="3">v6e</th>
+      <th colspan="3">v7x</th>
+    </tr>
+    <tr>
+      <th>flax</th>
+      <th>pytorch</th>
+      <th>default</th>
+      <th>flax</th>
+      <th>pytorch</th>
+      <th>default</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Chunked Prefill</td>
+      <td>✅ Passing</td>
+      <td>✅ Passing</td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+    </tr>
+    <tr>
+      <td>DCN-based P/D disaggregation</td>
+      <td>❓ Untested</td>
+      <td>✅ Passing</td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+    </tr>
+    <tr>
+      <td>KV cache host offloading</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+    </tr>
+    <tr>
+      <td>LoRA_Torch</td>
+      <td>✅ Passing</td>
+      <td>✅ Passing</td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+    </tr>
+    <tr>
+      <td>Multimodal Inputs</td>
+      <td>✅ Passing</td>
+      <td>✅ Passing</td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+    </tr>
+    <tr>
+      <td>Out-of-tree model support</td>
+      <td>✅ Passing</td>
+      <td>✅ Passing</td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+    </tr>
+    <tr>
+      <td>Prefix Caching</td>
+      <td>✅ Passing</td>
+      <td>✅ Passing</td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+    </tr>
+    <tr>
+      <td>Single Program Multi Data</td>
+      <td>✅ Passing</td>
+      <td>✅ Passing</td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+    </tr>
+    <tr>
+      <td>Single-Host-P-D-disaggregation</td>
+      <td>-</td>
+      <td>-</td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+    </tr>
+    <tr>
+      <td>Speculative Decoding: Eagle3</td>
+      <td>✅ Passing</td>
+      <td>✅ Passing</td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+    </tr>
+    <tr>
+      <td>Speculative Decoding: Ngram</td>
+      <td>✅ Passing</td>
+      <td>✅ Passing</td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+    </tr>
+    <tr>
+      <td>async scheduler</td>
+      <td>✅ Passing</td>
+      <td>✅ Passing</td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+    </tr>
+    <tr>
+      <td>data_parallelism</td>
+      <td>✅ Passing</td>
+      <td>❓ Untested</td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+    </tr>
+    <tr>
+      <td>runai_model_streamer_loader</td>
+      <td>✅ Passing</td>
+      <td>-</td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+    </tr>
+    <tr>
+      <td>sampling_params</td>
+      <td>✅ Passing</td>
+      <td>-</td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+    </tr>
+    <tr>
+      <td>structured_decoding</td>
+      <td>✅ Passing</td>
+      <td>-</td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+    </tr>
+  </tbody>
+</table>
 <!-- END: core_features -->
 
 </details>

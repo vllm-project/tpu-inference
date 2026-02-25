@@ -55,6 +55,41 @@ def generate_markdown_table(headers, data):
         data_lines += "| " + " | ".join(formatted_row) + " |\n"
     return header_line + separator_line + data_lines
 
+def generate_html_feature_table(headers, data):
+    """Generates an HTML table specifically for the core feature matrix."""
+    if not headers: return ""
+    
+    html = []
+    html.append("<table>")
+    html.append("  <thead>")
+    html.append("    <tr>")
+    html.append("      <th rowspan=\"2\">Test / Feature</th>")
+    html.append("      <th colspan=\"3\">v6e</th>")
+    html.append("      <th colspan=\"3\">v7x</th>")
+    html.append("    </tr>")
+    html.append("    <tr>")
+    html.append("      <th>flax</th>")
+    html.append("      <th>pytorch</th>")
+    html.append("      <th>default</th>")
+    html.append("      <th>flax</th>")
+    html.append("      <th>pytorch</th>")
+    html.append("      <th>default</th>")
+    html.append("    </tr>")
+    html.append("  </thead>")
+    html.append("  <tbody>")
+    
+    for row in data:
+        html.append("    <tr>")
+        # Ensure we have 7 columns worth of data (1 feature + 6 backend columns)
+        # If the CSV doesn't have 7 yet, we pad it.
+        padded_row = row + [""] * (7 - len(row))
+        for cell in padded_row[:7]:
+            html.append(f"      <td>{cell}</td>")
+        html.append("    </tr>")
+        
+    html.append("  </tbody>")
+    html.append("</table>")
+    return "\n".join(html)
 
 def update_readme():
     """Finds markers in README.md and replaces content with fresh tables."""
@@ -71,7 +106,10 @@ def update_readme():
                 if not headers: headers = h
                 all_data.extend(d)
         
-        new_table = generate_markdown_table(headers, all_data)
+        if section_key == "core_features":
+            new_table = generate_html_feature_table(headers, all_data)
+        else:
+            new_table = generate_markdown_table(headers, all_data)
         
         # Special handling for microbenchmarks to append footer
         if section_key == "microbenchmarks":
