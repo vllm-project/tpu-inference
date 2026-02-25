@@ -156,6 +156,11 @@ class TPUWorker:
         # step_counter is used to calculate uuid to transfer intermediate tensors.
         self.step_counter = 0
 
+        # Profiling state
+        self._profiling = False
+        self._profile_delay_remaining: int | None = None
+        self._profile_options = None
+
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
@@ -358,9 +363,11 @@ class TPUWorker:
                 scheduler_output, self.rank, self.step_counter)
             get_pp_group().send_tensor_dict(uuid, output.tensors)
             self.step_counter += 1
+            self._maybe_start_delayed_profile()
             return None
         else:
             self.step_counter += 1
+            self._maybe_start_delayed_profile()
             # With a connector, the scheduler expects output from all workers
             # TODO(mrjunwan): Figure out if this is ok after https://github.com/vllm-project/vllm/pull/26866
             if has_kv_transfer_group():
@@ -381,17 +388,37 @@ class TPUWorker:
         raise NotImplementedError(
             "LoRA is not supported by the JAX worker yet.")
 
+    def _maybe_start_delayed_profile(self):
+        """Check if a delayed profile start should be triggered."""
+        if self._profile_delay_remaining is not None:
+            self._profile_delay_remaining -= 1
+            if self._profile_delay_remaining <= 0:
+                logger.info("Delayed profile start: beginning trace now")
+                jax.profiler.start_trace(
+                    self.profile_dir,
+                    profiler_options=self._profile_options)
+                self._profiling = True
+                self._profile_delay_remaining = None
+                self._profile_options = None
+
     def profile(self,
                 is_start: bool = True,
-                profile_prefix: str | None = None):
+                profile_prefix: str | None = None,
+                delay: int = 0):
         if is_start:
             options = jax.profiler.ProfileOptions()
             # default: https://docs.jax.dev/en/latest/profiling.html#general-options
             options.python_tracer_level = envs.PYTHON_TRACER_LEVEL
             options.host_tracer_level = os.getenv("HOST_TRACER_LEVEL", 1)
-            jax.profiler.start_trace(self.profile_dir,
-                                     profiler_options=options)
-            self._profiling = True
+            if delay > 0:
+                # Defer trace start until N execute_model() calls complete
+                logger.info("Profile start deferred by %d engine steps", delay)
+                self._profile_delay_remaining = delay
+                self._profile_options = options
+            else:
+                jax.profiler.start_trace(self.profile_dir,
+                                         profiler_options=options)
+                self._profiling = True
         else:
             if not getattr(self, '_profiling', False):
                 logger.warning("Profiler was not started, nothing to stop.")
