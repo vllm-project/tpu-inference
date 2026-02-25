@@ -14,7 +14,8 @@
 
 import re
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from itertools import islice
+from typing import Any, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -25,6 +26,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
 
+from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.quant_methods import MXFP4
 from tpu_inference.layers.common.quantization import (e8m0_to_fp32,
                                                       u8_unpack_e2m1)
@@ -33,10 +35,14 @@ from tpu_inference.layers.jax.attention.gpt_oss_attention import (
 from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.layers import Embedder, LMhead, RMSNorm
 from tpu_inference.layers.jax.moe.gpt_oss_moe import GptOssMoE, GptOssRouter
+from tpu_inference.layers.jax.pp_utils import (PPMissingLayer,
+                                               get_start_end_layer)
 from tpu_inference.layers.jax.transformer_block import TransformerBlock
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.jax_intermediate_tensor import \
+    JaxIntermediateTensors
 from tpu_inference.models.jax.utils.weight_utils import (
-    get_param, model_weights_generator, print_param_info)
+    _is_pp_missing_layer, get_param, model_weights_generator, print_param_info)
 
 logger = init_logger(__name__)
 
@@ -92,17 +98,31 @@ class GptOss(nnx.Module):
             "random_weights", False)
         self.mesh = mesh
 
-        self.embedder = Embedder(
-            vocab_size=vocab_size,
-            hidden_size=hidden_size,
-            dtype=dtype,
-            rngs=self.rng,
-            vd_sharding=P('model', None),
-            random_init=self.random_init,
-        )
+        self.is_first_rank = get_pp_group().is_first_rank
+        self.is_last_rank = get_pp_group().is_last_rank
+
+        if self.is_first_rank or (self.hf_config.tie_word_embeddings
+                                  and self.is_last_rank):
+            self.embedder = Embedder(
+                vocab_size=vocab_size,
+                hidden_size=hidden_size,
+                dtype=dtype,
+                rngs=self.rng,
+                vd_sharding=P('model', None),
+                random_init=self.random_init,
+            )
+        else:
+            self.embedder = PPMissingLayer()
 
         self.layers = []
-        for i in range(num_layers):
+        self.start_layer, self.end_layer = get_start_end_layer(
+            num_layers,
+            get_pp_group().rank_in_group,
+            get_pp_group().world_size)
+        for i in range(self.start_layer):
+            self.layers.append(PPMissingLayer())
+
+        for i in range(self.start_layer, self.end_layer):
             attn = GptOssAttention(
                 hidden_size=hidden_size,
                 num_attention_heads=num_attention_heads,
@@ -177,26 +197,34 @@ class GptOss(nnx.Module):
                 custom_module=moe_mlp,
             )
             self.layers.append(block)
-        # Note: ALL RMSNorm does not upcast input to float32, while the pytorch does
-        self.final_norm = RMSNorm(
-            dims=hidden_size,
-            rngs=self.rng,
-            random_init=self.random_init,
-            epsilon=rms_norm_eps,
-            dtype=dtype,
-            activation_ffw_td=P('data', None),
-        )
 
-        self.lm_head = LMhead(
-            vocab_size=vocab_size,
-            hidden_size=hidden_size,
-            dtype=dtype,
-            rngs=self.rng,
-            vd_sharding=P('model', None),
-            dv_sharding=P(None, 'model'),
-            prelogit_td=P('data', None),
-            random_init=self.random_init,
-        )
+        for i in range(self.end_layer, num_layers):
+            self.layers.append(PPMissingLayer())
+
+        # Note: ALL RMSNorm does not upcast input to float32, while the pytorch does
+        if self.is_last_rank:
+            self.final_norm = RMSNorm(
+                dims=hidden_size,
+                rngs=self.rng,
+                random_init=self.random_init,
+                epsilon=rms_norm_eps,
+                dtype=dtype,
+                activation_ffw_td=P('data', None),
+            )
+
+            self.lm_head = LMhead(
+                vocab_size=vocab_size,
+                hidden_size=hidden_size,
+                dtype=dtype,
+                rngs=self.rng,
+                vd_sharding=P('model', None),
+                dv_sharding=P(None, 'model'),
+                prelogit_td=P('data', None),
+                random_init=self.random_init,
+            )
+        else:
+            self.final_norm = PPMissingLayer()
+            self.lm_head = PPMissingLayer()
 
     # For compatibility with flax.
     def apply(self, variables, *args, **kwargs):
@@ -205,6 +233,14 @@ class GptOss(nnx.Module):
     def load_weights(self, rng: PRNGKey, cache_dir: Optional[str] = None):
         """Loads and transforms all weights from a checkpoint"""
         self.rng = nnx.Rngs(rng)
+
+        # Populate missing layers for PP
+        self.pp_missing_layers = []
+        for path, module in nnx.iter_graph(self):
+            if isinstance(module, PPMissingLayer):
+                # this layer name is layers.{i} or final_norm, embedder, lm_head, etc
+                layer_name = ".".join([str(s) for s in path])
+                self.pp_missing_layers.append(layer_name)
 
         # Determine quantization method from HF config (config.json)
         quant_method = (self.hf_config.quantization_config["quant_method"]
@@ -338,6 +374,12 @@ class GptOss(nnx.Module):
                         bundles = [gate_bundle, up_bundle]
                         for i, path_template in enumerate(jax_path_template):
                             jax_path = path_template.replace("*", layer_num)
+                            if _is_pp_missing_layer(jax_path,
+                                                    self.pp_missing_layers):
+                                logger.debug(
+                                    f"Skip loading {jax_path} as it doesn't belong to this PP stage."
+                                )
+                                continue
                             model_weight = get_param(model_params, jax_path)
 
                             b_u8, s_u8 = bundles[i]
@@ -360,6 +402,12 @@ class GptOss(nnx.Module):
                         splits = [gate_w, up_w]
                         for i, path_template in enumerate(jax_path_template):
                             jax_path = path_template.replace("*", layer_num)
+                            if _is_pp_missing_layer(jax_path,
+                                                    self.pp_missing_layers):
+                                logger.debug(
+                                    f"Skip loading {jax_path} as it doesn't belong to this PP stage."
+                                )
+                                continue
                             model_weight = get_param(model_params, jax_path)
                             self._load_regular_param(
                                 model_weight=model_weight,
@@ -373,6 +421,11 @@ class GptOss(nnx.Module):
                     # Standard 1-to-1 loading path
                     jax_path = jax_path_template.replace(
                         "*", layer_num) if layer_num else jax_path_template
+                    if _is_pp_missing_layer(jax_path, self.pp_missing_layers):
+                        logger.debug(
+                            f"Skip loading {jax_path} as it doesn't belong to this PP stage."
+                        )
+                        continue
                     model_weight = get_param(model_params, jax_path)
 
                     if isinstance(loaded_weight, tuple):
@@ -522,19 +575,34 @@ class GptOss(nnx.Module):
         kv_caches: List[jax.Array],
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
+        inputs_embeds: Optional[jax.Array] = None,
+        _input_positions: Optional[jax.Array] = None,
+        _layer_name_to_kv_cache: Optional[Tuple[Tuple[str, int]]] = None,
+        _lora_metadata: Any = None,
+        intermediate_tensors: Optional[JaxIntermediateTensors] = None,
         *args,
     ) -> Tuple[List[KVCacheType], jax.Array, List[jax.Array]]:
         is_prefill = False
-        x = self.embedder.encode(input_ids)
+        if self.is_first_rank:
+            x = self.embedder.encode(input_ids)
+        else:
+            assert intermediate_tensors is not None
+            x = intermediate_tensors["hidden_states"]
 
-        for i, block in enumerate(self.layers):
+        for (i, block) in enumerate(
+                islice(self.layers, self.start_layer, self.end_layer)):
             kv_cache = kv_caches[i]
-            current_sliding_window = self.sliding_window if i % 2 == 0 else None
+            current_sliding_window = self.sliding_window if (
+                self.start_layer + i) % 2 == 0 else None
             attention_metadata.sliding_window = current_sliding_window
 
             new_kv_cache, x = block(x, is_prefill, kv_cache,
                                     attention_metadata)
+            jax.block_until_ready(x)
             kv_caches[i] = new_kv_cache
+
+        if not self.is_last_rank:
+            return kv_caches, JaxIntermediateTensors({"hidden_states": x}), []
 
         final_activation = self.final_norm(x)
         return kv_caches, final_activation, []
