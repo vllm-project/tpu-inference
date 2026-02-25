@@ -245,7 +245,8 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             kernel_init(rngs.params(), (self.out_features_total, self.in_features_total), param_dtype),
             weight_loader=partial(load_nnx_param_from_reshaped_torch,
                                   reshape_dims=None,
-                                  permute_dims=(0, 1)), 
+                                  permute_dims=(0, 1),
+                                  param_name=layer.prefix + ".weight"), 
             _is_loaded=False)
         layer.weight.get_metadata()['mesh'] = mesh
         layer.weight.sharding = () # Weight loading on CPU is unsharded.
@@ -303,6 +304,17 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 bias=bias,
                 weight_block_size=weight_block_size,
                 linear_config=self.linear_config)
+            
+            # Print the new scales calculated during re-quantization
+            if "k_up_proj" in layer.prefix or "v_up_proj" in layer.prefix:
+                import numpy as np
+                print(f"  Requant Scales Sample: {np.array(weights.weight_scale).flatten()[:5]}")
+
+            if "k_up_proj" in layer.prefix or "v_up_proj" in layer.prefix:
+                import numpy as np
+                print(f"\n[FP8 DEBUG] {layer.prefix}")
+                print(f"  2D Weights Shape: {weights.weight.shape}")
+                print(f"  2D Weights Sample [0,0:5]: {np.array(weights.weight)[0, :5]}")
 
             # Convert the requantized 2D results back to the 3D layout if necessary.
             logical_output_shape = tuple(self.kernel_shape[i] for i in self.output_side_indices)
@@ -316,6 +328,11 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                     weights.weight = weights.weight.reshape(self.kernel_shape)
             else:
                 weights.weight = weights.weight.reshape(self.kernel_shape)
+            
+            if "k_up_proj" in layer.prefix or "v_up_proj" in layer.prefix:
+                import numpy as np
+                print(f"  Final 3D Shape:   {weights.weight.shape}")
+                print(f"  Final 3D Sample [0,0,0:5]: {np.array(weights.weight)[0, 0, :5]}")
             
             self.linear_config.output_sizes = old_output_sizes
 

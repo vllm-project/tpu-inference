@@ -1,4 +1,6 @@
-import os; os.environ["JAX_PLATFORMS"] = "cpu"
+import os; 
+os.environ["JAX_PLATFORMS"] = "cpu"
+os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
 # Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -136,8 +138,11 @@ def test_mla_k_up_proj_lifecycle(rngs):
     layer.weight_scale_inv.weight_loader(layer.weight_scale_inv, torch_scale)
     
     # Process Weights
+    # Simulate a 4-device mesh to verify sharding compatibility
     devices = jax.devices()
-    mesh = jax.sharding.Mesh(np.array(devices[:1]).reshape(1, 1), ('x', 'y'))
+    assert len(devices) >= 4, f"Test requires at least 4 devices, found {len(devices)}"
+    mesh = jax.sharding.Mesh(np.array(devices[:4]).reshape(4), ('x',))
+    
     method.linear_config.mesh = mesh
     method.linear_config.bias_sharding = jax.sharding.PartitionSpec(None)
     
@@ -145,16 +150,23 @@ def test_mla_k_up_proj_lifecycle(rngs):
         method.process_weights_after_loading(layer)
         
     # Verify Final ND Layout: (A, N, H)
+    # Since weights are stored quantized in FP8, we must dequantize to verify values.
     final_w = layer.weight.value
+    final_s = layer.weight_scale_inv.value
     assert final_w.shape == (512, 128, 128)
+    # Confirm it is sharded (not just a single device array)
+    assert len(final_w.addressable_shards) > 1
     
-    # Verify a sample value remains correct after the lifecycle
     # Sample: a=4, n=2, h=3
+    # Logic: latent dimension a=4 is Index 0. Head dimensions n=2, h=3 are Index 1, 2.
     # Checkpoint value was at (n*128 + h, a)
     expected_val = 2.0 + 3.0 * 0.1 + 4.0 * 0.01
-    actual_val = final_w[4, 2, 3]
-    # Check with tolerance due to FP8 quantization
-    assert np.allclose(actual_val, expected_val, atol=0.1), f"Value mismatch at [4,2,3]: expected {expected_val}, got {actual_val}"
+    
+    # Dequantize: final_s matches the output dimension (A=512 for k_up_proj)
+    # So we use final_s[a]
+    actual_val = float(final_w[4, 2, 3]) * float(final_s[4])
+    
+    assert np.allclose(actual_val, expected_val, atol=0.1), f"Value mismatch at [4,2,3]: expected {expected_val}, got {actual_val} (quantized was {final_w[4,2,3]}, scale was {final_s[4]})"
 
 def test_mla_v_up_proj_lifecycle(rngs):
     # MLA v_up_proj parameters: TNA,ANH->TNH
@@ -198,23 +210,29 @@ def test_mla_v_up_proj_lifecycle(rngs):
     torch_scale = torch.ones(1, 512)
     layer.weight_scale_inv.weight_loader(layer.weight_scale_inv, torch_scale)
     
-    # Process Weights
+        # Process Weights
+    # Simulate a 4-device mesh to verify sharding compatibility
     devices = jax.devices()
-    mesh = jax.sharding.Mesh(np.array(devices[:1]).reshape(1, 1), ('x', 'y'))
+    assert len(devices) >= 4, f"Test requires at least 4 devices, found {len(devices)}"
+    mesh = jax.sharding.Mesh(np.array(devices[:4]).reshape(4), ('x',))
+        
     method.linear_config.mesh = mesh
     method.linear_config.bias_sharding = jax.sharding.PartitionSpec(None)
     
     with jax.set_mesh(mesh):
         method.process_weights_after_loading(layer)
-        
+    
     # Verify Final ND Layout: (A, N, H)
     final_w = layer.weight.value
+    final_s = layer.weight_scale_inv.value
     assert final_w.shape == (512, 128, 128)
+    assert len(final_w.addressable_shards) > 1
     
     # Sample: a=4, n=2, h=3
     expected_val = 2.0 + 3.0 * 0.1 + 4.0 * 0.01
-    actual_val = final_w[4, 2, 3]
-    assert np.allclose(actual_val, expected_val, atol=0.1), f"Value mismatch at [4,2,3]: expected {expected_val}, got {actual_val}"
+    # Dequantize: final_s matches output dimension (H=128 for v_up_proj)
+    actual_val = float(final_w[4, 2, 3]) * float(final_s[3])
+    assert np.allclose(actual_val, expected_val, atol=0.1), f"Value mismatch at [4,2,3]: expected {expected_val}, got {actual_val} (quantized was {final_w[4,2,3]}, scale was {final_s[3]})"
 
 def test_mla_disabled_kv_b_proj_lifecycle(rngs):
     # MLA disabled kv_b_proj parameters: SA,AL->SL
