@@ -153,147 +153,147 @@ Below is the live status of our supported models, features, and kernels. Click o
   <tbody>
     <tr>
       <td>Chunked Prefill</td>
+      <td></td>
       <td>✅ Passing</td>
-      <td>✅ Passing</td>
-      <td>✅ Passing</td>
-      <td>✅ Passing</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-    </tr>
-    <tr>
-      <td>DCN-based P/D disaggregation</td>
-      <td>✅ Passing</td>
-      <td>✅ Passing</td>
-      <td>✅ Passing</td>
-      <td>❓ Untested</td>
+      <td></td>
+      <td></td>
       <td>✅ Passing</td>
       <td></td>
     </tr>
     <tr>
+      <td>DCN-based P/D disaggregation</td>
+      <td></td>
+      <td>❓ Untested</td>
+      <td></td>
+      <td></td>
+      <td>❓ Untested</td>
+      <td></td>
+    </tr>
+    <tr>
       <td>KV cache host offloading</td>
-      <td>✅ Passing</td>
-      <td>✅ Passing</td>
-      <td>✅ Passing</td>
-      <td>✅ Passing</td>
+      <td></td>
       <td>❓ Untested</td>
+      <td></td>
+      <td></td>
       <td>❓ Untested</td>
+      <td></td>
     </tr>
     <tr>
       <td>LoRA_Torch</td>
+      <td></td>
       <td>✅ Passing</td>
+      <td></td>
+      <td></td>
       <td>✅ Passing</td>
-      <td>✅ Passing</td>
-      <td>✅ Passing</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
+      <td></td>
     </tr>
     <tr>
       <td>Multimodal Inputs</td>
+      <td></td>
       <td>✅ Passing</td>
+      <td></td>
+      <td></td>
       <td>✅ Passing</td>
-      <td>✅ Passing</td>
-      <td>✅ Passing</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
+      <td></td>
     </tr>
     <tr>
       <td>Out-of-tree model support</td>
+      <td></td>
       <td>✅ Passing</td>
+      <td></td>
+      <td></td>
       <td>✅ Passing</td>
-      <td>✅ Passing</td>
-      <td>✅ Passing</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
+      <td></td>
     </tr>
     <tr>
       <td>Prefix Caching</td>
+      <td></td>
       <td>✅ Passing</td>
+      <td></td>
+      <td></td>
       <td>✅ Passing</td>
-      <td>✅ Passing</td>
-      <td>✅ Passing</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
+      <td></td>
     </tr>
     <tr>
       <td>Single Program Multi Data</td>
+      <td></td>
       <td>✅ Passing</td>
+      <td></td>
+      <td></td>
       <td>✅ Passing</td>
-      <td>✅ Passing</td>
-      <td>✅ Passing</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
+      <td></td>
     </tr>
     <tr>
       <td>Single-Host-P-D-disaggregation</td>
-      <td>-</td>
-      <td>-</td>
-      <td>-</td>
-      <td>-</td>
-      <td>-</td>
-      <td>-</td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
     </tr>
     <tr>
       <td>Speculative Decoding: Eagle3</td>
+      <td></td>
       <td>✅ Passing</td>
+      <td></td>
+      <td></td>
       <td>✅ Passing</td>
-      <td>✅ Passing</td>
-      <td>✅ Passing</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
+      <td></td>
     </tr>
     <tr>
       <td>Speculative Decoding: Ngram</td>
+      <td></td>
       <td>✅ Passing</td>
+      <td></td>
+      <td></td>
       <td>✅ Passing</td>
-      <td>✅ Passing</td>
-      <td>✅ Passing</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
+      <td></td>
     </tr>
     <tr>
       <td>async scheduler</td>
+      <td></td>
       <td>✅ Passing</td>
+      <td></td>
+      <td></td>
       <td>✅ Passing</td>
-      <td>✅ Passing</td>
-      <td>✅ Passing</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
+      <td></td>
     </tr>
     <tr>
       <td>data_parallelism</td>
-      <td>✅ Passing</td>
+      <td></td>
       <td>❓ Untested</td>
-      <td>✅ Passing</td>
-      <td>✅ Passing</td>
+      <td></td>
+      <td></td>
       <td>❓ Untested</td>
-      <td>❓ Untested</td>
+      <td></td>
     </tr>
     <tr>
       <td>runai_model_streamer_loader</td>
-      <td>✅ Passing</td>
-      <td>-</td>
-      <td>✅ Passing</td>
-      <td>✅ Passing</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
     </tr>
     <tr>
       <td>sampling_params</td>
-      <td>✅ Passing</td>
-      <td>-</td>
-      <td>✅ Passing</td>
-      <td>✅ Passing</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
     </tr>
     <tr>
       <td>structured_decoding</td>
-      <td>✅ Passing</td>
-      <td>-</td>
-      <td>✅ Passing</td>
-      <td>✅ Passing</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
     </tr>
   </tbody>
 </table>
@@ -324,7 +324,93 @@ Below is the live status of our supported models, features, and kernels. Click o
 <summary>Quantization Methods</summary>
 
 <!-- START: quantization -->
-None
+<table>
+  <thead>
+    <tr>
+      <th rowspan="2">Format</th>
+      <th rowspan="2">Method</th>
+      <th rowspan="2">Recommended<br>TPU Generations</th>
+      <th colspan="3">v6e</th>
+      <th colspan="3">v7x</th>
+    </tr>
+    <tr>
+      <th>flax</th>
+      <th>pytorch</th>
+      <th>default</th>
+      <th>flax</th>
+      <th>pytorch</th>
+      <th>default</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>AWQ INT4</td>
+      <td></td>
+      <td>v5, v6</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+    </tr>
+    <tr>
+      <td>FP4 W4A16</td>
+      <td>mxfp4</td>
+      <td>v7</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+    </tr>
+    <tr>
+      <td>FP8 W8A8</td>
+      <td>compressed-tensor</td>
+      <td>v7</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+    </tr>
+    <tr>
+      <td>FP8 W8A16</td>
+      <td>compressed-tensor</td>
+      <td>v7</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+    </tr>
+    <tr>
+      <td>INT4 W4A16</td>
+      <td>awq</td>
+      <td>v5, v6</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+    </tr>
+    <tr>
+      <td>INT8 W8A8</td>
+      <td>compressed-tensor</td>
+      <td>v5, v6</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
+    </tr>
+  </tbody>
+</table>
 <!-- END: quantization -->
 
 </details>

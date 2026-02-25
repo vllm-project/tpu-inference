@@ -80,11 +80,16 @@ def generate_html_feature_table(headers, data):
     
     for row in data:
         html.append("    <tr>")
-        # Ensure we have 7 columns worth of data (1 feature + 6 backend columns)
-        # If the CSV doesn't have 7 yet, we pad it.
-        padded_row = row + [""] * (7 - len(row))
-        for cell in padded_row[:7]:
-            html.append(f"      <td>{cell}</td>")
+        feature_name = row[0] if len(row) > 0 else ""
+        merged_status = merge_metrics(row[1], row[2]) if len(row) > 2 else ""
+        
+        html.append(f"      <td>{feature_name}</td>")
+        html.append(f"      <td></td>") # v6e flax
+        html.append(f"      <td>{merged_status}</td>") # v6e pytorch
+        html.append(f"      <td></td>") # v6e default
+        html.append(f"      <td></td>") # v7x flax
+        html.append(f"      <td>{merged_status}</td>") # v7x pytorch
+        html.append(f"      <td></td>") # v7x default
         html.append("    </tr>")
         
     html.append("  </tbody>")
@@ -126,13 +131,15 @@ def generate_html_quantization_table(headers, data):
         
     html.append("  </tbody>")
     html.append("</table>")
+    return "\n".join(html)
+
 def merge_metrics(c, p):
     """Merges Correctness (c) and Performance (p) metrics."""
     c = str(c).strip()
     p = str(p).strip()
     
     is_failed = "❌" in c or "❌" in p or "Failed" in c or "Failed" in p or "🔴" in c or "🔴" in p
-    is_untested = "❓" in c or "❓" in p or "Untested" in c or "Untested" in p
+    is_untested = "❓" in c or "❓" in p or "Untested" in c or "Untested" in p or "unverified" in c or "unverified" in p
     
     if is_failed:
         return "❓ Untested" if "❓" in c or "❓" in p else "❌ Failed" # Overriding based on PM logic, Untested could take precedence depending, but "Any Red = Red" usually means failed has highest precedence. Actually, mockup shows untested for red. Let's stick to standard: Failed > Untested > Passed. Wait, PM said: "Any Red = Red. If either is untested, untested". Let's do: Failed wins, then Untested.
