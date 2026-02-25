@@ -1,0 +1,7 @@
+# Defines the math500 task, inheriting its configuration from the local template.
+include: /workspace/lm_eval/math500/_template_math500.yaml
+task: math500
+dataset_kwargs:
+  data_files:
+    test: /workspace/dataset/math500.jsonl
+test_split: test

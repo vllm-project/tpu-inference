@@ -1,0 +1,15 @@
+# Defines the mlperf task, inheriting its configuration from the local template.
+include: /workspace/lm_eval/mlperf/_template_mlperf.yaml
+task: mlperf
+dataset_kwargs:
+  data_files:
+    test: /workspace/dataset/mlperf.jsonl
+test_split: test
+output_type: generate_until
+generation_kwargs:
+  until:
+    - "<|eot_id|>"
+    - "<|end_of_text|>"
+  do_sample: false
+  temperature: 0
+  max_gen_toks: 1024
