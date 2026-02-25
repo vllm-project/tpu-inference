@@ -1,17 +1,17 @@
-Feature,CorrectnessTest,PerformanceTest
-Chunked Prefill,✅ Passing,✅ Passing
-DCN-based P/D disaggregation,❓ Untested,✅ Passing
-KV cache host offloading,❓ Untested,❓ Untested
-LoRA_Torch,✅ Passing,✅ Passing
-Multimodal Inputs,✅ Passing,✅ Passing
-Out-of-tree model support,✅ Passing,✅ Passing
-Prefix Caching,✅ Passing,✅ Passing
-Single Program Multi Data,✅ Passing,✅ Passing
-Single-Host-P-D-disaggregation,-,-
-Speculative Decoding: Eagle3,✅ Passing,✅ Passing
-Speculative Decoding: Ngram,✅ Passing,✅ Passing
-async scheduler,✅ Passing,✅ Passing
-data_parallelism,✅ Passing,❓ Untested
-runai_model_streamer_loader,✅ Passing,-
-sampling_params,✅ Passing,-
-structured_decoding,✅ Passing,-
+Feature,v6e (flax),v6e (pytorch),v6e (default),v7x (flax),v7x (pytorch),v7x (default)
+Chunked Prefill,✅ Passing,✅ Passing,✅ Passing,✅ Passing,❓ Untested,❓ Untested
+DCN-based P/D disaggregation,✅ Passing,✅ Passing,✅ Passing,❓ Untested,✅ Passing,
+KV cache host offloading,✅ Passing,✅ Passing,✅ Passing,✅ Passing,❓ Untested,❓ Untested
+LoRA_Torch,✅ Passing,✅ Passing,✅ Passing,✅ Passing,❓ Untested,❓ Untested
+Multimodal Inputs,✅ Passing,✅ Passing,✅ Passing,✅ Passing,❓ Untested,❓ Untested
+Out-of-tree model support,✅ Passing,✅ Passing,✅ Passing,✅ Passing,❓ Untested,❓ Untested
+Prefix Caching,✅ Passing,✅ Passing,✅ Passing,✅ Passing,❓ Untested,❓ Untested
+Single Program Multi Data,✅ Passing,✅ Passing,✅ Passing,✅ Passing,❓ Untested,❓ Untested
+Single-Host-P-D-disaggregation,-,-,-,-,-,-
+Speculative Decoding: Eagle3,✅ Passing,✅ Passing,✅ Passing,✅ Passing,❓ Untested,❓ Untested
+Speculative Decoding: Ngram,✅ Passing,✅ Passing,✅ Passing,✅ Passing,❓ Untested,❓ Untested
+async scheduler,✅ Passing,✅ Passing,✅ Passing,✅ Passing,❓ Untested,❓ Untested
+data_parallelism,✅ Passing,❓ Untested,✅ Passing,✅ Passing,❓ Untested,❓ Untested
+runai_model_streamer_loader,✅ Passing,-,✅ Passing,✅ Passing,❓ Untested,❓ Untested
+sampling_params,✅ Passing,-,✅ Passing,✅ Passing,❓ Untested,❓ Untested
+structured_decoding,✅ Passing,-,✅ Passing,✅ Passing,❓ Untested,❓ Untested
