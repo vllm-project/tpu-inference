@@ -3,7 +3,7 @@ Model,Type,UnitTest,Accuracy/Correctness,Benchmark
 "Qwen/Qwen3-Omni-30B-A3B-Instruct",Multimodal,unverified,unverified,unverified
 "meta-llama/Llama-4-Maverick-17B-128E-Instruct",Multimodal,unverified,unverified,unverified
 "Qwen/Qwen3-30B-A3B",Text,✅,❌,N/A
-"Qwen/Qwen3-32B",Text,✅,✅,✅
+"Qwen/Qwen3-32B",Text,❌,N/A,N/A
 "Qwen/Qwen3-4B",Text,✅,✅,✅
 "Qwen/Qwen3-Coder-480B-A35B-Instruct",Text,❌,N/A,N/A
 "deepseek-ai/DeepSeek-V3.1",Text,unverified,unverified,unverified
