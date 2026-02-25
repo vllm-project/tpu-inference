@@ -41,6 +41,7 @@ def test_min_token_size_alignment():
     assert min_token_size == 64
     assert (min_token_size & (min_token_size - 1) == 0)
 
+
 def test_min_req_size_alignment():
     """
     Simulates the logic in tpu_runner.py to verify that non-power-of-two 
@@ -49,9 +50,9 @@ def test_min_req_size_alignment():
     # Simulate a scenario with DP=6 (non-power-of-two)
     dp_size = 6
     MIN_NUM_SEQS = 8
-    
+
     min_num_reqs = max(MIN_NUM_SEQS, next_power_of_2(dp_size))
-    
+
     # Assert that 6 correctly aligns to 8
     assert min_num_reqs == 8
     assert (min_num_reqs & (min_num_reqs - 1) == 0) and min_num_reqs > 0
