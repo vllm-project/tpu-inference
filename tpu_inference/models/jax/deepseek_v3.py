@@ -1369,13 +1369,24 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
 
             for name, weight in weights_iter:
                 if "self_attn.kv_b_proj" in name:
-                    # DeepSeek MLA weights/scales are typically (Out, In).
-                    # We split on the 'Out' dimension (dim 0).
-                    split_idx = int(weight.shape[0] * ratio)
-                    
-                    k_val = weight[:split_idx, ...]
-                    v_val = weight[split_idx:, ...]
-                    
+                    # https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/attention/mla_attention.py#L655-L677
+                    # [A, N, H], split on H
+                    print(f"loading {name}, {weight.shape=}")
+                    block_size = 128  # block size from HF config.
+                    if 'scale' in name:
+                        num_attention_heads = int(attn.num_attention_heads /
+                                                  block_size)
+                    else:
+                        num_attention_heads = attn.num_attention_heads
+                    weight = weight.view(kv_lora_rank, num_attention_heads, -1)
+                    split_idx = int(weight.shape[-1] * ratio)
+                    print(
+                        f"split_idx/H = {split_idx}/{weight.shape[-1]}, {qk_nope_head_dim=}, {v_head_dim=}"
+                    )
+
+                    k_val = weight[..., split_idx:]
+                    v_val = weight[..., :split_idx]
+
                     yield name.replace("kv_b_proj", "k_up_proj"), k_val
                     yield name.replace("kv_b_proj", "v_up_proj"), v_val
                 else:
