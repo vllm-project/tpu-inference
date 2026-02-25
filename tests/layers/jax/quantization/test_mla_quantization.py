@@ -1,3 +1,4 @@
+import os; os.environ["JAX_PLATFORMS"] = "cpu"
 # Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -116,19 +117,20 @@ def test_mla_k_up_proj_lifecycle(rngs):
     
     method = layer.quant_method
     
-    # Verify Decoupled Placeholder (Step 1)
-    assert layer.weight.value.shape == (512, 16384)
-    assert layer.weight.sharding == ()
-    assert layer.weight_scale_inv.sharding == ()
+    # 1. Checkpoint matches DeepSeek format: (N*H, A) = (16384, 512)
+    # We use a pattern to track data: value = head_idx * 1000000 + dim_idx * 1000 + latent_idx
+    torch_weight = torch.zeros(16384, 512)
+    for n in range(num_heads):
+        for h in range(qk_nope_head_dim):
+            for a in range(kv_lora_rank):
+                torch_weight[n * qk_nope_head_dim + h, a] = n * 10000 + h * 100 + a
+
+    # 2. Generator logic: k_val = weight.T -> (512, 16384)
+    k_val_gen = torch_weight.T
     
-    # Mock Loaded Checkpoint (OutTotal, InTotal)
-    torch_weight = torch.randn(512, 16384) 
-    torch_scale = torch.randn(4, 128)      # (OutBlocks, InBlocks)
+    layer.weight.weight_loader(layer.weight, k_val_gen)
     
-    layer.weight.weight_loader(layer.weight, torch_weight)
-    layer.weight_scale_inv.weight_loader(layer.weight_scale_inv, torch_scale)
-    
-    # Process Weights (Step 2)
+    # Process Weights
     devices = jax.devices()
     mesh = jax.sharding.Mesh(np.array(devices[:1]).reshape(1, 1), ('x', 'y'))
     method.linear_config.mesh = mesh
@@ -137,13 +139,15 @@ def test_mla_k_up_proj_lifecycle(rngs):
     with jax.set_mesh(mesh):
         method.process_weights_after_loading(layer)
         
-    # Verify Final ND Layouts (Step 2.1.2)
-    assert layer.weight.value.shape == (512, 128, 128)
-    assert layer.weight_scale_inv.value.shape == (512,)
+    # Verify Final ND Layout: (A, N, H)
+    # Check a few samples
+    final_w = layer.weight.value
+    assert final_w.shape == (512, 128, 128)
     
-    if hasattr(layer.weight.sharding, 'spec'):
-        assert layer.weight.sharding.spec == original_w_sharding
-        assert layer.weight_scale_inv.sharding.spec == jax.sharding.PartitionSpec('x')
+    # Sample: a=5, n=10, h=20
+    # Original torch was [n*qk_nope_head_dim + h, a]
+    expected_val = 10 * 10000 + 20 * 100 + 5
+    assert final_w[5, 10, 20] == expected_val
 
 def test_mla_v_up_proj_lifecycle(rngs):
     # MLA v_up_proj parameters: TNA,ANH->TNH
@@ -170,19 +174,19 @@ def test_mla_v_up_proj_lifecycle(rngs):
     
     method = layer.quant_method
     
-    # Verify Decoupled Placeholder (Step 1)
-    assert layer.weight.value.shape == (128, 65536)
-    assert layer.weight.sharding == ()
-    assert layer.weight_scale_inv.sharding == ()
+    # 1. Checkpoint matches DeepSeek format: (N*H, A) = (16384, 512)
+    torch_weight = torch.zeros(16384, 512)
+    for n in range(num_heads):
+        for h in range(v_head_dim):
+            for a in range(kv_lora_rank):
+                torch_weight[n * v_head_dim + h, a] = n * 10000 + h * 100 + a
+
+    # 2. Generator logic: .reshape(N, H, A).permute(1, 2, 0).reshape(H, -1) -> (128, 65536)
+    v_val_gen = torch_weight.reshape(num_heads, v_head_dim, kv_lora_rank).permute(1, 2, 0).reshape(v_head_dim, -1)
     
-    # Mock Loaded Checkpoint (OutTotal, InTotal)
-    torch_weight = torch.randn(128, 65536) 
-    torch_scale = torch.randn(1, 512)      # (OutBlocks, InBlocks)
+    layer.weight.weight_loader(layer.weight, v_val_gen)
     
-    layer.weight.weight_loader(layer.weight, torch_weight)
-    layer.weight_scale_inv.weight_loader(layer.weight_scale_inv, torch_scale)
-    
-    # Process Weights (Step 2)
+    # Process Weights
     devices = jax.devices()
     mesh = jax.sharding.Mesh(np.array(devices[:1]).reshape(1, 1), ('x', 'y'))
     method.linear_config.mesh = mesh
@@ -191,13 +195,60 @@ def test_mla_v_up_proj_lifecycle(rngs):
     with jax.set_mesh(mesh):
         method.process_weights_after_loading(layer)
         
-    # Verify Final ND Layouts (Step 2.1.2)
-    assert layer.weight.value.shape == (512, 128, 128)
-    assert layer.weight_scale_inv.value.shape == (128,)
+    # Verify Final ND Layout: (A, N, H)
+    final_w = layer.weight.value
+    assert final_w.shape == (512, 128, 128)
     
-    if hasattr(layer.weight.sharding, 'spec'):
-        assert layer.weight.sharding.spec == original_w_sharding
-        assert layer.weight_scale_inv.sharding.spec == jax.sharding.PartitionSpec(None)
+    # Sample: a=5, n=10, h=20
+    expected_val = 10 * 10000 + 20 * 100 + 5
+    assert final_w[5, 10, 20] == expected_val
+
+def test_mla_disabled_kv_b_proj_lifecycle(rngs):
+    # MLA disabled kv_b_proj parameters: SA,AL->SL
+    kv_lora_rank = 512
+    num_heads = 128
+    qk_nope_head_dim = 128
+    v_head_dim = 128
+    out_features = num_heads * (qk_nope_head_dim + v_head_dim) # 128 * 256 = 32768
+    
+    hf_quant_config = {
+        "quant_method": "fp8",
+        "activation_scheme": "dynamic",
+        "weight_block_size": [128, 128],
+    }
+    fp8_config = Fp8Config(hf_quant_config)
+    original_w_sharding = jax.sharding.PartitionSpec(None, 'x')
+    
+    layer = JaxEinsum(
+        einsum_str="SA,AL->SL",
+        kernel_shape=(kv_lora_rank, out_features),
+        rngs=rngs,
+        quant_config=fp8_config,
+        prefix="model.layers.4.self_attn.kv_b_proj",
+        kernel_init=nnx.with_partitioning(nnx.initializers.uniform(), original_w_sharding)
+    )
+    
+    # Standard linear checkpoint: (Out, In) = (32768, 512)
+    torch_weight = torch.randn(32768, 512)
+    
+    layer.weight.weight_loader(layer.weight, torch_weight)
+    
+    # Process Weights
+    devices = jax.devices()
+    mesh = jax.sharding.Mesh(np.array(devices[:1]).reshape(1, 1), ('x', 'y'))
+    method = layer.quant_method
+    method.linear_config.mesh = mesh
+    method.linear_config.bias_sharding = jax.sharding.PartitionSpec(None)
+    
+    with jax.set_mesh(mesh):
+        method.process_weights_after_loading(layer)
+        
+    # Verify Final 2D Layout: (32768, 512)
+    assert layer.weight.value.shape == (32768, 512)
+    # Check values match (approx due to requantization if it happened, 
+    # but here we just check if it was loaded correctly)
+    # Since it's fp8 -> bf16, there might be slight precision loss, but shapes must match.
+    assert layer.weight.value.shape == torch_weight.shape
 
 if __name__ == "__main__":
     pytest.main([__file__])

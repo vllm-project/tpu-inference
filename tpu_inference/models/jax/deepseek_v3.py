@@ -1372,9 +1372,22 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
                     # DeepSeek MLA weights/scales are typically (Out, In).
                     # We split on the 'Out' dimension (dim 0).
                     split_idx = int(weight.shape[0] * ratio)
-                    
-                    k_val = weight[:split_idx, ...]
-                    v_val = weight[split_idx:, ...]
+                    N = num_attention_heads
+                    # A is the out dim of k_up_proj so we need to permute it
+                    # so that it is in the expected (OutShape, InShape) order.
+                    if name.endswith(".weight"):
+                        k_val = weight[:split_idx, ...].T
+                        # Since A is the contracting dim of v_up_proj, it is already in (OutShape, InShape) order.
+                        v_val = weight[split_idx:, ...]\
+                            .reshape(N, v_head_dim, kv_lora_rank)\
+                            .permute(1, 2, 0)\
+                            .reshape(v_head_dim, -1)
+                    elif name.endswith(".weight_scale_inv"):
+                        k_val = weight[:split_idx, ...].T
+                        v_val = weight[split_idx:, ...]\
+                            .reshape(N, -1, weight.shape[-1])\
+                            .permute(1, 2, 0)\
+                            .reshape(-1, N * weight.shape[-1])
                     
                     yield name.replace("kv_b_proj", "k_up_proj"), k_val
                     yield name.replace("kv_b_proj", "v_up_proj"), v_val

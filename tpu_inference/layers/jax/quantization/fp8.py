@@ -196,8 +196,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         self.in_features = math.prod(adapt_info.in_features)
         self.batch_features = adapt_info.batch_features
         self.batch_sharding = adapt_info.batch_sharding
-        if self.batch_features:
-            # Batched case: keep original weight sharding for the full
+        if len(layer.weight.value.shape) > 2:
             # 3D weight (matches kernel_shape).
             self.weight_sharding = _to_partition_spec(layer.weight.sharding)
             self.kernel_shape = layer.kernel_shape
@@ -235,6 +234,13 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         # Initialize the layer.weight as a 2D CPU placeholder to load the fp8 checkpoint weights.
         # Checkpoints typically store linear weights as (OutTotal, InTotal).
         # We use explicit permute_dims=(0, 1) to bypass the default 2D transpose in the loader.
+        
+        # # 3D tensors are stored (InTotal, OutTotal)
+        # if self.batch_features:
+        #     permute_dims = (1, 0)
+        # else:
+        #     permute_dims = (0, 1)
+
         layer.weight = nnx.Param(
             kernel_init(rngs.params(), (self.out_features_total, self.in_features_total), param_dtype),
             weight_loader=partial(load_nnx_param_from_reshaped_torch,
@@ -302,11 +308,11 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             weights.weight_scale = weights.weight_scale.reshape(logical_output_shape)
 
             if len(self.kernel_shape) > 2:
-                if self.output_side_indices[0] == 0:
-                    weights.weight = weights.weight.reshape(self.kernel_shape)
+                if self.output_side_indices[0] == 2:
+                    weights.weight = weights.weight.T.reshape(self.kernel_shape)
                 else:
                     # Some 3D weights like v_up_proj in deepseek-ai/DeepSeek-R1 are transposed
-                    weights.weight = weights.weight.T.reshape(self.kernel_shape)
+                    weights.weight = weights.weight.reshape(self.kernel_shape)
             else:
                 weights.weight = weights.weight.reshape(self.kernel_shape)
             
@@ -327,6 +333,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             final_w = weights.weight
             final_s = weights.weight_scale
             final_b = weights.bias
+            logger.warning(f"!!!!!!kernel_shape = {self.kernel_shape}, final_w = {final_w.shape}, final_s = {final_s.shape}")
 
         # Perform sharded device placement outside of the CPU block.
         mesh = self.linear_config.mesh
