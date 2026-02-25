@@ -22,6 +22,7 @@ from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.layer import \
     FusedMoeWeightScaleSupported
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
@@ -246,9 +247,6 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
         self.extra_backend_kwargs = {}
         if self.moe_backend == MoEBackend.FUSED_MOE:
             self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name)
-        self._w13_interleave = layer.activation == "swigluoai"
-        self._w13_reorder_size = get_mesh_shape_product(
-            self.mesh, ShardingAxisName.MLP_TENSOR)
 
     @property
     def is_monolithic(self) -> bool:
@@ -357,63 +355,82 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
         assert not self.moe.has_bias
 
         w13_qweight = t2j(layer.w13_qweight, use_dlpack=False)
-        w13_qweight = jnp.swapaxes(awq_u32_unpack_u4(w13_qweight), 1, 2)
         delattr(layer, "w13_qweight")
 
         w2_qweight = t2j(layer.w2_qweight, use_dlpack=False)
-        w2_qweight = jnp.swapaxes(awq_u32_unpack_u4(w2_qweight), 1, 2)
         delattr(layer, "w2_qweight")
 
         w13_scales = t2j(layer.w13_scales, use_dlpack=False)
-        w13_scales = jnp.swapaxes(w13_scales, 1, 2)
         delattr(layer, "w13_scales")
 
         w2_scales = t2j(layer.w2_scales, use_dlpack=False)
-        w2_scales = jnp.swapaxes(w2_scales, 1, 2)
         delattr(layer, "w2_scales")
 
         w13_qzeros = t2j(layer.w13_qzeros, use_dlpack=False)
-        w13_qzeros = jnp.swapaxes(awq_u32_unpack_u4(w13_qzeros), 1, 2)
         delattr(layer, "w13_qzeros")
 
         w2_qzeros = t2j(layer.w2_qzeros, use_dlpack=False)
-        w2_qzeros = jnp.swapaxes(awq_u32_unpack_u4(w2_qzeros), 1, 2)
         delattr(layer, "w2_qzeros")
 
-        weights = process_moe_weights(
-            FusedMoEWeights(
-                w13_weight=w13_qweight,
-                w13_weight_scale=w13_scales,
-                w13_weight_zero_point=w13_qzeros,
-                w13_bias=None,
-                w2_weight=w2_qweight,
-                w2_weight_scale=w2_scales,
-                w2_weight_zero_point=w2_qzeros,
-                w2_bias=None,
-            ),
-            moe_backend=self.moe_backend,
-            w13_interleave=self._w13_interleave,
-            w13_reorder_size=self._w13_reorder_size,
+        @jax.jit
+        def process_awq_moe_weights(
+            w13_qweight: jax.Array,
+            w13_scales: jax.Array,
+            w13_qzeros: jax.Array,
+            w2_qweight: jax.Array,
+            w2_scales: jax.Array,
+            w2_qzeros: jax.Array,
+        ) -> FusedMoEWeights:
+            w13_qweight = jnp.swapaxes(awq_u32_unpack_u4(w13_qweight), 1, 2)
+            w2_qweight = jnp.swapaxes(awq_u32_unpack_u4(w2_qweight), 1, 2)
+            w13_scales = jnp.swapaxes(w13_scales, 1, 2)
+            w2_scales = jnp.swapaxes(w2_scales, 1, 2)
+            w13_qzeros = jnp.swapaxes(awq_u32_unpack_u4(w13_qzeros), 1, 2)
+            w2_qzeros = jnp.swapaxes(awq_u32_unpack_u4(w2_qzeros), 1, 2)
+
+            w13_interleave = layer.activation == MoEActivation.SWIGLUOAI
+            w13_reorder_size = get_mesh_shape_product(
+                self.mesh, ShardingAxisName.MLP_TENSOR)
+
+            return process_moe_weights(
+                FusedMoEWeights(
+                    w13_weight=w13_qweight,
+                    w13_weight_scale=w13_scales,
+                    w13_weight_zero_point=w13_qzeros,
+                    w13_bias=None,
+                    w2_weight=w2_qweight,
+                    w2_weight_scale=w2_scales,
+                    w2_weight_zero_point=w2_qzeros,
+                    w2_bias=None,
+                ),
+                moe_backend=self.moe_backend,
+                w13_interleave=w13_interleave,
+                w13_reorder_size=w13_reorder_size,
+            )
+
+        weights = process_awq_moe_weights(
+            w13_qweight,
+            w13_scales,
+            w13_qzeros,
+            w2_qweight,
+            w2_scales,
+            w2_qzeros,
         )
 
-        weights = shard_moe_weights(weights, self.moe_backend, self.mesh)
+        weights = torch_view(
+            shard_moe_weights(weights, self.moe_backend, self.mesh))
 
-        layer.w13_weight = Parameter(torch_view(weights.w13_weight),
-                                     requires_grad=False)
-        layer.w2_weight = Parameter(torch_view(weights.w2_weight),
-                                    requires_grad=False)
+        layer.w13_weight = Parameter(weights.w13_weight, requires_grad=False)
+        layer.w2_weight = Parameter(weights.w2_weight, requires_grad=False)
 
-        layer.w13_weight_scale = Parameter(torch_view(
-            weights.w13_weight_scale),
+        layer.w13_weight_scale = Parameter(weights.w13_weight_scale,
                                            requires_grad=False)
-        layer.w2_weight_scale = Parameter(torch_view(weights.w2_weight_scale),
+        layer.w2_weight_scale = Parameter(weights.w2_weight_scale,
                                           requires_grad=False)
 
-        layer.w13_weight_zero_point = Parameter(torch_view(
-            weights.w13_weight_zero_point),
+        layer.w13_weight_zero_point = Parameter(weights.w13_weight_zero_point,
                                                 requires_grad=False)
-        layer.w2_weight_zero_point = Parameter(torch_view(
-            weights.w2_weight_zero_point),
+        layer.w2_weight_zero_point = Parameter(weights.w2_weight_zero_point,
                                                requires_grad=False)
 
     def apply_monolithic(
@@ -430,12 +447,10 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
             w2_weight=jax_view(layer.w2_weight),
             w2_weight_scale=jax_view(layer.w2_weight_scale),
             w2_weight_zero_point=jax_view(layer.w2_weight_zero_point),
-            w2_bias=None,
-        )
-        return vllm_moe_apply(
-            layer=layer,
-            weights=weights,
-            quant_method_instance=self,
-            x=x,
-            router_logits=router_logits,
-        )
+            w2_bias=None)
+
+        return vllm_moe_apply(layer=layer,
+                              weights=weights,
+                              quant_method_instance=self,
+                              x=x,
+                              router_logits=router_logits)
