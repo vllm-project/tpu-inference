@@ -126,6 +126,75 @@ def generate_html_quantization_table(headers, data):
         
     html.append("  </tbody>")
     html.append("</table>")
+def merge_metrics(c, p):
+    """Merges Correctness (c) and Performance (p) metrics."""
+    c = str(c).strip()
+    p = str(p).strip()
+    
+    is_failed = "❌" in c or "❌" in p or "Failed" in c or "Failed" in p or "🔴" in c or "🔴" in p
+    is_untested = "❓" in c or "❓" in p or "Untested" in c or "Untested" in p
+    
+    if is_failed:
+        return "❓ Untested" if "❓" in c or "❓" in p else "❌ Failed" # Overriding based on PM logic, Untested could take precedence depending, but "Any Red = Red" usually means failed has highest precedence. Actually, mockup shows untested for red. Let's stick to standard: Failed > Untested > Passed. Wait, PM said: "Any Red = Red. If either is untested, untested". Let's do: Failed wins, then Untested.
+        # Wait, the instruction said: "if one of Corr/Perf is untested or failed, show it as untested or failed."
+    
+    if is_failed:
+        return "❌ Failed"
+    if is_untested:
+        return "❓ Untested"
+    if "✅" in c and "✅" in p:
+        return "✅ Passing"
+    return ""
+
+def generate_html_microbenchmark_table(headers, data):
+    """Generates an HTML table specifically for the microbenchmarks matrix."""
+    if not headers: return ""
+    
+    html = []
+    html.append("<table>")
+    html.append("  <thead>")
+    html.append("    <tr>")
+    html.append("      <th rowspan=\"2\">test</th>")
+    html.append("      <th colspan=\"6\">v6e</th>")
+    html.append("      <th colspan=\"6\">V7X</th>")
+    html.append("    </tr>")
+    html.append("    <tr>")
+    for _ in range(2):
+        html.append("      <th>W16A16</th>")
+        html.append("      <th>W8A16</th>")
+        html.append("      <th>W8 A8</th>")
+        html.append("      <th>W4A4</th>")
+        html.append("      <th>W4A8</th>")
+        html.append("      <th>W4A16</th>")
+    html.append("    </tr>")
+    html.append("  </thead>")
+    html.append("  <tbody>")
+    
+    for row in data:
+        html.append("    <tr>")
+        padded_row = row + [""] * (25 - len(row))
+        html.append(f"      <td>{padded_row[0]}</td>") # Kernel
+        
+        # v6e metrics
+        html.append(f"      <td>{merge_metrics(padded_row[1], padded_row[2])}</td>")
+        html.append(f"      <td>{merge_metrics(padded_row[3], padded_row[4])}</td>")
+        html.append(f"      <td>{merge_metrics(padded_row[5], padded_row[6])}</td>")
+        html.append(f"      <td>{merge_metrics(padded_row[7], padded_row[8])}</td>")
+        html.append(f"      <td>{merge_metrics(padded_row[9], padded_row[10])}</td>")
+        html.append(f"      <td>{merge_metrics(padded_row[11], padded_row[12])}</td>")
+        
+        # v7x metrics
+        html.append(f"      <td>{merge_metrics(padded_row[13], padded_row[14])}</td>")
+        html.append(f"      <td>{merge_metrics(padded_row[15], padded_row[16])}</td>")
+        html.append(f"      <td>{merge_metrics(padded_row[17], padded_row[18])}</td>")
+        html.append(f"      <td>{merge_metrics(padded_row[19], padded_row[20])}</td>")
+        html.append(f"      <td>{merge_metrics(padded_row[21], padded_row[22])}</td>")
+        html.append(f"      <td>{merge_metrics(padded_row[23], padded_row[24])}</td>")
+        
+        html.append("    </tr>")
+        
+    html.append("  </tbody>")
+    html.append("</table>")
     return "\n".join(html)
 
 def update_readme():
@@ -147,6 +216,8 @@ def update_readme():
             new_table = generate_html_feature_table(headers, all_data)
         elif section_key == "quantization":
             new_table = generate_html_quantization_table(headers, all_data)
+        elif section_key == "microbenchmarks":
+            new_table = generate_html_microbenchmark_table(headers, all_data)
         else:
             new_table = generate_markdown_table(headers, all_data)
         
