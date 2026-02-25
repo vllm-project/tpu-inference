@@ -173,7 +173,7 @@ fi
 
 if [[ "$DATASET" == "math500" || "$DATASET" == "mmlu" || "$DATASET" == "mlperf" ]]; then
   echo "Copying lm_eval directory to container..."
-  docker cp lm_eval "$CONTAINER_NAME:/workspace/"
+  docker cp .buildkite/benchmark/lm_eval "$CONTAINER_NAME:/workspace/"
 fi
 
 # echo "Copying bench_serving directory to container..."
