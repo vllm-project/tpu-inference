@@ -240,7 +240,6 @@ class GmmTest(jtu.JaxTestCase):
                 rhs_q,
                 group_sizes,
                 rhs_scale=rhs_scale,
-                rhs_zero_point=rhs_zero_point,
                 group_offset=group_offset,
                 rhs_bias=rhs_bias,
             ).astype(lhs.dtype)
