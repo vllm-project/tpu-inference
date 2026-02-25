@@ -66,6 +66,7 @@ def reference_gmm(
     rhs: jax.Array,
     group_sizes: jax.Array,
     rhs_scale: jax.Array | None = None,
+    rhs_zero_point: jax.Array | None = None,
     rhs_bias: jax.Array | None = None,
     group_offset: jax.Array | None = None,
 ):
@@ -106,7 +107,9 @@ def reference_gmm(
                     jnp.float32)
                 rhs_block = rhs_slice[block_start:block_end, :].astype(
                     jnp.float32)
-
+                if rhs_zero_point is not None:
+                    rhs_block = rhs_block - rhs_zero_point[group][
+                        block].astype(jnp.float32)
                 acc = jnp.einsum("bd,dh->bh", lhs_block, rhs_block)
                 if rhs_scale is not None:
                     acc *= rhs_scale[group][block]
@@ -171,7 +174,7 @@ class GmmTest(jtu.JaxTestCase):
         out_size=[512, 1024],
         num_groups=[16, 32],
         has_bias=[True, False],
-        weight_dtype=[jnp.int8, jnp.float8_e5m2, jnp.float4_e2m1fn],
+        weight_dtype=[jnp.int8, jnp.float8_e5m2, jnp.float4_e2m1fn, jnp.uint4],
         block_size=[64, 128, 256, 512],
         group_offset=[0, 2, 3],
     )
@@ -201,6 +204,16 @@ class GmmTest(jtu.JaxTestCase):
                                            block_size=block_size)
         rhs_scale = jnp.expand_dims(rhs_scale, axis=2)
 
+        rhs_zero_point = None
+        if weight_dtype == jnp.uint4:
+            # NOTE(catswe): awq case has uint4 weight and zero point
+            rhs_zero_point = jax.random.randint(
+                key,
+                rhs_scale.shape,
+                minval=jnp.iinfo(jnp.uint4).min,
+                maxval=jnp.iinfo(jnp.uint4).max,
+                dtype=jnp.uint4)
+
         rhs_bias = None
         if has_bias:
             rhs_bias = jax.random.normal(key, (num_local_groups, 1, out_size),
@@ -214,23 +227,30 @@ class GmmTest(jtu.JaxTestCase):
             rhs_q,
             group_sizes,
             rhs_scale=rhs_scale,
+            rhs_zero_point=rhs_zero_point,
             rhs_bias=rhs_bias,
             group_offset=group_offset,
         )
-
-        if is_supported_by_gmm_v2(lhs, rhs_q, rhs_scale, None):
-            gmm_fn = gmm_v2
+        if is_supported_by_gmm_v2(lhs, rhs_q, rhs_scale, rhs_zero_point):
+            actual = gmm_v2(
+                lhs,
+                rhs_q,
+                group_sizes,
+                rhs_scale=rhs_scale,
+                rhs_zero_point=rhs_zero_point,
+                group_offset=group_offset,
+                rhs_bias=rhs_bias,
+            ).astype(lhs.dtype)
         else:
-            gmm_fn = gmm
-
-        actual = gmm_fn(
-            lhs,
-            rhs_q,
-            group_sizes,
-            rhs_scale=rhs_scale,
-            group_offset=group_offset,
-            rhs_bias=rhs_bias,
-        ).astype(lhs.dtype)
+            actual = gmm(
+                lhs,
+                rhs_q,
+                group_sizes,
+                rhs_scale=rhs_scale,
+                rhs_zero_point=rhs_zero_point,
+                group_offset=group_offset,
+                rhs_bias=rhs_bias,
+            ).astype(lhs.dtype)
 
         self.assertArraysAllClose(actual, expected, atol=3e-1, rtol=3e-1)
 
