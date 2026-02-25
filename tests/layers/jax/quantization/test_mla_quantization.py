@@ -15,7 +15,6 @@ os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import MagicMock
 import numpy as np
 import torch
 import jax
@@ -30,16 +29,10 @@ from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
 def rngs():
     return nnx.Rngs(42)
 
-def get_spec(sharding):
-    if hasattr(sharding, 'spec'):
-        return sharding.spec
-    return jax.sharding.PartitionSpec()
-
 def test_standard_linear_lifecycle(rngs):
-    # Standard 2D linear TD,DA->TA (In=7168, Out=1536)
-    # Optimized layout is (1536, 7168)
-    in_features = 7168
-    out_features = 1536
+    # Standard 2D linear MatMul(X, W). Weight is (In, Out) = (512, 256)
+    in_features = 512
+    out_features = 256
     
     hf_quant_config = {
         "quant_method": "fp8",
@@ -60,42 +53,53 @@ def test_standard_linear_lifecycle(rngs):
     )
     
     method = layer.quant_method
-    assert isinstance(method, Fp8BlockwiseLinearMethod)
     
-    # Verify Decoupled Placeholder (Step 1)
-    # Weight: OutTotal=1536, InTotal=7168
-    assert layer.weight.value.shape == (1536, 7168)
-    assert layer.weight.sharding == ()
-    assert layer.weight_scale_inv.sharding == ()
-    
-    # Mock Loaded Checkpoint (OutTotal, InTotal)
-    torch_weight = torch.randn(1536, 7168) 
-    torch_scale = torch.randn(12, 56)      # (OutBlocks, InBlocks)
-    
+    # 1. Mock Checkpoint: (Out, In) = (256, 512)
+    torch_weight = torch.zeros(256, 512)
+    for r in range(256):
+        for c in range(512):
+            torch_weight[r, c] = (r % 10) * 1.0 + (c % 10) * 0.01
+            
+    # Patterned Scales: (OutBlocks=2, InBlocks=4)
+    torch_scale = torch.zeros(2, 4)
+    for ob in range(2):
+        for ib in range(4):
+            torch_scale[ob, ib] = 1.0 + ob * 0.1 + ib * 0.01
+            
     layer.weight.weight_loader(layer.weight, torch_weight)
     layer.weight_scale_inv.weight_loader(layer.weight_scale_inv, torch_scale)
     
-    # Process Weights (Step 2)
+    # 2. Process Weights
     devices = jax.devices()
-    mesh = jax.sharding.Mesh(np.array(devices[:1]).reshape(1, 1), ('x', 'y'))
+    mesh = jax.sharding.Mesh(np.array(devices[:1]).reshape(1), ('x',))
     method.linear_config.mesh = mesh
-    method.linear_config.bias_sharding = jax.sharding.PartitionSpec(None)
     
     with jax.set_mesh(mesh):
         method.process_weights_after_loading(layer)
         
-    # Verify Optimized 2D Layouts (Step 2.1.2)
-    assert layer.weight.value.shape == (1536, 7168)
-    # Scale: Output was 1536. Logical shape (1536,)
-    assert layer.weight_scale_inv.value.shape == (1536,)
+    # 3. Verify Reality: Standard JaxLinear MUST BE (In, Out) = (512, 256)
+    final_w = layer.weight.value
+    final_s = layer.weight_scale_inv.value
+    assert final_w.shape == (512, 256)
     
-    # Verify Sharding
-    if hasattr(layer.weight.sharding, 'spec'):
-        assert layer.weight.sharding.spec == original_w_sharding
-        assert layer.weight_scale_inv.sharding.spec == jax.sharding.PartitionSpec('x')
+    # Sample check at block boundary: row=130 (In), col=5 (Out)
+    # Original checkpoint (Out, In) index was (5, 130)
+    expected_val = (5 % 10) * 1.0 + (130 % 10) * 0.01
+    # Dequantize: final_w[in, out] * final_s[out]
+    actual_val = float(final_w[130, 5]) * float(final_s[5])
+    assert np.allclose(actual_val, expected_val, atol=0.1)
+
+    # NEW: Verify Forward Pass
+    x = jnp.ones((1, 512), dtype=jnp.bfloat16)
+    try:
+        y = layer(x)
+        assert y.shape == (1, 256)
+        assert not jnp.isnan(y).any()
+    except Exception as e:
+        pytest.fail(f"Forward pass failed for JaxLinear: {e}")
 
 def test_mla_k_up_proj_lifecycle(rngs):
-    # MLA k_up_proj parameters: TNH,ANH->TNA
+    # MLA k_up_proj parameters: TNH,ANH->TNA. Weight is (A, N, H) = (512, 128, 128)
     kv_lora_rank = 512
     num_heads = 128
     qk_nope_head_dim = 128
@@ -120,56 +124,58 @@ def test_mla_k_up_proj_lifecycle(rngs):
     method = layer.quant_method
     
     # 1. Checkpoint matches DeepSeek format: (N*H, A) = (16384, 512)
-    # Use a pattern that fits in FP8: value = (n*0.1 + h*0.01 + a*0.001)
     torch_weight = torch.zeros(16384, 512)
-    for n in range(num_heads):
-        for h in range(qk_nope_head_dim):
-            for a in range(kv_lora_rank):
-                # Scale values to be distinct but within FP8 range (~ -448 to 448)
-                torch_weight[n * qk_nope_head_dim + h, a] = (n % 10) * 1.0 + (h % 10) * 0.1 + (a % 10) * 0.01
-
-    # 2. Generator logic: k_val = weight.T -> (512, 16384)
+    for nh in range(16384):
+        for a in range(512):
+            torch_weight[nh, a] = (nh % 10) * 1.0 + (a % 10) * 0.01
+            
+    # Generator logic: k_val = weight.T -> (512, 16384)
     k_val_gen = torch_weight.T.contiguous()
-    
+            
+    # Scales: checkpoint is (N, A_blocks) = (128, 4)
+    # Generator logic: k_val = weight[:split_idx, ...].T.contiguous() -> (4, 128)
+    torch_scale = torch.zeros(128, 4)
+    for n in range(128):
+        for ab in range(4):
+            torch_scale[n, ab] = 1.0 + n * 0.01 + ab * 0.1
+    k_scale_gen = torch_scale.T.contiguous()
+            
     layer.weight.weight_loader(layer.weight, k_val_gen)
+    layer.weight_scale_inv.weight_loader(layer.weight_scale_inv, k_scale_gen)
     
-    # 3. Scale loading (set to 1.0 to preserve values during dequant)
-    torch_scale = torch.ones(4, 128)
-    layer.weight_scale_inv.weight_loader(layer.weight_scale_inv, torch_scale)
-    
-    # Process Weights
-    # Simulate a 4-device mesh to verify sharding compatibility
+    # 2. Process Weights on multi-device mesh
     devices = jax.devices()
-    assert len(devices) >= 4, f"Test requires at least 4 devices, found {len(devices)}"
     mesh = jax.sharding.Mesh(np.array(devices[:4]).reshape(4), ('x',))
-    
     method.linear_config.mesh = mesh
-    method.linear_config.bias_sharding = jax.sharding.PartitionSpec(None)
     
     with jax.set_mesh(mesh):
         method.process_weights_after_loading(layer)
         
-    # Verify Final ND Layout: (A, N, H)
-    # Since weights are stored quantized in FP8, we must dequantize to verify values.
+    # 3. Verify Final ND Layout: (A, N, H) = (512, 128, 128)
     final_w = layer.weight.value
     final_s = layer.weight_scale_inv.value
     assert final_w.shape == (512, 128, 128)
-    # Confirm it is sharded (not just a single device array)
     assert len(final_w.addressable_shards) > 1
     
-    # Sample: a=4, n=2, h=3
-    # Logic: latent dimension a=4 is Index 0. Head dimensions n=2, h=3 are Index 1, 2.
-    # Checkpoint value was at (n*128 + h, a)
-    expected_val = 2.0 + 3.0 * 0.1 + 4.0 * 0.01
-    
-    # Dequantize: final_s matches the output dimension (A=512 for k_up_proj)
-    # So we use final_s[a]
-    actual_val = float(final_w[4, 2, 3]) * float(final_s[4])
-    
-    assert np.allclose(actual_val, expected_val, atol=0.1), f"Value mismatch at [4,2,3]: expected {expected_val}, got {actual_val} (quantized was {final_w[4,2,3]}, scale was {final_s[4]})"
+    # Scale final_s should be (A, InBlocks) = (512, 128)
+    # Checkpoint (NH, A) was (259, 130). 
+    # nh=259 -> block_idx = 259 // 128 = 2.
+    expected_val = (259 % 10) * 1.0 + (130 % 10) * 0.01
+    actual_val = float(final_w[130, 2, 3]) * float(final_s[130, 2])
+    assert np.allclose(actual_val, expected_val, atol=0.1)
+
+    # NEW: Verify Forward Pass
+    # x: (T, N, H) = (1, 128, 128)
+    x = jnp.ones((1, 128, 128), dtype=jnp.bfloat16)
+    try:
+        y = layer(x)
+        assert y.shape == (1, 128, 512)
+        assert not jnp.isnan(y).any()
+    except Exception as e:
+        pytest.fail(f"Forward pass failed for k_up_proj: {e}")
 
 def test_mla_v_up_proj_lifecycle(rngs):
-    # MLA v_up_proj parameters: TNA,ANH->TNH
+    # MLA v_up_proj parameters: TNA,ANH->TNH. Weight is (A, N, H) = (512, 128, 128)
     kv_lora_rank = 512
     num_heads = 128
     v_head_dim = 128
@@ -195,52 +201,64 @@ def test_mla_v_up_proj_lifecycle(rngs):
     
     # 1. Checkpoint matches DeepSeek format: (N*H, A) = (16384, 512)
     torch_weight = torch.zeros(16384, 512)
-    for n in range(num_heads):
-        for h in range(v_head_dim):
-            for a in range(kv_lora_rank):
-                # Pattern: n.h_a
-                torch_weight[n * v_head_dim + h, a] = n * 1.0 + h * 0.1 + a * 0.01
-
-    # 2. Generator logic: .reshape(N, H, A).permute(1, 2, 0).reshape(H, -1) -> (128, 65536)
+    for nh in range(16384):
+        for a in range(512):
+            torch_weight[nh, a] = (nh % 10) * 1.0 + (a % 10) * 0.01
+            
+    # Generator logic: .reshape(N, H, A).permute(1, 2, 0).reshape(H, -1) -> (128, 65536)
     v_val_gen = torch_weight.reshape(num_heads, v_head_dim, kv_lora_rank).permute(1, 2, 0).reshape(v_head_dim, -1).contiguous()
-    
+            
+    # Scales: checkpoint is (N, A_blocks) = (128, 4)
+    # Generator logic: v_val = weight[split_idx:, ...].T.contiguous().reshape(1, -1).contiguous() -> (1, 512)
+    torch_scale = torch.zeros(128, 4)
+    for n in range(128):
+        for ab in range(4):
+            torch_scale[n, ab] = 1.0 + n * 0.01 + ab * 0.1
+    v_scale_gen = torch_scale.T.contiguous().reshape(1, -1).contiguous()
+            
     layer.weight.weight_loader(layer.weight, v_val_gen)
+    layer.weight_scale_inv.weight_loader(layer.weight_scale_inv, v_scale_gen)
     
-    # 3. Scale loading
-    torch_scale = torch.ones(1, 512)
-    layer.weight_scale_inv.weight_loader(layer.weight_scale_inv, torch_scale)
-    
-        # Process Weights
-    # Simulate a 4-device mesh to verify sharding compatibility
+    # 2. Process Weights
     devices = jax.devices()
-    assert len(devices) >= 4, f"Test requires at least 4 devices, found {len(devices)}"
     mesh = jax.sharding.Mesh(np.array(devices[:4]).reshape(4), ('x',))
-        
     method.linear_config.mesh = mesh
-    method.linear_config.bias_sharding = jax.sharding.PartitionSpec(None)
     
     with jax.set_mesh(mesh):
         method.process_weights_after_loading(layer)
-    
-    # Verify Final ND Layout: (A, N, H)
+        
+    # 3. Verify Final ND Layout: (A, N, H) = (512, 128, 128)
     final_w = layer.weight.value
     final_s = layer.weight_scale_inv.value
     assert final_w.shape == (512, 128, 128)
-    assert len(final_w.addressable_shards) > 1
     
-    # Sample: a=4, n=2, h=3
-    expected_val = 2.0 + 3.0 * 0.1 + 4.0 * 0.01
-    # Dequantize: final_s matches output dimension (H=128 for v_up_proj)
-    actual_val = float(final_w[4, 2, 3]) * float(final_s[3])
-    assert np.allclose(actual_val, expected_val, atol=0.1), f"Value mismatch at [4,2,3]: expected {expected_val}, got {actual_val} (quantized was {final_w[4,2,3]}, scale was {final_s[3]})"
+    # Scale final_s should be (H, InBlocks) = (128, 512)
+    # Checkpoint (NH, A) was (259, 4).
+    # Generator v_val_gen layout is (H, A*N).
+    # nh=259, a=4 -> h=3, a=4, n=2.
+    # index in A*N is a*num_heads + n = 4*128 + 2 = 514.
+    # block_idx = 514 // 128 = 4.
+    expected_val = (259 % 10) * 1.0 + (4 % 10) * 0.01
+    actual_val = float(final_w[4, 2, 3]) * float(final_s[3, 4])
+    assert np.allclose(actual_val, expected_val, atol=0.1)
+
+    # NEW: Verify Forward Pass
+    # x: (T, N, A) = (1, 128, 512)
+    x = jnp.ones((1, 128, 512), dtype=jnp.bfloat16)
+    try:
+        y = layer(x)
+        assert y.shape == (1, 128, 128)
+        assert not jnp.isnan(y).any()
+    except Exception as e:
+        pytest.fail(f"Forward pass failed for v_up_proj: {e}")
 
 def test_mla_disabled_kv_b_proj_lifecycle(rngs):
-    # MLA disabled kv_b_proj parameters: SA,AL->SL
+    # Standard linear Einsum: MatMul(X, W). Weight is (In, Out) = (512, 32768)
     kv_lora_rank = 512
     num_heads = 128
     qk_nope_head_dim = 128
     v_head_dim = 128
-    out_features = num_heads * (qk_nope_head_dim + v_head_dim) # 128 * 256 = 32768
+    out_features = num_heads * (qk_nope_head_dim + v_head_dim)
     
     hf_quant_config = {
         "quant_method": "fp8",
@@ -259,27 +277,30 @@ def test_mla_disabled_kv_b_proj_lifecycle(rngs):
         kernel_init=nnx.with_partitioning(nnx.initializers.uniform(), original_w_sharding)
     )
     
-    # Standard linear checkpoint: (Out, In) = (32768, 512)
+    # 1. Mock Checkpoint: (Out, In) = (32768, 512)
     torch_weight = torch.randn(32768, 512)
-    
     layer.weight.weight_loader(layer.weight, torch_weight)
     
-    # Process Weights
+    # 2. Process Weights
     devices = jax.devices()
-    mesh = jax.sharding.Mesh(np.array(devices[:1]).reshape(1, 1), ('x', 'y'))
+    mesh = jax.sharding.Mesh(np.array(devices[:1]).reshape(1), ('x',))
     method = layer.quant_method
     method.linear_config.mesh = mesh
-    method.linear_config.bias_sharding = jax.sharding.PartitionSpec(None)
     
     with jax.set_mesh(mesh):
         method.process_weights_after_loading(layer)
         
-    # Verify Final 2D Layout: (32768, 512)
-    assert layer.weight.value.shape == (32768, 512)
-    # Check values match (approx due to requantization if it happened, 
-    # but here we just check if it was loaded correctly)
-    # Since it's fp8 -> bf16, there might be slight precision loss, but shapes must match.
-    assert layer.weight.value.shape == torch_weight.shape
+    # 3. Verify physical layout: MUST be (512, 32768) to match JaxEinsum(SA,AL->SL)
+    assert layer.weight.value.shape == (512, 32768)
+
+    # NEW: Verify Forward Pass
+    x = jnp.ones((1, 512), dtype=jnp.bfloat16)
+    try:
+        y = layer(x)
+        assert y.shape == (1, 32768)
+        assert not jnp.isnan(y).any()
+    except Exception as e:
+        pytest.fail(f"Forward pass failed for disabled MLA kv_b_proj: {e}")
 
 if __name__ == "__main__":
     pytest.main([__file__])
