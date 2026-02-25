@@ -1385,14 +1385,7 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
                     elif name.endswith(".weight_scale_inv"):
                         # k_up_proj scale: (N, A_blocks) -> (A_blocks, N)
                         k_val = weight[:split_idx, ...].T.contiguous()
-                        # v_up_proj scale: checkpoint is (N, A_blocks) = (128, 4).
-                        # Target JAX buffer is (OutTotal, InTotal_blocks) = (H, A_blocks * N).
-                        # Since H=128 and N=128, we need to map the 128 heads in the checkpoint 
-                        # to the 128 columns of the JAX input side.
-                        # Final shape should be (1, 512) to match JAX OutTotal=H=128.
-                        # Wait, OutTotal for v_up_proj is H=128. 
-                        # The checkpoint (128, 4) is (N, A_blocks).
-                        # We need (H, A_blocks * 1) because for JAX, N is an INPUT dim.
+                        # TODO: check this piece again.
                         v_val = weight[split_idx:, ...].T.contiguous().reshape(1, -1).contiguous()
                     
                     yield name.replace("kv_b_proj", "k_up_proj"), k_val

@@ -233,14 +233,6 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
 
         # Initialize the layer.weight as a 2D CPU placeholder to load the fp8 checkpoint weights.
         # Checkpoints typically store linear weights as (OutTotal, InTotal).
-        # We use explicit permute_dims=(0, 1) to bypass the default 2D transpose in the loader.
-        
-        # # 3D tensors are stored (InTotal, OutTotal)
-        # if self.batch_features:
-        #     permute_dims = (1, 0)
-        # else:
-        #     permute_dims = (0, 1)
-
         layer.weight = nnx.Param(
             kernel_init(rngs.params(), (self.out_features_total, self.in_features_total), param_dtype),
             weight_loader=partial(load_nnx_param_from_reshaped_torch,

@@ -771,23 +771,11 @@ def load_nnx_param_from_reshaped_torch(
         reshape_dims: Optional tuple specifying the shape to reshape the torch weight to before permutation. If None, no reshaping is applied.
         permute_dims: Optional tuple specifying the permutation of dimensions. If None, no-op for 1D tensors and transpose for 2D tensors is applied.
     """
-    if "k_up_proj" in param_name or "v_up_proj" in param_name:
-        import numpy as np
-        print(f"\n[LOADER DEBUG] {param_name}")
-        print(f"  Input Torch Shape: {torch_weight.shape}")
-        print(f"  Input Torch Sample [0,0:5]: {torch_weight[0, :5].cpu().float().numpy() if torch_weight.ndim > 1 else torch_weight[:5].cpu().float().numpy()}")
-        print(f"  Target JAX Shape:  {jax_param.value.shape}")
-        print(f"  reshape_dims:      {reshape_dims}")
-        print(f"  permute_dims:      {permute_dims}")
 
     jax_weight = jax_array_from_reshaped_torch(torch_weight,
                                                reshape_dims=reshape_dims,
                                                permute_dims=permute_dims)
 
-    if "k_up_proj" in param_name or "v_up_proj" in param_name:
-        import numpy as np
-        print(f"  Loaded JAX Shape:  {jax_weight.shape}")
-        print(f"  Loaded JAX Sample [0,0:5]: {np.array(jax_weight)[0, :5] if jax_weight.ndim > 1 else np.array(jax_weight)[:5]}")
 
     assert tuple(jax_weight.shape) == jax_param.value.shape, \
         f"Shape mismatch when loading weight '{param_name}': loaded weight {jax_weight.shape} vs expected {jax_param.value.shape} when loading torch weight: {torch_weight.shape}"
