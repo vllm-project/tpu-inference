@@ -25,7 +25,7 @@ LOCAL_TPU_VERSION="${BUILDKITE_TAG:-nightly_$(date +%Y%m%d)}"
 # Note: This script assumes the metadata keys contain newline-separated lists.
 mapfile -t model_list < <(buildkite-agent meta-data get "${MODEL_LIST_KEY}" --default "")
 mapfile -t metadata_feature_list < <(buildkite-agent meta-data get "${FEATURE_LIST_KEY}" --default "")
-MODEL_STAGES=("UnitTest" "Accuracy/Correctness" "Benchmark")
+MODEL_STAGES=("Type" "UnitTest" "Accuracy/Correctness" "Benchmark")
 FEATURE_STAGES=("CorrectnessTest" "PerformanceTest")
 FEATURE_STAGES_QUANTIZATION=("QuantizationMethods" "RecommendedTPUGenerations" "CorrectnessTest" "PerformanceTest")
 FEATURE_STAGES_MICROBENCHMARKS=("CorrectnessTest" "PerformanceTest" "TPU Versions")
@@ -94,29 +94,28 @@ process_models() {
         # Get category (default: text-only)
         local category
         category=$(buildkite-agent meta-data get "${TPU_METADATA_PREFIX}${model}_category" --default "text-only")
-        # Define the category-specific CSV filename
-        local category_filename
-        if [ "$category" == "text-only" ]; then
-            category_filename="text_only_model"
-        elif [ "$category" == "multimodal" ]; then
-            category_filename="multimodal_model"
-        else
-            category_filename=${category// /_}
-        fi
         # Use the TPU_DIR prefix for the CSV path
-        local category_csv="${TPU_DIR}/${category_filename}_support_matrix.csv"
+        local category_csv="${TPU_DIR}/model_support_matrix.csv"
         # Initialize CSV if not exists
         if [ ! -f "$category_csv" ]; then
-            echo "Model,UnitTest,Accuracy/Correctness,Benchmark" > "$category_csv"
+            echo "Model,Type,UnitTest,Accuracy/Correctness,Benchmark" > "$category_csv"
             model_csv_files+=("$category_csv")
         fi
         # Build Row
         local row="\"$model\""
         for stage in "${MODEL_STAGES[@]}"; do
             local result
-            result=$(buildkite-agent meta-data get "${TPU_METADATA_PREFIX}${model}:${stage}" --default "N/A")
+            if [ "$stage" == "Type" ]; then
+                if [ "$category" == "multimodal" ]; then
+                    result="Multimodal"
+                else
+                    result="Text"
+                fi
+            else
+                result=$(buildkite-agent meta-data get "${TPU_METADATA_PREFIX}${model}:${stage}" --default "N/A")
+            fi
             row="$row,$result"
-            if [ "${result}" != "✅" ] && [ "${result}" != "N/A" ] && [ "${result}" != "unverified" ]; then
+            if [ "$stage" != "Type" ] && [ "${result}" != "✅" ] && [ "${result}" != "N/A" ] && [ "${result}" != "unverified" ]; then
                 ANY_FAILED=true
             fi
         done
@@ -304,6 +303,14 @@ buildkite-agent meta-data set "CI_TESTS_FAILED" "${ANY_FAILED}"
 # Model support matrices
 for csv_file in "${model_csv_files[@]:-}"; do
     if [[ -n "$csv_file" && -f "$csv_file" ]]; then
+        header=$(head -n 1 "$csv_file")
+        # Sort data rows based on the 'Type' column
+        sorted_content=$(tail -n +2 "$csv_file" | sort -t',' -k2,2)
+
+        # Reconstruct the file with sorted data
+        echo "$header" > "$csv_file"
+        echo "$sorted_content" >> "$csv_file"
+
         echo "--- Uploading Model Matrix: $csv_file ---"
         cat "$csv_file"
         buildkite-agent artifact upload "$csv_file"

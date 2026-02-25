@@ -1,0 +1,15 @@
+Model,Type,UnitTest,Accuracy/Correctness,Benchmark
+"Qwen/Qwen2.5-VL-7B-Instruct",Multimodal,✅,✅,✅
+"Qwen/Qwen3-Omni-30B-A3B-Instruct",Multimodal,unverified,unverified,unverified
+"meta-llama/Llama-4-Maverick-17B-128E-Instruct",Multimodal,unverified,unverified,unverified
+"Qwen/Qwen3-30B-A3B",Text,✅,❌,N/A
+"Qwen/Qwen3-32B",Text,❌,N/A,N/A
+"Qwen/Qwen3-4B",Text,✅,✅,✅
+"Qwen/Qwen3-Coder-480B-A35B-Instruct",Text,❌,N/A,N/A
+"deepseek-ai/DeepSeek-V3.1",Text,unverified,unverified,unverified
+"google/gemma-3-27b-it",Text,✅,✅,✅
+"meta-llama/Llama-3.1-8B-Instruct",Text,✅,✅,✅
+"meta-llama/Llama-3.3-70B-Instruct",Text,✅,❌,N/A
+"meta-llama/Llama-Guard-4-12B",Text,N/A,N/A,N/A
+"moonshotai/Kimi-K2-Thinking",Text,unverified,unverified,unverified
+"openai/gpt-oss-120b",Text,unverified,unverified,unverified

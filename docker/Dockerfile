@@ -18,7 +18,6 @@ ARG VLLM_COMMIT_HASH=""
 
 FROM $BASE_IMAGE
 
-ARG IS_FOR_V7X="false"
 ARG IS_TEST="false"
 
 # Update pip

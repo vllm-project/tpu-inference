@@ -19,8 +19,6 @@ steps:
     key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_UnitTest"
     agents:
       queue: {QUEUE}
-    env:
-      IS_FOR_V7X: "${{IS_FOR_V7X}}"
     soft_fail: true
     commands:
       - echo "placeholder"  # TODO: replace with your unit test command
@@ -45,7 +43,6 @@ steps:
       queue: {QUEUE}
     soft_fail: true
     env:
-      IS_FOR_V7X: "${{IS_FOR_V7X}}"
       TEST_MODEL: {MODEL_NAME}
       TENSOR_PARALLEL_SIZE: {TENSOR_PARALLEL_SIZE}
       MINIMUM_ACCURACY_THRESHOLD: 0  # TODO : replace 0 with your accuracy threshold
