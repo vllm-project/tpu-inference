@@ -339,18 +339,6 @@ download_mm_safetybench_dataset() {
         echo "Downloading MM-SafetyBench images from Google Drive..."
         local zip_file="${MM_SAFETYBENCH_DIR}/MM-SafetyBench_imgs.zip"
         
-        # Ensure gdown is installed
-        if ! command -v gdown &> /dev/null; then
-            echo "Installing gdown..."
-            pip install gdown
-        fi
-
-        # Ensure unzip is installed
-        if ! command -v unzip &> /dev/null; then
-            echo "Installing unzip..."
-            sudo apt-get update && sudo apt-get install -y unzip
-        fi
-
         # Use gdown to handle Google Drive download
         if ! gdown --fuzzy --id 1xjW9k-aGkmwycqGCXbru70FaSKhSDcR_ -O "$zip_file"; then
             echo "Error: Failed to download MM-SafetyBench images." >&2
