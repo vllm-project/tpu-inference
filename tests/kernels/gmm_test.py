@@ -233,6 +233,7 @@ class GmmTest(jtu.JaxTestCase):
             rhs_bias=rhs_bias,
             group_offset=group_offset,
         )
+
         if is_supported_by_gmm_v2(lhs, rhs_q, rhs_scale, rhs_zero_point):
             actual = gmm_v2(
                 lhs,
