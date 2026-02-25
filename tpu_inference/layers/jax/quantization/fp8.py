@@ -14,6 +14,7 @@
 
 import functools
 import math
+import os
 from functools import partial
 from typing import Iterable, Optional, Tuple
 
@@ -296,17 +297,6 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 bias=bias,
                 weight_block_size=weight_block_size,
                 linear_config=self.linear_config)
-            
-            # Print the new scales calculated during re-quantization
-            if "k_up_proj" in layer.prefix or "v_up_proj" in layer.prefix:
-                import numpy as np
-                print(f"  Requant Scales Sample: {np.array(weights.weight_scale).flatten()[:5]}")
-
-            if "k_up_proj" in layer.prefix or "v_up_proj" in layer.prefix:
-                import numpy as np
-                print(f"\n[FP8 DEBUG] {layer.prefix}")
-                print(f"  2D Weights Shape: {weights.weight.shape}")
-                print(f"  2D Weights Sample [0,0:5]: {np.array(weights.weight)[0, :5]}")
 
             # Convert the requantized 2D results back to the 3D layout if necessary.
             logical_output_shape = tuple(self.kernel_shape[i] for i in self.output_side_indices)
@@ -320,11 +310,6 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                     weights.weight = weights.weight.reshape(self.kernel_shape)
             else:
                 weights.weight = weights.weight.reshape(self.kernel_shape)
-            
-            if "k_up_proj" in layer.prefix or "v_up_proj" in layer.prefix:
-                import numpy as np
-                print(f"  Final 3D Shape:   {weights.weight.shape}")
-                print(f"  Final 3D Sample [0,0,0:5]: {np.array(weights.weight)[0, 0, :5]}")
             
             self.linear_config.output_sizes = old_output_sizes
 
@@ -394,6 +379,24 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
         self.weight_scale_name = ("weight_scale_inv"
                                   if self.block_quant else "weight_scale")
         self._called_process_weights_after_loading = False
+
+        # Parse requantization settings from environment variables
+        self.requant_weight_dtype = self._parse_moe_requant_dtype(
+            os.environ.get("MOE_REQUANT_WEIGHT_DTYPE"))
+
+        requant_block_size = os.environ.get("MOE_REQUANT_BLOCK_SIZE")
+        self.requant_block_size = (int(requant_block_size)
+                                   if requant_block_size else None)
+
+    def _parse_moe_requant_dtype(self, dtype_str: str | None) -> jnp.dtype:
+        if dtype_str is None:
+            return jnp.float8_e4m3fn
+        dtype_str = dtype_str.lower()
+        if dtype_str in ["fp4", "float4_e2m1fn"]:
+            return jnp.float4_e2m1fn
+        if dtype_str in ["fp8", "float8_e4m3fn"]:
+            return jnp.float8_e4m3fn
+        raise ValueError(f"Unsupported requant dtype: {dtype_str}")
 
     def load_weights(self, *, layer: JaxMoE, original_load_weights_fn,
                      weights: Iterable) -> set:
@@ -577,6 +580,8 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                     activation=layer.activation,
                     # Convert to tuple so jax jit can hash it
                     weight_block_size=weight_block_size,
+                    requant_dtype=self.requant_weight_dtype,
+                    requant_block_size=self.requant_block_size,
                 )
 
             del layer.kernel_gating_EDF
