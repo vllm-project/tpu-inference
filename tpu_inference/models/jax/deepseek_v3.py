@@ -228,6 +228,17 @@ class DeepseekV3BaseAttention(JaxModule):
             kernel_init=nnx.with_partitioning(weight_init,
                                               self.kv_da_sharding),
             prefix=self.prefix + ".kv_a_proj_with_mqa")
+        
+        self.kv_b_proj = JaxEinsum(
+            einsum_str="SA,AL->SL",
+            kernel_shape=(self.kv_lora_rank,
+                          self.N * (self.qk_nope_head_dim + self.v_head_dim)),
+            rngs=rngs,
+            quant_config=self.quant_config,
+            param_dtype=self.dtype,
+            kernel_init=nnx.with_partitioning(weight_init, self.ap_sharding),
+            prefix=self.prefix + ".kv_b_proj",
+        )
 
         self.o_proj = JaxEinsum(
             einsum_str="TR,RD->TD",
@@ -329,19 +340,6 @@ class DeepseekV3BaseAttention(JaxModule):
 @dataclass(kw_only=True)
 class DeepseekV3Attention(DeepseekV3BaseAttention):
     """Standard Multi-Head Attention (MHA) for DeepSeek models."""
-
-    def setup_specific_layers(self, rngs: nnx.Rngs) -> None:
-        weight_init = _weight_init(self.random_init)
-        self.kv_b_proj = JaxEinsum(
-            einsum_str="SA,AL->SL",
-            kernel_shape=(self.kv_lora_rank,
-                          self.N * (self.qk_nope_head_dim + self.v_head_dim)),
-            rngs=rngs,
-            quant_config=self.quant_config,
-            param_dtype=self.dtype,
-            kernel_init=nnx.with_partitioning(weight_init, self.ap_sharding),
-            prefix=self.prefix + ".kv_b_proj",
-        )
 
     def compute_q_projection(self, x_q_TD: jax.Array,
                              input_positions: jax.Array) -> jax.Array:
@@ -511,6 +509,11 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
             param_dtype=self.dtype,
             kernel_init=nnx.with_partitioning(weight_init, self.anh_sharding),
         )
+
+        # Reference the split parameters so that we can process self.kv_b_proj
+        # and store its processed outputs in self.k_up_proj and self.v_up_proj
+        self.kv_b_proj.k_up_proj = self.k_up_proj
+        self.kv_b_proj.v_up_proj = self.v_up_proj
 
     def compute_q_projection(
             self, x_q_TD: jax.Array,
@@ -1373,7 +1376,7 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
             skip_substrs=[
                 f"layers.{i}"
                 for i in range(start_ignore_layer_num, end_ignore_layer_num)
-            ],
+            ] + ["k_up_proj", "v_up_proj"],
         )
         loaded = loader.load_weights(weights)
 

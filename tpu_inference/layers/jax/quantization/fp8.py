@@ -14,6 +14,7 @@
 
 import functools
 import math
+import os
 from functools import partial
 from typing import Iterable, Optional, Tuple
 
@@ -27,7 +28,7 @@ from torchax.ops.mappings import t2j
 from tpu_inference.layers.common.linear import sharded_quantized_batched_matmul
 from tpu_inference.layers.common.moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.process_weights.linear_weights import \
-    shard_linear_weights
+    LinearWeights, shard_linear_weights
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_fp8_moe_weights)
 from tpu_inference.layers.common.quantization import fp8 as common_fp8
@@ -196,6 +197,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         self.in_features = math.prod(adapt_info.in_features)
         self.batch_features = adapt_info.batch_features
         self.batch_sharding = adapt_info.batch_sharding
+        self.use_mla = os.getenv("VLLM_MLA_DISABLE") != "1" and 'kv_b_proj' in layer.prefix
         if self.batch_features:
             # Batched case: keep original weight sharding for the full
             # 3D weight (matches kernel_shape).
@@ -206,10 +208,11 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                                     adapt_info.in_features_sharding)
             self.kernel_shape = (math.prod(self.out_features),
                                  self.in_features)
-        self.bias_sharding = adapt_info.out_features_sharding
+        self.bias_sharding = P(*adapt_info.out_features_sharding)
 
         # Storing list of output sizes (instead of self.out_features) for compatibility.
         self.linear_config.output_sizes = [math.prod(self.out_features)]
+        self.is_processed = False
 
     def create_weights_jax(self, layer: JaxModule, *weight_args, rngs,
                            **extra_weight_attrs):
@@ -274,6 +277,8 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         layer.weight_scale_inv.sharding = self.weight_sharding
 
     def process_weights_after_loading(self, layer):
+        if self.is_processed:
+            return
         assert isinstance(layer, JaxEinsum)
         assert self.quant_config.weight_block_size is not None
 
@@ -302,22 +307,72 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 bias=bias,
                 weight_block_size=tuple(self.quant_config.weight_block_size),
                 linear_config=self.linear_config)
-            delattr(layer, 'weight')
-            delattr(layer, 'weight_scale_inv')
-            delattr(layer, 'bias')
+            
+            # If MLA is used then we will split kv_b_proj and process targets
+            if self.use_mla:
+                layer_k = getattr(layer, 'k_up_proj', None)
+                layer_v = getattr(layer, 'v_up_proj', None)
+                if layer_k and layer_v:
+                    # Split 2D processed results along the output dimension (axis 0).
+                    k_w, v_w = jnp.split(weights.weight, 2, axis=0)
+                    k_s, v_s = jnp.split(weights.weight_scale, 2, axis=0)
+                    
+                    # Reshape them HERE inside the CPU context to avoid jitted device errors later
+                    k_w = k_w.reshape(layer_k.kernel_shape)
+                    v_w = v_w.reshape(layer_v.kernel_shape)
 
-            if self.linear_config.enable_quantized_matmul_kernel:
-                # The quantized_matmul_kernel expects weight scales shaped (n_out_features, 1, n_blocks) for blockwisze quantization.
-                weights.weight_scale = jnp.expand_dims(
-                    jnp.transpose(weights.weight_scale),
-                    axis=1,
-                )
-            weights = shard_linear_weights(
-                weights,
-                mesh=self.linear_config.mesh,
-                weight_p_spec=self.linear_config.weight_sharding,
-                bias_p_spec=self.linear_config.bias_sharding,
-            )
+                    def finalize_mla_target(target_layer, w_chunk, s_chunk):
+                        import jax
+                        w_obj = shard_linear_weights(
+                            LinearWeights(weight=w_chunk, weight_scale=s_chunk, zero_point=None, bias=None),
+                            mesh=self.linear_config.mesh,
+                            weight_p_spec=target_layer.quant_method.weight_sharding,
+                            bias_p_spec=target_layer.quant_method.bias_sharding
+                        )
+                        # The weights are already in the target shape
+                        target_layer.weight = nnx.Param(w_obj.weight)
+                        target_layer.weight_scale_inv = nnx.Param(w_obj.weight_scale)
+                        setattr(target_layer.weight, '_is_loaded', True)
+                        setattr(target_layer.weight_scale_inv, '_is_loaded', True)
+                        target_layer.quant_method.is_processed = True
+
+                    # Definitions are complete, finalize below outside this mesh
+                    pass
+
+            if not self.use_mla:
+                delattr(layer, 'weight')
+                delattr(layer, 'weight_scale_inv')
+                if hasattr(layer, 'bias'):
+                    delattr(layer, 'bias')
+
+                if self.linear_config.enable_quantized_matmul_kernel:
+                    # The quantized_matmul_kernel expects weight scales shaped (n_out_features, 1, n_blocks) for blockwisze quantization.
+                    weights.weight_scale = jnp.expand_dims(
+                        jnp.transpose(weights.weight_scale),
+                        axis=1,
+                    )
+
+        if self.use_mla:
+            layer_k = getattr(layer, 'k_up_proj', None)
+            layer_v = getattr(layer, 'v_up_proj', None)
+            if layer_k and layer_v:
+                finalize_mla_target(layer_k, k_w, k_s)
+                finalize_mla_target(layer_v, v_w, v_s)
+                
+                # Cleanup the source layer
+                delattr(layer, 'weight')
+                delattr(layer, 'weight_scale_inv')
+                if hasattr(layer, 'bias'):
+                    delattr(layer, 'bias')
+                self.is_processed = True
+                return
+
+        weights = shard_linear_weights(
+            weights,
+            mesh=self.linear_config.mesh,
+            weight_p_spec=self.linear_config.weight_sharding,
+            bias_p_spec=self.linear_config.bias_sharding,
+        )
 
         if self.linear_config.fuse_matmuls:
             layer.weight = nnx.Param(
