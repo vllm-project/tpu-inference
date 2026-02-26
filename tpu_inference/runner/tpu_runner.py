@@ -602,7 +602,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called "
                                "after execute_model() returns None.")
-        with jax.set_mesh(self.mesh):
+        reqs = len(scheduler_output.num_scheduled_tokens)
+        toks = scheduler_output.total_num_scheduled_tokens
+        with jax.set_mesh(self.mesh), jax.profiler.TraceAnnotation(
+            f"execute_model: {reqs} reqs, {toks} toks"
+        ):
             output = self._execute_model(scheduler_output,
                                          intermediate_tensors)
         return output
