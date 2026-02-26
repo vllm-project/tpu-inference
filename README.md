@@ -154,73 +154,73 @@ Below is the live status of our supported models, features, and kernels. Click o
     <tr>
       <td>Chunked Prefill</td>
       <td></td>
-      <td>✅ Passing</td>
+      <td>✅&nbsp;Passing</td>
       <td></td>
       <td></td>
-      <td>✅ Passing</td>
+      <td>✅&nbsp;Passing</td>
       <td></td>
     </tr>
     <tr>
       <td>DCN-based P/D disaggregation</td>
       <td></td>
-      <td>❓ Untested</td>
+      <td>❓&nbsp;Untested</td>
       <td></td>
       <td></td>
-      <td>❓ Untested</td>
+      <td>❓&nbsp;Untested</td>
       <td></td>
     </tr>
     <tr>
       <td>KV cache host offloading</td>
       <td></td>
-      <td>❓ Untested</td>
+      <td>❓&nbsp;Untested</td>
       <td></td>
       <td></td>
-      <td>❓ Untested</td>
+      <td>❓&nbsp;Untested</td>
       <td></td>
     </tr>
     <tr>
       <td>LoRA_Torch</td>
       <td></td>
-      <td>✅ Passing</td>
+      <td>✅&nbsp;Passing</td>
       <td></td>
       <td></td>
-      <td>✅ Passing</td>
+      <td>✅&nbsp;Passing</td>
       <td></td>
     </tr>
     <tr>
       <td>Multimodal Inputs</td>
       <td></td>
-      <td>✅ Passing</td>
+      <td>✅&nbsp;Passing</td>
       <td></td>
       <td></td>
-      <td>✅ Passing</td>
+      <td>✅&nbsp;Passing</td>
       <td></td>
     </tr>
     <tr>
       <td>Out-of-tree model support</td>
       <td></td>
-      <td>✅ Passing</td>
+      <td>✅&nbsp;Passing</td>
       <td></td>
       <td></td>
-      <td>✅ Passing</td>
+      <td>✅&nbsp;Passing</td>
       <td></td>
     </tr>
     <tr>
       <td>Prefix Caching</td>
       <td></td>
-      <td>✅ Passing</td>
+      <td>✅&nbsp;Passing</td>
       <td></td>
       <td></td>
-      <td>✅ Passing</td>
+      <td>✅&nbsp;Passing</td>
       <td></td>
     </tr>
     <tr>
       <td>Single Program Multi Data</td>
       <td></td>
-      <td>✅ Passing</td>
+      <td>✅&nbsp;Passing</td>
       <td></td>
       <td></td>
-      <td>✅ Passing</td>
+      <td>✅&nbsp;Passing</td>
       <td></td>
     </tr>
     <tr>
@@ -235,37 +235,37 @@ Below is the live status of our supported models, features, and kernels. Click o
     <tr>
       <td>Speculative Decoding: Eagle3</td>
       <td></td>
-      <td>✅ Passing</td>
+      <td>✅&nbsp;Passing</td>
       <td></td>
       <td></td>
-      <td>✅ Passing</td>
+      <td>✅&nbsp;Passing</td>
       <td></td>
     </tr>
     <tr>
       <td>Speculative Decoding: Ngram</td>
       <td></td>
-      <td>✅ Passing</td>
+      <td>✅&nbsp;Passing</td>
       <td></td>
       <td></td>
-      <td>✅ Passing</td>
+      <td>✅&nbsp;Passing</td>
       <td></td>
     </tr>
     <tr>
       <td>async scheduler</td>
       <td></td>
-      <td>✅ Passing</td>
+      <td>✅&nbsp;Passing</td>
       <td></td>
       <td></td>
-      <td>✅ Passing</td>
+      <td>✅&nbsp;Passing</td>
       <td></td>
     </tr>
     <tr>
       <td>data_parallelism</td>
       <td></td>
-      <td>❓ Untested</td>
+      <td>❓&nbsp;Untested</td>
       <td></td>
       <td></td>
-      <td>❓ Untested</td>
+      <td>❓&nbsp;Untested</td>
       <td></td>
     </tr>
     <tr>
@@ -460,14 +460,14 @@ Below is the live status of our supported models, features, and kernels. Click o
   <tbody>
     <tr>
       <td>all&#8209;gather&#8209;matmul</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
       <td></td>
       <td></td>
       <td></td>
@@ -475,14 +475,14 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td>fused&nbsp;moe</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
       <td></td>
       <td></td>
       <td></td>
@@ -490,14 +490,14 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td>generic&nbsp;ragged<br>paged&nbsp;attention<br>v3*</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
       <td></td>
       <td></td>
       <td></td>
@@ -505,14 +505,14 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td>gmm</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
       <td></td>
       <td></td>
       <td></td>
@@ -520,14 +520,14 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td>mla*</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
       <td></td>
       <td></td>
       <td></td>
@@ -535,14 +535,14 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td>ragged&nbsp;paged<br>attention&nbsp;v3<br>head_dim&nbsp;64*</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
       <td></td>
       <td></td>
       <td></td>

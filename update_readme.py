@@ -145,15 +145,15 @@ def merge_metrics(c, p):
     is_untested = "❓" in c or "❓" in p or "Untested" in c or "Untested" in p or "unverified" in c or "unverified" in p
     
     if is_failed:
-        return "❓ Untested" if "❓" in c or "❓" in p else "❌ Failed" # Overriding based on PM logic, Untested could take precedence depending, but "Any Red = Red" usually means failed has highest precedence. Actually, mockup shows untested for red. Let's stick to standard: Failed > Untested > Passed. Wait, PM said: "Any Red = Red. If either is untested, untested". Let's do: Failed wins, then Untested.
+        return "❓&nbsp;Untested" if "❓" in c or "❓" in p else "❌&nbsp;Failed" # Overriding based on PM logic, Untested could take precedence depending, but "Any Red = Red" usually means failed has highest precedence. Actually, mockup shows untested for red. Let's stick to standard: Failed > Untested > Passed. Wait, PM said: "Any Red = Red. If either is untested, untested". Let's do: Failed wins, then Untested.
         # Wait, the instruction said: "if one of Corr/Perf is untested or failed, show it as untested or failed."
     
     if is_failed:
-        return "❌ Failed"
+        return "❌&nbsp;Failed"
     if is_untested:
-        return "❓ Untested"
+        return "❓&nbsp;Untested"
     if "✅" in c and "✅" in p:
-        return "✅ Passing"
+        return "✅&nbsp;Passing"
     return ""
 
 def format_kernel_name(name):
