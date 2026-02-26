@@ -440,6 +440,7 @@ class GmmTest(jtu.JaxTestCase):
             rhs_scale=rhs_scale,
             group_offset=group_offset,
             rhs_bias=rhs_bias,
+            maybe_quantize_lhs=False,
         ).astype(lhs.dtype)
 
         self.assertEqual(actual.shape, (batch_size, out_size))
