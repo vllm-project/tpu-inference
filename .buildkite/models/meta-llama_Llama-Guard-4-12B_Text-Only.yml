@@ -45,7 +45,7 @@ steps:
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     env:
-      TEST_MODEL: meta-llama/Llama-Guard-4-12B/Text-Only
+      TEST_MODEL: meta-llama/Llama-Guard-4-12B
       TENSOR_PARALLEL_SIZE: 1
       MINIMUM_ACCURACY_THRESHOLD: 0.31 #TODO: This will be updated later with a true threshold
     commands:
@@ -72,7 +72,7 @@ steps:
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     env:
-      TEST_MODEL: meta-llama/Llama-Guard-4-12B/Text-Only
+      TEST_MODEL: meta-llama/Llama-Guard-4-12B
       TENSOR_PARALLEL_SIZE: 1
     commands:
       - |
