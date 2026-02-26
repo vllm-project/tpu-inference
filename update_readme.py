@@ -153,6 +153,31 @@ def merge_metrics(c, p):
         return "✅ Passing"
     return ""
 
+def format_kernel_name(name):
+    """Formats kernel names to wrap cleanly in max 2-3 lines by using non-breaking spaces and hyphens."""
+    name = str(name).replace("-", "&#8209;")
+    name = name.replace("<br>", " ") # Clean up any existing manual tags
+    words = name.split(" ")
+    lines = []
+    current_line = []
+    current_len = 0
+    
+    for w in words:
+        if not w: continue
+        # If adding this word exceeds ~15 chars and we already have words on this line, break it
+        if current_len + len(w) > 15 and current_line:
+            lines.append("&nbsp;".join(current_line))
+            current_line = [w]
+            current_len = len(w)
+        else:
+            current_line.append(w)
+            current_len += len(w) + 1
+            
+    if current_line:
+        lines.append("&nbsp;".join(current_line))
+        
+    return "<br>".join(lines)
+
 def generate_html_microbenchmark_table(headers, data):
     """Generates an HTML table specifically for the microbenchmarks matrix."""
     if not headers: return ""
@@ -180,7 +205,7 @@ def generate_html_microbenchmark_table(headers, data):
     for row in data:
         html.append("    <tr>")
         padded_row = row + [""] * (25 - len(row))
-        html.append(f"      <td>{padded_row[0]}</td>") # Kernel
+        html.append(f"      <td>{format_kernel_name(padded_row[0])}</td>") # Kernel
         
         # v6e metrics
         html.append(f"      <td>{merge_metrics(padded_row[1], padded_row[2])}</td>")

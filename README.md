@@ -459,7 +459,7 @@ Below is the live status of our supported models, features, and kernels. Click o
   </thead>
   <tbody>
     <tr>
-      <td>all-gather-matmul</td>
+      <td>all&#8209;gather&#8209;matmul</td>
       <td>❓ Untested</td>
       <td>❓ Untested</td>
       <td>❓ Untested</td>
@@ -474,7 +474,7 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td></td>
     </tr>
     <tr>
-      <td>fused moe</td>
+      <td>fused&nbsp;moe</td>
       <td>❓ Untested</td>
       <td>❓ Untested</td>
       <td>❓ Untested</td>
@@ -489,7 +489,7 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td></td>
     </tr>
     <tr>
-      <td>generic ragged paged<br>attention v3*</td>
+      <td>generic&nbsp;ragged<br>paged&nbsp;attention<br>v3*</td>
       <td>❓ Untested</td>
       <td>❓ Untested</td>
       <td>❓ Untested</td>
@@ -534,7 +534,7 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td></td>
     </tr>
     <tr>
-      <td>ragged paged attention v3<br>head_dim 64*</td>
+      <td>ragged&nbsp;paged<br>attention&nbsp;v3<br>head_dim&nbsp;64*</td>
       <td>❓ Untested</td>
       <td>❓ Untested</td>
       <td>❓ Untested</td>
