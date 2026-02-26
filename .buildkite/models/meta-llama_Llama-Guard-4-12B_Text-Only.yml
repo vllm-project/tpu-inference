@@ -19,9 +19,11 @@ steps:
     key: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-Guard-4-12B_Text-Only_UnitTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
-      - echo "placeholder"  # TODO: replace with your unit test command
+      - |
+        .buildkite/scripts/run_in_docker.sh \
+          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/models/jax/test_llama_guard_4.py'
   - label: "${TPU_VERSION:-tpu6e} Record unit test result for meta-llama/Llama-Guard-4-12B/Text-Only"
     key: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-Guard-4-12B_Text-Only_UnitTest"
     depends_on: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-Guard-4-12B_Text-Only_UnitTest"
@@ -41,14 +43,14 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-Guard-4-12B_Text-Only_UnitTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     env:
       TEST_MODEL: meta-llama/Llama-Guard-4-12B/Text-Only
       TENSOR_PARALLEL_SIZE: 1
-      MINIMUM_ACCURACY_THRESHOLD: 0  # TODO : replace 0 with your accuracy threshold
+      MINIMUM_ACCURACY_THRESHOLD: 0.31 #TODO: This will be updated later with a true threshold
     commands:
       - |
-        .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
+        .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/safety_model_benchmark.sh --mode accuracy --benchmark text-only
   - label: "${TPU_VERSION:-tpu6e} Record accuracy result for meta-llama/Llama-Guard-4-12B/Text-Only"
     key: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-Guard-4-12B_Text-Only_Accuracy"
     depends_on: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-Guard-4-12B_Text-Only_Accuracy"
@@ -68,14 +70,13 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-Guard-4-12B_Text-Only_Accuracy"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     env:
       TEST_MODEL: meta-llama/Llama-Guard-4-12B/Text-Only
       TENSOR_PARALLEL_SIZE: 1
-      MINIMUM_THROUGHPUT_THRESHOLD: 0  # TODO : replace 0 with your performance threshold
     commands:
       - |
-        .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
+        .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/safety_model_benchmark.sh --mode performance --benchmark text-only
   - label: "${TPU_VERSION:-tpu6e} Record performance benchmark result for meta-llama/Llama-Guard-4-12B/Text-Only"
     key: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-Guard-4-12B_Text-Only_Benchmark"
     depends_on: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-Guard-4-12B_Text-Only_Benchmark"
