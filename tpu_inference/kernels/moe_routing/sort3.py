@@ -91,9 +91,8 @@ def kernel(
 
   curr_offset = 0
   for e in range(num_experts):
-    next_offset = curr_offset + group_sizes_ref[e]
-    group_offset_ref[e] = next_offset
-    curr_offset = next_offset
+    group_offset_ref[e] = curr_offset
+    curr_offset = curr_offset + group_sizes_ref[e]
 
   for t in range(num_tokens):
     for k in range(topk):
