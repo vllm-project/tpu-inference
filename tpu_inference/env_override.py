@@ -7,4 +7,3 @@ import os
 # This prevents errors when trying to create CUDA streams on TPU hardware
 # The issue was introduced by vllm-project/vllm#26440
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
-os.environ["VLLM_MLA_DISABLE"] = "1"

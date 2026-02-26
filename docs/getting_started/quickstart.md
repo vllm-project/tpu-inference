@@ -16,19 +16,34 @@ Google Cloud TPUs (Tensor Processing Units) accelerate machine learning workload
 
 For detailed steps on installing `vllm-tpu` with `pip` or running it as a Docker image, please see the [**Installation Guide**](installation.md).
 
-!!! important
-    Until jax=0.8.3 is released, v7x will have different build requirements from previous TPU generations (v6e and prior). As a result, please use the following until consolidation is complete:
-
-**For v6e and prior**
+We recommend using [uv](https://docs.astral.sh/uv/) (`uv pip install`) instead of standard `pip` as it improves installation speed.
 
 ```shell
-pip install vllm-tpu --version=0.13.2.post6
+uv pip install vllm-tpu
 ```
 
-**For v7x**
+## Verify Installation
+
+To quickly verify that the installation was successful and `vllm-tpu` is correctly configured:
 
 ```shell
-pip install vllm-tpu
+python -c '
+import jax
+import vllm
+import importlib.metadata
+from vllm.platforms import current_platform
+
+tpu_version = importlib.metadata.version("tpu_inference")
+print(f"vllm version: {vllm.__version__}")
+print(f"tpu_inference version: {tpu_version}")
+print(f"vllm platform: {current_platform.get_device_name()}")
+print(f"jax backends: {jax.devices()}")
+'
+# Expected output:
+# vllm version: 0.x.x
+# tpu_inference version: 0.x.x
+# vllm platform: TPU V6E (or your specific TPU architecture)
+# jax backends: [TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0), ...]
 ```
 
 ## Run the vLLM Server

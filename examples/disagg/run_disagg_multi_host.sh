@@ -22,7 +22,7 @@ set -e
 # docker related
 CONTAINER_PREFIX=${CONTAINER_PREFIX:="disagg-node"}
 RUN_IN_BUILDKITE=${RUN_IN_BUILDKITE:=false}
-IS_FOR_V7X=${IS_FOR_V7X:=false}
+TPU_VERSION=${TPU_VERSION:=tpu6e}
 MODEL=${MODEL:="Qwen/Qwen3-0.6B"}
 DOCKER_IMAGE=${DOCKER_IMAGE:="vllm-tpu:000"}
 
@@ -95,7 +95,7 @@ fi
 if [ "$RUN_IN_BUILDKITE" = "false" ]; then
     echo "Running in local mode, building image."
     docker image prune -f
-    docker build -f docker/Dockerfile -t ${DOCKER_IMAGE} --build-arg IS_FOR_V7X="${IS_FOR_V7X}" .
+    docker build -f docker/Dockerfile -t ${DOCKER_IMAGE} .
 fi
 
 # log folder $HOME/logs
@@ -125,7 +125,7 @@ TPU_PROCESS_BOUNDS="2,2,1"
 PREFILL_TPU_PORTS=(8476 8477 8478 8479)
 DECODE_TPU_PORTS=(9476 9477 9478 9479)
 
-if [ "$IS_FOR_V7X" = "true" ]; then
+if [ "$TPU_VERSION" = "tpu7x" ]; then
     NUM_HOSTS_PER_INSTANCE=2
     TPU_PROCESS_BOUNDS="1,2,1"
     PREFILL_TPU_PORTS=(8476 8477)
@@ -176,7 +176,7 @@ for ((i=0; i<NUM_HOSTS_PER_INSTANCE; i++)); do
         -e TPU_PROCESS_PORT="${tpu_port}" \
         \
         -e HF_HOME="/root/hf" \
-        -e IS_FOR_V7X="${IS_FOR_V7X}" \
+        -e TPU_VERSION="${TPU_VERSION}" \
         -v "${HOST_HF_HOME}:/root/hf" \
         -v $LOG_DIR:/root/logs \
         "${local_mounts[@]}" \
@@ -248,7 +248,7 @@ for ((i=0; i<NUM_HOSTS_PER_INSTANCE; i++)); do
         -e TPU_PROCESS_PORT="${tpu_port}" \
         \
         -e HF_HOME="/root/hf" \
-        -e IS_FOR_V7X="${IS_FOR_V7X}" \
+        -e TPU_VERSION="${TPU_VERSION}" \
         -v "${HOST_HF_HOME}:/root/hf" \
         -v $LOG_DIR:/root/logs \
         "${local_mounts[@]}" \

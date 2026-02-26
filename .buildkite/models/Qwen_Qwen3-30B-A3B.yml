@@ -19,8 +19,6 @@ steps:
     key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-30B-A3B_UnitTest"
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
-    env:
-      IS_FOR_V7X: "${IS_FOR_V7X}"
     soft_fail: true
     commands:
       - |
@@ -47,7 +45,6 @@ steps:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     soft_fail: true
     env:
-      IS_FOR_V7X: "${IS_FOR_V7X}"
       TEST_MODEL: Qwen/Qwen3-30B-A3B
       TENSOR_PARALLEL_SIZE: 4
       MINIMUM_ACCURACY_THRESHOLD: 0.89
@@ -75,7 +72,6 @@ steps:
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     env:
-      IS_FOR_V7X: "${IS_FOR_V7X}"
       TEST_MODEL: Qwen/Qwen3-30B-A3B
       TENSOR_PARALLEL_SIZE: 4
       MINIMUM_THROUGHPUT_THRESHOLD: 7.20
