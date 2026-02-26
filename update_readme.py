@@ -9,7 +9,14 @@ CSV_MAP = {
     "model_support": [
         "support_matrices/combined_model_support_matrix.csv"
     ],
-    "core_features": "support_matrices/feature_support_matrix.csv",
+    "core_features": {
+        "v6_flax": "support_matrices/nightly/flax_nnx/v6/feature_support_matrix.csv",
+        "v6_pytorch": "support_matrices/nightly/vllm/v6/feature_support_matrix.csv",
+        "v6_default": "support_matrices/nightly/default/v6/feature_support_matrix.csv",
+        "v7_flax": "support_matrices/nightly/flax_nnx/v7/feature_support_matrix.csv",
+        "v7_pytorch": "support_matrices/nightly/vllm/v7/feature_support_matrix.csv",
+        "v7_default": "support_matrices/nightly/default/v7/feature_support_matrix.csv"
+    },
     "parallelism": "support_matrices/parallelism_support_matrix.csv",
     "quantization": "support_matrices/quantization_support_matrix.csv",
     "kernel_support": "support_matrices/kernel_support_matrix.csv",
@@ -83,16 +90,13 @@ def generate_html_feature_table(headers, data):
     
     for row in data:
         html.append("    <tr>")
-        feature_name = row[0] if len(row) > 0 else ""
-        merged_status = merge_metrics(row[1], row[2]) if len(row) > 2 else ""
-        
-        html.append(f"      <td>{feature_name}</td>")
-        html.append(f"      <td></td>") # v6e flax
-        html.append(f"      <td>{merged_status}</td>") # v6e pytorch
-        html.append(f"      <td></td>") # v6e default
-        html.append(f"      <td></td>") # v7x flax
-        html.append(f"      <td>{merged_status}</td>") # v7x pytorch
-        html.append(f"      <td></td>") # v7x default
+        html.append(f"      <td>{row[0]}</td>")     # Feature name
+        html.append(f"      <td>{row[1]}</td>")     # v6e flax
+        html.append(f"      <td>{row[2]}</td>")     # v6e pytorch
+        html.append(f"      <td>{row[3]}</td>")     # v6e default
+        html.append(f"      <td>{row[4]}</td>")     # v7x flax
+        html.append(f"      <td>{row[5]}</td>")     # v7x pytorch
+        html.append(f"      <td>{row[6]}</td>")     # v7x default
         html.append("    </tr>")
         
     html.append("  </tbody>")
@@ -239,7 +243,37 @@ def update_readme():
     for section_key, file_sources in CSV_MAP.items():
         headers, all_data = [], []
         
-        if section_key == "microbenchmarks":
+        if section_key == "core_features":
+            merged_features = {}
+            for col_key, fpath in file_sources.items():
+                h, d = read_csv_data(fpath)
+                if d:
+                    for r in d:
+                        if not r: continue
+                        feature = r[0].strip()
+                        if feature not in merged_features:
+                            merged_features[feature] = {"v6_flax": "", "v6_pytorch": "", "v6_default": "", "v7_flax": "", "v7_pytorch": "", "v7_default": ""}
+                        c = r[1] if len(r) > 1 else ""
+                        p = r[2] if len(r) > 2 else ""
+                        merged_features[feature][col_key] = merge_metrics(c, p)
+
+            for feature in sorted(merged_features.keys(), key=lambda x: x.lower()):
+                metrics = merged_features[feature]
+                row = [
+                    feature,
+                    metrics["v6_flax"],
+                    metrics["v6_pytorch"],
+                    metrics["v6_default"],
+                    metrics["v7_flax"],
+                    metrics["v7_pytorch"],
+                    metrics["v7_default"]
+                ]
+                all_data.append(row)
+                
+            headers = ["Feature"]
+            new_table = generate_html_feature_table(headers, all_data)
+            
+        elif section_key == "microbenchmarks":
             # Custom merge logic for microbenchmarks (Horizontal Join of v6 and v7)
             v6_h, v6_d = read_csv_data(file_sources["v6"])
             v7_h, v7_d = read_csv_data(file_sources["v7"])
