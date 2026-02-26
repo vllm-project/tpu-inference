@@ -87,13 +87,13 @@ Below is the live status of our supported models, features, and kernels. Click o
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
 
-- ✅ **Passing:** Tested and works as expected. Ready for use.
-- ⚠️ **Beta:** Works, but may be unstable or have known issues. Use with caution.
-- 🧪 **Experimental:** Works, but unoptimized or pending community validation. [Vote to prioritize](https://github.com/vllm-project/tpu-inference/issues/1749)
-- ❌ **Failing:** Known to be broken or not functional. Help is wanted to fix this!
-- 📝 **Planned:** Not yet implemented, but on the official roadmap.
-- ❓ **Untested:** The functionality exists but has not been recently or thoroughly verified.
-- ⚪️ **N/A:** Not applicable for this feature.
+- ✅ **Passing:** <span style="color: gray; font-size: 0.9em">Tested and works as expected. Ready for use.</span>
+- ⚠️ **Beta:** <span style="color: gray; font-size: 0.9em">Works, but may be unstable or have known issues. Use with caution.</span>
+- 🧪 **Experimental:** <span style="color: gray; font-size: 0.9em">Works, but unoptimized or pending community validation. <a href="https://github.com/vllm-project/tpu-inference/issues/1749">Vote to prioritize</a></span>
+- ❌ **Failing:** <span style="color: gray; font-size: 0.9em">Known to be broken or not functional. Help is wanted to fix this!</span>
+- 📝 **Planned:** <span style="color: gray; font-size: 0.9em">Not yet implemented, but on the official roadmap.</span>
+- ❓ **Untested:** <span style="color: gray; font-size: 0.9em">The functionality exists but has not been recently or thoroughly verified.</span>
+- ⚪️ **N/A:** <span style="color: gray; font-size: 0.9em">Not applicable for this feature.</span>
 
 </details>
 
