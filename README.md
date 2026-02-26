@@ -105,7 +105,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 <summary><b> ✅ Model Support </b></summary>
 
 <!-- START: model_support -->
-| Model | Type | Load&nbsp;Test | Correctness&nbsp;Test | Benchmark |
+| Model | Type | Unit&nbsp;Test | Correctness&nbsp;Test | Benchmark |
 | --- | --- | --- | --- | --- |
 | `meta-llama/Llama-4-Maverick-17B-128E-Instruct` | Multimodal | ❓&nbsp;Untested | ❓&nbsp;Untested | ❓&nbsp;Untested |
 | `Qwen/Qwen2.5-VL-7B-Instruct` | Multimodal | ✅&nbsp;Passing | ✅&nbsp;Passing | ✅&nbsp;Passing |

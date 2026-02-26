@@ -9,7 +9,7 @@ OUTPUT_CSV = os.path.join(SUPPORT_MATRICES_DIR, "combined_model_support_matrix.c
 
 # Column name mapping
 COLUMN_MAPPING = {
-    "UnitTest": "Load Test",
+    "UnitTest": "Unit Test",
     "Accuracy/Correctness": "Correctness Test"
 }
 
