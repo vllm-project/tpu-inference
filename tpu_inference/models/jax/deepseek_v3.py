@@ -23,7 +23,6 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from flax.typing import Sharding
-from flax.typing import Sharding
 from jax import lax
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
@@ -51,7 +50,6 @@ from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.moe.utils import (get_expert_parallelism,
                                                 select_moe_backend)
 from tpu_inference.layers.jax.norm import JaxRmsNorm
-from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.layers.jax.rope import DeepseekScalingRotaryEmbedding
@@ -329,6 +327,21 @@ class DeepseekV3BaseAttention(JaxModule):
 class DeepseekV3Attention(DeepseekV3BaseAttention):
     """Standard Multi-Head Attention (MHA) for DeepSeek models."""
 
+    def __post_init__(self, rngs: nnx.Rngs):
+        super().__post_init__(rngs)
+
+        weight_init = _weight_init(self.random_init)
+        self.kv_b_proj = JaxEinsum(
+            einsum_str="SA,AL->SL",
+            kernel_shape=(self.kv_lora_rank,
+                          self.N * (self.qk_nope_head_dim + self.v_head_dim)),
+            rngs=rngs,
+            quant_config=self.quant_config,
+            param_dtype=self.dtype,
+            kernel_init=nnx.with_partitioning(weight_init, self.ap_sharding),
+            prefix=self.prefix + ".kv_b_proj",
+        )
+
     def compute_q_projection(self, x_q_TD: jax.Array,
                              input_positions: jax.Array) -> jax.Array:
         """
@@ -474,6 +487,12 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
 
 
 class MLAEinsum(JaxEinsum):
+    """Extending JaxEinsum to handle MLA.
+    
+    This class is used for MLA, where:
+    1) the weight is split into k/v parts after loading, and
+    2) modify the MLA layer to set k/v weights
+    """
 
     def __init__(self,
                  mla_layer,
@@ -543,16 +562,32 @@ class MLAEinsum(JaxEinsum):
             JaxEinsum(einsum_str="TNA,ANH->TNH",
                       kernel_shape=(A, N, v_head_dim),
                       rngs=nnx.Rngs(0)))
-        mla_layer.k_up_proj.weight.value = shard_put(
-            k_ANH, self.mla_layer.anh_sharding)
-        mla_layer.v_up_proj.weight.value = shard_put(
-            v_ANH, self.mla_layer.anh_sharding)
+        mla_layer.k_up_proj.weight.set_raw_value(
+            shard_put(k_ANH, self.mla_layer.anh_sharding))
+        mla_layer.v_up_proj.weight.set_raw_value(
+            shard_put(v_ANH, self.mla_layer.anh_sharding))
 
 
 @dataclass(kw_only=True)
 class DeepseekV3MLA(DeepseekV3BaseAttention):
     """Multi-Head Latent Attention (MLA) for DeepSeek V3."""
     anh_sharding: Sharding = ()
+
+    def __post_init__(self, rngs: nnx.Rngs):
+        super().__post_init__(rngs)
+
+        weight_init = _weight_init(self.random_init)
+        self.kv_b_proj = MLAEinsum(
+            mla_layer=self,
+            einsum_str="SA,AL->SL",
+            kernel_shape=(self.kv_lora_rank,
+                          self.N * (self.qk_nope_head_dim + self.v_head_dim)),
+            rngs=rngs,
+            quant_config=self.quant_config,
+            param_dtype=self.dtype,
+            kernel_init=nnx.with_partitioning(weight_init, self.ap_sharding),
+            prefix=self.prefix + ".kv_b_proj",
+        )
 
     def compute_q_projection(
             self, x_q_TD: jax.Array,
@@ -680,7 +715,6 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
 
 
 @dataclass(kw_only=True)
-class DeepseekV3MLP(JaxModule):
 class DeepseekV3MLP(JaxModule):
     """A Gated Feed-Forward Network (FFN) layer.
 
@@ -1046,9 +1080,7 @@ class DeepSeekV3(JaxModule):
     def __init__(self,
                  vllm_config: VllmConfig,
                  rng: nnx.Rngs,
-                 rng: nnx.Rngs,
                  mesh: Mesh,
-                 quant_config,
                  quant_config,
                  prefix: str = ""):
         self.vllm_config = vllm_config
@@ -1087,7 +1119,6 @@ class DeepSeekV3(JaxModule):
                 embedding_init=nnx.with_partitioning(
                     init_fn, (ShardingAxisName.MLP_TENSOR, )),
                 rngs=rng,
-                quant_config=quant_config,
                 quant_config=quant_config,
                 prefix=prefix + ".embed_tokens",
             )
@@ -1294,17 +1325,6 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
                                       "quantization_config", {})
             vllm_config.quant_config = Fp8Config(hg_quant_config)
 
-        if getattr(vllm_config.model_config, "quantization", None) == "fp8":
-            # `get_tpu_quantization_config` returns None for "fp8" because
-            # the work in #1623 is not fully merged. So this block overrides
-            # the logic to return Fp8Config when model_config indicates fp8.
-            # TODO(#1623): Remove this block when `get_tpu_quantization_config`
-            # is updated.
-            from tpu_inference.layers.jax.quantization.fp8 import Fp8Config
-            hg_quant_config = getattr(vllm_config.model_config.hf_config,
-                                      "quantization_config", {})
-            vllm_config.quant_config = Fp8Config(hg_quant_config)
-
         self.vllm_config = vllm_config
         rng = nnx.Rngs(rng_key)
         self.mesh = mesh
@@ -1313,7 +1333,6 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
             vllm_config=vllm_config,
             rng=rng,
             mesh=mesh,
-            quant_config=vllm_config.quant_config,
             quant_config=vllm_config.quant_config,
             prefix="model",
         )
