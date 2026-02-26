@@ -13,7 +13,10 @@ CSV_MAP = {
     "parallelism": "support_matrices/parallelism_support_matrix.csv",
     "quantization": "support_matrices/quantization_support_matrix.csv",
     "kernel_support": "support_matrices/kernel_support_matrix.csv",
-    "microbenchmarks": "support_matrices/nightly/v7/kernel_support_matrix-microbenchmarks.csv"
+    "microbenchmarks": {
+        "v6": "support_matrices/nightly/v6/kernel_support_matrix-microbenchmarks.csv",
+        "v7": "support_matrices/nightly/v7/kernel_support_matrix-microbenchmarks.csv"
+    }
 }
 
 README_PATH = "README.md"
@@ -236,22 +239,50 @@ def update_readme():
 
     for section_key, file_sources in CSV_MAP.items():
         headers, all_data = [], []
-        sources = file_sources if isinstance(file_sources, list) else [file_sources]
         
-        for i, file_path in enumerate(sources):
-            h, d = read_csv_data(file_path)
-            if h:
-                if not headers: headers = h
-                all_data.extend(d)
-        
-        if section_key == "core_features":
-            new_table = generate_html_feature_table(headers, all_data)
-        elif section_key == "quantization":
-            new_table = generate_html_quantization_table(headers, all_data)
-        elif section_key == "microbenchmarks":
+        if section_key == "microbenchmarks":
+            # Custom merge logic for microbenchmarks (Horizontal Join of v6 and v7)
+            v6_h, v6_d = read_csv_data(file_sources["v6"])
+            v7_h, v7_d = read_csv_data(file_sources["v7"])
+            
+            merged_data = {}
+            if v6_d:
+                for row in v6_d:
+                    if not row: continue
+                    merged_data[row[0]] = {"v6": row[1:]}
+                    
+            if v7_d:
+                for row in v7_d:
+                    if not row: continue
+                    if row[0] not in merged_data:
+                        merged_data[row[0]] = {}
+                    merged_data[row[0]]["v7"] = row[1:]
+                    
+            for kernel in sorted(merged_data.keys()):
+                v6_metrics = merged_data[kernel].get("v6", [""] * 12)
+                v7_metrics = merged_data[kernel].get("v7", [""] * 12)
+                # Ensure they have exactly 12 columns
+                v6_metrics = v6_metrics + [""] * (12 - len(v6_metrics))
+                v7_metrics = v7_metrics + [""] * (12 - len(v7_metrics))
+                all_data.append([kernel] + v6_metrics[:12] + v7_metrics[:12])
+                
+            headers = ["test"] # Dummy header, script handles rendering manually
             new_table = generate_html_microbenchmark_table(headers, all_data)
+            
         else:
-            new_table = generate_markdown_table(headers, all_data)
+            sources = file_sources if isinstance(file_sources, list) else [file_sources]
+            for i, file_path in enumerate(sources):
+                h, d = read_csv_data(file_path)
+                if h:
+                    if not headers: headers = h
+                    all_data.extend(d)
+            
+            if section_key == "core_features":
+                new_table = generate_html_feature_table(headers, all_data)
+            elif section_key == "quantization":
+                new_table = generate_html_quantization_table(headers, all_data)
+            else:
+                new_table = generate_markdown_table(headers, all_data)
         
         # Special handling for microbenchmarks to append footer
         if section_key == "microbenchmarks":
