@@ -126,13 +126,19 @@ def generate_html_quantization_table(headers, data):
     html.append("  </thead>")
     html.append("  <tbody>")
     
+    def _format_cell(text):
+        text = str(text)
+        for status in ["❓ Untested", "✅ Passing", "❌ Failed", "❌ Failing", "⚠️ Beta", "🧪 Experimental", "📝 Planned", "⚪ N/A"]:
+            text = text.replace(status, status.replace(" ", "&nbsp;"))
+        return text
+
     for row in data:
         html.append("    <tr>")
         # Ensure we have 9 columns worth of data, then drop default columns (indices 5 and 8)
         padded_row = row + [""] * (9 - len(row))
         indices_to_keep = [0, 1, 2, 3, 4, 6, 7]
         for idx in indices_to_keep:
-            html.append(f"      <td>{padded_row[idx]}</td>")
+            html.append(f"      <td>{_format_cell(padded_row[idx])}</td>")
         html.append("    </tr>")
         
     html.append("  </tbody>")
