@@ -20,8 +20,6 @@ steps:
     soft_fail: true
     agents:
       queue: {QUEUE}
-    env:
-      IS_FOR_V7X: "${{IS_FOR_V7X}}"
     commands:
       - echo "placeholder"  # TODO : replace with your correctness test command
   - label: "${{TPU_VERSION:-tpu6e}} Record correctness test result for {FEATURE_NAME}"
@@ -44,8 +42,6 @@ steps:
     soft_fail: true
     agents:
       queue: {QUEUE}
-    env:
-      IS_FOR_V7X: "${{IS_FOR_V7X}}"
     commands:
       - echo "placeholder"  # TODO : replace with your performance test command
   - label: "${{TPU_VERSION:-tpu6e}} Record performance test result for {FEATURE_NAME}"

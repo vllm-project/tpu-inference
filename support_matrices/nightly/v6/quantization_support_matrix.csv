@@ -1,7 +1,0 @@
-Quantization dtype,Quantization methods,Recommended TPU Generations,CorrectnessTest,PerformanceTest
-AWQ INT4,-,"v5, v6",❓ Untested,❓ Untested
-FP4 W4A16,mxfp4,v7,❓ Untested,❓ Untested
-FP8 W8A8,compressed-tensor,v7,❓ Untested,❓ Untested
-FP8 W8A16,compressed-tensor,v7,❓ Untested,❓ Untested
-INT4 W4A16,awq,"v5, v6",❓ Untested,❓ Untested
-INT8 W8A8,compressed-tensor,"v5, v6",❌ Failing,-

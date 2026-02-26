@@ -11,13 +11,9 @@ If you’d like us to prioritize something specific, please submit a GitHub feat
 
 These tables show the models currently tested for accuracy and performance.
 
-### Text-Only Models
+### Models
 
-{{ read_csv('../support_matrices/text_only_model_support_matrix.csv', keep_default_na=False) }}
-
-### Multimodal Models
-
-{{ read_csv('../support_matrices/multimodal_model_support_matrix.csv', keep_default_na=False) }}
+{{ read_csv('../support_matrices/model_support_matrix.csv', keep_default_na=False) }}
 
 ## Recommended Features
 

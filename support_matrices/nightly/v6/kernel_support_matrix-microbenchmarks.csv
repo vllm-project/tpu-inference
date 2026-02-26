@@ -1,7 +1,0 @@
-Kernel,W16 A16 (Corr),W16 A16 (Perf),W8 A8 (Corr),W8 A8 (Perf),W8 A16 (Corr),W8 A16 (Perf),W4 A4 (Corr),W4 A4 (Perf),W4 A8 (Corr),W4 A8 (Perf),W4 A16 (Corr),W4 A16 (Perf)
-all-gather-matmul,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓
-fused moe,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓
-generic ragged paged<br>attention v3*,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓
-gmm,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓
-mla*,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓
-ragged paged attention v3<br>head_dim 64*,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓,❓

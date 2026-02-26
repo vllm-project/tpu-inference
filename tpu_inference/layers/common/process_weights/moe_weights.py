@@ -387,7 +387,7 @@ def shard_moe_weights(
         if (weight := getattr(weights, key, None)) is not None:
             layout = getattr(weight_layouts, key)
             sharding = getattr(weight_shardings, key)
-            weight = general_device_put(weight, sharding, layout)
+            weight = general_device_put(weight, sharding, layout=layout)
             setattr(weights, key, weight)
     return weights
 

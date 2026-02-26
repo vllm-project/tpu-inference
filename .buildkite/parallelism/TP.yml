@@ -20,8 +20,6 @@ steps:
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
-    env:
-      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
@@ -46,8 +44,6 @@ steps:
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
-    env:
-      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
