@@ -552,11 +552,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 </table>
 
 > **Note:**
-> *   ✅ = Verified Passing
-> *   ❓ = Unverified
-> *   ❌ = Failed
-> *   Performance numbers (e.g., `10ms`) will appear under the icon if available.
-> *   *Tested on TPU v7 (Nightly 20260217)*
+> *   *Tested on TPU v7 (Nightly 20260225)*
 > *   *For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision.*
 <!-- END: microbenchmarks -->
 

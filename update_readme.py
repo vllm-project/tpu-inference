@@ -285,13 +285,18 @@ def update_readme():
         
         # Special handling for microbenchmarks to append footer
         if section_key == "microbenchmarks":
+            try:
+                import datetime
+                v7_path = file_sources["v7"]
+                mtime = os.path.getmtime(v7_path)
+                dt = datetime.datetime.fromtimestamp(mtime)
+                date_str = dt.strftime("%Y%m%d")
+            except Exception:
+                date_str = "Unknown"
+                
             footer = (
                 "\n\n> **Note:**\n"
-                "> *   ✅ = Verified Passing\n"
-                "> *   ❓ = Unverified\n"
-                "> *   ❌ = Failed\n"
-                "> *   Performance numbers (e.g., `10ms`) will appear under the icon if available.\n"
-                "> *   *Tested on TPU v7 (Nightly 20260217)*\n"
+                f"> *   *Tested on TPU v7 (Nightly {date_str})*\n"
                 "> *   *For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision.*"
             )
             new_table += footer
