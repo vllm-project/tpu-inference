@@ -354,55 +354,55 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td>AWQ INT4</td>
       <td></td>
       <td>v5, v6</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
     </tr>
     <tr>
       <td>FP4 W4A16</td>
       <td>mxfp4</td>
       <td>v7</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
     </tr>
     <tr>
       <td>FP8 W8A8</td>
       <td>compressed-tensor</td>
       <td>v7</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
     </tr>
     <tr>
       <td>FP8 W8A16</td>
       <td>compressed-tensor</td>
       <td>v7</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
     </tr>
     <tr>
       <td>INT4 W4A16</td>
       <td>awq</td>
       <td>v5, v6</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
     </tr>
     <tr>
       <td>INT8 W8A8</td>
       <td>compressed-tensor</td>
       <td>v5, v6</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
     </tr>
   </tbody>
 </table>
