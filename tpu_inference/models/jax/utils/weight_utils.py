@@ -20,6 +20,7 @@ import os
 import re
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 
@@ -30,19 +31,23 @@ import torchax
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from jax.sharding import SingleDeviceSharding
+from jax.sharding import SingleDeviceSharding, get_mesh
 from safetensors import safe_open
 from torchax.ops.mappings import t2j
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
+from vllm.model_executor.model_loader import register_model_loader
+from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
 from tpu_inference import envs, utils
-from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.jax import JaxModule, JaxModuleList
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils import file_utils
 
 logger = init_logger(__name__)
+# Lazy initialized, since device might not be ready at import time.
+_cpu_mesh = None
 
 HF_WEIGHTS_FORMAT = "*.safetensors"
 
@@ -217,9 +222,7 @@ def shard_put(x: jax.Array,
     # Single device sharding requires this special handling
     # to avoid the recursive jit error.
     if mesh is None:
-        if isinstance(shardings, tuple):
-            return jax.device_put(x, P(*shardings))
-        return jax.device_put(x, shardings)
+        mesh = get_mesh()
 
     if math.prod(mesh.axis_sizes) == 1:
         return jax.device_put(x, mesh.devices.flatten()[0])
@@ -657,6 +660,18 @@ def transfer_state_with_mappings(src_state,
     return tgt_state
 
 
+def cpu_mesh():
+    global _cpu_mesh
+    if _cpu_mesh is None:
+        _cpu_mesh = Mesh(jax.devices("cpu")[:1], ("cpu", ))
+    return _cpu_mesh
+
+
+def cpu_mesh_context():
+    """A context to enforce using CPU mesh, used for loading weights on CPU."""
+    return jax.set_mesh(cpu_mesh())
+
+
 class BaseWeightLoader:
 
     def __init__(self, vllm_config: VllmConfig, **kwargs):
@@ -740,7 +755,8 @@ def jax_array_from_reshaped_torch(
     if permute_dims is not None:
         torch_weight = torch_weight.permute(*permute_dims)
 
-    return t2j(torch_weight, use_dlpack=False)
+    with cpu_mesh_context():
+        return t2j(torch_weight, use_dlpack=False)
 
 
 def load_nnx_param_from_reshaped_torch(
@@ -769,12 +785,12 @@ def load_nnx_param_from_reshaped_torch(
     assert tuple(jax_weight.shape) == jax_param.value.shape, \
         f"Shape mismatch when loading weight '{param_name}': torch {jax_weight.shape} vs jax {jax_param.value.shape}"
 
-    spec = jax_param.sharding
-    if isinstance(jax_param.sharding, NamedSharding):
-        spec = jax_param.sharding.spec
-    elif isinstance(jax_param.sharding, SingleDeviceSharding):
+    spec = jax_param.get_metadata().get('sharding', ())
+    if isinstance(spec, NamedSharding):
+        spec = spec.spec
+    elif isinstance(spec, SingleDeviceSharding):
         spec = ()
-    mesh = getattr(jax_param, 'mesh', None)
+    mesh = jax_param.get_metadata().get('mesh', None)
 
     try:
         jax_param.value = shard_put(jax_weight, spec, mesh=mesh)
@@ -852,3 +868,62 @@ class LoadableWithIterator:
             skip_prefixes=(["lm_head"]
                            if not hasattr(self, 'lm_head') else None))
         return loader.load_weights(weights)
+
+
+@register_model_loader("jax_dummy")
+class JaxDummyModelLoader(DummyModelLoader):
+    """A dummy weights loader for flax_nnx models.
+
+    The upstream DummyModelLoader relies on many torch-specific APIs, this
+    implementation overrides the load_weights method to support flax_nnx models.
+    """
+
+    def load_weights(self, model: JaxModule,
+                     model_config: ModelConfig) -> None:
+        params = nnx.state(model, nnx.Param)
+        graph_def, params = nnx.flatten(params)
+        for path, param in params:
+            assert isinstance(
+                param,
+                nnx.Param), f"Expected nnx.Param, got {type(param)} {param=}"
+            kwargs = dict(
+                shape=param.value.shape,
+                dtype=param.value.dtype,
+                # upstream claims this range works well
+                # https://github.com/vllm-project/vllm/blob/7291d1b288558d48508e1a17c37b0aa170332264/vllm/model_executor/model_loader/weight_utils.py#L1088
+                minval=-1e-3,
+                maxval=1e-3,
+            )
+            if hasattr(param, "_weights_to_load"):
+                # MoE param
+                E, K, N = param.value.shape
+                with cpu_mesh_context():
+                    kwargs["key"] = jax.random.PRNGKey(0)
+                    kwargs["shape"] = (1, N, K)
+                    for i in range(E):
+                        param._weights_to_load[i] = jax.random.uniform(
+                            **kwargs)
+                continue
+            mesh = param.get_metadata().get('mesh', None)
+            ctx = nullcontext() if mesh is None else jax.set_mesh(mesh)
+            with ctx:
+                kwargs["key"] = jax.random.PRNGKey(0)
+                param.value = jax.random.uniform(**kwargs)
+        params = nnx.unflatten(graph_def, params)
+        nnx.update(model, params)
+
+        self._process_weights_after_loading(model)
+
+    def _process_weights_after_loading(
+            self, module: JaxModule | JaxModuleList) -> None:
+        """Recursively call process_weights_after_loading if any."""
+        if (quant_method := getattr(module, 'quant_method', None)) is not None:
+            assert isinstance(quant_method, QuantizeMethodBase)
+            quant_method.process_weights_after_loading(module)
+            return
+        if isinstance(module, JaxModuleList):
+            for sub_module in module:
+                self._process_weights_after_loading(sub_module)
+        else:
+            for name, sub_module in module.named_children():
+                self._process_weights_after_loading(sub_module)

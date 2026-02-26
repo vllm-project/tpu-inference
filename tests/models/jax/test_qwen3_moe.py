@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import unittest
-
 import jax
 import pytest
 from jax import numpy as jnp
@@ -30,19 +28,20 @@ from tpu_inference.models.jax.qwen3_moe import Qwen3MoeForCausalLM
 
 class TestQwen3MoeForCausalLM:
 
-    @unittest.skip(
-        "TODO: skip to unblock jax/flax merging bug created for this")
     @pytest.mark.parametrize("model_name", [
         "Qwen/Qwen3-30B-A3B-Instruct-2507",
         "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8",
     ])
     @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
                                                        (3, 4)])
+    @pytest.mark.parametrize(
+        "load_format", ["skip_layers_model_loader_for_test", "jax_dummy"])
     def test_model_loading(
             self,
             model_name,
             pp_rank,
             pp_world_size,
+            load_format,
             # following are defined in conftest.py
             rng,
             mesh,
@@ -52,7 +51,7 @@ class TestQwen3MoeForCausalLM:
         vllm_config = mock_vllm_config(model_name, kv_cache_type)
         # No need to load full model.
         vllm_config.model_config.hf_config.num_hidden_layers = 4
-        vllm_config.load_config.load_format = "skip_layers_model_loader_for_test"
+        vllm_config.load_config.load_format = load_format
         vllm_config.load_config.num_layers_to_load_for_test = 4
 
         init_pp_distributed_environment(

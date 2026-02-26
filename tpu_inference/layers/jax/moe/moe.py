@@ -19,7 +19,6 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from flax.typing import Sharding
-from jax._src.dtypes import TypePromotionError
 from jax.sharding import NamedSharding, PartitionSpec
 from jaxtyping import Float
 
@@ -31,7 +30,7 @@ from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
-    jax_array_from_reshaped_torch, shard_put)
+    cpu_mesh_context, jax_array_from_reshaped_torch, shard_put)
 
 modeling_flax_utils = FlaxUtils()
 logger = init_logger(__name__)
@@ -194,11 +193,15 @@ class JaxMoE(JaxModule):
                                               dtype=self.dtype,
                                               sharding=self.edf_sharding,
                                               random_init=self.random_init)
+        self.kernel_gating_EDF.set_metadata(
+            _weights_to_load=[None for _ in range(E)])
         self.kernel_up_proj_EDF = create_param(rngs,
                                                shape=(E, D, F),
                                                dtype=self.dtype,
                                                sharding=self.edf_sharding,
                                                random_init=self.random_init)
+        self.kernel_up_proj_EDF.set_metadata(
+            _weights_to_load=[None for _ in range(E)])
         self.kernel_down_proj_EFD = create_param(
             rngs,
             shape=(E, F, D),
@@ -206,6 +209,8 @@ class JaxMoE(JaxModule):
             sharding=self.efd_sharding if self.moe_backend
             not in MoEBackend.fused_moe_backends() else self.edf_sharding,
             random_init=self.random_init)
+        self.kernel_down_proj_EFD.set_metadata(
+            _weights_to_load=[None for _ in range(E)])
 
         # Derive if data is sharded by expert
         self.data_axis_name = self.activation_ffw_td[0]
@@ -279,24 +284,11 @@ class JaxMoE(JaxModule):
                 )
 
             assert isinstance(jax_param, nnx.Param)
-            if not hasattr(jax_param, "_cnt_moe_weights_loaded"):
-                jax_param.value = jax.numpy.zeros(jax_param.value.shape,
-                                                  dtype=jax_param.value.dtype)
-                jax_param.set_metadata("_cnt_moe_weights_loaded", 0)
-            jax_param.set_metadata("_cnt_moe_weights_loaded",
-                                   jax_param._cnt_moe_weights_loaded + 1)
-            assert isinstance(
-                jax_param.value,
-                jax.Array), f"Expecting jax.Array, got {type(jax_param.value)}"
 
-            jax_weight = jax_array_from_reshaped_torch(torch_weight)
-            try:
-                jax_param.value = jax_param.value.at[expert_id].set(jax_weight)
-            except TypePromotionError as e:
-                raise TypePromotionError(
-                    f"Error while loading weight for {param_name} with {jax_weight.dtype=} {jax_weight.shape=} "
-                    f"into {jax_param.value.dtype=} {jax_param.value.shape=}"
-                ) from e
+            jax_weight = jax_array_from_reshaped_torch(
+                torch_weight, reshape_dims=(1, ) +
+                torch_weight.shape)  # add expert dim for concatenation later
+            jax_param._weights_to_load[expert_id] = jax_weight
 
         logger.debug(f"Loaded {cnt} weights for {self.prefix} MoE layer.")
 
@@ -308,9 +300,16 @@ class JaxMoE(JaxModule):
                 "kernel_up_proj_EDF": self.kernel_up_proj_EDF,
                 "kernel_down_proj_EFD": self.kernel_down_proj_EFD
         }.items():
-            if getattr(param, "_cnt_moe_weights_loaded",
-                       0) == self.num_local_experts:
-                param.value = shard_put(param.value, param.sharding)
-                loaded_names.add(param_name)
+            weights_to_load = param._weights_to_load
+            if all(w is not None for w in weights_to_load):
+                with cpu_mesh_context():
+                    weights = jnp.concatenate(param._weights_to_load, axis=0)
+                try:
+                    param.value = shard_put(weights, param.sharding)
+                    loaded_names.add(param_name)
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Failed to load weights for {param_name} with {weights.shape=} {param.value.shape=}"
+                    ) from e
 
         return loaded_names
