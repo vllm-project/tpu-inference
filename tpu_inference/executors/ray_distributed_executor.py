@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import copy
 import os
+from collections import defaultdict
 from typing import Dict, List, Optional
 
 import ray
@@ -31,14 +33,10 @@ from vllm.v1.executor.ray_executor import RayWorkerMetaData
 from vllm.v1.executor.ray_utils import RayWorkerWrapper as RayWorkerWrapperV1
 from vllm.v1.executor.ray_utils import _wait_until_pg_ready
 
+from tpu_inference.distributed.utils import set_node_kv_ip_port
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
-
-import asyncio
-from collections import defaultdict
-
-from tpu_inference.distributed.utils import set_node_kv_ip_port
 
 logger = init_logger(__name__)
 
@@ -143,13 +141,11 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         # This is necessary when the head node doesn't have TPU resources
         # (e.g., KubeRay deployments where head runs on a non-TPU node)
         nodes_with_device = [
-            n for n in ray_nodes
-            if device_str in n.get("Resources", {})
+            n for n in ray_nodes if device_str in n.get("Resources", {})
         ]
         logger.info(
             f"RayDistributedExecutor | nodes_with_device={len(nodes_with_device)} "
-            f"(filtered from {len(ray_nodes)} total nodes)"
-        )
+            f"(filtered from {len(ray_nodes)} total nodes)")
 
         if pp_size == 1:
             placement_group_specs = [{
@@ -172,11 +168,9 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         # Get resources from ray.nodes() which is more reliable
         # than available_resources_per_node() for TPU resource reporting
         current_node_info = next(
-            (n for n in ray.nodes() if n["NodeID"] == current_node_id), None
-        )
-        current_node_resource = (
-            current_node_info.get("Resources", {}) if current_node_info else {}
-        )
+            (n for n in ray.nodes() if n["NodeID"] == current_node_id), None)
+        current_node_resource = (current_node_info.get("Resources", {})
+                                 if current_node_info else {})
         if current_node_resource.get(device_str, 0) < 1:
             raise ValueError(
                 f"Current node has no {device_str} available. "

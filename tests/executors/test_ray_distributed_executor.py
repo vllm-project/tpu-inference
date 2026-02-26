@@ -89,9 +89,12 @@ class TestTpuRayDistributedExecutor(unittest.TestCase):
         mock_vllm_platform.additional_env_vars = []
 
         mock_ray.is_initialized.return_value = False
-        mock_ray.nodes.return_value = [
-            {"NodeID": "node_1", "Resources": {"TPU": 4}}
-        ]
+        mock_ray.nodes.return_value = [{
+            "NodeID": "node_1",
+            "Resources": {
+                "TPU": 4
+            }
+        }]
         mock_ray.get_runtime_context.return_value.get_node_id.return_value = "node_1"
 
         mock_wait_until_pg_ready.return_value = None
@@ -139,10 +142,17 @@ class TestTpuRayDistributedExecutor(unittest.TestCase):
         mock_ray.is_initialized.return_value = False
         # ray.nodes() is now used to get resources
         # Simulate driver node without TPU and worker node with TPU
-        mock_ray.nodes.return_value = [
-            {"NodeID": "driver_node", "Resources": {"CPU": 8}},
-            {"NodeID": "worker_node", "Resources": {"TPU": 4}}
-        ]
+        mock_ray.nodes.return_value = [{
+            "NodeID": "driver_node",
+            "Resources": {
+                "CPU": 8
+            }
+        }, {
+            "NodeID": "worker_node",
+            "Resources": {
+                "TPU": 4
+            }
+        }]
         mock_ray.get_runtime_context.return_value.get_node_id.return_value = "driver_node"
 
         executor = self.RayDistributedExecutor(self.vllm_config)
@@ -156,8 +166,9 @@ class TestTpuRayDistributedExecutor(unittest.TestCase):
 
     def test_init_workers_ray_sorts_correctly(self, mock_wait_until_pg_ready,
                                               mock_get_port, mock_get_ip,
-                                              mock_vllm_platform, mock_platform,
-                                              mock_ray, mock_envs):
+                                              mock_vllm_platform,
+                                              mock_platform, mock_ray,
+                                              mock_envs):
         # --- Setup Mocks ---
         mock_envs.VLLM_RAY_BUNDLE_INDICES = ""
         mock_platform.ray_device_key = "TPU"
@@ -242,11 +253,40 @@ class TestTpuRayDistributedExecutor(unittest.TestCase):
         mock_ray.is_initialized.return_value = True
         # Simulate cluster with head node (no TPU) and 4 TPU worker nodes
         mock_ray.nodes.return_value = [
-            {"NodeID": "head_node", "Resources": {"CPU": 8}},  # No TPU
-            {"NodeID": "tpu_node_1", "Resources": {"TPU": 4, "CPU": 160}},
-            {"NodeID": "tpu_node_2", "Resources": {"TPU": 4, "CPU": 160}},
-            {"NodeID": "tpu_node_3", "Resources": {"TPU": 4, "CPU": 160}},
-            {"NodeID": "tpu_node_4", "Resources": {"TPU": 4, "CPU": 160}},
+            {
+                "NodeID": "head_node",
+                "Resources": {
+                    "CPU": 8
+                }
+            },  # No TPU
+            {
+                "NodeID": "tpu_node_1",
+                "Resources": {
+                    "TPU": 4,
+                    "CPU": 160
+                }
+            },
+            {
+                "NodeID": "tpu_node_2",
+                "Resources": {
+                    "TPU": 4,
+                    "CPU": 160
+                }
+            },
+            {
+                "NodeID": "tpu_node_3",
+                "Resources": {
+                    "TPU": 4,
+                    "CPU": 160
+                }
+            },
+            {
+                "NodeID": "tpu_node_4",
+                "Resources": {
+                    "TPU": 4,
+                    "CPU": 160
+                }
+            },
         ]
         # Current node is a TPU node
         mock_ray.get_runtime_context.return_value.get_node_id.return_value = "tpu_node_1"
@@ -286,7 +326,13 @@ class TestTpuRayDistributedExecutor(unittest.TestCase):
         mock_ray.is_initialized.return_value = True
         # Simulate node with TPU resources
         mock_ray.nodes.return_value = [
-            {"NodeID": "tpu_node_1", "Resources": {"TPU": 4, "CPU": 160}},
+            {
+                "NodeID": "tpu_node_1",
+                "Resources": {
+                    "TPU": 4,
+                    "CPU": 160
+                }
+            },
         ]
         mock_ray.get_runtime_context.return_value.get_node_id.return_value = "tpu_node_1"
         mock_get_ip.return_value = "10.0.0.1"
