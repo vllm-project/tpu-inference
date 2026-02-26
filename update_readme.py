@@ -141,20 +141,19 @@ def merge_metrics(c, p):
     c = str(c).strip()
     p = str(p).strip()
     
+    # Empty or hyphen in the CSV should be treated as Untested
+    if not c or c == "-": c = "❓"
+    if not p or p == "-": p = "❓"
+    
     is_failed = "❌" in c or "❌" in p or "Failed" in c or "Failed" in p or "🔴" in c or "🔴" in p
-    is_untested = "❓" in c or "❓" in p or "Untested" in c or "Untested" in p or "unverified" in c or "unverified" in p
     
     if is_failed:
-        return "❓&nbsp;Untested" if "❓" in c or "❓" in p else "❌&nbsp;Failed" # Overriding based on PM logic, Untested could take precedence depending, but "Any Red = Red" usually means failed has highest precedence. Actually, mockup shows untested for red. Let's stick to standard: Failed > Untested > Passed. Wait, PM said: "Any Red = Red. If either is untested, untested". Let's do: Failed wins, then Untested.
-        # Wait, the instruction said: "if one of Corr/Perf is untested or failed, show it as untested or failed."
-    
-    if is_failed:
-        return "❌&nbsp;Failed"
-    if is_untested:
-        return "❓&nbsp;Untested"
+        return "❓&nbsp;Untested" if "❓" in c or "❓" in p else "❌&nbsp;Failed" 
+        
     if "✅" in c and "✅" in p:
         return "✅&nbsp;Passing"
-    return ""
+        
+    return "❓&nbsp;Untested"
 
 def format_kernel_name(name):
     """Formats kernel names to wrap cleanly in max 2-3 lines by using non-breaking spaces and hyphens."""

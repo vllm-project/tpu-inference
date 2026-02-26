@@ -226,10 +226,10 @@ Below is the live status of our supported models, features, and kernels. Click o
     <tr>
       <td>Single-Host-P-D-disaggregation</td>
       <td></td>
+      <td>❓&nbsp;Untested</td>
       <td></td>
       <td></td>
-      <td></td>
-      <td></td>
+      <td>❓&nbsp;Untested</td>
       <td></td>
     </tr>
     <tr>
@@ -271,28 +271,28 @@ Below is the live status of our supported models, features, and kernels. Click o
     <tr>
       <td>runai_model_streamer_loader</td>
       <td></td>
+      <td>❓&nbsp;Untested</td>
       <td></td>
       <td></td>
-      <td></td>
-      <td></td>
+      <td>❓&nbsp;Untested</td>
       <td></td>
     </tr>
     <tr>
       <td>sampling_params</td>
       <td></td>
+      <td>❓&nbsp;Untested</td>
       <td></td>
       <td></td>
-      <td></td>
-      <td></td>
+      <td>❓&nbsp;Untested</td>
       <td></td>
     </tr>
     <tr>
       <td>structured_decoding</td>
       <td></td>
+      <td>❓&nbsp;Untested</td>
       <td></td>
       <td></td>
-      <td></td>
-      <td></td>
+      <td>❓&nbsp;Untested</td>
       <td></td>
     </tr>
   </tbody>
@@ -468,10 +468,10 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td>❓&nbsp;Untested</td>
       <td>❓&nbsp;Untested</td>
       <td>❓&nbsp;Untested</td>
-      <td></td>
-      <td></td>
-      <td></td>
-      <td></td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
     </tr>
     <tr>
       <td>fused&nbsp;moe</td>
@@ -483,10 +483,10 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td>❓&nbsp;Untested</td>
       <td>❓&nbsp;Untested</td>
       <td>❓&nbsp;Untested</td>
-      <td></td>
-      <td></td>
-      <td></td>
-      <td></td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
     </tr>
     <tr>
       <td>generic&nbsp;ragged<br>paged&nbsp;attention<br>v3*</td>
@@ -498,10 +498,10 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td>❓&nbsp;Untested</td>
       <td>❓&nbsp;Untested</td>
       <td>❓&nbsp;Untested</td>
-      <td></td>
-      <td></td>
-      <td></td>
-      <td></td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
     </tr>
     <tr>
       <td>gmm</td>
@@ -513,10 +513,10 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td>❓&nbsp;Untested</td>
       <td>❓&nbsp;Untested</td>
       <td>❓&nbsp;Untested</td>
-      <td></td>
-      <td></td>
-      <td></td>
-      <td></td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
     </tr>
     <tr>
       <td>mla*</td>
@@ -528,10 +528,10 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td>❓&nbsp;Untested</td>
       <td>❓&nbsp;Untested</td>
       <td>❓&nbsp;Untested</td>
-      <td></td>
-      <td></td>
-      <td></td>
-      <td></td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
     </tr>
     <tr>
       <td>ragged&nbsp;paged<br>attention&nbsp;v3<br>head_dim&nbsp;64*</td>
@@ -543,10 +543,10 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td>❓&nbsp;Untested</td>
       <td>❓&nbsp;Untested</td>
       <td>❓&nbsp;Untested</td>
-      <td></td>
-      <td></td>
-      <td></td>
-      <td></td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
     </tr>
   </tbody>
 </table>
