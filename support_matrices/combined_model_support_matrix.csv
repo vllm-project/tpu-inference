@@ -1,4 +1,4 @@
-Model,Type,Load Test,Correctness Test,Benchmark
+Model,Type,Unit Test,Correctness Test,Benchmark
 `meta-llama/Llama-4-Maverick-17B-128E-Instruct`,Multimodal,❓ Untested,❓ Untested,❓ Untested
 `Qwen/Qwen2.5-VL-7B-Instruct`,Multimodal,✅ Passing,✅ Passing,✅ Passing
 `Qwen/Qwen3-Omni-30B-A3B-Instruct`,Multimodal,❓ Untested,❓ Untested,❓ Untested
