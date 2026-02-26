@@ -12,17 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from itertools import islice
 from functools import partial
-from typing import Iterable, List, Optional, Tuple, Set, Any
+from itertools import islice
+from typing import Any, Iterable, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
+from vllm.config import VllmConfig
 # from transformers import Gemma4TextConfig
 from vllm.vllm.transformers_utils.configs.gemma4 import Gemma4TextConfig
-from vllm.config import VllmConfig
 
 from tpu_inference import utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
@@ -33,7 +33,8 @@ from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
 from tpu_inference.layers.jax.norm import JaxRmsNorm
-from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
+from tpu_inference.layers.jax.pp_utils import (PPMissingLayer,
+                                               get_start_end_layer)
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
@@ -46,11 +47,12 @@ logger = init_logger(__name__)
 
 init_fn = nnx.initializers.uniform()
 
+
 # MLP arch is the same as Gemma3
 class Gemma4MLP(JaxModule):
 
-    def __init__(self, config: Gemma4TextConfig, dtype: jnp.dtype, rng: nnx.Rngs,
-                 quant_config: VllmQuantConfig):
+    def __init__(self, config: Gemma4TextConfig, dtype: jnp.dtype,
+                 rng: nnx.Rngs, quant_config: VllmQuantConfig):
         hidden_size = config.hidden_size
         intermediate_size = config.intermediate_size
 
@@ -93,9 +95,9 @@ class Gemma4MLP(JaxModule):
 
 class Gemma4Attention(JaxModule):
 
-    def __init__(self, config: Gemma4TextConfig, layer_idx: int, dtype: jnp.dtype,
-                 rng: nnx.Rngs, mesh: Mesh, kv_cache_dtype: str,
-                 quant_config: VllmQuantConfig):
+    def __init__(self, config: Gemma4TextConfig, layer_idx: int,
+                 dtype: jnp.dtype, rng: nnx.Rngs, mesh: Mesh,
+                 kv_cache_dtype: str, quant_config: VllmQuantConfig):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.rms_norm_eps = config.rms_norm_eps
@@ -105,8 +107,9 @@ class Gemma4Attention(JaxModule):
 
         # Same as Gemma3: use layer_idx to handle GLOBAL/LOCAL layer
         self.layer_type = "full_attention"
-        if hasattr(config, "layer_types") and layer_idx < len(config.layer_types):
-             self.layer_type = config.layer_types[layer_idx]
+        if hasattr(config, "layer_types") and layer_idx < len(
+                config.layer_types):
+            self.layer_type = config.layer_types[layer_idx]
 
         self.is_sliding = self.layer_type == "sliding_attention"
         self.sliding_window = config.sliding_window if self.is_sliding else None
@@ -116,25 +119,32 @@ class Gemma4Attention(JaxModule):
         if self.layer_type in rope_parameters:
             # Transformers v5 rope config.
             rope_parameters = rope_parameters[self.layer_type]
-            self.rope_theta = rope_parameters.get("rope_theta", config.rope_theta)
-            self.rope_scaling = rope_parameters.get("rope_scaling", getattr(config, "rope_scaling", None))
-            if not self.is_sliding: # GLOBAL layer
-                self.rope_fraction = getattr(config, "global_partial_rotary_factor", 0.25)
-            else: # LOCAL layer
-                self.rope_fraction = rope_parameters.get("partial_rotary_factor", 1.0)
+            self.rope_theta = rope_parameters.get("rope_theta",
+                                                  config.rope_theta)
+            self.rope_scaling = rope_parameters.get(
+                "rope_scaling", getattr(config, "rope_scaling", None))
+            if not self.is_sliding:  # GLOBAL layer
+                self.rope_fraction = getattr(config,
+                                             "global_partial_rotary_factor",
+                                             0.25)
+            else:  # LOCAL layer
+                self.rope_fraction = rope_parameters.get(
+                    "partial_rotary_factor", 1.0)
             # self.rope_type = rope_parameters.get("rope_type", "proportional" if not self.is_sliding else "default") # Not sure if this is needed?
         else:
             # Transformers v4 rope config.
             # Fallback for config backward compatibility
             self.rope_theta = config.rope_local_base_freq if self.is_sliding else config.rope_theta
             self.rope_scaling = getattr(config, "rope_scaling", None)
-            self.rope_fraction = getattr(config, "global_partial_rotary_factor", 0.25) if not self.is_sliding else 1.0 # Assuming the config name is global_partial_rotary_factor
+            self.rope_fraction = getattr(
+                config, "global_partial_rotary_factor", 0.25
+            ) if not self.is_sliding else 1.0  # Assuming the config name is global_partial_rotary_factor
             # self.rope_type = "proportional" if not self.is_sliding else "default"
 
         # Gemma4: use different num_kv_heads and head_dim in GLOBAL/LOCAL layers
         if not self.is_sliding:
             # GLOBAL layers
-            self.num_kv_heads = config.global_num_key_value_heads # Assuming 4 new config names for GLOBAL/LOCAL layers
+            self.num_kv_heads = config.global_num_key_value_heads  # Assuming 4 new config names for GLOBAL/LOCAL layers
             self.head_dim_original = config.global_head_dim
         else:
             # LOCAL layers
@@ -154,10 +164,12 @@ class Gemma4Attention(JaxModule):
         self.q_proj = JaxEinsum(
             "TD,DNH->TNH",
             (self.hidden_size, self.num_heads, self.head_dim),
-            bias_shape=(self.num_heads, self.head_dim) if config.attention_bias else None,
+            bias_shape=(self.num_heads,
+                        self.head_dim) if config.attention_bias else None,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
-            bias_init=nnx.with_partitioning(init_fn, ("model", None)) if config.attention_bias else None,
+            bias_init=nnx.with_partitioning(init_fn, ("model", None))
+            if config.attention_bias else None,
             rngs=rng,
             quant_config=quant_config,
         )
@@ -171,14 +183,17 @@ class Gemma4Attention(JaxModule):
         )
 
         # --- Shared KV Projection Logic ---
-        if not self.is_sliding: # Shared KV (GLOBAL layers)
+        if not self.is_sliding:  # Shared KV (GLOBAL layers)
             self.k_proj = JaxEinsum(
                 "TD,DKH->TKH",
                 (self.hidden_size, self.num_kv_heads, self.head_dim),
-                bias_shape=(self.num_kv_heads, self.head_dim) if config.attention_bias else None,
+                bias_shape=(self.num_kv_heads,
+                            self.head_dim) if config.attention_bias else None,
                 param_dtype=dtype,
-                kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
-                bias_init=nnx.with_partitioning(init_fn, ("model", None)) if config.attention_bias else None,
+                kernel_init=nnx.with_partitioning(init_fn,
+                                                  (None, "model", None)),
+                bias_init=nnx.with_partitioning(init_fn, ("model", None))
+                if config.attention_bias else None,
                 rngs=rng,
                 quant_config=quant_config,
             )
@@ -188,20 +203,26 @@ class Gemma4Attention(JaxModule):
             self.k_proj = JaxEinsum(
                 "TD,DKH->TKH",
                 (self.hidden_size, self.num_kv_heads, self.head_dim),
-                bias_shape=(self.num_kv_heads, self.head_dim) if config.attention_bias else None,
+                bias_shape=(self.num_kv_heads,
+                            self.head_dim) if config.attention_bias else None,
                 param_dtype=dtype,
-                kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
-                bias_init=nnx.with_partitioning(init_fn, ("model", None)) if config.attention_bias else None,
+                kernel_init=nnx.with_partitioning(init_fn,
+                                                  (None, "model", None)),
+                bias_init=nnx.with_partitioning(init_fn, ("model", None))
+                if config.attention_bias else None,
                 rngs=rng,
                 quant_config=quant_config,
             )
             self.v_proj = JaxEinsum(
                 "TD,DKH->TKH",
                 (self.hidden_size, self.num_kv_heads, self.head_dim),
-                bias_shape=(self.num_kv_heads, self.head_dim) if config.attention_bias else None,
+                bias_shape=(self.num_kv_heads,
+                            self.head_dim) if config.attention_bias else None,
                 param_dtype=dtype,
-                kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
-                bias_init=nnx.with_partitioning(init_fn, ("model", None)) if config.attention_bias else None,
+                kernel_init=nnx.with_partitioning(init_fn,
+                                                  (None, "model", None)),
+                bias_init=nnx.with_partitioning(init_fn, ("model", None))
+                if config.attention_bias else None,
                 rngs=rng,
                 quant_config=quant_config,
             )
@@ -219,17 +240,19 @@ class Gemma4Attention(JaxModule):
             self.head_dim,
             epsilon=self.rms_norm_eps,
             param_dtype=dtype,
-            scale_init=nnx.with_partitioning(init_fn, (None, )), # need to disable scaling for value norm
+            scale_init=nnx.with_partitioning(
+                init_fn, (None, )),  # need to disable scaling for value norm
             rngs=rng,
             quant_config=quant_config,
         )
         self.o_proj = JaxEinsum(
             "TNH,NHD->TD",
             (self.num_heads, self.head_dim, self.hidden_size),
-            bias_shape=(self.hidden_size,) if config.attention_bias else None,
+            bias_shape=(self.hidden_size, ) if config.attention_bias else None,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
-            bias_init=nnx.with_partitioning(init_fn, (None,)) if config.attention_bias else None,
+            bias_init=nnx.with_partitioning(init_fn, (None, ))
+            if config.attention_bias else None,
             rngs=rng,
             quant_config=quant_config,
         )
@@ -260,7 +283,7 @@ class Gemma4Attention(JaxModule):
             q_pass = q[..., rope_dim:]
 
             q_rope = apply_rope(q_rope, md.input_positions, rope_dim,
-                           self.rope_theta, self.rope_scaling)
+                                self.rope_theta, self.rope_scaling)
             q = jnp.concatenate([q_rope, q_pass], axis=-1)
         else:
             q = apply_rope(q, md.input_positions, self.head_dim_original,
@@ -285,7 +308,7 @@ class Gemma4Attention(JaxModule):
             k_pass = k[..., rope_dim:]
 
             k_rope = apply_rope(k_rope, md.input_positions, rope_dim,
-                           self.rope_theta, self.rope_scaling)
+                                self.rope_theta, self.rope_scaling)
             k = jnp.concatenate([k_rope, k_pass], axis=-1)
         else:
             k = apply_rope(k, md.input_positions, self.head_dim_original,
@@ -320,21 +343,24 @@ class Gemma4Attention(JaxModule):
 
 class Gemma4DecoderLayer(JaxModule):
 
-    def __init__(self, config: Gemma4TextConfig, layer_idx: int, dtype: jnp.dtype, rng: nnx.Rngs,
-                 mesh: Mesh, kv_cache_dtype: str,
-                 quant_config: VllmQuantConfig):
+    def __init__(self, config: Gemma4TextConfig, layer_idx: int,
+                 dtype: jnp.dtype, rng: nnx.Rngs, mesh: Mesh,
+                 kv_cache_dtype: str, quant_config: VllmQuantConfig):
         rms_norm_eps = config.rms_norm_eps
         hidden_size = config.hidden_size
 
         # Same as Gemma3: use layer_idx to handle GLOBAL/LOCAL layer
         self.layer_type = "full_attention"
-        if hasattr(config, "layer_types") and layer_idx < len(config.layer_types):
-             self.layer_type = config.layer_types[layer_idx]
+        if hasattr(config, "layer_types") and layer_idx < len(
+                config.layer_types):
+            self.layer_type = config.layer_types[layer_idx]
 
         self.is_sliding = self.layer_type == "sliding_attention"
 
         if not self.is_sliding:
-            self.skip_scale = nnx.Param(jnp.ones((1,), dtype=dtype)) # placeholder for learnable skip_scale value
+            self.skip_scale = nnx.Param(jnp.ones(
+                (1, ),
+                dtype=dtype))  # placeholder for learnable skip_scale value
         else:
             self.skip_scale = None
 
@@ -383,7 +409,6 @@ class Gemma4DecoderLayer(JaxModule):
             rngs=rng,
             quant_config=quant_config,
         )
-
 
     def __call__(
         self,
@@ -535,8 +560,8 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
 
         # Gemma 4: soft-capping in the final logits.
         self.final_logit_softcapping = getattr(
-            model_config.hf_config.text_config, "final_logit_softcapping", None
-        )
+            model_config.hf_config.text_config, "final_logit_softcapping",
+            None)
 
         if not model_config.hf_config.tie_word_embeddings:
             if self.model.is_last_rank:
@@ -556,8 +581,8 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
         stripped_weights = (
             (clean_name, 1.0 + tensor if "norm" in clean_name else tensor)
             for name, tensor in weights
-            if (clean_name := name.replace("language_model.", "")).startswith(("model.", "lm_head"))
-        )
+            if (clean_name := name.replace("language_model.", "")).startswith((
+                "model.", "lm_head")))
 
         return super().load_weights(stripped_weights)
 
@@ -581,7 +606,8 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
             assert intermediate_tensors is not None
             inputs_embeds = intermediate_tensors["hidden_states"]
 
-        layer_name_to_kv_cache = dict(_layer_name_to_kv_cache) if _layer_name_to_kv_cache else None
+        layer_name_to_kv_cache = dict(
+            _layer_name_to_kv_cache) if _layer_name_to_kv_cache else None
         kv_caches, x = self.model(
             kv_caches,
             input_ids,
@@ -603,6 +629,7 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
 
         # Gemma4: Use Logit Soft-capping
         if self.final_logit_softcapping is not None:
-            logits = jnp.tanh(logits / self.final_logit_softcapping) * self.final_logit_softcapping
+            logits = jnp.tanh(
+                logits /
+                self.final_logit_softcapping) * self.final_logit_softcapping
         return logits
-
