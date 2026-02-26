@@ -21,8 +21,8 @@ CSV_MAP = {
     "quantization": "support_matrices/quantization_support_matrix.csv",
     "kernel_support": "support_matrices/kernel_support_matrix.csv",
     "microbenchmarks": {
-        "v6": "support_matrices/nightly/v6/kernel_support_matrix-microbenchmarks.csv",
-        "v7": "support_matrices/nightly/v7/kernel_support_matrix-microbenchmarks.csv"
+        "v6": "support_matrices/nightly/vllm/v6/kernel_support_matrix-microbenchmarks.csv",
+        "v7": "support_matrices/nightly/vllm/v7/kernel_support_matrix-microbenchmarks.csv"
     }
 }
 
