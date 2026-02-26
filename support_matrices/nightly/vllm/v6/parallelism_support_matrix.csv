@@ -1,7 +1,7 @@
 Feature,CorrectnessTest,PerformanceTest
-CP,❓ Untested,❓ Untested
-DP,✅ Passing,✅ Passing
-EP,❌ Failing,-
-PP,❓ Untested,❓ Untested
-SP,❌ Failing,-
-TP,❌ Failing,-
+"CP",unverified,unverified
+"DP",✅,✅
+"EP",❌,N/A
+"PP",unverified,unverified
+"SP",❌,N/A
+"TP",❌,N/A

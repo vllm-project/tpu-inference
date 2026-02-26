@@ -152,148 +152,157 @@ Below is the live status of our supported models, features, and kernels. Click o
   </thead>
   <tbody>
     <tr>
+      <td>async scheduler</td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+      <td>❌&nbsp;Failed</td>
+      <td>✅&nbsp;Passing</td>
+      <td>❌&nbsp;Failed</td>
+    </tr>
+    <tr>
       <td>Chunked Prefill</td>
-      <td></td>
       <td>✅&nbsp;Passing</td>
-      <td></td>
-      <td></td>
       <td>✅&nbsp;Passing</td>
-      <td></td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
     </tr>
     <tr>
       <td>DCN-based P/D disaggregation</td>
-      <td></td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+    </tr>
+    <tr>
+      <td>hybrid kv cache</td>
       <td>❓&nbsp;Untested</td>
-      <td></td>
-      <td></td>
       <td>❓&nbsp;Untested</td>
-      <td></td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
     </tr>
     <tr>
       <td>KV cache host offloading</td>
-      <td></td>
       <td>❓&nbsp;Untested</td>
-      <td></td>
-      <td></td>
       <td>❓&nbsp;Untested</td>
-      <td></td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
     </tr>
     <tr>
       <td>LoRA_Torch</td>
-      <td></td>
       <td>✅&nbsp;Passing</td>
-      <td></td>
-      <td></td>
       <td>✅&nbsp;Passing</td>
-      <td></td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+    </tr>
+    <tr>
+      <td>multi-host</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
     </tr>
     <tr>
       <td>Multimodal Inputs</td>
-      <td></td>
-      <td>✅&nbsp;Passing</td>
-      <td></td>
-      <td></td>
-      <td>✅&nbsp;Passing</td>
-      <td></td>
+      <td>❌&nbsp;Failed</td>
+      <td>❌&nbsp;Failed</td>
+      <td>❌&nbsp;Failed</td>
+      <td>❌&nbsp;Failed</td>
+      <td>❌&nbsp;Failed</td>
+      <td>❌&nbsp;Failed</td>
     </tr>
     <tr>
       <td>Out-of-tree model support</td>
-      <td></td>
       <td>✅&nbsp;Passing</td>
-      <td></td>
-      <td></td>
       <td>✅&nbsp;Passing</td>
-      <td></td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
     </tr>
     <tr>
       <td>Prefix Caching</td>
-      <td></td>
       <td>✅&nbsp;Passing</td>
-      <td></td>
-      <td></td>
       <td>✅&nbsp;Passing</td>
-      <td></td>
-    </tr>
-    <tr>
-      <td>Single Program Multi Data</td>
-      <td></td>
       <td>✅&nbsp;Passing</td>
-      <td></td>
-      <td></td>
       <td>✅&nbsp;Passing</td>
-      <td></td>
-    </tr>
-    <tr>
-      <td>Single-Host-P-D-disaggregation</td>
-      <td></td>
-      <td>❓&nbsp;Untested</td>
-      <td></td>
-      <td></td>
-      <td>❓&nbsp;Untested</td>
-      <td></td>
-    </tr>
-    <tr>
-      <td>Speculative Decoding: Eagle3</td>
-      <td></td>
       <td>✅&nbsp;Passing</td>
-      <td></td>
-      <td></td>
       <td>✅&nbsp;Passing</td>
-      <td></td>
-    </tr>
-    <tr>
-      <td>Speculative Decoding: Ngram</td>
-      <td></td>
-      <td>✅&nbsp;Passing</td>
-      <td></td>
-      <td></td>
-      <td>✅&nbsp;Passing</td>
-      <td></td>
-    </tr>
-    <tr>
-      <td>async scheduler</td>
-      <td></td>
-      <td>✅&nbsp;Passing</td>
-      <td></td>
-      <td></td>
-      <td>✅&nbsp;Passing</td>
-      <td></td>
-    </tr>
-    <tr>
-      <td>data_parallelism</td>
-      <td></td>
-      <td>❓&nbsp;Untested</td>
-      <td></td>
-      <td></td>
-      <td>❓&nbsp;Untested</td>
-      <td></td>
     </tr>
     <tr>
       <td>runai_model_streamer_loader</td>
-      <td></td>
       <td>❓&nbsp;Untested</td>
-      <td></td>
-      <td></td>
+      <td>❌&nbsp;Failed</td>
       <td>❓&nbsp;Untested</td>
-      <td></td>
+      <td>❓&nbsp;Untested</td>
+      <td>❌&nbsp;Failed</td>
+      <td>❓&nbsp;Untested</td>
     </tr>
     <tr>
       <td>sampling_params</td>
-      <td></td>
       <td>❓&nbsp;Untested</td>
-      <td></td>
-      <td></td>
+      <td>❌&nbsp;Failed</td>
       <td>❓&nbsp;Untested</td>
-      <td></td>
+      <td>❓&nbsp;Untested</td>
+      <td>❌&nbsp;Failed</td>
+      <td>❓&nbsp;Untested</td>
+    </tr>
+    <tr>
+      <td>Single Program Multi Data</td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+    </tr>
+    <tr>
+      <td>Single-Host-P-D-disaggregation</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+    </tr>
+    <tr>
+      <td>Speculative Decoding: Eagle3</td>
+      <td>✅&nbsp;Passing</td>
+      <td>❌&nbsp;Failed</td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+      <td>❌&nbsp;Failed</td>
+      <td>✅&nbsp;Passing</td>
+    </tr>
+    <tr>
+      <td>Speculative Decoding: Ngram</td>
+      <td>✅&nbsp;Passing</td>
+      <td>❌&nbsp;Failed</td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
     </tr>
     <tr>
       <td>structured_decoding</td>
-      <td></td>
       <td>❓&nbsp;Untested</td>
-      <td></td>
-      <td></td>
+      <td>❌&nbsp;Failed</td>
       <td>❓&nbsp;Untested</td>
-      <td></td>
+      <td>❓&nbsp;Untested</td>
+      <td>❌&nbsp;Failed</td>
+      <td>❓&nbsp;Untested</td>
     </tr>
   </tbody>
 </table>
@@ -552,7 +561,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 </table>
 
 > **Note:**
-> *   *Tested on TPU v7 (Nightly 20260225)*
+> *   *Tested on TPU v7 (Nightly 20260226)*
 > *   *For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision.*
 <!-- END: microbenchmarks -->
 
