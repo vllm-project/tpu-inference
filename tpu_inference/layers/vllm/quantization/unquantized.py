@@ -29,6 +29,8 @@ from vllm.model_executor.layers.quantization import \
     register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead, UnquantizedEmbeddingMethod, VocabParallelEmbedding)
 
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.linear_weights import (
@@ -40,7 +42,7 @@ from tpu_inference.layers.common.quant_methods import UNQUANTIZED
 from tpu_inference.layers.common.quantization import \
     unquantized as common_unquantized
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.vllm.moe import (
+from tpu_inference.layers.vllm.interface.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
     _tensor_is_in_cpu
@@ -80,15 +82,38 @@ class VllmUnquantizedConfig(QuantizationConfig, VllmQuantConfig):
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional[QuantizeMethodBase]:
-        if isinstance(layer, vllm_linear.LinearBase):
-            linear_config = self.get_linear_config(layer)
-            return VllmUnquantizedLinearMethod(linear_config)
-        if isinstance(layer, FusedMoE):
-            moe_config = self.get_moe_config(layer)
-            return VllmUnquantizedFusedMoEMethod(moe_config, self.mesh)
-        if isinstance(layer, Attention):
-            return None
-        return None
+        match layer:
+            case vllm_linear.LinearBase():
+                linear_config = self.get_linear_config(layer)
+                return VllmUnquantizedLinearMethod(linear_config)
+            case FusedMoE():
+                moe_config = self.get_moe_config(layer)
+                return VllmUnquantizedFusedMoEMethod(moe_config, self.mesh)
+            case Attention():
+                return None
+            case VocabParallelEmbedding():
+                return VllmUnquantizedEmbeddingMethod(self.mesh)
+            case _:
+                return None
+
+
+class VllmUnquantizedEmbeddingMethod(UnquantizedEmbeddingMethod):
+
+    def __init__(self, mesh):
+        self.mesh = mesh
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        weight = t2j(layer.weight, use_dlpack=False)
+        weight = jax.device_put(
+            weight,
+            NamedSharding(self.mesh, P(ShardingAxisName.MLP_TENSOR, None)))
+        layer.weight = Parameter(torch_view(weight), requires_grad=False)
+
+        if isinstance(layer, ParallelLMHead) and layer.bias is not None:
+            bias = t2j(layer.bias, use_dlpack=False)
+            bias = jax.device_put(
+                bias, NamedSharding(self.mesh, P(ShardingAxisName.MLP_TENSOR)))
+            layer.bias = Parameter(torch_view(bias), requires_grad=False)
 
 
 class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,

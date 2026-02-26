@@ -65,7 +65,7 @@ class TpuPlatform(Platform):
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         # Invoke @register_backend in the module.
-        import tpu_inference.layers.vllm.attention  # noqa: F401
+        import tpu_inference.layers.vllm.interface.attention  # noqa: F401
         if selected_backend != AttentionBackendEnum.FLASH_ATTN:
             logger.info("Cannot use %s backend on TPU. Setting to FLASH_ATTN.",
                         selected_backend)
@@ -161,7 +161,7 @@ class TpuPlatform(Platform):
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = cast(BlockSize, 16)
             if vllm_config.model_config:
-                from tpu_inference.layers.vllm.attention import \
+                from tpu_inference.layers.vllm.interface.attention import \
                     PallasAttentionBackend
                 cache_config.block_size = PallasAttentionBackend.get_page_size(
                     vllm_config)  # type: ignore[assignment]

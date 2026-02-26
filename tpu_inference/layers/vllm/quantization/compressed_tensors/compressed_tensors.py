@@ -118,17 +118,20 @@ class VllmCompressedTensorsConfig(CompressedTensorsConfig, VllmQuantConfig):
                                ignore=self.ignore,
                                fused_mapping=self.packed_modules_mapping):
             return VllmUnquantizedConfig.get_quant_method(self, layer, prefix)
-        if isinstance(layer, LinearBase):
-            scheme = self.get_scheme(layer=layer, layer_name=prefix)
-            if scheme is None:
-                return VllmUnquantizedConfig.get_quant_method(
-                    self, layer, prefix)
-            layer.scheme = scheme
-            return CompressedTensorsLinearMethod(self)
-        if isinstance(layer, FusedMoE):
-            layer.moe_config = self.get_moe_config(layer)
-            return VllmCompressedTensorsMoEMethod.get_moe_method(
-                self, layer, layer_name=prefix)
-        if isinstance(layer, Attention):
-            return CompressedTensorsKVCacheMethod(self)
-        return None
+
+        match layer:
+            case LinearBase():
+                scheme = self.get_scheme(layer=layer, layer_name=prefix)
+                if scheme is None:
+                    return VllmUnquantizedConfig.get_quant_method(
+                        self, layer, prefix)
+                layer.scheme = scheme
+                return CompressedTensorsLinearMethod(self)
+            case FusedMoE():
+                layer.moe_config = self.get_moe_config(layer)
+                return VllmCompressedTensorsMoEMethod.get_moe_method(
+                    self, layer, layer_name=prefix)
+            case Attention():
+                return CompressedTensorsKVCacheMethod(self)
+            case _:
+                return None
