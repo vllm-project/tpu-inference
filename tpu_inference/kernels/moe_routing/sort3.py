@@ -74,9 +74,10 @@ def kernel(
     *,
     tile_out: int,
     tile_in: int,
+    num_tokens: int,
+    topk: int,
 ):
   hidden_size = x_ref.shape[-1]
-  num_tokens, topk = topk_indices_ref.shape
   num_out_tokens = num_tokens * topk
   num_experts = group_sizes_ref.shape[0]
 
@@ -85,7 +86,7 @@ def kernel(
 
   for t in range(num_tokens):
     for k in range(topk):
-      expert_idx = topk_indices_ref[t, k]
+      expert_idx = topk_indices_ref[t * topk + k]
       group_size = group_sizes_ref[expert_idx]
       group_sizes_ref[expert_idx] = group_size + 1
 
@@ -96,7 +97,7 @@ def kernel(
 
   for t in range(num_tokens):
     for k in range(topk):
-      expert_idx = topk_indices_ref[t, k]
+      expert_idx = topk_indices_ref[t * topk + k]
       group_offset = group_offset_ref[expert_idx]
       topk_argsort_revert_indices_ref[group_offset] = t
       group_offset_ref[expert_idx] = group_offset + 1
@@ -148,7 +149,7 @@ def sort_tokens(
 
   scope_name = f"sort_tokens-m_{num_tokens}-k_{hidden_size}-topk_{topk}"
   return pl.pallas_call(
-      functools.partial(kernel, tile_out=tile_out, tile_in=tile_in),
+      functools.partial(kernel, tile_out=tile_out, tile_in=tile_in, num_tokens=num_tokens, topk=topk),
       out_shape=[
           jax.ShapeDtypeStruct(out_shape, orig_dtype),
           jax.ShapeDtypeStruct((num_experts,), jnp.int32), # group_sizes
@@ -168,4 +169,4 @@ def sort_tokens(
       ),
       compiler_params=pltpu.CompilerParams(vmem_limit_bytes=vmem_limit_bytes),
       name=scope_name,
-  )(topk_indices, x)
+  )(topk_indices.flatten(), x)
