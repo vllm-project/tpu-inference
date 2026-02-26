@@ -468,6 +468,21 @@ Below is the live status of our supported models, features, and kernels. Click o
   </thead>
   <tbody>
     <tr>
+      <td>*&nbsp;For&nbsp;attention<br>kernels,<br>W[x]A[y]&nbsp;denotes<br>KV&nbsp;cache&nbsp;as&nbsp;W,&nbsp;A<br>as&nbsp;compute,&nbsp;and<br>x,&nbsp;y&nbsp;as&nbsp;bit<br>precision</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+    </tr>
+    <tr>
       <td>all&#8209;gather&#8209;matmul</td>
       <td>❓&nbsp;Untested</td>
       <td>❓&nbsp;Untested</td>
@@ -514,6 +529,21 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td>gmm</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+    </tr>
+    <tr>
+      <td>kernels</td>
       <td>❓&nbsp;Untested</td>
       <td>❓&nbsp;Untested</td>
       <td>❓&nbsp;Untested</td>
