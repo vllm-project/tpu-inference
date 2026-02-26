@@ -352,7 +352,6 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         assert isinstance(layer, FusedMoE)
-        assert not self.moe.has_bias
 
         w13_qweight = t2j(layer.w13_qweight, use_dlpack=False)
         delattr(layer, "w13_qweight")
@@ -372,14 +371,24 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
         w2_qzeros = t2j(layer.w2_qzeros, use_dlpack=False)
         delattr(layer, "w2_qzeros")
 
+        if self.moe.has_bias:
+            w13_bias = t2j(layer.w13_bias, use_dlpack=False)
+            w2_bias = t2j(layer.w2_bias, use_dlpack=False)
+            delattr(layer, "w13_bias")
+            delattr(layer, "w2_bias")
+        else:
+            w13_bias = w2_bias = None
+
         @jax.jit
         def process_awq_moe_weights(
             w13_qweight: jax.Array,
             w13_scales: jax.Array,
             w13_qzeros: jax.Array,
+            w13_bias: jax.Array | None,
             w2_qweight: jax.Array,
             w2_scales: jax.Array,
             w2_qzeros: jax.Array,
+            w2_bias: jax.Array | None,
         ) -> FusedMoEWeights:
             w13_qweight = jnp.swapaxes(awq_u32_unpack_u4(w13_qweight), 1, 2)
             w2_qweight = jnp.swapaxes(awq_u32_unpack_u4(w2_qweight), 1, 2)
@@ -397,11 +406,11 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
                     w13_weight=w13_qweight,
                     w13_weight_scale=w13_scales,
                     w13_weight_zero_point=w13_qzeros,
-                    w13_bias=None,
+                    w13_bias=w13_bias,
                     w2_weight=w2_qweight,
                     w2_weight_scale=w2_scales,
                     w2_weight_zero_point=w2_qzeros,
-                    w2_bias=None,
+                    w2_bias=w2_bias,
                 ),
                 moe_backend=self.moe_backend,
                 w13_interleave=w13_interleave,
@@ -412,9 +421,11 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
             w13_qweight,
             w13_scales,
             w13_qzeros,
+            w13_bias,
             w2_qweight,
             w2_scales,
             w2_qzeros,
+            w2_bias,
         )
 
         weights = torch_view(
@@ -433,6 +444,10 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
         layer.w2_weight_zero_point = Parameter(weights.w2_weight_zero_point,
                                                requires_grad=False)
 
+        if self.moe.has_bias:
+            layer.w13_bias = Parameter(weights.w13_bias, requires_grad=False)
+            layer.w2_bias = Parameter(weights.w2_bias, requires_grad=False)
+
     def apply_monolithic(
         self,
         layer: FusedMoE,
@@ -443,11 +458,11 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
             w13_weight=jax_view(layer.w13_weight),
             w13_weight_scale=jax_view(layer.w13_weight_scale),
             w13_weight_zero_point=jax_view(layer.w13_weight_zero_point),
-            w13_bias=None,
+            w13_bias=jax_view(layer.w13_bias) if self.moe.has_bias else None,
             w2_weight=jax_view(layer.w2_weight),
             w2_weight_scale=jax_view(layer.w2_weight_scale),
             w2_weight_zero_point=jax_view(layer.w2_weight_zero_point),
-            w2_bias=None)
+            w2_bias=jax_view(layer.w2_bias) if self.moe.has_bias else None)
 
         return vllm_moe_apply(layer=layer,
                               weights=weights,
