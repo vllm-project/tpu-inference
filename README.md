@@ -466,8 +466,8 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td>❓ Untested</td>
       <td>❓ Untested</td>
       <td>❓ Untested</td>
-      <td></td>
-      <td></td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
       <td></td>
       <td></td>
       <td></td>
@@ -481,8 +481,8 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td>❓ Untested</td>
       <td>❓ Untested</td>
       <td>❓ Untested</td>
-      <td></td>
-      <td></td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
       <td></td>
       <td></td>
       <td></td>
@@ -496,8 +496,8 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td>❓ Untested</td>
       <td>❓ Untested</td>
       <td>❓ Untested</td>
-      <td></td>
-      <td></td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
       <td></td>
       <td></td>
       <td></td>
@@ -511,8 +511,8 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td>❓ Untested</td>
       <td>❓ Untested</td>
       <td>❓ Untested</td>
-      <td></td>
-      <td></td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
       <td></td>
       <td></td>
       <td></td>
@@ -526,8 +526,8 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td>❓ Untested</td>
       <td>❓ Untested</td>
       <td>❓ Untested</td>
-      <td></td>
-      <td></td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
       <td></td>
       <td></td>
       <td></td>
@@ -541,8 +541,8 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td>❓ Untested</td>
       <td>❓ Untested</td>
       <td>❓ Untested</td>
-      <td></td>
-      <td></td>
+      <td>❓ Untested</td>
+      <td>❓ Untested</td>
       <td></td>
       <td></td>
       <td></td>
