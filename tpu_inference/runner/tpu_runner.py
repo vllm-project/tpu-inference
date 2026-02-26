@@ -605,8 +605,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         reqs = len(scheduler_output.num_scheduled_tokens)
         toks = scheduler_output.total_num_scheduled_tokens
         with jax.set_mesh(self.mesh), jax.profiler.TraceAnnotation(
-            f"execute_model: {reqs} reqs, {toks} toks"
-        ):
+                f"execute_model: {reqs} reqs, {toks} toks"):
             output = self._execute_model(scheduler_output,
                                          intermediate_tensors)
         return output
