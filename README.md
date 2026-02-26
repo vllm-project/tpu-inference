@@ -87,13 +87,13 @@ Below is the live status of our supported models, features, and kernels. Click o
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
 
-- ✅ **Passing:** $\color{gray}{\text{Tested and works as expected. Ready for use.}}$
-- ⚠️ **Beta:** $\color{gray}{\text{Works, but may be unstable or have known issues. Use with caution.}}$
-- 🧪 **Experimental:** $\color{gray}{\text{Works, but unoptimized or pending community validation.}}$
-- ❌ **Failing:** $\color{gray}{\text{Known to be broken or not functional. Help is wanted to fix this!}}$
-- 📝 **Planned:** $\color{gray}{\text{Not yet implemented, but on the official roadmap.}}$
-- ❓ **Untested:** $\color{gray}{\text{The functionality exists but has not been recently or thoroughly verified.}}$
-- ⚪️ **N/A:** $\color{gray}{\text{Not applicable for this feature.}}$
+- ✅ **Passing:** $\color{gray}{\textsf{Tested and works as expected. Ready for use.}}$
+- ⚠️ **Beta:** $\color{gray}{\textsf{Works, but may be unstable or have known issues. Use with caution.}}$
+- 🧪 **Experimental:** $\color{gray}{\textsf{Works, but unoptimized or pending community validation.}}$
+- ❌ **Failing:** $\color{gray}{\textsf{Known to be broken or not functional. Help is wanted to fix this!}}$
+- 📝 **Planned:** $\color{gray}{\textsf{Not yet implemented, but on the official roadmap.}}$
+- ❓ **Untested:** $\color{gray}{\textsf{The functionality exists but has not been recently or thoroughly verified.}}$
+- ⚪️ **N/A:** $\color{gray}{\textsf{Not applicable for this feature.}}$
 
 </details>
 
