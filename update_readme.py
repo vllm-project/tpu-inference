@@ -345,6 +345,11 @@ def update_readme():
         replacement = f"\\1\n{new_table}\n\\3"
         content = re.sub(pattern, replacement, content, flags=re.DOTALL)
 
+    # Automatically update the Last Updated timestamp
+    import datetime
+    current_time = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %I:%M %p UTC")
+    content = re.sub(r"\*Last Updated: .*\*?", f"*Last Updated: {current_time}*", content)
+
     with open(README_PATH, "w", encoding="utf-8") as f:
         f.write(content)
     print("✅ README.md has been automatically updated.")
