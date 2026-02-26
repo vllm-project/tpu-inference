@@ -228,7 +228,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                                       permute_dims=None,
                                       param_name=layer.prefix + ".weight"),
                 eager_sharding=False)
-            layer.weight.set_metadata('sharding', self.weight_sharding)
+            layer.weight.set_metadata('out_sharding', self.weight_sharding)
 
             # Per-output-channel scale (1D, covers the free weight dim).
             layer.weight_scale_inv = nnx.Param(
@@ -239,7 +239,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                     param_name=layer.prefix + ".weight_scale_inv",
                 ),
                 eager_sharding=False)
-            layer.weight_scale_inv.set_metadata('sharding', ())
+            layer.weight_scale_inv.set_metadata('out_sharding', ())
             return
 
         # Follow upstream limitation that only float8_e4m3 is supported.
@@ -251,7 +251,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                                   permute_dims=(0, 1),
                                   param_name=layer.prefix + ".weight"),
             eager_sharding=False)
-        layer.weight.set_metadata('sharding', self.weight_sharding)
+        layer.weight.set_metadata('out_sharding', self.weight_sharding)
 
         # Block-wise quantization scale
         block_n, block_k = self.quant_config.weight_block_size[
@@ -269,7 +269,8 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 param_name=layer.prefix + ".weight_scale_inv",
             ),
             eager_sharding=False)
-        layer.weight_scale_inv.set_metadata('sharding', self.weight_sharding)
+        layer.weight_scale_inv.set_metadata('out_sharding',
+                                            self.weight_sharding)
 
     def process_weights_after_loading(self, layer):
         assert isinstance(layer, JaxEinsum)

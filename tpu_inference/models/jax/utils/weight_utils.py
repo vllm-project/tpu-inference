@@ -68,7 +68,7 @@ class MetadataMap:
 
 def print_param_info(param: nnx.Param, name: str):
     logger.warning(f"Global shape for {name}: {param.value.shape}")
-    logger.warning(f"Sharding for {name}: {param.sharding}")
+    logger.warning(f"Out_sharding for {name}: {param.out_sharding}")
 
     logger.warning(
         f"Shape of {name} on a single device: {param.value.addressable_shards[0].data.shape}"
@@ -434,8 +434,9 @@ def _load_and_shard_weight(vllm_config,
         assert model_weight.value.shape == hf_weight.shape, f"{hf_key}: {model_weight.value.shape} != {hf_weight.shape}"
 
     # Update the model weight
-    spec = model_weight.sharding.spec if isinstance(
-        model_weight.sharding, NamedSharding) else model_weight.sharding
+    spec = model_weight.out_sharding.spec if isinstance(
+        model_weight.out_sharding,
+        NamedSharding) else model_weight.out_sharding
     model_weight.value = shard(hf_weight, spec)
 
 
@@ -769,10 +770,10 @@ def load_nnx_param_from_reshaped_torch(
     assert tuple(jax_weight.shape) == jax_param.value.shape, \
         f"Shape mismatch when loading weight '{param_name}': torch {jax_weight.shape} vs jax {jax_param.value.shape}"
 
-    spec = jax_param.sharding
-    if isinstance(jax_param.sharding, NamedSharding):
-        spec = jax_param.sharding.spec
-    elif isinstance(jax_param.sharding, SingleDeviceSharding):
+    spec = jax_param.out_sharding
+    if isinstance(jax_param.out_sharding, NamedSharding):
+        spec = jax_param.out_sharding.spec
+    elif isinstance(jax_param.out_sharding, SingleDeviceSharding):
         spec = ()
     mesh = getattr(jax_param, 'mesh', None)
 

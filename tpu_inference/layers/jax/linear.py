@@ -64,8 +64,6 @@ class JaxEinsum(nnx.Einsum, JaxModule):
         # `self.weight` such that `named_parameters()` can match the names in HF models.
         self.weight = self.kernel
         delattr(self, 'kernel')
-        if hasattr(self.weight, 'out_sharding'):
-            self.weight.set_metadata('sharding', self.weight.out_sharding)
         self.prefix = prefix
 
         if quant_config is None:
