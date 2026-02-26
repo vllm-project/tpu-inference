@@ -35,6 +35,7 @@ DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS = 512
 DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS = 256
 DEFAULT_MAX_NUM_BLOCKS_PER_REQ = 16
 
+# TODO (#1680): remove once FP8 linear support lands
 DEFAULT_DEEPSEEK_FP8_CONFIG = {
     "qwix": {
         "use_abstract_model":
@@ -55,6 +56,7 @@ DEFAULT_DEEPSEEK_FP8_CONFIG = {
     }
 }
 
+# TODO (#1680): remove once FP8 linear support lands
 DEFAULT_DEEPSEEK_FP4_MLP_MOE_FP8_ATTN_CONFIG = {
     "qwix": {
         "use_abstract_model":
@@ -64,7 +66,7 @@ DEFAULT_DEEPSEEK_FP4_MLP_MOE_FP8_ATTN_CONFIG = {
         "rules": [
             # Exclude router from quantization
             {
-                "module_path": ".*.custom_module.experts.router.*",
+                "module_path": ".*.mlp.experts.router.*",
                 "weight_qtype": None,
             },
             # Avoid the combine expert ops
@@ -80,7 +82,7 @@ DEFAULT_DEEPSEEK_FP4_MLP_MOE_FP8_ATTN_CONFIG = {
             },
             # MoE experts: use FP4 for expert weights
             {
-                "module_path": ".*.custom_module.*",
+                "module_path": ".*.mlp.*",
                 "weight_qtype": "float4_e2m1fn",
                 "act_qtype": "float8_e4m3fn",
                 "tile_size": 256,
@@ -374,7 +376,7 @@ def apply_qwix_quantization(
             qwix_quantize_nnx_model, qwix_config=qwix_config)
         # NOTE: it's REALLY important `qwix_quantize_nnx_model_with_config` is jitted
         # or else you'll run into hanging
-        model_or_model_fn = nnx.jit(
+        model_or_model_fn = jax.jit(
             qwix_quantize_nnx_model_with_config,
             donate_argnums=(0, ),
             static_argnames=(
@@ -614,8 +616,10 @@ def get_random_sharded_array(key: PRNGKey, mesh: Mesh, param: nnx.Param,
         return weight[index]
 
     try:
+        # new flax version use eager sharding which makes param.sharding a NamedSharding rather than a PartitionSpec
         sharded_array = jax.make_array_from_callback(
-            param_shape, NamedSharding(mesh, P(*param.sharding)), get_slice)
+            param_shape, NamedSharding(mesh, P(*param.sharding.spec)),
+            get_slice)
     except (ValueError, TypeError):
         logger.warning(
             f"Could not create sharded scale for {param_name} with shape {param_shape} and sharding {param.sharding}, skipping sharding..."
@@ -663,8 +667,8 @@ def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
         param_dtype = scale_dtype if is_qwix_scale else param.value.dtype
         param_shape = param.value.shape
         if is_qwix_scale:
-            key = f"{path[2]}.{path[3]}"
-
+            # structure of path is ('layers', NUM_NUM, RELEVANT_MODULE_NAME, .... , RELEVANT_MODULE_NAME, 'scale', 'array')
+            key = ".".join(path[2:-2])
             if key in scale_shape_map:
                 param_shape = scale_shape_map[key]
             else:

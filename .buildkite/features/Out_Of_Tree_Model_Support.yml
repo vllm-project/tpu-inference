@@ -15,21 +15,22 @@
 # pipeline-name: Out-of-tree model support
 # pipeline-type: feature support matrix
 steps:
-  - label: "Correctness tests for Out-of-tree model support"
-    key: "out_of_tree_model_support_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Correctness tests for Out-of-tree model support"
+    key: "${TPU_VERSION:-tpu6e}_out_of_tree_model_support_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
           python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_model_loader.py::test_register_model_success \
           /workspace/tpu_inference/tests/e2e/test_model_loader.py::test_registered_model_passes_vllm_interface_check
 
-  - label: "Record correctness test result for Out-of-tree model support"
-    key: "record_out_of_tree_model_support_CorrectnessTest"
-    depends_on: "out_of_tree_model_support_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for Out-of-tree model support"
+    key: "${TPU_VERSION:-tpu6e}_record_out_of_tree_model_support_CorrectnessTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_out_of_tree_model_support_CorrectnessTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "Out-of-tree model support"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "feature support matrix"
@@ -37,23 +38,24 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh out_of_tree_model_support_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_out_of_tree_model_support_CorrectnessTest
 
-  - label: "Performance tests for Out-of-tree model support"
-    key: "out_of_tree_model_support_PerformanceTest"
-    depends_on: "record_out_of_tree_model_support_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Performance tests for Out-of-tree model support"
+    key: "${TPU_VERSION:-tpu6e}_out_of_tree_model_support_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_out_of_tree_model_support_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
           python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_model_loader.py::test_flax_nnx_vs_vllm_performance
 
-  - label: "Record performance test result for Out-of-tree model support"
-    key: "record_out_of_tree_model_support_PerformanceTest"
-    depends_on: "out_of_tree_model_support_PerformanceTest"
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for Out-of-tree model support"
+    key: "${TPU_VERSION:-tpu6e}_record_out_of_tree_model_support_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_out_of_tree_model_support_PerformanceTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "Out-of-tree model support"
       CI_STAGE: "PerformanceTest"
       CI_CATEGORY: "feature support matrix"
@@ -61,4 +63,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh out_of_tree_model_support_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_out_of_tree_model_support_PerformanceTest

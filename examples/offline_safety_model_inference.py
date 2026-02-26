@@ -20,13 +20,14 @@ python examples/offline_safety_model_inference.py \
 
 import os
 
-import vllm.envs as vllm_envs
 from vllm import LLM, EngineArgs
+from vllm.inputs import TokensPrompt
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from tpu_inference.core import disagg_utils
 
 
+# TODO: Place in safety model common utils file
 def get_llama_guard_4_config():
     """Configuration specific to the Llama Guard 4 model."""
     return {
@@ -126,9 +127,6 @@ def main(args: dict):
     # Create an LLM
     llm = LLM(**args)
 
-    #TODO: Temporary patch as we haven't fully implemented the multimodal part of this model
-    llm.llm_engine.input_processor.model_config.processor_return_mm_hashes = False
-
     sampling_params = llm.get_default_sampling_params()
     if max_tokens is not None:
         sampling_params.max_tokens = max_tokens
@@ -149,8 +147,6 @@ def main(args: dict):
             f"Token for '{token_name}': {tokenizer._tokenizer.encode(token_name)}"
         )
 
-    from vllm.inputs import TokensPrompt
-
     prompts = []
 
     for conv in conversations:
@@ -170,7 +166,8 @@ def main(args: dict):
 
         prompts.append(TokensPrompt(prompt_token_ids=tokenized_prompt))
 
-    if vllm_envs.VLLM_TORCH_PROFILER_DIR is not None:
+    profiler_config = llm.llm_engine.vllm_config.profiler_config
+    if profiler_config.profiler == "torch":
         llm.start_profile()
 
     outputs = llm.generate(
@@ -179,7 +176,7 @@ def main(args: dict):
         use_tqdm=True,
     )
 
-    if vllm_envs.VLLM_TORCH_PROFILER_DIR is not None:
+    if profiler_config.profiler == "torch":
         llm.stop_profile()
 
     passed_tests = 0

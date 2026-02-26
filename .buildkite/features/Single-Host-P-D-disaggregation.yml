@@ -13,27 +13,28 @@
 # limitations under the License.
 
 # pipeline-name: Single-Host-P-D-disaggregation
-# pipeline-type: features support matrix
+# pipeline-type: feature support matrix
 steps:
-  - label: "Correctness tests for Single-Host P-D disaggregation"
-    key: "SingleHostPDDisaggregation_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Correctness tests for Single-Host P-D disaggregation"
+    key: "${TPU_VERSION:-tpu6e}_SingleHostPDDisaggregation_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_8_queue
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
           python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_local_disagg.py::test_disaggregated_serving \
           /workspace/tpu_inference/tests/e2e/test_local_disagg.py::test_disaggregated_serving_correctness
-  - label: "Record correctness test result for Single-Host P-D disaggregation"
-    key: "record_SingleHostPDDisaggregation_CorrectnessTest"
-    depends_on: "SingleHostPDDisaggregation_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for Single-Host P-D disaggregation"
+    key: "${TPU_VERSION:-tpu6e}_record_SingleHostPDDisaggregation_CorrectnessTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_SingleHostPDDisaggregation_CorrectnessTest"
     env:
-      CI_TARGET: "SingleHostPDDisaggregation"
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Single-Host-P-D-disaggregation"
       CI_STAGE: "CorrectnessTest"
-      CI_CATEGORY: "features support matrix"
+      CI_CATEGORY: "feature support matrix"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh SingleHostPDDisaggregation_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_SingleHostPDDisaggregation_CorrectnessTest

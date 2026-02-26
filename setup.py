@@ -53,13 +53,6 @@ def get_requirements() -> List[str]:
 
     try:
         _read_requirements("requirements.txt")
-
-        # For TPU v7x build
-        # TODO: Temporary workaround. The v7x requirements will be consolidated, and this block will be removed,
-        # once the JAX package fix is released, since v6e/v7x differentiation will no longer be required.
-        if os.getenv("IS_FOR_V7X", "true").lower() == "true":
-            print("Overriding and adding packages from requirements_v7x.txt")
-            _read_requirements("requirements_v7x.txt")
     except (FileNotFoundError, IOError):
         print("Failed to read requirements.txt in vllm_tpu.")
 
@@ -73,14 +66,7 @@ def get_requirements() -> List[str]:
 
 
 def get_version():
-    version = os.getenv("VLLM_VERSION_OVERRIDE", "0.0.0").strip()
-
-    # TODO: Temporary workaround. The v7x requirements will be consolidated, and this block will be removed,
-    # once the JAX package fix is released, since v6e/v7x differentiation will no longer be required.
-    if os.getenv("IS_FOR_V7X", "true").lower() == "false":
-        version = f"{version}.post6"
-
-    return version
+    return os.getenv("VLLM_VERSION_OVERRIDE", "0.0.0").strip()
 
 
 setup(
@@ -106,4 +92,9 @@ setup(
         "Programming Language :: Python :: 3.12",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
+    entry_points={
+        "vllm.general_plugins": [
+            "tpu_quantization_configs = tpu_inference.layers.vllm.quantization:register_tpu_quantization_configs",
+        ],
+    },
 )

@@ -19,17 +19,18 @@
 # following a JSON schema. This is useful for classification tasks,
 # structured data extraction, and ensuring outputs conform to expected formats.
 steps:
-  - label: "Correctness tests for structured_decoding"
-    key: "structured_decoding_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Correctness tests for structured_decoding"
+    key: "${TPU_VERSION:-tpu6e}_structured_decoding_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_structured_decoding.py::test_structured_decoding
-  - label: "Record correctness test result for structured_decoding"
-    key: "record_structured_decoding_CorrectnessTest"
-    depends_on: "structured_decoding_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for structured_decoding"
+    key: "${TPU_VERSION:-tpu6e}_record_structured_decoding_CorrectnessTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_structured_decoding_CorrectnessTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "structured_decoding"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "feature support matrix"
@@ -37,4 +38,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh structured_decoding_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_structured_decoding_CorrectnessTest

@@ -11,8 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import jax
 import jax.numpy as jnp
@@ -25,9 +24,12 @@ from transformers import AutoModelForCausalLM
 from vllm.config import ModelConfig
 from vllm.model_executor.model_loader import LoadConfig, get_model_loader
 
+from tpu_inference.distributed.jax_parallel_state import \
+    init_pp_distributed_environment
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     get_kv_cache_shape
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
 from tpu_inference.models.jax.qwen3 import Qwen3ForCausalLM
 from tpu_inference.models.jax.utils.qwix.qwix_utils import \
     apply_qwix_quantization
@@ -95,6 +97,16 @@ def rng() -> PRNGKey:
     return jax.random.PRNGKey(42)
 
 
+@pytest.fixture(autouse=True)
+def mock_get_pp_group():
+    with patch("tpu_inference.models.jax.qwen3.get_pp_group",
+               return_value=MagicMock(is_first_rank=True,
+                                      is_last_rank=True,
+                                      rank_in_group=0,
+                                      world_size=1)):
+        yield
+
+
 class TestQwen3ForCausalLM:
 
     @pytest.mark.parametrize("model_name", ["Qwen/Qwen3-0.6B"])
@@ -107,16 +119,33 @@ class TestQwen3ForCausalLM:
             "act_qtype": "float8_e4m3fn"
         }]
     ])
+    @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
+                                                       (3, 4)])
     def test_qwen3_600M(self, model_name, kv_cache_type, qwix_rules, rng, mesh,
-                        mock_model_inputs):
+                        mock_model_inputs, pp_rank, pp_world_size):
         """Tests model init and model forward for the 0.6B model variant."""
+        init_pp_distributed_environment(
+            ip="",
+            rank=pp_rank,
+            world_size=pp_world_size,
+            device=jax.devices()[0],
+            need_pp=False,
+        )
         mock_vllm_config = MockVllmConfig(model_name, kv_cache_type)
         if qwix_rules:
             mock_vllm_config.additional_config["quanntization"] = dict(
                 qwix=dict(rules=qwix_rules))
 
+        init_pp_distributed_environment(
+            ip="",
+            rank=0,
+            world_size=1,
+            device=jax.devices()[0],
+            need_pp=False,
+        )
         # Test model init
-        model = Qwen3ForCausalLM(mock_vllm_config, rng, mesh)
+        with jax.set_mesh(mesh):
+            model = Qwen3ForCausalLM(mock_vllm_config, rng, mesh)
 
         model_config = mock_vllm_config.model_config
         hf_config = model_config.hf_config
@@ -131,7 +160,7 @@ class TestQwen3ForCausalLM:
         layers = model.model.layers
         assert len(layers) == hf_config.num_hidden_layers
 
-        attn = layers[0].self_attn
+        attn = layers[model.model.start_layer].self_attn
         hidden_size = hf_config.hidden_size
         num_heads = hf_config.num_attention_heads
         num_kv_heads = hf_config.num_key_value_heads
@@ -153,7 +182,7 @@ class TestQwen3ForCausalLM:
                                             head_dim)
         assert attn.o_proj.weight.shape == (num_heads, head_dim, hidden_size)
 
-        mlp = layers[0].mlp
+        mlp = layers[model.model.start_layer].mlp
         assert mlp.gate_proj.weight.shape == (hidden_size, intermediate_size)
         assert mlp.up_proj.weight.shape == (hidden_size, intermediate_size)
         assert mlp.down_proj.weight.shape == (intermediate_size, hidden_size)
@@ -194,11 +223,29 @@ class TestQwen3ForCausalLM:
         logits = model.compute_logits(hidden_states)
         assert logits.shape == (1, hf_config.vocab_size)
 
-    def test_model_loading(self, rng, mesh):
+    @pytest.mark.parametrize("model_name",
+                             ["Qwen/Qwen3-0.6B", "Qwen/Qwen3-0.6B-FP8"])
+    @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
+                                                       (3, 4)])
+    def test_model_loading(self, model_name, pp_rank, pp_world_size, rng, mesh,
+                           mock_vllm_config):
         """Tests loading weights from HF model"""
-        model_name = "Qwen/Qwen3-0.6B"
         kv_cache_type = "auto"
-        mock_vllm_config = MockVllmConfig(model_name, kv_cache_type)
+        mock_vllm_config = mock_vllm_config(model_name, kv_cache_type)
+        # No need to load full model.
+        mock_vllm_config.model_config.hf_config.num_hidden_layers = 4
+        mock_vllm_config.load_config.load_format = "skip_layers_model_loader_for_test"
+        mock_vllm_config.load_config.num_layers_to_load_for_test = 4
+
+        init_pp_distributed_environment(
+            ip="",
+            rank=pp_rank,
+            world_size=pp_world_size,
+            device=jax.devices()[0],
+            need_pp=False,
+        )
+        mock_vllm_config.quant_config = get_tpu_quantization_config(
+            mock_vllm_config)
 
         model_dim = mock_vllm_config.model_config.hf_config.hidden_size
         model_config = mock_vllm_config.model_config
@@ -209,13 +256,14 @@ class TestQwen3ForCausalLM:
         seq_len = 1
         input = [[0.01 * i for i in range(model_dim)] for _ in range(seq_len)]
 
-        model = Qwen3ForCausalLM(mock_vllm_config, rng, mesh)
-        # load weights from HF model
         with jax.set_mesh(mesh):
-            loader = get_model_loader(LoadConfig(load_format="hf"))
+            model = Qwen3ForCausalLM(mock_vllm_config, rng, mesh)
+            # load weights from HF model
+            loader = get_model_loader(mock_vllm_config.load_config)
             loader.load_weights(model, model_config)
 
-        jax_layer_0 = model.model.layers[0]
+        layer_idx = model.model.start_layer
+        jax_layer_0 = model.model.layers[layer_idx]
 
         input_tensor_jax = jnp.array(input, dtype=jnp.bfloat16)
 
@@ -226,17 +274,19 @@ class TestQwen3ForCausalLM:
         cache_shape = get_kv_cache_shape(num_blocks, block_size,
                                          num_key_value_heads, qk_head_dim,
                                          kv_dtype)
-        jax_output, _ = jax_layer_0(
-            kv_cache=jnp.zeros(cache_shape, dtype=kv_dtype),
-            x=input_tensor_jax,
-            attention_metadata=AttentionMetadata(
-                input_positions=jnp.array(seq_len),
-                block_tables=jnp.array(list(range(1))),
-                seq_lens=jnp.array([seq_len]),
-                query_start_loc=jnp.array([0, seq_len]),
-                request_distribution=jnp.array([0, 0, 1]),
-            ),
-        )
+
+        with jax.set_mesh(mesh):
+            jax_output, _ = jax_layer_0(
+                kv_cache=jnp.zeros(cache_shape, dtype=kv_dtype),
+                x=input_tensor_jax,
+                attention_metadata=AttentionMetadata(
+                    input_positions=jnp.array(seq_len),
+                    block_tables=jnp.array(list(range(1))),
+                    seq_lens=jnp.array([seq_len]),
+                    query_start_loc=jnp.array([0, seq_len]),
+                    request_distribution=jnp.array([0, 0, 1]),
+                ),
+            )
         assert jax_output is not None
 
         # TODO(#1604): Enable HF comparison when issue resolved.

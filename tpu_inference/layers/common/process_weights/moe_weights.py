@@ -11,21 +11,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import functools
 from dataclasses import dataclass, fields
 
 import jax
 import jax.numpy as jnp
-from jax.experimental.layout import Format, Layout, with_layout_constraint
+from jax.experimental.layout import Layout, with_layout_constraint
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.tensor import Tensor
 
-from tpu_inference.layers.common.quantization import quantize_tensor
+from tpu_inference.layers.common.moe import MoEBackend
+from tpu_inference.layers.common.quantization import (dequantize_tensor,
+                                                      quantize_tensor)
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.common.utils import \
-    reorder_concatenated_tensor_for_sharding
-from tpu_inference.layers.vllm.fused_moe import FusedMoEBackend
-from tpu_inference.utils import align_to
+from tpu_inference.layers.common.utils import (
+    general_device_put, reorder_concatenated_tensor_for_sharding)
+from tpu_inference.utils import align_to, get_mesh_shape_product
 
 P = PartitionSpec
 
@@ -42,6 +43,21 @@ class FusedMoEWeights:
     w2_bias: jax.Array | Tensor | None
 
 
+@jax.tree_util.register_dataclass
+@dataclass
+class UnfusedMoEWeights:
+    """Unfused moe weights. weights can be either jax or torchax array."""
+    w1_weight: jax.Array | Tensor
+    w1_weight_scale: jax.Array | Tensor | None
+    w1_bias: jax.Array | Tensor | None
+    w2_weight: jax.Array | Tensor
+    w2_weight_scale: jax.Array | Tensor | None
+    w2_bias: jax.Array | Tensor | None
+    w3_weight: jax.Array | Tensor
+    w3_weight_scale: jax.Array | Tensor | None
+    w3_bias: jax.Array | Tensor | None
+
+
 def quantize_moe_weights(
     weights: FusedMoEWeights,
     dtype: jnp.dtype,
@@ -53,7 +69,7 @@ def quantize_moe_weights(
         weights: fused moe weights.
         dtype: dtype to perform quantization.
         block_size: Specify block quantization size. If non, use per-channel
-            quantization. If contracting dim is not divisible by block size, 
+            quantization. If contracting dim is not divisible by block size,
             the dim will be automatically padded and corresponding dim on bias
             and the other weight (w13_weight <-> w2_weight) is also padded.
 
@@ -111,7 +127,7 @@ def quantize_moe_weights(
 
 def process_moe_weights(
     weights: FusedMoEWeights,
-    moe_backend: FusedMoEBackend,
+    moe_backend: MoEBackend,
     w13_reorder_size: int | None = None,
     w13_interleave: bool = False,
 ) -> FusedMoEWeights:
@@ -121,8 +137,8 @@ def process_moe_weights(
         weights: fused moe weights.
         moe_backend: backend type the weights should be processed for.
         w13_reorder_size: only used when backend type is GMM_TP. in order to
-            eliminate collective operations when using tensor parallelism, 
-            group w13_weight into w13_reorder_size number of chuncks where each
+            eliminate collective operations when using tensor parallelism,
+            group w13_weight into w13_reorder_size number of chunks where each
             chunk stores both w1 and w3 weights.
         w13_interleave: used when loaded w13_weight is stored in interleaved
             pattern where even index element is w1 and odd index element is w3.
@@ -181,7 +197,7 @@ def process_moe_weights(
         w2_bias = jnp.expand_dims(w2_bias, 1)
 
     match moe_backend:
-        case FusedMoEBackend.FUSED_MOE:
+        case MoEBackend.FUSED_MOE:
             # Kernel expects:
             # w13: (num_experts, 2, hidden_size, intermediate_size)
             # w2: (num_experts, intermediate_size, hidden_size)
@@ -245,7 +261,7 @@ def process_moe_weights(
                     ((0, 0), (0, 0), (0, pad_width_hidden_size)),
                 )
 
-        case FusedMoEBackend.GMM_TP:
+        case MoEBackend.GMM_TP:
             assert w13_reorder_size is not None
             assert intermediate_size % w13_reorder_size == 0
             output_sizes = [intermediate_size, intermediate_size]
@@ -269,9 +285,20 @@ def process_moe_weights(
                     w13_reorder_size,
                     dim=2,
                 )
-        case FusedMoEBackend.GMM_EP:
+        case MoEBackend.GMM_EP:
             # No additional processing is needed for GMM_EP.
             pass
+
+        case MoEBackend.DENSE_MAT:
+            # TODO (jacobplatin)
+            raise NotImplementedError(
+                "process_moe_weights is not yet implemented for dense matmul backend."
+            )
+        case MoEBackend.MEGABLX_GMM:
+            # TODO (jacobplatin)
+            raise NotImplementedError(
+                "process_moe_weights is not yet implemented for megablox gmm backend"
+            )
 
     return FusedMoEWeights(
         w13_weight=w13_weight,
@@ -285,12 +312,12 @@ def process_moe_weights(
 
 def shard_moe_weights(
     weights: FusedMoEWeights,
-    moe_backend: FusedMoEBackend,
+    moe_backend: MoEBackend,
     mesh: Mesh,
 ) -> FusedMoEWeights:
 
     match moe_backend:
-        case FusedMoEBackend.FUSED_MOE | FusedMoEBackend.GMM_EP:
+        case MoEBackend.FUSED_MOE | MoEBackend.GMM_EP:
             ep_sharding = NamedSharding(mesh, P(ShardingAxisName.EXPERT))
             weight_shardings = FusedMoEWeights(
                 w13_weight=ep_sharding,
@@ -300,7 +327,7 @@ def shard_moe_weights(
                 w2_weight_scale=ep_sharding,
                 w2_bias=ep_sharding,
             )
-        case FusedMoEBackend.GMM_TP:
+        case MoEBackend.GMM_TP:
             # When using per-channel, in_dim // block_size == 1. This means we
             # are unable to shard w2_weight_scale along 1st dim. Therefore, we
             # fully replicate it instead.
@@ -336,7 +363,7 @@ def shard_moe_weights(
             )
 
     match moe_backend:
-        case FusedMoEBackend.FUSED_MOE:
+        case MoEBackend.FUSED_MOE:
             weight_layouts = FusedMoEWeights(
                 w13_weight=Layout((0, 1, 2, 3)),
                 w13_weight_scale=Layout((0, 1, 2, 3, 4)),
@@ -345,7 +372,7 @@ def shard_moe_weights(
                 w2_weight_scale=Layout((0, 1, 2, 3)),
                 w2_bias=Layout((0, 1, 2)),
             )
-        case FusedMoEBackend.GMM_TP | FusedMoEBackend.GMM_EP:
+        case MoEBackend.GMM_TP | MoEBackend.GMM_EP:
             weight_layouts = FusedMoEWeights(
                 w13_weight=Layout((0, 1, 2)),
                 w13_weight_scale=Layout((0, 1, 2, 3)),
@@ -360,6 +387,59 @@ def shard_moe_weights(
         if (weight := getattr(weights, key, None)) is not None:
             layout = getattr(weight_layouts, key)
             sharding = getattr(weight_shardings, key)
-            weight = jax.device_put(weight, Format(layout, sharding))
+            weight = general_device_put(weight, sharding, layout=layout)
             setattr(weights, key, weight)
     return weights
+
+
+@functools.partial(jax.jit,
+                   static_argnames=(
+                       "moe_backend",
+                       "mesh",
+                       "activation",
+                       "weight_block_size",
+                   ))
+def process_fp8_moe_weights(
+    weights: FusedMoEWeights,
+    moe_backend: MoEBackend,
+    mesh: Mesh,
+    activation: str,
+    weight_block_size: tuple[int, ...] | None = None,
+) -> FusedMoEWeights:
+    w13_weight = weights.w13_weight
+    w13_weight_scale = weights.w13_weight_scale
+    w2_weight = weights.w2_weight
+    w2_weight_scale = weights.w2_weight_scale
+
+    # Dequantize fp8 2d block quantized weights into fp32.
+    w13_weight = dequantize_tensor(w13_weight,
+                                   w13_weight_scale, (1, 2),
+                                   jnp.float32,
+                                   block_size=weight_block_size)
+    w2_weight = dequantize_tensor(w2_weight,
+                                  w2_weight_scale, (1, 2),
+                                  jnp.float32,
+                                  block_size=weight_block_size)
+
+    w13_interleave = activation == "swigluoai"
+    w13_reorder_size = get_mesh_shape_product(mesh,
+                                              ShardingAxisName.MLP_TENSOR)
+
+    weights = quantize_moe_weights(
+        FusedMoEWeights(
+            w13_weight=w13_weight,
+            w13_weight_scale=None,
+            w13_bias=None,
+            w2_weight=w2_weight,
+            w2_weight_scale=None,
+            w2_bias=None,
+        ),
+        jnp.float8_e4m3fn,
+        None,
+    )
+    return process_moe_weights(
+        weights,
+        moe_backend=moe_backend,
+        w13_reorder_size=w13_reorder_size,
+        w13_interleave=w13_interleave,
+    )

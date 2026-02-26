@@ -4,11 +4,13 @@ This guide provides instructions for installing and running `tpu-inference`.
 
 There are three ways to install `tpu-inference`:
 
-1. **[Install with pip](#install-using-pip)**
+1. **[Install using pip via uv](#install-using-pip-via-uv)**
 2. **[Run with Docker](#run-with-docker)**
 3. **[Install from source](#install-from-source)**
 
-## Install using pip
+## Install using pip via uv
+
+We recommend using [uv](https://docs.astral.sh/uv/) (`uv pip install`) instead of standard `pip` as it improves installation speed.
 
 1. Create a working directory:
 
@@ -17,24 +19,21 @@ There are three ways to install `tpu-inference`:
     cd ~/work-dir
     ```
 
-2. Set up a Python virtual environment:
+1. Install `uv` and set up a Python virtual environment:
 
     ```shell
-    python3.12 -m venv vllm_env --symlinks
+    # If you prefer standard pip, simply use `python3.12 -m venv vllm_env`
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    source $HOME/.local/bin/env
+    uv venv vllm_env --python 3.12
     source vllm_env/bin/activate
     ```
 
-3. Use the following command to install vllm-tpu using `pip`
-
-    !!! note
-        Until jax=0.8.3 is released, v7x will have different build requirements from previous TPU generations (v6e and prior). As a result, please use the following until consolidation is complete.
+1. Use the following command to install vllm-tpu using `uv` or `pip`:
 
     ```shell
-    # v6e and prior
-    pip install vllm-tpu --version=0.13.2.post6
-
-    # v7x
-    pip install vllm-tpu
+    uv pip install vllm-tpu
+    # Or instead: pip install vllm-tpu
     ```
 
 ## Run with Docker
@@ -63,14 +62,20 @@ For debugging or development purposes, you can install `tpu-inference` from sour
 1. Clone the `vllm` and `tpu-inference` repositories:
 
     ```shell
-    git clone https://github.com/vllm-project/tpu-inference.git; export VLLM_COMMIT_HASH="$(cat tpu-inference/.buildkite/vllm_lkg.version)"
-    git clone https://github.com/vllm-project/vllm.git; cd vllm && git checkout "${VLLM_COMMIT_HASH}"
+    git clone https://github.com/vllm-project/tpu-inference.git
+    export VLLM_COMMIT_HASH="$(cat tpu-inference/.buildkite/vllm_lkg.version)"
+    git clone https://github.com/vllm-project/vllm.git
+    cd vllm
+    git checkout "${VLLM_COMMIT_HASH}"
+    cd ..
     ```
 
-1. Set up a Python virtual environment:
+1. Install `uv` and set up a Python virtual environment:
 
     ```shell
-    python3.12 -m venv vllm_env --symlinks
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    source $HOME/.local/bin/env
+    uv venv vllm_env --python 3.12
     source vllm_env/bin/activate
     ```
 
@@ -81,8 +86,8 @@ For debugging or development purposes, you can install `tpu-inference` from sour
 
     ```shell
     cd vllm
-    pip install -r requirements/tpu.txt
-    VLLM_TARGET_DEVICE="tpu" pip install -e .
+    uv pip install -r requirements/tpu.txt
+    VLLM_TARGET_DEVICE="tpu" uv pip install -e .
     cd ..
     ```
 
@@ -90,6 +95,30 @@ For debugging or development purposes, you can install `tpu-inference` from sour
 
     ```shell
     cd tpu-inference
-    pip install -e .
+    uv pip install -e .
     cd ..
     ```
+
+## Verify Installation
+
+To quickly verify that the installation was successful under any of the above methods and `vllm-tpu` is correctly configured:
+
+```shell
+python -c '
+import jax
+import vllm
+import importlib.metadata
+from vllm.platforms import current_platform
+
+tpu_version = importlib.metadata.version("tpu_inference")
+print(f"vllm version: {vllm.__version__}")
+print(f"tpu_inference version: {tpu_version}")
+print(f"vllm platform: {current_platform.get_device_name()}")
+print(f"jax backends: {jax.devices()}")
+'
+# Expected output:
+# vllm version: 0.x.x
+# tpu_inference version: 0.x.x
+# vllm platform: TPU V6E (or your specific TPU architecture)
+# jax backends: [TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0), ...]
+```

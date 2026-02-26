@@ -1,0 +1,18 @@
+Feature,CorrectnessTest,PerformanceTest
+"Chunked Prefill",✅,✅
+"DCN-based P/D disaggregation",✅,✅
+"KV cache host offloading",unverified,unverified
+"LoRA_Torch",✅,✅
+"Multimodal Inputs",❌,N/A
+"Out-of-tree model support",✅,✅
+"Prefix Caching",✅,✅
+"Single Program Multi Data",✅,✅
+"Single-Host-P-D-disaggregation",✅,N/A
+"Speculative Decoding: Eagle3",✅,✅
+"Speculative Decoding: Ngram",✅,✅
+"async scheduler",❌,N/A
+"hybrid kv cache",✅,N/A
+"multi-host",✅,unverified
+"runai_model_streamer_loader",✅,N/A
+"sampling_params",✅,N/A
+"structured_decoding",✅,N/A

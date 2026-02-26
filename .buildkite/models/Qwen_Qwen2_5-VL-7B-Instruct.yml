@@ -15,33 +15,34 @@
 # pipeline-name: Qwen/Qwen2.5-VL-7B-Instruct
 # pipeline-type: multimodal
 steps:
-  - label: "Unit tests for Qwen/Qwen2.5-VL-7B-Instruct"
-    key: "Qwen_Qwen2_5-VL-7B-Instruct_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} Unit tests for Qwen/Qwen2.5-VL-7B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen2_5-VL-7B-Instruct_UnitTest"
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     soft_fail: true
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/models/jax/test_qwen2_5_vl.py'
-  - label: "Record unit test result for Qwen/Qwen2.5-VL-7B-Instruct"
-    key: "record_Qwen_Qwen2_5-VL-7B-Instruct_UnitTest"
-    depends_on: "Qwen_Qwen2_5-VL-7B-Instruct_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} Record unit test result for Qwen/Qwen2.5-VL-7B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen2_5-VL-7B-Instruct_UnitTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_Qwen_Qwen2_5-VL-7B-Instruct_UnitTest"
     env:
-      CI_TARGET: Qwen/Qwen2.5-VL-7B-Instruct
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen2.5-VL-7B-Instruct"
       CI_STAGE: "UnitTest"
       CI_CATEGORY: "multimodal"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh Qwen_Qwen2_5-VL-7B-Instruct_UnitTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen2_5-VL-7B-Instruct_UnitTest
 
-  - label: "Accuracy for Qwen/Qwen2.5-VL-7B-Instruct"
-    key: "Qwen_Qwen2_5-VL-7B-Instruct_Accuracy"
-    depends_on: "record_Qwen_Qwen2_5-VL-7B-Instruct_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} Accuracy for Qwen/Qwen2.5-VL-7B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen2_5-VL-7B-Instruct_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen2_5-VL-7B-Instruct_UnitTest"
     agents:
-      queue: tpu_v6e_8_queue
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     soft_fail: true
     env:
       TEST_MODEL: Qwen/Qwen2.5-VL-7B-Instruct
@@ -50,37 +51,39 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
-  - label: "Record accuracy result for Qwen/Qwen2.5-VL-7B-Instruct"
-    key: "record_Qwen_Qwen2_5-VL-7B-Instruct_Accuracy"
-    depends_on: "Qwen_Qwen2_5-VL-7B-Instruct_Accuracy"
+  - label: "${TPU_VERSION:-tpu6e} Record accuracy result for Qwen/Qwen2.5-VL-7B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen2_5-VL-7B-Instruct_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_Qwen_Qwen2_5-VL-7B-Instruct_Accuracy"
     env:
-      CI_TARGET: Qwen/Qwen2.5-VL-7B-Instruct
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen2.5-VL-7B-Instruct"
       CI_STAGE: "Accuracy/Correctness"
       CI_CATEGORY: "multimodal"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh Qwen_Qwen2_5-VL-7B-Instruct_Accuracy
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen2_5-VL-7B-Instruct_Accuracy
 
-  - label: "Performance benchmarks for Qwen/Qwen2.5-VL-7B-Instruct"
-    key: "Qwen_Qwen2_5-VL-7B-Instruct_Benchmark"
-    depends_on: "record_Qwen_Qwen2_5-VL-7B-Instruct_Accuracy"
+  - label: "${TPU_VERSION:-tpu6e} Performance benchmarks for Qwen/Qwen2.5-VL-7B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen2_5-VL-7B-Instruct_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen2_5-VL-7B-Instruct_Accuracy"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench_recipe.sh
-  - label: "Record performance benchmark result for Qwen/Qwen2.5-VL-7B-Instruct"
-    key: "record_Qwen_Qwen2_5-VL-7B-Instruct_Benchmark"
-    depends_on: "Qwen_Qwen2_5-VL-7B-Instruct_Benchmark"
+  - label: "${TPU_VERSION:-tpu6e} Record performance benchmark result for Qwen/Qwen2.5-VL-7B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen2_5-VL-7B-Instruct_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_Qwen_Qwen2_5-VL-7B-Instruct_Benchmark"
     env:
-      CI_TARGET: Qwen/Qwen2.5-VL-7B-Instruct
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen2.5-VL-7B-Instruct"
       CI_STAGE: "Benchmark"
       CI_CATEGORY: "multimodal"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh Qwen_Qwen2_5-VL-7B-Instruct_Benchmark
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen2_5-VL-7B-Instruct_Benchmark

@@ -16,18 +16,19 @@
 # pipeline-type: kernel support matrix microbenchmarks
 # For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision-w8a8
 steps:
-  - label: "Correctness tests for attention kernels-w8a8"
-    key: "attention_kernels-w8a8_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Correctness tests for attention kernels-w8a8"
+    key: "${TPU_VERSION:-tpu6e}_attention_kernels-w8a8_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "attention_kernels-w8a8_CorrectnessTest" "unverified"
-  - label: "Record correctness test result for attention kernels-w8a8"
-    key: "record_attention_kernels-w8a8_CorrectnessTest"
-    depends_on: "attention_kernels-w8a8_CorrectnessTest"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_attention_kernels-w8a8_CorrectnessTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for attention kernels-w8a8"
+    key: "${TPU_VERSION:-tpu6e}_record_attention_kernels-w8a8_CorrectnessTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_attention_kernels-w8a8_CorrectnessTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "attention_kernels-w8a8"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "kernel support matrix microbenchmarks"
@@ -35,21 +36,22 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh attention_kernels-w8a8_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_attention_kernels-w8a8_CorrectnessTest
 
-  - label: "Performance tests for attention kernels-w8a8"
-    key: "attention_kernels-w8a8_PerformanceTest"
-    depends_on: "record_attention_kernels-w8a8_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Performance tests for attention kernels-w8a8"
+    key: "${TPU_VERSION:-tpu6e}_attention_kernels-w8a8_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_attention_kernels-w8a8_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "attention_kernels-w8a8_PerformanceTest" "unverified"
-  - label: "Record performance test result for attention kernels-w8a8"
-    key: "record_attention_kernels-w8a8_PerformanceTest"
-    depends_on: "attention_kernels-w8a8_PerformanceTest"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_attention_kernels-w8a8_PerformanceTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for attention kernels-w8a8"
+    key: "${TPU_VERSION:-tpu6e}_record_attention_kernels-w8a8_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_attention_kernels-w8a8_PerformanceTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "attention_kernels-w8a8"
       CI_STAGE: "PerformanceTest"
       CI_CATEGORY: "kernel support matrix microbenchmarks"
@@ -57,4 +59,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh attention_kernels-w8a8_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_attention_kernels-w8a8_PerformanceTest
