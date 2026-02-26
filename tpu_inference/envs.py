@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     ENABLE_QUANTIZED_MATMUL_KERNEL: bool = False
     REQUANTIZE_BLOCK_SIZE: int | None = None
     REQUANTIZE_WEIGHT_DTYPE: str = "float8_e4m3fn"
+    MOE_REQUANT_BLOCK_SIZE: int | None = None
 
 
 def env_with_choices(
@@ -175,6 +176,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Specify dtype for quantized weights
     "REQUANTIZE_WEIGHT_DTYPE":
     lambda: os.getenv("REQUANTIZE_WEIGHT_DTYPE", "float8_e4m3fn"),
+    "MOE_REQUANT_BLOCK_SIZE":
+    lambda: int(block_size) if
+    (block_size := os.getenv("MOE_REQUANT_BLOCK_SIZE")) is not None else None,
 }
 
 

@@ -423,10 +423,15 @@ def process_fp8_moe_weights(
             raise ValueError(
                 f"Expected w13_weight and w2_weight to have the same dtype, but got {w13_weight.dtype} and {w2_weight.dtype}"
             )
+    requant_block_size = None
+    if requant_block_size_from_env := envs.MOE_REQUANT_BLOCK_SIZE:
+        requant_block_size = (int(requant_block_size_from_env)
+                              if requant_block_size_from_env else None)
 
-    logger.info(
-        f"[MoE requantization]: Quantizing moe weights to {desired_quant_dtype}"
-    )
+    moe_logging_str = f"[MoE requantization]: re-quantizing MoE weights to {desired_quant_dtype}"
+    if requant_block_size is not None:
+        moe_logging_str += f" with block size {requant_block_size}"
+    logger.info(moe_logging_str)
 
     # Dequantize fp8 2d block quantized weights into fp32.
     w13_weight = dequantize_tensor(w13_weight,
@@ -452,7 +457,7 @@ def process_fp8_moe_weights(
             w2_bias=None,
         ),
         desired_quant_dtype,
-        None,
+        requant_block_size,
     )
     return process_moe_weights(
         weights,

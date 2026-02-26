@@ -169,6 +169,7 @@ def test_integer_env_vars(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("PYTHON_TRACER_LEVEL", "1")
     monkeypatch.setenv("NUM_SLICES", "1")
     monkeypatch.delenv("REQUANTIZE_BLOCK_SIZE", raising=False)
+    monkeypatch.delenv("MOE_REQUANT_BLOCK_SIZE", raising=False)
 
     assert envs.PYTHON_TRACER_LEVEL == 1
     monkeypatch.setenv("PYTHON_TRACER_LEVEL", "3")
@@ -187,6 +188,11 @@ def test_integer_env_vars(monkeypatch: pytest.MonkeyPatch):
     assert envs.REQUANTIZE_BLOCK_SIZE is None
     monkeypatch.setenv("REQUANTIZE_BLOCK_SIZE", "512")
     assert envs.REQUANTIZE_BLOCK_SIZE == 512
+
+    # Test MOE_REQUANT_BLOCK_SIZE default should be None
+    assert envs.MOE_REQUANT_BLOCK_SIZE is None
+    monkeypatch.setenv("MOE_REQUANT_BLOCK_SIZE", "512")
+    assert envs.MOE_REQUANT_BLOCK_SIZE == 512
 
 
 def test_model_impl_type_choices(monkeypatch: pytest.MonkeyPatch):
