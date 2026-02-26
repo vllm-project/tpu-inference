@@ -176,7 +176,6 @@ class VllmModelWrapper:
         jax_context = jax.default_device(
             jax.devices("cpu")
             [0]) if not vllm_envs.VLLM_TPU_USING_PATHWAYS else nullcontext()
-
         # Load the vLLM model and wrap it into a new model whose forward
         # function can calculate the hidden_state and logits.
         with load_context, jax_context:

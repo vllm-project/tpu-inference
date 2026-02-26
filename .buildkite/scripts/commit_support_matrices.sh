@@ -30,8 +30,8 @@ if [ "${NIGHTLY}" = "1" ]; then
     ARTIFACT_DOWNLOAD_PATH="${BASE_PATH}/${MODEL_IMPL_TYPE}"
     COMMIT_MESSAGE="[skip ci] Update nightly support matrices for ${MODEL_IMPL_TYPE} (v6/v7)"
   else
-    # Default case: support_matrices/nightly
-    ARTIFACT_DOWNLOAD_PATH="${BASE_PATH}"
+    # Default case: support_matrices/nightly/default
+    ARTIFACT_DOWNLOAD_PATH="${BASE_PATH}/default"
     COMMIT_MESSAGE="[skip ci] Update nightly support matrices (v6/v7)"
   fi
 else

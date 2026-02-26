@@ -21,7 +21,7 @@ steps:
     agents:
       queue: tpu_v7x_16_queue
     env:
-      IS_FOR_V7X: "${IS_FOR_V7X}"
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       HEAD_SSH_IP: ""
       HEAD_INTERNAL_IP: ""
       WORKER_SSH_IPS: ""
@@ -66,8 +66,6 @@ steps:
     soft_fail: true
     agents:
       queue: tpu_v7x_16_queue
-    env:
-      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - buildkite-agent meta-data set "${TPU_VERSION:-tpu7x}_multi-host_PerformanceTest" "unverified"
   - label: "${TPU_VERSION:-tpu7x} Record performance test result for multi-host"

@@ -132,7 +132,6 @@ if [[ "${#pipeline_v7x_fragments[@]}" -gt 0 ]]; then
   # Export v7x specific variables (overwrites previous exports)
   export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
   export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
-  export IS_FOR_V7X="true"
   export TPU_VERSION="tpu7x"
   buildkite-agent meta-data set "run_v7_matrix" "true"
   {

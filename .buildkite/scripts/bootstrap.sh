@@ -78,10 +78,9 @@ upload_pipeline() {
       export TPU_VERSION="tpu7x"
       export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
       export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
-      export IS_FOR_V7X="true"
       export COV_FAIL_UNDER="67"
       buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
-      unset TPU_VERSION TPU_QUEUE_SINGLE TPU_QUEUE_MULTI IS_FOR_V7X COV_FAIL_UNDER
+      unset TPU_VERSION TPU_QUEUE_SINGLE TPU_QUEUE_MULTI COV_FAIL_UNDER
 
       # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
       buildkite-agent pipeline upload .buildkite/nightly_releases.yml
@@ -141,10 +140,9 @@ if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
     export TPU_VERSION="tpu7x"
     export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
     export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
-    export IS_FOR_V7X="true"
     export COV_FAIL_UNDER="67"
     buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
-    unset TPU_VERSION TPU_QUEUE_SINGLE TPU_QUEUE_MULTI IS_FOR_V7X COV_FAIL_UNDER
+    unset TPU_VERSION TPU_QUEUE_SINGLE TPU_QUEUE_MULTI COV_FAIL_UNDER
 
     # Upload JAX pipeline for v6 (default)
     buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
