@@ -184,8 +184,10 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
         """
         connector = self._create_connector()
         worker = connector.connector_worker
-        chunks_list = worker._decompose_into_buckets(num_blocks)
-        self.assertEqual(chunks_list, expected_buckets)
+        block_ids = [i for i in range(num_blocks)]
+        chunks_list = worker._decompose_into_buckets(block_ids)
+        chunk_size_list = [len(x) for x in chunks_list]
+        self.assertEqual(chunk_size_list, expected_buckets)
         logger.info(
             f"Decomposition for {num_blocks} blocks into {expected_buckets}.")
 
