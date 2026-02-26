@@ -88,7 +88,9 @@ for folder_path in "${TARGET_FOLDERS[@]}"; do
     yml_content=$(grep -v "^steps:" "${yml_file}")
 
     # Store the content for both hardware types
-    pipeline_v6e_fragments+=("${yml_content}")
+    if [[ "$subject_name" != "multi-host" ]]; then
+      pipeline_v6e_fragments+=("${yml_content}")
+    fi
     pipeline_v7x_fragments+=("${yml_content}")
 
   done < <(find "$folder" -maxdepth 1 -type f \( -name "*.yml" -o -name "*.yaml" \) -print0)
@@ -130,7 +132,6 @@ if [[ "${#pipeline_v7x_fragments[@]}" -gt 0 ]]; then
   # Export v7x specific variables (overwrites previous exports)
   export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
   export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
-  export IS_FOR_V7X="true"
   export TPU_VERSION="tpu7x"
   buildkite-agent meta-data set "run_v7_matrix" "true"
   {

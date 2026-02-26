@@ -35,8 +35,10 @@ _VLLM_DTYPE_STR_TO_JAX_DTYPE = {
 
 
 def to_jax_dtype(dtype: str | jnp.dtype | torch.dtype) -> jnp.dtype:
-    if isinstance(dtype, str):
-        if dict_dtype := _VLLM_DTYPE_STR_TO_JAX_DTYPE.get(dtype, None):
+    if isinstance(dtype, (str, type)):
+        if isinstance(dtype, str) and (dict_dtype :=
+                                       _VLLM_DTYPE_STR_TO_JAX_DTYPE.get(
+                                           dtype, None)):
             return dict_dtype
         return jnp.dtype(dtype)
     elif isinstance(dtype, torch.dtype):
@@ -199,8 +201,7 @@ def get_padded_num_heads(num_heads: int, sharding_size: int) -> int:
 
 
 def get_dtype_packing(dtype):
-    bits = (dtypes.bit_width(dtype)
-            if hasattr(dtypes, "bit_width") else dtypes.itemsize_bits(dtype))
+    bits = dtypes.itemsize_bits(dtype)
     return 32 // bits
 
 

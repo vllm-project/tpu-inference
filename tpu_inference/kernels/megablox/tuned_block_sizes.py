@@ -30,6 +30,11 @@ logger = init_logger(__name__)
 #   - tk: int, k-dimension tile size
 #   - tn: int, n-dimension tile size
 TUNED_BLOCK_SIZES = {
+    (128, 320, 6144, 160, 160, 'bfloat16', 'float8_e4m3fn', 320): (
+        128,
+        640,
+        256 * 5,
+    ),
     (128, 2560, 5120, 160, 20, 'bfloat16', 'float8_e4m3fn', 2560): (
         128,
         256 * 10,
@@ -48,6 +53,11 @@ TUNED_BLOCK_SIZES = {
     (128, 6144, 6144, 160, 20, 'bfloat16', 'float8_e4m3fn', 6144): (
         128,
         256 * 8,
+        256 * 24,
+    ),
+    (256, 320, 6144, 160, 160, 'bfloat16', 'float8_e4m3fn', 320): (
+        128,
+        640,
         256 * 24,
     ),
     (256, 2560, 5120, 160, 20, 'bfloat16', 'float8_e4m3fn', 2560): (
@@ -70,6 +80,11 @@ TUNED_BLOCK_SIZES = {
         256 * 8,
         256 * 24,
     ),
+    (512, 320, 6144, 160, 160, 'bfloat16', 'float8_e4m3fn', 320): (
+        128,
+        640,
+        256 * 24,
+    ),
     (512, 2560, 5120, 160, 20, 'bfloat16', 'float8_e4m3fn', 2560): (
         128,
         256 * 10,
@@ -90,6 +105,11 @@ TUNED_BLOCK_SIZES = {
         256 * 24,
         256 * 6,
     ),
+    (1024, 320, 6144, 160, 160, 'bfloat16', 'float8_e4m3fn', 320): (
+        128,
+        640,
+        256 * 24,
+    ),
     (1024, 2560, 5120, 160, 20, 'bfloat16', 'float8_e4m3fn', 2560): (
         128,
         256 * 10,
@@ -108,6 +128,11 @@ TUNED_BLOCK_SIZES = {
     (1024, 6144, 6144, 160, 20, 'bfloat16', 'float8_e4m3fn', 6144): (
         128,
         256 * 8,
+        256 * 24,
+    ),
+    (2048, 320, 6144, 160, 160, 'bfloat16', 'float8_e4m3fn', 320): (
+        128,
+        640,
         256 * 24,
     ),
     (2048, 2560, 5120, 160, 20, 'bfloat16', 'float8_e4m3fn', 2560): (
@@ -130,6 +155,11 @@ TUNED_BLOCK_SIZES = {
         256 * 24,
         256 * 8,
     ),
+    (4096, 320, 6144, 160, 160, 'bfloat16', 'float8_e4m3fn', 320): (
+        128,
+        640,
+        256 * 24,
+    ),
     (4096, 2560, 5120, 160, 20, 'bfloat16', 'float8_e4m3fn', 2560): (
         128,
         256 * 10,
@@ -149,6 +179,11 @@ TUNED_BLOCK_SIZES = {
         128,
         256 * 24,
         256 * 8,
+    ),
+    (8192, 320, 6144, 160, 160, 'bfloat16', 'float8_e4m3fn', 320): (
+        128,
+        640,
+        256 * 24,
     ),
     (8192, 2560, 5120, 160, 20, 'bfloat16', 'float8_e4m3fn', 2560): (
         128,
@@ -170,6 +205,11 @@ TUNED_BLOCK_SIZES = {
         256 * 24,
         256 * 8,
     ),
+    (16384, 320, 6144, 160, 160, 'bfloat16', 'float8_e4m3fn', 320): (
+        128,
+        640,
+        256 * 24,
+    ),
     (16384, 2560, 5120, 160, 20, 'bfloat16', 'float8_e4m3fn', 2560): (
         128,
         256 * 10,
@@ -190,6 +230,11 @@ TUNED_BLOCK_SIZES = {
         256 * 24,
         256 * 6,
     ),
+    (32768, 320, 6144, 160, 160, 'bfloat16', 'float8_e4m3fn', 320): (
+        128,
+        640,
+        256 * 24,
+    ),
     (32768, 2560, 5120, 160, 20, 'bfloat16', 'float8_e4m3fn', 2560): (
         128,
         256 * 10,
@@ -209,6 +254,11 @@ TUNED_BLOCK_SIZES = {
         128,
         256 * 24,
         256 * 8,
+    ),
+    (65536, 320, 6144, 160, 160, 'bfloat16', 'float8_e4m3fn', 320): (
+        128,
+        640,
+        256 * 24,
     ),
     (65536, 2560, 5120, 160, 20, 'bfloat16', 'float8_e4m3fn', 2560): (
         128,
@@ -290,7 +340,18 @@ def get_default_gmm_block_sizes(m: int, k: int, n: int,
     # topk=2, m=topk * num_tokens=64, in this case, 2*m//g will be less than
     # 512.
     tm = round_up_to_multiple_of_128_within_limit(2 * m // g, 512)
-    tm = min(tm, m)  # there's a requirement that m % tm == 0
+    # NOTE(catswe): this divisor-search approach may produce suboptimal tile
+    # sizes (e.g., num_tokens=64 and topk=5, so m=num_tokens*topk=320, will
+    # result in tm=80 and 4 tiles, instead of tm=128 and 3 tiles), though it's
+    # unclear if such a case currently exists in practice. one solution is to
+    # replace _calculate_num_tiles(m, tm) with
+    # _calculate_irregular_num_tiles(m, tm) in make_group_metadata. this would
+    # allow using tm=128 with a partial final tile, like k and n already do.
+    # another solution is to pad the tensor so m is always a multiple of 128.
+    for candidate in range(tm, 0, -1):
+        if m % candidate == 0:  # there's a requirement that m % tm == 0
+            tm = candidate
+            break
     # k/n correspond to n_input_features/n_output_features in the matmul so they
     # are normally greater than 2048, unless the num shards is large.
     tk = round_up_to_multiple_of_128_within_limit(k, 2048)

@@ -387,7 +387,7 @@ def shard_moe_weights(
         if (weight := getattr(weights, key, None)) is not None:
             layout = getattr(weight_layouts, key)
             sharding = getattr(weight_shardings, key)
-            weight = general_device_put(weight, sharding, layout)
+            weight = general_device_put(weight, sharding, layout=layout)
             setattr(weights, key, weight)
     return weights
 
@@ -414,9 +414,11 @@ def process_fp8_moe_weights(
     # Dequantize fp8 2d block quantized weights into fp32.
     w13_weight = dequantize_tensor(w13_weight,
                                    w13_weight_scale, (1, 2),
+                                   jnp.float32,
                                    block_size=weight_block_size)
     w2_weight = dequantize_tensor(w2_weight,
                                   w2_weight_scale, (1, 2),
+                                  jnp.float32,
                                   block_size=weight_block_size)
 
     w13_interleave = activation == "swigluoai"

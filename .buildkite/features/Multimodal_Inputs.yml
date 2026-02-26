@@ -20,8 +20,6 @@ steps:
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
-    env:
-      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_multi_modal_inference.py
   - label: "${TPU_VERSION:-tpu6e} Record correctness test result for Multimodal Inputs"
@@ -44,8 +42,6 @@ steps:
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
-    env:
-      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench.sh
   - label: "${TPU_VERSION:-tpu6e} Record performance test result for Multimodal Inputs"

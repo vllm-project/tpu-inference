@@ -21,7 +21,7 @@ steps:
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     env:
-      IS_FOR_V7X: "${IS_FOR_V7X}"
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
@@ -48,7 +48,7 @@ steps:
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     env:
-      IS_FOR_V7X: "${IS_FOR_V7X}"
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \

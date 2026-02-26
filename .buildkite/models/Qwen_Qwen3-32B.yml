@@ -20,8 +20,6 @@ steps:
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
-    env:
-      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
@@ -47,7 +45,6 @@ steps:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     soft_fail: true
     env:
-      IS_FOR_V7X: "${IS_FOR_V7X}"
       TEST_MODEL: Qwen/Qwen3-32B
       TENSOR_PARALLEL_SIZE: 8
       MINIMUM_ACCURACY_THRESHOLD: 0.74
@@ -75,7 +72,6 @@ steps:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     soft_fail: true
     env:
-      IS_FOR_V7X: "${IS_FOR_V7X}"
       TEST_MODEL: Qwen/Qwen3-32B
       TENSOR_PARALLEL_SIZE: 8
       MINIMUM_THROUGHPUT_THRESHOLD: 12.46
