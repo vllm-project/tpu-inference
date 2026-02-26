@@ -25,15 +25,15 @@ from tpu_inference.kernels.quantized_matmul.util import (
 
 def _get_x_q_dtype(w_q_dtype: jnp.dtype) -> jnp.dtype:
     """Return 8-bit float or integer dtype depending on w_q_dtype."""
-    if jnp.issubdtype(w_q_dtype, jnp.integer):
-        return jnp.int8
-    elif jnp.issubdtype(w_q_dtype, jnp.floating):
-        return jnp.float8_e4m3fn
+    # if jnp.issubdtype(w_q_dtype, jnp.integer):
+    #     return jnp.int8
+    # elif jnp.issubdtype(w_q_dtype, jnp.floating):
+    return jnp.float8_e4m3fn
     # TODO: we need a new flag for 4bit activation later such as w4a4.
-    else:
-        raise ValueError(
-            f"Unsupported quantized dtype: {w_q_dtype}, it should be integer or float"
-        )
+    # else:
+    #     raise ValueError(
+    #         f"Unsupported quantized dtype: {w_q_dtype}, it should be integer or float"
+    #     )
 
 
 def sharded_quantized_matmul(x: jax.Array,

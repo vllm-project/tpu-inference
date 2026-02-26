@@ -20,7 +20,7 @@ jax.config.parse_flags_with_absl()
 
 def reference_block_quantized_matmul(x, w_q, w_scale, block_size, x_q_dtype):
     """Pure JAX reference for Block-wise Quantized Matmul.
-    
+
     Mimics the logic of the Pallas kernel using the SAME weights/scales:
     1. Reshape inputs to blocks.
     2. Quantize X per-block (using kernel's utility).
@@ -259,6 +259,32 @@ class QuantizedMatmulKernelTest(jtu.JaxTestCase):
         self._test_quantized_matmul(
             dtype,
             jnp.float4_e2m1fn,
+            bs,
+            n_input_features,
+            n_output_features,
+            quantize_activation=True,
+            tuned_value=TunedValue(512, 512, 512, 2),
+            block_size=512,
+            atol=6,
+            rtol=0.5,
+            x_q_dtype=jnp.float8_e4m3fn,
+        )
+
+    @parameterized.parameters(
+        (jnp.float32, 512, 1024, 2048),
+    )
+    def test_quantized_matmul_blockwise_w4a8(
+        self,
+        dtype: jnp.dtype,
+        bs: int,
+        n_input_features: int,
+        n_output_features: int,
+    ):
+        if not jtu.is_device_tpu_at_least(version=7):
+            self.skipTest("Expect TPUv7+")
+        self._test_quantized_matmul(
+            dtype,
+            jnp.int4,
             bs,
             n_input_features,
             n_output_features,
