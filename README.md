@@ -599,7 +599,7 @@ We're thrilled you're interested in contributing to the vLLM TPU project! Your h
 
 If you're ready to contribute code, our **[Contributing Guide](https://github.com/vllm-project/tpu-inference/blob/main/CONTRIBUTING.md)** is the best place to start. It covers everything you need to know, including:
 
-*   **Tips for finding an issue to work on** (we recommend starting with our **[good-first issues](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)**!).
+*   **Tips for finding an issue to work on** (we recommend starting with our **[good-first issues](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)**!.
 
 <br>
 
