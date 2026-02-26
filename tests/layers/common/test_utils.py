@@ -23,9 +23,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 from tpu_inference import envs
-from tpu_inference.layers.common.utils import (
-    general_device_put,
-    get_desired_quant_dtype_for_fp8_moe_weights_from_hf_config)
+from tpu_inference.layers.common.utils import general_device_put
 
 
 class UtilsTest(jtu.JaxTestCase):
@@ -98,43 +96,6 @@ class UtilsTest(jtu.JaxTestCase):
                 self.assertEqual(mock_make_array.call_count, 2)
                 self.assertIsInstance(result, list)
                 self.assertEqual(len(result), 2)
-
-    def test_get_desired_quant_dtype_success(self):
-        """Tests that the correct dtype is returned when config matches 'e4m3'."""
-        mock_config = mock.Mock()
-        mock_config.model_config.hf_config.quantization_config = {
-            "format": "e4m3"
-        }
-
-        result = get_desired_quant_dtype_for_fp8_moe_weights_from_hf_config(
-            mock_config)
-
-        self.assertEqual(result, jnp.float8_e4m3fn)
-
-    def test_get_desired_quant_dtype_mismatch_format(self):
-        """Tests that None is returned if the format is not 'e4m3'."""
-        mock_config = mock.Mock()
-        mock_config.model_config.hf_config.quantization_config = {
-            "format": "int8"
-        }
-
-        result = get_desired_quant_dtype_for_fp8_moe_weights_from_hf_config(
-            mock_config)
-
-        self.assertIsNone(result)
-
-    def test_get_desired_quant_dtype_missing_config(self):
-        """Tests that None is returned if the config structure is missing."""
-        mock_config = mock.Mock()
-        # Simulate missing quantization_config by raising an AttributeError
-        # when accessing hf_config or underlying attributes.
-        type(mock_config.model_config).hf_config = mock.PropertyMock(
-            side_effect=AttributeError)
-
-        result = get_desired_quant_dtype_for_fp8_moe_weights_from_hf_config(
-            mock_config)
-
-        self.assertIsNone(result)
 
 
 if __name__ == "__main__":

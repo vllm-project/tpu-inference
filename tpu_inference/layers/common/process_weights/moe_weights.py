@@ -391,45 +391,56 @@ def shard_moe_weights(
         if (weight := getattr(weights, key, None)) is not None:
             layout = getattr(weight_layouts, key)
             sharding = getattr(weight_shardings, key)
-            weight = general_device_put(weight, sharding, layout)
+            weight = general_device_put(weight, sharding, layout=layout)
             setattr(weights, key, weight)
     return weights
 
 
 @functools.partial(jax.jit,
-                   static_argnames=("moe_backend", "mesh", "activation",
-                                    "weight_block_size",
-                                    "desired_quant_dtype"))
+                   static_argnames=(
+                       "moe_backend",
+                       "mesh",
+                       "activation",
+                       "weight_block_size",
+                   ))
 def process_fp8_moe_weights(
-        weights: FusedMoEWeights,
-        moe_backend: MoEBackend,
-        mesh: Mesh,
-        activation: str,
-        weight_block_size: tuple[int, ...] | None = None,
-        desired_quant_dtype: jnp.dtype | None = None) -> FusedMoEWeights:
+    weights: FusedMoEWeights,
+    moe_backend: MoEBackend,
+    mesh: Mesh,
+    activation: str,
+    weight_block_size: tuple[int, ...] | None = None,
+) -> FusedMoEWeights:
     w13_weight = weights.w13_weight
     w13_weight_scale = weights.w13_weight_scale
     w2_weight = weights.w2_weight
     w2_weight_scale = weights.w2_weight_scale
 
+    if desired_quant_dtype_from_env := envs.REQUANTIZE_WEIGHT_DTYPE:
+        desired_quant_dtype = to_jax_dtype(desired_quant_dtype_from_env)
+    else:
+        desired_quant_dtype = w13_weight.dtype
+        if w13_weight.dtype != w2_weight.dtype:
+            raise ValueError(
+                f"Expected w13_weight and w2_weight to have the same dtype, but got {w13_weight.dtype} and {w2_weight.dtype}"
+            )
+
+    logger.info(
+        f"[MoE requantization]: Quantizing moe weights to {desired_quant_dtype}"
+    )
+
     # Dequantize fp8 2d block quantized weights into fp32.
     w13_weight = dequantize_tensor(w13_weight,
                                    w13_weight_scale, (1, 2),
+                                   jnp.float32,
                                    block_size=weight_block_size)
     w2_weight = dequantize_tensor(w2_weight,
                                   w2_weight_scale, (1, 2),
+                                  jnp.float32,
                                   block_size=weight_block_size)
 
     w13_interleave = activation == "swigluoai"
     w13_reorder_size = get_mesh_shape_product(mesh,
                                               ShardingAxisName.MLP_TENSOR)
-
-    if desired_quant_dtype_from_env := envs.REQUANTIZE_WEIGHT_DTYPE:
-        desired_quant_dtype = to_jax_dtype(desired_quant_dtype_from_env)
-
-    logger.info(
-        f"[MoE requantization]: Quantizing moe weights to {desired_quant_dtype}"
-    )
 
     weights = quantize_moe_weights(
         FusedMoEWeights(

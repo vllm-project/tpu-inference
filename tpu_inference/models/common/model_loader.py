@@ -46,7 +46,7 @@ _MODEL_REGISTRY = {}
 # List of architectures that are preferred to use  "vllm" implementation over
 # "flax_nnx" implementation due to various factors such as performance.
 _VLLM_PREFERRED_ARCHITECTURES: frozenset[str] = frozenset(
-    {"GptOssForCausalLM"})
+    {"GptOssForCausalLM", "Qwen3MoeForCausalLM"})
 
 
 class UnsupportedArchitectureError(ValueError):
@@ -160,7 +160,7 @@ def _get_nnx_model(
                                              use_qwix_on_abstract_model=True)
             return jit_model
 
-        @nnx.jit
+        @jax.jit
         def create_sharded_model():
             model = model_class(vllm_config, rng, mesh)
             state = nnx.state(model)

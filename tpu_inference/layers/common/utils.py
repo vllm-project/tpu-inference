@@ -12,12 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from contextlib import nullcontext
+
 import jax
 import jax.numpy as jnp
 from jax.experimental.layout import Format
-from vllm.config import VllmConfig
+from jax.sharding import Mesh
 
 from tpu_inference import envs
+
+# Lazy initialized, since device might not be ready at import time.
+_cpu_mesh = None
 
 
 def reorder_concatenated_tensor_for_sharding(concatenated_tensor: jax.Array,
@@ -98,10 +103,16 @@ def slice_sharded_tensor_for_concatenation(sharded_tensor: jax.Array,
     return split_tensors
 
 
-def general_device_put(tensor: jax.Array, sharding, layout=None) -> jax.Array:
+def general_device_put(tensor: jax.Array,
+                       sharding,
+                       *,
+                       layout=None,
+                       source_mesh=None) -> jax.Array:
     """
     Put a tensor onto devices with the given sharding.
     This method handles both single-host and multi-host cases.
+
+    `source_mesh` specifies the mesh on which the input tensor is currently located.
     """
 
     def _put(t):
@@ -113,41 +124,36 @@ def general_device_put(tensor: jax.Array, sharding, layout=None) -> jax.Array:
         # meaning we are in multi-host setup. Each host will run the same process
         # and each process only need to handle the devices accessible to this host.
         shape = t.shape
-        x_split = [
-            jax.device_put(t[i], device) for device, i in
-            sharding.addressable_devices_indices_map(shape).items()
-        ]
+        ctx = nullcontext() if source_mesh is None else jax.set_mesh(
+            source_mesh)
+        # `t[i]` needs to be operated in the same mesh as `t`, which is provided as
+        # `source_mesh`.
+        with ctx:
+            x_split = [
+                jax.device_put(t[i], device) for device, i in
+                sharding.addressable_devices_indices_map(shape).items()
+            ]
         global_array = jax.make_array_from_single_device_arrays(shape,
                                                                 sharding,
                                                                 x_split,
                                                                 dtype=t.dtype)
         if layout is not None:
-            global_array = jax.device_put(global_array,
-                                          Format(layout, sharding))
+            dst_mesh = sharding.mesh
+            with jax.set_mesh(dst_mesh):
+                global_array = jax.device_put(global_array,
+                                              Format(layout, sharding))
         return global_array
 
     return jax.tree_util.tree_map(_put, tensor)
 
 
-def get_desired_quant_dtype_for_fp8_moe_weights_from_hf_config(
-        vllm_config: VllmConfig) -> jnp.dtype | None:
-    """
-    Gets the desired quant dtype for the `process_fp8_moe_weights` function.
+def cpu_mesh() -> Mesh:
+    global _cpu_mesh
+    if _cpu_mesh is None:
+        _cpu_mesh = Mesh(jax.devices("cpu")[:1], ("cpu", ))
+    return _cpu_mesh
 
-    Args:
-        vllm_config: The VllmConfig object.
 
-    Returns:
-        The desired quant dtype.
-    """
-    try:
-        quantization_format_str = vllm_config.model_config.hf_config.quantization_config[
-            "format"]
-        # For all FP8 checkpoints, this should be the case but we check just in case
-        assert quantization_format_str == "e4m3"
-        desired_quant_dtype = jnp.float8_e4m3fn
-
-    except Exception:
-        desired_quant_dtype = None
-
-    return desired_quant_dtype
+def cpu_mesh_context():
+    """A context to enforce using CPU mesh, used for loading weights on CPU."""
+    return jax.set_mesh(cpu_mesh())
