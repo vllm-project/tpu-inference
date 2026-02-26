@@ -1822,6 +1822,7 @@ class DeepSeekV3(JaxModule):
             rngs=self.rng,
             kernel_init=nnx.with_partitioning(
                 init_fn, (None, ShardingAxisName.MLP_TENSOR)),
+            param_dtype=dtype,
             # Same as https://github.com/vllm-project/tpu-inference/issues/1684
             # DS-V3 doesn't quantize lm_head, so set quant_config to None.
             quant_config=None,
