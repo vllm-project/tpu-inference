@@ -63,6 +63,7 @@ def _swigluoai(x1: jax.Array,
 
 def gmm_wrapper(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset):
     if is_supported_by_gmm_v2(lhs, rhs, rhs_scale):
+        print("gxd debug: use gmm_v2")
         gmm_res = gmm_v2(
             lhs=lhs,
             rhs=rhs,
@@ -72,6 +73,7 @@ def gmm_wrapper(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset):
             group_offset=group_offset[0],
         )
     else:
+        print("gxd debug: use gmm")
         gmm_res = gmm(
             lhs=lhs,
             rhs=rhs,
