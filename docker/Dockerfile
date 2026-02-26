@@ -35,6 +35,7 @@ RUN apt-get update && apt-get install -y \
     wget \
     bc \
     ca-certificates \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Build vLLM
@@ -57,7 +58,8 @@ RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install \
     pytest-asyncio \
     "lm-eval[api]==0.4.9.2" \
     pytest-cov \
-    tblib
+    tblib \
+    gdown
 
 # Install tpu_inference
 WORKDIR /workspace/tpu_inference
