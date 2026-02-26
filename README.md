@@ -339,16 +339,14 @@ Below is the live status of our supported models, features, and kernels. Click o
       <th rowspan="2">Format</th>
       <th rowspan="2">Method</th>
       <th rowspan="2">Recommended<br>TPU Generations</th>
-      <th colspan="3">v6e</th>
-      <th colspan="3">v7x</th>
+      <th colspan="2">v6e</th>
+      <th colspan="2">v7x</th>
     </tr>
     <tr>
       <th>flax</th>
       <th>pytorch</th>
-      <th>default</th>
       <th>flax</th>
       <th>pytorch</th>
-      <th>default</th>
     </tr>
   </thead>
   <tbody>
@@ -356,8 +354,6 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td>AWQ INT4</td>
       <td></td>
       <td>v5, v6</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
       <td>❓ Untested</td>
       <td>❓ Untested</td>
       <td>❓ Untested</td>
@@ -371,15 +367,11 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td>❓ Untested</td>
       <td>❓ Untested</td>
       <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
     </tr>
     <tr>
       <td>FP8 W8A8</td>
       <td>compressed-tensor</td>
       <td>v7</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
       <td>❓ Untested</td>
       <td>❓ Untested</td>
       <td>❓ Untested</td>
@@ -393,8 +385,6 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td>❓ Untested</td>
       <td>❓ Untested</td>
       <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
     </tr>
     <tr>
       <td>INT4 W4A16</td>
@@ -404,15 +394,11 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td>❓ Untested</td>
       <td>❓ Untested</td>
       <td>❓ Untested</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
     </tr>
     <tr>
       <td>INT8 W8A8</td>
       <td>compressed-tensor</td>
       <td>v5, v6</td>
-      <td>❓ Untested</td>
-      <td>❓ Untested</td>
       <td>❓ Untested</td>
       <td>❓ Untested</td>
       <td>❓ Untested</td>

@@ -114,26 +114,25 @@ def generate_html_quantization_table(headers, data):
     html.append("      <th rowspan=\"2\">Format</th>")
     html.append("      <th rowspan=\"2\">Method</th>")
     html.append("      <th rowspan=\"2\">Recommended<br>TPU Generations</th>")
-    html.append("      <th colspan=\"3\">v6e</th>")
-    html.append("      <th colspan=\"3\">v7x</th>")
+    html.append("      <th colspan=\"2\">v6e</th>")
+    html.append("      <th colspan=\"2\">v7x</th>")
     html.append("    </tr>")
     html.append("    <tr>")
     html.append("      <th>flax</th>")
     html.append("      <th>pytorch</th>")
-    html.append("      <th>default</th>")
     html.append("      <th>flax</th>")
     html.append("      <th>pytorch</th>")
-    html.append("      <th>default</th>")
     html.append("    </tr>")
     html.append("  </thead>")
     html.append("  <tbody>")
     
     for row in data:
         html.append("    <tr>")
-        # Ensure we have 9 columns worth of data (3 metadata + 6 backend columns)
+        # Ensure we have 9 columns worth of data, then drop default columns (indices 5 and 8)
         padded_row = row + [""] * (9 - len(row))
-        for cell in padded_row[:9]:
-            html.append(f"      <td>{cell}</td>")
+        indices_to_keep = [0, 1, 2, 3, 4, 6, 7]
+        for idx in indices_to_keep:
+            html.append(f"      <td>{padded_row[idx]}</td>")
         html.append("    </tr>")
         
     html.append("  </tbody>")
