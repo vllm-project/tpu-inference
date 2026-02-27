@@ -31,7 +31,7 @@ from jax.sharding import PartitionSpec as P
 from jaxtyping import Float
 from torchax.ops.mappings import j2t_dtype
 from vllm.config import VllmConfig
-
+from tpu_inference.layers.jax import JaxModule
 from tpu_inference import utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
@@ -1503,7 +1503,7 @@ class DeepSeekV3WeightLoader(BaseWeightLoader):
 
 
 @dataclass
-class DeepSeekV3(nnx.Module):
+class DeepSeekV3(JaxModule):
     WeightLoader = DeepSeekV3WeightLoader
 
     def __init__(self,
