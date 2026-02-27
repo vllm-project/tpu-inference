@@ -68,14 +68,13 @@ class TestLayers(unittest.TestCase):
             hidden_size = 512
             intermediate_size = 2048
 
-            ffw_layer = DenseFFW(
-                random_init=True,
-                dtype=jnp.bfloat16,
-                hidden_act="silu",
-                hidden_size=hidden_size,
-                intermediate_size=intermediate_size,
-                rngs=nnx.Rngs(0),
-            )
+            ffw_layer = DenseFFW(random_init=True,
+                                 dtype=jnp.bfloat16,
+                                 hidden_act="silu",
+                                 hidden_size=hidden_size,
+                                 intermediate_size=intermediate_size,
+                                 rngs=nnx.Rngs(0),
+                                 mesh=self.mesh)
 
             seq_len = 128
             x = jnp.ones((seq_len, hidden_size), dtype=jnp.bfloat16)

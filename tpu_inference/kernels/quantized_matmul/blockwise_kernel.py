@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Quantized matmul kernel with blockwise quantization support."""
 
-import functools
-
 import jax
 import jax.numpy as jnp
 from jax.experimental import pallas as pl
@@ -19,14 +17,11 @@ quantize_tensor = util.quantize_tensor
 MXU_SIZE = 256
 
 
-@functools.partial(
-    jax.jit,
-    static_argnames=[
-        "block_size",
-        "x_q_dtype",
-        "tuned_value",
-    ],
-)
+@jax.jit(static_argnames=[
+    "block_size",
+    "x_q_dtype",
+    "tuned_value",
+])
 def quantized_matmul_kernel(
     x: jax.Array,  # [bs, n_in]
     w_q: jax.Array,  # [n_out, n_in]
@@ -53,6 +48,8 @@ def quantized_matmul_kernel(
       Quantized matmul result.
     """
 
+    if block_size is None:
+        raise ValueError("Block size was not specified.")
     if w_zp is not None:
         raise NotImplementedError("zero_point is not supported.")
 
@@ -75,7 +72,8 @@ def quantized_matmul_kernel(
     out_block_size = tuned_value.out_block_size
     in_block_size = tuned_value.in_block_size
     n_lane_multiplier = tuned_value.n_lane_multiplier
-    block_size = tuned_value.in_block_size if block_size is None else block_size
+    # The num_blocks should become 1 in case of channelwise.
+    block_size = tuned_value.in_block_size if block_size == orig_n_in else block_size
 
     # Pad the inputs to be multiple of block size.
     padded_n_batch = next_multiple(orig_n_batch, batch_block_size)

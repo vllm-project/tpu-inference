@@ -36,7 +36,8 @@ class AttentionMetadata(object):
     # (padded_total_num_scheduled_tokens,)
     input_positions: jax.Array
     # (max_num_seqs * max_num_blocks_per_req,)
-    block_tables: jax.Array = None
+    # None for pooling models that using no KV cache
+    block_tables: jax.Array | None = None
     # (max_num_seqs,)
     seq_lens: jax.Array = None
     # (max_num_seqs + 1,)

@@ -28,12 +28,15 @@ from vllm.utils.func_utils import supports_kw
 
 from tpu_inference import envs
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     apply_qwix_on_abstract_model, apply_qwix_quantization,
     load_random_weights_into_qwix_abstract_model,
     update_vllm_config_for_qwix_quantization)
-from tpu_inference.models.jax.utils.weight_utils import BaseWeightLoader
+from tpu_inference.models.jax.utils.weight_utils import (BaseWeightLoader,
+                                                         LoadableWithIterator)
 from tpu_inference.utils import to_jax_dtype, to_torch_dtype
 
 logger = init_logger(__name__)
@@ -43,7 +46,7 @@ _MODEL_REGISTRY = {}
 # List of architectures that are preferred to use  "vllm" implementation over
 # "flax_nnx" implementation due to various factors such as performance.
 _VLLM_PREFERRED_ARCHITECTURES: frozenset[str] = frozenset(
-    {"GptOssForCausalLM"})
+    {"GptOssForCausalLM", "Qwen3MoeForCausalLM"})
 
 
 class UnsupportedArchitectureError(ValueError):
@@ -61,18 +64,22 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     from tpu_inference.models.jax.llama4 import Llama4ForCausalLM
     from tpu_inference.models.jax.llama_eagle3 import EagleLlama3ForCausalLM
     from tpu_inference.models.jax.llama_guard_4 import LlamaGuard4ForCausalLM
+    from tpu_inference.models.jax.qwen2 import Qwen2ForCausalLM
     from tpu_inference.models.jax.qwen2_5_vl import \
         Qwen2_5_VLForConditionalGeneration
     from tpu_inference.models.jax.qwen3 import Qwen3ForCausalLM
+    from tpu_inference.models.jax.qwen3_moe import Qwen3MoeForCausalLM
     _MODEL_REGISTRY["Llama4ForCausalLM"] = Llama4ForCausalLM
     _MODEL_REGISTRY["DeepseekV3ForCausalLM"] = DeepSeekV3
     _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
     _MODEL_REGISTRY["Llama4ForConditionalGeneration"] = LlamaGuard4ForCausalLM
     _MODEL_REGISTRY["Qwen3ForCausalLM"] = Qwen3ForCausalLM
+    _MODEL_REGISTRY["Qwen3MoeForCausalLM"] = Qwen3MoeForCausalLM
     _MODEL_REGISTRY[
         "Qwen2_5_VLForConditionalGeneration"] = Qwen2_5_VLForConditionalGeneration
     _MODEL_REGISTRY["Eagle3LlamaForCausalLM"] = EagleLlama3ForCausalLM
     _MODEL_REGISTRY["GptOssForCausalLM"] = GptOss
+    _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
@@ -153,7 +160,7 @@ def _get_nnx_model(
                                              use_qwix_on_abstract_model=True)
             return jit_model
 
-        @nnx.jit
+        @jax.jit
         def create_sharded_model():
             model = model_class(vllm_config, rng, mesh)
             state = nnx.state(model)
@@ -196,13 +203,17 @@ def _get_nnx_model(
                 rng,
                 mesh,
                 apply_to_abstract_model=True)
-        model = nnx.eval_shape(abstract_model_fn)
+        with jax.set_mesh(mesh):
+            model = nnx.eval_shape(abstract_model_fn)
         # Although the created model can already work, we still need to jit
         # the model creation again, otherwise the model forward will have
         # non-trivial overhead in PjitFunction.
-        with mesh:
+        with jax.set_mesh(mesh):
             loader = get_model_loader(vllm_config.load_config)
-            if isinstance(loader, RunaiModelStreamerLoader):
+            if isinstance(model, LoadableWithIterator):
+                assert isinstance(model, JaxModule)
+                loader.load_weights(model, vllm_config.model_config)
+            elif isinstance(loader, RunaiModelStreamerLoader):
                 model_weights = vllm_config.model_config.model
                 if hasattr(vllm_config.model_config, "model_weights"):
                     model_weights = vllm_config.model_config.model_weights
@@ -224,6 +235,10 @@ def _get_nnx_model(
     return jit_model
 
 
+def _not_support(*args, **kwargs):
+    raise NotImplementedError("The action on this path is not supported yet.")
+
+
 # TODO(pooyam): We need to refactor this. This is returning a bunch of functions that do not work with all models and this is not very easy to see from the code.
 def get_flax_model(
     vllm_config: VllmConfig,
@@ -233,6 +248,7 @@ def get_flax_model(
 ) -> nnx.Module:
     model_dtype = to_jax_dtype(vllm_config.model_config.dtype)
     vllm_config.model_config.dtype = model_dtype
+    vllm_config.quant_config = get_tpu_quantization_config(vllm_config)
 
     # Only perform qwix quantization if it is jax model.
     if vllm_config.model_config:
@@ -258,8 +274,7 @@ def get_flax_model(
     # https://flax.readthedocs.io/en/latest/guides/performance.html
     graphdef, state = nnx.split(jit_model)
 
-    @functools.partial(
-        jax.jit,
+    @jax.jit(
         out_shardings=(
             kv_cache_sharding,
             hidden_states_sharding,
@@ -278,10 +293,7 @@ def get_flax_model(
         mesh,
         PartitionSpec(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR))
 
-    @functools.partial(
-        jax.jit,
-        out_shardings=(logits_sharding),
-    )
+    @jax.jit(out_shardings=(logits_sharding))
     def run_compute_logits(graphdef, state, *args):
         model = nnx.merge(graphdef, state)
         hidden_state, *_ = args
@@ -295,19 +307,13 @@ def get_flax_model(
 
     embed_sharding = NamedSharding(mesh, PartitionSpec(None))
     # This function will calculates the embeddings of input texts and then merge with the image embeddings
-    @functools.partial(
-        jax.jit,
-        out_shardings=(embed_sharding),
-    )
+    @jax.jit(out_shardings=(embed_sharding))
     def run_embed_input_ids(graphdef, state, *args, **kwargs):
         model = nnx.merge(graphdef, state)
         return model.embed_input_ids(*args, **kwargs)
 
     # For models that want to work with EAGLE-3 speculative decoding
-    @functools.partial(
-        jax.jit,
-        out_shardings=(logits_sharding),
-    )
+    @jax.jit(out_shardings=(logits_sharding))
     def combine_hidden_states(graphdef, state, hidden_states):
         model = nnx.merge(graphdef, state)
         return model.combine_hidden_states(hidden_states)
@@ -334,7 +340,7 @@ def get_flax_model(
         "get_mrope_input_positions_fn": get_mrope_input_positions_fn,
     }
 
-    return model_fn, compute_logits_fn, combine_hidden_states_fn, multimodal_fns, state, lora_manager, model
+    return model_fn, compute_logits_fn, _not_support, combine_hidden_states_fn, multimodal_fns, state, lora_manager, model
 
 
 def get_vllm_model(
@@ -355,9 +361,10 @@ def get_vllm_model(
 
     jit_model = model.jit_step_func()
     compute_logits_fn = model.jit_compute_logits_func()
+    pooler_fn = model.build_pooler_func()
     # the model needs to be returned because lora weights are neither torch.nn.parameter nor torch.nn.buffer. After we load the lora weights and set it to the torch.nn.Module, we can shard it and move it to TPU.
     combine_hidden_states_fn = None
-    return jit_model, compute_logits_fn, combine_hidden_states_fn, None, params, lora_manager, model
+    return jit_model, compute_logits_fn, pooler_fn, combine_hidden_states_fn, None, params, lora_manager, model
 
 
 def get_model(
@@ -374,22 +381,24 @@ def get_model(
 
     match impl:
         case "flax_nnx":
-            if vllm_config.parallel_config.pipeline_parallel_size > 1:
-                logger.warning(
-                    "PP is not fully supported on Jax flax_nnx models yet, fallback to vllm models."
-                )
-                return get_vllm_model(vllm_config, rng, mesh)
-            try:
-                # Try to load the flax model first
-                return get_flax_model(vllm_config, rng, mesh, is_draft_model)
-            except UnsupportedArchitectureError as e:
-                # Convert the error message to a string to check its contents
-                error_msg = str(e)
+            with jax.set_mesh(mesh):
+                if vllm_config.parallel_config.pipeline_parallel_size > 1:
+                    logger.warning(
+                        "PP is not fully supported on Jax flax_nnx models yet, fallback to vllm models."
+                    )
+                    return get_vllm_model(vllm_config, rng, mesh)
+                try:
+                    # Try to load the flax model first
+                    return get_flax_model(vllm_config, rng, mesh,
+                                          is_draft_model)
+                except UnsupportedArchitectureError as e:
+                    # Convert the error message to a string to check its contents
+                    error_msg = str(e)
 
-                logger.warning(error_msg)
+                    logger.warning(error_msg)
 
-                # Fall back to the vLLM model and updating the dtype accordingly
-                return get_vllm_model(vllm_config, rng, mesh)
+                    # Fall back to the vLLM model and updating the dtype accordingly
+                    return get_vllm_model(vllm_config, rng, mesh)
         case "vllm":
             return get_vllm_model(vllm_config, rng, mesh)
         case _:

@@ -12,12 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-notify:
-  - email: "ullm-test-notifications-external@google.com"
-    if: build.state == "failed"
-  - slack: "vllm#tpu-ci-notifications"
-    if: build.state == "failed"
-
 steps:
   - label: "Publish vllm/vllm-tpu nightly image"
     if: build.branch == "main" && build.env("NIGHTLY") == "1"
@@ -34,26 +28,6 @@ steps:
       - "docker build --build-arg VLLM_COMMIT_HASH=$$VLLM_COMMIT_HASH --no-cache -f docker/Dockerfile -t vllm/vllm-tpu:nightly -t vllm/vllm-tpu:nightly-$$DATE-$$BUILDKITE_SHORT_COMMIT-$$VLLM_SHORT_COMMIT ."
       - "docker push vllm/vllm-tpu:nightly"
       - "docker push vllm/vllm-tpu:nightly-$$DATE-$$BUILDKITE_SHORT_COMMIT-$$VLLM_SHORT_COMMIT"
-    plugins:
-      - docker-login#v3.0.0:
-          username: tpuinference
-          password-env: DOCKERHUB_TOKEN
-
-  - label: "Publish vllm/vllm-tpu nightly image for ironwood"
-    if: build.branch == "main" && build.env("NIGHTLY") == "1"
-    agents:
-      queue: cpu
-    secrets:
-      - DOCKERHUB_TOKEN
-    commands:
-      - "DATE=$$(date +%Y%m%d)"
-      - "VLLM_COMMIT_HASH=$$(buildkite-agent meta-data get 'VLLM_COMMIT_HASH')"
-      - "VLLM_SHORT_COMMIT=$${VLLM_COMMIT_HASH:0:7}"
-      - "BUILDKITE_SHORT_COMMIT=$${BUILDKITE_COMMIT:0:7}"
-      - "yes | docker system prune -a"
-      - "docker build --build-arg VLLM_COMMIT_HASH=$$VLLM_COMMIT_HASH --no-cache --build-arg IS_FOR_V7X=true -f docker/Dockerfile -t vllm/vllm-tpu:nightly-ironwood -t vllm/vllm-tpu:nightly-ironwood-$$DATE-$$BUILDKITE_SHORT_COMMIT-$$VLLM_SHORT_COMMIT ."
-      - "docker push vllm/vllm-tpu:nightly-ironwood"
-      - "docker push vllm/vllm-tpu:nightly-ironwood-$$DATE-$$BUILDKITE_SHORT_COMMIT-$$VLLM_SHORT_COMMIT"
     plugins:
       - docker-login#v3.0.0:
           username: tpuinference

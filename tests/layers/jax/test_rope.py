@@ -67,7 +67,8 @@ class DeepseekScalingRotaryEmbeddingTest(jtu.JaxTestCase):
             original_max_position_embeddings=original_max_position_embeddings,
             scaling_factor=scaling_factor,
             dtype=jnp.float32)
-        rope.initialize_cache(mesh)
+        with jax.set_mesh(mesh):
+            rope.initialize_cache()
         expected_padded_dim = 128
         self.assertTrue(
             rope.sin_cos_cache.shape == (scaling_factor *

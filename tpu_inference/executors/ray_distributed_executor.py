@@ -386,13 +386,12 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         if self.parallel_config.pipeline_parallel_size > 1:
             self.collective_rpc("initialize_pp_transfer_connect")
         self.collective_rpc("load_model")
-
         if self.use_ray_spmd_worker:
             for pp_rank in range(self.parallel_config.pipeline_parallel_size):
                 self.pp_tp_workers.append([])
                 num_tp_workers = int(
-                    self.parallel_config.tensor_parallel_size //
-                    num_tpu_per_worker)
+                    len(self.workers) //
+                    self.parallel_config.pipeline_parallel_size)
                 for tp_rank in range(num_tp_workers):
                     # PP=2, TP=4, num_tpu_per_worker=2
                     # pp_tp_workers = [[0, 1], [2, 3]]

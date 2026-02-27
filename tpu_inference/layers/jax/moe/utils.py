@@ -13,59 +13,24 @@
 # limitations under the License.
 
 import enum
+import math
 
 import jax
 import jax.numpy as jnp
 from jax.experimental import xla_metadata
-from qwix._src.core.qarray import QArray
-from qwix._src.core.ragged_dot import ragged_dot as qwix_ragged_dot
+from jax.sharding import Mesh
 
 from tpu_inference import envs
 from tpu_inference.kernels.megablox.gmm import gmm as megablox_gmm
-from tpu_inference.layers.common.fused_moe_gmm import \
+from tpu_inference.kernels.megablox.tuned_block_sizes import \
     round_up_to_multiple_of_128_within_limit
+from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.utils.qwix.qwix_utils import \
-    manually_quantize_qwix_activation
 
 logger = init_logger(__name__)
 modeling_flax_utils = FlaxUtils()
 set_xla_metadata = xla_metadata.set_xla_metadata
-
-
-class MoEBackend(enum.Enum):
-    FUSED_MOE = "fused_moe"
-    VLLM_MOE = "vllm_moe"
-    DENSE_MAT = "dense_mat"
-    MEGABLX_GMM = "megablox_gmm"
-    RAGGED_DOT = "ragged_dot_gmm"
-
-
-def select_moe_backend():
-    # Validation: Ensure mutually exclusive flags aren't set together
-    if envs.USE_MOE_EP_KERNEL and envs.USE_VLLM_MOE_KERNEL:
-        raise ValueError("Cannot enable multiple MoE kernels simultaneously.")
-
-    if envs.USE_MOE_EP_KERNEL:
-        logger.info("[MoE]: Fused MoE kernel is enabled")
-        return MoEBackend.FUSED_MOE
-
-    if envs.USE_VLLM_MOE_KERNEL:
-        logger.info("[MoE]: VLLM MoE kernel is enabled")
-        return MoEBackend.VLLM_MOE
-
-    if envs.USE_MEGABLOCKS:
-        logger.info("[MoE]: Mega Blocks is enabled for GMM in Sparse Matmul")
-        return MoEBackend.MEGABLX_GMM
-
-    if envs.USE_RAGGED_DOT:
-        logger.info("[MoE]: Ragged Dot is enabled for GMM in Sparse Matmul")
-        return MoEBackend.RAGGED_DOT
-
-    # Default case
-    logger.info("[MoE]: Dense Matmul is enabled")
-    return MoEBackend.DENSE_MAT
 
 
 # --- Helper Functions/Class for Sparse MoE ---
@@ -266,23 +231,63 @@ def gmm_fn(inputs, kernel, group_sizes, tile_size, moe_backend, dtype,
                               preferred_element_type=dtype,
                               tiling=(tm, tk, tn))
 
-    elif moe_backend == MoEBackend.RAGGED_DOT:
-        # TODO (jacobplatin): support more than just fp8_e4m3fn for activations!
-        inputs = manually_quantize_qwix_activation(
-            inputs, "ragged_dot", jnp.float8_e4m3fn, [0], {},
-            "absmax") if quantized_dtype else inputs
-        ragged_dot_func = qwix_ragged_dot if quantized_dtype else jax.lax.ragged_dot
-        if quantized_dtype:
-            q_value, q_scale = kernel
-            kernel = QArray(q_value, q_scale, qtype=quantized_dtype)
-        with set_xla_metadata(ragged_dot_tiling=",".join(
-            [str(t) for t in tile_size]),
-                              mosaic_fusion_group="ragged-dot"):
-            output = ragged_dot_func(lhs=inputs,
-                                     rhs=kernel,
-                                     group_sizes=group_sizes,
-                                     preferred_element_type=dtype)
-
     if pad_amount > 0:
         output = output[:num_rows, :]
     return output
+
+
+def get_expert_parallelism(expert_axis_name: str, mesh: Mesh) -> int:
+    """
+    Returns the expert parallelism number from the mesh.
+
+    Args:
+        expert_axis_name: The expert axis name.
+        mesh: The mesh.
+
+    Returns:
+        The expert parallelism number.
+    """
+    if expert_axis_name is None:
+        return 1
+    else:
+        if isinstance(expert_axis_name, str):
+            return mesh.shape[expert_axis_name]
+        else:
+            return math.prod(mesh.shape[axis] for axis in expert_axis_name)
+
+
+def select_moe_backend(use_ep: bool) -> MoEBackend:
+    """
+    Selects the MoE backend for the JAX path.
+
+    Args:
+        use_ep: Whether to use expert parallelism.
+
+    Returns:
+        The selected MoE backend.
+    """
+    if envs.USE_MOE_EP_KERNEL:
+        if use_ep:
+            logger.info_once("[MoE]: Using fused MoE EP kernel")
+            return MoEBackend.FUSED_MOE
+
+    if envs.USE_UNFUSED_MEGABLOCKS:
+        logger.info_once(
+            "[MoE]: Mega Blocks is enabled for GMM in Sparse Matmul")
+        return MoEBackend.MEGABLX_GMM
+
+    if use_ep:
+        logger.warning_once(
+            "USE_MOE_EP_KERNEL=1 but expert parallelism is not "
+            "enabled. Falling back to gmm implementation.")
+        logger.info_once("[MoE]: Using GMM EP kernel")
+        return MoEBackend.GMM_EP
+
+    if envs.USE_DENSE_MOE:
+        logger.info_once("[MoE]: Using DENSE_MOE")
+        logger.warning_once(
+            "[MoE]: DENSE_MOE is naive and not intended for production.")
+        return MoEBackend.DENSE_MAT
+
+    logger.info_once("[MoE]: Using GMM TP kernel")
+    return MoEBackend.GMM_TP

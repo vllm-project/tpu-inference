@@ -101,7 +101,7 @@ class GptOss(nnx.Module):
             random_init=self.random_init,
         )
 
-        self.layers = []
+        self.layers = nnx.List([])
         for i in range(num_layers):
             attn = GptOssAttention(
                 hidden_size=hidden_size,

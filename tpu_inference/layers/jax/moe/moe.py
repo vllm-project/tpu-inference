@@ -11,31 +11,30 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import math
+
 from dataclasses import InitVar, dataclass
-from functools import partial
-from typing import Optional
+from typing import Any, Iterable, Iterator, Optional
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 from flax.typing import Sharding
-from jax.sharding import PartitionSpec
+from jax.sharding import NamedSharding, PartitionSpec
 from jaxtyping import Float
-from qwix._src.providers import ptq
 
-from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
+from tpu_inference.layers.common.moe import MoEBackend
+from tpu_inference.layers.common.utils import cpu_mesh_context
+from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
-from tpu_inference.layers.jax.moe.dense_moe import (
-    dense_moe_fwd, dense_moe_fwd_preapply_router_weights)
-from tpu_inference.layers.jax.moe.sparse_moe import sparse_moe_distributed_fwd
-from tpu_inference.layers.jax.moe.utils import MoEBackend
-from tpu_inference.layers.vllm.fused_moe import fused_moe_func
-from tpu_inference.models.jax.utils.qwix.qwix_utils import \
-    manually_quantize_qwix_weight
+from tpu_inference.layers.jax.quantization import QuantizeMethodBase
+from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
+from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.utils.weight_utils import (
+    jax_array_from_reshaped_torch, shard_put)
 
 modeling_flax_utils = FlaxUtils()
+logger = init_logger(__name__)
 
 
 @dataclass(kw_only=True)
@@ -79,6 +78,7 @@ class Router(nnx.Module):
     ed_sharding: Sharding
     random_init: bool = False
     moe_backend: MoEBackend = MoEBackend.DENSE_MAT
+    mesh: Optional[jax.sharding.Mesh] = None
 
     def __call__(self, x_TD: Float):
         """Routes tokens to experts.
@@ -92,13 +92,15 @@ class Router(nnx.Module):
                 - selected_experts_TX: Indices of selected experts, shape (sequence_length, num_experts_per_tok).
         """
         x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
+        x_TD = jax.lax.with_sharding_constraint(
+            x_TD,
+            NamedSharding(self.mesh, PartitionSpec(*self.activation_ffw_td)))
         router_act = modeling_flax_utils.ACT2FN[self.router_act]
         router_logits_TE = jnp.einsum('TD,DE -> TE', x_TD,
                                       self.kernel_DE.value)
 
         #TODO: Refactor the Router so that it will always only return router_logits_TE
-        if self.moe_backend == MoEBackend.FUSED_MOE or self.moe_backend == MoEBackend.VLLM_MOE:
+        if self.moe_backend in MoEBackend.fused_moe_backends():
             return router_logits_TE
         else:
             weights_TX, selected_experts_TX = jax.lax.top_k(
@@ -124,7 +126,7 @@ class Router(nnx.Module):
 
 # --- Main Class for MoE ---
 @dataclass(kw_only=True)
-class MoE(nnx.Module):
+class JaxMoE(JaxModule):
     """Mixture-of-Experts (MoE) Routed MLP Layer.
 
     This module implements a MoE layer with a router and multiple expert MLPs.
@@ -149,8 +151,12 @@ class MoE(nnx.Module):
 
     # --- Flags & Configs ---
     apply_expert_weight_before_computation: bool
+    expert_axis_name: str
+    num_expert_parallelism: int
     random_init: bool = False
     moe_backend: MoEBackend = MoEBackend.DENSE_MAT
+    scoring_func = "softmax"
+
     # --- Sparse MoE Specific Attributes ---
     num_experts_per_tok: int = 1  # Required for Sparse, optional/derived for Dense
     tile_size: tuple[int, int, int] = (128, 128, 128)
@@ -159,6 +165,10 @@ class MoE(nnx.Module):
 
     # --- MoE Kernel Specific Attributes ---
     renormalize: bool = True
+
+    # ---- Quantization Specific Attributes ----
+    quant_config: Optional[QuantizationConfig] = None
+    prefix: str = ""
 
     def __call__(self, x_TD: Float):
         """Performs the forward pass of the MoE layer.
@@ -169,120 +179,9 @@ class MoE(nnx.Module):
         Returns:
             Output array of shape (sequence_length, d_model) after passing through MoE.
         """
-        x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = nnx.with_sharding_constraint(x_TD, self.activation_ffw_td)
-        if self.moe_backend == MoEBackend.FUSED_MOE:
-            router_logits_TE = self.router(x_TD)
-            ep_axis_name = self.efd_sharding[0]
-            output_TD = fused_ep_moe(
-                mesh=self.mesh,
-                tokens=x_TD,
-                w1=self.kernel_gating_upproj_E2DF.value,
-                w2=self.kernel_down_proj_EFD.value,
-                gating_output=router_logits_TE,
-                top_k=self.router.num_experts_per_tok,
-                ep_axis_name=ep_axis_name,
-                renormalize_topk_logits=self.renormalize,
-                act_fn=self.hidden_act,
-                **self.block_size,
-            )
-            return output_TD
-        elif self.moe_backend == MoEBackend.VLLM_MOE:
-            router_logits_TE = self.router(x_TD)
-            output_TD = fused_moe_func(
-                hidden_states=x_TD,
-                w1=self.kernel_gating_upproj_EFD.value,
-                w2=self.kernel_down_proj_EDF.value,
-                w1_bias=self.w1_bias,
-                w2_bias=self.w2_bias,
-                w1_scale=self.w1_scale,
-                w2_scale=self.w2_scale,
-                gating_output=router_logits_TE,
-                topk=self.router.num_experts_per_tok,
-                renormalize=self.renormalize,
-                mesh=self.mesh,
-                use_ep=self.num_expert_parallelism > 1,
-                activation=self.hidden_act,
-            )
-            return output_TD
-        else:
-            weights_TX, indices_TX = self.router(x_TD)
-
-            if self.moe_backend == MoEBackend.MEGABLX_GMM or self.moe_backend == MoEBackend.RAGGED_DOT:
-                # NOTE: for the qwix_quantized_weight_dtype case, we make the spec a tuple of 2 PartitionSpecs
-                # since the first entry corresponds to the weight and the second entry corresponds to the scale.
-                # For the scale, we don't shard on the "D" dimmension because this is the subchannel dimmension
-                if self.qwix_quantized_weight_dtype:
-                    gating_up_proj_spec = (PartitionSpec(*self.edf_sharding),
-                                           PartitionSpec(
-                                               self.edf_sharding[0], None,
-                                               self.edf_sharding[2]))
-                    down_proj_spec = (PartitionSpec(*self.efd_sharding),
-                                      PartitionSpec(self.efd_sharding[0], None,
-                                                    self.efd_sharding[2]))
-                else:
-                    gating_up_proj_spec = PartitionSpec(*self.edf_sharding)
-                    down_proj_spec = PartitionSpec(*self.efd_sharding)
-
-                in_specs = (
-                    PartitionSpec(),  # replicated MoE instance
-                    PartitionSpec(*self.activation_ffw_td),  # Sharded x_TD
-                    PartitionSpec(),  # Replicated router_weights_TX
-                    PartitionSpec(),  # Replicated selected_experts_TX
-                    gating_up_proj_spec,  # Sharded gating kernel
-                    gating_up_proj_spec,  # Sharded up-projection kernel
-                    down_proj_spec,  # Sharded down-projection kernel
-                )
-                out_specs = PartitionSpec(*self.activation_ffw_td)
-
-                mapped_moe_fwd = partial(
-                    jax.experimental.shard_map.shard_map,
-                    mesh=self.mesh,
-                    in_specs=in_specs,
-                    out_specs=out_specs,
-                    check_rep=False)(sparse_moe_distributed_fwd)
-
-                # TODO (jacobplatin): this is needed because of issues with Qwix quantizing the `shard_map` in SpraseMatmul
-                # Basically, during the abstract pass, we need to manually quantize the weights here for Qwix, but we'll
-                # override the actual weight/scale during loading (we just need to make sure Qwix quantizes the weight
-                # in the first place).
-                kernel_gating_EDF = self._process_weight_for_qwix(
-                    "kernel_gating_EDF",
-                    self.kernel_gating_EDF,
-                    channelwise_axes=[0, 2],
-                    tiled_axes={})
-                kernel_up_proj_EDF = self._process_weight_for_qwix(
-                    "kernel_up_proj_EDF",
-                    self.kernel_up_proj_EDF,
-                    channelwise_axes=[0, 2],
-                    tiled_axes={})
-                kernel_down_proj_EFD = self._process_weight_for_qwix(
-                    "kernel_down_proj_EFD",
-                    self.kernel_down_proj_EFD,
-                    channelwise_axes=[0, 2],
-                    tiled_axes={})
-
-                return mapped_moe_fwd(self, x_TD, weights_TX, indices_TX,
-                                      kernel_gating_EDF, kernel_up_proj_EDF,
-                                      kernel_down_proj_EFD)
-
-            # Dense Matmul
-            elif self.moe_backend == MoEBackend.DENSE_MAT:
-                one_hot_indices_TXE = jax.nn.one_hot(
-                    indices_TX,
-                    num_classes=self.num_local_experts,
-                    dtype=self.dtype)
-                full_weights_TE = jnp.sum(one_hot_indices_TXE *
-                                          weights_TX[..., None],
-                                          axis=1)
-                # Some models use the routing scores to weight the data instead of
-                # weighting the expert outputs.
-                if self.apply_expert_weight_before_computation:
-                    with jax.named_scope("pre_computing_weight"):
-                        return dense_moe_fwd_preapply_router_weights(
-                            self, x_TD, full_weights_TE)
-                else:
-                    return dense_moe_fwd(self, x_TD, full_weights_TE)
+        if self.quant_method is not None:
+            return self.quant_method.apply_jax(self, x_TD)
+        raise ValueError("Expected quant_method to be set!")
 
     def __post_init__(self, rngs: nnx.Rngs):
         """Generates the kernels (weights) for the router and experts (gating, up-projection, and down-projection layers)."""
@@ -290,81 +189,29 @@ class MoE(nnx.Module):
         D = self.hidden_size
         F = self.intermediate_size_moe
 
-        if self.moe_backend == MoEBackend.FUSED_MOE:
-            if self.edf_sharding:
-                self.e2df_sharding = (self.edf_sharding[0], None,
-                                      self.edf_sharding[1],
-                                      self.edf_sharding[2])
-            self.kernel_gating_upproj_E2DF = create_param(
-                rngs,
-                shape=(E, 2, D, F),
-                dtype=self.dtype,
-                sharding=self.e2df_sharding,
-                random_init=self.random_init)
-            self.kernel_down_proj_EFD = create_param(
-                rngs,
-                shape=(E, F, D),
-                dtype=self.dtype,
-                sharding=self.efd_sharding,
-                random_init=self.random_init)
-            self.block_size = {
-                "bt": 32,
-                "bf": 512,
-                "bd1": 512,
-                "bd2": 512,
-                "btc": 64,
-                "bfc": 256,
-                "bd1c": 256,
-                "bd2c": 256,
-            }
-        elif self.moe_backend == MoEBackend.VLLM_MOE:
-            self.kernel_gating_upproj_EFD = create_param(
-                rngs,
-                shape=(E, 2 * F, D),
-                dtype=self.dtype,
-                sharding=self.efd_sharding,
-                random_init=self.random_init)
-            self.kernel_down_proj_EDF = create_param(
-                rngs,
-                shape=(E, D, F),
-                dtype=self.dtype,
-                sharding=self.edf_sharding,
-                random_init=self.random_init)
-        else:
-            self.kernel_gating_EDF = create_param(rngs,
-                                                  shape=(E, D, F),
-                                                  dtype=self.dtype,
-                                                  sharding=self.edf_sharding,
-                                                  random_init=self.random_init)
-            self.kernel_up_proj_EDF = create_param(
-                rngs,
-                shape=(E, D, F),
-                dtype=self.dtype,
-                sharding=self.edf_sharding,
-                random_init=self.random_init)
-            self.kernel_down_proj_EFD = create_param(
-                rngs,
-                shape=(E, F, D),
-                dtype=self.dtype,
-                sharding=self.efd_sharding,
-                random_init=self.random_init)
-
-        # Default MoE has no bias vectors
-        self.w1_bias, self.w2_bias = (None, None)
-
-        # TODO: Add quantization scale params for VLLM MoE kernel
-        self.w1_scale, self.w2_scale = (None, None)
-
-        self.expert_axis_name = self.edf_sharding[0]
-        if self.expert_axis_name is None:
-            self.num_expert_parallelism = 1
-        else:
-            if isinstance(self.expert_axis_name, str):
-                self.num_expert_parallelism = self.mesh.shape[
-                    self.expert_axis_name]
-            else:
-                self.num_expert_parallelism = math.prod(
-                    self.mesh.shape[axis] for axis in self.expert_axis_name)
+        self.kernel_gating_EDF = create_param(rngs,
+                                              shape=(E, D, F),
+                                              dtype=self.dtype,
+                                              sharding=self.edf_sharding,
+                                              random_init=self.random_init)
+        self.kernel_gating_EDF.set_metadata(
+            _weights_to_load=[None for _ in range(E)])
+        self.kernel_up_proj_EDF = create_param(rngs,
+                                               shape=(E, D, F),
+                                               dtype=self.dtype,
+                                               sharding=self.edf_sharding,
+                                               random_init=self.random_init)
+        self.kernel_up_proj_EDF.set_metadata(
+            _weights_to_load=[None for _ in range(E)])
+        self.kernel_down_proj_EFD = create_param(
+            rngs,
+            shape=(E, F, D),
+            dtype=self.dtype,
+            sharding=self.efd_sharding if self.moe_backend
+            not in MoEBackend.fused_moe_backends() else self.edf_sharding,
+            random_init=self.random_init)
+        self.kernel_down_proj_EFD.set_metadata(
+            _weights_to_load=[None for _ in range(E)])
 
         # Derive if data is sharded by expert
         self.data_axis_name = self.activation_ffw_td[0]
@@ -372,22 +219,98 @@ class MoE(nnx.Module):
             self.expert_axis_name is not None) and (self.expert_axis_name
                                                     == self.data_axis_name)
 
-    def _process_weight_for_qwix(self,
-                                 name,
-                                 weight_param,
-                                 channelwise_axes=[],
-                                 tiled_axes={}):
-        """
-        Extracts weight value, applies quantization if needed,
-        and returns the underlying array.
-        """
-        weight = weight_param.value
+        self.top_k = self.router.num_experts_per_tok
+        self.use_ep = self.num_expert_parallelism > 1
+        self.activation = self.hidden_act
+        self.scoring_func = self.scoring_func
 
-        if self.qwix_quantized_weight_dtype:
-            if not isinstance(weight, ptq.WithAux):
-                weight = manually_quantize_qwix_weight(
-                    name, weight, self.qwix_quantized_weight_dtype,
-                    channelwise_axes, tiled_axes, "absmax")
-            return (weight.array.qvalue, weight.array.scale)
+        if self.quant_config is None:
+            self.quant_method = None
+        elif (quant_method :=
+              self.quant_config.get_quant_method(self, prefix=self.prefix)):
+            assert isinstance(quant_method, QuantizeMethodBase)
+            self.quant_method = quant_method
+            self.quant_method.create_weights_jax(self, rngs=rngs)
+        else:
+            self.quant_method = None
 
-        return weight
+    def named_parameters(self, *args, **kwargs) -> Iterator[tuple[str, Any]]:
+        for name, param in super().named_parameters(*args, **kwargs):
+            # Weight loader relies on this function to check if all parameters are loaded.
+            # We put router/gating param in JaxMoE because we fuse all kinds of MoE into one.
+            # However, router/gating param does not belong to "experts" but "mlp" in HF checkpoint,
+            # so we skip them in the named_parameters of JaxMoE to avoid confusion for weight loading completeness check.
+            if "router" in name:
+                continue
+            yield name, param
+
+    def load_weights(self, weights: Iterable):
+        """Used by JaxAutoWeightLoader to load HF weights into the layer."""
+        if self.quant_method is None or not hasattr(self.quant_method,
+                                                    "load_weights"):
+            return self._load_weights(weights)
+
+        return self.quant_method.load_weights(
+            layer=self,
+            original_load_weights_fn=self._load_weights,
+            weights=weights)
+
+    def _load_weights(self, weights: Iterable):
+        """Load HF weights into the layer.
+
+        self.quant_method might reuse this method if the quantization method has specific logic for loading weights.
+        """
+
+        cnt = 0
+        for param_name, torch_weight in weights:
+            cnt += 1
+            param_name: str = param_name.split(
+                self.prefix)[-1]  # ".0.down_proj.weight" for example
+            names = param_name.split(".")
+            assert len(
+                names
+            ) == 3, f"Expected param name to be .<expert_id>.<param_name>.weight, got {param_name}"
+            expert_id, param_type, _ = names
+            expert_id = int(expert_id)
+            jax_param = None
+            if param_type.endswith("up_proj"):
+                jax_param = self.kernel_up_proj_EDF
+            elif param_type.endswith("down_proj"):
+                jax_param = self.kernel_down_proj_EFD
+            elif param_type.endswith("gate_proj"):
+                jax_param = self.kernel_gating_EDF
+            else:
+                raise ValueError(
+                    f"Unexpected param type in {param_name}, expected up_proj, down_proj, gate_proj"
+                )
+
+            assert isinstance(jax_param, nnx.Param)
+
+            jax_weight = jax_array_from_reshaped_torch(
+                torch_weight, reshape_dims=(1, ) +
+                torch_weight.shape)  # add expert dim for concatenation later
+            jax_param._weights_to_load[expert_id] = jax_weight
+
+        logger.debug(f"Loaded {cnt} weights for {self.prefix} MoE layer.")
+
+        loaded_names = set()
+        # This function could be called more than once, if the weights for moe layer is spread
+        # across multiple safetensor files. Here we use counter to track the completion of weight loading, and only perform the fusion and sharding after all weights are loaded.
+        for param_name, param in {
+                "kernel_gating_EDF": self.kernel_gating_EDF,
+                "kernel_up_proj_EDF": self.kernel_up_proj_EDF,
+                "kernel_down_proj_EFD": self.kernel_down_proj_EFD
+        }.items():
+            weights_to_load = param._weights_to_load
+            if all(w is not None for w in weights_to_load):
+                with cpu_mesh_context():
+                    weights = jnp.concatenate(param._weights_to_load, axis=0)
+                try:
+                    param.value = shard_put(weights, param.sharding)
+                    loaded_names.add(param_name)
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Failed to load weights for {param_name} with {weights.shape=} {param.value.shape=}"
+                    ) from e
+
+        return loaded_names

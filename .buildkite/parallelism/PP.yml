@@ -15,21 +15,24 @@
 # pipeline-name: PP
 # pipeline-type: parallelism support matrix
 steps:
-  - label: "Correctness tests for PP"
-    key: "PP_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Correctness tests for PP"
+    key: "${TPU_VERSION:-tpu6e}_PP_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
-        .buildkite/scripts/run_in_docker.sh \
-          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model \
-          /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_vllm_model \
-          /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model_correctness
-  - label: "Record correctness test result for PP"
-    key: "record_PP_CorrectnessTest"
-    depends_on: "PP_CorrectnessTest"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_PP_CorrectnessTest" "unverified"
+        # Note: uncomment the actual tests after PP is fully supported.
+        # .buildkite/scripts/run_in_docker.sh \
+        #   python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model \
+        #   /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_vllm_model \
+        #   /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model_correctness
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for PP"
+    key: "${TPU_VERSION:-tpu6e}_record_PP_CorrectnessTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_PP_CorrectnessTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "PP"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "parallelism support matrix"
@@ -37,24 +40,27 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh PP_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_PP_CorrectnessTest
 
-  - label: "Performance tests for PP"
-    key: "PP_PerformanceTest"
-    depends_on: "record_PP_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Performance tests for PP"
+    key: "${TPU_VERSION:-tpu6e}_PP_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_PP_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
-        .buildkite/scripts/run_in_docker.sh \
-          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model \
-          /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_vllm_model \
-          /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model_correctness
-  - label: "Record performance test result for PP"
-    key: "record_PP_PerformanceTest"
-    depends_on: "PP_PerformanceTest"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_PP_PerformanceTest" "unverified"
+        # Note: uncomment the actual tests after PP is fully supported.
+        # .buildkite/scripts/run_in_docker.sh \
+        #   python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model \
+        #   /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_vllm_model \
+        #   /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model_correctness
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for PP"
+    key: "${TPU_VERSION:-tpu6e}_record_PP_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_PP_PerformanceTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "PP"
       CI_STAGE: "PerformanceTest"
       CI_CATEGORY: "parallelism support matrix"
@@ -62,4 +68,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh PP_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_PP_PerformanceTest

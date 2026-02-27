@@ -1,0 +1,7 @@
+Kernel,W16 A16 (Correctness),W16 A16 (Performance),W8 A8 (Correctness),W8 A8 (Performance),W8 A16 (Correctness),W8 A16 (Performance),W4 A4 (Correctness),W4 A4 (Performance),W4 A8 (Correctness),W4 A8 (Performance),W4 A16 (Correctness),W4 A16 (Performance)
+"all-gather-matmul",unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified
+"fused moe",unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified
+"generic ragged paged<br>attention v3*",unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified
+"gmm",unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified
+"mla*",unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified
+"ragged paged attention v3<br>head_dim 64*",unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified,unverified

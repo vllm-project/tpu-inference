@@ -21,7 +21,7 @@ import re
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 import jax
 import jax.numpy as jnp
@@ -30,10 +30,17 @@ import torchax
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
+from jax.sharding import SingleDeviceSharding, get_mesh
 from safetensors import safe_open
+from torchax.ops.mappings import t2j
 from vllm.config import VllmConfig
+from vllm.model_executor.models.utils import AutoWeightsLoader
 
 from tpu_inference import envs, utils
+from tpu_inference.layers.common.utils import (cpu_mesh_context,
+                                               general_device_put)
+from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils import file_utils
 
@@ -206,16 +213,29 @@ def get_param_and_sharding(params: nnx.State, shardings: Any,
     return plevel, slevel.value
 
 
-def shard_put(x: jax.Array, shardings, mesh: jax.sharding.Mesh) -> jax.Array:
+def shard_put(x: jax.Array,
+              shardings,
+              mesh: jax.sharding.Mesh | None = None) -> jax.Array:
     # Single device sharding requires this special handling
     # to avoid the recursive jit error.
+    if mesh is None:
+        mesh = get_mesh()
+
+    x_mesh = None
+    if isinstance(x.sharding, NamedSharding):
+        x_mesh = x.sharding.mesh
+
     if math.prod(mesh.axis_sizes) == 1:
-        return jax.device_put(x, mesh.devices.flatten()[0])
+        return general_device_put(x,
+                                  mesh.devices.flatten()[0],
+                                  source_mesh=x_mesh)
 
     if isinstance(shardings, tuple):
-        return jax.device_put(x, NamedSharding(mesh, P(*shardings)))
+        return general_device_put(x,
+                                  NamedSharding(mesh, P(*shardings)),
+                                  source_mesh=x_mesh)
     else:
-        return jax.device_put(x, shardings)
+        return general_device_put(x, shardings, source_mesh=x_mesh)
 
 
 def get_default_maps(model_config, mesh: Mesh,
@@ -703,3 +723,150 @@ class StandardWeightLoader(BaseWeightLoader):
             mesh=self.mesh,
             pp_missing_layers=getattr(model, 'pp_missing_layers', []),
             keep_hf_weight_suffix_when_match=keep_hf_weight_suffix_when_match)
+
+
+def jax_array_from_reshaped_torch(
+        torch_weight: torch.Tensor,
+        *,
+        reshape_dims: Optional[tuple[int, ...]] = None,
+        permute_dims: Optional[tuple[int, ...]] = None) -> jax.Array:
+    """Convert a torch.Tensor to a jax.Array with reshaping and transposing.
+
+    HuggingFace model almost always store linear layer weights with contracting dimension
+    last, and only support 1D/2D weight tensors. This function reshapes then transposes
+    the torch weight to match the jax_param shape before loading.
+
+    Args:
+        torch_weight: The source torch.Tensor weight.
+        reshape_dims: Optional tuple specifying the shape to reshape the torch weight to before permutation. If None, no reshaping is applied.
+        permute_dims: Optional tuple specifying the permutation of dimensions. If None, no-op for 1D tensors and transpose for 2D tensors is applied.
+    """
+    if reshape_dims is not None:
+        torch_weight = torch_weight.reshape(reshape_dims)
+    if permute_dims is None and torch_weight.ndim == 2:
+        permute_dims = (1, 0)
+    if permute_dims is not None:
+        torch_weight = torch_weight.permute(*permute_dims)
+
+    with cpu_mesh_context():
+        return t2j(torch_weight, use_dlpack=False)
+
+
+def load_nnx_param_from_reshaped_torch(
+        jax_param: nnx.Param,
+        torch_weight: torch.Tensor,
+        *,
+        reshape_dims: Optional[tuple[int, ...]] = None,
+        permute_dims: Optional[tuple[int, ...]] = None,
+        param_name: str = "Unknown"):
+    """Load a nnx.Param from a torch.Tensor with reshaping and transposing.
+
+    HuggingFace model almost always store linear layer weights with contracting dimension
+    last, and only support 1D/2D weight tensors. This function reshapes then transposes
+    the torch weight to match the jax_param shape before loading.
+
+    Args:
+        jax_param: The target nnx.Param to load the weight into.
+        torch_weight: The source torch.Tensor weight.
+        reshape_dims: Optional tuple specifying the shape to reshape the torch weight to before permutation. If None, no reshaping is applied.
+        permute_dims: Optional tuple specifying the permutation of dimensions. If None, no-op for 1D tensors and transpose for 2D tensors is applied.
+    """
+    jax_weight = jax_array_from_reshaped_torch(torch_weight,
+                                               reshape_dims=reshape_dims,
+                                               permute_dims=permute_dims)
+
+    assert tuple(jax_weight.shape) == jax_param.value.shape, \
+        f"Shape mismatch when loading weight '{param_name}': torch {jax_weight.shape} vs jax {jax_param.value.shape}"
+
+    spec = jax_param.get_metadata().get('sharding', ())
+    if isinstance(spec, NamedSharding):
+        spec = spec.spec
+    elif isinstance(spec, SingleDeviceSharding):
+        spec = ()
+    mesh = jax_param.get_metadata().get('mesh', None)
+
+    try:
+        jax_param.value = shard_put(jax_weight, spec, mesh=mesh)
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to load weight '{param_name}' with shape {jax_weight.shape} into param with shape {jax_param.value.shape}"
+        ) from e
+
+
+class JaxAutoWeightsLoader(AutoWeightsLoader):
+    """A weights loader for JAX models."""
+
+    def __init__(self, model, **kwargs):
+        assert isinstance(model, JaxModule)
+
+        for name, param in model.named_parameters():
+            if not hasattr(param, "weight_loader"):
+                # Following are common patterns in standard transformers. To add pattern for modules
+                # beyond standard transformers, please consider setting weight_loader.
+                reshape_dims = None
+                permute_dims = None
+                if any(substr in name
+                       for substr in ["k_proj.weight", "v_proj.weight"]):
+                    D, N, H = param.value.shape
+                    reshape_dims = (N, H, D)
+                    permute_dims = (2, 0, 1)
+                if any(substr in name for substr in ["q_proj.weight"]):
+                    if envs.LAYOUT_Q_PROJ_AS_NDH:
+                        N, D, H = param.value.shape
+                        reshape_dims = (N, H, D)
+                        permute_dims = (0, 2, 1)
+                    else:
+                        D, N, H = param.value.shape
+                        reshape_dims = (N, H, D)
+                        permute_dims = (2, 0, 1)
+                elif any(substr in name for substr in
+                         ["q_proj.bias", "k_proj.bias", "v_proj.bias"]):
+                    N, H = param.value.shape
+                    reshape_dims = (N, H)
+                    permute_dims = (0, 1)
+                elif "o_proj.weight" in name:
+                    N, H, D = param.value.shape
+                    reshape_dims = (D, N, H)
+                    permute_dims = (1, 2, 0)
+                elif "embed_tokens.weight" in name:
+                    permute_dims = (0, 1)
+                elif "lm_head" in name:
+                    permute_dims = (1, 0)
+
+                param.set_metadata(
+                    "weight_loader",
+                    functools.partial(load_nnx_param_from_reshaped_torch,
+                                      reshape_dims=reshape_dims,
+                                      permute_dims=permute_dims,
+                                      param_name=name))
+
+        super().__init__(model, **kwargs)
+
+    def _load_module(self, base_prefix: str, module: JaxModule,
+                     weights: Iterable) -> Iterable:
+        yield from super()._load_module(base_prefix, module, weights)
+        # Post-process module after loading weights. Unlike vLLM post-process
+        # weights after loading all weights, we do it per-module here to
+        # avoid OOM.
+        if (quant_method := getattr(module, 'quant_method', None)) is not None:
+            assert isinstance(quant_method, QuantizeMethodBase)
+            quant_method.process_weights_after_loading(module)
+
+
+class LoadableWithIterator:
+    """Mixin for models that support loading weights with an iterator.
+
+    This is replicating what vLLM does for most models, e.g. https://github.com/vllm-project/vllm/blob/8e2a469b3b2f67bc900ed72724fe3f05e3564994/vllm/model_executor/models/gemma3_mm.py#L644-L646
+    """
+
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        if not isinstance(weights, Iterable):
+            # Use next parent class in MRO.
+            return super().load_weights(weights)
+
+        loader = JaxAutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head"]
+                           if not hasattr(self, 'lm_head') else None))
+        return loader.load_weights(weights)

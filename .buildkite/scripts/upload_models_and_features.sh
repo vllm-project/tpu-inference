@@ -40,7 +40,9 @@ else
     echo "Warning: Kernel microbenchmarks directory '$KERNEL_PARENT_DIR' not found. Skipping dynamic folder discovery."
 fi
 
-declare -a pipeline_steps
+# Arrays to store YAML content fragments (without 'steps:' header)
+pipeline_v6e_fragments=()
+pipeline_v7x_fragments=()
 
 # Declare separate arrays for each list
 declare -a model_list
@@ -81,16 +83,15 @@ for folder_path in "${TARGET_FOLDERS[@]}"; do
       esac
     fi
 
-#     For each found .yml file, generate a command step
-    pipeline_yaml=$(cat <<EOF
-- label: "Upload: ${yml_file}"
-  command: "buildkite-agent pipeline upload ${yml_file}"
-  agents:
-    queue: cpu
-EOF
-)
+    # Read the YAML file and strip the top-level 'steps:' line
+    # This is required because we wrap them inside a 'group' later
+    yml_content=$(grep -v "^steps:" "${yml_file}")
 
-  pipeline_steps+=("${pipeline_yaml}")
+    # Store the content for both hardware types
+    if [[ "$subject_name" != "multi-host" ]]; then
+      pipeline_v6e_fragments+=("${yml_content}")
+    fi
+    pipeline_v7x_fragments+=("${yml_content}")
 
   done < <(find "$folder" -maxdepth 1 -type f \( -name "*.yml" -o -name "*.yaml" \) -print0)
 done
@@ -110,14 +111,37 @@ if [[ -n "$feature_list_string" ]]; then
 fi
 
 # --- Upload Dynamic Pipeline ---
-
-if [[ "${#pipeline_steps[@]}" -gt 0 ]]; then
-  echo "--- Uploading Dynamic Pipeline Steps"
-  final_pipeline_yaml="steps:"$'\n'
-  final_pipeline_yaml+=$(printf "%s\n" "${pipeline_steps[@]}")
-  echo "Upload YML: ${final_pipeline_yaml}"
-  echo -e "${final_pipeline_yaml}" | buildkite-agent pipeline upload
+# Final Uploads (Two separate calls to handle variables) ---
+if [[ "${#pipeline_v6e_fragments[@]}" -gt 0 ]]; then
+  echo "--- Uploading TPU v6e Pipeline Group"
+  buildkite-agent meta-data set "run_v6_matrix" "true"
+  {
+    echo "steps:"
+    echo "  - group: \"TPU v6e nightly Tests (${MODEL_IMPL_TYPE:-auto})\""
+    echo "    key: \"v6e-group\""
+    echo "    steps:"
+    printf "%s\n" "${pipeline_v6e_fragments[@]}" | sed 's/^/      /'
+  } | buildkite-agent pipeline upload
 else
-  echo "--- No .yml files found, no new Pipeline Steps to upload."
+  echo "--- No .yml files found, nothing to upload."
+  exit 0
+fi
+
+if [[ "${#pipeline_v7x_fragments[@]}" -gt 0 ]]; then
+  echo "--- Uploading TPU v7x Pipeline Group"
+  # Export v7x specific variables (overwrites previous exports)
+  export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
+  export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
+  export TPU_VERSION="tpu7x"
+  buildkite-agent meta-data set "run_v7_matrix" "true"
+  {
+    echo "steps:"
+    echo "  - group: \"TPU v7x nightly Tests (${MODEL_IMPL_TYPE:-auto})\""
+    echo "    key: \"v7x-group\""
+    echo "    steps:"
+    printf "%s\n" "${pipeline_v7x_fragments[@]}" | sed 's/^/      /'
+  } | buildkite-agent pipeline upload
+else
+  echo "--- No .yml files found, nothing to upload."
   exit 0
 fi

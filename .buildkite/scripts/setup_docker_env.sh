@@ -19,6 +19,7 @@ set -euo pipefail
 
 setup_environment() {
   local image_name_param=${1:-"vllm-tpu"}
+  local should_push=${2:-"false"}
   IMAGE_NAME="$image_name_param"
 
   local DOCKERFILE_NAME="Dockerfile"
@@ -76,14 +77,24 @@ setup_environment() {
   if [ -z "${BUILDKITE:-}" ]; then
       VLLM_COMMIT_HASH=""
       TPU_INFERENCE_HASH=$(git log -n 1 --pretty="%H")
-  else    
+  else
       VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH" --default "")
       TPU_INFERENCE_HASH="$BUILDKITE_COMMIT"
   fi
-
+ 
+  # Build with specific hash and 'latest' tag for convenience
   docker build \
       --build-arg VLLM_COMMIT_HASH="${VLLM_COMMIT_HASH}" \
-      --build-arg IS_FOR_V7X="${IS_FOR_V7X:-false}" \
       --build-arg IS_TEST="true" \
-      --no-cache -f docker/"${DOCKERFILE_NAME}" -t "${IMAGE_NAME}:${TPU_INFERENCE_HASH}" .
+      --no-cache -f docker/"${DOCKERFILE_NAME}" \
+      -t "${IMAGE_NAME}:${TPU_INFERENCE_HASH}" \
+      -t "${IMAGE_NAME}:latest" .
+
+  # Push logic if requested
+  if [[ "$should_push" == "true" ]]; then
+    echo "--- Pushing Docker image(s) to registry..."
+    gcloud auth configure-docker us-central1-docker.pkg.dev
+    docker push "${IMAGE_NAME}:${TPU_INFERENCE_HASH}"
+    docker push "${IMAGE_NAME}:latest"
+  fi
 }
