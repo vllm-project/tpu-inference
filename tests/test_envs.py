@@ -169,6 +169,7 @@ def test_integer_env_vars(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("PYTHON_TRACER_LEVEL", "1")
     monkeypatch.setenv("NUM_SLICES", "1")
     monkeypatch.delenv("REQUANTIZE_BLOCK_SIZE", raising=False)
+    monkeypatch.delenv("MOE_REQUANTIZE_BLOCK_SIZE", raising=False)
 
     assert envs.PYTHON_TRACER_LEVEL == 1
     monkeypatch.setenv("PYTHON_TRACER_LEVEL", "3")
@@ -188,6 +189,11 @@ def test_integer_env_vars(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("REQUANTIZE_BLOCK_SIZE", "512")
     assert envs.REQUANTIZE_BLOCK_SIZE == 512
 
+    # Test MOE_REQUANTIZE_BLOCK_SIZE default should be None
+    assert envs.MOE_REQUANTIZE_BLOCK_SIZE is None
+    monkeypatch.setenv("MOE_REQUANTIZE_BLOCK_SIZE", "512")
+    assert envs.MOE_REQUANTIZE_BLOCK_SIZE == 512
+
 
 def test_model_impl_type_choices(monkeypatch: pytest.MonkeyPatch):
     # Test case sensitive choices
@@ -203,12 +209,14 @@ def test_string_env_vars_defaults(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("PREFILL_SLICES", raising=False)
     monkeypatch.delenv("DECODE_SLICES", raising=False)
     monkeypatch.delenv("REQUANTIZE_WEIGHT_DTYPE", raising=False)
+    monkeypatch.delenv("MOE_REQUANTIZE_WEIGHT_DTYPE", raising=False)
 
     assert envs.JAX_PLATFORMS == ""
     assert envs.PREFILL_SLICES == ""
     assert envs.DECODE_SLICES == ""
     assert envs.PHASED_PROFILING_DIR == ""
     assert envs.REQUANTIZE_WEIGHT_DTYPE == "float8_e4m3fn"
+    assert envs.MOE_REQUANTIZE_WEIGHT_DTYPE == "float8_e4m3fn"
 
 
 def test_none_default_env_vars(monkeypatch: pytest.MonkeyPatch):

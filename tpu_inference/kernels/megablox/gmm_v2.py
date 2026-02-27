@@ -538,6 +538,11 @@ def calculate_tiling(
     lhs_bits = jax.dtypes.itemsize_bits(lhs_dtype)
     rhs_bits = jax.dtypes.itemsize_bits(rhs_dtype)
 
+    # Otherwise we run into a VMEM OOM
+    # TODO (jacobplatin/wenxindongwork): remove this hotfix once FP4 RHS bug is fixed
+    if rhs_bits == 4:
+        rhs_bits = 8
+
     # When using bf16 for lhs and rhs, 128 is the largest tile_m value that is
     # safe to use for most scenarios. But if are using lower bitwidth, we need
     # to tweak tile_m to account for using faster hardware unit.

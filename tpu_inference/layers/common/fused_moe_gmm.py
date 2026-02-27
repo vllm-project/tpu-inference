@@ -104,7 +104,7 @@ def moe_gmm_local(
     parallelism: Literal["tp", "ep"],
 ) -> jax.Array:
     """ Main MoE logic on a local shard can run in TP or EP mode.
-    
+
     Set parallelism for "tp" or "ep"
     """
 
